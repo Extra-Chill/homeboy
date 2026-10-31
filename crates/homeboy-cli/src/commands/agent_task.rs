@@ -18,6 +18,8 @@ pub mod contract;
 pub mod cook_batch;
 pub(crate) mod default_branch;
 pub mod doctor;
+#[cfg(test)]
+pub(crate) mod fake_pi_test;
 pub(crate) mod feedback;
 pub(crate) mod gate_contract;
 pub mod prompts;

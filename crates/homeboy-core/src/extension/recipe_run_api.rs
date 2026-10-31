@@ -377,7 +377,6 @@ fn plan_selection_failure(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::extension::registry::ExtensionLifecycleValidation;
 
     fn install_extension(id: &str, providers: serde_json::Value) -> tempfile::TempDir {
         let source = tempfile::tempdir().expect("extension source");
@@ -391,12 +390,8 @@ mod tests {
             .to_string(),
         )
         .expect("manifest");
-        crate::extension::lifecycle::install(
-            &source.path().display().to_string(),
-            Some(id),
-            ExtensionLifecycleValidation::declaration_only(),
-        )
-        .expect("install extension");
+        crate::extension::lifecycle::install(&source.path().display().to_string(), Some(id))
+            .expect("install extension");
         source
     }
 

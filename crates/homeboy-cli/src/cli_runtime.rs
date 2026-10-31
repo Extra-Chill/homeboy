@@ -5342,11 +5342,35 @@ mod tests {
             .stack_size(32 * 1024 * 1024)
             .spawn(|| {
                 crate::test_support::with_isolated_home(|_| {
+                    let (repository, primary) =
+                        crate::test_support::shared_committed_git_repo_fixture("primary");
+                    let workspace = repository.path().join("task-worktree");
+                    crate::test_support::run_git_command(
+                        &primary,
+                        &["worktree", "add", "--quiet", "-b", "task", workspace.to_str().unwrap()],
+                    );
+                    let fake = crate::commands::agent_task::fake_pi_test::FakePi::with_probes(
+                        "exit 99", "printf 'test model\\n'",
+                    );
+                    fake.install_catalog_config();
+                    let mut config = homeboy::core::defaults::load_config();
+                    config.retention.reconstructable_artifact_reserve_bytes = 0;
+                    homeboy::core::defaults::save_config(&config).expect("capacity policy");
+                    let _capacity = homeboy::core::observation::disk_budget::test_seam::ample_disk_capacity_for_test(repository.path());
                     let preview = CliRuntime::new().run_from_args(argv(&[
                         "homeboy",
                         "agent-task",
                         "cook",
                         "--preview",
+                        "--prompt",
+                        "Check built-in Pi backend resolution",
+                        "--no-finalize",
+                        "--repo",
+                        "preview-fixture",
+                        "--to-worktree",
+                        workspace.to_str().unwrap(),
+                        "--backend",
+                        "pi",
                     ]));
 
                     assert_eq!(preview, std::process::ExitCode::SUCCESS);
@@ -6233,6 +6257,28 @@ mod tests {
 
     #[test]
     fn managed_runner_context_clears_before_production_run_command() {
+        // Other runtime tests clear process-wide placement markers. Keep this
+        // provenance assertion in its own process rather than racing them.
+        let name = homeboy::core::test_support::harness_test_name(
+            module_path!(),
+            "managed_runner_context_clears_before_production_run_command_child",
+        );
+        let output = homeboy::core::test_support::run_child_test(
+            std::process::Command::new(std::env::current_exe().expect("test executable"))
+                .arg("--exact")
+                .arg(&name)
+                .arg("--ignored"),
+            &name,
+        );
+        assert!(
+            output.status.success(),
+            "runner context assertion: {output:?}"
+        );
+    }
+
+    #[test]
+    #[ignore = "process-wide placement markers; invoked by parent test"]
+    fn managed_runner_context_clears_before_production_run_command_child() {
         let _lock = env_lock().lock().unwrap_or_else(|err| err.into_inner());
         let previous = [
             crate::runner::RUNNER_HOSTED_EXEC_ENV,

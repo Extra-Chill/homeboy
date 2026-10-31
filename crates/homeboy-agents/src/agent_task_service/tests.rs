@@ -14,7 +14,6 @@ use crate::agent_task_scheduler::{
     AgentTaskExecutorAdapter, AgentTaskProviderRotationEntry, AgentTaskProviderRotationPolicy,
     AgentTaskScheduler, AgentTaskState,
 };
-use homeboy_core::command_invocation::CommandInvocation;
 use homeboy_core::run_lifecycle_record::RunExecutionState;
 use homeboy_core::test_support::{with_isolated_home, write_component_registration};
 use homeboy_core::worktree;
@@ -1624,35 +1623,21 @@ fn submitted_incomplete_run_still_executes_for_recovery() {
 #[test]
 fn submitted_run_persists_and_executes_its_admitted_fallback_route() {
     with_isolated_home(|_| {
-        let temp = tempfile::tempdir().expect("readiness fixture");
-        let script = temp.path().join("readiness.js");
-        std::fs::write(
-            &script,
-            "const fs=require('fs');const input=JSON.parse(fs.readFileSync(0,'utf8'));const model=input.effective_config.model;process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:model==='fallback',classification:model==='fallback'?'ready':'account',retryable:false,remediation:'switch',reason:model==='fallback'?'':'blocked',cache_key:model,identity:{model}}));",
-        )
-        .expect("readiness script");
-        let mut provider: crate::agent_task_provider::AgentTaskExecutorProvider =
-            serde_json::from_value(serde_json::json!({
-                "id": "service",
-                "backend": "test"
-            }))
-            .expect("provider fixture");
-        provider.readiness_invocation = Some(
-            CommandInvocation {
-                argv: vec!["node".to_string(), script.display().to_string()],
-                ..CommandInvocation::default()
-            }
-            .into(),
+        let fake = crate::agent_task_provider::test_pi::FakePi::with_probes(
+            "exit 99",
+            "printf 'test-pi\\n'",
+            "printf 'test fallback\\n'",
         );
+        let provider = fake.provider();
         let catalog = crate::agent_task_provider::AgentTaskProviderCatalog {
             providers: vec![provider],
             ..Default::default()
         };
         let mut plan = test_plan();
-        plan.tasks[0].executor.model = Some("primary".to_string());
+        plan.tasks[0].executor = fake.request("fixture").executor;
         plan.options.rotation = Some(AgentTaskProviderRotationPolicy {
             entries: vec![AgentTaskProviderRotationEntry {
-                model: Some("fallback".to_string()),
+                model: Some("test/fallback".to_string()),
                 ..Default::default()
             }],
             ..Default::default()
@@ -1677,10 +1662,10 @@ fn submitted_run_persists_and_executes_its_admitted_fallback_route() {
                 .expect("observed request")
                 .as_ref()
                 .and_then(|request| request.executor.model()),
-            Some("fallback")
+            Some("test/fallback")
         );
         let persisted = agent_task_lifecycle::load_plan("submitted-fallback").expect("plan");
-        assert_eq!(persisted.tasks[0].executor.model(), Some("fallback"));
+        assert_eq!(persisted.tasks[0].executor.model(), Some("test/fallback"));
         assert_eq!(
             persisted.tasks[0].metadata["provider_readiness_routing"]["next_rotation_index"],
             1
@@ -2110,36 +2095,14 @@ fn run_next_redacts_adversarial_provider_readiness_diagnostics_everywhere() {
             "LEAK_COMMAND_OUTPUT",
             "LEAK_ENV_VALUE",
         ];
-        let temp = tempfile::tempdir().expect("temporary readiness provider");
-        let script = temp.path().join("adversarial-readiness.js");
-        std::fs::write(
-            &script,
-            "process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:false,classification:'LEAK_COMMAND_OUTPUT',retryable:false,remediation:'LEAK_REMEDIATION',reason:'LEAK_READINESS_REASON',cache_key:'LEAK_ENV_VALUE',identity:{value:'LEAK_IDENTITY'}}));",
-        )
-        .expect("readiness script written");
-        let mut provider: crate::agent_task_provider::AgentTaskExecutorProvider =
-            serde_json::from_value(serde_json::json!({
-                "id": "locally-trusted-readiness-provider",
-                "backend": "adversarial-readiness"
-            }))
-            .expect("provider fixture");
-        provider.readiness_invocation = Some(
-            CommandInvocation {
-                argv: vec!["node".to_string(), script.display().to_string()],
-                ..CommandInvocation::default()
-            }
-            .into(),
+        let fake = crate::agent_task_provider::test_pi::FakePi::with_probes(
+            "exit 99",
+            "printf 'test-pi\\n'",
+            "printf 'LEAK_READINESS_REASON LEAK_REMEDIATION LEAK_IDENTITY LEAK_COMMAND_OUTPUT LEAK_ENV_VALUE\\n' >&2; exit 1",
         );
-        assert_eq!(provider.backend, "adversarial-readiness");
-        assert!(provider.readiness_invocation.is_some());
-
+        let provider = fake.provider();
         let mut adversarial = test_plan();
-        adversarial.tasks[0].executor.backend = "adversarial-readiness".to_string();
-        adversarial.tasks[0].executor.selector = None;
-        assert_eq!(
-            adversarial.tasks[0].executor.backend,
-            "adversarial-readiness"
-        );
+        adversarial.tasks[0].executor = fake.request("adversarial").executor;
         crate::agent_task_provider::preflight_plan_provider_runtime_readiness_with_providers(
             &adversarial,
             &[provider.clone()],
@@ -2156,7 +2119,7 @@ fn run_next_redacts_adversarial_provider_readiness_diagnostics_everywhere() {
             |_| Ok(None),
             None,
             |_, plan| {
-                if plan.tasks[0].executor.backend == "adversarial-readiness" {
+                if plan.tasks[0].executor.backend == "pi" {
                     crate::agent_task_provider::preflight_plan_provider_runtime_readiness_with_providers(
                         plan,
                         &[provider.clone()],

@@ -1834,6 +1834,7 @@ fn preview_placement_policy(argv: &[String]) -> Value {
 mod preview_tests {
     use super::*;
     use crate::cli_surface::{Cli, Commands};
+    use crate::commands::agent_task::fake_pi_test::FakePi;
     use clap::Parser;
 
     /// Lab placement binds on the runner: preview names no selected route and
@@ -2283,69 +2284,41 @@ mod preview_tests {
     }
 
     #[test]
-    fn backend_preview_choices_exclude_declared_but_unready_backends() {
-        let required = format!("HOMEBOY_TEST_CREDENTIAL_{}", uuid::Uuid::new_v4());
-        let catalog = provider::AgentTaskProviderCatalog {
-            providers: vec![
-                serde_json::from_value(serde_json::json!({
-                    "id": "ready.agent-task-executor",
-                    "backend": "ready",
-                    "invocation": { "argv": ["true"] },
-                }))
-                .expect("ready provider"),
-                serde_json::from_value(serde_json::json!({
-                    "id": "declared.agent-task-executor",
-                    "backend": "declared",
-                    "invocation": { "argv": ["true"] },
-                    "secret_env_requirements": [{
-                        "env": [required]
-                    }],
-                }))
-                .expect("declared provider"),
-            ],
-            ..Default::default()
-        };
-
-        assert_eq!(ready_cook_backends(&catalog), vec!["ready"]);
-    }
-
-    #[test]
     fn backend_preview_does_not_select_unrelated_account_default_credentials() {
+        let _home = homeboy::core::test_support::HomeGuard::new();
+        let fake = FakePi::with_probes("exit 99", "printf 'test model\\n'");
+        fake.install_catalog_config();
+        let mut provider = fake.provider();
+        provider.provider_defaults.insert(
+            "unused-account".into(),
+            serde_json::json!({
+                "required_secret_env": ["UNUSED_ACCOUNT_TOKEN"]
+            }),
+        );
         let catalog = provider::AgentTaskProviderCatalog {
-            providers: vec![serde_json::from_value(serde_json::json!({
-                "id": "sample-runtime.agent-task-executor",
-                "backend": "sample-runtime",
-                "invocation": { "argv": ["true"] },
-                "provider_defaults": {
-                    "unused-account": {
-                        "required_secret_env": ["UNUSED_ACCOUNT_TOKEN"]
-                    }
-                }
-            }))
-            .expect("provider")],
+            providers: vec![provider],
             ..Default::default()
         };
 
-        assert_eq!(ready_cook_backends(&catalog), vec!["sample-runtime"]);
+        assert_eq!(ready_cook_backends(&catalog), vec!["pi"]);
     }
 
     #[test]
     fn backend_preview_readiness_injects_unconditional_declared_credentials() {
         let root = tempfile::tempdir().expect("tempdir");
         let credential = root.path().join("credential.json");
-        let readiness = root.path().join("readiness.js");
+        let fake = FakePi::with_probes(
+            "exit 99",
+            "test \"$PREVIEW_REQUIRED_TOKEN\" = required-token || exit 1; printf 'test model\\n'",
+        );
         std::fs::write(&credential, r#"{"token":"required-token"}"#).expect("credential");
-        std::fs::write(
-            &readiness,
-            "const fs=require('fs');JSON.parse(fs.readFileSync(0,'utf8'));const token=process.env.PREVIEW_REQUIRED_TOKEN||'';process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:token==='required-token',classification:token==='required-token'?'ready':'auth_failure',retryable:false,remediation:'',reason:'',cache_key:'preview',identity:{}}));",
-        )
-        .expect("readiness script");
+
         let catalog = provider::AgentTaskProviderCatalog {
             providers: vec![serde_json::from_value(serde_json::json!({
-                "id": "sample-runtime.agent-task-executor",
-                "backend": "sample-runtime",
-                "invocation": { "argv": ["true"] },
-                "readiness_invocation": { "argv": ["node", readiness] },
+                "id": "pi.agent-task-executor",
+                "backend": "pi",
+                "provider_defaults": {"pi": fake.config()},
+                "cli": {"profiles":[{"name":"test", "model":"test/model"}]},
                 "secret_env_requirements": [{
                     "env": ["PREVIEW_REQUIRED_TOKEN"],
                     "secret_env_sources": {
@@ -2361,7 +2334,32 @@ mod preview_tests {
             ..Default::default()
         };
 
-        assert_eq!(ready_cook_backends(&catalog), vec!["sample-runtime"]);
+        let verdict =
+            homeboy::agents::agent_task_provider::evaluate_provider_dispatchability_with_config(
+                &catalog,
+                "pi",
+                Some("pi.agent-task-executor"),
+                Some("test/model"),
+                &fake.config(),
+                true,
+                &mut Default::default(),
+            );
+        assert!(verdict.ready, "{verdict:?}");
+        std::fs::write(&credential, r#"{"token":"wrong-token"}"#).unwrap();
+        let verdict =
+            homeboy::agents::agent_task_provider::evaluate_provider_dispatchability_with_config(
+                &catalog,
+                "pi",
+                Some("pi.agent-task-executor"),
+                Some("test/model"),
+                &fake.config(),
+                true,
+                &mut Default::default(),
+            );
+        assert!(
+            !verdict.ready,
+            "the Pi probe must actually receive the declared token"
+        );
     }
 
     #[test]
@@ -2374,14 +2372,8 @@ mod preview_tests {
             AgentTaskWorkspace, AGENT_TASK_REQUEST_SCHEMA,
         };
 
-        let provider: provider::AgentTaskExecutorProvider =
-            serde_json::from_value(serde_json::json!({
-                "id": "model.agent-task-executor",
-                "backend": "model-backend",
-                "invocation": {"argv":["true"]},
-                "cli": {"profiles":[{"name":"valid-fallback", "model":"valid-fallback"}]}
-            }))
-            .expect("provider");
+        let fake = FakePi::with_probes("exit 99", "printf 'test fallback\\n'");
+        let provider = fake.provider();
         let catalog = provider::AgentTaskProviderCatalog {
             providers: vec![provider],
             ..Default::default()
@@ -2392,13 +2384,13 @@ mod preview_tests {
             group_key: None,
             parent_plan_id: None,
             executor: AgentTaskExecutor {
-                backend: "model-backend".to_string(),
+                backend: "pi".to_string(),
                 selector: None,
                 runtime_selection: None,
                 required_capabilities: Vec::new(),
                 secret_env: Vec::new(),
                 model: Some("invalid-primary".to_string()),
-                config: Value::Null,
+                config: fake.config(),
             },
             instructions: "run".to_string(),
             inputs: Value::Null,
@@ -2416,7 +2408,7 @@ mod preview_tests {
         let mut plan = AgentTaskPlan::new("cook-model-fallback", vec![request]);
         plan.options.rotation = Some(AgentTaskProviderRotationPolicy {
             entries: vec![AgentTaskProviderRotationEntry {
-                model: Some("valid-fallback".to_string()),
+                model: Some("test/fallback".to_string()),
                 ..Default::default()
             }],
             ..Default::default()
@@ -2426,7 +2418,7 @@ mod preview_tests {
             .expect("fallback route validates Cook");
         assert_eq!(
             selected.tasks[0].executor.model(),
-            Some("valid-fallback"),
+            Some("test/fallback"),
             "compile validation returns the route readiness bound"
         );
         assert_eq!(
@@ -2434,40 +2426,6 @@ mod preview_tests {
             "invalid-primary"
         );
         assert_eq!(plan.tasks[0].executor.model(), Some("invalid-primary"));
-    }
-
-    #[test]
-    fn preview_reports_missing_backend_policy_before_prompt_validation() {
-        crate::test_support::with_isolated_home(|_| {
-            let (preview, exit_code) =
-                preview_cook(cook(&["homeboy", "agent-task", "cook", "--preview"]), None)
-                    .expect("missing policy returns backend guidance before prompt validation");
-
-            assert_eq!(exit_code, 0);
-            assert_eq!(
-                preview["resolved"]["provider"]["backend"]["default_policy"],
-                "missing"
-            );
-            assert!(matches!(
-                preview["resolved"]["provider"]["backend"]["state"].as_str(),
-                Some(
-                    "ready_backend_unambiguous"
-                        | "backend_required_no_ready_route"
-                        | "backend_required_multiple_ready_routes"
-                )
-            ));
-            assert_eq!(
-                preview["progress"],
-                serde_json::json!([
-                    { "event": "cook_preview_progress", "phase": "prompt_input" },
-                    { "event": "cook_preview_progress", "phase": "input_validation" },
-                ])
-            );
-            assert!(
-                preview["replay_argv"].is_array(),
-                "terminal preview has replay"
-            );
-        });
     }
 
     #[test]
@@ -3549,25 +3507,23 @@ mod preview_tests {
             let script = fixtures.path().join("reader.cjs");
             std::fs::write(&script, r#"
 const fs = require('fs'), path = require('path');
-const req = JSON.parse(fs.readFileSync(0, 'utf8'));
-// Discover from the instructions, exactly as a coding agent does.
-const inputs = JSON.parse(req.instructions.trim().split('\n').pop());
+const instructions = process.argv.at(-1);
+const inputs = JSON.parse(instructions.trim().split('\n').pop());
 if (inputs.length !== 2 || inputs.some(i => !i.read_only)) throw Error('missing read-only locations');
-if (req.instructions.includes('DO_NOT_FORWARD')) throw Error('private config leaked into instructions');
+if (instructions.includes('DO_NOT_FORWARD')) throw Error('private config leaked into instructions');
 const values = inputs.map(input => {
   const file = fs.statSync(input.path).isDirectory() ? path.join(input.path, 'member.txt') : input.path;
   return fs.readFileSync(file, 'utf8');
 });
-fs.writeFileSync(path.join(req.workspace.root, 'evidence-result.txt'), values.join('|'));
-const transcript = path.join(req.artifacts_path, 'transcript.txt');
-fs.writeFileSync(transcript, 'Read immutable inputs and produced an evidence-dependent result.');
-process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:'succeeded',summary:values.join('|'),artifacts:[{id:'transcript',kind:'transcript',path:transcript}]}));
+fs.writeFileSync('evidence-result.txt', values.join('|'));
+process.stdout.write(JSON.stringify({type:'message_end',message:{role:'assistant',stopReason:'stop',content:[{type:'text',text:values.join('|')}]}}));
 "#).unwrap();
-            let provider = serde_json::from_value(serde_json::json!({
-                "id": "neutral.evidence", "backend": "neutral-evidence",
-                "argv": ["node", script], "capabilities": ["structured_outcome"]
-            }))
-            .unwrap();
+            let fake = FakePi::with_probes(
+                &format!("exec node '{}' \"$@\"", script.display()),
+                "printf 'test model\\n'",
+            );
+            fake.install_catalog_config();
+            let provider = fake.provider();
             let executor = std::sync::Arc::new(ExtensionProviderAgentTaskExecutor::from_catalog(
                 AgentTaskProviderCatalog {
                     providers: vec![provider],
@@ -3582,7 +3538,7 @@ process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-outcome/v1',task
                     "agent-task",
                     "cook",
                     "--backend",
-                    "fixture",
+                    "pi",
                     "--prompt",
                     &format!("Inspect {} and {}.", source.display(), tree.display()),
                     "--to-worktree",
@@ -3606,8 +3562,12 @@ process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-outcome/v1',task
                         .unwrap(),
                 ));
                 for task in &mut plan.tasks {
-                    task.executor.backend = "neutral-evidence".into();
-                    task.executor.selector = Some("neutral.evidence".into());
+                    task.expected_artifacts.clear();
+                    task.artifact_declarations.clear();
+                    task.executor.backend = "pi".into();
+                    task.executor.selector = Some("pi.agent-task-executor".into());
+                    task.executor.model = Some("test/model".into());
+                    task.executor.config["command"] = fake.config()["command"].clone();
                     task.metadata
                         .as_object_mut()
                         .unwrap()

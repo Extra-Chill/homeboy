@@ -23,7 +23,12 @@ pub(super) fn script(body: &str) -> String {
         std::process::id(),
         SCRIPT_SEQUENCE.fetch_add(1, Ordering::Relaxed)
     ));
-    fs::write(&path, body).expect("script written");
+    fs::write(&path, format!("#!/usr/bin/env node\nif(process.argv.includes('--version')) {{ console.log('test-pi'); process.exit(0); }}\nif(process.argv.includes('--list-models')) {{ console.log('test model'); process.exit(0); }}\n{body}")).expect("script written");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("executable fake Pi");
+    }
     path.to_string_lossy().to_string()
 }
 
@@ -66,6 +71,12 @@ pub(super) fn request(
         runtime_path: None,
         extra: BTreeMap::new(),
     };
+    let mut command_parts = command.split_whitespace();
+    let mut program = command_parts.next().unwrap_or("pi");
+    if program == "node" {
+        program = command_parts.next().expect("fake Pi script");
+    }
+    let args: Vec<_> = command_parts.collect();
     let request = AgentTaskRequest {
         schema: AGENT_TASK_REQUEST_SCHEMA.to_string(),
         task_id: task_id.to_string(),
@@ -78,7 +89,7 @@ pub(super) fn request(
             required_capabilities: Vec::new(),
             secret_env: Vec::new(),
             model: None,
-            config: Value::Null,
+            config: json!({"command": program, "command_args": args}),
         },
         instructions: "run".to_string(),
         inputs: Value::Null,

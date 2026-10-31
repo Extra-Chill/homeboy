@@ -1041,9 +1041,33 @@ mod tests {
 
     #[test]
     fn dispatch_plan_leaves_rotation_unset_without_global_policy() {
+        const CHILD: &str = "HOMEBOY_TEST_NO_ROTATION_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            // The absence of global policy is the behavior under test. Other
+            // tests mutate the process-wide defaults cache, so give this
+            // fixture its own process rather than racing those cache writes.
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "agent_task_dispatch_plan::tests::dispatch_plan_leaves_rotation_unset_without_global_policy",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .output()
+                .expect("run isolated no-rotation fixture");
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
         with_isolated_home(|_| {
+            defaults::save_config(&defaults::HomeboyConfig::default()).expect("save config");
             let plan = build_dispatch_plan(&dispatch_request(DispatchRequestOverrides {
                 prompt: Some("Cook without rotation.".to_string()),
+                backend: Some("pi".to_string()),
                 repo: Some("sample-plugin".to_string()),
                 ..DispatchRequestOverrides::default()
             }))

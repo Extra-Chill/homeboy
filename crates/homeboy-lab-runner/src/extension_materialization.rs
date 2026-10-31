@@ -894,7 +894,7 @@ fn shell_command(command: &[String]) -> String {
 mod tests {
     use super::*;
     use crate::Runner;
-    use homeboy_core::extension::registry::ExtensionLifecycleValidation;
+
     use std::sync::{Arc, Barrier};
 
     fn runner() -> Runner {
@@ -1275,7 +1275,6 @@ mod tests {
             homeboy_core::extension::lifecycle::install(
                 &nodejs.display().to_string(),
                 Some("nodejs"),
-                ExtensionLifecycleValidation::declaration_only(),
             )
             .expect("install linked nodejs extension");
 

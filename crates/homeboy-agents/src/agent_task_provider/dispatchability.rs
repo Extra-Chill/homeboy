@@ -1609,6 +1609,7 @@ pub fn preflight_plan_provider_dispatchability_without_runtime_with_providers(
 
 #[cfg(test)]
 mod tests {
+    use super::super::test_pi::FakePi;
     use super::*;
     use crate::agent_task::{
         AgentTaskExecutor, AgentTaskLimits, AgentTaskPolicy, AgentTaskRequest, AgentTaskWorkspace,
@@ -1619,6 +1620,16 @@ mod tests {
     };
     use homeboy_core::command_invocation::CommandInvocation;
     use serde_json::json;
+
+    fn route_pi(models: &str) -> FakePi {
+        FakePi::with_probes("exit 99", "printf 'test-pi\\n'", models)
+    }
+
+    fn pi_task(fake: &FakePi, model: &str) -> AgentTaskRequest {
+        let mut task = fake.request("route");
+        task.executor.model = Some(model.into());
+        task
+    }
 
     fn provider(
         script: &std::path::Path,
@@ -1845,37 +1856,30 @@ mod tests {
 
     #[test]
     fn a_live_readiness_probe_that_passes_reports_verified_credentials() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let script = root.path().join("readiness.js");
-        std::fs::write(
-            &script,
-            "const ready=process.env.HOMEBOY_TEST_REVOCABLE_REFRESH_TOKEN==='present-and-live-checked';process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready,classification:ready?'ready':'auth_failure',retryable:false,remediation:'',reason:ready?'':'fallback credential was not resolved',cache_key:'k',identity:{credential:ready?'resolved':'missing'}}));",
-        )
-        .expect("readiness script");
-        let mut live_provider = provider_with_present_but_unverifiable_credential(
-            root.path().join("unused-auth.json").as_path(),
+        let fake = route_pi(
+            "if [ \"$HOMEBOY_TEST_REVOCABLE_REFRESH_TOKEN\" = present-and-live-checked ]; then printf 'test model\\n'; else printf 'No models available\\n'; fi",
         );
-        std::fs::write(
-            root.path().join("unused-auth.json"),
-            r#"{"token":"present-and-live-checked"}"#,
-        )
-        .expect("write auth");
-        live_provider.readiness_invocation = Some(
-            CommandInvocation {
-                argv: vec!["node".to_string(), script.display().to_string()],
-                ..CommandInvocation::default()
-            }
-            .into(),
-        );
+        let auth = fake.root.path().join("auth.json");
+        std::fs::write(&auth, r#"{"token":"present-and-live-checked"}"#).unwrap();
+        let mut live_provider = fake.provider();
+        live_provider.secret_env_requirements =
+            provider_with_present_but_unverifiable_credential(&auth).secret_env_requirements;
         let catalog = catalog(live_provider);
 
-        let verdict = evaluate_provider_dispatchability(&catalog, "revocable", None, None, true);
+        let verdict = evaluate_provider_dispatchability_with_config(
+            &catalog,
+            "pi",
+            None,
+            Some("test/model"),
+            &fake.config(),
+            true,
+            &mut ProviderRuntimeReadinessCache::default(),
+        );
 
         assert!(verdict.ready);
         assert!(
             verdict.checks.credentials.verified,
-            "a provider-declared readiness probe ran and passed, so this is a genuine live \
-             verification"
+            "the Pi probe received the resolved credential and passed live verification"
         );
         assert_eq!(verdict.reason, "all dispatchability checks passed");
     }
@@ -1918,11 +1922,17 @@ mod tests {
 
     #[test]
     fn local_placement_still_rejects_controller_credentials_the_live_probe_refuses() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let (catalog, count) = controller_with_rejected_live_credentials(root.path());
+        let root = tempfile::tempdir().unwrap();
+        let count = root.path().join("count");
+        let fake = route_pi(&format!(
+            "printf 'probe\\n' >> '{}'; printf 'No models available\\n'",
+            count.display()
+        ));
+        let catalog = catalog(fake.provider());
+        let plan = AgentTaskPlan::new("local-admission", vec![pi_task(&fake, "test/model")]);
 
         let error = admit_plan_provider_dispatchability_for_runner_ownership(
-            &revocable_plan(),
+            &plan,
             &catalog,
             &mut ProviderRuntimeReadinessCache::default(),
             false,
@@ -1975,26 +1985,17 @@ mod tests {
 
     #[test]
     fn revoked_or_unusable_credentials_preserve_provider_remediation() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let auth = root.path().join("auth.json");
-        let script = root.path().join("readiness.js");
-        std::fs::write(&auth, r#"{"token":"revoked-but-present-token"}"#).expect("write auth");
-        std::fs::write(
-            &script,
-            "process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:false,classification:'auth_failure',retryable:false,remediation:'Log out and sign in again.',reason:'refresh token revoked',cache_key:'k',identity:{}}));",
-        )
-        .expect("readiness script");
-        let mut provider = provider_with_present_but_unverifiable_credential(&auth);
-        provider.readiness_invocation = Some(
-            CommandInvocation {
-                argv: vec!["node".to_string(), script.display().to_string()],
-                ..CommandInvocation::default()
-            }
-            .into(),
+        let fake = route_pi("printf 'No models available\\n'");
+        let catalog = catalog(fake.provider());
+        let verdict = evaluate_provider_dispatchability_with_config(
+            &catalog,
+            "pi",
+            None,
+            None,
+            &fake.config(),
+            true,
+            &mut ProviderRuntimeReadinessCache::default(),
         );
-        let catalog = catalog(provider);
-
-        let verdict = evaluate_provider_dispatchability(&catalog, "revocable", None, None, true);
 
         assert_eq!(verdict.state, "credentials_unusable");
         assert!(!verdict.ready);
@@ -2004,49 +2005,40 @@ mod tests {
         );
         assert_eq!(
             verdict.checks.credentials.reason.as_deref(),
-            Some("auth_failure: refresh token revoked")
+            Some("auth_failure: no_models_available")
         );
-        assert_eq!(
-            verdict.checks.credentials.remediation,
-            vec!["Log out and sign in again."]
-        );
+        assert!(verdict.checks.credentials.remediation[0].contains("Log in to a provider"));
 
-        let error = preflight_provider_dispatchability(&catalog, "revocable", None, None)
-            .expect_err("revoked credential must fail before dispatch");
-        assert!(error.message.contains("refresh token revoked"), "{error}");
-        assert!(
-            error.message.contains("Log out and sign in again"),
-            "{error}"
-        );
+        let error = preflight_provider_dispatchability_with_config(
+            &catalog,
+            "pi",
+            None,
+            None,
+            &fake.config(),
+            &mut ProviderRuntimeReadinessCache::default(),
+        )
+        .expect_err("unusable credential must fail before dispatch");
+        assert!(error.message.contains("no_models_available"), "{error}");
+        assert!(error.message.contains("Log in to a provider"), "{error}");
     }
 
     #[test]
     fn offline_provider_owned_auth_remains_runtime_unavailable() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let auth = root.path().join("auth.json");
-        let script = root.path().join("readiness.js");
-        std::fs::write(&auth, r#"{"token":"present-token"}"#).expect("write auth");
-        std::fs::write(
-            &script,
-            "process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:false,classification:'unavailable',retryable:true,remediation:'Start the provider runtime.',reason:'provider is offline',cache_key:'offline',identity:{}}));",
-        )
-        .expect("readiness script");
-        let mut provider = provider_with_present_but_unverifiable_credential(&auth);
-        provider.readiness_invocation = Some(
-            CommandInvocation {
-                argv: vec!["node".to_string(), script.display().to_string()],
-                ..CommandInvocation::default()
-            }
-            .into(),
+        let fake = route_pi("exit 1");
+        let verdict = evaluate_provider_dispatchability_with_config(
+            &catalog(fake.provider()),
+            "pi",
+            None,
+            None,
+            &fake.config(),
+            true,
+            &mut ProviderRuntimeReadinessCache::default(),
         );
-
-        let verdict =
-            evaluate_provider_dispatchability(&catalog(provider), "revocable", None, None, true);
 
         assert_eq!(verdict.state, "runtime_unavailable");
         assert_eq!(
             verdict.reason,
-            "runtime_unavailable: unavailable: provider is offline"
+            "runtime_unavailable: transient_failure: model_list_probe_interrupted"
         );
         assert_eq!(
             verdict.checks.credentials.status,
@@ -2054,78 +2046,10 @@ mod tests {
         );
         assert_eq!(
             verdict.checks.runtime.reason.as_deref(),
-            Some("unavailable: provider is offline")
+            Some("transient_failure: model_list_probe_interrupted")
         );
-        assert_eq!(
-            verdict.checks.credentials.remediation,
-            vec!["Start the provider runtime."]
-        );
-    }
-
-    #[test]
-    fn account_blocked_probe_is_unavailable_before_a_provider_execution() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let count = root.path().join("probe-count");
-        let script = root.path().join("readiness.js");
-        std::fs::write(
-            &script,
-            "const fs=require('fs');fs.appendFileSync(process.argv[2],'probe\\n');process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:false,classification:'account',retryable:false,remediation:'restore account quota or billing access',reason:'account spending limit is exhausted',cache_key:'blocked-account',identity:{account:'blocked'}}));",
-        )
-        .expect("readiness script");
-        let mut provider = provider(&script, &count);
-        provider.cli.profiles = serde_json::from_value(json!([
-            { "name": "blocked", "model": "selected-model" }
-        ]))
-        .expect("model profile");
-        let catalog = catalog(provider);
-
-        let verdict =
-            evaluate_provider_dispatchability(&catalog, "test", None, Some("selected-model"), true);
-
-        assert_eq!(verdict.state, "account_unavailable");
-        assert!(!verdict.ready);
-        assert!(verdict.readiness.structural_dispatchability.ready);
-        assert_ne!(
-            verdict.checks.credentials.status,
-            AgentTaskProviderCredentialStatus::Unusable,
-            "an account quota or billing block is not a rejected credential"
-        );
-        assert_eq!(verdict.readiness.live_inference.state, "unavailable");
-        assert_eq!(
-            verdict
-                .readiness
-                .live_inference
-                .evidence
-                .as_ref()
-                .map(|evidence| evidence.classification.as_str()),
-            Some("account")
-        );
-        assert!(verdict.reason.contains("quota or billing"));
-        assert_eq!(
-            std::fs::read_to_string(&count).expect("one bounded probe"),
-            "probe\n"
-        );
-
-        std::fs::remove_file(&count).expect("reset probe evidence for Cook admission");
-
-        let error = admit_plan_provider_dispatchability_with_providers(
-            &AgentTaskPlan::new("account-blocked", vec![request("selected-model")]),
-            &catalog,
-            &mut ProviderRuntimeReadinessCache::default(),
-        )
-        .expect_err("Cook admission must reject an account-blocked route");
-        assert_eq!(
-            error.details["route_evidence"][0]["classification"],
-            "account"
-        );
-        assert_eq!(
-            error.details["route_evidence"][0]["state"],
-            "account_unavailable"
-        );
-        assert_eq!(
-            std::fs::read_to_string(&count).expect("one bounded Cook admission probe"),
-            "probe\n"
-        );
+        assert!(verdict.checks.credentials.remediation[0]
+            .contains("Retry the bounded Pi model catalog probe"));
     }
 
     #[test]
@@ -2179,41 +2103,6 @@ mod tests {
         );
         assert!(!verdict.checks.credentials.ready);
         assert!(verdict.checks.credentials.missing.is_empty());
-    }
-
-    #[test]
-    fn repeated_provider_classification_is_normalized_in_readiness_output() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let count = root.path().join("count");
-        let script = root.path().join("readiness.js");
-        std::fs::write(
-            &script,
-            "const fs=require('fs');JSON.parse(fs.readFileSync(0,'utf8'));process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:false,classification:'provider_account_blocked',retryable:false,remediation:'switch account',reason:'provider_account_blocked: provider_account_blocked: account access rejected',cache_key:'blocked',identity:{}}));",
-        )
-        .expect("readiness script");
-
-        let verdict = evaluate_provider_dispatchability(
-            &catalog(provider(&script, &count)),
-            "test",
-            None,
-            None,
-            true,
-        );
-
-        assert_eq!(verdict.state, "account_unavailable");
-        assert_eq!(
-            verdict.checks.runtime.reason.as_deref(),
-            Some("account: account access rejected")
-        );
-        assert_eq!(
-            verdict
-                .readiness
-                .live_inference
-                .evidence
-                .as_ref()
-                .map(|evidence| evidence.classification.as_str()),
-            Some("account")
-        );
     }
 
     #[test]
@@ -2285,52 +2174,56 @@ mod tests {
     fn shared_evaluator_uses_effective_config_redacts_runtime_reason_and_deduplicates() {
         let _home = crate::agent_task_provider::runtime_readiness::stable_identity_home();
         let root = tempfile::tempdir().expect("tempdir");
-        let script = root.path().join("readiness.js");
         let count = root.path().join("count");
-        std::fs::write(
-            &script,
-            "const fs=require('fs');const input=JSON.parse(fs.readFileSync(0,'utf8'));const count=process.argv[2];fs.writeFileSync(count,String(Number(fs.existsSync(count)?fs.readFileSync(count,'utf8'):0)+1));const ready=input.effective_config.marker==='ready';process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready,classification:'configuration',retryable:false,remediation:'token=runtime-secret',reason:'token=runtime-secret',cache_key:'test',identity:{}}));",
-        )
-        .expect("readiness script");
-        let catalog = catalog(provider(&script, &count));
+        let fake = route_pi(&format!("printf 'probe\\n' >> '{}'; if [ \"$MARKER\" != ready ]; then printf 'token=runtime-secret' >&2; exit 1; fi; printf 'test model\\n'", count.display()));
+        let catalog = catalog(fake.provider());
+        let mut blocked_config = fake.config();
+        blocked_config["runtime_env"] = json!({"MARKER":"blocked"});
+        let mut ready_config = fake.config();
+        ready_config["runtime_env"] = json!({"MARKER":"ready"});
         let mut cache = ProviderRuntimeReadinessCache::default();
 
         let blocked = evaluate_provider_dispatchability_with_config(
             &catalog,
-            "test",
+            "pi",
             None,
             None,
-            &json!({ "marker": "blocked" }),
+            &blocked_config,
             true,
             &mut cache,
         );
         assert_eq!(blocked.state, "runtime_unavailable");
         assert_eq!(
             blocked.checks.runtime.reason.as_deref(),
-            Some("configuration: token=[REDACTED]")
+            Some("transient_failure: model_list_probe_interrupted")
         );
 
         let ready = evaluate_provider_dispatchability_with_config(
             &catalog,
-            "test",
+            "pi",
             None,
             None,
-            &json!({ "marker": "ready" }),
+            &ready_config,
             true,
             &mut cache,
         );
         assert!(ready.ready);
         let ready_again = evaluate_provider_dispatchability_with_config(
             &catalog,
-            "test",
+            "pi",
             None,
             None,
-            &json!({ "marker": "ready" }),
+            &ready_config,
             true,
             &mut cache,
         );
         assert!(ready_again.ready);
-        assert_eq!(std::fs::read_to_string(count).expect("probe count"), "2");
+        let probes = std::fs::read_to_string(count).expect("probe count");
+        assert_eq!(probes.lines().count(), 3); // transient failure retries once
+        let serialized = serde_json::to_string(&blocked).unwrap();
+        assert!(!serialized.contains("runtime-secret"));
+        // Pi exposes a stable reason code instead of echoing raw probe stderr.
+        assert!(serialized.contains("model_list_probe_interrupted"));
     }
 
     #[test]
@@ -2352,24 +2245,20 @@ mod tests {
 
     #[test]
     fn plan_preflight_accepts_the_first_dispatchable_rotation_route() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let script = root.path().join("readiness.js");
-        let count = root.path().join("count");
-        std::fs::write(
-            &script,
-            "const fs=require('fs');const input=JSON.parse(fs.readFileSync(0,'utf8'));const count=process.argv[2];fs.writeFileSync(count,String(Number(fs.existsSync(count)?fs.readFileSync(count,'utf8'):0)+1));const ready=input.effective_config.model==='ready-model';process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready,classification:ready?'ready':'account',retryable:false,remediation:'',reason:ready?'':'account blocked',cache_key:input.effective_config.model,identity:{model:input.effective_config.model}}));",
-        )
-        .expect("readiness script");
-        let catalog = catalog(provider(&script, &count));
-        let mut plan = AgentTaskPlan::new("rotation-readiness", vec![request("blocked-model")]);
+        let fake = route_pi("printf 'test ready-model\\n'");
+        let catalog = catalog(fake.provider());
+        let mut plan = AgentTaskPlan::new(
+            "rotation-readiness",
+            vec![pi_task(&fake, "test/blocked-model")],
+        );
         plan.options.rotation = Some(AgentTaskProviderRotationPolicy {
             entries: vec![
                 AgentTaskProviderRotationEntry {
-                    model: Some("blocked-model".to_string()),
+                    model: Some("test/blocked-model".to_string()),
                     ..Default::default()
                 },
                 AgentTaskProviderRotationEntry {
-                    model: Some("ready-model".to_string()),
+                    model: Some("test/ready-model".to_string()),
                     ..Default::default()
                 },
             ],
@@ -2383,8 +2272,7 @@ mod tests {
         )
         .expect("ready fallback admits the plan");
 
-        assert_eq!(std::fs::read_to_string(count).expect("probe count"), "2");
-        assert_eq!(plan.tasks[0].executor.model(), Some("blocked-model"));
+        assert_eq!(plan.tasks[0].executor.model(), Some("test/blocked-model"));
         assert!(plan.tasks[0]
             .metadata
             .get("provider_readiness_routing")
@@ -2393,19 +2281,15 @@ mod tests {
 
     #[test]
     fn readiness_fallback_uses_rotation_budget_not_dispatch_attempt_budget() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let count = root.path().join("count");
-        let script = root.path().join("readiness.js");
-        std::fs::write(
-            &script,
-            "const fs=require('fs');const input=JSON.parse(fs.readFileSync(0,'utf8'));const ready=input.effective_config.model==='ready-model';process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready,classification:ready?'ready':'account',retryable:false,remediation:'',reason:ready?'':'blocked',cache_key:input.effective_config.model,identity:{model:input.effective_config.model}}));",
-        )
-        .expect("readiness script");
-        let catalog = catalog(provider(&script, &count));
-        let mut plan = AgentTaskPlan::new("bounded-readiness", vec![request("blocked-model")]);
+        let fake = route_pi("printf 'test ready-model\\n'");
+        let catalog = catalog(fake.provider());
+        let mut plan = AgentTaskPlan::new(
+            "bounded-readiness",
+            vec![pi_task(&fake, "test/blocked-model")],
+        );
         plan.options.rotation = Some(AgentTaskProviderRotationPolicy {
             entries: vec![AgentTaskProviderRotationEntry {
-                model: Some("ready-model".to_string()),
+                model: Some("test/ready-model".to_string()),
                 ..Default::default()
             }],
             max_attempts: Some(1),
@@ -2420,7 +2304,7 @@ mod tests {
         )
         .expect("readiness transition consumes no dispatch attempt");
 
-        assert_eq!(plan.tasks[0].executor.model(), Some("blocked-model"));
+        assert_eq!(plan.tasks[0].executor.model(), Some("test/blocked-model"));
     }
 
     /// An unpinned rotation may bind a fallback during readiness; the bound
@@ -2428,27 +2312,20 @@ mod tests {
     /// the executor, and the recorded provider model agree.
     #[test]
     fn readiness_fallback_records_the_bound_model_as_selected() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let probes = root.path().join("probes");
-        let script = root.path().join("readiness.js");
-        std::fs::write(
-            &script,
-            "const fs=require('fs');const input=JSON.parse(fs.readFileSync(0,'utf8'));const model=input.effective_config.model;const ready=model==='fallback';process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready,classification:ready?'ready':'auth_failure',retryable:false,remediation:'',reason:ready?'':'authentication_rejected',cache_key:model,identity:{model}}));",
-        )
-        .expect("readiness script");
-        let catalog = catalog(provider(&script, &probes));
-        let mut task = request("primary");
+        let fake = route_pi("printf 'test fallback\\n'");
+        let catalog = catalog(fake.provider());
+        let mut task = pi_task(&fake, "test/primary");
         task.metadata = json!({
             "model_selection": {
                 "requested": null,
-                "selected": "primary",
+                "selected": "test/primary",
                 "reason": "policy-rotation"
             }
         });
         let mut plan = AgentTaskPlan::new("rotatable-readiness", vec![task]);
         plan.options.rotation = Some(AgentTaskProviderRotationPolicy {
             entries: vec![AgentTaskProviderRotationEntry {
-                model: Some("fallback".to_string()),
+                model: Some("test/fallback".to_string()),
                 ..Default::default()
             }],
             ..Default::default()
@@ -2463,45 +2340,33 @@ mod tests {
         .expect("rotatable plan binds the ready fallback");
 
         let task = &admitted.tasks[0];
-        assert_eq!(task.executor.model(), Some("fallback"));
-        assert_eq!(task.metadata["model_selection"]["selected"], "fallback");
+        assert_eq!(task.executor.model(), Some("test/fallback"));
+        assert_eq!(
+            task.metadata["model_selection"]["selected"],
+            "test/fallback"
+        );
         assert_eq!(
             task.metadata["provider_readiness_routing"]["skipped"][0]["model"],
-            "primary"
+            "test/primary"
         );
     }
 
     #[test]
     fn repeated_admission_reconsiders_a_recovered_primary_from_the_durable_plan() {
         let _home = crate::agent_task_provider::runtime_readiness::stable_identity_home();
-        let root = tempfile::tempdir().expect("tempdir");
-        let count = root.path().join("count");
-        let block_fallback = root.path().join("block-fallback");
-        let script = root.path().join("readiness.js");
-        std::fs::write(
-            &script,
-            "const fs=require('fs');const input=JSON.parse(fs.readFileSync(0,'utf8'));const model=input.effective_config.model;const ready=model==='fallback-one'&&!fs.existsSync(process.argv[3])||model==='fallback-two';fs.appendFileSync(process.argv[2],model+'\\n');process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready,classification:ready?'ready':'account',retryable:false,remediation:'switch',reason:ready?'':'blocked',cache_key:model,identity:{model}}));",
-        )
-        .expect("readiness script");
-        let mut provider = provider(&script, &count);
-        provider
-            .readiness_invocation
-            .as_mut()
-            .expect("readiness invocation")
-            .command
-            .argv
-            .push(block_fallback.display().to_string());
-        let catalog = catalog(provider);
-        let mut plan = AgentTaskPlan::new("repeated-admission", vec![request("primary")]);
+        let fake = route_pi("printf 'test fallback-one\\ntest fallback-two\\n'");
+        let catalog = catalog(fake.provider());
+        let mut plan =
+            AgentTaskPlan::new("repeated-admission", vec![pi_task(&fake, "test/primary")]);
         plan.options.execution_budget.max_provider_rotations = 1;
         plan.options.rotation = Some(AgentTaskProviderRotationPolicy {
             entries: vec![
                 AgentTaskProviderRotationEntry {
-                    model: Some("fallback-one".to_string()),
+                    model: Some("test/fallback-one".to_string()),
                     ..Default::default()
                 },
                 AgentTaskProviderRotationEntry {
-                    model: Some("fallback-two".to_string()),
+                    model: Some("test/fallback-two".to_string()),
                     ..Default::default()
                 },
             ],
@@ -2514,43 +2379,33 @@ mod tests {
             &mut ProviderRuntimeReadinessCache::default(),
         )
         .expect("first fallback is admitted");
-        assert_eq!(admitted.tasks[0].executor.model(), Some("fallback-one"));
+        assert_eq!(
+            admitted.tasks[0].executor.model(),
+            Some("test/fallback-one")
+        );
         assert_eq!(admitted.options.rotation.as_ref().unwrap().entries.len(), 2);
-        std::fs::write(
-            &script,
-            "const fs=require('fs');const input=JSON.parse(fs.readFileSync(0,'utf8'));const model=input.effective_config.model;fs.appendFileSync(process.argv[2],model+'\\n');process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:model==='primary',classification:model==='primary'?'ready':'account',retryable:false,remediation:'',reason:'',cache_key:model,identity:{model}}));",
-        )
-        .expect("recover primary probe");
+        let recovered = route_pi("printf 'test primary\\n'");
+        std::fs::copy(&recovered.command, &fake.command).unwrap();
 
-        admit_plan_provider_dispatchability_with_providers(
+        let readmitted = admit_plan_provider_dispatchability_with_providers(
             &plan,
             &catalog,
             &mut ProviderRuntimeReadinessCache::default(),
         )
         .expect("restart-style re-admission sees the recovered primary");
-        let probes = std::fs::read_to_string(count).expect("probe log");
-        assert_eq!(
-            probes.lines().filter(|model| *model == "primary").count(),
-            2
-        );
+        assert_eq!(readmitted.tasks[0].executor.model(), Some("test/primary"));
+        assert_eq!(plan.tasks[0].executor.model(), Some("test/primary"));
     }
 
     #[test]
     fn repeated_admission_of_a_bound_fallback_never_reconsiders_primary() {
         let _home = crate::agent_task_provider::runtime_readiness::stable_identity_home();
-        let root = tempfile::tempdir().expect("tempdir");
-        let count = root.path().join("count");
-        let script = root.path().join("readiness.js");
-        std::fs::write(
-            &script,
-            "const fs=require('fs');const input=JSON.parse(fs.readFileSync(0,'utf8'));const model=input.effective_config.model;fs.appendFileSync(process.argv[2],model+'\\n');process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:model==='fallback',classification:model==='fallback'?'ready':'account',retryable:false,remediation:'',reason:'blocked',cache_key:model,identity:{model}}));",
-        )
-        .expect("readiness script");
-        let catalog = catalog(provider(&script, &count));
-        let mut plan = AgentTaskPlan::new("bound-admission", vec![request("primary")]);
+        let fake = route_pi("printf 'test fallback\\n'");
+        let catalog = catalog(fake.provider());
+        let mut plan = AgentTaskPlan::new("bound-admission", vec![pi_task(&fake, "test/primary")]);
         plan.options.rotation = Some(AgentTaskProviderRotationPolicy {
             entries: vec![AgentTaskProviderRotationEntry {
-                model: Some("fallback".to_string()),
+                model: Some("test/fallback".to_string()),
                 ..Default::default()
             }],
             ..Default::default()
@@ -2561,11 +2416,8 @@ mod tests {
             &mut ProviderRuntimeReadinessCache::default(),
         )
         .expect("fallback admitted");
-        std::fs::write(
-            &script,
-            "const fs=require('fs');const input=JSON.parse(fs.readFileSync(0,'utf8'));const model=input.effective_config.model;fs.appendFileSync(process.argv[2],model+'\\n');process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:true,classification:'ready',retryable:false,remediation:'',reason:'',cache_key:model,identity:{model}}));",
-        )
-        .expect("recover primary");
+        let recovered = route_pi("printf 'test primary\\ntest fallback\\n'");
+        std::fs::copy(&recovered.command, &fake.command).unwrap();
 
         let readmitted = admit_plan_provider_dispatchability_with_providers(
             &admitted,
@@ -2574,67 +2426,29 @@ mod tests {
         )
         .expect("bound fallback remains admitted");
 
-        assert_eq!(readmitted.tasks[0].executor.model(), Some("fallback"));
+        assert_eq!(readmitted.tasks[0].executor.model(), Some("test/fallback"));
         assert_eq!(
-            std::fs::read_to_string(count)
-                .expect("probe log")
-                .lines()
-                .filter(|model| *model == "primary")
-                .count(),
-            1
+            readmitted.tasks[0].metadata["provider_readiness_routing"],
+            admitted.tasks[0].metadata["provider_readiness_routing"]
         );
     }
 
     #[test]
-    fn request_capabilities_select_the_same_provider_for_readiness_as_execution() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let count = root.path().join("count");
-        let script = root.path().join("unready.js");
-        std::fs::write(
-            &script,
-            "process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:false,classification:'account',retryable:false,remediation:'',reason:'wrong provider',cache_key:'wrong',identity:{}}));",
-        )
-        .expect("readiness script");
-        let incapable = provider(&script, &count);
-        let mut capable = incapable.clone();
-        capable.id = "test.capable-provider".to_string();
-        capable.capabilities = vec!["required-capability".to_string()];
-        capable.readiness_invocation = None;
-        let mut task = request("model");
-        task.executor.required_capabilities = vec!["required-capability".to_string()];
-        let mut plan = AgentTaskPlan::new("capability-readiness", vec![task]);
-
-        preflight_plan_provider_dispatchability_with_providers(
-            &mut plan,
-            &AgentTaskProviderCatalog {
-                providers: vec![incapable, capable],
-                ..Default::default()
-            },
-            &mut ProviderRuntimeReadinessCache::default(),
-        )
-        .expect("the capable provider is the readiness and execution identity");
-    }
-
-    #[test]
     fn transient_primary_recovers_before_fallback_selection() {
-        let root = tempfile::tempdir().expect("tempdir");
+        let root = tempfile::tempdir().unwrap();
         let count = root.path().join("count");
-        let script = root.path().join("recover-primary.js");
-        std::fs::write(
-            &script,
-            "const fs=require('fs');const count=process.argv[2],n=Number(fs.existsSync(count)?fs.readFileSync(count,'utf8'):0)+1;fs.writeFileSync(count,String(n));const ready=n>1;process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready,classification:ready?'ready':'transient_failure',retryable:!ready,remediation:ready?'':'retry',reason:ready?'':'temporary',cache_key:'primary',identity:{account:'primary'}}));",
-        )
-        .expect("readiness script");
-        let catalog = catalog(provider(&script, &count));
-        let mut plan = AgentTaskPlan::new("recovered-primary", vec![request("primary")]);
+        let fake = route_pi(&format!("if [ ! -f '{}' ]; then printf '1' > '{}'; exit 1; fi; printf '2' > '{}'; printf 'test primary\\n'", count.display(), count.display(), count.display()));
+        let catalog = catalog(fake.provider());
+        let mut plan =
+            AgentTaskPlan::new("recovered-primary", vec![pi_task(&fake, "test/primary")]);
         plan.options.rotation = Some(AgentTaskProviderRotationPolicy {
             entries: vec![
                 AgentTaskProviderRotationEntry {
-                    model: Some("primary".to_string()),
+                    model: Some("test/primary".to_string()),
                     ..Default::default()
                 },
                 AgentTaskProviderRotationEntry {
-                    model: Some("fallback".to_string()),
+                    model: Some("test/fallback".to_string()),
                     ..Default::default()
                 },
             ],
@@ -2646,7 +2460,7 @@ mod tests {
             &mut ProviderRuntimeReadinessCache::default(),
         )
         .expect("transient primary recovers");
-        assert_eq!(admitted.tasks[0].executor.model(), Some("primary"));
+        assert_eq!(admitted.tasks[0].executor.model(), Some("test/primary"));
         assert_eq!(std::fs::read_to_string(count).expect("probe count"), "2");
         assert!(admitted.tasks[0]
             .metadata
@@ -2656,48 +2470,30 @@ mod tests {
 
     #[test]
     fn conditional_credentials_are_recomputed_for_each_rotation_route() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let count = root.path().join("count");
-        let script = root.path().join("blocked.js");
-        std::fs::write(
-            &script,
-            "process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:false,classification:'account',retryable:false,remediation:'switch',reason:'blocked',cache_key:'primary',identity:{account:'primary'}}));",
-        )
-        .expect("readiness script");
-        let mut primary = provider(&script, &count);
-        primary.id = "test.primary".to_string();
-        let mut conditional = primary.clone();
-        conditional.id = "test.conditional".to_string();
-        conditional.readiness_invocation = None;
-        conditional.secret_env_requirements =
+        let fake = route_pi("printf 'test conditional\\ntest fallback\\n'");
+        let mut provider = fake.provider();
+        provider.secret_env_requirements =
             vec![super::super::AgentTaskProviderSecretEnvRequirement {
                 env: vec![format!("HOMEBOY_MISSING_{}", uuid::Uuid::new_v4())],
                 when: Some(json!({"path":"executor.config.provider","equals":"conditional"})),
                 ..Default::default()
             }];
-        let mut fallback = conditional.clone();
-        fallback.id = "test.fallback".to_string();
-        fallback.secret_env_requirements.clear();
-        let catalog = AgentTaskProviderCatalog {
-            providers: vec![primary, conditional, fallback],
-            ..Default::default()
-        };
-        let mut task = request("model");
-        task.executor.selector = Some("test.primary".to_string());
+        let catalog = catalog(provider);
+        let task = pi_task(&fake, "test/primary");
         let mut plan = AgentTaskPlan::new("conditional-credentials", vec![task]);
         plan.options.rotation = Some(AgentTaskProviderRotationPolicy {
             entries: vec![
                 AgentTaskProviderRotationEntry {
-                    selector: Some("test.primary".to_string()),
+                    model: Some("test/primary".to_string()),
                     ..Default::default()
                 },
                 AgentTaskProviderRotationEntry {
-                    selector: Some("test.conditional".to_string()),
+                    model: Some("test/conditional".to_string()),
                     provider_config: json!({"provider":"conditional"}),
                     ..Default::default()
                 },
                 AgentTaskProviderRotationEntry {
-                    selector: Some("test.fallback".to_string()),
+                    model: Some("test/fallback".to_string()),
                     provider_config: json!({"provider":"fallback"}),
                     ..Default::default()
                 },
@@ -2710,9 +2506,10 @@ mod tests {
             &mut ProviderRuntimeReadinessCache::default(),
         )
         .expect("route after missing conditional credential is selected");
+        assert_eq!(admitted.tasks[0].executor.model(), Some("test/fallback"));
         assert_eq!(
-            admitted.tasks[0].executor.selector.as_deref(),
-            Some("test.fallback")
+            admitted.tasks[0].metadata["provider_readiness_routing"]["skipped"][1]["state"],
+            "credentials_missing"
         );
         assert!(admitted.tasks[0].executor.secret_env.is_empty());
         assert_eq!(
@@ -2726,31 +2523,26 @@ mod tests {
         let root = tempfile::tempdir().expect("tempdir");
         let credential = root.path().join("account.json");
         let count = root.path().join("count");
-        let script = root.path().join("readiness.js");
-        std::fs::write(&credential, r#"{"token":"fallback-account"}"#)
-            .expect("fallback credential");
-        std::fs::write(
-            &script,
-            "const fs=require('fs');JSON.parse(fs.readFileSync(0,'utf8'));fs.appendFileSync(process.argv[2],'probe\\n');const token=process.env.TEST_ACCOUNT_TOKEN||'';const ready=token==='fallback-account';process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready,classification:ready?'ready':'auth_failure',retryable:false,remediation:token,reason:token,cache_key:token,identity:{account:token}}));",
-        )
-        .expect("readiness script");
-        let mut provider = provider(&script, &count);
-        provider.capabilities = vec!["provider_owned_auth".to_string()];
-        provider.provider_defaults = serde_json::from_value(json!({
-            "conditional-account": {
-                "secret_env": ["TEST_ACCOUNT_TOKEN"],
-                "secret_env_sources": {
-                    "TEST_ACCOUNT_TOKEN": {
-                        "source": "json-file",
-                        "path": credential,
-                        "field": "token"
+        std::fs::write(&credential, r#"{"token":"fallback-account"}"#).unwrap();
+        let fake = route_pi(&format!("printf 'probe\\n' >> '{}'; if [ \"$TEST_ACCOUNT_TOKEN\" = fallback-account ]; then printf 'test model\\n'; else printf 'No models available\\n'; fi", count.display()));
+        let mut provider = fake.provider();
+        provider.provider_defaults.extend(
+            serde_json::from_value::<std::collections::BTreeMap<String, Value>>(json!({
+                "conditional-account": {
+                    "secret_env": ["TEST_ACCOUNT_TOKEN"],
+                    "secret_env_sources": {
+                        "TEST_ACCOUNT_TOKEN": {
+                            "source": "json-file",
+                            "path": credential,
+                            "field": "token"
+                        }
                     }
                 }
-            }
-        }))
-        .expect("provider defaults");
-        let mut task = request("model");
-        task.executor.config = json!({"provider":"conditional-account"});
+            }))
+            .expect("provider defaults"),
+        );
+        let mut task = pi_task(&fake, "test/model");
+        task.executor.config["provider"] = json!("conditional-account");
         task.executor
             .secret_env
             .push(format!("UNRELATED_TASK_SECRET_{}", uuid::Uuid::new_v4()));
@@ -2776,175 +2568,24 @@ mod tests {
             .contains("fallback-account"));
     }
 
-    /// #14858 acceptance: known capacity. A provider's readiness invocation
-    /// can report remaining/limit capacity for a route that is otherwise
-    /// ready, and that evidence is observable before dispatch through the
-    /// same shared verdict `providers --validate-readiness` renders.
-    #[test]
-    fn a_ready_route_with_known_capacity_reports_it_before_dispatch() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let script = root.path().join("readiness.js");
-        let count = root.path().join("count");
-        std::fs::write(
-            &script,
-            "const fs=require('fs');JSON.parse(fs.readFileSync(0,'utf8'));process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:true,classification:'ready',retryable:false,remediation:'',reason:'',cache_key:'k',identity:{},capacity:{remaining:42,limit:100,unit:'requests'}}));",
-        )
-        .expect("readiness script");
-        let catalog = catalog(provider(&script, &count));
-        let mut cache = ProviderRuntimeReadinessCache::default();
+    // Extension readiness JSON could publish known capacity and per-account
+    // resets. Pi's CLI catalog probe publishes neither; those protocol-only
+    // fixtures are retired rather than teaching FakePi the removed protocol.
 
-        let verdict = evaluate_provider_dispatchability_with_config(
-            &catalog,
-            "test",
-            None,
-            None,
-            &json!({}),
-            true,
-            &mut cache,
-        );
-
-        assert!(verdict.ready, "{verdict:?}");
-        let evidence = verdict
-            .readiness
-            .live_inference
-            .evidence
-            .as_ref()
-            .expect("live probe ran");
-        assert_eq!(
-            evidence.capacity,
-            AgentTaskProviderCapacityReadiness::Known {
-                remaining: Some(Value::from(42)),
-                limit: Some(Value::from(100)),
-                unit: Some("requests".to_string()),
-                reset_at: None,
-                scope: None,
-                accounts: Vec::new(),
-            }
-        );
-    }
-
-    /// #14858 acceptance: exhausted-with-reset. A `classification: "capacity"`
-    /// readiness result is a distinct typed `capacity_exhausted` state, not
-    /// the generic `runtime_unavailable` bucket every other failed probe
-    /// falls into, and its reset instant is exposed structurally rather than
-    /// only embedded in free text.
-    #[test]
-    fn an_exhausted_route_is_a_distinct_typed_state_carrying_its_reset_instant() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let script = root.path().join("readiness.js");
-        let count = root.path().join("count");
-        std::fs::write(
-            &script,
-            "const fs=require('fs');JSON.parse(fs.readFileSync(0,'utf8'));process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:false,classification:'capacity',retryable:true,remediation:'wait for the reset window',reason:'5-hour usage limit reached',cache_key:'k',identity:{},capacity:{remaining:0,reset_at:'2026-08-27T12:37:03Z'}}));",
-        )
-        .expect("readiness script");
-        let catalog = catalog(provider(&script, &count));
-        let mut cache = ProviderRuntimeReadinessCache::default();
-
-        let verdict = evaluate_provider_dispatchability_with_config(
-            &catalog,
-            "test",
-            None,
-            None,
-            &json!({}),
-            true,
-            &mut cache,
-        );
-
-        assert!(!verdict.ready);
-        assert_eq!(
-            verdict.state, "capacity_exhausted",
-            "capacity exhaustion must not collapse into the generic runtime_unavailable bucket: {verdict:?}"
-        );
-        assert!(
-            verdict.reason.contains("2026-08-27") && verdict.reason.contains("12:37:03"),
-            "the reset instant must be legible in the human-facing reason: {}",
-            verdict.reason
-        );
-        let evidence = verdict
-            .readiness
-            .live_inference
-            .evidence
-            .as_ref()
-            .expect("live probe ran");
-        assert_eq!(
-            evidence.capacity,
-            AgentTaskProviderCapacityReadiness::Exhausted {
-                reset_at: Some("2026-08-27T12:37:03+00:00".to_string()),
-                reason: "5-hour usage limit reached".to_string(),
-                scope: None,
-                accounts: Vec::new(),
-            }
-        );
-        assert!(evidence.capacity.is_exhausted());
-    }
-
-    /// An exhausted account pool names every account's reset in the
-    /// human-facing reason, not only the route's earliest reset.
-    #[test]
-    fn an_exhausted_account_pool_names_each_account_reset() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let script = root.path().join("readiness.js");
-        let count = root.path().join("count");
-        std::fs::write(
-            &script,
-            "const fs=require('fs');JSON.parse(fs.readFileSync(0,'utf8'));process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:false,classification:'capacity',retryable:true,remediation:'wait',reason:'provider_capacity_exhausted',cache_key:'k',identity:{},capacity:{remaining:0,limit:100,unit:'percent',reset_at:'2026-09-27T15:26:09Z',accounts:[{account:'one@example.com',state:'exhausted',remaining:0,reset_at:'2026-09-27T15:26:09Z'},{account:'two@example.com',state:'exhausted',remaining:0,reset_at:'2026-09-28T23:29:35Z'}]}}));",
-        )
-        .expect("readiness script");
-        let catalog = catalog(provider(&script, &count));
-        let mut cache = ProviderRuntimeReadinessCache::default();
-
-        let verdict = evaluate_provider_dispatchability_with_config(
-            &catalog,
-            "test",
-            None,
-            None,
-            &json!({}),
-            true,
-            &mut cache,
-        );
-
-        assert_eq!(verdict.state, "capacity_exhausted");
-        assert!(
-            verdict.reason.contains(
-                "accounts: one@example.com exhausted until 2026-09-27T15:26:09+00:00, two@example.com exhausted until 2026-09-28T23:29:35+00:00"
-            ),
-            "{}",
-            verdict.reason
-        );
-        let evidence = verdict
-            .readiness
-            .live_inference
-            .evidence
-            .as_ref()
-            .expect("live probe ran");
-        assert_eq!(evidence.capacity.accounts().len(), 2);
-    }
-
-    /// #14858 acceptance: unknown capacity. A provider that declares a
-    /// readiness invocation but never fills in `capacity` publishes nothing —
-    /// that is reported as `Unknown` with a reason, and the route stays
-    /// exactly as dispatchable as its other checks already say (it must not
-    /// be silently treated as available, nor blocked for staying silent).
+    /// Pi publishes no capacity evidence: report Unknown without blocking an
+    /// otherwise dispatchable route or silently claiming known availability.
     #[test]
     fn a_provider_that_never_publishes_capacity_stays_dispatchable_and_reports_unknown() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let script = root.path().join("readiness.js");
-        let count = root.path().join("count");
-        std::fs::write(
-            &script,
-            "const fs=require('fs');JSON.parse(fs.readFileSync(0,'utf8'));process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:true,classification:'ready',retryable:false,remediation:'',reason:'',cache_key:'k',identity:{}}));",
-        )
-        .expect("readiness script");
-        let catalog = catalog(provider(&script, &count));
+        let fake = route_pi("printf 'test model\\n'");
+        let catalog = catalog(fake.provider());
         let mut cache = ProviderRuntimeReadinessCache::default();
 
         let verdict = evaluate_provider_dispatchability_with_config(
             &catalog,
-            "test",
+            "pi",
             None,
-            None,
-            &json!({}),
+            Some("test/model"),
+            &fake.config(),
             true,
             &mut cache,
         );

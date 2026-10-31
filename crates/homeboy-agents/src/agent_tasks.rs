@@ -262,17 +262,17 @@ pub mod provider {
         preflight_provider_dispatchability_with_config, provider_credential_readiness,
         AgentTaskProviderDispatchability,
     };
-    pub use crate::agent_task_provider::{
-        probe_provider_executor_resolves, provider_runner_secret_env_for_plan_with_providers,
-        provider_secret_credential_mappings_for_plan_with_providers,
-        provider_secret_sources_for_plan_with_providers, ProviderExecutorResolution,
-    };
     /// Controller-owned credential refresh before Lab delivery (#15783).
     pub use crate::agent_task_provider::{
         provider_controller_refreshes_for_plan_with_providers,
         provider_route_secret_env_for_plan_with_providers,
         provider_route_secret_sources_for_plan_with_providers, run_provider_controller_refresh,
         ProviderControllerRefresh,
+    };
+    pub use crate::agent_task_provider::{
+        provider_runner_secret_env_for_plan_with_providers,
+        provider_secret_credential_mappings_for_plan_with_providers,
+        provider_secret_sources_for_plan_with_providers,
     };
 }
 

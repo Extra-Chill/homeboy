@@ -8,12 +8,18 @@ fn unresolved_backend_preview_binds_stable_replay_lifecycle_without_mutation() {
     let home = tempfile::tempdir().expect("home");
     let output_dir = tempfile::tempdir().expect("output directory");
     let output_path = output_dir.path().join("preview.json");
+    let path = super::fake_pi::install(home.path(), "test model");
+    let repository = tempfile::tempdir().expect("repository");
+    let repo = repository.path().join("repo");
+    initialize_git_repository(&repo);
     let output = Command::new(homeboy_bin())
+        .current_dir(&repo)
+        .env("PATH", path)
         .args([
             "agent-task",
             "cook",
             "--repo",
-            "homeboy",
+            repo.to_str().unwrap(),
             "--task-url",
             "https://github.com/Extra-Chill/homeboy/issues/13490",
             "--head",
@@ -65,10 +71,7 @@ fn unresolved_backend_preview_binds_stable_replay_lifecycle_without_mutation() {
             .exists(),
         "preview must not create a Cook output lease"
     );
-    assert_eq!(
-        preview["resolved"]["provider"]["backend"]["default_policy"],
-        "missing"
-    );
+    assert_eq!(preview["resolved"]["provider"]["backend"], "pi");
 
     let replay = preview["replay_argv"]
         .as_array()
@@ -82,29 +85,12 @@ fn unresolved_backend_preview_binds_stable_replay_lifecycle_without_mutation() {
         "preview Replay must not inject a generated --attempt-run-id: {replay:?}"
     );
 
-    for choice in preview["resolved"]["provider"]["backend"]["ready_choices"]
-        .as_array()
-        .expect("ready backend choices")
-    {
-        let choice_replay = choice["replay_argv"]
-            .as_array()
-            .expect("choice replay argv");
-        assert!(
-            !replay_has_flag(choice_replay, "--run-id"),
-            "choice Replay must not inject a generated --run-id: {choice_replay:?}"
-        );
-        assert!(
-            !replay_has_flag(choice_replay, "--attempt-run-id"),
-            "choice Replay must not inject a generated --attempt-run-id: {choice_replay:?}"
-        );
-    }
-
     assert_eq!(
         std::fs::read_dir(home.path())
             .expect("read isolated home")
             .count(),
-        0,
-        "preview must not create Homeboy state"
+        1,
+        "preview must leave only the fake Pi bin directory"
     );
 }
 
@@ -159,13 +145,18 @@ fn removed_detach_after_handoff_flag_is_rejected_before_cook_admission() {
 #[test]
 fn stdin_prompt_preview_declares_replay_requirement() {
     let home = tempfile::tempdir().expect("home");
+    let path = super::fake_pi::install(home.path(), "test model");
+    let repository = tempfile::tempdir().expect("repository");
+    let repo = repository.path().join("repo");
+    initialize_git_repository(&repo);
     let mut command = Command::new(homeboy_bin());
+    command.env("PATH", path).current_dir(&repo);
     command
         .args([
             "agent-task",
             "cook",
             "--repo",
-            "homeboy",
+            repo.to_str().unwrap(),
             "--task-url",
             "https://github.com/Extra-Chill/homeboy/issues/13490",
             "--head",

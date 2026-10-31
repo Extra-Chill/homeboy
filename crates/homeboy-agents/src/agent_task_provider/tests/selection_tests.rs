@@ -1,4 +1,4 @@
-use super::common::{request, script};
+use super::common::request;
 use super::*;
 
 #[test]
@@ -27,13 +27,9 @@ fn provider_preflight_reports_missing_command_before_spawn() {
 
 #[test]
 fn provider_preflight_reports_missing_secret_readiness() {
-    let (request, mut provider) = request(
-        "missing-secret",
-        std::env::current_exe()
-            .expect("current exe")
-            .display()
-            .to_string(),
-    );
+    let fake = super::super::test_pi::FakePi::success();
+    let request = fake.request("missing-secret");
+    let mut provider = fake.provider();
     provider.secret_requirements = vec![AgentTaskProviderSecretRequirement {
         name: None,
         env: vec!["HOMEBOY_TEST_PROVIDER_SECRET_THAT_SHOULD_NOT_EXIST".to_string()],
@@ -63,18 +59,13 @@ fn provider_preflight_reports_missing_secret_readiness() {
 fn provider_nonzero_exit_preserves_bounded_redacted_process_diagnostics() {
     let secret_value = "super-secret-provider-token";
     std::env::set_var("HOMEBOY_TEST_PROVIDER_SECRET", secret_value);
-    let script = script(&format!(
-        r#"cat <<'JSON'
-{{"schema":"{AGENT_TASK_OUTCOME_SCHEMA}","task_id":"codex-failed","status":"failed","summary":"Codex CLI exited with status 1.","failure_classification":"provider","artifacts":[],"typed_artifacts":[],"evidence_refs":[],"diagnostics":[],"outputs":null,"workflow":null,"follow_up":null,"metadata":null}}
-JSON
-printf '%s\n' 'Codex stderr: quota exhausted; token={secret_value}' >&2
-exit 1
-"#
+    let fake = super::super::test_pi::FakePi::new(&format!(
+        "{}\nprintf '%s\\n' 'Pi stderr: quota exhausted; token={secret_value}' >&2\nexit 1",
+        super::super::test_pi::FakePi::answer("Pi CLI exited with status 1."),
     ));
-    let (mut request, mut provider) = request("codex-failed", format!("sh {script}"));
+    let mut request = fake.request("pi-failed");
+    let provider = fake.provider();
     request.executor.secret_env = vec!["HOMEBOY_TEST_PROVIDER_SECRET".to_string()];
-    provider.id = "codex.provider".to_string();
-    provider.backend = "codex".to_string();
 
     let outcome = run_provider_command_once(&request, &provider);
 
@@ -85,11 +76,11 @@ exit 1
         .iter()
         .find(|diagnostic| diagnostic.class == "agent_task.provider_process_failed")
         .expect("process failure diagnostic");
-    assert!(diagnostic.message.contains("codex.provider"));
-    assert!(diagnostic.message.contains("codex"));
+    assert!(diagnostic.message.contains("pi.agent-task-executor"));
+    assert!(diagnostic.message.contains("pi"));
     assert!(diagnostic.message.contains("status 1"));
-    assert_eq!(diagnostic.data["provider"], "codex.provider");
-    assert_eq!(diagnostic.data["provider_backend"], "codex");
+    assert_eq!(diagnostic.data["provider"], "pi.agent-task-executor");
+    assert_eq!(diagnostic.data["provider_backend"], "pi");
     assert_eq!(diagnostic.data["exit_code"], 1);
     let stderr = diagnostic.data["stderr"].as_str().expect("stderr tail");
     assert!(stderr.contains("quota exhausted"));
@@ -98,7 +89,7 @@ exit 1
     assert!(diagnostic.data["stdout"]
         .as_str()
         .expect("stdout tail")
-        .contains("Codex CLI exited with status 1."));
+        .contains("Pi CLI exited with status 1."));
     assert!(diagnostic.data["remediation_hints"]
         .as_array()
         .expect("remediation hints")
@@ -332,78 +323,23 @@ fn provider_manifest_parses_role_aliases() {
 
 #[test]
 fn provider_command_receives_canonical_artifact_declarations() {
-    let command = format!(
-        "node {}",
-        script(
-            r#"
-const fs = require('fs');
-const input = JSON.parse(fs.readFileSync(0, 'utf8'));
-process.stdout.write(JSON.stringify({
-  schema: 'homeboy/agent-task-outcome/v1',
-  task_id: input.task_id,
-  status: 'succeeded',
-  artifacts: [],
-  typed_artifacts: [],
-  evidence_refs: [],
-  diagnostics: [],
-  outputs: { artifact_declarations: input.artifact_declarations },
-  metadata: null
-}));
-"#
-        )
-    );
-    let (mut request, provider) = request("task-artifact-normalization", command);
-    request.expected_artifacts = vec!["patch".to_string()];
-
-    let outcome = run_provider_command(&request, &provider, None);
-
+    let _home = super::common::artifact_home();
+    let fake = super::super::test_pi::FakePi::success();
+    let mut request = fake.request("task-artifact-normalization");
+    request.expected_artifacts = vec!["patch".into()];
+    request.normalize_artifact_declarations();
+    let outcome = run_provider_command(&request, &fake.provider(), None);
     assert_eq!(outcome.status, AgentTaskOutcomeStatus::Succeeded);
-    assert_eq!(outcome.outputs["artifact_declarations"][0]["name"], "patch");
-    assert_eq!(
-        outcome.outputs["artifact_declarations"][0]["required"],
-        true
-    );
-}
-
-#[test]
-fn provider_command_argv_preserves_extension_and_runtime_paths_with_spaces() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let extension_dir = temp.path().join("extension path with spaces");
-    let runtime_dir = temp.path().join("runtime path with spaces");
-    fs::create_dir_all(&extension_dir).expect("extension dir");
-    fs::create_dir_all(&runtime_dir).expect("runtime dir");
-    fs::write(
-        runtime_dir.join("provider.js"),
-        r#"
-const fs = require('fs');
-const input = JSON.parse(fs.readFileSync(0, 'utf8'));
-process.stdout.write(JSON.stringify({
-  schema: 'homeboy/agent-task-outcome/v1',
-  task_id: input.task_id,
-  status: process.argv[2] === '--extension' && process.argv[3].includes('extension path with spaces') ? 'succeeded' : 'failed',
-  summary: process.argv.slice(2).join('|')
-}));
-"#,
-    )
-    .expect("provider script");
-    let (request, mut provider) = request("task-argv-spaces", "legacy unused".to_string());
-    provider.extension_path = Some(extension_dir.to_string_lossy().to_string());
-    provider.runtime_path = Some(runtime_dir.to_string_lossy().to_string());
-    provider.command_argv = vec![
-        "node".to_string(),
-        "{{runtime_path}}/provider.js".to_string(),
-        "--extension".to_string(),
-        "{{extension_path}}".to_string(),
-    ];
-
-    let outcome = run_provider_command(&request, &provider, None);
-
-    assert_eq!(outcome.status, AgentTaskOutcomeStatus::Succeeded);
-    assert!(outcome
-        .summary
-        .as_deref()
-        .unwrap_or_default()
-        .contains("extension path with spaces"));
+    let input = outcome
+        .evidence_refs
+        .iter()
+        .find(|e| e.kind == "executor-input")
+        .unwrap();
+    let persisted: Value =
+        serde_json::from_slice(&fs::read(input.uri.strip_prefix("file://").unwrap()).unwrap())
+            .unwrap();
+    assert_eq!(persisted["artifact_declarations"][0]["name"], "patch");
+    assert_eq!(persisted["artifact_declarations"][0]["required"], true);
 }
 
 #[test]
@@ -411,33 +347,26 @@ fn provider_invocation_argv_and_cwd_preserve_paths_with_spaces() {
     let temp = tempfile::tempdir().expect("tempdir");
     let runtime_dir = temp.path().join("runtime path with spaces");
     fs::create_dir_all(&runtime_dir).expect("runtime dir");
-    fs::write(
-        runtime_dir.join("provider.js"),
-        r#"
-const fs = require('fs');
-const input = JSON.parse(fs.readFileSync(0, 'utf8'));
-process.stdout.write(JSON.stringify({
-  schema: 'homeboy/agent-task-outcome/v1',
-  task_id: input.task_id,
-  status: process.cwd().includes('runtime path with spaces') ? 'succeeded' : 'failed',
-  summary: process.cwd()
-}));
-"#,
-    )
-    .expect("provider script");
-    let (request, mut provider) = request("task-invocation-cwd", "legacy unused".to_string());
-    provider.runtime_path = Some(runtime_dir.to_string_lossy().to_string());
-    provider.invocation.argv = vec!["node".to_string(), "provider.js".to_string()];
-    provider.invocation.cwd = Some("{{runtime_path}}".to_string());
+    let fake = super::super::test_pi::FakePi::new(&format!(
+        "pwd > observed-cwd\n{}",
+        super::super::test_pi::FakePi::answer("paths preserved")
+    ));
+    let command = runtime_dir.join("fake pi");
+    fs::copy(&fake.command, &command).unwrap();
+    let mut request = fake.request("task-invocation-cwd");
+    request.executor.config["command"] = json!(command);
+    request.workspace.root = Some(runtime_dir.display().to_string());
+    let provider = fake.provider();
 
     let outcome = run_provider_command(&request, &provider, None);
 
     assert_eq!(outcome.status, AgentTaskOutcomeStatus::Succeeded);
-    assert!(outcome
-        .summary
-        .as_deref()
-        .unwrap_or_default()
-        .contains("runtime path with spaces"));
+    assert_eq!(
+        fs::read_to_string(runtime_dir.join("observed-cwd"))
+            .unwrap()
+            .trim(),
+        runtime_dir.canonicalize().unwrap().to_str().unwrap()
+    );
 }
 
 #[test]
@@ -584,20 +513,5 @@ fn default_backend_reads_component_scoped_extension_policy() {
     assert_eq!(
         component_default_backend(&component).as_deref(),
         Some("component-policy")
-    );
-}
-
-#[test]
-fn provider_command_interpolates_runtime_path_separately_from_extension_path() {
-    let (_, mut provider) = request(
-        "task-a",
-        "{{runtime_path}}/bin/provider --extension {{extension_path}}".to_string(),
-    );
-    provider.extension_path = Some("/extensions/project-type".to_string());
-    provider.runtime_path = Some("/agent-runtimes/example".to_string());
-
-    assert_eq!(
-        render_provider_command_display(&provider),
-        "/agent-runtimes/example/bin/provider --extension /extensions/project-type"
     );
 }

@@ -1084,6 +1084,7 @@ mod tests {
     use crate::agent_task::{
         AgentTaskExecutor, AgentTaskLimits, AgentTaskPolicy, AgentTaskWorkspace,
     };
+    use crate::agent_task_provider::test_pi::FakePi;
 
     fn readiness_request(model: &str) -> AgentTaskRequest {
         AgentTaskRequest {
@@ -1127,22 +1128,22 @@ mod tests {
         let _home = crate::agent_task_provider::runtime_readiness::stable_identity_home();
         let temp = tempfile::tempdir().expect("tempdir");
         let count = temp.path().join("probe-count");
-        let readiness: AgentTaskExecutorProvider = serde_json::from_value(json!({
-            "id": format!("test.provider.{}", uuid::Uuid::new_v4()),
-            "backend": "test",
-            "readiness_invocation": {
-                "argv": ["sh", "-c", format!(
-                    "count={:?}; value=0; test ! -f \"$count\" || value=$(cat \"$count\"); value=$((value + 1)); printf '%s' \"$value\" > \"$count\"; printf '%s' '{{\"schema\":\"homeboy/agent-task-provider-readiness-result/v1\",\"ready\":true,\"classification\":\"ready\",\"retryable\":false,\"remediation\":\"\",\"reason\":\"\",\"cache_key\":\"shared\",\"identity\":{{}}}}'",
-                    count.display()
-                )]
-            }
-        })).expect("provider");
+        let fake = FakePi::with_probes(
+            "exit 1",
+            "echo test-pi",
+            &format!(
+                "printf 'probe\\n' >> '{}'; echo 'test shared-model'",
+                count.display()
+            ),
+        );
+        let readiness = fake.provider();
         let first_executor =
             ExtensionProviderAgentTaskExecutor::with_providers(vec![readiness.clone()]);
         let later_child_executor = first_executor.sharing_evidence_with(vec![readiness]);
 
         for task_id in ["child-one", "child-two", "child-three"] {
-            let mut request = readiness_request("shared-model");
+            let mut request = fake.request("readiness-route");
+            request.executor.model = Some("test/shared-model".into());
             request.task_id = task_id.to_string();
             assert!(
                 if task_id == "child-one" {
@@ -1154,7 +1155,13 @@ mod tests {
             );
         }
 
-        assert_eq!(std::fs::read_to_string(count).expect("probe count"), "1");
+        assert_eq!(
+            std::fs::read_to_string(count)
+                .expect("probe count")
+                .lines()
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -1166,22 +1173,19 @@ mod tests {
             .ok()
             .and_then(|value| value.parse::<u64>().ok())
             .unwrap_or(20_000);
-        let provider: AgentTaskExecutorProvider = serde_json::from_value(json!({
-            "id": "test.provider.independent-process",
-            "backend": "test",
-            "secret_env_requirements": [{ "env": ["HOMEBOY_TEST_READINESS_TOKEN"] }],
-            "readiness_invocation": {
-                "argv": ["node", "-e", readiness_script],
-                "timeout_ms": timeout_ms
-            }
-        }))
-        .expect("worker provider");
+        let mut provider = super::discovery::discover_agent_task_executor_providers().remove(0);
+        provider.secret_env_requirements =
+            serde_json::from_value(json!([{ "env": ["HOMEBOY_TEST_READINESS_TOKEN"] }])).unwrap();
+        provider.readiness_invocation.as_mut().unwrap().timeout_ms = timeout_ms;
         let executor = ExtensionProviderAgentTaskExecutor::with_providers(vec![provider]);
         let mut request = readiness_request(
             &std::env::var("HOMEBOY_TEST_READINESS_MODEL").expect("worker model"),
         );
         let account = std::env::var("HOMEBOY_TEST_READINESS_ACCOUNT").expect("worker account");
+        request.executor.backend = "pi".into();
+        request.executor.model = request.executor.model.map(|model| format!("test/{model}"));
         request.executor.config = json!({
+            "command": readiness_script,
             "client_context": {
                 "account": account,
                 "fanout": {
@@ -1230,25 +1234,15 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let baseline_probe_log = temp.path().join("baseline-probe-log");
         let candidate_probe_log = temp.path().join("candidate-probe-log");
-        let ready = serde_json::json!({
-            "schema": "homeboy/agent-task-provider-readiness-result/v1",
-            "ready": true,
-            "classification": "ready",
-            "retryable": false,
-            "remediation": "",
-            "reason": "",
-            "cache_key": "shared-route",
-            "identity": {}
-        });
-        let make_readiness_script = |probe_log: &std::path::Path| {
-            format!(
-            "const fs=require('fs');const request=JSON.parse(fs.readFileSync(0,'utf8'));fs.appendFileSync({:?},request.effective_config.client_context.account+':'+process.env.HOMEBOY_TEST_READINESS_TOKEN+'\\n');setTimeout(()=>process.stdout.write({:?}),100);",
-            probe_log.display().to_string(),
-            serde_json::to_string(&ready).expect("readiness verdict")
-        )
+        let make_pi = |probe_log: &std::path::Path| {
+            FakePi::with_probes("exit 1", "echo test-pi", &format!(
+                "printf '%s\\n' \"$HOMEBOY_TEST_READINESS_TOKEN\" >> '{}'; sleep 0.1; printf 'test shared-model\\ntest other-model\\n'", probe_log.display()
+            ))
         };
-        let baseline_readiness_script = make_readiness_script(&baseline_probe_log);
-        let candidate_readiness_script = make_readiness_script(&candidate_probe_log);
+        let baseline_pi = make_pi(&baseline_probe_log);
+        let candidate_pi = make_pi(&candidate_probe_log);
+        let baseline_readiness_script = baseline_pi.command.display().to_string();
+        let candidate_readiness_script = candidate_pi.command.display().to_string();
         let test_binary = std::env::current_exe().expect("test binary");
         // PATH and HOME are part of the readiness request identity, and child
         // processes inherit them from this process, where concurrent tests
@@ -1487,13 +1481,13 @@ mod tests {
         assert_eq!(
             probes.lines().collect::<Vec<_>>(),
             [
-                "account-a:token-one",
-                "account-a:token-one",
-                "account-a:token-one",
-                "account-a:token-rotated",
-                "account-b:token-one",
-                "account-a:token-one",
-                "account-c:token-one",
+                "token-one",
+                "token-one",
+                "token-one",
+                "token-rotated",
+                "token-one",
+                "token-one",
+                "token-one",
             ]
         );
         // The probe log above is the sharing proof. Comparing against the
@@ -1541,7 +1535,7 @@ mod tests {
         );
         let probes = std::fs::read_to_string(&candidate_probe_log)
             .expect("probe log after durable TTL expiration");
-        assert_eq!(probes.lines().last(), Some("account-c:token-one"));
+        assert_eq!(probes.lines().last(), Some("token-one"));
         assert_eq!(probes.lines().count(), 8);
     }
 
@@ -1571,15 +1565,28 @@ mod tests {
     #[test]
     fn provider_capacity_evidence_is_shared_across_plans_and_scoped_to_the_model_identity() {
         let _home = crate::agent_task_provider::runtime_readiness::stable_identity_home();
-        let executor = readiness_executor();
-        let blocked = readiness_request("blocked-model");
+        let fake = FakePi::with_probes(
+            "exit 1",
+            "echo test-pi",
+            "printf 'test changed-model\\ntest capped-model\\n'; test ! -f \"$0.recovered\" || echo 'test blocked-model'", 
+        );
+        let executor = ExtensionProviderAgentTaskExecutor::with_providers(vec![fake.provider()]);
+        let route = |model: &str| {
+            let mut request = fake.request("capacity-route");
+            request.executor.model = Some(format!("test/{model}"));
+            request
+        };
+        let blocked = route("blocked-model");
         let mut blocked_outcome = AgentTaskOutcome {
             task_id: blocked.task_id.clone(),
             status: AgentTaskOutcomeStatus::ProviderError,
             failure_classification: Some(AgentTaskFailureClassification::ProviderAccountBlocked),
             ..Default::default()
         };
-        let capacity_key = executor.provider_route_capacity_key(&blocked);
+        let capacity_key = executor
+            .provider_route_readiness(&blocked)
+            .capacity_key
+            .unwrap();
         executor.record_provider_outcome(&blocked, &capacity_key, &blocked_outcome);
 
         assert_eq!(
@@ -1588,12 +1595,12 @@ mod tests {
         );
         assert!(
             executor
-                .provider_route_readiness(&readiness_request("changed-model"))
+                .provider_route_readiness(&route("changed-model"))
                 .ready,
             "a changed model/config identity must not inherit an account block"
         );
 
-        let capped = readiness_request("capped-model");
+        let capped = route("capped-model");
         let reset_at = chrono::Utc::now() + chrono::Duration::hours(1);
         blocked_outcome.failure_classification = Some(AgentTaskFailureClassification::RateLimited);
         blocked_outcome.diagnostics = vec![AgentTaskDiagnostic {
@@ -1601,7 +1608,10 @@ mod tests {
             message: "usage cap".to_string(),
             data: json!({ "reset_at": reset_at.to_rfc3339() }),
         }];
-        let capacity_key = executor.provider_route_capacity_key(&capped);
+        let capacity_key = executor
+            .provider_route_readiness(&capped)
+            .capacity_key
+            .unwrap();
         executor.record_provider_outcome(&capped, &capacity_key, &blocked_outcome);
 
         let separately_constructed_for_later_plan =
@@ -1610,10 +1620,10 @@ mod tests {
         assert_eq!(readiness.state, "usage_capped");
         assert_eq!(readiness.reset_at, Some(reset_at));
 
-        let provider = effective_provider_for_request(&blocked, executor.providers())
-            .expect("provider resolution")
-            .expect("provider");
-        let key = provider_capacity_key(&blocked, &provider).expect("capacity key");
+        let key = executor
+            .provider_route_readiness(&blocked)
+            .capacity_key
+            .unwrap();
         executor
             .evidence
             .lock()
@@ -1622,6 +1632,8 @@ mod tests {
             .get_mut(&key)
             .expect("account block")
             .expires_at = chrono::Utc::now() - chrono::Duration::seconds(1);
+        std::fs::write(fake.command.with_extension("recovered"), "").unwrap();
+        executor.evidence.lock().unwrap().readiness.expire_all();
         assert!(
             executor
                 .sharing_evidence_with(executor.providers().to_vec())
@@ -1695,38 +1707,28 @@ mod tests {
     }
 
     #[test]
-    fn provider_reported_account_switch_does_not_inherit_capacity_evidence() {
+    fn pi_account_credential_switch_does_not_inherit_capacity_evidence() {
         let _home = crate::agent_task_provider::runtime_readiness::stable_identity_home();
         let root = tempfile::tempdir().expect("tempdir");
         let account = root.path().join("account");
-        let script = root.path().join("readiness.js");
-        std::fs::write(&account, "account-a").expect("account A");
-        std::fs::write(
-            &script,
-            "const fs=require('fs');const account=fs.readFileSync(process.argv[2],'utf8').trim();process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:true,classification:'ready',retryable:false,remediation:'',reason:'',cache_key:'capacity-'+account,identity:{account}}));",
-        )
-        .expect("readiness script");
-        let mut provider: AgentTaskExecutorProvider = serde_json::from_value(json!({
-            "id": "test.provider",
-            "backend": "test"
-        }))
-        .expect("provider");
-        provider.readiness_invocation = Some(
-            homeboy_core::command_invocation::CommandInvocation {
-                argv: vec![
-                    "node".to_string(),
-                    script.display().to_string(),
-                    account.display().to_string(),
-                ],
-                ..Default::default()
-            }
-            .into(),
+        std::fs::write(&account, r#"{"token":"account-a"}"#).expect("account A");
+        let fake = FakePi::success();
+        let mut provider = fake.provider();
+        provider.provider_defaults.insert(
+            "account".into(),
+            json!({
+                "secret_env": ["TEST_ACCOUNT_TOKEN"],
+                "secret_env_sources": {
+                    "TEST_ACCOUNT_TOKEN": {"source":"json-file", "path":account, "field":"token"}
+                }
+            }),
         );
         let mut executor = ExtensionProviderAgentTaskExecutor::with_providers(vec![provider]);
         // This fixture expires readiness to simulate account rotation. Keep that
         // invalidation local rather than expiring other tests' process cache.
         executor.evidence = Arc::new(Mutex::new(ProviderEvidenceStore::default()));
-        let request = readiness_request("model");
+        let mut request = fake.request("account-switch");
+        request.executor.config["provider"] = json!("account");
         let readiness = executor.provider_route_readiness(&request);
         assert!(readiness.ready);
         let capacity_key = readiness.capacity_key.expect("reported capacity binding");
@@ -1752,7 +1754,7 @@ mod tests {
             "usage_capped"
         );
 
-        std::fs::write(&account, "account-b").expect("account B");
+        std::fs::write(&account, r#"{"token":"account-b"}"#).expect("account B");
         executor
             .evidence
             .lock()
@@ -1761,10 +1763,10 @@ mod tests {
             .expire_all();
         assert!(
             executor.provider_route_readiness(&request).ready,
-            "provider-reported account B must not inherit account A's cap"
+            "Pi credential B must not inherit credential A's cap"
         );
 
-        std::fs::write(&account, "account-a").expect("restore account A");
+        std::fs::write(&account, r#"{"token":"account-a"}"#).expect("restore account A");
         executor
             .evidence
             .lock()

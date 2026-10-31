@@ -10,6 +10,8 @@ mod pi;
 pub(crate) mod pi_response;
 #[cfg(test)]
 mod pi_tests;
+#[cfg(test)]
+pub(crate) mod test_pi;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -30,8 +32,6 @@ use crate::agent_task_secrets::{
     AgentTaskSecretResolutionError,
 };
 use crate::agent_task_timeout::timeout_with_grace;
-#[cfg(test)]
-use homeboy_core::agent_runtime_manifest;
 use homeboy_core::agent_runtime_manifest::AgentRuntimeDiscoveryDiagnostic;
 pub(crate) use homeboy_core::command_invocation::CommandInvocation;
 use homeboy_core::engine::shell;
@@ -83,12 +83,9 @@ pub use capacity_readiness::{
     PROVIDER_READINESS_CAPACITY_CLASSIFICATION,
 };
 pub use catalog::*;
-#[cfg(test)]
-pub(crate) use command_runner::run_provider_readiness_invocation_with_test_timeout;
 pub use command_runner::{
-    probe_provider_executor_resolves, provider_command_parts, run_provider_controller_refresh,
-    run_provider_readiness_invocation, validate_provider_immediate_failure_patterns,
-    ProviderExecutorResolution, ProviderReadinessInvocationCapacity,
+    provider_command_parts, run_provider_controller_refresh, run_provider_readiness_invocation,
+    validate_provider_immediate_failure_patterns, ProviderReadinessInvocationCapacity,
     ProviderReadinessInvocationResult, PROVIDER_READINESS_RESULT_SCHEMA,
 };
 pub(crate) use config_preflight::preflight_plan_provider_config_with_providers;
@@ -181,8 +178,7 @@ pub(crate) use outcome_normalization::{
 #[cfg(test)]
 use command_runner::{
     immediate_provider_failure, is_transient_provider_error, provider_command_env,
-    render_provider_command_display, run_provider_command, run_provider_command_once,
-    PROVIDER_TRANSIENT_MAX_ATTEMPTS,
+    run_provider_command, run_provider_command_once, PROVIDER_TRANSIENT_MAX_ATTEMPTS,
 };
 #[cfg(test)]
 use fixtures::fixture_artifact;

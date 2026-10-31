@@ -3,7 +3,6 @@ use super::resolution::{
     provider_requires_cwd_git_checkout_with_providers,
     required_extension_ids_for_plan_with_providers, select_provider,
 };
-use super::runner_readiness::provider_executable_env;
 use super::secrets::{
     apply_provider_runner_secret_env_contracts_with_providers, provider_declared_secret_sources,
     provider_secret_sources_for_plan_with_providers,
@@ -531,27 +530,6 @@ fn validate_provider_runner_readiness_for_backend_with_diagnostics(
             )
         },
     )?;
-
-    provider_executable_env(provider).map_err(|error| {
-        Error::validation_invalid_argument(
-            "backend",
-            format!(
-                "agent-task backend '{backend}' is registered but runner readiness failed for provider '{}': {}",
-                provider.id,
-                error.message()
-            ),
-            Some(backend.to_string()),
-            Some(vec![
-                format!(
-                    "Selected provider: {} (backend '{}', selector '{}').",
-                    provider.id,
-                    provider.backend,
-                    selector.unwrap_or("<default>")
-                ),
-                "Fix the executable/env on this machine or runner before dispatching the task wave.".to_string(),
-            ]),
-        )
-    })?;
 
     let effective_config =
         crate::agent_task_config_materialization::materialize_provider_config_refs(Value::Object(
