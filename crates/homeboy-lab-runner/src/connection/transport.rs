@@ -107,60 +107,6 @@ pub fn transport_is_live(session: &RunnerSession, timeout: Duration) -> bool {
     session_is_live_with_timeout(session, timeout)
 }
 
-/// Re-establish a transport for placement or admission.
-///
-/// A runner with a recorded current session first gets its transport back
-/// through [`ensure_transport`]. Only when the recorded daemon is
-/// [`TransportFailure::Unreachable`] (for example after the runner host
-/// rebooted) does it fall back to the full [`connect`]. `connect` runs the
-/// idempotent `ensure-running` on the one state dir: it adopts a live daemon
-/// and starts a dead one, and it never restarts a live daemon in place. An SSH
-/// failure (liveness unknown) or an identity mismatch (another daemon answered)
-/// is the answer and never reaches `connect`. A runner with no daemon session
-/// at all goes straight to `connect`.
-pub(crate) fn reach_runner(runner_id: &str) -> Result<()> {
-    reach_runner_with(
-        runner_id,
-        |runner_id| Ok(read_session(runner_id)?.is_some()),
-        |runner_id| ensure_transport(runner_id, TransportLifetime::Persisted).map(|_| ()),
-        connect_until_connected,
-    )
-}
-
-/// [`reach_runner`] with its three effects injected, so the choice between
-/// re-establishing the transport and the no-session `connect` is testable.
-pub(crate) fn reach_runner_with(
-    runner_id: &str,
-    has_recorded_session: impl FnOnce(&str) -> Result<bool>,
-    ensure: impl FnOnce(&str) -> Result<()>,
-    connect: impl FnOnce(&str) -> Result<()>,
-) -> Result<()> {
-    if !has_recorded_session(runner_id)? {
-        return connect(runner_id);
-    }
-    match ensure(runner_id) {
-        Err(error) if TransportFailure::of(&error) == Some(TransportFailure::Unreachable) => {
-            connect(runner_id)
-        }
-        result => result,
-    }
-}
-
-fn connect_until_connected(runner_id: &str) -> Result<()> {
-    let (report, exit_code) = connect(runner_id)?;
-    if report.connected && exit_code == 0 {
-        return Ok(());
-    }
-    Err(Error::validation_invalid_argument(
-        "runner",
-        report
-            .failure_message
-            .unwrap_or_else(|| "runner connect did not report a live session".to_string()),
-        Some(runner_id.to_string()),
-        None,
-    ))
-}
-
 /// Close a transport [`ensure_transport`] returned for
 /// [`TransportLifetime::Temporary`]. This only signals the exact local tunnel
 /// process; it never stops the remote daemon that owns the durable job.
