@@ -1,20 +1,10 @@
 # Homeboy Extensions
 
-Agent runtime providers describe invocation and process lifecycle behavior. They do not own
-execution capacity. Configure the global runner ceiling with Homeboy's
-`runner.settings.concurrency_limit`; per-plan concurrency requests remain bounded by that limit.
-
 Official extension directory for [Homeboy](https://github.com/Extra-Chill/homeboy). Each extension is a project-type primitive — it teaches Homeboy how to discover, audit, lint, test, and release a particular kind of codebase.
 
 This is a **monorepo** — each subdirectory is a standalone extension. Install individual extensions, not the whole repo.
 
-Agent runtimes live under `agent-runtimes/`. Direct WP Codebox integration is
-owned by the WordPress extension rather than the agent-runtime registry.
-
-Generic runtime package requirements are documented in
-[`docs/agent-runtime-package-contract.md`](docs/agent-runtime-package-contract.md).
-Use `tests/fixtures/agent-runtime-manifest.json` for static contract assertions;
-`agent-runtimes/` contains only shipped runtime packages.
+Direct WP Codebox integration and its runtime helpers are owned by the WordPress extension.
 
 Generic project-root, package-manager, and named-script execution helpers live in
 [`scripts/lib/project-scripts.sh`](scripts/lib/project-scripts.sh) and are
@@ -22,19 +12,10 @@ documented in [`docs/project-script-runtime.md`](docs/project-script-runtime.md)
 They are extension-owned until Homeboy core grows an ecosystem-neutral runtime
 helper contract.
 
-Generic runtime loop, fanout/reconcile, proof, and lifecycle primitives are
-exported from `homeboy-runtime-agent-ci/generic-orchestration`; provider and
-workflow adapters are exported from `homeboy-runtime-agent-ci/provider-adapters`.
-Module internals live in `runtime-agent-ci/lib/` and are documented in
-[`docs/generic-fanout-reconcile-workflow.md`](docs/generic-fanout-reconcile-workflow.md).
-
 Declarative dependency adapter manifests live in
 [`dependency-adapters/`](dependency-adapters/). They describe extension-owned
 Node.js, Composer, and WordPress dependency materialization surfaces without
 teaching Homeboy core ecosystem-specific package-manager behavior.
-Use `.github/workflows/runtime-agent-full-run.yml` for the standard single-task
-path: injectable runtime execution, workspace verification, dry-run or PR
-publication evidence, and one final green/red proof envelope.
 
 Integration-specific examples live under [`docs/integrations/`](docs/integrations/)
 when a reusable integration needs documentation outside its owning project.
@@ -140,49 +121,7 @@ homeboy review test
 homeboy release
 ```
 
-### Runtime agent full-run tasks
-
-The reusable `.github/workflows/runtime-agent-full-run.yml` workflow is a thin
-GitHub Actions adapter over the headless deterministic loop runner in
-`runtime-agent-ci`. Use `runtime_task` or the `ability_request`/`ability_input`
-shorthand for direct ability execution. Mount downloaded GitHub Actions
-artifacts with `runtime_mounts`, and enforce typed outputs with
-`artifact_declarations` plus `runtime_output_projections`.
-
-Callers select runtimes with `runtime` and `profile`. Omitting `runtime` selects
-the neutral `local-shell` runtime for generic contract smokes; WordPress callers
-must pass `runtime: wp-codebox` explicitly.
-
-Call `.github/workflows/runtime-agent-full-run.yml` directly for runtime-backed
-agent runs. WP Codebox callers use the same workflow with `runtime: wp-codebox`
-and canonical selected-runtime inputs such as `runtime_mounts`,
-`runtime_overlays`, `runtime_profiles`, `component_contracts`, and
-`artifact_declarations`. See [`.github/workflows/README.md`](.github/workflows/README.md)
-for workflow inputs and integration examples.
-
-Use `component_contracts` only when the ability provider plugin or runtime
-component must be mounted explicitly. Keep ability names, schemas, and artifact
-types owned by the caller; Homeboy Extensions only forwards the generic runtime
-task contract.
-
-Non-GitHub callers can run the same primitive directly:
-
-```bash
-node runtime-agent-ci/scripts/run-headless-loop.cjs \
-  --spec runtime-agent-full-run-config.json \
-  --result loop-result.json \
-  --events loop-events.json \
-  --outcome agent-task-outcome.json \
-  --results run-results.json
-```
-
-The CLI accepts the same loop spec/config that GitHub Actions materializes, plus
-an injected `runtime_manifest` when the caller does not want to rely on the
-checked-in runtime registry. It emits durable JSON loop results, ordered events,
-and the existing outcome/results files consumed by workflow adapters.
-
-The public `runtime-agent-ci` binaries are the package `bin` entries. The
-package exposes only explicit subpath exports for public surfaces.
+### WordPress runtime integration
 
 WP Codebox is expected to consume a `wp-codebox/runtime-profile/v1` payload with
 generic runtime dependencies such as `components`, `plugins`, `mu_plugins`,

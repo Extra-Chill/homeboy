@@ -61,11 +61,7 @@ if [ -z "$ADAPTERS_HELPER" ] || [ ! -f "$ADAPTERS_HELPER" ]; then
 fi
 # shellcheck source=../../../scripts/lib/test-result-adapters.sh
 source "$ADAPTERS_HELPER"
-# Shared agent runtimes install beside the extensions directory
-# (<homeboy>/agent-runtimes), one level above where a monorepo checkout puts
-# them relative to this script. Probe both so an installed extension still
-# finds the WP Codebox result adapters instead of silently parsing without
-# them (#12585).
+# WP Codebox result adapters ship inside the WordPress extension.
 WP_CODEBOX_ADAPTERS_HELPER="${HOMEBOY_WP_CODEBOX_TEST_RESULT_ADAPTERS:-}"
 if [ -n "$WP_CODEBOX_ADAPTERS_HELPER" ] && [ ! -f "$WP_CODEBOX_ADAPTERS_HELPER" ]; then
     echo "ERROR: HOMEBOY_WP_CODEBOX_TEST_RESULT_ADAPTERS points to a missing file: ${WP_CODEBOX_ADAPTERS_HELPER}" >&2
@@ -95,19 +91,8 @@ then
     NEEDS_WP_CODEBOX_ADAPTER=1
 fi
 if [ "$NEEDS_WP_CODEBOX_ADAPTER" -eq 1 ]; then
-    if [ -z "$WP_CODEBOX_ADAPTERS_HELPER" ] && [ -n "${HOMEBOY_AGENT_RUNTIMES_DIR:-}" ]; then
-        if ! WP_CODEBOX_ADAPTERS_HELPER="$(node "${SCRIPT_DIR}/../lib/agent-runtime-paths.cjs" "wp-codebox/scripts/lib/test-result-adapters.sh")"; then
-            exit 1
-        fi
-    elif [ -z "$WP_CODEBOX_ADAPTERS_HELPER" ]; then
-        for candidate in \
-            "${SCRIPT_DIR}/../../../../agent-runtimes/wp-codebox/scripts/lib/test-result-adapters.sh" \
-            "${SCRIPT_DIR}/../../../agent-runtimes/wp-codebox/scripts/lib/test-result-adapters.sh"; do
-            if [ -f "$candidate" ]; then
-                WP_CODEBOX_ADAPTERS_HELPER="$candidate"
-                break
-            fi
-        done
+    if [ -z "$WP_CODEBOX_ADAPTERS_HELPER" ]; then
+        WP_CODEBOX_ADAPTERS_HELPER="${SCRIPT_DIR}/../../wp-codebox-runtime/scripts/lib/test-result-adapters.sh"
     fi
     if [ -n "$WP_CODEBOX_ADAPTERS_HELPER" ] && [ -f "$WP_CODEBOX_ADAPTERS_HELPER" ]; then
         # shellcheck source=/dev/null

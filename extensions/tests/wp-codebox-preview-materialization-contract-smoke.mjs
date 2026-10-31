@@ -10,7 +10,7 @@ const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 process.env.HOMEBOY_WP_CODEBOX_CORE_MODULE ||= path.join(rootDir, 'tests', 'fixtures', 'wp-codebox-core-runtime-contract.cjs');
 const {
 	materializePreview,
-} = require(path.join(rootDir, 'runtime-agent-ci', 'provider-adapters.js'));
+} = require(path.join(rootDir, 'wordpress', 'lib', 'preview-materialization.js'));
 const {
 	WP_CODEBOX_BROWSER_CONTAINED_SITE_OPEN_SCHEMA,
 	WP_CODEBOX_BROWSER_CONTAINED_SITE_STATUS_SCHEMA,
@@ -65,7 +65,7 @@ assert.equal(
 
 const boundaryTerms = /wp-site-generator|WPSG|site-generator|site generator|PLAYGROUND_PREVIEW|PLAYGROUND_URL/i;
 for (const relativePath of [
-	'runtime-agent-ci/lib/preview-materialization.js',
+	'wordpress/lib/preview-materialization.js',
 	'wordpress/lib/wp-codebox-preview-materialization-contract.js',
 ]) {
 	assert.equal(boundaryTerms.test(fs.readFileSync(path.join(rootDir, relativePath), 'utf8')), false, `${relativePath} must remain generic.`);

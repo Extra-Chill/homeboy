@@ -1,5 +1,4 @@
 {
-  "_generated_by": "agent-runtimes/fixtures/homeboy-agent-task-core-contract.json",
   "core_contract_schema": "homeboy/agent-task-core-contract/v1",
   "provider_capability": {
     "failure_classifications": [

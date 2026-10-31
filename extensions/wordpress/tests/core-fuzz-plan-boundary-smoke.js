@@ -33,7 +33,6 @@ assert(wordpressDocs.includes('wp-codebox/fuzz-suite/v1'), 'WordPress extension 
 
 const workflowAndScriptText = [
 	...readDirectoryFiles('.github/workflows', (entry) => entry.endsWith('.yml') || entry.endsWith('.yaml')),
-	...readDirectoryFiles('.github/scripts/runtime-agent-full-run', (entry) => entry.endsWith('.cjs') || entry.endsWith('.mjs') || entry.endsWith('.js')),
 	readIfExists('wordpress/package.json'),
 ].join('\n');
 

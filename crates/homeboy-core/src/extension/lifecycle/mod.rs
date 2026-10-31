@@ -515,9 +515,9 @@ mod tests {
         write_shared_asset_manifest(
             root,
             &[
-                "agent-runtimes",
-                "runtime-agent-ci",
-                "agent-task-contracts",
+                "shared-tools",
+                "shared-helpers",
+                "shared-contracts",
                 "dependency-adapters",
             ],
         );
@@ -526,14 +526,14 @@ mod tests {
 
     fn write_shared_runtime_fixture(root: &Path) {
         let runtime_script = root.join(
-            "agent-runtimes/sample-runtime/scripts/agent/sample-runtime-agent-task-executor.cjs",
+            "shared-tools/sample-runtime/scripts/agent/sample-runtime-agent-task-executor.cjs",
         );
         fs::create_dir_all(runtime_script.parent().expect("runtime script parent"))
             .expect("runtime script dir");
         fs::write(&runtime_script, "console.log('sample runtime');\n").expect("runtime script");
 
         let runtime_agent_ci_helper =
-            root.join("runtime-agent-ci/lib/agent-task-provider-contract.js");
+            root.join("shared-helpers/lib/agent-task-provider-contract.js");
         fs::create_dir_all(
             runtime_agent_ci_helper
                 .parent()
@@ -546,7 +546,7 @@ mod tests {
         )
         .expect("runtime agent ci helper");
 
-        let agent_task_contract = root.join("agent-task-contracts/agent-task-provider-contract.js");
+        let agent_task_contract = root.join("shared-contracts/agent-task-provider-contract.js");
         fs::create_dir_all(
             agent_task_contract
                 .parent()
@@ -1214,9 +1214,9 @@ exec '{}' "$@"
             write_extension_fixture(&source, "rust");
             write_shared_runtime_fixture(&source);
             let shared = [
-                "agent-runtimes",
-                "runtime-agent-ci",
-                "agent-task-contracts",
+                "shared-tools",
+                "shared-helpers",
+                "shared-contracts",
                 "scripts/lib",
             ];
             write_shared_asset_manifest(&source, &shared);
@@ -1226,11 +1226,7 @@ exec '{}' "$@"
             let extension = external.join("extensions/rust");
             fs::create_dir_all(extension.parent().unwrap()).unwrap();
             for path in shared {
-                let target = if path == "scripts/lib" {
-                    ambient.join("extensions").join(path)
-                } else {
-                    ambient.join(path)
-                };
+                let target = ambient.join("extensions").join(path);
                 fs::create_dir_all(&target).unwrap();
                 fs::write(target.join("ambient-sentinel"), "ambient unchanged").unwrap();
             }
@@ -1238,18 +1234,10 @@ exec '{}' "$@"
             let actual = shared_assets_for_extension_source(&extension);
             assert_eq!(actual.len(), shared.len());
             for path in shared {
-                let target = if path == "scripts/lib" {
-                    external.join("extensions").join(path)
-                } else {
-                    external.join(path)
-                };
+                let target = external.join("extensions").join(path);
                 assert!(actual.contains(&(path.to_string(), target.clone())));
                 assert!(target.is_dir());
-                let ambient_target = if path == "scripts/lib" {
-                    ambient.join("extensions").join(path)
-                } else {
-                    ambient.join(path)
-                };
+                let ambient_target = ambient.join("extensions").join(path);
                 assert_eq!(
                     fs::read_to_string(ambient_target.join("ambient-sentinel")).unwrap(),
                     "ambient unchanged"
@@ -1262,25 +1250,23 @@ exec '{}' "$@"
             }
             assert_eq!(
                 fs::read_to_string(
-                    external.join("agent-task-contracts/agent-task-provider-contract.js")
+                    external.join("extensions/shared-contracts/agent-task-provider-contract.js")
                 )
                 .unwrap(),
-                fs::read_to_string(
-                    source.join("agent-task-contracts/agent-task-provider-contract.js")
-                )
-                .unwrap()
+                fs::read_to_string(source.join("shared-contracts/agent-task-provider-contract.js"))
+                    .unwrap()
             );
             assert_eq!(
                 fs::read_to_string(
-                    external.join("runtime-agent-ci/lib/agent-task-provider-contract.js")
+                    external.join("extensions/shared-helpers/lib/agent-task-provider-contract.js")
                 )
                 .unwrap(),
                 fs::read_to_string(
-                    source.join("runtime-agent-ci/lib/agent-task-provider-contract.js")
+                    source.join("shared-helpers/lib/agent-task-provider-contract.js")
                 )
                 .unwrap()
             );
-            assert!(external.join("agent-runtimes/sample-runtime/scripts/agent/sample-runtime-agent-task-executor.cjs").is_file());
+            assert!(external.join("extensions/shared-tools/sample-runtime/scripts/agent/sample-runtime-agent-task-executor.cjs").is_file());
             assert_eq!(
                 fs::read_to_string(external.join("extensions/scripts/lib/helper.sh")).unwrap(),
                 "declared helper\n"
@@ -1309,13 +1295,15 @@ exec '{}' "$@"
                 .join(".config/homeboy/extensions/wordpress/wordpress.json")
                 .exists());
             assert!(home
-                .join(".config/homeboy/agent-runtimes/sample-runtime/scripts/agent/sample-runtime-agent-task-executor.cjs")
+                .join(".config/homeboy/extensions/shared-tools/sample-runtime/scripts/agent/sample-runtime-agent-task-executor.cjs")
                 .exists());
             assert!(home
-                .join(".config/homeboy/runtime-agent-ci/lib/agent-task-provider-contract.js")
+                .join(
+                    ".config/homeboy/extensions/shared-helpers/lib/agent-task-provider-contract.js"
+                )
                 .exists());
             assert!(home
-                .join(".config/homeboy/agent-task-contracts/agent-task-provider-contract.js")
+                .join(".config/homeboy/extensions/shared-contracts/agent-task-provider-contract.js")
                 .exists());
             assert!(home
                 .join(".config/homeboy/extensions/dependency-adapters/examples/nodejs.json")
@@ -1343,11 +1331,11 @@ exec '{}' "$@"
 
             // Cloned installs must keep copying: the clone temp dir is discarded,
             // so the shared trees have to be standalone copies, not symlinks.
-            let runtimes = home.join(".config/homeboy/agent-runtimes");
-            let meta = fs::symlink_metadata(&runtimes).expect("agent-runtimes exists");
+            let runtimes = home.join(".config/homeboy/extensions/shared-tools");
+            let meta = fs::symlink_metadata(&runtimes).expect("shared-tools exists");
             assert!(
                 meta.file_type().is_dir() && !meta.file_type().is_symlink(),
-                "cloned install should copy agent-runtimes as a real directory"
+                "cloned install should copy shared-tools as a real directory"
             );
         });
     }
@@ -1374,13 +1362,15 @@ exec '{}' "$@"
             update("wordpress", false, None).expect("update cloned extension");
 
             assert!(home
-                .join(".config/homeboy/agent-runtimes/sample-runtime/scripts/agent/sample-runtime-agent-task-executor.cjs")
+                .join(".config/homeboy/extensions/shared-tools/sample-runtime/scripts/agent/sample-runtime-agent-task-executor.cjs")
                 .exists());
             assert!(home
-                .join(".config/homeboy/runtime-agent-ci/lib/agent-task-provider-contract.js")
+                .join(
+                    ".config/homeboy/extensions/shared-helpers/lib/agent-task-provider-contract.js"
+                )
                 .exists());
             assert!(home
-                .join(".config/homeboy/agent-task-contracts/agent-task-provider-contract.js")
+                .join(".config/homeboy/extensions/shared-contracts/agent-task-provider-contract.js")
                 .exists());
             assert!(home
                 .join(".config/homeboy/extensions/dependency-adapters/examples/nodejs.json")
@@ -1442,10 +1432,10 @@ exec '{}' "$@"
                 .join(".config/homeboy/extensions/wordpress/wordpress.json")
                 .exists());
             assert!(home
-                .join(".config/homeboy/agent-runtimes/sample-runtime/scripts/agent/sample-runtime-agent-task-executor.cjs")
+                .join(".config/homeboy/extensions/shared-tools/sample-runtime/scripts/agent/sample-runtime-agent-task-executor.cjs")
                 .exists());
             assert!(home
-                .join(".config/homeboy/agent-task-contracts/agent-task-provider-contract.js")
+                .join(".config/homeboy/extensions/shared-contracts/agent-task-provider-contract.js")
                 .exists());
         });
     }
@@ -1463,9 +1453,9 @@ exec '{}' "$@"
             write_shared_asset_manifest(
                 &source,
                 &[
-                    "agent-runtimes",
-                    "runtime-agent-ci",
-                    "agent-task-contracts",
+                    "shared-tools",
+                    "shared-helpers",
+                    "shared-contracts",
                     "dependency-adapters",
                     "scripts/lib",
                 ],
@@ -1484,16 +1474,16 @@ exec '{}' "$@"
             // not a standalone copy, so local edits go live without a reinstall.
             for (target, link_source) in [
                 (
-                    home.join(".config/homeboy/agent-runtimes"),
-                    source.join("agent-runtimes"),
+                    home.join(".config/homeboy/extensions/shared-tools"),
+                    source.join("shared-tools"),
                 ),
                 (
-                    home.join(".config/homeboy/runtime-agent-ci"),
-                    source.join("runtime-agent-ci"),
+                    home.join(".config/homeboy/extensions/shared-helpers"),
+                    source.join("shared-helpers"),
                 ),
                 (
-                    home.join(".config/homeboy/agent-task-contracts"),
-                    source.join("agent-task-contracts"),
+                    home.join(".config/homeboy/extensions/shared-contracts"),
+                    source.join("shared-contracts"),
                 ),
                 (
                     home.join(".config/homeboy/extensions/scripts/lib"),
@@ -1540,16 +1530,16 @@ exec '{}' "$@"
             // Edit the shared asset in the source worktree after install. Because
             // the install symlinks the tree, the edit must be visible at the live
             // install path with no reinstall — the iteration-blocker fix.
-            let source_contract =
-                source.join("agent-task-contracts/agent-task-provider-contract.js");
+            let source_contract = source.join("shared-contracts/agent-task-provider-contract.js");
             fs::write(
                 &source_contract,
                 "module.exports = { contract: 'edited-live' };\n",
             )
             .expect("edit shared source file");
 
-            let installed_contract =
-                home.join(".config/homeboy/agent-task-contracts/agent-task-provider-contract.js");
+            let installed_contract = home.join(
+                ".config/homeboy/extensions/shared-contracts/agent-task-provider-contract.js",
+            );
             let observed =
                 fs::read_to_string(&installed_contract).expect("read installed contract");
             assert!(
@@ -1575,10 +1565,10 @@ exec '{}' "$@"
                 .join(".config/homeboy/extensions/wordpress/wordpress.json")
                 .exists());
             assert!(home
-                .join(".config/homeboy/agent-runtimes/sample-runtime/scripts/agent/sample-runtime-agent-task-executor.cjs")
+                .join(".config/homeboy/extensions/shared-tools/sample-runtime/scripts/agent/sample-runtime-agent-task-executor.cjs")
                 .exists());
             assert!(home
-                .join(".config/homeboy/agent-task-contracts/agent-task-provider-contract.js")
+                .join(".config/homeboy/extensions/shared-contracts/agent-task-provider-contract.js")
                 .exists());
         });
     }

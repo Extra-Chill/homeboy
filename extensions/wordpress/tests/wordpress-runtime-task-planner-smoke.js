@@ -16,16 +16,9 @@ const {
 } = require('../lib/wordpress-generic-fuzz-primitives');
 const {
 	genericAgentTaskRequest,
-} = require('../../agent-task-contracts');
+} = require('../lib/wordpress-task-contract');
 
-const contract = JSON.parse(fs.readFileSync(path.join(
-	__dirname,
-	'..',
-	'..',
-	'agent-runtimes',
-	'fixtures',
-	'homeboy-agent-task-core-contract.json'
-), 'utf8'));
+const contract = { schemas: { plan: 'homeboy/agent-task-plan/v1', request: 'homeboy/agent-task-request/v1' } };
 
 const plan = wordpressRuntimeTaskPlan({
 	planId: 'runtime-task-plan-smoke',
@@ -182,12 +175,9 @@ try {
 		recursive: true,
 		filter: (source) => !source.split(path.sep).includes('node_modules'),
 	});
-	fs.cpSync(path.join(__dirname, '..', '..', 'agent-task-contracts'), path.join(installCopy, 'agent-task-contracts'), {
-		recursive: true,
-	});
 	const installedRequire = spawnSync(process.execPath, [
 		'-e',
-		"require(process.argv[1]); process.stdout.write('installed planner require passed\\n');",
+		"const path = require('node:path'); const root = path.dirname(process.argv[1]); require(process.argv[1]); require(path.join(root, 'preview-materialization.js')); require(path.join(root, 'wp-codebox-preview-materialization-contract.js')); const resolver = require(path.join(root, '../scripts/lib/agent-runtime-paths.cjs')); require('node:fs').accessSync(resolver.resolveAgentRuntimeFile('scripts/lib/test-result-adapters.sh')); process.stdout.write('installed WordPress helpers require passed\\n');",
 		path.join(installedExtension, 'lib', 'wordpress-runtime-task-planner.js'),
 	], { encoding: 'utf8' });
 	assert.equal(installedRequire.status, 0, installedRequire.stderr || installedRequire.stdout);
