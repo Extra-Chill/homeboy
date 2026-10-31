@@ -724,7 +724,6 @@ fn verify_source_candidate_target_admission(
     workspace_root: &Path,
     built_binary: &Path,
     source_revision: Option<&str>,
-    installed_binary: Option<&Path>,
 ) -> Result<ActiveBinaryInfo> {
     let expected_version = source_workspace_package_version(workspace_root)?;
     if let Some(revision) = source_revision {
@@ -967,7 +966,6 @@ fn complete_source_upgrade(
         &workspace_root,
         &built_binary,
         source_revision.as_deref(),
-        Some(replacement_target),
     )?;
     promotion_lease.assert_generation()?;
     phase("installing_controller")?;

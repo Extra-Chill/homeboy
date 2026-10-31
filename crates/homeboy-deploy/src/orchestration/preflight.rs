@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 use homeboy_core::component::Component;
 use homeboy_core::error::{Error, Result};
@@ -303,8 +303,8 @@ pub(super) fn guard_local_build_source_freshness(
 #[cfg(test)]
 fn guard_local_build_downgrades(
     components: &[Component],
-    local_versions: &HashMap<String, String>,
-    remote_versions: &HashMap<String, String>,
+    local_versions: &std::collections::HashMap<String, String>,
+    remote_versions: &std::collections::HashMap<String, String>,
     config: &DeployConfig,
 ) -> Result<()> {
     if config.allow_downgrade {

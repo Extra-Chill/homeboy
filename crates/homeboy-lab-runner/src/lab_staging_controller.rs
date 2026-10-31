@@ -536,6 +536,7 @@ fn runtime_version_is_newer(candidate: &str, current: &str) -> bool {
 /// controller-owned handoff runs before any daemon has attached. An absent daemon identity must NOT block
 /// admission; only a daemon that is present AND positively disagrees with
 /// `requested` indicates a stale runtime worth refusing.
+#[cfg(test)]
 fn handoff_identities_match(
     requested: &str,
     configured: Option<&str>,

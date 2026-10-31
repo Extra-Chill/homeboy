@@ -161,26 +161,6 @@ impl AgentTaskLifecycleStore {
         )
     }
 
-    #[cfg(test)]
-    pub(crate) fn submit_plan_with_runtime_admission_status(
-        &self,
-        plan: &AgentTaskPlan,
-        run_id: &str,
-        execution_runner_id: Option<String>,
-        admission_status: &dyn Fn(&str) -> Option<Value>,
-        admit_runtime: impl FnOnce(&str) -> Result<Value>,
-    ) -> Result<AgentTaskRunRecord> {
-        super::lifecycle_ops::submit_plan_with_runtime_admission_in_store(
-            self,
-            plan,
-            Some(run_id),
-            execution_runner_id,
-            None,
-            Some(admission_status),
-            admit_runtime,
-        )
-    }
-
     pub(crate) fn submit_plan_with_current_runtime(
         &self,
         plan: &AgentTaskPlan,
@@ -2047,6 +2027,7 @@ fn read_aggregate_bytes_bounded_in_store(
     Ok(raw)
 }
 
+#[cfg(test)]
 pub(super) fn aggregate_path(run_id: &str) -> Result<PathBuf> {
     Ok(default_store()?.aggregate_path(run_id))
 }

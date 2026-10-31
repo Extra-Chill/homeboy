@@ -213,7 +213,10 @@ fn plan_capacity_response_includes_aggregate_requirements() {
         available_bytes: 1,
         available_inodes: 1,
     };
-    let requirement = snapshot_filesystem_requirement(2, 2);
+    let requirement = SnapshotFilesystemRequirement {
+        bytes: 2,
+        inodes: 2,
+    };
     assert!(!snapshot_probe_has_capacity(&probe, requirement));
     let refusal = snapshot_capacity_error(&probe, requirement, &runner, None);
     assert_eq!(refusal.details["available_bytes"], 1);

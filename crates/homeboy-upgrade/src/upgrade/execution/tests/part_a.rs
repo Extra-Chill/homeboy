@@ -213,13 +213,9 @@ fn staged_source_candidate_owns_admission_and_preserves_installed_bytes_on_failu
         homeboy_core::observation::store::CURRENT_SCHEMA_VERSION
     ), 0o755).expect("candidate");
 
-        let candidate_identity = verify_source_candidate_target_admission(
-            workspace.path(),
-            &candidate,
-            None,
-            Some(&installed),
-        )
-        .expect("new candidate, not the old controller, admits replacement");
+        let candidate_identity =
+            verify_source_candidate_target_admission(workspace.path(), &candidate, None)
+                .expect("new candidate, not the old controller, admits replacement");
         assert_eq!(candidate_identity.version.as_deref(), Some("0.352.0"));
         assert_eq!(
             candidate_identity.build_identity.as_deref(),
@@ -228,13 +224,8 @@ fn staged_source_candidate_owns_admission_and_preserves_installed_bytes_on_failu
         homeboy_test_support::write_executable(&candidate, "#!/bin/sh\nif [ \"$1\" = --version ]; then printf 'homeboy 0.352.0+new\\n'; exit 0; fi\nexit 1\n", 0o755)
     .expect("failing staged candidate");
 
-        let error = verify_source_candidate_target_admission(
-            workspace.path(),
-            &candidate,
-            None,
-            Some(&installed),
-        )
-        .expect_err("candidate admission failure blocks promotion");
+        let error = verify_source_candidate_target_admission(workspace.path(), &candidate, None)
+            .expect_err("candidate admission failure blocks promotion");
 
         assert!(error
             .message
