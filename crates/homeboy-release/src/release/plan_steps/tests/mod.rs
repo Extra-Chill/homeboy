@@ -815,14 +815,14 @@ fn skip_publish_with_package_provider_still_packages_before_github_release() {
     let push_index = step_index(&ids, "git.push");
     let github_release_index = step_index(&ids, "github.release");
 
-    assert!(package_preflight_index < package_index);
+    assert!(package_preflight_index < commit_index);
+    assert!(commit_index < package_index);
     assert!(package_index < authority_index);
-    assert!(authority_index < commit_index);
     assert!(authority_index < tag_index);
     assert!(authority_index < push_index);
     assert!(package_index < github_release_index);
-    assert_eq!(steps[commit_index].needs, vec!["artifacts.authority"]);
-    assert_eq!(steps[tag_index].needs, vec!["git.commit"]);
+    assert_eq!(steps[package_index].needs, vec!["git.commit"]);
+    assert_eq!(steps[tag_index].needs, vec!["artifacts.authority"]);
     assert_eq!(steps[github_release_index].needs, vec!["git.push"]);
     assert!(!ids.contains(&"publish.artifact-packager"));
     assert_eq!(
