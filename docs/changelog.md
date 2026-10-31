@@ -4,6 +4,18 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.437.1] - 2026-10-31
+
+### Changed
+- one transport function for observation and job-log reconnects
+- Remove immutable Cook runtime store (net production Rust: -4,011 lines)
+- delete the daemon generation store and its status surface
+- select Cook promotion by the immutable candidate
+- controller_runtime: current binary owns every record
+
+### Fixed
+- Fix Cook admission for repositories with nested Homeboy components
+
 ## [0.437.0] - 2026-10-31
 
 ### Added
