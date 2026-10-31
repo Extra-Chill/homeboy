@@ -392,7 +392,6 @@ pub fn refresh_mirrored_daemon_evidence(
     run: &RunRecord,
 ) -> Result<homeboy_core::observation::runs_service::runner_evidence::MirroredRunRefresh> {
     use homeboy_core::observation::runs_service::runner_evidence::MirroredRunRefresh;
-    let run_id = run.id.as_str();
     let Some((runner_id, job_id)) = mirrored_runner_job_identity(run) else {
         return Ok(MirroredRunRefresh {
             run: run.clone(),
@@ -401,14 +400,6 @@ pub fn refresh_mirrored_daemon_evidence(
             runs: Vec::new(),
         });
     };
-    if crate::generation_store::has_retired_evidence_owner(&runner_id, Some(run_id), None)? {
-        return Ok(MirroredRunRefresh {
-            run: run.clone(),
-            job: None,
-            events_pending: false,
-            runs: Vec::new(),
-        });
-    }
     let runner = load(&runner_id)?;
     let after = mirrored_last_sequence(run);
     let snapshot = runner_job_log_snapshot_with_owner_recovery_with(
@@ -657,14 +648,14 @@ pub(super) fn runner_job_log_snapshot_with_owner_recovery_with<
 ) -> Result<SnapshotValue>
 where
     Current: FnOnce() -> Result<SnapshotValue>,
-    Reconnect: FnOnce(&str, &str) -> Result<Owner>,
+    Reconnect: FnOnce(&str) -> Result<Owner>,
     Snapshot: FnOnce(&Owner, &str) -> Result<SnapshotValue>,
     Close: FnOnce(&Owner),
 {
     match current() {
         Ok(snapshot) => Ok(snapshot),
         Err(_) => {
-            let owner = reconnect(runner_id, job_id)?;
+            let owner = reconnect(runner_id)?;
             let recovered = snapshot(&owner, job_id);
             close(&owner);
             recovered

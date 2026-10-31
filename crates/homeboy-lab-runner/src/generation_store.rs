@@ -1,5 +1,3 @@
-use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -7,26 +5,12 @@ use chrono::Utc;
 use homeboy_core::engine::shell;
 use homeboy_core::error::{Error, Result};
 use homeboy_core::paths;
-use homeboy_core::process::{
-    process_identity_state_with_start_identity, process_start_identity, ProcessIdentityState,
-    ProcessStartIdentity,
-};
 use homeboy_core::server::SshClient;
 
-use crate::rolling_generation::RollingResultOwnerRetirement;
+use crate::runner_state_lock::{with_runner_registry_lock, write_durable_json};
 use crate::{
     RollingGenerations, RunnerDaemonGenerationStatus, RunnerGenerationJobOwners, RunnerSession,
 };
-
-#[cfg(all(test, unix))]
-#[path = "generation_retirement_tests.rs"]
-mod retirement_tests;
-
-#[derive(Debug, Clone)]
-pub(crate) struct AdmissionFence {
-    pub generation: String,
-    pub active_job_count: usize,
-}
 
 /// The durable generation registry is scoped to one runner. Keep this wrapper
 /// at the state-store boundary so rolling ownership remains reusable in memory.
@@ -162,352 +146,8 @@ pub fn persisted_retirement_verdicts(
     Ok(serde_json::from_slice(&bytes)?)
 }
 
-fn recovery_lock_path(runner_id: &str, generation: &str) -> Result<PathBuf> {
-    let generation = generation
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() {
-                character
-            } else {
-                '_'
-            }
-        })
-        .collect::<String>();
-    Ok(paths::runner_sessions_dir()?
-        .join(runner_id)
-        .join(format!("recovery-{generation}.lock")))
-}
-
-fn pending_replacement_path_in_root(config_root: &Path, runner_id: &str) -> PathBuf {
-    paths::runner_sessions_dir_in_root(config_root)
-        .join(runner_id)
-        .join("pending-replacement.json")
-}
-
-fn pending_replacement_path(runner_id: &str) -> Result<PathBuf> {
-    Ok(pending_replacement_path_in_root(
-        &paths::homeboy()?,
-        runner_id,
-    ))
-}
-
-fn replacement_operation_path_in_root(config_root: &Path, runner_id: &str) -> PathBuf {
-    paths::runner_sessions_dir_in_root(config_root)
-        .join(runner_id)
-        .join("replacement-operation.json")
-}
-
-fn replacement_operation_path(runner_id: &str) -> Result<PathBuf> {
-    Ok(replacement_operation_path_in_root(
-        &paths::homeboy()?,
-        runner_id,
-    ))
-}
-
-fn rejected_replacement_path_in_root(config_root: &Path, runner_id: &str) -> PathBuf {
-    paths::runner_sessions_dir_in_root(config_root)
-        .join(runner_id)
-        .join("rejected-replacements")
-        .join(format!("{}.json", uuid::Uuid::new_v4()))
-}
-
-fn superseded_replacement_path_in_root(config_root: &Path, runner_id: &str) -> PathBuf {
-    paths::runner_sessions_dir_in_root(config_root)
-        .join(runner_id)
-        .join("superseded-replacements")
-        .join(format!("{}.json", uuid::Uuid::new_v4()))
-}
-
-fn admission_reservation_path_in_root(config_root: &Path, runner_id: &str) -> PathBuf {
-    paths::runner_sessions_dir_in_root(config_root)
-        .join(runner_id)
-        .join("admission-mutation-reservation.json")
-}
-
-fn admission_reservation_path(runner_id: &str) -> Result<PathBuf> {
-    Ok(admission_reservation_path_in_root(
-        &paths::homeboy()?,
-        runner_id,
-    ))
-}
-
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-struct AdmissionReservation {
-    operation_id: String,
-    owner_pid: u32,
-    owner_start_identity: ProcessStartIdentity,
-    created_at: String,
-    operation: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    generation: Option<String>,
-}
-
-#[derive(serde::Serialize, serde::Deserialize)]
-struct ReplacementOperation {
-    runner_id: String,
-    operation_id: String,
-    #[serde(default)]
-    replay_command: Option<String>,
-    #[serde(default)]
-    kind: Option<String>,
-}
-
-#[derive(serde::Serialize)]
-struct RejectedReplacementEvidence<'a> {
-    schema: &'static str,
-    runner_id: &'a str,
-    operation_id: &'a str,
-    kind: &'a str,
-    replay_command: Option<&'a str>,
-    rejected_at: String,
-    exit_code: i32,
-    timed_out: bool,
-    stdout: &'a str,
-    stderr: &'a str,
-}
-
-#[derive(serde::Serialize)]
-struct SupersededReplacementEvidence<'a> {
-    schema: &'static str,
-    runner_id: &'a str,
-    operation_id: &'a str,
-    previous_kind: &'a str,
-    previous_replay_command: &'a str,
-    replacement_kind: &'a str,
-    replacement_replay_command: &'a str,
-    superseded_at: String,
-}
-
-pub(crate) fn write_durable_json<T: serde::Serialize>(
-    path: &std::path::Path,
-    value: &T,
-) -> Result<()> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| Error::internal_unexpected("journal has no parent"))?;
-    std::fs::create_dir_all(parent).map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some(format!("create {}", parent.display())),
-        )
-    })?;
-    let temporary = parent.join(format!(
-        ".{}.{}.tmp",
-        path.file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("journal"),
-        uuid::Uuid::new_v4()
-    ));
-    let bytes = serde_json::to_vec_pretty(value).map_err(|error| {
-        Error::internal_json(
-            error.to_string(),
-            Some("serialize replacement journal".to_string()),
-        )
-    })?;
-    let mut file = File::create(&temporary).map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some(format!("create {}", temporary.display())),
-        )
-    })?;
-    file.write_all(&bytes)
-        .and_then(|_| file.sync_all())
-        .map_err(|error| {
-            Error::internal_io(
-                error.to_string(),
-                Some(format!("write {}", temporary.display())),
-            )
-        })?;
-    std::fs::rename(&temporary, path).map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some(format!("rename {}", path.display())),
-        )
-    })?;
-    File::open(parent)
-        .and_then(|directory| directory.sync_all())
-        .map_err(|error| {
-            Error::internal_io(
-                error.to_string(),
-                Some(format!("sync {}", parent.display())),
-            )
-        })
-}
-
-/// Serialize read-modify-write registry updates independently for each runner.
-/// A status reconciliation and `/exec` acceptance can arrive concurrently.
-fn with_lock<T>(
-    lock_path: PathBuf,
-    runner_id: &str,
-    operation: impl FnOnce() -> Result<T>,
-) -> Result<T> {
-    const LOCK_TIMEOUT: Duration = Duration::from_secs(30);
-    with_lock_until(lock_path, runner_id, LOCK_TIMEOUT, operation)
-}
-
-fn with_lock_until<T>(
-    lock_path: PathBuf,
-    runner_id: &str,
-    lock_timeout: Duration,
-    operation: impl FnOnce() -> Result<T>,
-) -> Result<T> {
-    const LOCK_RETRY: Duration = Duration::from_millis(25);
-    if let Some(parent) = lock_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|error| {
-            Error::internal_io(
-                error.to_string(),
-                Some("create generation lock directory".to_string()),
-            )
-        })?;
-    }
-    let mut lock = OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .truncate(false)
-        .open(&lock_path)
-        .map_err(|error| {
-            Error::internal_io(error.to_string(), Some("open generation lock".to_string()))
-        })?;
-    #[cfg(unix)]
-    {
-        use std::os::fd::AsRawFd;
-        let deadline = Instant::now() + lock_timeout;
-        loop {
-            if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
-                break;
-            }
-            let error = std::io::Error::last_os_error();
-            if error.raw_os_error() != Some(libc::EWOULDBLOCK) {
-                return Err(Error::internal_io(
-                    error.to_string(),
-                    Some("lock generation registry".to_string()),
-                ));
-            }
-            if Instant::now() >= deadline {
-                let mut lock_owner = serde_json::Value::Null;
-                if let Ok(mut owner_file) = OpenOptions::new().read(true).open(&lock_path) {
-                    let mut owner = String::new();
-                    if owner_file.read_to_string(&mut owner).is_ok() {
-                        lock_owner =
-                            serde_json::from_str(&owner).unwrap_or(serde_json::Value::Null);
-                    }
-                }
-                let owner_age_ms = lock_owner
-                    .get("acquired_at")
-                    .and_then(serde_json::Value::as_str)
-                    .and_then(|acquired| chrono::DateTime::parse_from_rfc3339(acquired).ok())
-                    .map(|acquired| {
-                        (Utc::now() - acquired.with_timezone(&Utc))
-                            .num_milliseconds()
-                            .max(0)
-                    });
-                let message = format!(
-                    "timed out after {}ms waiting for runner generation registry lock held by pid {} (phase {}, held {}ms)",
-                    lock_timeout.as_millis(),
-                    lock_owner.get("owner_pid").map(ToString::to_string).unwrap_or_else(|| "unknown".to_string()),
-                    lock_owner.get("phase").and_then(serde_json::Value::as_str).unwrap_or("unknown"),
-                    owner_age_ms.map(|age| age.to_string()).unwrap_or_else(|| "unknown".to_string()),
-                );
-                let mut error = Error::new(
-                    homeboy_core::error::ErrorCode::InternalIoError,
-                    message.clone(),
-                    serde_json::json!({
-                    "error": message,
-                    "context": "lock generation registry",
-                    "kind": "runner_generation_lock_timeout",
-                    "runner_id": runner_id,
-                    "timeout_ms": lock_timeout.as_millis(),
-                    "owner_pid": lock_owner.get("owner_pid"),
-                    "phase": lock_owner.get("phase").and_then(serde_json::Value::as_str).unwrap_or("unknown"),
-                    "owner_acquired_at": lock_owner.get("acquired_at"),
-                    "owner_age_ms": owner_age_ms,
-                    "deadline_ms": lock_timeout.as_millis(),
-                    "legal_action": format!("homeboy runner status {runner_id} --full"),
-                    }),
-                );
-                error.retryable = Some(true);
-                return Err(error);
-            }
-            std::thread::sleep(LOCK_RETRY);
-        }
-    }
-    #[cfg(unix)]
-    {
-        let _ = lock.seek(SeekFrom::Start(0));
-        let _ = lock.set_len(0);
-        let _ = lock.write_all(
-            serde_json::to_string(&serde_json::json!({
-                "owner_pid": std::process::id(),
-                "phase": "generation_registry_mutation",
-                "acquired_at": Utc::now().to_rfc3339(),
-                "runner_id": runner_id,
-            }))
-            .unwrap_or_default()
-            .as_bytes(),
-        );
-        let _ = lock.sync_data();
-    }
-    let result = operation();
-    #[cfg(unix)]
-    {
-        use std::os::fd::AsRawFd;
-        let _ = unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_UN) };
-    }
-    result
-}
-
-fn with_registry_lock<T>(runner_id: &str, operation: impl FnOnce() -> Result<T>) -> Result<T> {
-    with_lock(
-        path(runner_id)?.with_extension("lock"),
-        runner_id,
-        operation,
-    )
-}
-
-/// Serialize one runner's registry mutations under a lock, and hand the
-/// operation the config root that lock was taken against.
-///
-/// The lock exists to make a read-modify-write sequence atomic. That guarantee
-/// only holds if the lock file and the files it guards name the same
-/// installation. The ambient path helpers each read the environment
-/// independently, so a repoint between taking the lock and performing the write
-/// leaves the lock guarding one home while the mutation lands in another
-/// (#7505).
-fn with_rooted_registry_lock<T>(
-    runner_id: &str,
-    operation: impl FnOnce(&Path) -> Result<T>,
-) -> Result<T> {
-    let config_root = paths::homeboy()?;
-    with_lock(
-        path_in_root(&config_root, runner_id).with_extension("lock"),
-        runner_id,
-        || operation(&config_root),
-    )
-}
-
-/// Cross-process lifecycle serialization for one runner. Operations that mutate
-/// a controller session must use this same lock as generation rotation.
-pub(crate) fn with_runner_registry_lock<T>(
-    runner_id: &str,
-    operation: impl FnOnce() -> Result<T>,
-) -> Result<T> {
-    with_registry_lock(runner_id, operation)
-}
-
-pub(crate) fn with_generation_recovery_lock<T>(
-    runner_id: &str,
-    generation: &str,
-    operation: impl FnOnce() -> Result<T>,
-) -> Result<T> {
-    with_lock(
-        recovery_lock_path(runner_id, generation)?,
-        runner_id,
-        operation,
-    )
-}
-
 /// The generation key a session is registered under: its daemon lease.
+#[cfg(test)]
 fn session_generation(session: &RunnerSession) -> String {
     session
         .remote_daemon_lease_id
@@ -607,522 +247,6 @@ pub(crate) fn admission_session(runner_id: &str) -> Result<Option<RunnerSession>
     }))
 }
 
-/// Reserve daemon mutation under the registry lock, then release it for remote
-/// I/O. Job admission observes the durable reservation and fails closed until
-/// the mutation completes or its reservation is cleared.
-pub(crate) fn with_admission_fence<T>(
-    runner_id: &str,
-    current_session: Option<&RunnerSession>,
-    operation_name: &str,
-    operation: impl FnOnce(Option<&AdmissionFence>) -> Result<T>,
-) -> Result<T> {
-    let (reservation, fence) = with_registry_lock(runner_id, || {
-        if let Some(reservation) = active_admission_reservation_locked(runner_id)? {
-            return Err(admission_reservation_error(runner_id, &reservation));
-        }
-        let generations = read(runner_id)?;
-        let reservation = AdmissionReservation {
-            operation_id: uuid::Uuid::new_v4().to_string(),
-            owner_pid: std::process::id(),
-            owner_start_identity: process_start_identity(std::process::id())
-                .map_err(Error::internal_unexpected)?
-                .ok_or_else(|| {
-                    Error::internal_unexpected(
-                        "current process exited while reserving daemon mutation",
-                    )
-                })?,
-            created_at: Utc::now().to_rfc3339(),
-            operation: operation_name.to_string(),
-            generation: current_session.map(session_generation),
-        };
-        write_durable_json(&admission_reservation_path(runner_id)?, &reservation)?;
-        let fence = generations.as_ref().and_then(|generations| {
-            generations
-                .generations
-                .iter()
-                .find_map(|(generation, entry)| {
-                    let owner_count =
-                        job_owner_ids_for(generations, generation, &entry.endpoint).len();
-                    let active_job_count = entry.observed_active_jobs.unwrap_or(owner_count);
-                    (active_job_count > 0).then(|| AdmissionFence {
-                        generation: generation.clone(),
-                        active_job_count,
-                    })
-                })
-        });
-        Ok((reservation, fence))
-    })?;
-    let result = operation(fence.as_ref());
-    let clear = clear_owned_admission_reservation(runner_id, &reservation);
-    match (result, clear) {
-        (Ok(value), Ok(())) => Ok(value),
-        (Err(error), Ok(())) | (Err(error), Err(_)) => Err(error),
-        (Ok(_), Err(error)) => Err(error),
-    }
-}
-
-/// Read a reservation while holding the registry lock. A process that has
-/// exited or whose PID was reused cannot still own a remote mutation, so its
-/// durable reservation is reclaimed before a new owner proceeds.
-fn active_admission_reservation_locked(runner_id: &str) -> Result<Option<AdmissionReservation>> {
-    let path = admission_reservation_path(runner_id)?;
-    if !path.exists() {
-        return Ok(None);
-    }
-    let reservation: AdmissionReservation =
-        serde_json::from_slice(&std::fs::read(&path).map_err(|error| {
-            Error::internal_io(error.to_string(), Some(format!("read {}", path.display())))
-        })?)
-        .map_err(|error| Error::config_invalid_json(path.display().to_string(), error))?;
-    match process_identity_state_with_start_identity(
-        reservation.owner_pid,
-        None,
-        Some(&reservation.owner_start_identity),
-    ) {
-        ProcessIdentityState::Dead | ProcessIdentityState::IdentityMismatch => {
-            std::fs::remove_file(&path).map_err(|error| {
-                Error::internal_io(
-                    error.to_string(),
-                    Some(format!("remove {}", path.display())),
-                )
-            })?;
-            Ok(None)
-        }
-        ProcessIdentityState::Live | ProcessIdentityState::Unverifiable => Ok(Some(reservation)),
-    }
-}
-
-fn clear_owned_admission_reservation(
-    runner_id: &str,
-    reservation: &AdmissionReservation,
-) -> Result<()> {
-    with_registry_lock(runner_id, || {
-        let path = admission_reservation_path(runner_id)?;
-        if !path.exists() {
-            return Ok(());
-        }
-        let current: AdmissionReservation =
-            serde_json::from_slice(&std::fs::read(&path).map_err(|error| {
-                Error::internal_io(error.to_string(), Some(format!("read {}", path.display())))
-            })?)
-            .map_err(|error| Error::config_invalid_json(path.display().to_string(), error))?;
-        if current.operation_id == reservation.operation_id
-            && current.owner_pid == reservation.owner_pid
-            && current.owner_start_identity == reservation.owner_start_identity
-        {
-            std::fs::remove_file(&path).map_err(|error| {
-                Error::internal_io(
-                    error.to_string(),
-                    Some(format!("remove {}", path.display())),
-                )
-            })?;
-        }
-        Ok(())
-    })
-}
-
-fn admission_reservation_error(runner_id: &str, reservation: &AdmissionReservation) -> Error {
-    let mut error = Error::validation_invalid_argument(
-        "runner_mutation_reservation",
-        format!(
-            "runner `{runner_id}` daemon mutation `{}` for generation `{}` is still owned by PID {}; retry admission after it completes or run `homeboy runner reconcile {runner_id}` to recover a dead owner",
-            reservation.operation,
-            reservation.generation.as_deref().unwrap_or("unknown"),
-            reservation.owner_pid,
-        ),
-        Some(runner_id.to_string()),
-        Some(vec![format!("homeboy runner reconcile {runner_id}")]),
-    )
-    .with_retryable(true);
-    error.details["reservation_operation"] = serde_json::json!(reservation.operation);
-    error.details["reservation_generation"] = serde_json::json!(reservation.generation);
-    error.details["reservation_created_at"] = serde_json::json!(reservation.created_at);
-    error
-}
-
-/// A recovery-created daemon is durable before a controller can authenticate
-/// its tunnel. Retain its exact coordinates so an interruption cannot fall
-/// back to the superseded generation or start a competing daemon.
-pub(crate) fn pending_replacement(runner_id: &str) -> Result<Option<RunnerSession>> {
-    let path = pending_replacement_path(runner_id)?;
-    if !path.exists() {
-        return Ok(None);
-    }
-    let raw = std::fs::read_to_string(&path).map_err(|error| {
-        Error::internal_io(error.to_string(), Some(format!("read {}", path.display())))
-    })?;
-    let session: RunnerSession = serde_json::from_str(&raw)
-        .map_err(|error| Error::config_invalid_json(path.display().to_string(), error))?;
-    if session.runner_id != runner_id {
-        return Err(Error::config_invalid_value(
-            "pending_replacement.runner_id",
-            Some(session.runner_id),
-            format!("pending replacement must match runner `{runner_id}`"),
-        ));
-    }
-    Ok(Some(session))
-}
-
-/// Persist the controller id before invoking a remote lifecycle mutation. The
-/// daemon uses this exact id as its durable startup token/receipt key.
-pub(crate) fn replacement_operation(runner_id: &str) -> Result<String> {
-    with_registry_lock(runner_id, || {
-        let path = replacement_operation_path(runner_id)?;
-        if path.exists() {
-            let operation: ReplacementOperation =
-                serde_json::from_slice(&std::fs::read(&path).map_err(|error| {
-                    Error::internal_io(error.to_string(), Some(format!("read {}", path.display())))
-                })?)
-                .map_err(|error| Error::config_invalid_json(path.display().to_string(), error))?;
-            if operation.runner_id != runner_id {
-                return Err(Error::config_invalid_value(
-                    "replacement_operation.runner_id",
-                    Some(operation.runner_id),
-                    "replacement operation must match its runner",
-                ));
-            }
-            return Ok(operation.operation_id);
-        }
-        let operation_id = uuid::Uuid::new_v4().to_string();
-        write_durable_json(
-            &path,
-            &ReplacementOperation {
-                runner_id: runner_id.to_string(),
-                operation_id: operation_id.clone(),
-                replay_command: None,
-                kind: None,
-            },
-        )?;
-        Ok(operation_id)
-    })
-}
-
-pub(crate) fn replacement_operation_replay(runner_id: &str) -> Result<Option<(String, String)>> {
-    let path = replacement_operation_path(runner_id)?;
-    if !path.exists() {
-        return Ok(None);
-    }
-    let operation: ReplacementOperation =
-        serde_json::from_slice(&std::fs::read(&path).map_err(|error| {
-            Error::internal_io(error.to_string(), Some(format!("read {}", path.display())))
-        })?)
-        .map_err(|error| Error::config_invalid_json(path.display().to_string(), error))?;
-    if operation.runner_id != runner_id {
-        return Err(Error::config_invalid_value(
-            "replacement_operation.runner_id",
-            Some(operation.runner_id),
-            "replacement operation must match its runner",
-        ));
-    }
-    Ok(operation.kind.zip(operation.replay_command))
-}
-
-pub(crate) fn record_replacement_operation_replay(
-    runner_id: &str,
-    kind: &str,
-    command: &str,
-) -> Result<()> {
-    with_registry_lock(runner_id, || {
-        let path = replacement_operation_path(runner_id)?;
-        let mut operation: ReplacementOperation =
-            serde_json::from_slice(&std::fs::read(&path).map_err(|error| {
-                Error::internal_io(error.to_string(), Some(format!("read {}", path.display())))
-            })?)
-            .map_err(|error| Error::config_invalid_json(path.display().to_string(), error))?;
-        operation.replay_command = Some(command.to_string());
-        operation.kind = Some(kind.to_string());
-        write_durable_json(&path, &operation)
-    })
-}
-
-/// Bind candidate reconciliation to the current replacement identity. An
-/// explicit operator recovery may supersede only `ensure-running`: that command
-/// can create one of the candidates reconciliation is responsible for, and
-/// replaying it first would reproduce the conflict the operator selected this
-/// recovery to resolve.
-pub(crate) fn record_unleased_candidate_reconciliation_replay(
-    runner_id: &str,
-    command: &str,
-) -> Result<()> {
-    with_rooted_registry_lock(runner_id, |config_root| {
-        let path = replacement_operation_path_in_root(config_root, runner_id);
-        let mut operation: ReplacementOperation =
-            serde_json::from_slice(&std::fs::read(&path).map_err(|error| {
-                Error::internal_io(error.to_string(), Some(format!("read {}", path.display())))
-            })?)
-            .map_err(|error| Error::config_invalid_json(path.display().to_string(), error))?;
-        match (
-            operation.kind.as_deref(),
-            operation.replay_command.as_deref(),
-        ) {
-            (Some("unleased-candidates"), Some(existing)) if existing == command => return Ok(()),
-            (Some("ensure-running"), Some(previous_command)) => {
-                write_durable_json(
-                    &superseded_replacement_path_in_root(config_root, runner_id),
-                    &SupersededReplacementEvidence {
-                        schema: "homeboy/runner-replacement-operation-supersession/v1",
-                        runner_id,
-                        operation_id: &operation.operation_id,
-                        previous_kind: "ensure-running",
-                        previous_replay_command: previous_command,
-                        replacement_kind: "unleased-candidates",
-                        replacement_replay_command: command,
-                        superseded_at: Utc::now().to_rfc3339(),
-                    },
-                )?;
-            }
-            (None, None) => {}
-            _ => {
-                return Err(Error::internal_unexpected(
-                    "replacement operation cannot transition to unleased candidate reconciliation",
-                ));
-            }
-        }
-        operation.kind = Some("unleased-candidates".to_string());
-        operation.replay_command = Some(command.to_string());
-        write_durable_json(&path, &operation)
-    })
-}
-
-/// An acknowledged `applied: false` reconciliation is terminal: the remote
-/// inspected the candidate set and declined to mutate it. Rotate the operation
-/// identity rather than replaying that stale observation on a later connect.
-pub(crate) fn terminalize_unleased_candidate_reconciliation(runner_id: &str) -> Result<()> {
-    with_registry_lock(runner_id, || {
-        let path = replacement_operation_path(runner_id)?;
-        let operation: ReplacementOperation =
-            serde_json::from_slice(&std::fs::read(&path).map_err(|error| {
-                Error::internal_io(error.to_string(), Some(format!("read {}", path.display())))
-            })?)
-            .map_err(|error| Error::config_invalid_json(path.display().to_string(), error))?;
-        if operation.runner_id != runner_id
-            || operation.kind.as_deref() != Some("unleased-candidates")
-            || operation.replay_command.is_none()
-        {
-            return Err(Error::internal_unexpected(
-                "refusing to terminalize a replacement operation that is not an immutable unleased candidate reconciliation",
-            ));
-        }
-        write_durable_json(
-            &path,
-            &ReplacementOperation {
-                runner_id: runner_id.to_string(),
-                operation_id: uuid::Uuid::new_v4().to_string(),
-                replay_command: None,
-                kind: None,
-            },
-        )
-    })
-}
-
-/// An exact live-lease adoption rechecks the observed daemon after its tunnel
-/// health probe. Once that succeeds, an older automatic start replay cannot
-/// safely add information and is terminalized with its replacement evidence.
-pub(crate) fn terminalize_ensure_running_replay_for_live_lease_adoption(
-    runner_id: &str,
-) -> Result<()> {
-    with_rooted_registry_lock(runner_id, |config_root| {
-        let path = replacement_operation_path_in_root(config_root, runner_id);
-        let mut operation: ReplacementOperation =
-            serde_json::from_slice(&std::fs::read(&path).map_err(|error| {
-                Error::internal_io(error.to_string(), Some(format!("read {}", path.display())))
-            })?)
-            .map_err(|error| Error::config_invalid_json(path.display().to_string(), error))?;
-        let Some(previous_command) = operation.replay_command.as_deref() else {
-            return Ok(());
-        };
-        if operation.kind.as_deref() != Some("ensure-running") {
-            return Ok(());
-        }
-        write_durable_json(
-            &superseded_replacement_path_in_root(config_root, runner_id),
-            &SupersededReplacementEvidence {
-                schema: "homeboy/runner-replacement-operation-supersession/v1",
-                runner_id,
-                operation_id: &operation.operation_id,
-                previous_kind: "ensure-running",
-                previous_replay_command: previous_command,
-                replacement_kind: "live-lease-adoption",
-                replacement_replay_command: "verified exact live-lease adoption",
-                superseded_at: Utc::now().to_rfc3339(),
-            },
-        )?;
-        operation.operation_id = uuid::Uuid::new_v4().to_string();
-        operation.replay_command = None;
-        operation.kind = None;
-        write_durable_json(&path, &operation)
-    })
-}
-
-/// Update an operation journal while the caller holds this runner's registry
-/// lock through [`with_admission_fence`].
-pub(crate) fn record_replacement_operation_replay_locked(
-    runner_id: &str,
-    kind: &str,
-    command: &str,
-) -> Result<()> {
-    let path = replacement_operation_path(runner_id)?;
-    let mut operation: ReplacementOperation =
-        serde_json::from_slice(&std::fs::read(&path).map_err(|error| {
-            Error::internal_io(error.to_string(), Some(format!("read {}", path.display())))
-        })?)
-        .map_err(|error| Error::config_invalid_json(path.display().to_string(), error))?;
-    operation.replay_command = Some(command.to_string());
-    operation.kind = Some(kind.to_string());
-    write_durable_json(&path, &operation)
-}
-
-pub(crate) fn record_pending_replacement(runner_id: &str, session: &RunnerSession) -> Result<()> {
-    with_registry_lock(runner_id, || {
-        write_durable_json(&pending_replacement_path(runner_id)?, session)
-    })
-}
-
-/// Retire an interrupted replacement only after the caller has re-probed the
-/// remote lease and proved that these recorded coordinates are no longer a
-/// publishable daemon. A later attempt receives a new operation identity.
-pub(crate) fn retire_pending_replacement(runner_id: &str) -> Result<String> {
-    retire_replacement(runner_id)
-}
-
-fn retire_replacement(runner_id: &str) -> Result<String> {
-    with_rooted_registry_lock(runner_id, |config_root| {
-        let operation_id = uuid::Uuid::new_v4().to_string();
-        // Publish the successor receipt before releasing the old coordinates.
-        // A crash can therefore leave both records, but never neither record.
-        write_durable_json(
-            &replacement_operation_path_in_root(config_root, runner_id),
-            &ReplacementOperation {
-                runner_id: runner_id.to_string(),
-                operation_id: operation_id.clone(),
-                replay_command: None,
-                kind: None,
-            },
-        )?;
-        let pending_path = pending_replacement_path_in_root(config_root, runner_id);
-        if pending_path.exists() {
-            std::fs::remove_file(&pending_path).map_err(|error| {
-                Error::internal_io(
-                    error.to_string(),
-                    Some(format!("remove {}", pending_path.display())),
-                )
-            })?;
-        }
-        Ok(operation_id)
-    })
-}
-
-/// Retire a remote policy or validation refusal after preserving the exact
-/// terminal response. Unlike an interrupted mutation, this operation cannot
-/// become publishable by replaying the same authority.
-pub(crate) fn retire_rejected_state_loss_replacement(
-    runner_id: &str,
-    output: &homeboy_core::server::CommandOutput,
-) -> Result<()> {
-    retire_rejected_replacement(
-        runner_id,
-        "state-loss",
-        output.exit_code,
-        output.timed_out,
-        &output.stdout,
-        &output.stderr,
-    )
-}
-
-/// Retire a terminally refused `ensure-running` replacement after preserving
-/// the exact rejection. `ensure-running` journals its replay command before
-/// crossing the remote mutation boundary (#8811 pattern) so a lost response
-/// can be replayed safely — but a `daemon_unleased_process_conflict` refusal
-/// is not a lost response, it is the remote authoritatively saying the exact
-/// operation id this journal entry names will never be admitted. Replaying
-/// that same command forever reproduces #15087: every subsequent `runner
-/// connect`/`refresh-homeboy --reconnect` repeats the identical doomed
-/// mutation instead of minting a fresh attempt.
-///
-/// Plain fields rather than a borrowed `CommandOutput`: the caller that hits
-/// this refusal on the *first* ensure-running attempt (not a replay) only
-/// has the summarized `Error` the remote failure was projected into, not the
-/// raw SSH transport output.
-pub(crate) fn retire_rejected_ensure_running_replacement(
-    runner_id: &str,
-    exit_code: i32,
-    timed_out: bool,
-    stdout: &str,
-    stderr: &str,
-) -> Result<()> {
-    retire_rejected_replacement(
-        runner_id,
-        "ensure-running",
-        exit_code,
-        timed_out,
-        stdout,
-        stderr,
-    )
-}
-
-fn retire_rejected_replacement(
-    runner_id: &str,
-    kind: &str,
-    exit_code: i32,
-    timed_out: bool,
-    stdout: &str,
-    stderr: &str,
-) -> Result<()> {
-    with_rooted_registry_lock(runner_id, |config_root| {
-        let operation_path = replacement_operation_path_in_root(config_root, runner_id);
-        let operation: ReplacementOperation =
-            serde_json::from_slice(&std::fs::read(&operation_path).map_err(|error| {
-                Error::internal_io(
-                    error.to_string(),
-                    Some(format!("read {}", operation_path.display())),
-                )
-            })?)
-            .map_err(|error| {
-                Error::config_invalid_json(operation_path.display().to_string(), error)
-            })?;
-        if operation.runner_id != runner_id || operation.kind.as_deref() != Some(kind) {
-            return Err(Error::internal_unexpected(format!(
-                "refusing to retire a replacement operation that is not the rejected {kind} recovery"
-            )));
-        }
-        let evidence_path = rejected_replacement_path_in_root(config_root, runner_id);
-        write_durable_json(
-            &evidence_path,
-            &RejectedReplacementEvidence {
-                schema: "homeboy/runner-rejected-replacement/v1",
-                runner_id,
-                operation_id: &operation.operation_id,
-                kind,
-                replay_command: operation.replay_command.as_deref(),
-                rejected_at: Utc::now().to_rfc3339(),
-                exit_code,
-                timed_out,
-                stdout,
-                stderr,
-            },
-        )?;
-        write_durable_json(
-            &operation_path,
-            &ReplacementOperation {
-                runner_id: runner_id.to_string(),
-                operation_id: uuid::Uuid::new_v4().to_string(),
-                replay_command: None,
-                kind: None,
-            },
-        )?;
-        let pending_path = pending_replacement_path_in_root(config_root, runner_id);
-        if pending_path.exists() {
-            std::fs::remove_file(&pending_path).map_err(|error| {
-                Error::internal_io(
-                    error.to_string(),
-                    Some(format!("remove {}", pending_path.display())),
-                )
-            })?;
-        }
-        Ok(())
-    })
-}
-
 /// Promote the direct session that status has just health-checked. The
 /// controller session is the admission authority for new work; older entries
 /// remain draining so their owned jobs keep their original endpoints.
@@ -1144,7 +268,7 @@ pub(crate) fn reconcile_admission_session(runner_id: &str, session: &RunnerSessi
             None,
         ));
     };
-    with_registry_lock(runner_id, || {
+    with_runner_registry_lock(runner_id, || {
         // A healthy, leased direct session is registry authority on its own:
         // seed the registry from it when none exists yet.
         let mut generations =
@@ -1168,64 +292,6 @@ pub(crate) fn reconcile_admission_session(runner_id: &str, session: &RunnerSessi
             .endpoint = session.clone();
         write(runner_id, &generations)
     })
-}
-
-pub(crate) fn job_session(runner_id: &str, job_id: &str) -> Result<Option<RunnerSession>> {
-    Ok(read(runner_id)?.and_then(|generations| {
-        generations
-            .job_owner(job_id)
-            .and_then(|owner| owner_session(&generations, owner))
-    }))
-}
-
-fn owner_session(
-    generations: &RollingGenerations<RunnerSession>,
-    owner: &str,
-) -> Option<RunnerSession> {
-    generations
-        .generations
-        .get(owner)
-        .or_else(|| {
-            generations.generations.values().find(|generation| {
-                generation.endpoint.remote_daemon_lease_id.as_deref() == Some(owner)
-            })
-        })
-        .map(|generation| generation.endpoint.clone())
-}
-
-pub(crate) fn has_retired_evidence_owner(
-    runner_id: &str,
-    run_id: Option<&str>,
-    artifact_id: Option<&str>,
-) -> Result<bool> {
-    Ok(read(runner_id)?.is_some_and(|registry| {
-        registry
-            .endpoint_owner(None, run_id, artifact_id)
-            .is_some_and(|owner| {
-                registry
-                    .retired_evidence
-                    .iter()
-                    .any(|(generation, endpoint)| {
-                        owner_matches_generation(owner, generation, endpoint)
-                    })
-            })
-    }))
-}
-
-/// Resolve every generation-aware endpoint through one persisted ownership
-/// ledger. Callers supply whichever lifecycle identity they have; job ownership
-/// wins because it is the original admission authority.
-pub(crate) fn endpoint_session(
-    runner_id: &str,
-    job_id: Option<&str>,
-    run_id: Option<&str>,
-    artifact_id: Option<&str>,
-) -> Result<Option<RunnerSession>> {
-    Ok(read(runner_id)?.and_then(|generations| {
-        generations
-            .endpoint_owner(job_id, run_id, artifact_id)
-            .and_then(|owner| owner_session(&generations, owner))
-    }))
 }
 
 pub(crate) fn status_projection(runner_id: &str) -> Result<Vec<RunnerDaemonGenerationStatus>> {
@@ -1329,18 +395,8 @@ fn has_result_owners_for(
         .any(|owner| owner_matches_generation(owner, generation, endpoint))
 }
 
-pub(crate) fn live_sessions(runner_id: &str) -> Result<Vec<RunnerSession>> {
-    Ok(read(runner_id)?.map_or_else(Vec::new, |generations| {
-        generations
-            .generations
-            .into_values()
-            .map(|generation| generation.endpoint)
-            .collect()
-    }))
-}
-
 pub(crate) fn clear(runner_id: &str) -> Result<()> {
-    with_registry_lock(runner_id, || {
+    with_runner_registry_lock(runner_id, || {
         let path = path(runner_id)?;
         if path.exists() {
             std::fs::remove_file(&path).map_err(|error| {
@@ -1366,7 +422,7 @@ pub(crate) fn tombstone_dead_direct_generations(
         .iter()
         .map(String::as_str)
         .collect::<std::collections::BTreeSet<_>>();
-    with_registry_lock(runner_id, || {
+    with_runner_registry_lock(runner_id, || {
         let Some(generations) = read(runner_id)? else {
             return Ok(());
         };
@@ -1416,6 +472,7 @@ trait GenerationEndpointOperations {
     ) -> bool {
         false
     }
+
     /// Returns one inventory result per path, in request order.
     fn evidence(
         &self,
@@ -1424,6 +481,7 @@ trait GenerationEndpointOperations {
     ) -> Vec<Option<serde_json::Value>> {
         vec![None; paths.len()]
     }
+
     /// The endpoint's own record for one job it owns, used to release ledger
     /// ownership for work that already finished. It is read while the
     /// generation still reports active jobs, because a stale owner is exactly
@@ -1431,6 +489,7 @@ trait GenerationEndpointOperations {
     fn job_record(&self, _session: &RunnerSession, _job_id: &str) -> Option<serde_json::Value> {
         None
     }
+
     /// Terminal linked handoffs can survive a controller restart in a daemon's
     /// job store. Settle them before treating its active count as ownership.
     fn reconcile_terminal_jobs(&self, session: &RunnerSession) -> bool;
@@ -2393,6 +1452,9 @@ fn reconcile_with_operations(
             ..Default::default()
         });
     }
+    // Jobs admitted before this observation started are terminal once the
+    // admitting daemon reports zero active jobs.
+    let idle_observed_since_ms = Utc::now().timestamp_millis();
     let live_idle = generations
         .generations
         .get(&generations.admission_owner)
@@ -2467,7 +1529,13 @@ fn reconcile_with_operations(
     // committing an observation. The bounded stop/retirement transaction below
     // fences concurrent registry writers.
     let observed_generations = &generations;
-    let stoppable = with_registry_lock(runner_id, || {
+    let stoppable = with_runner_registry_lock(runner_id, || {
+        if live_idle {
+            crate::admission_fence::release_admitted_jobs_observed_idle_locked(
+                runner_id,
+                idle_observed_since_ms,
+            )?;
+        }
         let Some(mut generations) = read(runner_id)? else {
             return Ok((Vec::new(), Vec::new()));
         };
@@ -2641,7 +1709,7 @@ fn reconcile_with_operations(
             .get(generation)
             .map(|entry| (generation.clone(), entry.endpoint.clone()))
     }));
-    let retired_generation_ids = with_registry_lock(runner_id, || {
+    let retired_generation_ids = with_runner_registry_lock(runner_id, || {
         let Some(mut generations) = read(runner_id)? else {
             return Ok(Vec::new());
         };
@@ -2750,136 +1818,6 @@ fn reconcile_with_operations(
     })
 }
 
-pub(crate) fn record_job(runner_id: &str, session: &RunnerSession, job_id: &str) -> Result<()> {
-    with_registry_lock(runner_id, || {
-        if let Some(reservation) = active_admission_reservation_locked(runner_id)? {
-            return Err(admission_reservation_error(runner_id, &reservation));
-        }
-        let mut generations = read(runner_id)?.unwrap_or_else(|| {
-            RollingGenerations::new(session_generation(session), session.clone())
-        });
-        let owner = session
-            .remote_daemon_lease_id
-            .as_deref()
-            .and_then(|lease_id| {
-                generations
-                    .generations
-                    .iter()
-                    .find_map(|(generation, entry)| {
-                        (entry.endpoint.remote_daemon_lease_id.as_deref() == Some(lease_id))
-                            .then_some(generation.clone())
-                    })
-            })
-            .unwrap_or_else(|| generations.admission_owner.clone());
-        generations.admit_job_for(&owner, job_id);
-        write(runner_id, &generations)
-    })
-}
-
-/// Replace the local endpoint for a job's already-owned generation after an
-/// authenticated reattachment. Unlike admission, this cannot change where new
-/// work is sent.
-pub(crate) fn record_reconnected_job_owner(
-    runner_id: &str,
-    session: &RunnerSession,
-    job_id: &str,
-) -> Result<RunnerSession> {
-    let lease_id = session
-        .remote_daemon_lease_id
-        .as_deref()
-        .ok_or_else(|| Error::internal_unexpected("reconnected daemon session has no lease ID"))?;
-    with_registry_lock(runner_id, || {
-        let Some(mut generations) = read(runner_id)? else {
-            return Err(Error::validation_invalid_argument(
-                "runner",
-                "runner has no durable daemon generation binding for this job",
-                Some(runner_id.to_string()),
-                None,
-            ));
-        };
-        let owner = generations.job_owner(job_id).ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "job_id",
-                "runner has no durable daemon generation binding for this job",
-                Some(job_id.to_string()),
-                None,
-            )
-        })?;
-        let Some(generation) = generations
-            .generations
-            .iter()
-            .find_map(|(generation, entry)| {
-                (generation == owner
-                    || entry.endpoint.remote_daemon_lease_id.as_deref() == Some(owner))
-                .then_some(generation.clone())
-            })
-        else {
-            return Err(Error::internal_unexpected(
-                "job owner does not resolve to a persisted daemon generation",
-            ));
-        };
-        let entry = generations
-            .generations
-            .get_mut(&generation)
-            .expect("job owner generation was resolved");
-        if entry.endpoint.remote_daemon_lease_id.as_deref() != Some(lease_id) {
-            return Err(Error::validation_invalid_argument(
-                "runner",
-                "reattached daemon lease does not match the durable job owner",
-                Some(runner_id.to_string()),
-                None,
-            ));
-        }
-        let replaced = std::mem::replace(&mut entry.endpoint, session.clone());
-        write(runner_id, &generations)?;
-        Ok(replaced)
-    })
-}
-
-/// Promote B only after `connect_remote_daemon` has authenticated its lease,
-/// PID, version, and build identity. Keeping the pending record until this
-/// locked transaction commits makes every interruption retry B first.
-pub(crate) fn promote_pending_replacement(runner_id: &str, session: &RunnerSession) -> Result<()> {
-    let generation = session.remote_daemon_lease_id.as_deref().ok_or_else(|| {
-        Error::internal_unexpected("authenticated daemon session has no lease ID")
-    })?;
-    with_registry_lock(runner_id, || {
-        if let Some(pending) = pending_replacement(runner_id)? {
-            if pending.remote_daemon_lease_id.as_deref() != Some(generation)
-                || pending.remote_daemon_pid != session.remote_daemon_pid
-                || pending.remote_daemon_address != session.remote_daemon_address
-            {
-                return Err(Error::validation_invalid_argument(
-                    "pending_replacement",
-                    "authenticated daemon does not match the pending replacement; refusing authority promotion",
-                    Some(runner_id.to_string()),
-                    None,
-                ));
-            }
-        }
-        record_authenticated_admission_locked(runner_id, session, generation)?;
-        let path = pending_replacement_path(runner_id)?;
-        if path.exists() {
-            std::fs::remove_file(&path).map_err(|error| {
-                Error::internal_io(
-                    error.to_string(),
-                    Some(format!("remove {}", path.display())),
-                )
-            })?;
-        }
-        let operation_path = replacement_operation_path(runner_id)?;
-        if operation_path.exists() {
-            std::fs::remove_file(&operation_path).map_err(|error| {
-                Error::internal_io(
-                    error.to_string(),
-                    Some(format!("remove {}", operation_path.display())),
-                )
-            })?;
-        }
-        Ok(())
-    })
-}
-
 /// Locked entry point used only by the process-isolation test below.
 ///
 /// Production reaches `record_authenticated_admission_locked` from inside an
@@ -2901,12 +1839,12 @@ pub(crate) fn record_authenticated_admission(
     let generation = session.remote_daemon_lease_id.as_deref().ok_or_else(|| {
         Error::internal_unexpected("authenticated daemon session has no lease ID")
     })?;
-    with_registry_lock(runner_id, || {
+    with_runner_registry_lock(runner_id, || {
         record_authenticated_admission_locked(runner_id, session, generation)
     })
 }
 
-fn record_authenticated_admission_locked(
+pub(crate) fn record_authenticated_admission_locked(
     runner_id: &str,
     session: &RunnerSession,
     generation: &str,
@@ -2926,115 +1864,22 @@ fn record_authenticated_admission_locked(
     write(runner_id, &generations)
 }
 
-pub(crate) fn record_job_run(runner_id: &str, job_id: &str, run_id: &str) -> Result<()> {
-    with_registry_lock(runner_id, || {
-        let Some(mut generations) = read(runner_id)? else {
-            return Ok(());
-        };
-        generations.record_run(job_id, run_id);
-        write(runner_id, &generations)
-    })
-}
-
-pub(crate) fn record_job_artifacts(
-    runner_id: &str,
-    job_id: &str,
-    artifact_ids: impl IntoIterator<Item = String>,
-) -> Result<()> {
-    let artifact_ids = artifact_ids.into_iter().collect::<Vec<_>>();
-    with_registry_lock(runner_id, || {
-        let Some(mut generations) = read(runner_id)? else {
-            return Ok(());
-        };
-        for artifact_id in artifact_ids {
-            generations.record_artifact(job_id, artifact_id);
-        }
-        write(runner_id, &generations)
-    })
-}
-
-/// Settle one exact daemon job after the controller has authoritatively read
-/// its terminal snapshot and event log. Unknown or in-flight jobs never reach
-/// this boundary, so their generation ownership remains fail-closed.
-pub(crate) fn settle_observed_terminal_job(runner_id: &str, job_id: &str) -> Result<bool> {
-    with_registry_lock(runner_id, || {
-        let Some(mut generations) = read(runner_id)? else {
-            return Ok(false);
-        };
-        if generations.job_owner(job_id).is_none() {
-            return Ok(false);
-        }
-        generations.complete_job_preserving_drained(job_id);
-        write(runner_id, &generations)?;
-        Ok(true)
-    })
-}
-
-/// Release a durable run's provenance claim after retention removes the record.
-/// Process retirement belongs exclusively to generation reconciliation.
-pub(crate) fn retire_run_owner(runner_id: &str, run_id: &str) -> Result<()> {
-    retire_result_owner(runner_id, RollingResultOwnerRetirement::Run(run_id))
-}
-
-/// Release one artifact routing claim after its owning lifecycle has consumed,
-/// finalized, or pruned the artifact.
-pub(crate) fn retire_artifact_owner(runner_id: &str, artifact_id: &str) -> Result<()> {
-    retire_result_owner(
-        runner_id,
-        RollingResultOwnerRetirement::Artifact(artifact_id),
-    )
-}
-
-fn retire_result_owner(
-    runner_id: &str,
-    retirement: RollingResultOwnerRetirement<'_>,
-) -> Result<()> {
-    with_registry_lock(runner_id, || {
-        let Some(mut generations) = read(runner_id)? else {
-            return Ok(());
-        };
-        generations.retire_result_owner(retirement);
-        let owners = generations
-            .run_owners
-            .values()
-            .chain(generations.artifact_owners.values());
-        let owners = owners.collect::<Vec<_>>();
-        generations.retired_evidence.retain(|generation, endpoint| {
-            owners
-                .iter()
-                .any(|owner| owner_matches_generation(owner, generation, endpoint))
-        });
-        write(runner_id, &generations)
-    })
-}
-
 /// A daemon restarted in place keeps its state directory, so every job, run
 /// and artifact the stopped lease owned now belongs to the restarted lease:
 /// the new daemon re-adopted them from the same store. Move the stopped
 /// lease's ledger entry onto the restarted lease (and make it the admission
 /// owner) instead of leaving a draining generation behind that observers
-/// would report as dead or replaced.
-pub(crate) fn rebind_restarted_lease(
+/// would report as dead or replaced. The caller holds the runner state lock.
+pub(crate) fn adopt_restarted_lease_locked(
     runner_id: &str,
     previous_lease: &str,
+    restarted_lease: &str,
     restarted: &RunnerSession,
 ) -> Result<()> {
-    let restarted_lease = restarted
-        .remote_daemon_lease_id
-        .clone()
-        .filter(|lease_id| !lease_id.is_empty())
-        .ok_or_else(|| Error::internal_unexpected("restarted daemon session has no lease ID"))?;
-    with_registry_lock(runner_id, || {
-        let mut generations = read(runner_id)?
-            .unwrap_or_else(|| RollingGenerations::new(restarted_lease.clone(), restarted.clone()));
-        rebind_restarted_lease_in(
-            &mut generations,
-            previous_lease,
-            &restarted_lease,
-            restarted,
-        );
-        write(runner_id, &generations)
-    })
+    let mut generations = read(runner_id)?
+        .unwrap_or_else(|| RollingGenerations::new(restarted_lease, restarted.clone()));
+    rebind_restarted_lease_in(&mut generations, previous_lease, restarted_lease, restarted);
+    write(runner_id, &generations)
 }
 
 fn rebind_restarted_lease_in(
@@ -3099,7 +1944,7 @@ pub(crate) fn activate(
     candidate: RunnerSession,
     draining_job_ids: &[String],
 ) -> Result<()> {
-    with_registry_lock(runner_id, || {
+    with_runner_registry_lock(runner_id, || {
         let mut generations = read(runner_id)?.unwrap_or_else(|| {
             RollingGenerations::new(session_generation(current), current.clone())
         });
@@ -3155,19 +2000,25 @@ mod tests {
         RunnerTunnelMode,
     };
 
-    #[test]
-    fn durable_json_write_overwrites_existing_file() {
-        let directory = tempfile::tempdir().expect("create journal directory");
-        let path = directory.path().join("journal.json");
-        std::fs::write(&path, "stale payload that is longer than the replacement")
-            .expect("write stale journal");
-
-        write_durable_json(&path, &json!({ "state": "current" })).expect("overwrite journal");
-
-        assert_eq!(
-            std::fs::read_to_string(path).expect("read replacement journal"),
-            "{\n  \"state\": \"current\"\n}"
-        );
+    /// Seed a durable job owner on the generation serving `session`.
+    /// Reconciliation and retirement still read these owners from persisted
+    /// registries.
+    fn seed_job_owner(runner_id: &str, session: &RunnerSession, job_id: &str) -> Result<()> {
+        with_runner_registry_lock(runner_id, || {
+            let mut generations = read(runner_id)?.unwrap_or_else(|| {
+                RollingGenerations::new(session_generation(session), session.clone())
+            });
+            let owner = generations
+                .generations
+                .iter()
+                .find_map(|(generation, entry)| {
+                    (entry.endpoint.remote_daemon_lease_id == session.remote_daemon_lease_id)
+                        .then(|| generation.clone())
+                })
+                .unwrap_or_else(|| generations.admission_owner.clone());
+            generations.admit_job_for(&owner, job_id);
+            write(runner_id, &generations)
+        })
     }
 
     pub(super) fn session(lease: &str, endpoint: &str, tunnel_pid: Option<u32>) -> RunnerSession {
@@ -3194,433 +2045,6 @@ mod tests {
             last_seen_at: None,
             leaseless_recovery_evidence: None,
         }
-    }
-
-    fn reservation(
-        operation: &str,
-        pid: u32,
-        identity: ProcessStartIdentity,
-    ) -> AdmissionReservation {
-        AdmissionReservation {
-            operation_id: uuid::Uuid::new_v4().to_string(),
-            owner_pid: pid,
-            owner_start_identity: identity,
-            created_at: "2026-08-03T00:00:00Z".to_string(),
-            operation: operation.to_string(),
-            generation: Some("lease-a".to_string()),
-        }
-    }
-
-    #[test]
-    fn live_reservation_blocks_admission_with_retryable_reconcile_action() {
-        crate::test_support::with_isolated_home(|_| {
-            let current_identity = process_start_identity(std::process::id())
-                .expect("inspect test process")
-                .expect("test process is live");
-            write_durable_json(
-                &admission_reservation_path("runner-a").expect("reservation path"),
-                &reservation("ensure_remote_daemon", std::process::id(), current_identity),
-            )
-            .expect("write live reservation");
-
-            let error = record_job("runner-a", &session("lease-a", "daemon-a", None), "job-a")
-                .expect_err("live mutation blocks admission");
-
-            assert_eq!(error.code.as_str(), "validation.invalid_argument");
-            assert_eq!(error.retryable, Some(true));
-            assert_eq!(error.details["field"], "runner_mutation_reservation");
-            assert_eq!(
-                error.details["reservation_operation"],
-                "ensure_remote_daemon"
-            );
-            assert_eq!(
-                error.details["tried"],
-                serde_json::json!(["homeboy runner reconcile runner-a"])
-            );
-        });
-    }
-
-    #[test]
-    fn registry_lock_publishes_durable_owner_and_phase_metadata() {
-        crate::test_support::with_isolated_home(|_| {
-            with_runner_registry_lock("runner-a", || {
-                let lock_path = path("runner-a")?.with_extension("lock");
-                let owner: serde_json::Value = serde_json::from_slice(
-                    &std::fs::read(lock_path).expect("read held lock metadata"),
-                )
-                .expect("lock metadata is JSON");
-                assert_eq!(owner["owner_pid"], std::process::id());
-                assert_eq!(owner["phase"], "generation_registry_mutation");
-                assert_eq!(owner["runner_id"], "runner-a");
-                assert!(owner["acquired_at"].as_str().is_some());
-                Ok(())
-            })
-            .expect("lock operation succeeds");
-        });
-    }
-
-    #[test]
-    fn lock_timeout_reports_the_live_holder_phase_age_deadline_and_action() {
-        crate::test_support::with_isolated_home(|_| {
-            let lock_path = path("runner-a")
-                .expect("registry path")
-                .with_extension("lock");
-            with_lock_until(
-                lock_path.clone(),
-                "runner-a",
-                Duration::from_millis(75),
-                || {
-                    let error = with_lock_until(
-                        lock_path,
-                        "runner-a",
-                        Duration::from_millis(75),
-                        || Ok(()),
-                    )
-                    .expect_err("second descriptor waits for the held flock");
-
-                    assert!(error.message.contains("timed out after 75ms"));
-                    assert!(error
-                        .message
-                        .contains(&format!("held by pid {}", std::process::id())));
-                    assert!(error
-                        .message
-                        .contains("phase generation_registry_mutation, held "));
-                    assert_eq!(error.details["error"], error.message);
-                    assert_eq!(error.details["context"], "lock generation registry");
-                    assert_eq!(error.retryable, Some(true));
-                    assert_eq!(error.details["owner_pid"], std::process::id());
-                    assert_eq!(error.details["phase"], "generation_registry_mutation");
-                    assert!(error.details["owner_age_ms"].as_i64().is_some());
-                    assert_eq!(error.details["deadline_ms"], 75);
-                    assert_eq!(
-                        error.details["legal_action"],
-                        "homeboy runner status runner-a --full"
-                    );
-                    Ok(())
-                },
-            )
-            .expect("outer lock operation succeeds");
-        });
-    }
-
-    #[test]
-    fn failed_mutation_clears_its_owned_reservation_before_returning() {
-        crate::test_support::with_isolated_home(|_| {
-            let error = with_admission_fence("runner-a", None, "ensure_remote_daemon", |_| {
-                Err::<(), _>(Error::internal_unexpected("remote mutation failed"))
-            })
-            .expect_err("operation failure is returned");
-            assert_eq!(error.message, "remote mutation failed");
-            assert!(
-                !admission_reservation_path("runner-a")
-                    .expect("reservation path")
-                    .exists(),
-                "an error path must not strand its reservation"
-            );
-            record_job("runner-a", &session("lease-a", "daemon-a", None), "job-a")
-                .expect("admission proceeds after failed mutation cleanup");
-        });
-    }
-
-    #[test]
-    fn concurrent_admission_observes_mutation_reservation_without_waiting_for_remote_work() {
-        crate::test_support::with_isolated_home(|_| {
-            let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
-            let holder_barrier = std::sync::Arc::clone(&barrier);
-            let holder = std::thread::spawn(move || {
-                with_admission_fence("runner-a", None, "ensure_remote_daemon", |_| {
-                    holder_barrier.wait();
-                    holder_barrier.wait();
-                    Ok(())
-                })
-            });
-
-            barrier.wait();
-            let error = record_job("runner-a", &session("lease-a", "daemon-a", None), "job-a")
-                .expect_err("admission races a durable mutation reservation");
-            assert_eq!(error.retryable, Some(true));
-            assert_eq!(
-                error.details["reservation_operation"],
-                "ensure_remote_daemon"
-            );
-            barrier.wait();
-            holder
-                .join()
-                .expect("mutation owner thread")
-                .expect("mutation succeeds");
-            record_job("runner-a", &session("lease-a", "daemon-a", None), "job-a")
-                .expect("admission succeeds after reservation release");
-        });
-    }
-
-    #[test]
-    fn dead_reservation_is_reclaimed_before_admission() {
-        crate::test_support::with_isolated_home(|_| {
-            let mut owner = std::process::Command::new("sh")
-                .args(["-c", "sleep 60"])
-                .spawn()
-                .expect("start reservation owner");
-            let identity = process_start_identity(owner.id())
-                .expect("inspect child")
-                .expect("child is live");
-            owner.kill().expect("stop reservation owner");
-            owner.wait().expect("reap reservation owner");
-            write_durable_json(
-                &admission_reservation_path("runner-a").expect("reservation path"),
-                &reservation("recover_missing_lease_state", owner.id(), identity),
-            )
-            .expect("write dead reservation");
-
-            record_job("runner-a", &session("lease-a", "daemon-a", None), "job-a")
-                .expect("dead owner reservation is reclaimed");
-
-            assert!(!admission_reservation_path("runner-a")
-                .expect("reservation path")
-                .exists());
-        });
-    }
-
-    #[test]
-    fn retiring_an_unpublishable_replacement_releases_its_endpoint_and_operation_identity() {
-        crate::test_support::with_isolated_home(|_| {
-            let first_operation = replacement_operation("runner-a").expect("operation");
-            record_replacement_operation_replay("runner-a", "ensure-running", "replay")
-                .expect("replay journal");
-            record_pending_replacement("runner-a", &session("lease-dead", "127.0.0.1", None))
-                .expect("pending coordinates");
-
-            let next_operation =
-                retire_pending_replacement("runner-a").expect("retire dead pending replacement");
-
-            assert!(pending_replacement("runner-a")
-                .expect("read pending")
-                .is_none());
-            assert!(replacement_operation_replay("runner-a")
-                .expect("read replay")
-                .is_none());
-            assert_ne!(next_operation, first_operation);
-            assert_eq!(
-                replacement_operation("runner-a").expect("new operation"),
-                next_operation
-            );
-        });
-    }
-
-    /// #15087: a `daemon_unleased_process_conflict` refusal is authoritative,
-    /// not a lost response. Retiring it must clear the journal so the next
-    /// connect mints a fresh operation id instead of replaying the exact
-    /// command that will refuse identically forever, and must preserve the
-    /// exact rejection as durable evidence.
-    #[test]
-    fn retiring_a_rejected_ensure_running_replacement_preserves_evidence_and_frees_the_operation() {
-        crate::test_support::with_isolated_home(|_| {
-            let first_operation = replacement_operation("runner-a").expect("operation");
-            let command =
-                "homeboy daemon ensure-running --replacement-operation-id operation-a --addr 127.0.0.1:0";
-            record_replacement_operation_replay("runner-a", "ensure-running", command)
-                .expect("ensure-running replay journal");
-            record_pending_replacement("runner-a", &session("lease-conflict", "127.0.0.1", None))
-                .expect("pending coordinates");
-
-            retire_rejected_ensure_running_replacement(
-                "runner-a",
-                2,
-                false,
-                "",
-                "daemon lease is absent or stale while foreground daemon candidates remain live",
-            )
-            .expect("retire the terminally refused ensure-running replacement");
-
-            assert!(
-                pending_replacement("runner-a")
-                    .expect("read pending")
-                    .is_none(),
-                "the unpublishable pending coordinates must not survive the refusal"
-            );
-            assert!(
-                replacement_operation_replay("runner-a")
-                    .expect("read replay")
-                    .is_none(),
-                "the doomed replay command must not be replayed again"
-            );
-            let next_operation = replacement_operation("runner-a").expect("new operation");
-            assert_ne!(
-                next_operation, first_operation,
-                "a fresh operation id must be minted so a retry cannot collide with the refused one"
-            );
-
-            let evidence_dir = paths::runner_sessions_dir()
-                .expect("runner sessions")
-                .join("runner-a")
-                .join("rejected-replacements");
-            let evidence = std::fs::read_dir(&evidence_dir)
-                .expect("rejection evidence directory")
-                .collect::<std::result::Result<Vec<_>, _>>()
-                .expect("evidence entries");
-            assert_eq!(evidence.len(), 1, "exactly one rejection is recorded");
-            let evidence: serde_json::Value = serde_json::from_slice(
-                &std::fs::read(evidence[0].path()).expect("read rejection evidence"),
-            )
-            .expect("rejection evidence JSON");
-            assert_eq!(evidence["kind"], "ensure-running");
-            assert_eq!(evidence["operation_id"], first_operation);
-            assert_eq!(evidence["replay_command"], command);
-            assert_eq!(evidence["exit_code"], 2);
-            assert_eq!(evidence["timed_out"], false);
-        });
-    }
-
-    /// Retiring the wrong kind must fail closed rather than silently clearing
-    /// a replacement journal entry that belongs to a different, still-viable
-    /// recovery (e.g. a state-loss replay in flight).
-    #[test]
-    fn retiring_ensure_running_refuses_a_journal_of_a_different_kind() {
-        crate::test_support::with_isolated_home(|_| {
-            replacement_operation("runner-a").expect("operation");
-            record_replacement_operation_replay(
-                "runner-a",
-                "state-loss",
-                "homeboy daemon recover-missing-lease-state --lease-id lease-a",
-            )
-            .expect("state-loss replay journal");
-
-            let error =
-                retire_rejected_ensure_running_replacement("runner-a", 1, false, "", "unrelated")
-                    .expect_err("must not retire a differently-kinded journal entry");
-            assert!(error
-                .message
-                .contains("not the rejected ensure-running recovery"));
-            assert_eq!(
-                replacement_operation_replay("runner-a")
-                    .expect("read replay")
-                    .map(|(kind, _)| kind),
-                Some("state-loss".to_string()),
-                "the unrelated journal entry must be left untouched"
-            );
-        });
-    }
-
-    #[test]
-    fn explicit_candidate_reconciliation_supersedes_ensure_running_with_evidence() {
-        crate::test_support::with_isolated_home(|_| {
-            let operation_id = replacement_operation("runner-a").expect("operation");
-            record_replacement_operation_replay(
-                "runner-a",
-                "ensure-running",
-                "homeboy daemon ensure-running --replacement-operation-id operation-a",
-            )
-            .expect("ensure-running replay");
-
-            let reconciliation = "homeboy daemon reconcile-unleased-candidates --apply --replacement-operation-id operation-a";
-            record_unleased_candidate_reconciliation_replay("runner-a", reconciliation)
-                .expect("explicit reconciliation supersedes ensure-running");
-            record_unleased_candidate_reconciliation_replay("runner-a", reconciliation)
-                .expect("same reconciliation replay is idempotent");
-
-            assert_eq!(
-                replacement_operation("runner-a").expect("preserved operation"),
-                operation_id
-            );
-            assert_eq!(
-                replacement_operation_replay("runner-a").expect("replacement replay"),
-                Some((
-                    "unleased-candidates".to_string(),
-                    reconciliation.to_string()
-                ))
-            );
-            let evidence_dir = paths::runner_sessions_dir()
-                .expect("runner sessions")
-                .join("runner-a")
-                .join("superseded-replacements");
-            let evidence = std::fs::read_dir(evidence_dir)
-                .expect("supersession evidence")
-                .collect::<std::result::Result<Vec<_>, _>>()
-                .expect("evidence entries");
-            assert_eq!(evidence.len(), 1, "idempotent replay writes one transition");
-            let evidence: serde_json::Value = serde_json::from_slice(
-                &std::fs::read(evidence[0].path()).expect("read supersession evidence"),
-            )
-            .expect("supersession evidence JSON");
-            assert_eq!(evidence["operation_id"], operation_id);
-            assert_eq!(evidence["previous_kind"], "ensure-running");
-            assert_eq!(evidence["replacement_kind"], "unleased-candidates");
-        });
-    }
-
-    #[test]
-    fn verified_live_lease_adoption_terminalizes_ensure_running_with_evidence() {
-        crate::test_support::with_isolated_home(|_| {
-            let operation_id = replacement_operation("runner-a").expect("operation");
-            record_replacement_operation_replay(
-                "runner-a",
-                "ensure-running",
-                "homeboy daemon ensure-running --replacement-operation-id operation-a",
-            )
-            .expect("ensure-running replay");
-
-            terminalize_ensure_running_replay_for_live_lease_adoption("runner-a")
-                .expect("verified adoption terminalizes stale replay");
-
-            assert!(replacement_operation_replay("runner-a")
-                .expect("replacement replay")
-                .is_none());
-            assert_ne!(
-                replacement_operation("runner-a").expect("replacement operation"),
-                operation_id
-            );
-            let evidence_dir = paths::runner_sessions_dir()
-                .expect("runner sessions")
-                .join("runner-a")
-                .join("superseded-replacements");
-            let evidence = std::fs::read_dir(evidence_dir)
-                .expect("supersession evidence")
-                .collect::<std::result::Result<Vec<_>, _>>()
-                .expect("evidence entries");
-            assert_eq!(evidence.len(), 1);
-            let evidence: serde_json::Value = serde_json::from_slice(
-                &std::fs::read(evidence[0].path()).expect("read supersession evidence"),
-            )
-            .expect("supersession evidence JSON");
-            assert_eq!(evidence["operation_id"], operation_id);
-            assert_eq!(evidence["previous_kind"], "ensure-running");
-            assert_eq!(evidence["replacement_kind"], "live-lease-adoption");
-        });
-    }
-
-    #[test]
-    fn legacy_replacement_journal_remains_replayable_after_rebinding() {
-        crate::test_support::with_isolated_home(|_| {
-            let path = replacement_operation_path("runner-a").expect("journal path");
-            write_durable_json(
-                &path,
-                &serde_json::json!({
-                    "runner_id": "runner-a",
-                    "operation_id": "legacy-operation",
-                }),
-            )
-            .expect("write legacy journal");
-
-            assert_eq!(
-                replacement_operation("runner-a").expect("read operation"),
-                "legacy-operation"
-            );
-            assert!(replacement_operation_replay("runner-a")
-                .expect("read legacy replay")
-                .is_none());
-            record_replacement_operation_replay(
-                "runner-a",
-                "ensure-running",
-                "/selected/homeboy daemon ensure-running --replacement-operation-id legacy-operation --addr 127.0.0.1:0",
-            )
-            .expect("rebind legacy journal");
-            assert_eq!(
-                replacement_operation_replay("runner-a").expect("read rebound replay"),
-                Some((
-                    "ensure-running".to_string(),
-                    "/selected/homeboy daemon ensure-running --replacement-operation-id legacy-operation --addr 127.0.0.1:0".to_string(),
-                ))
-            );
-        });
     }
 
     /// A job whose submitting client disappeared must not pin its generation
@@ -4686,7 +3110,7 @@ mod tests {
         crate::test_support::with_isolated_home(|_| {
             let draining = session("lease-draining", "daemon-draining", Some(101));
             let active = session("lease-active", "daemon-active", Some(202));
-            record_job("runner-a", &draining, "draining-job").expect("record draining job");
+            seed_job_owner("runner-a", &draining, "draining-job").expect("record draining job");
             activate(
                 "runner-a",
                 &draining,
@@ -4726,7 +3150,7 @@ mod tests {
         crate::test_support::with_isolated_home(|_| {
             let a = session("lease-a", "daemon-a", Some(101));
             let b = session("lease-b", "daemon-b", Some(202));
-            record_job("runner-a", &a, "job-a").expect("record A job");
+            seed_job_owner("runner-a", &a, "job-a").expect("record A job");
             activate(
                 "runner-a",
                 &a,
@@ -4783,8 +3207,12 @@ mod tests {
     fn reconciled_zero_for_admission_owner_retires_unclaimed_jobs() {
         crate::test_support::with_isolated_home(|_| {
             let current = session("lease-current", "daemon-current", Some(202));
-            record_job("runner-a", &current, "job-a").expect("record first job");
-            record_job("runner-a", &current, "job-b").expect("record second job");
+            seed_job_owner("runner-a", &current, "job-a").expect("record first job");
+            seed_job_owner("runner-a", &current, "job-b").expect("record second job");
+            crate::admission_fence::record_admitted_job("runner-a", "job-a").expect("admit job-a");
+            crate::admission_fence::record_admitted_job("runner-a", "job-b").expect("admit job-b");
+            // The idle observation must start after both admissions.
+            std::thread::sleep(Duration::from_millis(5));
             let operations = FakeEndpointOperations::default();
             operations
                 .active_jobs
@@ -4802,7 +3230,7 @@ mod tests {
                     .is_empty(),
                 "durable jobs with no live daemon owner are residue"
             );
-            with_admission_fence("runner-a", Some(&current), "connect", |fence| {
+            crate::admission_fence::with_admission_fence("runner-a", "connect", |fence| {
                 assert!(fence.is_none(), "authoritative zero must permit reconnect");
                 Ok(())
             })
@@ -4814,7 +3242,9 @@ mod tests {
     fn live_daemon_owner_keeps_its_durable_job() {
         crate::test_support::with_isolated_home(|_| {
             let current = session("lease-current", "daemon-current", Some(202));
-            record_job("runner-a", &current, "job-live").expect("record live job");
+            seed_job_owner("runner-a", &current, "job-live").expect("record live job");
+            crate::admission_fence::record_admitted_job("runner-a", "job-live")
+                .expect("admit live job");
             let operations = FakeEndpointOperations::default();
             operations
                 .active_jobs
@@ -4827,7 +3257,7 @@ mod tests {
                 status_job_owners("runner-a").expect("owners")[0].job_ids,
                 ["job-live"]
             );
-            with_admission_fence("runner-a", Some(&current), "connect", |fence| {
+            crate::admission_fence::with_admission_fence("runner-a", "connect", |fence| {
                 assert!(fence.is_some(), "a live job remains a placement fence");
                 Ok(())
             })
@@ -5080,7 +3510,7 @@ mod tests {
     #[ignore = "invoked by process_isolated_reconciliation_preserves_concurrent_job_admission"]
     fn process_record_fresh_job() {
         let fresh = session("lease-fresh", "daemon-fresh", Some(202));
-        record_job("runner-a", &fresh, "accepted-during-reconcile")
+        seed_job_owner("runner-a", &fresh, "accepted-during-reconcile")
             .expect("record job accepted during reconciliation");
     }
 
@@ -5209,20 +3639,16 @@ mod tests {
         crate::test_support::with_isolated_home(|_| {
             let stale = session("lease-stale", "127.0.0.1:63114", Some(101));
             let fresh = session("lease-fresh", "127.0.0.1:50575", Some(202));
-            record_job("runner-a", &stale, "active-stale-job").expect("record stale job");
+            seed_job_owner("runner-a", &stale, "active-stale-job").expect("record stale job");
 
             reconcile_admission_session("runner-a", &fresh).expect("promote fresh admission");
-            record_job("runner-a", &fresh, "fresh-cook-job").expect("record one fresh dispatch");
+            seed_job_owner("runner-a", &fresh, "fresh-cook-job")
+                .expect("record one fresh dispatch");
 
             assert_eq!(
                 admission_session("runner-a").expect("resolve admission"),
                 Some(fresh.clone()),
                 "new Cook work uses the same endpoint runner status just verified"
-            );
-            assert_eq!(
-                job_session("runner-a", "active-stale-job").expect("resolve draining job"),
-                Some(stale),
-                "existing work remains pinned to its draining generation"
             );
             let projection = status_projection("runner-a").expect("projection");
             assert!(projection.iter().any(|entry| {
@@ -5236,73 +3662,6 @@ mod tests {
                     && entry.remote_daemon_lease_id.as_deref() == Some("lease-stale")
                     && entry.active_job_count == 1
             }));
-        });
-    }
-
-    #[test]
-    fn draining_generation_keeps_result_routing_after_zero_job_reconciliation() {
-        crate::test_support::with_isolated_home(|_| {
-            let a = session("lease-a", "daemon-a", Some(101));
-            let b = session("lease-b", "daemon-b", Some(202));
-
-            let store = homeboy_core::observation::ObservationStore::open_initialized().unwrap();
-            store
-                .start_run_with_id(
-                    homeboy_core::observation::NewRunRecord::builder("runner-exec")
-                        .metadata(serde_json::json!({"lab":{"runner":{"id":"runner-a"}}}))
-                        .build(),
-                    "run-a".to_string(),
-                )
-                .unwrap();
-            record_job("runner-a", &a, "job-a").expect("record A job");
-            record_job_run("runner-a", "job-a", "run-a").expect("record A run");
-            record_job_artifacts("runner-a", "job-a", ["artifact-a".to_string()])
-                .expect("record A artifact");
-            let initial = persisted_registry("runner-a");
-            assert_eq!(initial["runner_id"], "runner-a");
-            assert_eq!(initial["job_owners"]["job-a"], "lease-a");
-            assert_eq!(initial["run_owners"]["run-a"], "lease-a");
-            assert_eq!(initial["artifact_owners"]["artifact-a"], "lease-a");
-
-            activate(
-                "runner-a",
-                &a,
-                "build-b".to_string(),
-                b.clone(),
-                &["job-a".to_string()],
-            )
-            .expect("promote B");
-            let promoted = persisted_registry("runner-a");
-            assert_eq!(promoted["runner_id"], "runner-a");
-            assert_eq!(promoted["admission_owner"], "build-b");
-            assert_eq!(promoted["job_owners"]["job-a"], "lease-a");
-            assert_eq!(promoted["run_owners"]["run-a"], "lease-a");
-            assert_eq!(promoted["artifact_owners"]["artifact-a"], "lease-a");
-
-            let operations = FakeEndpointOperations::default();
-            operations
-                .active_jobs
-                .borrow_mut()
-                .insert("lease-a".to_string(), 0);
-            reconcile_with("runner-a", &operations).expect("drain A");
-            let drained = persisted_registry("runner-a");
-            assert_eq!(drained["runner_id"], "runner-a");
-            assert_eq!(drained["admission_owner"], "build-b");
-            assert!(drained["job_owners"].get("job-a").is_none());
-            assert_eq!(drained["run_owners"]["run-a"], "lease-a");
-            assert_eq!(drained["artifact_owners"]["artifact-a"], "lease-a");
-            assert_eq!(
-                endpoint_session("runner-a", None, Some("run-a"), None)
-                    .expect("route retained run"),
-                Some(a.clone())
-            );
-            assert_eq!(
-                endpoint_session("runner-a", None, None, Some("artifact-a"))
-                    .expect("route retained artifact"),
-                Some(a)
-            );
-            assert!(operations.stopped_leases.borrow().is_empty());
-            assert!(operations.terminated_pids.borrow().is_empty());
         });
     }
 
@@ -5518,15 +3877,6 @@ mod tests {
             assert_eq!(projected_stale.active_job_count, 0);
             assert_eq!(projected_stale.observed_active_job_count, Some(2));
             assert!(projected_stale.active_job_count_authoritative);
-            with_admission_fence("runner-a", Some(&fresh), "connect", |fence| {
-                assert_eq!(
-                    fence.map(|fence| (fence.generation.clone(), fence.active_job_count)),
-                    Some(("lease-fresh".to_string(), 1)),
-                    "the observed count fences admission while the owner count stays zero"
-                );
-                Ok(())
-            })
-            .expect("observed fence");
         });
     }
 
@@ -5558,19 +3908,6 @@ mod tests {
             assert_eq!(stale.observed_active_job_count, None);
             assert!(!stale.active_job_count_authoritative);
             assert_eq!(stale.job_owner_count, 1);
-            assert_eq!(
-                job_session("runner-a", "job-stale").expect("route persisted job"),
-                Some(session("lease-stale", "daemon-stale", Some(101)))
-            );
-            with_admission_fence("runner-a", Some(&fresh), "connect", |fence| {
-                assert_eq!(
-                    fence.map(|fence| (fence.generation.clone(), fence.active_job_count)),
-                    Some(("lease-stale".to_string(), 1)),
-                    "an unobservable draining generation still fences admission"
-                );
-                Ok(())
-            })
-            .expect("unobservable fence");
             assert!(result.retired_generation_ids.is_empty());
             assert_eq!(
                 result
@@ -5584,117 +3921,11 @@ mod tests {
     }
 
     #[test]
-    fn cancelling_a_queued_owned_job_settles_its_ledger_owner() {
-        crate::test_support::with_isolated_home(|_| {
-            let endpoint = session("lease-cancel", "daemon-cancel", Some(101));
-            let job_id = uuid::Uuid::new_v4();
-            record_job("runner-a", &endpoint, &job_id.to_string()).expect("record queued job");
-
-            let cancelled_job = homeboy_core::api_jobs::Job {
-                id: job_id,
-                operation: "runner.exec".to_string(),
-                status: homeboy_core::api_jobs::JobStatus::Cancelled,
-                created_at_ms: 1,
-                updated_at_ms: 2,
-                started_at_ms: None,
-                finished_at_ms: Some(2),
-                event_count: 1,
-                source_snapshot: None,
-                path_materialization_plan: None,
-                stale_reason: None,
-                daemon_lease_id: None,
-                target_runner_id: None,
-                target_project_id: None,
-                claim_id: None,
-                claimed_by_runner_id: None,
-                claimed_at_ms: None,
-                claim_expires_at_ms: None,
-                artifacts: Vec::new(),
-                runner_job_projection: None,
-            };
-            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind fixture");
-            let address = listener.local_addr().expect("fixture address");
-            let server = std::thread::spawn(move || {
-                use std::io::{Read, Write};
-                let (mut stream, _) = listener.accept().expect("cancel request");
-                let mut bytes = [0; 4096];
-                let count = stream.read(&mut bytes).expect("read cancel request");
-                let request = String::from_utf8_lossy(&bytes[..count]);
-                assert!(
-                    request.starts_with(&format!("POST /jobs/{job_id}/cancel ")),
-                    "{request}"
-                );
-                let body = json!({
-                    "success": true,
-                    "data": {"body": {
-                        "job": serde_json::to_value(&cancelled_job).expect("cancel job"),
-                        "events": [],
-                    }}
-                })
-                .to_string();
-                write!(
-                    stream,
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    body.len(),
-                    body
-                )
-                .expect("cancel response");
-            });
-            let mut cancellable = endpoint.clone();
-            cancellable.local_url = Some(format!("http://{address}"));
-
-            let (job, _events) =
-                crate::runner_job_cancel_for_session(&cancellable, &job_id.to_string(), "fixture")
-                    .expect("cancel queued job");
-            assert_eq!(job.status, homeboy_core::api_jobs::JobStatus::Cancelled);
-            server.join().expect("fixture server");
-
-            let owners = status_job_owners("runner-a").expect("owners");
-            assert!(
-                owners.iter().all(|owner| owner.job_ids.is_empty()),
-                "a terminal cancel response must settle its ledger owner: {owners:?}"
-            );
-            with_admission_fence("runner-a", Some(&endpoint), "connect", |fence| {
-                assert!(
-                    fence.is_none(),
-                    "the settled owner releases the admission fence"
-                );
-                Ok(())
-            })
-            .expect("released fence");
-            let projection = status_projection("runner-a").expect("projection");
-            assert_eq!(projection[0].active_job_count, 0);
-            assert_eq!(projection[0].observed_active_job_count, None);
-            let report = RunnerStatusReport {
-                runner_id: "runner-a".to_string(),
-                connected: true,
-                state: RunnerSessionState::Connected,
-                session: Some(endpoint.clone()),
-                stale_daemon: None,
-                configured_job_binary_build_identity: None,
-                daemon_freshness: None,
-                active_jobs: Vec::new(),
-                active_runner_jobs: Vec::new(),
-                stale_runner_jobs: Vec::new(),
-                active_job_count: 0,
-                stale_runner_job_count: 0,
-                active_job_state: RunnerActiveJobState::Available,
-                active_job_source: None,
-                active_job_error: None,
-                active_job_recovery_evidence: None,
-                session_path: "test".to_string(),
-            };
-            let summary = report.admission_summary_with_generations(&projection, &owners, 1);
-            assert_eq!(summary.unresolved_retained_projection_count, 0);
-        });
-    }
-
-    #[test]
     fn unclaimed_draining_projection_retires_when_live_daemon_is_idle() {
         crate::test_support::with_isolated_home(|_| {
             let stale = session("lease-stale", "daemon-stale", Some(101));
             let fresh = session("lease-fresh", "daemon-fresh", Some(202));
-            record_job("runner-a", &stale, "job-stale").expect("record stale job");
+            seed_job_owner("runner-a", &stale, "job-stale").expect("record stale job");
             activate(
                 "runner-a",
                 &stale,
@@ -5758,7 +3989,7 @@ mod tests {
         crate::test_support::with_isolated_home(|_| {
             let stale = session("lease-stale", "daemon-stale", Some(101));
             let fresh = session("lease-fresh", "daemon-fresh", Some(202));
-            record_job("runner-a", &stale, "job-stale").expect("record stale job");
+            seed_job_owner("runner-a", &stale, "job-stale").expect("record stale job");
             activate(
                 "runner-a",
                 &stale,
@@ -5836,7 +4067,7 @@ mod tests {
     fn stopped_generation_with_stuck_job(proven_stopped: bool) -> FakeEndpointOperations {
         let stopped = session("lease-stopped", "daemon-stopped", Some(101));
         let live = session("lease-live", "daemon-live", Some(202));
-        record_job("runner-a", &stopped, "job-stuck").expect("record stuck job");
+        seed_job_owner("runner-a", &stopped, "job-stuck").expect("record stuck job");
         activate(
             "runner-a",
             &stopped,
@@ -5845,7 +4076,7 @@ mod tests {
             &["job-stuck".to_string()],
         )
         .expect("activate live generation");
-        record_job("runner-a", &live, "job-live").expect("record live job");
+        seed_job_owner("runner-a", &live, "job-live").expect("record live job");
         let operations = FakeEndpointOperations::default();
         if proven_stopped {
             operations
@@ -5953,43 +4184,6 @@ mod tests {
     }
 
     #[test]
-    fn dropped_generation_a_reconnect_retains_one_owner_after_admission_rotates_to_b() {
-        crate::test_support::with_isolated_home(|_| {
-            let stale = session("lease-stale", "daemon-stale", Some(101));
-            let fresh = session("lease-fresh", "daemon-fresh", Some(202));
-            record_job("runner-a", &stale, "job-stale").expect("record stale job");
-            activate(
-                "runner-a",
-                &stale,
-                "lease-fresh".to_string(),
-                fresh.clone(),
-                &["job-stale".to_string()],
-            )
-            .expect("activate fresh generation");
-
-            let mut reattached = stale.clone();
-            reattached.local_url = Some("http://127.0.0.1:49152".to_string());
-            reattached.local_port = Some(49152);
-            reattached.tunnel_pid = Some(303);
-            let replaced = record_reconnected_job_owner("runner-a", &reattached, "job-stale")
-                .expect("retain reattached owner");
-            assert_eq!(
-                replaced, stale,
-                "the dropped generation-A endpoint is superseded"
-            );
-
-            assert_eq!(
-                job_session("runner-a", "job-stale").expect("route stale job"),
-                Some(reattached)
-            );
-            assert_eq!(
-                admission_session("runner-a").expect("retain admission owner"),
-                Some(fresh)
-            );
-        });
-    }
-
-    #[test]
     fn persisted_generations_route_jobs_project_status_and_retire_once() {
         crate::test_support::with_isolated_home(|_| {
             let a = session("lease-a", "daemon-a", Some(101));
@@ -5998,11 +4192,7 @@ mod tests {
             // With no generations file yet, the first recorded job seeds
             // generation A from its session.
             assert_eq!(admission_session("runner-a").expect("admission"), None);
-            record_job("runner-a", &a, "job-a").expect("record A job");
-            assert_eq!(
-                job_session("runner-a", "job-a").expect("route A job"),
-                Some(a.clone())
-            );
+            seed_job_owner("runner-a", &a, "job-a").expect("record A job");
 
             // Candidate B has already passed startup/tunnel validation. Only
             // this activation moves admission; a failed candidate leaves A intact.
@@ -6016,7 +4206,7 @@ mod tests {
                 &["job-a".to_string()],
             )
             .expect("activate validated B");
-            record_job("runner-a", &b, "job-b").expect("record B job");
+            seed_job_owner("runner-a", &b, "job-b").expect("record B job");
 
             // Reloading the persisted ledger simulates a controller restart.
             let reloaded = read("runner-a").expect("reload").expect("ledger");
@@ -6025,14 +4215,6 @@ mod tests {
             assert_eq!(reloaded.job_owner("job-b"), Some("build-b"));
             assert_eq!(
                 admission_session("runner-a").expect("route admission"),
-                Some(b.clone())
-            );
-            assert_eq!(
-                job_session("runner-a", "job-a").expect("route A operation"),
-                Some(a.clone())
-            );
-            assert_eq!(
-                job_session("runner-a", "job-b").expect("route B operation"),
                 Some(b.clone())
             );
 
@@ -6172,7 +4354,7 @@ mod tests {
             let b = session("lease-b", "daemon-b", Some(202));
             let c = session("lease-c", "daemon-c", Some(303));
 
-            record_job("runner-a", &a, "job-a").expect("record A job");
+            seed_job_owner("runner-a", &a, "job-a").expect("record A job");
             activate(
                 "runner-a",
                 &a,
@@ -6181,7 +4363,7 @@ mod tests {
                 &["job-a".to_string()],
             )
             .expect("promote B");
-            record_job("runner-a", &b, "job-b").expect("record B job");
+            seed_job_owner("runner-a", &b, "job-b").expect("record B job");
             activate(
                 "runner-a",
                 &b,
@@ -6190,7 +4372,7 @@ mod tests {
                 &["job-b".to_string()],
             )
             .expect("promote C");
-            record_job("runner-a", &c, "job-c").expect("record C job");
+            seed_job_owner("runner-a", &c, "job-c").expect("record C job");
 
             let operations = FakeEndpointOperations::default();
             operations
@@ -6239,7 +4421,7 @@ mod tests {
             let a = session("lease-a", "daemon-a", Some(101));
             let b = session("lease-b", "daemon-b", Some(202));
 
-            record_job("runner-a", &a, "job-a").expect("record A job");
+            seed_job_owner("runner-a", &a, "job-a").expect("record A job");
             activate(
                 "runner-a",
                 &a,
@@ -6278,7 +4460,7 @@ mod tests {
             let c = session("lease-c", "daemon-c", Some(303));
 
             activate("runner-a", &a, "build-b".to_string(), b.clone(), &[]).expect("promote B");
-            record_job("runner-a", &b, "job-b").expect("record B job");
+            seed_job_owner("runner-a", &b, "job-b").expect("record B job");
 
             activate(
                 "runner-a",
@@ -6293,38 +4475,7 @@ mod tests {
                 .expect("read generations")
                 .expect("generation registry");
             assert_eq!(generations.job_owner("job-b"), Some("build-b"));
-            assert_eq!(
-                job_session("runner-a", "job-b").expect("route B job"),
-                Some(b)
-            );
             assert_eq!(generations.admission_owner, "build-c");
-        });
-    }
-
-    #[test]
-    fn persisted_lease_alias_routes_to_its_named_generation() {
-        crate::test_support::with_isolated_home(|_| {
-            let a = session("lease-a", "daemon-a", Some(101));
-            let b = session("lease-b", "daemon-b", Some(202));
-            let mut generations = RollingGenerations::new("build-a", a.clone());
-            generations
-                .job_owners
-                .insert("job-a".to_string(), "lease-a".to_string());
-            generations
-                .run_owners
-                .insert("run-a".to_string(), "lease-a".to_string());
-            generations.begin("build-b", b.clone());
-            generations.activate_preserving_drained("build-b");
-            write("runner-a", &generations).expect("persist lease aliases");
-
-            assert_eq!(
-                job_session("runner-a", "job-a").expect("route aliased job"),
-                Some(a.clone())
-            );
-            assert_eq!(
-                endpoint_session("runner-a", None, Some("run-a"), None).expect("route aliased run"),
-                Some(a)
-            );
         });
     }
 
@@ -6348,27 +4499,31 @@ mod tests {
             let ledger = read("runner-a").expect("read ledger").expect("ledger");
             assert_eq!(ledger.job_owner("active-job-a"), Some("lease-a"));
             assert_eq!(
-                job_session("runner-a", "active-job-a").expect("route A job"),
-                Some(a)
-            );
-            assert_eq!(
                 admission_session("runner-a").expect("route admissions"),
                 Some(b)
             );
         });
     }
+
     #[test]
     fn in_place_restart_rebinds_the_stopped_lease_without_leaving_a_generation_behind() {
         crate::test_support::with_isolated_home(|_| {
             let a = session("lease-a", "daemon", Some(101));
             let b = session("lease-b", "daemon", Some(202));
-            record_job("runner-a", &a, "job-a").expect("record job on lease A");
+            seed_job_owner("runner-a", &a, "job-a").expect("record job on lease A");
             let mut generations = read("runner-a").expect("read").expect("ledger");
-            assert!(generations.record_run("job-a", "run-a"));
-            assert!(generations.record_artifact("job-a", "artifact-a"));
+            generations
+                .run_owners
+                .insert("run-a".to_string(), "lease-a".to_string());
+            generations
+                .artifact_owners
+                .insert("artifact-a".to_string(), "lease-a".to_string());
             write("runner-a", &generations).expect("record result owners");
 
-            rebind_restarted_lease("runner-a", "lease-a", &b).expect("rebind restarted lease");
+            with_runner_registry_lock("runner-a", || {
+                adopt_restarted_lease_locked("runner-a", "lease-a", "lease-b", &b)
+            })
+            .expect("adopt restarted lease");
 
             let generations = read("runner-a").expect("read").expect("ledger");
             assert_eq!(
@@ -6378,38 +4533,17 @@ mod tests {
             );
             assert_eq!(generations.admission_owner, "lease-b");
             assert_eq!(generations.job_owner("job-a"), Some("lease-b"));
-            assert_eq!(
-                generations.endpoint_owner(None, Some("run-a"), Some("artifact-a")),
-                Some("lease-b")
-            );
+            assert_eq!(generations.run_owners["run-a"], "lease-b");
+            assert_eq!(generations.artifact_owners["artifact-a"], "lease-b");
             assert_eq!(
                 generations.generations["lease-b"].drain_state,
                 crate::RollingDrainState::Admitting
-            );
-            assert_eq!(
-                job_session("runner-a", "job-a").expect("route job"),
-                Some(b.clone()),
-                "the controller follows the re-adopted job to the restarted lease"
             );
             assert_eq!(admission_session("runner-a").expect("admission"), Some(b));
             let owners = status_job_owners("runner-a").expect("status owners");
             assert!(owners
                 .iter()
                 .all(|owner| owner.job_ids.is_empty() || owner.generation == "lease-b"));
-        });
-    }
-
-    #[test]
-    fn in_place_restart_rebind_seeds_a_missing_ledger_on_the_restarted_lease() {
-        crate::test_support::with_isolated_home(|_| {
-            let b = session("lease-b", "daemon", Some(202));
-            rebind_restarted_lease("runner-a", "lease-a", &b).expect("rebind");
-            let generations = read("runner-a").expect("read").expect("ledger");
-            assert_eq!(generations.admission_owner, "lease-b");
-            assert_eq!(
-                generations.generations.keys().collect::<Vec<_>>(),
-                vec!["lease-b"]
-            );
         });
     }
 }

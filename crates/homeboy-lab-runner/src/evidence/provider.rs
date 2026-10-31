@@ -19,26 +19,6 @@ use homeboy_core::observation::RunRecord;
 pub struct RunnerEvidence;
 
 impl RunnerEvidenceProvider for RunnerEvidence {
-    fn retire_durable_result_owner(
-        &self,
-        run: &RunRecord,
-        artifact_id: Option<&str>,
-    ) -> Result<()> {
-        let runner_id = run
-            .metadata_json
-            .pointer("/lab_offload/runner_id")
-            .or_else(|| run.metadata_json.pointer("/lab/runner/id"))
-            .and_then(Value::as_str);
-        let Some(runner_id) = runner_id else {
-            return Ok(());
-        };
-        if let Some(artifact_id) = artifact_id {
-            super::super::generation_store::retire_artifact_owner(runner_id, artifact_id)
-        } else {
-            super::super::generation_store::retire_run_owner(runner_id, &run.id)
-        }
-    }
-
     fn mirror_connected_runner_run(&self, run_id: &str) -> Result<Option<RunRecord>> {
         super::mirror::mirror_connected_runner_run(run_id)
     }

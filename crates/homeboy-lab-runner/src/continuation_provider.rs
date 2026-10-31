@@ -152,36 +152,20 @@ impl RunnerContinuationProvider for RunnerContinuation {
         let Ok(status) = super::connection::status(runner_id) else {
             return RunnerJobReconciliation::UnconfirmedAbsence;
         };
-        if !status.connected || status.session.is_none() {
-            return RunnerJobReconciliation::UnconfirmedAbsence;
-        }
-        let Ok(generations) = super::generation_store::live_sessions(runner_id) else {
+        // The runner's one current session owns every job its daemon runs.
+        let Some(session) = status.session.filter(|_| status.connected) else {
             return RunnerJobReconciliation::UnconfirmedAbsence;
         };
-        if generations.is_empty() {
+        if session.local_url.is_none() {
             return RunnerJobReconciliation::UnconfirmedAbsence;
         }
-
-        let mut checked_generations = 0;
-        for generation in generations {
-            if generation.local_url.is_none() {
-                return RunnerJobReconciliation::UnconfirmedAbsence;
-            }
-            checked_generations += 1;
-            match super::evidence::runner_job_log_snapshot_for_session(&generation, job_id) {
-                Ok(snapshot) => {
-                    if super::generation_store::record_job(runner_id, &generation, job_id).is_err()
-                    {
-                        return RunnerJobReconciliation::UnconfirmedAbsence;
-                    }
-                    return RunnerJobReconciliation::Snapshot(Box::new(snapshot));
-                }
-                Err(error) if job_not_found(&error, job_id) => continue,
-                Err(_) => return RunnerJobReconciliation::UnconfirmedAbsence,
-            }
+        match super::evidence::runner_job_log_snapshot_for_session(&session, job_id) {
+            Ok(snapshot) => return RunnerJobReconciliation::Snapshot(Box::new(snapshot)),
+            Err(error) if job_not_found(&error, job_id) => {}
+            Err(_) => return RunnerJobReconciliation::UnconfirmedAbsence,
         }
         RunnerJobReconciliation::ConfirmedAbsent {
-            checked_generations,
+            checked_generations: 1,
         }
     }
 

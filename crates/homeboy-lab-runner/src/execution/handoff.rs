@@ -169,7 +169,8 @@ pub fn runner_job_cancel(
 ) -> Result<(Job, Vec<JobEvent>)> {
     let runner = load(runner_id)?;
     let connected = status(runner_id)?;
-    let Some(current_session) = connected.session.filter(|_| connected.connected) else {
+    // The runner's one current session owns every job it runs.
+    let Some(session) = connected.session.filter(|_| connected.connected) else {
         return Err(Error::validation_invalid_argument(
             "runner",
             "runner is not connected; run `homeboy runner connect <runner-id>` first",
@@ -179,9 +180,6 @@ pub fn runner_job_cancel(
             ]),
         ));
     };
-    let session =
-        super::super::generation_store::endpoint_session(runner_id, Some(job_id), None, None)?
-            .unwrap_or(current_session);
     let client = Client::builder()
         .timeout(Duration::from_secs(10))
         .build()
@@ -234,9 +232,8 @@ pub fn runner_job_cancel_for_session(
     )?;
     if job.status.is_terminal() {
         // The cancel response is the daemon's authoritative terminal snapshot,
-        // so its durable generation owner can be settled immediately instead of
-        // waiting for reconcile to observe the endpoint again.
-        super::super::generation_store::settle_observed_terminal_job(&session.runner_id, job_id)?;
+        // so the job stops fencing daemon mutation immediately.
+        crate::admission_fence::settle_admitted_job(&session.runner_id, job_id)?;
     }
     Ok((job, events))
 }
@@ -250,19 +247,13 @@ pub fn runner_job_cancel_projection(
 ) -> Result<(Job, Vec<JobEvent>)> {
     let runner = load(runner_id)?;
     let connected = status(runner_id)?;
-    let Some(current_session) = connected.session.filter(|_| connected.connected) else {
+    // The runner's one current session owns every job it runs.
+    let Some(session) = connected.session.filter(|_| connected.connected) else {
         return Err(runner_job_cancel_unsupported(
             &runner.id,
             "runner is not connected",
         ));
     };
-    let session = super::super::generation_store::endpoint_session(
-        runner_id,
-        Some(job_id),
-        Some(durable_run_id),
-        None,
-    )?
-    .unwrap_or(current_session);
     let client = Client::builder()
         .timeout(Duration::from_secs(10))
         .build()

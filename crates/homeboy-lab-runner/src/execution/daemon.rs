@@ -225,19 +225,8 @@ pub(super) fn exec_via_daemon(
         },
         job,
         |job| {
-            if let Some(session) = accepted_session.as_ref() {
-                super::super::generation_store::record_job(
-                    &runner.id,
-                    session,
-                    &job.id.to_string(),
-                )?;
-                if let Some(durable_run_id) = run_id.as_deref() {
-                    super::super::generation_store::record_job_run(
-                        &runner.id,
-                        &job.id.to_string(),
-                        durable_run_id,
-                    )?;
-                }
+            if accepted_session.is_some() {
+                crate::admission_fence::record_admitted_job(&runner.id, &job.id.to_string())?;
             }
             Ok(())
         },
@@ -282,9 +271,8 @@ pub(super) fn exec_via_daemon(
                     .renew_running_runner_exec_source_lease(run_id, token)?;
             }
             let job_id = current.id.to_string();
-            let reload = || {
-                refreshed_daemon_endpoint(&runner.id, &job_id, accepted_daemon_identity.as_deref())
-            };
+            let reload =
+                || refreshed_daemon_endpoint(&runner.id, accepted_daemon_identity.as_deref());
             let poll_failure = |err| {
                 terminal_runner_poll_failure(
                     runner,
@@ -338,11 +326,7 @@ pub(super) fn exec_via_daemon(
                 let endpoint = daemon_endpoint.borrow().clone();
                 let refreshed_endpoint = follow
                     .drain_to_end(&client, &endpoint, &job.id.to_string(), || {
-                        refreshed_daemon_endpoint(
-                            &runner.id,
-                            &job.id.to_string(),
-                            accepted_daemon_identity.as_deref(),
-                        )
+                        refreshed_daemon_endpoint(&runner.id, accepted_daemon_identity.as_deref())
                     })
                     .map_err(|error| {
                         lab_terminal_result_transport_error(runner, &cwd, &command, job, error)
@@ -391,16 +375,6 @@ pub(super) fn exec_via_daemon(
                     .as_ref()
                     .expect("lease store is opened whenever a lease is held")
                     .release_running_runner_exec_source_lease(&run_id, &token)?;
-            }
-            Ok(())
-        },
-        |job, artifacts| {
-            if accepted_session.is_some() {
-                super::super::generation_store::record_job_artifacts(
-                    &runner.id,
-                    &job.id.to_string(),
-                    artifacts.iter().map(|artifact| artifact.id.clone()),
-                )?;
             }
             Ok(())
         },
@@ -1777,7 +1751,7 @@ pub(crate) fn observe_daemon_job_until_terminal(
                 .filter(|_| status.connected)
                 .and_then(|session| session.local_url))
         },
-        || refreshed_daemon_endpoint(runner_id, runner_job_id, accepted_daemon_identity),
+        || refreshed_daemon_endpoint(runner_id, accepted_daemon_identity),
     )?;
     let started = Instant::now();
     let deadline = started + budget;
@@ -1790,7 +1764,7 @@ pub(crate) fn observe_daemon_job_until_terminal(
             &client,
             &endpoint,
             runner_job_id,
-            || refreshed_daemon_endpoint(runner_id, runner_job_id, accepted_daemon_identity),
+            || refreshed_daemon_endpoint(runner_id, accepted_daemon_identity),
         )?;
         endpoint = refreshed_endpoint;
         if job.status.is_terminal() {
@@ -1816,11 +1790,6 @@ pub(crate) fn observe_daemon_job_until_terminal(
             .min(DAEMON_TERMINAL_WAIT_MAX_BACKOFF);
     };
     let events = fetch_daemon_events(&client, &endpoint, runner_job_id)?;
-    super::super::generation_store::record_job_artifacts(
-        runner_id,
-        runner_job_id,
-        job.artifacts.iter().map(|artifact| artifact.id.clone()),
-    )?;
     super::super::generation_store::reconcile(runner_id)?;
     Ok(DaemonTerminalObservation { job, events })
 }
@@ -1958,8 +1927,8 @@ pub(super) fn daemon_poll_transport_was_lost(error: &Error) -> bool {
 }
 
 /// A failed job-owner reattach is transient when it lost the daemon transport
-/// or its producer marked it retryable (for example a controller generation
-/// lock contended by concurrent Cooks). Authoritative refusals, such as a
+/// or its producer marked it retryable (for example a runner state lock
+/// contended by concurrent Cooks). Authoritative refusals, such as a
 /// daemon identity mismatch, are not retryable and end the poll.
 fn reattach_failure_is_transient(error: &Error) -> bool {
     daemon_poll_transport_was_lost(error) || error.retryable == Some(true)
@@ -1967,10 +1936,9 @@ fn reattach_failure_is_transient(error: &Error) -> bool {
 
 pub(super) fn refreshed_daemon_endpoint(
     runner_id: &str,
-    job_id: &str,
     expected_identity: Option<&str>,
 ) -> Result<Option<String>> {
-    let session = super::super::connection::reconnect_job_owner_for_polling(runner_id, job_id)?;
+    let session = super::super::connection::reconnect_job_owner_for_polling(runner_id)?;
     if session.mode != crate::RunnerTunnelMode::DirectSsh {
         return Ok(None);
     }
@@ -1987,7 +1955,7 @@ pub(super) fn refreshed_daemon_endpoint(
         if !daemon_identity_is_accepted(
             &actual_identity,
             expected_identity,
-            super::super::generation_store::job_session(runner_id, job_id)?.as_ref(),
+            super::super::connection::read_session(runner_id)?.as_ref(),
         ) {
             return Err(Error::validation_invalid_argument(
                 "runner",
@@ -2003,18 +1971,18 @@ pub(super) fn refreshed_daemon_endpoint(
 }
 
 /// The daemon serving a polled job is accepted when it is the daemon the job
-/// was admitted to, or the daemon the durable ledger now names as the job's
-/// owner. The ledger only moves a job onto a different lease when a refresh
-/// restarted its daemon in place on the same state directory, so the restarted
-/// daemon re-adopted the job rather than replacing the daemon that ran it.
+/// was admitted to, or the daemon the runner's current session names. The
+/// current session only moves to a different lease when a refresh restarted
+/// the daemon in place on the same state directory, so the restarted daemon
+/// re-adopted the job rather than replacing the daemon that ran it.
 pub(super) fn daemon_identity_is_accepted(
     actual_identity: &str,
     accepted_identity: &str,
-    ledger_owner: Option<&crate::RunnerSession>,
+    current_session: Option<&crate::RunnerSession>,
 ) -> bool {
     let actual_identity = actual_identity.trim();
     actual_identity == accepted_identity.trim()
-        || ledger_owner
+        || current_session
             .and_then(|owner| owner.homeboy_build_identity.as_deref())
             .is_some_and(|owner_identity| owner_identity.trim() == actual_identity)
 }

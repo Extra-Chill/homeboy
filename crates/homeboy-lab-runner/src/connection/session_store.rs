@@ -292,7 +292,7 @@ fn is_hostname_uid_controller_id(value: &str) -> bool {
         .is_some_and(|(_, uid)| !uid.is_empty() && uid.chars().all(|c| c.is_ascii_digit()))
 }
 
-pub(super) fn read_session(runner_id: &str) -> Result<Option<RunnerSession>> {
+pub(crate) fn read_session(runner_id: &str) -> Result<Option<RunnerSession>> {
     read_session_for_controller(runner_id, &controller_id())
 }
 

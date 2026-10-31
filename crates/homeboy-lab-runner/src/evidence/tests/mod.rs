@@ -93,9 +93,8 @@ fn mirror_refresh_recovers_terminal_evidence_from_the_exact_retained_generation(
                 None,
             ))
         },
-        |runner_id, requested_job_id| {
+        |runner_id| {
             assert_eq!(runner_id, "homeboy-lab");
-            assert_eq!(requested_job_id, job_id);
             reconnected = true;
             Ok("generation-a")
         },

@@ -992,7 +992,7 @@ pub(super) struct RemoteDaemonEnsureRequest<'a> {
     pub(super) confirmed_no_pid_job_ids: &'a [uuid::Uuid],
     pub(super) live_lease_expectation: Option<(&'a str, u32)>,
     pub(super) replacement_operation_id: Option<&'a str>,
-    pub(super) admission_fence: Option<&'a crate::generation_store::AdmissionFence>,
+    pub(super) admission_fence: Option<&'a crate::admission_fence::AdmissionFence>,
     pub(super) registry_lock_held: bool,
     /// The typed daemon-recovery capabilities advertised in the remote's
     /// self-identity report.
@@ -1040,8 +1040,8 @@ fn ensure_remote_daemon_inner(
     if let Some(lease_id) = orphan_lease_id {
         if let Some(fence) = admission_fence {
             return Err(RemoteDaemonEnsureError::Other(format!(
-                "runner `{runner_id}` generation `{}` has {} unresolved active job(s); refusing orphan adoption before terminal job evidence is available",
-                fence.generation, fence.active_job_count,
+                "runner `{runner_id}` has {} unresolved active job(s); refusing orphan adoption before terminal job evidence is available",
+                fence.active_job_count,
             )));
         }
         if status.stale_reason_code == Some(DaemonStaleReasonCode::PidDead)
@@ -1077,7 +1077,7 @@ fn ensure_remote_daemon_inner(
         runner_id,
         live_lease_expectation,
     )?;
-    let action = fence_generation_admission(action, admission_fence, runner_id)?;
+    let action = fence_daemon_admission(action, admission_fence, runner_id)?;
     match action {
         RemoteDaemonConnectAction::Reattach => {
             let mut daemon = status.daemon.ok_or_else(|| {
@@ -1134,9 +1134,9 @@ fn ensure_remote_daemon_inner(
     }
 }
 
-pub(super) fn fence_generation_admission(
+pub(super) fn fence_daemon_admission(
     action: RemoteDaemonConnectAction,
-    fence: Option<&crate::generation_store::AdmissionFence>,
+    fence: Option<&crate::admission_fence::AdmissionFence>,
     runner_id: &str,
 ) -> std::result::Result<RemoteDaemonConnectAction, String> {
     let Some(fence) = fence else {
@@ -1146,8 +1146,8 @@ pub(super) fn fence_generation_admission(
         return Ok(action);
     }
     Err(format!(
-        "runner `{runner_id}` generation `{}` has {} unresolved active job(s); refusing to create or replace an admission daemon. Reattach the live generation when available, or run `homeboy runner reconcile {runner_id}` after terminal job evidence is available",
-        fence.generation, fence.active_job_count,
+        "runner `{runner_id}` has {} unresolved active job(s); refusing to create or replace its daemon. Reattach the live daemon when available, or run `homeboy runner reconcile {runner_id}` after terminal job evidence is available",
+        fence.active_job_count,
     ))
 }
 
@@ -1163,13 +1163,13 @@ fn journal_ensure_running_replay(
     let command =
         remote_daemon_ensure_running_command(homeboy, runner_id, replacement_operation_id);
     let write = if registry_lock_held {
-        crate::generation_store::record_replacement_operation_replay_locked(
+        super::replacement_journal::record_replacement_operation_replay_locked(
             runner_id,
             "ensure-running",
             &command,
         )
     } else {
-        crate::generation_store::record_replacement_operation_replay(
+        super::replacement_journal::record_replacement_operation_replay(
             runner_id,
             "ensure-running",
             &command,

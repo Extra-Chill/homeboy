@@ -572,8 +572,8 @@ fn daemon_identity_transition_reports_a_restarted_control_plane() {
 fn polling_accepts_the_daemon_restarted_in_place_but_not_an_unrelated_replacement() {
     let accepted = "homeboy 0.436.8+before-refresh";
     let restarted = "homeboy 0.436.9+after-refresh";
-    let mut rebound_owner = crate::test_support::direct_ssh_session("lease-b");
-    rebound_owner.homeboy_build_identity = Some(restarted.to_string());
+    let mut restarted_session = crate::test_support::direct_ssh_session("lease-b");
+    restarted_session.homeboy_build_identity = Some(restarted.to_string());
 
     assert!(super::super::daemon::daemon_identity_is_accepted(
         accepted, accepted, None
@@ -582,21 +582,21 @@ fn polling_accepts_the_daemon_restarted_in_place_but_not_an_unrelated_replacemen
         super::super::daemon::daemon_identity_is_accepted(
             restarted,
             accepted,
-            Some(&rebound_owner)
+            Some(&restarted_session)
         ),
-        "the ledger rebound the job onto the restarted lease, so its new identity is the owner"
+        "the current session names the restarted lease, so its new identity is accepted"
     );
     assert!(
         !super::super::daemon::daemon_identity_is_accepted(restarted, accepted, None),
-        "without a ledger owner a changed identity is still refused"
+        "without a current session a changed identity is still refused"
     );
     assert!(
         !super::super::daemon::daemon_identity_is_accepted(
             "homeboy 9.9.9+unrelated",
             accepted,
-            Some(&rebound_owner)
+            Some(&restarted_session)
         ),
-        "a daemon matching neither the admission nor the ledger owner is refused"
+        "a daemon matching neither the admission nor the current session is refused"
     );
 }
 
@@ -2078,7 +2078,7 @@ fn daemon_polling_keeps_its_grace_window_when_a_reattach_cannot_reach_the_daemon
 }
 
 #[test]
-fn daemon_polling_keeps_its_grace_window_when_a_reattach_waits_out_a_contended_generation_lock() {
+fn daemon_polling_keeps_its_grace_window_when_a_reattach_waits_out_a_contended_runner_state_lock() {
     let stale_endpoint = closed_endpoint();
     let job = running_job();
     let job_id = job.id.to_string();
@@ -2091,13 +2091,13 @@ fn daemon_polling_keeps_its_grace_window_when_a_reattach_waits_out_a_contended_g
     let (fetched, endpoint) =
         fetch_daemon_job_resilient_with_endpoint_reload(&client, &stale_endpoint, &job_id, || {
             if reloads.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
-                // Concurrent Cooks hold the runner generation registry lock;
-                // the reattach times out waiting for it (retryable).
+                // Concurrent Cooks hold the runner state lock; the reattach
+                // times out waiting for it (retryable).
                 let mut error = Error::internal_io(
-                    "timed out after 30000ms waiting for runner generation registry lock",
-                    Some("lock generation registry".to_string()),
+                    "timed out after 30000ms waiting for runner state lock",
+                    Some("lock runner state".to_string()),
                 );
-                error.details = serde_json::json!({ "kind": "runner_generation_lock_timeout" });
+                error.details = serde_json::json!({ "kind": "runner_state_lock_timeout" });
                 error.retryable = Some(true);
                 return Err(error);
             }

@@ -123,28 +123,26 @@ fn compact_live_lease_without_binary_identity_remains_unadoptable() {
 }
 
 #[test]
-fn active_generation_fence_allows_reattach_but_rejects_new_admission() {
-    let fence = crate::generation_store::AdmissionFence {
-        generation: "lease-active".to_string(),
+fn active_job_fence_allows_reattach_but_rejects_new_admission() {
+    let fence = crate::admission_fence::AdmissionFence {
         active_job_count: 2,
     };
 
     assert_eq!(
-        remote_daemon::fence_generation_admission(
+        remote_daemon::fence_daemon_admission(
             RemoteDaemonConnectAction::Reattach,
             Some(&fence),
             "homeboy-lab",
         )
-        .expect("live generation remains reconnectable"),
+        .expect("live daemon remains reconnectable"),
         RemoteDaemonConnectAction::Reattach
     );
-    let error = remote_daemon::fence_generation_admission(
+    let error = remote_daemon::fence_daemon_admission(
         RemoteDaemonConnectAction::Start,
         Some(&fence),
         "homeboy-lab",
     )
-    .expect_err("two active jobs block a new generation");
-    assert!(error.contains("generation `lease-active`"));
+    .expect_err("two active jobs block a new daemon");
     assert!(error.contains("2 unresolved active job(s)"));
     assert!(error.contains("homeboy runner reconcile homeboy-lab"));
 }

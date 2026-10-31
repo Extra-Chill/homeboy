@@ -44,12 +44,6 @@ pub enum RollingStart {
     AlreadyActive,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RollingResultOwnerRetirement<'a> {
-    Run(&'a str),
-    Artifact(&'a str),
-}
-
 impl<E> RollingGenerations<E> {
     pub fn new(generation: impl Into<String>, endpoint: E) -> Self {
         let generation = generation.into();
@@ -119,45 +113,9 @@ impl<E> RollingGenerations<E> {
         self.job_owners.get(job_id).map(String::as_str)
     }
 
-    pub fn record_run(&mut self, job_id: &str, run_id: impl Into<String>) -> bool {
-        let Some(owner) = self.job_owner(job_id).map(str::to_string) else {
-            return false;
-        };
-        self.run_owners.insert(run_id.into(), owner);
-        true
-    }
-
-    pub fn record_artifact(&mut self, job_id: &str, artifact_id: impl Into<String>) -> bool {
-        let Some(owner) = self.job_owner(job_id).map(str::to_string) else {
-            return false;
-        };
-        self.artifact_owners.insert(artifact_id.into(), owner);
-        true
-    }
-
-    pub fn endpoint_owner(
-        &self,
-        job_id: Option<&str>,
-        run_id: Option<&str>,
-        artifact_id: Option<&str>,
-    ) -> Option<&str> {
-        job_id
-            .and_then(|id| self.job_owner(id))
-            .or_else(|| run_id.and_then(|id| self.run_owners.get(id).map(String::as_str)))
-            .or_else(|| artifact_id.and_then(|id| self.artifact_owners.get(id).map(String::as_str)))
-    }
-
     /// External process owners retain the endpoint until stop is proven.
     pub fn complete_job_preserving_drained(&mut self, job_id: &str) -> bool {
         self.job_owners.remove(job_id).is_some()
-    }
-
-    pub fn retire_result_owner(&mut self, retirement: RollingResultOwnerRetirement<'_>) -> bool {
-        let removed = match retirement {
-            RollingResultOwnerRetirement::Run(id) => self.run_owners.remove(id),
-            RollingResultOwnerRetirement::Artifact(id) => self.artifact_owners.remove(id),
-        };
-        removed.is_some()
     }
 
     pub fn reconcile_result_owners(
@@ -182,15 +140,13 @@ mod tests {
     fn rotation_preserves_job_and_result_owners_until_their_lifecycle_releases_them() {
         let mut generations = RollingGenerations::new("A", "endpoint-a");
         assert!(generations.admit_job_for("A", "job-a"));
-        assert!(generations.record_run("job-a", "run-a"));
-        assert!(generations.record_artifact("job-a", "artifact-a"));
+        generations
+            .run_owners
+            .insert("run-a".to_string(), "A".to_string());
         assert_eq!(generations.begin("B", "endpoint-b"), RollingStart::Start);
         assert!(generations.activate_preserving_drained("B"));
         assert!(generations.admit_job_for("B", "job-b"));
-        assert_eq!(
-            generations.endpoint_owner(Some("job-a"), None, None),
-            Some("A")
-        );
+        assert_eq!(generations.job_owner("job-a"), Some("A"));
         assert!(generations.complete_job_preserving_drained("job-a"));
         assert!(
             generations.generations.contains_key("A"),

@@ -2912,7 +2912,7 @@ fn durable_refresh_partial_error(
     });
     let path = refresh_partial_state_path(runner_id);
     match path.and_then(|path| {
-        super::generation_store::write_durable_json(&path, &state)?;
+        crate::runner_state_lock::write_durable_json(&path, &state)?;
         Ok(path)
     }) {
         Ok(path) => {

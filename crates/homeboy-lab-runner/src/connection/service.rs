@@ -736,7 +736,7 @@ pub(crate) fn connect_service_runner(runner_id: &str) -> Result<(RunnerConnectRe
         last_seen_at: None,
         leaseless_recovery_evidence: None,
     };
-    super::super::generation_store::promote_pending_replacement(runner_id, &session)?;
+    super::replacement_journal::promote_pending_replacement(runner_id, &session)?;
     write_session(&session)?;
 
     super::super::runner_probe_gate::invalidate_runner_probes(runner_id);
