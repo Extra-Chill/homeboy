@@ -142,11 +142,11 @@ mod tests {
     }
 
     #[test]
-    fn diagnostic_accepts_code_as_class_alias() {
+    fn diagnostic_uses_canonical_class_and_metadata_fields() {
         let diagnostic: BenchDiagnostic = serde_json::from_str(
-            r#"{"code":"wordpress.bench.stdout_noise","message":"captured non-JSON stdout","severity":"warning","details":{"line_count":3}}"#,
+            r#"{"class":"wordpress.bench.stdout_noise","message":"captured non-JSON stdout","severity":"warning","metadata":{"line_count":3}}"#,
         )
-        .expect("diagnostic with code alias parses");
+        .expect("canonical diagnostic parses");
 
         assert_eq!(diagnostic.class, "wordpress.bench.stdout_noise");
         assert_eq!(
@@ -158,10 +158,21 @@ mod tests {
 
         let serialized = serde_json::to_value(&diagnostic).expect("diagnostic serializes");
         assert_eq!(serialized["class"], "wordpress.bench.stdout_noise");
-        assert_eq!(serialized["severity"], "warning");
         assert_eq!(serialized["metadata"]["line_count"], 3);
-        assert!(serialized.get("code").is_none());
-        assert!(serialized.get("details").is_none());
+    }
+
+    #[test]
+    fn diagnostic_rejects_removed_code_kind_and_details_aliases() {
+        for raw in [
+            r#"{"code":"wordpress.bench.stdout_noise"}"#,
+            r#"{"kind":"wordpress.bench.stdout_noise"}"#,
+            r#"{"class":"wordpress.bench.stdout_noise","details":{"line_count":3}}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<BenchDiagnostic>(raw).is_err(),
+                "removed alias must not parse (#16779): {raw}"
+            );
+        }
     }
 
     fn diagnostic(class: &str) -> BenchDiagnostic {
