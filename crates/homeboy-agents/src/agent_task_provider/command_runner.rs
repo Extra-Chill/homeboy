@@ -1,5 +1,5 @@
 use super::artifact_finalization::{
-    finalize_provider_file_artifacts, retain_failed_workspace_artifacts,
+    finalize_provider_file_artifacts, retain_declared_workspace_artifacts,
 };
 use super::outcome_normalization::{
     normalize_homeboy_local_artifact_sizes, normalize_provider_outcome_roles,
@@ -853,7 +853,7 @@ fn run_materialized_provider_command_once_with_credentials(
         outcome.metadata["served_models"] = json!(models);
     }
     containment_report.annotate(&mut outcome);
-    if let Err(error) = retain_failed_workspace_artifacts(&mut outcome, request) {
+    if let Err(error) = retain_declared_workspace_artifacts(&mut outcome, request) {
         push_unique_diagnostic(
             &mut outcome.diagnostics,
             "agent_task.failed_workspace_artifact_retention_failed".to_string(),
@@ -874,14 +874,38 @@ fn run_materialized_provider_command_once_contained(
 ) -> AgentTaskOutcome {
     let run_id = execution.run_id.as_deref();
     let attempt = execution.attempt;
-    let command = render_provider_command_display(provider);
+    let command = if request.request.executor.backend == "pi" {
+        super::pi::command(&request.request.executor.config)
+            .map(|(program, args)| format!("{program} {}", args.join(" ")))
+            .unwrap_or_else(|_| "pi".into())
+    } else {
+        render_provider_command_display(provider)
+    };
     let deadline_remaining_ms = crate::agent_task_timeout::remaining_execution_deadline_ms(
         request.limits.execution_deadline_unix_ms,
     );
     if deadline_remaining_ms == Some(0) {
         return execution_deadline_outcome(request, provider, &command, "provider_execution");
     }
-    let Some((program, args, provider_cwd)) = provider_command_parts(provider) else {
+    let native_pi = request.request.executor.backend == "pi";
+    let parts = if native_pi {
+        match super::pi::command(&request.request.executor.config) {
+            Ok((program, args)) => Some((program, args, None)),
+            Err(message) => {
+                return failure_outcome(
+                    request,
+                    AgentTaskOutcomeStatus::ProviderError,
+                    AgentTaskFailureClassification::InvalidInput,
+                    "agent_task.invalid_pi_command",
+                    message,
+                    json!({}),
+                )
+            }
+        }
+    } else {
+        provider_command_parts(provider)
+    };
+    let Some((program, mut args, provider_cwd)) = parts else {
         return failure_outcome(
             request,
             AgentTaskOutcomeStatus::ProviderError,
@@ -993,7 +1017,30 @@ fn run_materialized_provider_command_once_contained(
             json!({ "provider": provider.id }),
         );
     }
-    let input = match serde_json::to_vec(&provider_request) {
+    if native_pi {
+        args = match super::pi::args(
+            &serde_json::to_value(&provider_request.request).expect("serializable request"),
+            &request.artifacts_path,
+            args,
+        ) {
+            Ok(args) => args,
+            Err(message) => {
+                return failure_outcome(
+                    request,
+                    AgentTaskOutcomeStatus::ProviderError,
+                    AgentTaskFailureClassification::InvalidInput,
+                    "agent_task.invalid_pi_request",
+                    message,
+                    json!({}),
+                )
+            }
+        };
+    }
+    let input = match if native_pi {
+        Ok(Vec::new())
+    } else {
+        serde_json::to_vec(&provider_request)
+    } {
         Ok(input) => input,
         Err(error) => {
             return failure_outcome(
@@ -1035,6 +1082,11 @@ fn run_materialized_provider_command_once_contained(
             )
         }
     };
+    if native_pi {
+        let dir = super::pi::agent_dir(&request.request.executor.config, &env);
+        env.retain(|(key, _)| key != "PI_CODING_AGENT_DIR");
+        env.push(("PI_CODING_AGENT_DIR".into(), dir));
+    }
     if provider.extension_id.is_some() {
         match reserved_control_plane_identity(&request.request.task_id, execution) {
             Ok(Some(identity)) => {
@@ -1134,7 +1186,7 @@ fn run_materialized_provider_command_once_contained(
         env.iter()
             .map(|(key, value)| (key.as_str(), value.as_str())),
     );
-    if let Some(cwd) = cwd {
+    if let Some(ref cwd) = cwd {
         // Old persisted Cook plans bind the source workspace. Newly materialized
         // plans replace that with an attempt-specific binding before execution.
         if let Some(attestation) = request
@@ -1662,7 +1714,7 @@ fn run_materialized_provider_command_once_contained(
             );
         }
     }
-    if stdout.is_empty() {
+    if stdout.is_empty() && !native_pi {
         return failure_outcome(
             request,
             AgentTaskOutcomeStatus::ProviderError,
@@ -1681,7 +1733,18 @@ fn run_materialized_provider_command_once_contained(
         );
     }
 
-    let parsed: Result<AgentTaskOutcome, _> = serde_json::from_str(&stdout);
+    let parsed: Result<AgentTaskOutcome, serde_json::Error> = if native_pi {
+        Ok(super::pi::outcome(
+            &serde_json::to_value(&provider_request.request).expect("serializable request"),
+            &stdout,
+            &stderr,
+            status.code(),
+            &program,
+            cwd.as_deref(),
+        ))
+    } else {
+        serde_json::from_str(&stdout)
+    };
     match parsed {
         Ok(mut outcome) => {
             if outcome.schema != AGENT_TASK_OUTCOME_SCHEMA {
@@ -2934,6 +2997,9 @@ pub(super) fn run_provider_readiness_invocation_with_env_and_timeout(
     timeout: Duration,
     mode: Option<&str>,
 ) -> Result<ProviderReadinessInvocationResult, String> {
+    if provider.backend == "pi" {
+        return super::pi::readiness(effective_config, credential_env, timeout, mode);
+    }
     let Some(invocation) = provider.readiness_invocation.as_ref() else {
         return Ok(ProviderReadinessInvocationResult {
             ready: true,
@@ -3041,8 +3107,12 @@ fn run_provider_readiness_invocation_with_timeout(
             let _ = stdin_sender.send(stdin.write_all(&input));
         })
     });
-    let stdout_reader = child.take_stdout().map(spawn_readiness_output_reader);
-    let stderr_reader = child.take_stderr().map(spawn_readiness_output_reader);
+    let stdout_reader = child
+        .take_stdout()
+        .map(|reader| spawn_readiness_output_reader(reader, PROVIDER_READINESS_OUTPUT_LIMIT_BYTES));
+    let stderr_reader = child
+        .take_stderr()
+        .map(|reader| spawn_readiness_output_reader(reader, PROVIDER_READINESS_OUTPUT_LIMIT_BYTES));
     let mut stdin_complete = stdin_writer.is_none();
     // A probe may exit, successfully, without reading its request, and the
     // request write then fails with EPIPE. That only says the probe closed its
@@ -3191,8 +3261,71 @@ struct ReadinessOutputCapture {
     truncated: bool,
 }
 
+/// Use the same containment and bounded output readers as provider readiness.
+pub(super) fn run_pi_readiness_probe(
+    program: &str,
+    flag: &str,
+    agent_dir: &str,
+    env: &[(String, String)],
+    timeout: Duration,
+) -> Result<String, String> {
+    let started = Instant::now();
+    let mut command = Command::new(program);
+    command.arg(flag).env_clear().envs(env.iter().cloned());
+    for name in ["PATH", "HOME"] {
+        if let Some(value) = std::env::var_os(name) {
+            command.env(name, value);
+        }
+    }
+    command
+        .env("PI_CODING_AGENT_DIR", agent_dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let containment =
+        AgentTaskProcessContainment::prepare(&mut command).map_err(|e| e.to_string())?;
+    let child = command.spawn().map_err(|e| e.to_string())?;
+    let mut child = containment.supervise(child).map_err(|e| e.to_string())?;
+    let stdout = child
+        .take_stdout()
+        .map(|reader| spawn_readiness_output_reader(reader, 1024 * 1024));
+    let stderr = child
+        .take_stderr()
+        .map(|reader| spawn_readiness_output_reader(reader, 1024 * 1024));
+    let terminal = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Ok(status),
+            Ok(None) if started.elapsed() < timeout => {
+                std::thread::sleep(Duration::from_millis(10))
+            }
+            Ok(None) => break Err("Pi readiness probe timed out".to_string()),
+            Err(error) => break Err(error.to_string()),
+        }
+    };
+    let cleanup = if terminal.is_ok() {
+        child.reap_after_exit()
+    } else {
+        child.terminate_live()
+    };
+    let remaining = || {
+        timeout
+            .saturating_sub(started.elapsed())
+            .min(PROVIDER_READINESS_IO_DRAIN_TIMEOUT)
+    };
+    let stdout = receive_readiness_output(stdout, remaining());
+    let _ = receive_readiness_output(stderr, remaining());
+    cleanup.map_err(|e| e.to_string())?;
+    let status = terminal?;
+    let stdout = stdout?;
+    if !status.success() || stdout.truncated {
+        return Err("Pi readiness probe failed".into());
+    }
+    Ok(String::from_utf8_lossy(&stdout.bytes).into_owned())
+}
+
 fn spawn_readiness_output_reader<R>(
     mut reader: R,
+    limit: usize,
 ) -> mpsc::Receiver<std::io::Result<ReadinessOutputCapture>>
 where
     R: Read + Send + 'static,
@@ -3206,8 +3339,7 @@ where
             match reader.read(&mut chunk) {
                 Ok(0) => break Ok(ReadinessOutputCapture { bytes, truncated }),
                 Ok(read) => {
-                    let available =
-                        PROVIDER_READINESS_OUTPUT_LIMIT_BYTES.saturating_sub(bytes.len());
+                    let available = limit.saturating_sub(bytes.len());
                     bytes.extend_from_slice(&chunk[..read.min(available)]);
                     truncated |= read > available;
                 }
@@ -3753,7 +3885,16 @@ fn provider_command_env_with_credentials(
         ),
         ("HOMEBOY_AGENT_RUNTIME_PATH".to_string(), runtime_path),
     ];
-    env.extend(provider_executable_env(provider).map_err(ProviderCommandEnvError::Executable)?);
+    if request.executor.backend != "pi" {
+        env.extend(provider_executable_env(provider).map_err(ProviderCommandEnvError::Executable)?);
+    }
+    if request.executor.backend == "pi" {
+        if let Some(runtime_env) = request.executor.config["runtime_env"].as_object() {
+            env.extend(runtime_env.iter().filter_map(|(key, value)| {
+                value.as_str().map(|value| (key.clone(), value.into()))
+            }));
+        }
+    }
     if let Some(credential_env) = credential_env {
         env.extend(credential_env.iter().cloned());
         let bound_names = credential_env

@@ -202,18 +202,20 @@ pub(crate) fn finalize_provider_file_artifacts(
     }
 }
 
-/// Preserves declared regular files from an attested Cook attempt workspace when
-/// a provider fails before it can serialize its own outcome. Sources remain
+/// Preserves declared regular files from a Cook attempt workspace for native Pi
+/// execution, or when another provider fails before serializing an outcome. Sources remain
 /// provider-owned only until they are copied into the executor root; the normal
 /// finalizer then moves the copied bytes into Homeboy-owned storage.
-pub(crate) fn retain_failed_workspace_artifacts(
+pub(crate) fn retain_declared_workspace_artifacts(
     outcome: &mut AgentTaskOutcome,
     request: &AgentTaskExecutorRequest,
 ) -> Result<()> {
-    if matches!(
-        outcome.status,
-        AgentTaskOutcomeStatus::Succeeded | AgentTaskOutcomeStatus::NoOp
-    ) || !outcome.artifacts.is_empty()
+    if (request.request.executor.backend != "pi"
+        && matches!(
+            outcome.status,
+            AgentTaskOutcomeStatus::Succeeded | AgentTaskOutcomeStatus::NoOp
+        ))
+        || !outcome.artifacts.is_empty()
     {
         return Ok(());
     }
@@ -221,16 +223,17 @@ pub(crate) fn retain_failed_workspace_artifacts(
     let Some(workspace) = request.request.workspace.root.as_deref() else {
         return Ok(());
     };
-    let Some(attestation) = request
+    let attestation = request
         .request
         .metadata
-        .get("cook_attempt_workspace_identity")
-    else {
+        .get("cook_attempt_workspace_identity");
+    if attestation.is_none() && request.request.executor.backend != "pi" {
         return Ok(());
-    };
+    }
     let workspace = Path::new(workspace);
-    if !crate::agent_task_workspace_identity::workspace_matches_attestation(workspace, attestation)
-    {
+    if attestation.is_some_and(|attestation| {
+        !crate::agent_task_workspace_identity::workspace_matches_attestation(workspace, attestation)
+    }) {
         return Err(Error::validation_invalid_argument(
             "workspace",
             "Cook attempt workspace no longer matches its identity attestation",
@@ -351,14 +354,53 @@ pub(crate) fn retain_failed_workspace_artifacts(
             ..Default::default()
         });
     }
-    if !crate::agent_task_workspace_identity::workspace_matches_attestation(&workspace, attestation)
-    {
+    if attestation.is_some_and(|attestation| {
+        !crate::agent_task_workspace_identity::workspace_matches_attestation(
+            &workspace,
+            attestation,
+        )
+    }) {
         return Err(Error::validation_invalid_argument(
             "workspace",
             "Cook attempt workspace changed while recovering declared artifacts",
             Some(workspace.display().to_string()),
             None,
         ));
+    }
+    if request.request.executor.backend == "pi" {
+        let missing = request
+            .request
+            .canonical_artifact_declarations()
+            .into_iter()
+            .filter(|d| {
+                d.required
+                    && d.path.is_some()
+                    && !outcome
+                        .artifacts
+                        .iter()
+                        .any(|a| a.name.as_deref() == Some(&d.name))
+            })
+            .map(|d| d.name)
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            if outcome.status == AgentTaskOutcomeStatus::Succeeded {
+                outcome.status = AgentTaskOutcomeStatus::Failed;
+                outcome.failure_classification =
+                    Some(crate::agent_task::AgentTaskFailureClassification::ExecutionFailed);
+                outcome.summary = Some(format!(
+                    "Declared artifact harvesting failed: {}.",
+                    missing.join(", ")
+                ));
+            }
+            outcome.diagnostics.push(AgentTaskDiagnostic {
+                class: "agent_task.required_declared_artifact_missing".into(),
+                message: format!(
+                    "Required declared artifact is absent: {}.",
+                    missing.join(", ")
+                ),
+                data: json!({"missing_artifacts": missing}),
+            });
+        }
     }
     finalize_provider_file_artifacts(outcome, &request.artifacts_root_identity)
 }

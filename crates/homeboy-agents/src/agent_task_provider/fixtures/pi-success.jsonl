@@ -1,0 +1,4 @@
+{"type":"agent_start"}
+{"type":"message_end","message":{"role":"assistant","provider":"roadie","model":"route","responseModel":"upstream-model","stopReason":"stop","usage":{"input":10,"output":20,"totalTokens":30,"cost":{"total":0.1234567}},"content":[{"type":"text","text":"```json\n{\"outputs\":{\"review_form\":{\"completion\":\"complete\"}}}\n```"}]}}
+{"type":"turn_end"}
+{"type":"agent_settled"}
