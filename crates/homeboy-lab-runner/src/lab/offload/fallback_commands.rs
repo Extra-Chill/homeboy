@@ -80,19 +80,3 @@ pub(crate) fn fallback_command(command: &str, args: &[String]) -> String {
 }
 
 pub(crate) use homeboy_engine_primitives::shell::shell_arg;
-
-pub(crate) fn tunnel_service_command(normalized_args: &[String]) -> Option<&str> {
-    normalized_args.windows(3).find_map(|window| {
-        let [first, second, third] = window else {
-            return None;
-        };
-        if first == "tunnel" && second == "service" {
-            match third.as_str() {
-                "list" | "show" | "status" | "url" | "set" | "remove" => Some(third.as_str()),
-                _ => None,
-            }
-        } else {
-            None
-        }
-    })
-}

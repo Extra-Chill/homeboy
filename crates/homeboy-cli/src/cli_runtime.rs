@@ -908,7 +908,6 @@ pub(crate) fn register_startup_providers_before_reconcile() {
     // Register optional feature crates' config entities with core so their
     // IDs/aliases participate in cross-entity collision detection. Core owns
     // the collision invariant but must not depend on these optional features.
-    homeboy_tunnel::register();
     // Register the in-core release provider so core's status mechanics
     // (fleet/project/context/git change reporting/tag-gap) get deploy+release
     // behavior through the hook. Moves out with deploy/release when they

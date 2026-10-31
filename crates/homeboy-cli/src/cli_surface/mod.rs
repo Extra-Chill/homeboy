@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use crate::commands::{
     agent_task, bench, cleanup, component, config, contract, control_plane, daemon, deploy,
     extension, fuzz, git, harvest, project, refactor, release, review, rig, runner, runs, runtime,
-    self_cmd, server, source, ssh, status, trace, tunnel, upgrade, workflow, workload, worktree,
+    self_cmd, server, source, ssh, status, trace, upgrade, workflow, workload, worktree,
 };
 
 mod argument_provenance;
@@ -229,8 +229,6 @@ pub enum Commands {
     Workflow(workflow::WorkflowArgs),
     /// Manage component-backed task worktrees
     Worktree(worktree::WorktreeArgs),
-    /// Manage private service tunnel declarations
-    Tunnel(tunnel::TunnelArgs),
     /// Inspect persisted observation runs, artifacts, and typed evidence projections
     Runs(runs::RunsArgs),
     /// Inspect the active Homeboy binary; `self identity` reports its local build identity
