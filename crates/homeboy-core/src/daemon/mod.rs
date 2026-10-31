@@ -1451,12 +1451,13 @@ pub(super) fn read_status_for_state_path(path: PathBuf) -> Result<DaemonStatus> 
     let state_identity = daemon_state_identity(&path, &jobs_path)?;
     let validation = validate_lease_file(&path)?;
     // Every daemon of one Unix user shares this ledger, whatever its state
-    // dir (#16089). Scope it to the lease this state dir recorded, live or
-    // dead, so another controller's stamped work on a shared Lab host neither
-    // protects this daemon nor blocks its replacement. Unstamped records have
-    // no proven owner and stay counted; a state dir with no lease projects the
-    // whole ledger, as before.
-    let job_store = JobStore::open_without_reconciliation(&jobs_path)?;
+    // dir (#16089). Scope it to this state dir's daemon scope (#16104) and to
+    // the lease it recorded, live or dead, so another controller's stamped
+    // work on a shared Lab host neither protects this daemon nor blocks its
+    // replacement, even before this state dir has a lease (#16798).
+    // Unstamped records have no proven owner and stay counted.
+    let job_store = JobStore::open_without_reconciliation(&jobs_path)?
+        .with_daemon_scope(daemon_scope_for_state_path(&path));
     let job_store = match validation.state.as_ref() {
         Some(state) => job_store.with_daemon_lease(state.lease_id.clone()),
         None => job_store,
@@ -6111,6 +6112,51 @@ mod tests {
             let mut expected = vec![own.id, unstamped.id];
             expected.sort();
             assert_eq!(ids, expected);
+        });
+    }
+
+    /// #16798: a state dir with no lease yet (a runner's first start in a new
+    /// layout) must not count another daemon scope's live job as its own.
+    #[test]
+    fn leaseless_status_ignores_another_scopes_live_job() {
+        with_isolated_home(|home| {
+            let path = home
+                .path()
+                .join("runner-daemons/runner/new-controller/state.json");
+            std::fs::create_dir_all(path.parent().unwrap()).expect("state dir");
+            let ledger = paths::observation_db().expect("shared ledger path");
+            let other = JobStore::open_without_reconciliation(&ledger)
+                .expect("open other scope's store")
+                .with_daemon_scope(crate::api_jobs::DaemonScope::from_state_dir(
+                    &home.path().join("runner-daemons/runner/other-controller"),
+                ))
+                .with_daemon_lease("lease-other-controller".to_string());
+            let foreign = other.create("runner.exec");
+            other.start(foreign.id).expect("start foreign job");
+
+            let status = read_status_for_state_path(path.clone()).expect("status");
+            assert!(
+                status.active_job_recovery_evidence.is_empty(),
+                "another scope's job is not this state dir's work: {:?}",
+                status.active_job_recovery_evidence
+            );
+            assert_eq!(status.freshness.active_jobs, 0);
+
+            // A job stamped with this state dir's own scope still counts.
+            let own = JobStore::open_without_reconciliation(&ledger)
+                .expect("open own store")
+                .with_daemon_scope(daemon_scope_for_state_path(&path));
+            let mine = own.create("runner.exec");
+            own.start(mine.id).expect("start own job");
+            let status = read_status_for_state_path(path).expect("status");
+            assert_eq!(
+                status
+                    .active_job_recovery_evidence
+                    .iter()
+                    .map(|evidence| evidence.job_id)
+                    .collect::<Vec<_>>(),
+                vec![mine.id]
+            );
         });
     }
 
