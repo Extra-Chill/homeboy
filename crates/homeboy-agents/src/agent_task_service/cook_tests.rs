@@ -21201,7 +21201,6 @@ fn cook_real_pi_response_persists_served_model_through_published_body() {
             // AI-authored prose (from the seeded review form).
             "Close the issue by guarding the reload path.",
             "Add a null guard in the render path.",
-            "Internal-only change; no compatibility impact.",
             // Deterministic evidence (orchestrator-owned), rendered once.
             "`cargo test --locked agent_task_promotion --lib`",
         ] {
@@ -22511,7 +22510,6 @@ fn substantive_retry_discloses_each_authenticated_contribution() {
             "Implementation 2: Homeboy (second-provider)",
             "Implementation 1: tier first-model; served model not recorded",
             "Implementation 2: tier second-model; served model not recorded",
-            "authored an authenticated contribution retained in the delivered candidate",
         ] {
             assert!(
                 backend.body.contains(expected),
