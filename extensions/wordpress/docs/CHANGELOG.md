@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.53.9] - 2026-10-31
+
+### Fixed
+- resolve monorepo members for cloned validation dependencies
+
 ## [3.53.8] - 2026-10-30
 
 ### Fixed
