@@ -934,10 +934,6 @@ pub(crate) fn finalize_pull_request(mut args: FinalizePrArgs) -> CmdResult<Value
             args.what_changed.clone()
         },
         how_to_test,
-        compatibility: args.compatibility.clone().unwrap_or_else(|| {
-            "No compatibility impact was recorded by this legacy finalization invocation."
-                .to_string()
-        }),
         evidence: Vec::new(),
         verified_commands: Vec::new(),
         changed_public_contracts: evidence.changed_public_contracts.clone(),
@@ -950,7 +946,6 @@ pub(crate) fn finalize_pull_request(mut args: FinalizePrArgs) -> CmdResult<Value
                 .ai_model
                 .clone()
                 .unwrap_or_else(|| "legacy caller did not record a model".to_string()),
-            used_for: args.ai_used_for.clone(),
         },
         source_relationships: args
             .closes
@@ -990,7 +985,6 @@ pub(crate) fn finalize_pull_request(mut args: FinalizePrArgs) -> CmdResult<Value
         accept_inherited_failures: false,
         changed_files: args.changed_files,
         evidence,
-        ai_used_for: args.ai_used_for,
         review_dossier,
         composed_ai_model_disclosure: false,
         review_profile,
@@ -1647,11 +1641,10 @@ fn parse_override(raw: &str) -> homeboy::core::Result<AgentTaskReviewOverride> {
     let target = match target {
         "summary" => AgentTaskReviewOverrideTarget::Summary,
         "what_changed" => AgentTaskReviewOverrideTarget::WhatChanged,
-        "compatibility" => AgentTaskReviewOverrideTarget::Compatibility,
         _ => {
             return Err(homeboy::core::Error::validation_invalid_argument(
                 "review-override",
-                "target must be summary, what_changed, or compatibility",
+                "target must be summary or what_changed",
                 None,
                 None,
             ))
@@ -4599,8 +4592,6 @@ mod tests {
                 "true",
                 "--model",
                 "fixture-model",
-                "--ai-used-for",
-                "CLI dirty preflight coverage",
             ]);
             assert!(
                 error
@@ -4648,8 +4639,6 @@ mod tests {
                 "cargo test fixture",
                 "--ai-model",
                 "fixture-model",
-                "--ai-used-for",
-                "CLI unpushed preflight coverage",
             ]);
             assert!(
                 error
@@ -4694,8 +4683,6 @@ mod tests {
                 "printf 'Authorization: Bearer manual-secret' >&2; false",
                 "--ai-model",
                 "fixture-model",
-                "--ai-used-for",
-                "CLI gate failure coverage",
             ]);
             assert!(failed_gate
                 .message
@@ -4744,8 +4731,6 @@ mod tests {
                 "printf 'changed by gate' > feature.txt",
                 "--ai-model",
                 "fixture-model",
-                "--ai-used-for",
-                "CLI immutable gate coverage",
             ]);
             assert!(changed_checkout
                 .message
@@ -4786,8 +4771,6 @@ mod tests {
                 &race_gate,
                 "--ai-model",
                 "fixture-model",
-                "--ai-used-for",
-                "CLI candidate binding coverage",
             ]);
             assert!(mutation
                 .message
@@ -4890,8 +4873,6 @@ esac
                 "test \"$(cat feature.txt)\" = feature",
                 "--model",
                 "fixture-model",
-                "--ai-used-for",
-                "CLI recovery coverage",
             ]);
             assert_eq!(preflight["status"], "validated");
             assert_eq!(preflight["normalized_gate_results"][0]["status"], "passed");
@@ -5082,8 +5063,6 @@ esac
                 "Reject immutable base",
                 "--commit-message",
                 "fixture",
-                "--ai-used-for",
-                "validation coverage",
             ]);
 
             assert!(error.message.contains("--base must name a branch"));

@@ -11,7 +11,6 @@ pub const AGENT_TASK_REVIEW_DOSSIER_SCHEMA: &str = "homeboy/agent-task-review-do
 pub enum AgentTaskReviewSectionId {
     Summary,
     WhatChanged,
-    Compatibility,
     /// Gate results, reviewer test steps, and the collapsed provenance block.
     Verification,
     /// The `Closes #N` / `Relates to …` lines at the top of the body.
@@ -122,7 +121,6 @@ pub struct AgentTaskReviewDossier {
     /// verification from `verified_commands` and leaves this empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub how_to_test: Vec<AgentTaskReviewTestStep>,
-    pub compatibility: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub evidence: Vec<AgentTaskReviewEvidence>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -155,7 +153,6 @@ pub struct AgentTaskReviewAiAssistance {
     pub used: bool,
     pub tool: String,
     pub model: String,
-    pub used_for: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -175,7 +172,6 @@ pub struct AgentTaskReviewIssueRelationship {
 pub enum AgentTaskReviewOverrideTarget {
     Summary,
     WhatChanged,
-    Compatibility,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentTaskReviewOverride {
@@ -198,7 +194,7 @@ pub fn review_form_output_declaration() -> crate::agent_task::AgentTaskOutputDec
         schema: AI_REVIEW_FORM_OUTPUT_SCHEMA.to_string(),
         structural_schema: serde_json::json!({
             "type": "object",
-            "required": ["pr_title", "summary", "what_changed", "compatibility", "used_for", "completion"],
+            "required": ["pr_title", "summary", "what_changed", "completion"],
             "properties": {
                 "pr_title": { "type": "string", "minLength": 1, "maxLength": 256 },
                 "completion": { "type": "string", "enum": ["complete", "incomplete"] },
@@ -208,9 +204,7 @@ pub fn review_form_output_declaration() -> crate::agent_task::AgentTaskOutputDec
                     "type": "array",
                     "items": { "type": "string" },
                     "minItems": 1
-                },
-                "compatibility": { "type": "string" },
-                "used_for": { "type": "string" }
+                }
             }
         }),
         max_bytes: None,
@@ -235,9 +229,6 @@ pub struct AiFilledReviewForm {
     /// Bullet points of the concrete changes.
     #[serde(default, deserialize_with = "prose_lines")]
     pub what_changed: Vec<String>,
-    /// Compatibility / impact assessment.
-    #[serde(deserialize_with = "prose_field")]
-    pub compatibility: String,
     /// Optional numeric test claims. No longer requested by the dispatched
     /// prompt or declared output schema (#14733): the deterministic gate
     /// commands are controller-owned, so asking the agent to also run and
@@ -248,10 +239,6 @@ pub struct AiFilledReviewForm {
     /// verification entry solely from durable candidate gate evidence.
     #[serde(default)]
     pub verification: Vec<AiReviewVerificationClaim>,
-    /// Self-reflective, concise description of the *process* the AI took —
-    /// deliberately distinct from `summary` (which describes *what* changed).
-    #[serde(deserialize_with = "prose_field")]
-    pub used_for: String,
     /// The agent's own verdict on whether the requested task is done. Gates
     /// prove the repository still passes, not that the task was completed;
     /// only the agent can declare that, and it must do so structurally rather
@@ -403,7 +390,7 @@ impl AiFilledReviewForm {
         // A validation fact about the declared output schema, not agent
         // instructions: Homeboy authors no agent-facing prose (#15818).
         "A valid `review_form` has non-empty `pr_title` (single line, at most 256 characters, specific to the change), \
-`summary`, `what_changed` (a non-empty list), `compatibility`, `used_for` (distinct from `summary`), and `completion` \
+`summary`, `what_changed` (a non-empty list), and `completion` \
 (`complete` or `incomplete`; `incomplete` requires a non-empty `incomplete_reason`)."
     }
 
@@ -438,15 +425,6 @@ impl AiFilledReviewForm {
                 "what_changed has no non-empty entries",
             ));
         }
-        if self.compatibility.trim().is_empty() {
-            return Err(review_form_gap(
-                "review_form.compatibility",
-                "compatibility is empty",
-            ));
-        }
-        if self.used_for.trim().is_empty() {
-            return Err(review_form_gap("review_form.used_for", "used_for is empty"));
-        }
         match self.completion {
             None => {
                 return Err(review_form_gap(
@@ -461,23 +439,6 @@ impl AiFilledReviewForm {
                 ));
             }
             _ => {}
-        }
-        if used_for_is_placeholder(&self.used_for) {
-            return Err(review_form_gap(
-                "review_form.used_for",
-                "used_for is a placeholder, not a genuine process reflection",
-            ));
-        }
-        // A used_for that merely restates the summary is not a reflection.
-        if self
-            .used_for
-            .trim()
-            .eq_ignore_ascii_case(self.summary.trim())
-        {
-            return Err(review_form_gap(
-                "review_form.used_for",
-                "used_for must be distinct from summary (it describes the process, not the change)",
-            ));
         }
         Ok(())
     }
@@ -579,81 +540,6 @@ fn review_form_gap(field: &str, problem: &str) -> Error {
     )
 }
 
-/// Phrases that assert no AI-authored code change. A review-form-only adoption
-/// follow-up (which changes no code) can supply such a `used_for`, but when the
-/// finalized candidate lineage has AI-authored changed files, that disclosure
-/// materially understates the work and misleads reviewers (#9897).
-const NO_CODE_CHANGE_CLAIMS: &[&str] = &[
-    "without changing code",
-    "without changing any code",
-    "did not change code",
-    "did not change any code",
-    "no code changed",
-    "no code was changed",
-    "changed no code",
-    "made no code changes",
-    "no changes to code",
-    "without modifying code",
-    "without writing code",
-];
-
-/// Whether a `used_for` narrative asserts that no code was changed.
-fn used_for_claims_no_code_change(used_for: &str) -> bool {
-    let normalized = used_for.to_ascii_lowercase();
-    NO_CODE_CHANGE_CLAIMS
-        .iter()
-        .any(|claim| normalized.contains(claim))
-}
-
-/// Reject a reviewer disclosure whose `used_for` claims no code was changed when
-/// the finalized candidate actually has changed files. This catches a
-/// review-form-only adoption follow-up erasing the substantive implementation
-/// the original provider attempt authored, keeping the PR's AI attribution
-/// honest against the patch lineage (#9897).
-pub fn validate_used_for_against_changed_files(
-    dossier: &AgentTaskReviewDossier,
-    changed_files: &[String],
-) -> Result<()> {
-    if changed_files.is_empty() {
-        return Ok(());
-    }
-    if !dossier.ai_assistance.used {
-        return Ok(());
-    }
-    if used_for_claims_no_code_change(&dossier.ai_assistance.used_for) {
-        return Err(review_form_gap(
-            "review_form.used_for",
-            &format!(
-                "used_for claims no code was changed, but the finalized candidate changes {} file(s) (e.g. {}). Attribute the AI-authored implementation across the candidate lineage instead of the review-form-only follow-up",
-                changed_files.len(),
-                changed_files
-                    .iter()
-                    .take(3)
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-        ));
-    }
-    Ok(())
-}
-
-/// Canned/placeholder `used_for` values that must not pass as a genuine
-/// reflection — including the legacy CLI default this refactor retires.
-fn used_for_is_placeholder(value: &str) -> bool {
-    let normalized = value.trim().to_ascii_lowercase();
-    matches!(
-        normalized.as_str(),
-        "" | "n/a"
-            | "na"
-            | "none"
-            | "ai-assisted"
-            | "ai assisted"
-            | "implementation"
-            | "drafted implementation and tests; chris reviews and owns the change."
-    )
-}
-
 /// Compose the deterministic AI-assistance tool disclosure for a generated PR.
 ///
 /// The tool string is orchestrator-owned (not AI-authored), which makes it the
@@ -678,7 +564,6 @@ pub fn default_profile() -> AgentTaskReviewProfile {
         required_sections: vec![
             AgentTaskReviewSectionId::Summary,
             AgentTaskReviewSectionId::WhatChanged,
-            AgentTaskReviewSectionId::Compatibility,
             AgentTaskReviewSectionId::Verification,
         ],
         ..Default::default()
@@ -790,9 +675,6 @@ impl AgentTaskReviewDossier {
         {
             missing("what_changed", "what changed is required");
         }
-        if self.compatibility.trim().is_empty() {
-            missing("compatibility", "compatibility is required");
-        }
         if self.how_to_test.is_empty() && self.verified_commands.is_empty() {
             missing("how_to_test", VERIFICATION_REQUIRED);
         }
@@ -813,17 +695,6 @@ impl AgentTaskReviewDossier {
             missing(
                 "ai_assistance.model",
                 "AI disclosure requires a concrete model identifier",
-            );
-        }
-        if self.ai_assistance.used && self.ai_assistance.used_for.trim().is_empty() {
-            missing(
-                "ai_assistance.used_for",
-                "AI disclosure requires a concrete, self-reflective description of how AI was used (the `used_for` field); it cannot be empty",
-            );
-        } else if self.ai_assistance.used && used_for_is_placeholder(&self.ai_assistance.used_for) {
-            missing(
-                "ai_assistance.used_for",
-                "AI disclosure `used_for` is a placeholder; provide a genuine, self-reflective description of the process the AI took",
             );
         }
         if !self.changed_public_contracts.is_empty() && self.public_contract_evidence.is_none() {
@@ -872,9 +743,6 @@ impl AgentTaskReviewDossier {
                 AgentTaskReviewOverrideTarget::WhatChanged => {
                     self.what_changed = vec![override_.value.clone()]
                 }
-                AgentTaskReviewOverrideTarget::Compatibility => {
-                    self.compatibility = override_.value.clone()
-                }
             }
         }
         Ok(())
@@ -886,13 +754,11 @@ impl AgentTaskReviewDossier {
             return invalid("schema", "review dossier schema is not supported");
         }
         scalar("summary", &self.summary)?;
-        scalar("compatibility", &self.compatibility)?;
         for value in &self.what_changed {
             scalar("what_changed", value)?;
         }
         scalar("ai_assistance.tool", &self.ai_assistance.tool)?;
         scalar("ai_assistance.model", &self.ai_assistance.model)?;
-        scalar("ai_assistance.used_for", &self.ai_assistance.used_for)?;
         for step in &self.how_to_test {
             scalar("how_to_test.command", &step.command)?;
             scalar("how_to_test.expected", &step.expected)?;
@@ -994,35 +860,11 @@ impl AgentTaskReviewDossier {
         if self.how_to_test.is_empty() && self.verified_commands.is_empty() {
             return invalid("how_to_test", VERIFICATION_REQUIRED);
         }
-        if required(profile, AgentTaskReviewSectionId::Compatibility)
-            && self.compatibility.is_empty()
-        {
-            return invalid("compatibility", "compatibility is required");
-        }
         if self.ai_assistance.used && placeholder_model(&self.ai_assistance.model) {
             return invalid(
                 "ai_assistance.model",
                 "AI disclosure requires a concrete model identifier",
             );
-        }
-        // `used_for` is the one introspective slot and must never render empty or
-        // as a canned placeholder. This is the render-time boundary EVERY
-        // finalization path crosses (cook's form gate is upstream of the cook
-        // path only), so enforcing it here closes the hole for the manual
-        // `agent-task review`/`pr` path too.
-        if self.ai_assistance.used {
-            if self.ai_assistance.used_for.trim().is_empty() {
-                return invalid(
-                    "ai_assistance.used_for",
-                    "AI disclosure requires a concrete, self-reflective description of how AI was used (the `used_for` field); it cannot be empty",
-                );
-            }
-            if used_for_is_placeholder(&self.ai_assistance.used_for) {
-                return invalid(
-                    "ai_assistance.used_for",
-                    "AI disclosure `used_for` is a placeholder; provide a genuine, self-reflective description of the process the AI took",
-                );
-            }
         }
         Ok(())
     }
@@ -1113,9 +955,6 @@ pub fn render_review_dossier(
             }
             AgentTaskReviewSectionId::WhatChanged if !dossier.what_changed.is_empty() => {
                 let mut changes = dossier.what_changed.clone();
-                if !dossier.compatibility.is_empty() && !changes.contains(&dossier.compatibility) {
-                    changes.push(dossier.compatibility.clone());
-                }
                 let mut seen = std::collections::BTreeSet::new();
                 changes.retain(|change| seen.insert(change.clone()));
                 Some(("What changed", bullets(&changes)))
@@ -1162,10 +1001,9 @@ pub fn render_review_dossier(
     if !steps.is_empty() {
         blocks.push(format!("## How to test\n{}", steps.join("\n")));
     }
-    blocks.push(format!(
-        "## AI assistance\n{}",
-        render_ai_disclosure(&dossier.ai_assistance)
-    ));
+    if dossier.ai_assistance.used {
+        blocks.push(render_ai_disclosure(&dossier.ai_assistance));
+    }
     if !hidden(&AgentTaskReviewSectionId::SourceRelationships)
         && !dossier.source_relationships.is_empty()
     {
@@ -1191,22 +1029,24 @@ fn render_source_relationships(relationships: &[AgentTaskReviewIssueRelationship
         .join("\n")
 }
 
+/// Remove legacy routing-tier suffixes from model disclosures, including lineage entries.
+fn strip_model_tiers(model: &str) -> String {
+    let mut display = model.to_string();
+    while let Some(start) = display.find(" (tier ") {
+        let Some(end) = display[start..].find(')') else {
+            break;
+        };
+        display.replace_range(start..start + end + 1, "");
+    }
+    display
+}
+
 /// The one AI disclosure in the body.
 fn render_ai_disclosure(ai: &AgentTaskReviewAiAssistance) -> String {
-    if !ai.used {
-        return "AI disclosure: no AI assistance was used.".to_string();
-    }
-    let used_for = ai
-        .used_for
-        .trim()
-        .trim_start_matches("AI disclosure:")
-        .trim_start_matches("Used for:")
-        .trim();
     format!(
-        "Tool: {} · Model: {} · Used for: {}",
+        "Tool: {} · Model: {}",
         prose(&ai.tool),
-        prose(&ai.model),
-        prose(used_for)
+        prose(&strip_model_tiers(&ai.model))
     )
 }
 
@@ -1380,7 +1220,6 @@ fn ordered_sections(profile: &AgentTaskReviewProfile) -> Vec<AgentTaskReviewSect
     for id in [
         AgentTaskReviewSectionId::Summary,
         AgentTaskReviewSectionId::WhatChanged,
-        AgentTaskReviewSectionId::Compatibility,
         AgentTaskReviewSectionId::Verification,
         AgentTaskReviewSectionId::SourceRelationships,
     ] {
@@ -1757,7 +1596,7 @@ pub(crate) fn served_model_disclosure(served_models: &[String], rotation: &str) 
     if served_models.is_empty() {
         format!("tier {rotation}; served model not recorded")
     } else {
-        format!("{} (tier {rotation})", served_models.join(", "))
+        served_models.join(", ")
     }
 }
 
@@ -1790,7 +1629,7 @@ fn unique_sections(field: &str, values: &[AgentTaskReviewSectionId]) -> Result<(
 fn builtin_section_name(id: &str) -> bool {
     matches!(
         id,
-        "summary" | "what_changed" | "compatibility" | "verification" | "source_relationships"
+        "summary" | "what_changed" | "verification" | "source_relationships"
     )
 }
 fn issue_pattern() -> Regex {
@@ -2123,8 +1962,6 @@ mod tests {
                 "summary": ["Adds the guard.", "Refs #12386."],
                 "pr_title": "Guard the reload render path",
                 "what_changed": ["one", "two"],
-                "compatibility": ["No breaking changes.", "Default is off."],
-                "used_for": ["Diagnosed the failure.", "Wrote the regression test."],
                 "completion": "complete",
             }
         });
@@ -2134,11 +1971,6 @@ mod tests {
             .expect("form present");
 
         assert_eq!(form.summary, "Adds the guard. Refs #12386.");
-        assert_eq!(form.compatibility, "No breaking changes. Default is off.");
-        assert_eq!(
-            form.used_for,
-            "Diagnosed the failure. Wrote the regression test."
-        );
         assert_eq!(
             form.what_changed,
             vec!["one".to_string(), "two".to_string()]
@@ -2157,8 +1989,6 @@ mod tests {
                 "pr_title": "Add a render-video ability",
                 "summary": "Adds a render plan.\n\nAlso adds\tsmoke tests for `<!-- wp:x /-->` and </p>.\r\n",
                 "what_changed": ["First line\nwraps here", "  ", "Second"],
-                "compatibility": "Additive.\nNo existing behavior changes.",
-                "used_for": "Read the issue.\n- Wrote the plan.\n- Ran lint.",
                 "completion": "complete",
             }
         });
@@ -2175,22 +2005,8 @@ mod tests {
             form.what_changed,
             vec!["First line wraps here".to_string(), "Second".to_string()]
         );
-        assert_eq!(
-            form.compatibility,
-            "Additive. No existing behavior changes."
-        );
-        assert_eq!(
-            form.used_for,
-            "Read the issue. - Wrote the plan. - Ran lint."
-        );
         form.validate().expect("flattened form is valid");
-        for (field, value) in [
-            ("summary", &form.summary),
-            ("compatibility", &form.compatibility),
-            ("ai_assistance.used_for", &form.used_for),
-        ] {
-            scalar(field, value).expect("flattened prose passes dossier validation");
-        }
+        scalar("summary", &form.summary).expect("flattened prose passes dossier validation");
         for entry in &form.what_changed {
             scalar("what_changed", entry).expect("flattened bullets pass dossier validation");
         }
@@ -2238,7 +2054,6 @@ mod tests {
             .expect("parses")
             .expect("form present");
         assert_eq!(form.summary, "s");
-        assert_eq!(form.compatibility, "c");
         assert_eq!(form.what_changed, vec!["one".to_string()]);
     }
 
@@ -2290,7 +2105,6 @@ mod tests {
         assert_eq!(form.pr_title, "Guard the reload render path");
         assert_eq!(form.summary, "Guard the reload path.");
         assert_eq!(form.what_changed, vec!["Guard reloads".to_string()]);
-        assert_eq!(form.compatibility, "Additive");
         let gap = form
             .validate()
             .expect_err("an absent verdict is incomplete");
@@ -2310,7 +2124,6 @@ mod tests {
                 command: "cargo test dossier".into(),
                 expected: "passes".into(),
             }],
-            compatibility: "No compatibility impact".into(),
             evidence: Vec::new(),
             verified_commands: Vec::new(),
             changed_public_contracts: Vec::new(),
@@ -2320,7 +2133,6 @@ mod tests {
                 used: true,
                 tool: "Pi".into(),
                 model: "openai/gpt-5.6-terra".into(),
-                used_for: "Isolated the failing path, implemented the guard, and verified with the recorded gate before finalizing.".into(),
             },
             source_relationships: vec![AgentTaskReviewIssueRelationship {
                 kind: AgentTaskReviewIssueRelationshipKind::Closes,
@@ -2336,22 +2148,18 @@ mod tests {
         value.summary.clear();
         value.what_changed.clear();
         value.how_to_test.clear();
-        value.compatibility.clear();
         value.ai_assistance.model = "unknown".to_string();
-        value.ai_assistance.used_for.clear();
 
         let error = value
             .validate_preflight_fields(&default_profile())
             .expect_err("all supplied dossier gaps are reported together");
-        assert!(error.message.contains("6 independent error(s)"));
+        assert!(error.message.contains("4 independent error(s)"));
         let diagnostics = error.details.to_string();
         for field in [
             "summary",
             "what_changed",
             "how_to_test",
-            "compatibility",
             "ai_assistance.model",
-            "ai_assistance.used_for",
         ] {
             assert!(
                 diagnostics.contains(field),
@@ -2365,9 +2173,7 @@ mod tests {
             pr_title: "Guard the reload render path".into(),
             summary: "Fix the widget so it renders on reload.".into(),
             what_changed: vec!["Guard the null path in render().".into()],
-            compatibility: "No compatibility impact; internal only.".into(),
             verification: Vec::new(),
-            used_for: "I traced the null deref to the reload path, added a guard, and verified with a focused test before finalizing.".into(),
             completion: Some(crate::agent_task_review_dossier::AiReviewCompletion::Complete),
             incomplete_reason: String::new(),
         }
@@ -2509,16 +2315,11 @@ mod tests {
     }
 
     #[test]
-    fn qualitative_compatibility_is_preserved_with_structured_verified_command() {
-        let mut form = valid_form();
-        // This is compatibility interpretation, not a command-result claim.
-        // It must not be subject to keyword/number prose policing.
-        form.compatibility = "Two previously failed deployment attempts are unrelated; the full suite remains the compatibility baseline.".into();
-        form.validate()
-            .expect("legitimate qualitative compatibility");
+    fn verified_commands_come_from_promotion_without_provider_claims() {
+        let form = valid_form();
         let verified = form
             .verify_against_promotion(&promotion("cargo test connection", "candidate-tree"))
-            .expect("qualitative compatibility needs no provider test claim");
+            .expect("no provider test claim is needed");
         assert_eq!(verified[0].candidate_tree, "candidate-tree");
         assert_eq!(verified[0].passed, Some(175));
         assert_eq!(verified[0].evidence_ref, "gate-connection");
@@ -2617,58 +2418,10 @@ mod tests {
     }
 
     #[test]
-    fn used_for_no_code_change_claim_is_detected() {
-        assert!(used_for_claims_no_code_change(
-            "I supplied the missing reviewer metadata without changing code, preserving the candidate."
-        ));
-        assert!(used_for_claims_no_code_change(
-            "Reviewed the state; no code was changed."
-        ));
-        // A genuine implementation narrative is not flagged.
-        assert!(!used_for_claims_no_code_change(
-            "Traced the bug, implemented the guard, and verified with the gate."
-        ));
-    }
-
-    #[test]
-    fn finalization_rejects_no_code_claim_when_candidate_changed_files() {
-        // #9897: a review-form-only follow-up claiming no code changed must not
-        // finalize when the candidate lineage actually changed files.
-        let mut d = dossier();
-        d.ai_assistance.used_for =
-            "Supplied the missing reviewer metadata without changing code, preserving the candidate."
-                .into();
-
-        let changed = vec!["src/lib.rs".to_string(), "src/tests.rs".to_string()];
-        let error = validate_used_for_against_changed_files(&d, &changed)
-            .expect_err("no-code claim with changed files must fail");
-        assert!(error.message.contains("changes 2 file(s)"));
-        assert!(error.message.contains("src/lib.rs"));
-    }
-
-    #[test]
-    fn finalization_allows_no_code_claim_when_no_files_changed() {
-        // A genuinely no-op review (no changed files) may honestly say so.
-        let mut d = dossier();
-        d.ai_assistance.used_for = "Reviewed the candidate; no code was changed.".into();
-        assert!(validate_used_for_against_changed_files(&d, &[]).is_ok());
-    }
-
-    #[test]
-    fn finalization_allows_substantive_narrative_with_changed_files() {
-        // The normal case: an implementation narrative + changed files passes.
-        let d = dossier();
-        let changed = vec!["src/lib.rs".to_string()];
-        assert!(validate_used_for_against_changed_files(&d, &changed).is_ok());
-    }
-
-    #[test]
     fn review_form_rejects_empty_required_fields() {
         for mutate in [
             (|f: &mut AiFilledReviewForm| f.summary.clear()) as fn(&mut AiFilledReviewForm),
             |f| f.what_changed.clear(),
-            |f| f.compatibility.clear(),
-            |f| f.used_for.clear(),
         ] {
             let mut form = valid_form();
             mutate(&mut form);
@@ -2677,27 +2430,6 @@ mod tests {
                 "expected validation failure for cleared required field"
             );
         }
-    }
-
-    #[test]
-    fn review_form_rejects_placeholder_used_for() {
-        let mut form = valid_form();
-        form.used_for =
-            "Drafted implementation and tests; Chris reviews and owns the change.".into();
-        let error = form
-            .validate()
-            .expect_err("legacy canned default must be rejected");
-        assert!(error.message.contains("placeholder"));
-    }
-
-    #[test]
-    fn review_form_rejects_used_for_equal_to_summary() {
-        let mut form = valid_form();
-        form.used_for = form.summary.clone();
-        let error = form
-            .validate()
-            .expect_err("used_for restating summary is not a process reflection");
-        assert!(error.message.contains("distinct from summary"));
     }
 
     #[test]
@@ -2803,14 +2535,10 @@ mod tests {
             "Added unit and end-to-end tests for same-repo, cross-repo and external-tracker URLs.".into(),
         ];
         value.how_to_test.clear();
-        value.compatibility = "Additive. `Closes` validation is unchanged.".into();
         value.ai_assistance = AgentTaskReviewAiAssistance {
             used: true,
             tool: "Homeboy (pi)".into(),
             model: "anthropic-claude-opus-5-5".into(),
-            used_for:
-                "Implemented the mapping and the tests, then ran the formatting and test gates."
-                    .into(),
         };
         value.verified_commands = vec![AgentTaskReviewVerifiedCommand {
             command: gate_command.into(),
@@ -2853,7 +2581,6 @@ mod tests {
                 "Closes #16247",
                 "Tool:",
                 "Model:",
-                "Used for:",
                 "CI:",
                 "<details><summary>Cook run</summary>",
                 // #16316: the collapsed block labels the entry by position.
@@ -2884,7 +2611,7 @@ mod tests {
         }
         // The gate command appears once, runnable, and the disclosure once.
         assert_eq!(body.matches("cargo fmt --all -- --check").count(), 1);
-        assert_eq!(body.matches("## AI assistance").count(), 1);
+        assert_eq!(body.matches("## AI assistance").count(), 0);
         for retired in [
             "## How to test",
             "AI disclosure:",
@@ -2928,10 +2655,7 @@ mod tests {
         let mut value = dossier();
         value.ai_assistance.model = served_model_disclosure(&record.served_models, "cook-heavy");
         let body = render_review_dossier(&value, &default_profile());
-        assert!(
-            body.contains("Model: gpt-6.1-sol (tier cook-heavy)"),
-            "{body}"
-        );
+        assert!(body.contains("Model: gpt-6.1-sol"), "{body}");
         assert!(!body.contains("claude-opus-5-5"), "{body}");
 
         value.ai_assistance.model = served_model_disclosure(&[], "cook-heavy");
@@ -2942,21 +2666,8 @@ mod tests {
                 &["gpt-6.1-sol".into(), "claude-opus-5-5".into()],
                 "cook-heavy"
             ),
-            "gpt-6.1-sol, claude-opus-5-5 (tier cook-heavy)"
+            "gpt-6.1-sol, claude-opus-5-5"
         );
-    }
-
-    #[test]
-    fn disclosure_has_one_process_label() {
-        let mut value = dossier();
-        value.ai_assistance.used_for =
-            "AI disclosure: Implemented `StyleResolver` and tested `<html>`.".into();
-        let body = render_review_dossier(&value, &default_profile());
-        assert_eq!(body.matches("Used for:").count(), 1);
-        assert!(!body.contains("AI disclosure:"));
-        assert!(body.contains("`StyleResolver`"));
-        assert!(body.contains("`<html>`"));
-        assert!(!body.contains("\\`"));
     }
 
     #[test]
@@ -2991,6 +2702,60 @@ mod tests {
             "{body}"
         );
         assert_eq!(body.matches("6229120").count(), 1, "{body}");
+    }
+
+    #[test]
+    fn signature_is_plain_and_absent_when_ai_was_not_used() {
+        let mut value = dossier();
+        value.ai_assistance.model = "served-model (tier heavy)".into();
+        let body = render_review_dossier(&value, &default_profile());
+        assert_eq!(body.matches("Tool:").count(), 1);
+        assert!(body.contains(&format!(
+            "Tool: {} · Model: served-model\n",
+            value.ai_assistance.tool
+        )));
+        assert!(!body.contains("## AI assistance"));
+        assert!(!body.contains("Used for:"));
+        assert!(!body.contains("(tier "));
+        value.ai_assistance.used = false;
+        let body = render_review_dossier(&value, &default_profile());
+        assert!(!body.contains("Tool:"));
+        assert!(body.ends_with("Closes #8058\n"));
+    }
+
+    #[test]
+    fn review_form_ignores_retired_used_for_and_compatibility_keys() {
+        let outputs = serde_json::json!({ "review_form": {
+            "pr_title": "Guard the reload path",
+            "summary": "Guard reloads.",
+            "what_changed": ["Added the guard."],
+            "compatibility": "Additive.",
+            "used_for": "Guard reloads.",
+            "completion": "complete"
+        }});
+        let form = AiFilledReviewForm::from_outcome_outputs(&outputs)
+            .expect("retired keys still parse")
+            .expect("form present");
+        form.validate().expect("retired keys are not validated");
+    }
+
+    #[test]
+    fn minimal_review_form_does_not_require_legacy_fields() {
+        let form: AiFilledReviewForm = serde_json::from_value(serde_json::json!({
+            "pr_title": "Simplify review signatures",
+            "summary": "Remove redundant reviewer fields.",
+            "what_changed": ["Simplified the form."],
+            "completion": "complete"
+        }))
+        .unwrap();
+        form.validate().unwrap();
+        let declaration = review_form_output_declaration();
+        assert!(declaration.structural_schema["properties"]
+            .get("used_for")
+            .is_none());
+        assert!(declaration.structural_schema["properties"]
+            .get("compatibility")
+            .is_none());
     }
 
     #[test]
@@ -3045,26 +2810,6 @@ mod tests {
         let mut value = dossier();
         value.source_relationships[0].reference = "https://evil.test/issues/1".into();
         assert!(value.validate(&default_profile()).is_err());
-    }
-    #[test]
-    fn dossier_validate_rejects_empty_or_placeholder_used_for_on_every_path() {
-        // Regression for #9649: the manual finalize path rendered an empty
-        // `Used for:` because used_for enforcement only lived in the cook form
-        // gate. The render-time dossier gate must reject it regardless of path.
-        let mut empty = dossier();
-        empty.ai_assistance.used_for = "  ".into();
-        assert!(
-            empty.validate(&default_profile()).is_err(),
-            "empty used_for must fail finalization"
-        );
-
-        let mut placeholder = dossier();
-        placeholder.ai_assistance.used_for =
-            "Drafted implementation and tests; Chris reviews and owns the change.".into();
-        assert!(
-            placeholder.validate(&default_profile()).is_err(),
-            "canned placeholder used_for must fail finalization"
-        );
     }
 
     #[test]

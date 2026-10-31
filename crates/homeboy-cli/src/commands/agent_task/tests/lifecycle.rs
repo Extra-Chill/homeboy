@@ -1820,7 +1820,6 @@ fn assert_cook_rearm_queue_ownership(block_capacity: bool) {
             ai_disclosure: homeboy::agents::agent_task_service::CookAiDisclosure {
                 ai_tool: "fixture".to_string(),
                 ai_model: None,
-                ai_used_for: "test".to_string(),
             },
             harvest_context: homeboy::agents::agent_task_scheduler::HarvestExecutionContext::from_current_process()
                 .expect("harvest context"),
@@ -2083,7 +2082,6 @@ fn persist_recipe_only_cook(cook_id: &str, run_id: &str) {
         ai_disclosure: homeboy::agents::agent_task_service::CookAiDisclosure {
             ai_tool: "fixture".to_string(),
             ai_model: Some("fixture-model".to_string()),
-            ai_used_for: "test".to_string(),
         },
         harvest_context:
             homeboy::agents::agent_task_scheduler::HarvestExecutionContext::from_current_process()
@@ -2411,7 +2409,6 @@ fn persist_legacy_candidate_cook(cook_id: &str, run_id: &str, runtime_generation
         ai_disclosure: homeboy::agents::agent_task_service::CookAiDisclosure {
             ai_tool: "fixture".to_string(),
             ai_model: None,
-            ai_used_for: "test".to_string(),
         },
         harvest_context:
             homeboy::agents::agent_task_scheduler::HarvestExecutionContext::from_current_process()
@@ -2755,7 +2752,6 @@ fn continuation_preflight_bypasses_model_provenance_for_retryable_pre_execution_
             ai_disclosure: homeboy::agents::agent_task_service::CookAiDisclosure {
                 ai_tool: "fixture".to_string(),
                 ai_model: None,
-                ai_used_for: "test".to_string(),
             },
             harvest_context: homeboy::agents::agent_task_scheduler::HarvestExecutionContext::from_current_process()
                 .expect("harvest context"),
@@ -2900,7 +2896,6 @@ fn cook_retry_run_recovers_a_historical_transport_recipe_after_zero_provider_exe
             ai_disclosure: homeboy::agents::agent_task_service::CookAiDisclosure {
                 ai_tool: "fixture".to_string(),
                 ai_model: Some("fixture-model".to_string()),
-                ai_used_for: "test".to_string(),
             },
             harvest_context: homeboy::agents::agent_task_scheduler::HarvestExecutionContext::from_current_process()
                 .expect("harvest context"),
@@ -3080,7 +3075,6 @@ fn diagnose_prioritizes_the_current_gate_denial_after_a_repaired_controller_fail
             ai_disclosure: homeboy::agents::agent_task_service::CookAiDisclosure {
                 ai_tool: "fixture".to_string(),
                 ai_model: Some("fixture-model".to_string()),
-                ai_used_for: "test".to_string(),
             },
             harvest_context: homeboy::agents::agent_task_scheduler::HarvestExecutionContext::from_current_process()
                 .expect("harvest context"),
@@ -4386,7 +4380,6 @@ fn diagnose_routes_timed_out_review_form_continuation_away_from_generic_retry() 
             ai_disclosure: homeboy::agents::agent_task_service::CookAiDisclosure {
                 ai_tool: "fixture".to_string(),
                 ai_model: Some("fixture-model".to_string()),
-                ai_used_for: "test".to_string(),
             },
             harvest_context: homeboy::agents::agent_task_scheduler::HarvestExecutionContext::from_current_process()
                 .expect("harvest context"),
@@ -6072,7 +6065,6 @@ fn cook_retry_run_executes_the_replacement_through_its_cook_lifecycle() {
             ai_disclosure: homeboy::agents::agent_task_service::CookAiDisclosure {
                 ai_tool: "fixture".to_string(),
                 ai_model: None,
-                ai_used_for: "test".to_string(),
             },
             harvest_context: homeboy::agents::agent_task_scheduler::HarvestExecutionContext::from_current_process()
                 .expect("harvest context"),
@@ -6158,7 +6150,6 @@ fn competing_retry_run_consumers_dispatch_a_queued_cook_replacement_exactly_once
             ai_disclosure: homeboy::agents::agent_task_service::CookAiDisclosure {
                 ai_tool: "fixture".to_string(),
                 ai_model: None,
-                ai_used_for: "test".to_string(),
             },
             harvest_context: homeboy::agents::agent_task_scheduler::HarvestExecutionContext::from_current_process()
                 .expect("harvest context"),

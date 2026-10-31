@@ -91,7 +91,6 @@ fn cook_fixture(
         ai_disclosure: CookAiDisclosure {
             ai_tool: "fixture".to_string(),
             ai_model: None,
-            ai_used_for: "test".to_string(),
         },
         harvest_context: Default::default(),
     };

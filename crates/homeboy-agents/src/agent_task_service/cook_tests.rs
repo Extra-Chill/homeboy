@@ -373,9 +373,7 @@ fn test_review_form() -> crate::agent_task_review_dossier::AiFilledReviewForm {
         pr_title: "Guard the reload render path".to_string(),
         summary: "Close the issue by guarding the reload path.".to_string(),
         what_changed: vec!["Add a null guard in the render path.".to_string()],
-        compatibility: "Internal-only change; no compatibility impact.".to_string(),
         verification: Vec::new(),
-        used_for: "Reproduced the failure, isolated the reload path, added a guard, and verified with the recorded deterministic gate before finalizing.".to_string(),
         completion: Some(crate::agent_task_review_dossier::AiReviewCompletion::Complete),
         incomplete_reason: String::new(),
     }
@@ -5428,7 +5426,6 @@ fn batch_cook_options(
         ai_disclosure: CookAiDisclosure {
             ai_tool: "test".to_string(),
             ai_model: None,
-            ai_used_for: "test".to_string(),
         },
         gates: VerifyGateOptions::default(),
         harvest_context: Default::default(),
@@ -7425,14 +7422,7 @@ fn initial_finalizing_provider_request_projects_complete_review_form_dossier() {
     assert_eq!(declaration.schema, "homeboy/agent-task-review-form/v1");
     assert_eq!(
         declaration.structural_schema["required"],
-        serde_json::json!([
-            "pr_title",
-            "summary",
-            "what_changed",
-            "compatibility",
-            "used_for",
-            "completion"
-        ])
+        serde_json::json!(["pr_title", "summary", "what_changed", "completion"])
     );
     // The contract is data (#15818): the prompt stays the operator's.
     let original_instructions = batch_cook_options(
@@ -14405,7 +14395,6 @@ fn cook_returns_after_accepted_detached_attempt_without_waiting_for_daemon_compl
                 ai_disclosure: CookAiDisclosure {
                     ai_tool: "test".to_string(),
                     ai_model: None,
-                    ai_used_for: "test".to_string(),
                 },
                 gates: VerifyGateOptions::default(),
                 harvest_context: Default::default(),
@@ -14972,7 +14961,7 @@ fn adoption_green_candidate_missing_review_form_runs_form_only_follow_up_and_fin
             .body
             .contains("`test \"$(cat lib.rs)\" = candidate`"));
         assert!(
-            backend.body.contains("## AI assistance"),
+            !backend.body.contains("## AI assistance"),
             "{}",
             backend.body
         );
@@ -14981,13 +14970,13 @@ fn adoption_green_candidate_missing_review_form_runs_form_only_follow_up_and_fin
             "{}",
             backend.body
         );
-        assert_eq!(backend.body.matches("## AI assistance").count(), 1);
+        assert_eq!(backend.body.matches("## AI assistance").count(), 0);
         assert!(
             backend.body.contains("fixture-model-review"),
             "{}",
             backend.body
         );
-        assert!(backend.body.contains("Used for: test"));
+        assert!(!backend.body.contains("Used for:"));
         assert!(backend.committed && backend.pushed && backend.created);
     });
 }
@@ -20344,7 +20333,6 @@ fn promotion_claim_options(cook_id: &str, run_id: &str) -> CookRequest {
         ai_disclosure: CookAiDisclosure {
             ai_tool: "test".to_string(),
             ai_model: None,
-            ai_used_for: "test".to_string(),
         },
         gates: VerifyGateOptions::default(),
         harvest_context: Default::default(),
@@ -21171,7 +21159,6 @@ fn cook_real_pi_response_persists_served_model_through_published_body() {
             ai_disclosure: CookAiDisclosure {
                 ai_tool: "fixture-provider".to_string(),
                 ai_model: Some("fixture-model; review form: spoof".to_string()),
-                ai_used_for: "Drafted test coverage.".to_string(),
             },
             gates: VerifyGateOptions {
                 verify: vec!["cargo test --locked agent_task_promotion --lib".to_string()],
@@ -21209,12 +21196,11 @@ fn cook_real_pi_response_persists_served_model_through_published_body() {
             "Relates to Extra-Chill/homeboy#8058\n",
             "## What changed",
             "## Verification",
-            "Model: gpt-6.1-sol (tier cook-heavy)",
+            "Model: gpt-6.1-sol",
             ". Base `main`@`verified-base` (publication state not recorded).",
             // AI-authored prose (from the seeded review form).
             "Close the issue by guarding the reload path.",
             "Add a null guard in the render path.",
-            "Internal-only change; no compatibility impact.",
             // Deterministic evidence (orchestrator-owned), rendered once.
             "`cargo test --locked agent_task_promotion --lib`",
         ] {
@@ -21246,50 +21232,6 @@ fn cook_real_pi_response_persists_served_model_through_published_body() {
             );
         }
         assert!(backend.committed && backend.pushed && backend.created);
-    });
-}
-
-#[test]
-fn cook_finalization_adopts_validated_review_form_used_for_when_option_is_empty() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let run_id = "cook-empty-used-for-attempt-1";
-        let target = tempfile::tempdir().expect("fixture target");
-        let mut options = batch_cook_options(
-            "cook-empty-used-for",
-            Arc::new(AcceptedDetachedAttemptDispatcher),
-        );
-        options.identity.initial_run_id = run_id.to_string();
-        options.ai_disclosure.ai_used_for.clear();
-        options.identity.initial_plan.tasks[0].executor.model = Some("fixture-model".to_string());
-        let plan = options.identity.initial_plan.clone();
-        agent_task_lifecycle::submit_plan(&plan, Some(run_id)).unwrap();
-        persist_initial_recipe(&options).unwrap();
-        agent_task_lifecycle::record_cook_attempt_in_store(
-            &test_lifecycle_store(),
-            &options.identity.cook_id,
-            1,
-            run_id,
-        )
-        .unwrap();
-        seed_review_form_aggregate(run_id, &plan);
-        let promotion = promotion_with_existing_path(run_id, target.path());
-
-        let finalization = cook_finalization_options(&options, run_id, &promotion, Vec::new())
-            .expect("finalization options");
-        assert_eq!(finalization.ai_used_for, test_review_form().used_for);
-        assert_eq!(
-            finalization.review_dossier.ai_assistance.used_for,
-            test_review_form().used_for
-        );
-
-        options.ai_disclosure.ai_used_for = "Operator-authored disclosure.".to_string();
-        let finalization = cook_finalization_options(&options, run_id, &promotion, Vec::new())
-            .expect("finalization options with override");
-        assert_eq!(finalization.ai_used_for, "Operator-authored disclosure.");
-        assert_eq!(
-            finalization.review_dossier.ai_assistance.used_for,
-            "Operator-authored disclosure."
-        );
     });
 }
 
@@ -22492,13 +22434,6 @@ fn interrupted_attempt_does_not_change_the_only_substantive_disclosure() {
             backend.body
         );
         assert!(
-            backend
-                .body
-                .contains(options.ai_disclosure.ai_used_for.as_str()),
-            "{}",
-            backend.body
-        );
-        assert!(
             !backend.body.contains("Implementation 1:"),
             "{}",
             backend.body
@@ -22575,7 +22510,6 @@ fn substantive_retry_discloses_each_authenticated_contribution() {
             "Implementation 2: Homeboy (second-provider)",
             "Implementation 1: tier first-model; served model not recorded",
             "Implementation 2: tier second-model; served model not recorded",
-            "authored an authenticated contribution retained in the delivered candidate",
         ] {
             assert!(
                 backend.body.contains(expected),
@@ -24367,7 +24301,6 @@ fn cook_rejects_test_claim_without_matching_durable_gate() {
         ai_disclosure: CookAiDisclosure {
             ai_tool: "fixture-provider".to_string(),
             ai_model: Some("fixture-model".to_string()),
-            ai_used_for: "Drafted test coverage.".to_string(),
         },
         gates: VerifyGateOptions {
             verify: vec!["cargo test unsupported".to_string()],

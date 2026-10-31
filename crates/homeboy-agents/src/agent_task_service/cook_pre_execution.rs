@@ -1147,7 +1147,6 @@ mod tests {
             ai_disclosure: CookAiDisclosure {
                 ai_tool: "test".to_string(),
                 ai_model: None,
-                ai_used_for: "test".to_string(),
             },
             gates: crate::agent_task_gate::VerifyGateOptions::default(),
             harvest_context: Default::default(),

@@ -1557,7 +1557,6 @@ pub struct CookFinalization {
 pub struct CookAiDisclosure {
     pub ai_tool: String,
     pub ai_model: Option<String>,
-    pub ai_used_for: String,
 }
 
 const COOK_CONTINUE_ROUTE_SCHEMA: &str = "homeboy/agent-task-cook-continue-route/v1";

@@ -146,12 +146,6 @@ fn find_open_pr_after_create_conflict<B: AgentTaskPrFinalizationBackend>(
     Ok(None)
 }
 
-fn append_requester(body: &mut String, requester: Option<&str>) {
-    if let Some(requester) = requester {
-        body.push_str(&format!("\n\nRequested by: {requester}\n"));
-    }
-}
-
 fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
     mut options: AgentTaskPrFinalizationOptions,
     backend: &mut B,
@@ -159,7 +153,7 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
     lifecycle_store: Option<&crate::agent_task_lifecycle::AgentTaskLifecycleStore>,
 ) -> Result<AgentTaskPrFinalizationReport> {
     let mut durable_changed_files = Vec::new();
-    let (publication_identity, requester) =
+    let (publication_identity, _requester) =
         backend.publication_context(&options.run_id, lifecycle_store)?;
     // Recorded before preflight so the validated intent and the published
     // receipt carry the same dossier (manual receipts must match exactly).
@@ -435,14 +429,6 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
         .review_dossier
         .validate_preflight_fields(&options.review_profile)?;
     options.review_dossier.validate(&options.review_profile)?;
-    // A review-form-only adoption follow-up can supply a `used_for` claiming no
-    // code was changed, but the finalized candidate here has AI-authored changed
-    // files — publishing that disclosure would materially understate the work
-    // and mislead reviewers (#9897). Fail closed against the patch lineage.
-    crate::agent_task_review_dossier::validate_used_for_against_changed_files(
-        &options.review_dossier,
-        &changed_files,
-    )?;
     let proof = build_finalization_proof(&options, options.normalized_gate_results.clone());
     let mut intent =
         build_pr_publication_intent(&options, &head, &changed_files, proof.clone(), &base);
@@ -629,8 +615,7 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
     if let Some(verified_base) = options.review_dossier.verified_base.as_mut() {
         verified_base.publication_sha = publication_base_sha;
     }
-    let mut body = render_review_dossier(&options.review_dossier, &options.review_profile);
-    append_requester(&mut body, requester.as_deref());
+    let body = render_review_dossier(&options.review_dossier, &options.review_profile);
     // The lookup and base observation may take long enough for another writer to
     // replace the branch. Bind the live remote again at the last safe point.
     let observed_remote_sha = backend.verify_remote_candidate(&options.path, &head, commit_sha)?;

@@ -8138,7 +8138,6 @@ fn run_preflight_cook_execution(
             // must not be reverse-parsed into a model — an omitted model stays
             // omitted so finalization records only real model identity (#9789).
                 ai_model: selected_model,
-                ai_used_for: args.ai_used_for,
             },
             harvest_context:
                 homeboy::agents::agent_task_scheduler::HarvestExecutionContext::from_current_process(

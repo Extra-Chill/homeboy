@@ -55,7 +55,6 @@ fn missing_transport_child_projection_resolves_without_recursion_or_provider_dis
         ai_disclosure: CookAiDisclosure {
             ai_tool: "fixture".to_string(),
             ai_model: None,
-            ai_used_for: "test".to_string(),
         },
         harvest_context: Default::default(),
     };
@@ -206,7 +205,6 @@ fn exercise_historical_runtime_retry(compatible_binary: &str, expected_identity_
         ai_disclosure: CookAiDisclosure {
             ai_tool: "fixture".to_string(),
             ai_model: Some("fixture-model".to_string()),
-            ai_used_for: "runtime retry integration test".to_string(),
         },
         harvest_context: Default::default(),
     };

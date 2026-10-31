@@ -1019,7 +1019,6 @@ fn initial_recipe(options: &CookRequest) -> Result<AgentTaskCookRecipe> {
             "protected_branches": options.finalization.protected_branches,
             "ai_tool": options.ai_disclosure.ai_tool,
             "ai_model": options.ai_disclosure.ai_model,
-            "ai_used_for": options.ai_disclosure.ai_used_for,
             "to_worktree": options.workspace.to_worktree,
             "source_worktree_path": options.workspace.source_worktree_path,
             "task_base_sha": options.workspace.task_base_sha,
@@ -1365,7 +1364,6 @@ fn recipe_mismatch_fields(
             "protected_branches",
             "ai_tool",
             "ai_model",
-            "ai_used_for",
         ]
         .iter()
         .any(|field| left.finalization.get(field) != right.finalization.get(field))
@@ -3053,8 +3051,6 @@ fn reconstruct_recipe_options(
                 .map_err(recipe_value_error("ai_tool"))?,
             ai_model: serde_json::from_value(field("ai_model")?)
                 .map_err(recipe_value_error("ai_model"))?,
-            ai_used_for: serde_json::from_value(field("ai_used_for")?)
-                .map_err(recipe_value_error("ai_used_for"))?,
         },
         harvest_context: recipe.harvest_context.clone(),
     })
