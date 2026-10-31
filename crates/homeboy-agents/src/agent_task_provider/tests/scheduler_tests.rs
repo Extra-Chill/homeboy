@@ -21,7 +21,10 @@ function answer(text) { console.log(JSON.stringify({type:'message_end',message:{
 function failure(text) { console.log(JSON.stringify({type:'message_end',message:{role:'assistant',stopReason:'error',errorMessage:text}})); }
 "#;
     FakePi::new(&format!(
-        "node -e {} -- \"$@\"",
+        // `exec` keeps node as the provider process itself, as the real `pi`
+        // is, rather than a descendant whose idle timer wakeups would read as
+        // descendant activity to the liveness watchdog.
+        "exec node -e {} -- \"$@\"",
         shell_quote(&format!("{prelude}\n{body}"))
     ))
 }
