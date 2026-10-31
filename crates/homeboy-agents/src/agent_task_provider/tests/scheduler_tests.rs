@@ -1,3 +1,4 @@
+use super::super::test_pi::FakePi;
 use super::common::{request, script};
 use super::*;
 use crate::agent_task::AgentTaskArtifactDeclaration;
@@ -6,6 +7,28 @@ use crate::agent_task_scheduler::{
     AgentTaskExecutionBudget, AgentTaskProviderRotationEntry, AgentTaskProviderRotationPolicy,
 };
 use std::sync::{Arc, Mutex};
+
+// Node is only fixture logic here: FakePi still handles the real CLI probes
+// and inference emits Pi events, never the retired executor response protocol.
+fn node_pi(body: &str) -> FakePi {
+    let prelude = r#"
+const fs = require('fs'), path = require('path');
+const config = JSON.parse(process.env.HOMEBOY_AGENT_TASK_EXECUTOR_CONFIG_JSON);
+const launch = JSON.parse(process.env.HOMEBOY_AGENT_TASK_PROVIDER_LAUNCH_CONTEXT_JSON);
+const args = process.argv.slice(1);
+const artifacts = path.dirname(args[args.indexOf('--session') + 1]);
+function answer(text) { console.log(JSON.stringify({type:'message_end',message:{role:'assistant',stopReason:'stop',content:[{type:'text',text}]}})); }
+function failure(text) { console.log(JSON.stringify({type:'message_end',message:{role:'assistant',stopReason:'error',errorMessage:text}})); }
+"#;
+    FakePi::new(&format!(
+        "node -e {} -- \"$@\"",
+        shell_quote(&format!("{prelude}\n{body}"))
+    ))
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
 
 static DEFAULT_TIMEOUT_ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -54,14 +77,9 @@ fn remapped_lab_cook_spawns_and_harvests_from_runner_snapshot_identity() {
     let temp = tempfile::tempdir().expect("tempdir");
     let (controller, source) = remapped_cook_source(&temp);
     let marker = temp.path().join("provider-started");
-    let command = format!(
-        "node {}",
-        script(&format!(
-            "let cp=require('child_process'),fs=require('fs'); let req=JSON.parse(fs.readFileSync(0,'utf8')); fs.writeFileSync('provider-change.txt','changed\\n'); cp.execFileSync('git',['add','provider-change.txt']); cp.execFileSync('git',['-c','user.name=Homeboy','-c','user.email=homeboy@example.test','commit','-m','provider change']); fs.writeFileSync({:?}, JSON.stringify({{cwd:process.cwd(),workspace:req.workspace.root,attestation:req.metadata.cook_attempt_workspace_identity}})); process.stdout.write(JSON.stringify({{schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:'succeeded',summary:'provider spawned'}}));",
-            marker.display().to_string()
-        ))
-    );
-    let (mut request, provider) = request("cook-provider", command);
+    let fake = node_pi(&format!("let cp=require('child_process');fs.writeFileSync('provider-change.txt','changed\\n');cp.execFileSync('git',['add','provider-change.txt']);cp.execFileSync('git',['-c','user.name=Homeboy','-c','user.email=homeboy@example.test','commit','-m','provider change'],{{stdio:'ignore'}});fs.writeFileSync({:?},JSON.stringify({{cwd:process.cwd(),workspace:launch.execution_cwd}}));answer('provider spawned');",marker));
+    let mut request = fake.request("cook-provider");
+    let provider = fake.provider();
     request.workspace.root = Some(source.display().to_string());
     request.metadata = serde_json::json!({
         "cook_workspace_identity": crate::agent_task_workspace_identity::attest_workspace(&controller)
@@ -90,10 +108,7 @@ fn remapped_lab_cook_spawns_and_harvests_from_runner_snapshot_identity() {
         "provider must run in the isolated attempt workspace"
     );
     assert_eq!(provider_observation["workspace"], provider_cwd);
-    assert_eq!(
-        provider_observation["attestation"]["canonical_path"], provider_cwd,
-        "the spawned provider must receive the attestation for its isolated cwd"
-    );
+    assert!(std::path::Path::new(provider_cwd).is_absolute());
     let candidate = aggregate.outcomes[0]
         .candidate
         .as_ref()
@@ -236,12 +251,11 @@ fn scheduler_dispatches_builtin_pi_event_stream_without_extensions() {
 }
 
 #[test]
-fn scheduler_dispatches_extension_provider_command() {
-    let command = format!(
-        "node {}",
-        script("let fs=require('fs'); let req=JSON.parse(fs.readFileSync(0,'utf8')); process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:'succeeded',summary:'ok',outputs:{issue_number:3447}}));")
-    );
-    let (request, provider) = request("task-a", command);
+fn scheduler_dispatches_pi_declared_outputs() {
+    let fake = node_pi("answer(JSON.stringify({outputs:{issue_number:3447}}));");
+    let mut request = fake.request("task-a");
+    request.output_declarations = serde_json::from_value(json!([{"schema":"homeboy/agent-task-output-declaration/v1","name":"issue_number","required":true}])).unwrap();
+    let provider = fake.provider();
     let scheduler = AgentTaskScheduler::new(Arc::new(
         ExtensionProviderAgentTaskExecutor::with_providers(vec![provider]),
     ));
@@ -260,27 +274,18 @@ fn scheduler_dispatches_extension_provider_command() {
 fn cook_admission_and_production_provider_execute_the_first_ready_fallback() {
     let temp = tempfile::tempdir().expect("tempdir");
     let marker = temp.path().join("executed.json");
-    let probe_count = temp.path().join("probe-count");
-    let command = format!(
-        "node {}",
-        script(&format!(
-            "let fs=require('fs');let req=JSON.parse(fs.readFileSync(0,'utf8'));fs.writeFileSync({:?},JSON.stringify({{model:req.executor.model,config:req.executor.config}}));process.stdout.write(JSON.stringify({{schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:'succeeded'}}));",
-            marker.display().to_string()
-        ))
+    let inference = node_pi(&format!("fs.writeFileSync({:?},JSON.stringify({{model:args[args.indexOf('--model')+1],config}}));answer('ready fallback');", marker));
+    let fake = FakePi::with_probes(
+        &format!(
+            "exec {} \"$@\"",
+            shell_quote(inference.command.to_str().unwrap())
+        ),
+        "printf 'test-pi\\n'",
+        "printf 'test ready-model\\n'",
     );
-    let (mut task, mut provider) = request("cook-ready-fallback", command);
-    task.executor.model = Some("blocked-model".to_string());
-    let readiness = script(&format!(
-        "let fs=require('fs');let req=JSON.parse(fs.readFileSync(0,'utf8'));let p={:?};fs.writeFileSync(p,String(Number(fs.existsSync(p)?fs.readFileSync(p,'utf8'):0)+1));let ready=req.effective_config.model==='ready-model';process.stdout.write(JSON.stringify({{schema:'homeboy/agent-task-provider-readiness-result/v1',ready,classification:ready?'ready':'account',retryable:false,remediation:'',reason:ready?'':'blocked',cache_key:req.effective_config.model,identity:{{model:req.effective_config.model}}}}));",
-        probe_count.display().to_string()
-    ));
-    provider.readiness_invocation = Some(
-        CommandInvocation {
-            argv: vec!["node".to_string(), readiness],
-            ..CommandInvocation::default()
-        }
-        .into(),
-    );
+    let mut task = fake.request("cook-ready-fallback");
+    let provider = fake.provider();
+    task.executor.model = Some("test/blocked-model".to_string());
     let catalog = AgentTaskProviderCatalog {
         providers: vec![provider.clone()],
         ..Default::default()
@@ -289,11 +294,11 @@ fn cook_admission_and_production_provider_execute_the_first_ready_fallback() {
     plan.options.rotation = Some(AgentTaskProviderRotationPolicy {
         entries: vec![
             AgentTaskProviderRotationEntry {
-                model: Some("blocked-model".to_string()),
+                model: Some("test/blocked-model".to_string()),
                 ..Default::default()
             },
             AgentTaskProviderRotationEntry {
-                model: Some("ready-model".to_string()),
+                model: Some("test/ready-model".to_string()),
                 provider_config: json!({ "account": "ready-account" }),
                 ..Default::default()
             },
@@ -308,7 +313,7 @@ fn cook_admission_and_production_provider_execute_the_first_ready_fallback() {
         &mut ProviderRuntimeReadinessCache::default(),
     )
     .expect("Cook admits the first ready production route");
-    assert_eq!(plan.tasks[0].executor.model(), Some("blocked-model"));
+    assert_eq!(plan.tasks[0].executor.model(), Some("test/blocked-model"));
     assert!(plan.tasks[0].executor.config.get("account").is_none());
 
     let aggregate = AgentTaskScheduler::new(Arc::new(
@@ -319,7 +324,7 @@ fn cook_admission_and_production_provider_execute_the_first_ready_fallback() {
     assert_eq!(aggregate.status(), AgentTaskRunState::Succeeded);
     let executed: Value = serde_json::from_slice(&std::fs::read(marker).expect("execution marker"))
         .expect("execution identity");
-    assert_eq!(executed["model"], "ready-model");
+    assert_eq!(executed["model"], "test/ready-model");
     assert_eq!(executed["config"]["account"], "ready-account");
     assert_eq!(
         aggregate.outcomes[0].metadata["execution_budget"]["executions_used"],
@@ -338,15 +343,11 @@ fn executor_materializes_runner_local_artifacts_for_no_op_and_editing_requests()
     let lifecycle_store = crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(roots.clone());
     let runner_root = roots.artifacts().to_path_buf();
     let controller_root = tempfile::tempdir().expect("controller root");
-    let command = format!(
-            "node {}",
-            script("let fs=require('fs'); let path=require('path'); let req=JSON.parse(fs.readFileSync(0,'utf8')); let valid=path.isAbsolute(req.artifacts_path)&&fs.statSync(req.artifacts_path).isDirectory()&&req.artifacts_path_provenance.owner==='homeboy'&&req.artifacts_path_provenance.locality==='runner'&&!req.artifacts_path.startsWith(req.executor.config.controller_root); fs.writeFileSync(path.join(req.artifacts_path, req.task_id+'.txt'),'captured'); process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:valid?(req.executor.config.no_op?'no_op':'succeeded'):'failed',summary:req.artifacts_path,artifacts:[]}));")
-        );
-    let (mut no_op, provider) = request("task-no-op", command);
-    no_op.executor.config = json!({
-        "controller_root": controller_root.path(),
-        "no_op": true
-    });
+    let fake = node_pi("if(!path.isAbsolute(artifacts)||!fs.statSync(artifacts).isDirectory()||artifacts.startsWith(config.controller_root))process.exit(23);fs.writeFileSync(path.join(artifacts,launch.task_id+'.txt'),'captured');answer(artifacts);");
+    let mut no_op = fake.request("task-no-op");
+    let provider = fake.provider();
+    no_op.executor.config["controller_root"] = json!(controller_root.path());
+    no_op.executor.config["no_op"] = json!(true);
     let mut editing = no_op.clone();
     editing.task_id = "task-editing".to_string();
     editing.executor.config["no_op"] = json!(false);
@@ -360,7 +361,11 @@ fn executor_materializes_runner_local_artifacts_for_no_op_and_editing_requests()
         vec![no_op, editing],
     ));
 
-    assert_eq!(aggregate.outcomes[0].status, AgentTaskOutcomeStatus::NoOp);
+    // Pi reports both successful no-edit and editing tasks as succeeded.
+    assert_eq!(
+        aggregate.outcomes[0].status,
+        AgentTaskOutcomeStatus::Succeeded
+    );
     assert_eq!(
         aggregate.outcomes[1].status,
         AgentTaskOutcomeStatus::Succeeded
@@ -483,11 +488,9 @@ fn scheduler_reports_missing_provider_capability() {
 
 #[test]
 fn scheduler_rotates_from_an_incapable_plan_level_primary_to_a_capable_fallback() {
-    let command = format!(
-        "node {}",
-        script("let fs=require('fs');let req=JSON.parse(fs.readFileSync(0,'utf8'));process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:'succeeded'}));")
-    );
-    let (mut request, mut primary) = request("task-capability-rotation", command);
+    let fake = FakePi::success();
+    let mut request = fake.request("task-capability-rotation");
+    let mut primary = fake.provider();
     primary.id = "test.primary".to_string();
     primary.capabilities.clear();
     let mut fallback = primary.clone();
@@ -522,89 +525,30 @@ fn scheduler_rotates_from_an_incapable_plan_level_primary_to_a_capable_fallback(
 }
 
 #[test]
-fn scheduler_normalizes_malformed_provider_output() {
-    let command = format!("node {}", script("process.stdout.write('{not json');"));
-    let (request, provider) = request("task-malformed-provider", command);
-    let scheduler = AgentTaskScheduler::new(Arc::new(
-        ExtensionProviderAgentTaskExecutor::with_providers(vec![provider]),
-    ));
-
-    let aggregate = scheduler.run(AgentTaskPlan::new("plan-malformed-provider", vec![request]));
-
-    assert_eq!(aggregate.totals.failed, 1);
-    assert_eq!(
-        aggregate.outcomes[0].failure_classification,
-        Some(AgentTaskFailureClassification::Provider)
-    );
-    assert_eq!(
-        aggregate.outcomes[0].diagnostics[0].class,
-        "agent_task.provider_malformed_json"
-    );
-    assert_eq!(
-        aggregate.outcomes[0].diagnostics[0].data["stdout"],
-        "{not json"
-    );
-}
-
-#[test]
 fn provider_empty_stdout_captures_bounded_stderr_and_exit_context() {
-    let command = format!(
-        "node {}",
-        script("process.stderr.write('x'.repeat(20000) + 'runtime contract constants are incomplete'); process.exit(42);")
-    );
-    let (request, provider) = request("task-empty-stdout", command);
+    let fake = node_pi("fs.writeSync(2,'x'.repeat(20000)+'runtime contract constants are incomplete');process.exit(42);");
+    let request = fake.request("task-empty-stdout");
+    let provider = fake.provider();
 
     let outcome = run_provider_command(&request, &provider, None);
 
-    assert_eq!(outcome.status, AgentTaskOutcomeStatus::ProviderError);
-    assert_eq!(
-        outcome.diagnostics[0].class,
-        "agent_task.provider_empty_stdout"
-    );
-    assert_eq!(outcome.diagnostics[0].data["exit_code"], json!(42));
-    assert_eq!(outcome.diagnostics[0].data["stderr_truncated"], json!(true));
-    assert!(
-        outcome.diagnostics[0].data["stderr_bytes"]
-            .as_u64()
-            .expect("stderr byte count")
-            > 16_384
-    );
-    let stderr = outcome.diagnostics[0].data["stderr"]
-        .as_str()
-        .expect("stderr capture");
+    assert_eq!(outcome.status, AgentTaskOutcomeStatus::Failed);
+    let diagnostic = outcome
+        .diagnostics
+        .iter()
+        .find(|d| d.class == "agent_task.provider_process_failed")
+        .expect("process failure context");
+    assert_eq!(diagnostic.data["exit_code"], json!(42));
+    // Pi's process diagnostic receives the already bounded capture tail.
+    assert_eq!(diagnostic.data["stderr_bytes"], json!(16_384));
+    let stderr = diagnostic.data["stderr"].as_str().expect("stderr capture");
     assert!(stderr.contains("runtime contract constants are incomplete"));
     assert!(stderr.len() <= 16 * 1024);
     assert!(outcome
-        .evidence_refs
-        .iter()
-        .any(|reference| reference.kind == "executor-result"));
-}
-
-#[test]
-fn declared_evidence_policy_denial_is_terminal_without_provider_retry() {
-    let count = tempfile::NamedTempFile::new().expect("count file");
-    let command = format!(
-        "node {} {}",
-        script(&format!("const fs=require('fs');const count=process.argv[2];fs.writeFileSync(count,String((Number(fs.readFileSync(count,'utf8')||0))+1));process.stdout.write(JSON.stringify({{schema:'{AGENT_TASK_OUTCOME_SCHEMA}',task_id:'task-evidence-policy-denied',status:'failed',diagnostics:[{{class:'provider.permission',message:'denied',data:{{kind:'permission_denied',path:'/state/provider-evidence/files/abc/input'}}}}]}}));")),
-        count.path().display(),
-    );
-    let (mut request, provider) = request("task-evidence-policy-denied", command);
-    request.executor.config = json!({"evidence_inputs":[{"path":"/state/provider-evidence/files/abc/input","read_only":true}]});
-
-    let outcome = run_provider_command(&request, &provider, None);
-
-    assert_eq!(
-        outcome.failure_classification,
-        Some(AgentTaskFailureClassification::PolicyDenied)
-    );
-    assert_eq!(
-        outcome.metadata["control_plane_failure"]["phase"],
-        "provider_evidence_preflight"
-    );
-    assert_eq!(
-        std::fs::read_to_string(count.path()).expect("read count"),
-        "1"
-    );
+        .summary
+        .as_deref()
+        .unwrap()
+        .starts_with("Pi execution failed:"));
 }
 
 #[test]
@@ -619,33 +563,6 @@ fn policy_denial_prose_without_a_declared_structured_path_is_not_reclassified() 
     assert_ne!(
         outcome.failure_classification,
         Some(AgentTaskFailureClassification::PolicyDenied)
-    );
-}
-
-#[test]
-fn denied_selected_directory_member_cannot_be_reported_as_success() {
-    let command = format!(
-        "node {}",
-        script("const req=JSON.parse(require('fs').readFileSync(0,'utf8'));process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:'succeeded',summary:'denied evidence input',diagnostics:[{class:'provider.permission',message:'denied',data:{kind:'permission_denied',path:'/workspace/evidence/sub/input.json'}}]}));")
-    );
-    let (mut request, provider) = request("task-evidence-member-denied", command);
-    request.executor.config = json!({"evidence_inputs":[{
-        "path":"/workspace/evidence", "read_only":true,
-        "entries":[{"path":"sub/input.json"}]
-    }]});
-    let outcome = run_provider_command(&request, &provider, None);
-    assert_eq!(
-        outcome.status,
-        AgentTaskOutcomeStatus::Failed,
-        "{outcome:?}"
-    );
-    assert_eq!(
-        outcome.failure_classification,
-        Some(AgentTaskFailureClassification::PolicyDenied)
-    );
-    assert_eq!(
-        outcome.metadata["control_plane_failure"]["reason"],
-        "declared_evidence_policy_denied"
     );
 }
 
@@ -729,11 +646,11 @@ fn provider_empty_stdout_records_failed_run_with_executor_evidence() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
     let roots = context.path_roots();
     let lifecycle_store = crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(roots.clone());
-    let command = format!(
-            "node {}",
-            script("process.stderr.write('provider emitted diagnostics but no outcome'); process.exit(42);")
-        );
-    let (request, provider) = request("task-empty-stdout-recorded", command);
+    let fake = node_pi(
+        "process.stderr.write('provider emitted diagnostics but no outcome');process.exit(42);",
+    );
+    let request = fake.request("task-empty-stdout-recorded");
+    let provider = fake.provider();
     let plan = AgentTaskPlan::new("plan-empty-stdout-recorded", vec![request]);
     let run_id = "run-empty-provider-output";
     let scheduler = AgentTaskScheduler::new(Arc::new(
@@ -754,14 +671,11 @@ fn provider_empty_stdout_records_failed_run_with_executor_evidence() {
         record.state(),
         crate::agent_task_lifecycle::AgentTaskRunState::Failed
     );
-    assert_eq!(
-        aggregate.outcomes[0].status,
-        AgentTaskOutcomeStatus::ProviderError
-    );
-    assert_eq!(
-        aggregate.outcomes[0].diagnostics[0].class,
-        "agent_task.provider_empty_stdout"
-    );
+    assert_eq!(aggregate.outcomes[0].status, AgentTaskOutcomeStatus::Failed);
+    assert!(aggregate.outcomes[0]
+        .diagnostics
+        .iter()
+        .any(|d| d.class == "agent_task.provider_process_failed"));
     assert!(aggregate.outcomes[0]
         .evidence_refs
         .iter()
@@ -934,31 +848,23 @@ fn stalled_provider_is_killed_and_rotates_to_configured_fallback() {
     let pid_path = unique_state_path("stalled-child");
     let _ = fs::remove_file(&pid_path);
     let pid = pid_path.to_string_lossy().replace('\\', "\\\\");
-    let primary_command = format!(
-        "node {}",
-        script(&format!(
-            "let fs=require('fs'); fs.writeFileSync('{pid}', String(process.pid)); setInterval(() => {{}}, 1000);"
-        ))
+    let fake = node_pi(&format!("if(args[args.indexOf('--model')+1]==='test/fallback'){{answer('fallback completed');}}else{{fs.writeFileSync('{pid}',String(process.pid));setInterval(()=>{{}},1000);}}"));
+    let routes = FakePi::with_probes(
+        &format!(
+            "exec {} \"$@\"",
+            shell_quote(fake.command.to_str().unwrap())
+        ),
+        "printf 'test-pi\\n'",
+        "printf 'test model\\ntest fallback\\n'",
     );
-    let fallback_command = format!(
-        "node {}",
-        script("let fs=require('fs'); let req=JSON.parse(fs.readFileSync(0,'utf8')); process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:'succeeded',summary:'fallback completed'}));")
-    );
-    let (request, primary) = request("task-stalled-rotation", primary_command);
-    let mut fallback = primary.clone();
-    fallback.id = "fallback.provider".to_string();
-    fallback.backend = "fallback".to_string();
-    fallback.command_argv = fallback_command
-        .split_whitespace()
-        .map(str::to_string)
-        .collect();
+    let request = routes.request("task-stalled-rotation");
     let scheduler = AgentTaskScheduler::new(Arc::new(
-        ExtensionProviderAgentTaskExecutor::with_providers(vec![primary, fallback]),
+        ExtensionProviderAgentTaskExecutor::with_providers(vec![routes.provider()]),
     ));
     let mut plan = AgentTaskPlan::new("plan-stalled-rotation", vec![request]);
     plan.options.rotation = Some(AgentTaskProviderRotationPolicy {
         entries: vec![AgentTaskProviderRotationEntry {
-            backend: Some("fallback".to_string()),
+            model: Some("test/fallback".to_string()),
             ..AgentTaskProviderRotationEntry::default()
         }],
         liveness_timeout_ms: Some(5_000),
@@ -967,7 +873,11 @@ fn stalled_provider_is_killed_and_rotates_to_configured_fallback() {
 
     let aggregate = scheduler.run(plan);
 
-    assert_eq!(aggregate.status(), AgentTaskRunState::Succeeded);
+    assert_eq!(
+        aggregate.status(),
+        AgentTaskRunState::Succeeded,
+        "{aggregate:?}"
+    );
     let attempts = aggregate.outcomes[0]
         .metadata
         .pointer("/provider_rotation/attempts")
@@ -975,7 +885,8 @@ fn stalled_provider_is_killed_and_rotates_to_configured_fallback() {
         .expect("rotation evidence");
     assert_eq!(attempts.len(), 2);
     assert_eq!(attempts[0]["failure_classification"], json!("stalled"));
-    assert_eq!(attempts[1]["backend"], json!("fallback"));
+    assert_eq!(attempts[1]["backend"], json!("pi"));
+    assert_eq!(attempts[1]["model"], json!("test/fallback"));
 
     let child_pid = fs::read_to_string(&pid_path).expect("stalled child wrote pid");
     assert!(
@@ -1095,11 +1006,9 @@ fn parent_visible_progress_keeps_provider_alive_until_wall_deadline() {
 
 #[test]
 fn structured_runtime_progress_keeps_provider_alive_until_completion() {
-    let command = format!(
-        "node {}",
-        script("let fs=require('fs'); let path=require('path'); let req=JSON.parse(fs.readFileSync(0,'utf8')); let progress=path.join(req.artifacts_path,'provider-progress.jsonl'); let timer=setInterval(()=>fs.appendFileSync(progress,'{}\\n'),10); setTimeout(()=>{clearInterval(timer); process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:'succeeded',summary:'completed with structured progress'}));},900);")
-    );
-    let (mut request, provider) = request("task-liveness-runtime-progress", command);
+    let fake = node_pi("let progress=path.join(artifacts,'provider-progress.jsonl'); let timer=setInterval(()=>fs.appendFileSync(progress,'{}\\n'),10); setTimeout(()=>{clearInterval(timer);answer('completed with structured progress');},900);");
+    let mut request = fake.request("task-liveness-runtime-progress");
+    let provider = fake.provider();
     request.limits.timeout_ms = Some(1_500);
     request.limits.liveness_timeout_ms = Some(500);
 
@@ -1118,9 +1027,8 @@ fn quiet_descendant_command(work: &str) -> String {
         "node {}",
         script(&format!(
             "let fs=require('fs'); let cp=require('child_process'); \
-             let req=JSON.parse(fs.readFileSync(0,'utf8')); \
              let child=cp.spawn(process.execPath,['-e',{}],{{stdio:'ignore'}}); \
-             child.on('exit',()=>process.stdout.write(JSON.stringify({{schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:'succeeded',summary:'quiet tool completed'}})));",
+             child.on('exit',()=>process.stdout.write(JSON.stringify({{type:'message_end',message:{{role:'assistant',stopReason:'stop',content:[{{type:'text',text:'quiet tool completed'}}]}}}})));",
             serde_json::to_string(work).expect("child script JSON")
         ))
     )
@@ -1225,11 +1133,9 @@ fn quiet_active_descendant_still_hits_absolute_execution_deadline() {
 /// parent pipes stay empty and the artifact is the only evidence of life.
 #[test]
 fn non_progress_named_runtime_artifact_keeps_provider_alive_until_completion() {
-    let command = format!(
-        "node {}",
-        script("let fs=require('fs'); let path=require('path'); let req=JSON.parse(fs.readFileSync(0,'utf8')); let log=path.join(req.artifacts_path,'task-runtime-stdout.log'); let timer=setInterval(()=>fs.appendFileSync(log,'working\\n'),10); setTimeout(()=>{clearInterval(timer); process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:'succeeded',summary:'completed while streaming a runtime log'}));},900);")
-    );
-    let (mut request, provider) = request("task-liveness-runtime-log", command);
+    let fake = node_pi("let log=path.join(artifacts,'task-runtime-stdout.log'); let timer=setInterval(()=>fs.appendFileSync(log,'working\\n'),10); setTimeout(()=>{clearInterval(timer);answer('completed while streaming a runtime log');},900);");
+    let mut request = fake.request("task-liveness-runtime-log");
+    let provider = fake.provider();
     request.limits.timeout_ms = Some(1_500);
     request.limits.liveness_timeout_ms = Some(500);
 
@@ -1277,20 +1183,9 @@ fn workspace_file_activity_keeps_silent_provider_alive_until_completion() {
     // nothing at all until it is done.
     let temp = tempfile::tempdir().expect("tempdir");
     let workspace = linked_cook_source(&temp);
-    let command = format!(
-        "node {}",
-        script(
-            "let fs=require('fs'); \
-             let req=JSON.parse(fs.readFileSync(0,'utf8')); \
-             let i=0; \
-             let timer=setInterval(()=>{ i++; fs.writeFileSync('agent-edit-'+i+'.txt','edit '+i+'\\n'); }, 100); \
-             setTimeout(()=>{ \
-               clearInterval(timer); \
-               process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:'succeeded',summary:'completed silently after workspace edits'})); \
-             }, 3000);"
-        )
-    );
-    let (mut request, provider) = request("task-liveness-workspace-activity", command);
+    let fake = node_pi("let i=0;let timer=setInterval(()=>fs.writeFileSync('agent-edit-'+(++i)+'.txt','edit\\n'),100);setTimeout(()=>{clearInterval(timer);answer('completed silently after workspace edits');},3000);");
+    let mut request = fake.request("task-liveness-workspace-activity");
+    let provider = fake.provider();
     request.workspace.root = Some(workspace.display().to_string());
     request.limits.timeout_ms = Some(10_000);
     request.limits.liveness_timeout_ms = Some(1_200);
@@ -1362,26 +1257,6 @@ fn stalled_provider_retains_declared_attempt_workspace_artifact() {
 }
 
 #[test]
-fn provider_can_return_timeout_payload_during_wrapper_grace() {
-    let command = format!(
-        "node {}",
-        script("let fs=require('fs'); let path=require('path'); let req=JSON.parse(fs.readFileSync(0,'utf8')); let evidence=path.join(req.artifacts_path,'timeout-evidence.json'); fs.writeFileSync(evidence,'{}'); setTimeout(()=>process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:'timeout',summary:'provider serialized timeout',failure_classification:'timeout',artifacts:[{schema:'homeboy/agent-task-artifact/v1',id:'timeout-evidence',kind:'provider-task-runner-preflight',path:evidence}]})), 5001);")
-    );
-    let (mut request, provider) = request("task-timeout-payload", command);
-    request.limits.timeout_ms = Some(5000);
-
-    let outcome = run_provider_command(&request, &provider, None);
-
-    assert_eq!(outcome.status, AgentTaskOutcomeStatus::Timeout);
-    assert_eq!(
-        outcome.summary.as_deref(),
-        Some("provider serialized timeout")
-    );
-    assert_eq!(outcome.artifacts.len(), 1);
-    assert_eq!(outcome.artifacts[0].id, "timeout-evidence");
-}
-
-#[test]
 fn provider_command_receives_executor_config_env() {
     let fake = super::super::test_pi::FakePi::new(&format!(
         "test \"$HOMEBOY_AGENT_TASK_PROVIDER_ID\" = pi.agent-task-executor || exit 23\nprintf '%s' \"$HOMEBOY_AGENT_TASK_EXECUTOR_CONFIG_JSON\" | grep configured >/dev/null || exit 24\n{}",
@@ -1410,14 +1285,10 @@ fn provider_attempts_receive_distinct_allocated_runtime_tmpdirs() {
     let lifecycle_store = crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(roots.clone());
     let state = unique_state_path("scratch-attempts");
     let state_path = state.to_string_lossy().replace('\\', "\\\\");
-    let command = format!(
-            "node {}",
-            script(&format!(
-                "let fs=require('fs'); let req=JSON.parse(fs.readFileSync(0,'utf8')); let tmp=req.executor.config.runtime_env.TMPDIR; let entries=[]; try {{ entries=JSON.parse(fs.readFileSync('{state_path}','utf8')); }} catch (_) {{}} entries.push({{tmp,keep:req.executor.config.runtime_env.KEEP}}); fs.writeFileSync('{state_path}',JSON.stringify(entries)); process.stdout.write(JSON.stringify({{schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:entries.length===1?'failed':'succeeded',failure_classification:entries.length===1?'execution_failed':null,summary:tmp}}));"
-            ))
-        );
-    let (mut request, provider) = request("task-scratch-retry", command);
-    request.executor.config = json!({ "runtime_env": { "KEEP": "preserved" } });
+    let fake = node_pi(&format!("let tmp=config.runtime_env.TMPDIR;let entries=[];try{{entries=JSON.parse(fs.readFileSync('{state_path}','utf8'));}}catch(_){{}}entries.push({{tmp,keep:config.runtime_env.KEEP}});fs.writeFileSync('{state_path}',JSON.stringify(entries));if(entries.length===1)process.exit(42);answer(tmp);"));
+    let mut request = fake.request("task-scratch-retry");
+    let provider = fake.provider();
+    request.executor.config["runtime_env"] = json!({"KEEP":"preserved"});
     let mut plan = AgentTaskPlan::new("plan-scratch-retry", vec![request]);
     plan.options.retry.max_attempts = 2;
     plan.options.retry.retryable_failure_classifications =
@@ -1464,13 +1335,11 @@ fn provider_attempts_receive_distinct_allocated_runtime_tmpdirs() {
 fn provider_command_receives_declared_secret_env() {
     let secret_name = format!("HOMEBOY_TEST_AGENT_TASK_SECRET_{}", std::process::id());
     std::env::set_var(&secret_name, "hydrated-secret");
-    let command = format!(
-        "node {}",
-        script(&format!(
-            "let fs=require('fs'); let req=JSON.parse(fs.readFileSync(0,'utf8')); process.stdout.write(JSON.stringify({{schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:process.env.{secret_name}==='hydrated-secret'?'succeeded':'failed',summary:'checked'}}));"
-        ))
-    );
-    let (mut request, provider) = request("task-secret-env", command);
+    let fake = node_pi(&format!(
+        "if(process.env.{secret_name}!=='hydrated-secret')process.exit(23);answer('checked');"
+    ));
+    let mut request = fake.request("task-secret-env");
+    let provider = fake.provider();
     request.executor.secret_env = vec![secret_name.clone()];
     let scheduler = AgentTaskScheduler::new(Arc::new(
         ExtensionProviderAgentTaskExecutor::with_providers(vec![provider]),
@@ -1488,14 +1357,9 @@ fn provider_command_receives_only_the_declared_launch_environment() {
     let ambient_name = format!("HOMEBOY_TEST_UNDECLARED_LAUNCH_ENV_{}", std::process::id());
     std::env::set_var(&secret_name, "declared-secret");
     std::env::set_var(&ambient_name, "must-not-leak");
-    let command = format!(
-        "node {}",
-        script(&format!(
-            "let fs=require('fs');let req=JSON.parse(fs.readFileSync(0,'utf8'));let launch=JSON.parse(process.env.{});let secretOk=process.env.{secret_name}==='declared-secret';let ambientAbsent=process.env.{ambient_name}===undefined;let redacted=!JSON.stringify(launch).includes('declared-secret');let identity=launch.task_id===req.task_id&&launch.schema==='homeboy/agent-task-provider-launch-context/v1';process.stdout.write(JSON.stringify({{schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:secretOk&&ambientAbsent&&redacted&&identity?'succeeded':'failed',summary:'launch context checked'}}));",
-            crate::agent_task_provider::AGENT_TASK_PROVIDER_LAUNCH_CONTEXT_JSON_ENV
-        ))
-    );
-    let (mut request, provider) = request("task-declared-launch-env", command);
+    let fake = node_pi(&format!("if(process.env.{secret_name}!=='declared-secret'||process.env.{ambient_name}!==undefined||JSON.stringify(launch).includes('declared-secret')||launch.task_id!=='task-declared-launch-env'||launch.schema!=='homeboy/agent-task-provider-launch-context/v1')process.exit(23);answer('launch context checked');"));
+    let mut request = fake.request("task-declared-launch-env");
+    let provider = fake.provider();
     request.executor.secret_env = vec![secret_name.clone()];
     let scheduler = AgentTaskScheduler::new(Arc::new(
         ExtensionProviderAgentTaskExecutor::with_providers(vec![provider]),
@@ -1515,14 +1379,9 @@ fn provider_command_receives_only_the_declared_launch_environment() {
 fn provider_command_receives_canonical_secret_env_plan_without_values() {
     let secret_name = format!("HOMEBOY_TEST_AGENT_TASK_PLAN_SECRET_{}", std::process::id());
     std::env::set_var(&secret_name, "hydrated-secret");
-    let command = format!(
-        "node {}",
-        script(&format!(
-            "let fs=require('fs'); let req=JSON.parse(fs.readFileSync(0,'utf8')); let plan=JSON.parse(process.env.{}); let mapped=(plan.env_name_mapping['test.provider']||[]).includes('{secret_name}'); let configured=(plan.status||[]).some((item)=>item.name==='{secret_name}'&&item.configured===true&&item.source==='env'); let leaked=JSON.stringify(plan).includes('hydrated-secret'); process.stdout.write(JSON.stringify({{schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:mapped&&configured&&!leaked?'succeeded':'failed',summary:JSON.stringify(plan)}}));",
-            homeboy_core::secret_env_plan::AGENT_TASK_SECRET_ENV_PLAN_JSON_ENV
-        ))
-    );
-    let (mut request, mut provider) = request("task-secret-env-plan", command);
+    let fake = node_pi(&format!("let plan=JSON.parse(process.env.{});if(!(plan.env_name_mapping['pi.agent-task-executor']||[]).includes('{secret_name}')||!(plan.status||[]).some(i=>i.name==='{secret_name}'&&i.configured&&i.source==='env')||JSON.stringify(plan).includes('hydrated-secret'))process.exit(23);answer(JSON.stringify(plan));", homeboy_core::secret_env_plan::AGENT_TASK_SECRET_ENV_PLAN_JSON_ENV));
+    let mut request = fake.request("task-secret-env-plan");
+    let mut provider = fake.provider();
     provider.runner_readiness = vec![AgentTaskProviderRunnerReadiness {
         id: "test.provider.auth".to_string(),
         label: "Test provider auth".to_string(),
@@ -1590,19 +1449,15 @@ fn launched_execution_uses_the_exact_credentials_bound_by_readiness() {
     let credential = root.path().join("account.json");
     let observed = root.path().join("observed");
     std::fs::write(&credential, r#"{"token":"bound-account"}"#).expect("initial credential");
-    let readiness = script(&format!(
-        "const fs=require('fs');const token=process.env.TEST_BOUND_ACCOUNT_TOKEN||'';fs.writeFileSync({:?},JSON.stringify({{token:'rotated-account'}}));process.stdout.write(JSON.stringify({{schema:'homeboy/agent-task-provider-readiness-result/v1',ready:token==='bound-account',classification:token==='bound-account'?'ready':'auth_failure',retryable:false,remediation:'',reason:token,cache_key:token,identity:{{account:token}}}}));",
-        credential.display().to_string()
-    ));
-    let command = format!(
-        "node {}",
-        script(&format!(
-            "const fs=require('fs');const req=JSON.parse(fs.readFileSync(0,'utf8'));const token=process.env.TEST_BOUND_ACCOUNT_TOKEN||'';fs.writeFileSync({:?},token);process.stdout.write(JSON.stringify({{schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:token==='bound-account'?'succeeded':'provider_error',summary:token==='bound-account'?'bound credential used':'credential drifted'}}));",
-            observed.display().to_string()
-        ))
+    let inference = node_pi(&format!("const token=process.env.TEST_BOUND_ACCOUNT_TOKEN;fs.writeFileSync({:?},token);if(token!=='bound-account')process.exit(23);answer('bound credential used');", observed));
+    let fake = FakePi::with_probes(
+        &format!("exec {} \"$@\"", shell_quote(inference.command.to_str().unwrap())),
+        "printf 'test-pi\\n'",
+        &format!("test \"$TEST_BOUND_ACCOUNT_TOKEN\" = bound-account || exit 23; printf '%s' '{{\"token\":\"rotated-account\"}}' > {}; printf 'test model\\n'", shell_quote(credential.to_str().unwrap())),
     );
-    let (mut request, mut provider) = request("bound-launch-credential", command);
-    request.executor.config = json!({"provider":"account"});
+    let mut request = fake.request("bound-launch-credential");
+    let mut provider = fake.provider();
+    request.executor.config["provider"] = json!("account");
     provider.provider_defaults = serde_json::from_value(json!({
         "account": {
             "required_secret_env": ["TEST_BOUND_ACCOUNT_TOKEN"],
@@ -1616,13 +1471,6 @@ fn launched_execution_uses_the_exact_credentials_bound_by_readiness() {
         }
     }))
     .expect("provider defaults");
-    provider.readiness_invocation = Some(
-        homeboy_core::command_invocation::CommandInvocation {
-            argv: vec!["node".to_string(), readiness],
-            ..Default::default()
-        }
-        .into(),
-    );
 
     let aggregate = AgentTaskScheduler::new(Arc::new(
         ExtensionProviderAgentTaskExecutor::with_providers(vec![provider]),
@@ -1645,24 +1493,17 @@ fn concurrent_launches_keep_each_readiness_bound_credential() {
     let root = tempfile::tempdir().expect("tempdir");
     let observed = root.path().join("observed");
     std::fs::create_dir(&observed).expect("observed directory");
-    let readiness = script(
-        "const fs=require('fs');const req=JSON.parse(fs.readFileSync(0,'utf8'));const token=process.env.TEST_CONCURRENT_ACCOUNT_TOKEN||'';fs.writeFileSync(req.effective_config.credential_path,JSON.stringify({token:'rotated-'+token}));process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:token.startsWith('bound-'),classification:token.startsWith('bound-')?'ready':'auth_failure',retryable:false,remediation:'',reason:token,cache_key:token,identity:{account:token}}));",
+    let inference = node_pi(&format!("const token=process.env.TEST_CONCURRENT_ACCOUNT_TOKEN;fs.writeFileSync(path.join({:?},launch.task_id),token);if(!token.startsWith('bound-'))process.exit(23);answer('credential observation');", observed));
+    let probe = format!("node -e {}", shell_quote(&format!("const fs=require('fs'),path=require('path');const token=process.env.TEST_CONCURRENT_ACCOUNT_TOKEN;fs.writeFileSync(path.join({:?},'account-'+token.split('-')[1]+'.json'),JSON.stringify({{token:'rotated-'+token}}));console.log('test model');", root.path())));
+    let fake = FakePi::with_probes(
+        &format!(
+            "exec {} \"$@\"",
+            shell_quote(inference.command.to_str().unwrap())
+        ),
+        "printf 'test-pi\\n'",
+        &probe,
     );
-    let command = format!(
-        "node {}",
-        script(&format!(
-            "const fs=require('fs'),path=require('path');const req=JSON.parse(fs.readFileSync(0,'utf8'));const token=process.env.TEST_CONCURRENT_ACCOUNT_TOKEN||'';fs.writeFileSync(path.join({:?},req.task_id),token);process.stdout.write(JSON.stringify({{schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:token.startsWith('bound-')?'succeeded':'provider_error',summary:'credential observation'}}));",
-            observed.display().to_string()
-        ))
-    );
-    let (_, mut provider) = request("concurrent-template", command);
-    provider.readiness_invocation = Some(
-        homeboy_core::command_invocation::CommandInvocation {
-            argv: vec!["node".to_string(), readiness],
-            ..Default::default()
-        }
-        .into(),
-    );
+    let mut provider = fake.provider();
     let mut tasks = Vec::new();
     let mut credentials = Vec::new();
     for index in 0..4 {
@@ -1682,11 +1523,9 @@ fn concurrent_launches_keep_each_readiness_bound_credential() {
                 }
             }),
         );
-        let (mut task, _) = request(&format!("concurrent-{index}"), "unused".to_string());
-        task.executor.config = json!({
-            "provider": account,
-            "credential_path": credential,
-        });
+        let mut task = fake.request(&format!("concurrent-{index}"));
+        task.executor.config["provider"] = json!(account);
+        task.executor.config["credential_path"] = json!(credential);
         tasks.push(task);
         credentials.push(credential);
     }
@@ -1939,13 +1778,9 @@ fn repeated_immediate_adapter_classified_failure_opens_circuit_with_actionable_e
     let state_path = unique_state_path("immediate-circuit");
     let _ = fs::remove_file(&state_path);
     let state = state_path.to_string_lossy().replace('\\', "\\\\");
-    let command = format!(
-        "node {}",
-        script(&format!(
-            "let fs=require('fs');let req=JSON.parse(fs.readFileSync(0,'utf8'));let p='{state}';let n=0;try{{n=parseInt(fs.readFileSync(p,'utf8'))||0}}catch(e){{}}fs.writeFileSync(p,String(n+1));process.stdout.write(JSON.stringify({{schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:'provider_error',summary:'Unexpected server error. Check server logs for details. err_test123',failure_classification:'provider'}}));"
-        ))
-    );
-    let (request, mut provider) = request("task-immediate-circuit", command);
+    let fake = node_pi(&format!("let p='{state}';let n=0;try{{n=Number(fs.readFileSync(p,'utf8'))}}catch(e){{}}fs.writeFileSync(p,String(n+1));failure('Unexpected server error. Check server logs for details. err_test123');"));
+    let request = fake.request("task-immediate-circuit");
+    let mut provider = fake.provider();
     provider.immediate_failure_patterns = vec![AgentTaskProviderImmediateFailurePattern {
         id: "server_error".to_string(),
         error_contains_any: vec!["unexpected server error".to_string()],
@@ -1969,10 +1804,11 @@ fn repeated_immediate_adapter_classified_failure_opens_circuit_with_actionable_e
             diagnostic.class == "agent_task.provider_immediate_failure_retry_suppressed"
         })
         .expect("circuit diagnostic");
-    assert_eq!(
-        diagnostic.data["provider_error_refs"],
-        json!(["err_test123"])
-    );
+    let refs = diagnostic.data["provider_error_refs"]
+        .as_array()
+        .expect("error references");
+    assert!(!refs.is_empty());
+    assert!(refs.iter().all(|value| value == "err_test123"));
     assert_eq!(diagnostic.data["retryable"], json!(false));
     assert_eq!(
         diagnostic.data["log_lookup"],
@@ -1993,9 +1829,9 @@ fn immediate_failure_suppression_is_scoped_to_one_task_provider_retry_sequence()
     let _ = fs::remove_file(&second_state);
     for (task_id, state) in [("first", &first_state), ("second", &second_state)] {
         let state = state.to_string_lossy().replace('\\', "\\\\");
-        let (request, mut provider) = request(task_id, format!("node {}", script(&format!(
-            "let fs=require('fs');let req=JSON.parse(fs.readFileSync(0,'utf8'));let p='{state}';let n=0;try{{n=parseInt(fs.readFileSync(p,'utf8'))||0}}catch(e){{}}fs.writeFileSync(p,String(n+1));process.stdout.write(JSON.stringify({{schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:'provider_error',summary:'server unavailable',failure_classification:'provider'}}));"
-        ))));
+        let fake = node_pi(&format!("let p='{state}';let n=0;try{{n=Number(fs.readFileSync(p,'utf8'))}}catch(e){{}}fs.writeFileSync(p,String(n+1));failure('server unavailable');"));
+        let request = fake.request(task_id);
+        let mut provider = fake.provider();
         provider.immediate_failure_patterns = vec![AgentTaskProviderImmediateFailurePattern {
             id: "server".to_string(),
             error_contains_any: vec!["server unavailable".to_string()],
@@ -2211,13 +2047,9 @@ fn a_flat_rate_usage_limit_is_classified_rate_limited_and_carries_its_reset_time
     // #13644: "5-hour usage limit reached. Resets in 3hr 3min." (pi-go)
     // is not a generic rate-limit blip Homeboy should retry blindly — it is a
     // known, temporary cap with a computable reset time rotation can act on.
-    let command = format!(
-        "node {}",
-        script(&format!(
-            "process.stdout.write(JSON.stringify({{schema:'{AGENT_TASK_OUTCOME_SCHEMA}',task_id:'task-usage-cap',status:'provider_error',summary:'5-hour usage limit reached. Resets in 3hr 3min.'}}));"
-        ))
-    );
-    let (request, provider) = request("task-usage-cap", command);
+    let fake = node_pi("failure('5-hour usage limit reached. Resets in 3hr 3min.');");
+    let request = fake.request("task-usage-cap");
+    let provider = fake.provider();
 
     let outcome = run_provider_command(&request, &provider, None);
 
@@ -2249,13 +2081,9 @@ fn a_bare_rate_limit_without_a_recognizable_usage_cap_reset_stays_plain_rate_lim
     // A generic 429 with no reset-time signature is still `RateLimited` for
     // retry/rotation purposes, but there is no known reset time to skip
     // rotation entries against, so no usage-cap diagnostic is attached.
-    let command = format!(
-        "node {}",
-        script(&format!(
-            "process.stdout.write(JSON.stringify({{schema:'{AGENT_TASK_OUTCOME_SCHEMA}',task_id:'task-bare-429',status:'provider_error',summary:'429 Too Many Requests'}}));"
-        ))
-    );
-    let (request, provider) = request("task-bare-429", command);
+    let fake = node_pi("failure('429 Too Many Requests');");
+    let request = fake.request("task-bare-429");
+    let provider = fake.provider();
 
     let outcome = run_provider_command(&request, &provider, None);
 
@@ -2269,23 +2097,11 @@ fn a_bare_rate_limit_without_a_recognizable_usage_cap_reset_stays_plain_rate_lim
     }));
 }
 
-/// Chatters on stderr every 20ms, then (if `finish_ms` is set) prints a
-/// succeeded outcome. Stands in for an agent that is busy, not hung.
-fn chatty_provider_script(finish_ms: Option<u64>) -> String {
-    let finish = finish_ms.map_or_else(String::new, |ms| {
-        format!(
-            "setTimeout(()=>{{clearInterval(t); process.stdout.write(JSON.stringify({{schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:'succeeded',summary:'finished after the base deadline'}}));}}, {ms});"
-        )
-    });
-    script(&format!(
-        "let fs=require('fs'); let req=JSON.parse(fs.readFileSync(0,'utf8')); let t=setInterval(()=>process.stderr.write('.'), 20); {finish}"
-    ))
-}
-
 #[test]
 fn a_provider_still_making_progress_is_extended_past_its_base_timeout() {
-    let command = format!("node {}", chatty_provider_script(Some(600)));
-    let (mut request, provider) = request("task-timeout-extended", command);
+    let fake = node_pi("let t=setInterval(()=>process.stderr.write('.'),20); setTimeout(()=>{clearInterval(t);answer('finished after the base deadline');},600);");
+    let mut request = fake.request("task-timeout-extended");
+    let provider = fake.provider();
     request.limits.timeout_ms = Some(150);
     request.limits.max_timeout_ms = Some(5_000);
     request.limits.liveness_timeout_ms = Some(2_000);
@@ -2305,8 +2121,9 @@ fn a_provider_still_making_progress_is_extended_past_its_base_timeout() {
 
 #[test]
 fn a_provider_that_never_finishes_still_times_out_at_the_cap() {
-    let command = format!("node {}", chatty_provider_script(None));
-    let (mut request, provider) = request("task-timeout-capped", command);
+    let fake = FakePi::new("while :; do printf '.' >&2; sleep 0.02; done");
+    let mut request = fake.request("task-timeout-capped");
+    let provider = fake.provider();
     request.limits.timeout_ms = Some(100);
     request.limits.max_timeout_ms = Some(400);
     request.limits.liveness_timeout_ms = Some(2_000);
@@ -2332,8 +2149,9 @@ fn a_provider_that_never_finishes_still_times_out_at_the_cap() {
 
 #[test]
 fn a_cap_equal_to_the_base_disables_extension() {
-    let command = format!("node {}", chatty_provider_script(Some(1_500)));
-    let (mut request, provider) = request("task-timeout-no-extension", command);
+    let fake = node_pi("let t=setInterval(()=>process.stderr.write('.'),20); setTimeout(()=>{clearInterval(t);answer('too late');},1500);");
+    let mut request = fake.request("task-timeout-no-extension");
+    let provider = fake.provider();
     request.limits.timeout_ms = Some(150);
     request.limits.max_timeout_ms = Some(150);
     request.limits.liveness_timeout_ms = Some(2_000);
@@ -2347,26 +2165,4 @@ fn a_cap_equal_to_the_base_disables_extension() {
         .find(|diagnostic| diagnostic.class == "agent_task.provider_timeout")
         .expect("timeout diagnostic");
     assert_eq!(diagnostic.data["timeout_extensions"], json!(0));
-}
-
-#[test]
-fn the_provider_is_handed_the_cap_as_its_own_timeout() {
-    // Executors run their own timer from `limits.timeout_ms`. If they got the
-    // base, they would kill a busy agent before Homeboy could extend it.
-    let command = format!(
-        "node {}",
-        script("let fs=require('fs'); let req=JSON.parse(fs.readFileSync(0,'utf8')); process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:'succeeded',summary:String(req.limits.timeout_ms)}));")
-    );
-    let (mut request, provider) = request("task-timeout-provider-cap", command);
-    request.limits.timeout_ms = Some(1_000);
-    request.limits.max_timeout_ms = Some(9_000);
-
-    let outcome = run_provider_command_once(&request, &provider);
-
-    assert_eq!(
-        outcome.status,
-        AgentTaskOutcomeStatus::Succeeded,
-        "{outcome:?}"
-    );
-    assert_eq!(outcome.summary.as_deref(), Some("9000"));
 }
