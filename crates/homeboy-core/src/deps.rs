@@ -294,16 +294,23 @@ fn hydrate_declared_dependencies_unlocked(
         }
         let component_for_plan = component.clone();
         let path_for_plan = path.to_path_buf();
-        let plan = match run_with_hydration_deadline(policy, deadline, move |control| {
-            provider.hydration_plan(&component_for_plan, &path_for_plan, control)
-        })? {
-            Some(Some(plan)) => plan,
-            Some(None) => continue,
-            None => {
-                outcomes.push(deadline_hydration_outcome(policy, workspace, package_root));
-                break;
-            }
-        };
+        let (plan, environment) =
+            match run_with_hydration_deadline(policy, deadline, move |control| {
+                let plan = provider.hydration_plan(&component_for_plan, &path_for_plan, control)?;
+                plan.map(|plan| {
+                    let environment =
+                        provider.hydration_environment(&component_for_plan, &path_for_plan)?;
+                    Ok((plan, environment))
+                })
+                .transpose()
+            })? {
+                Some(Some(plan)) => plan,
+                Some(None) => continue,
+                None => {
+                    outcomes.push(deadline_hydration_outcome(policy, workspace, package_root));
+                    break;
+                }
+            };
         if hydration_deadline_expired(policy, deadline) {
             outcomes.push(deadline_hydration_outcome(policy, workspace, package_root));
             break;
@@ -323,6 +330,7 @@ fn hydrate_declared_dependencies_unlocked(
                 &reusable.command,
                 &provider_id,
                 "assessing_reusable_state",
+                &environment,
                 policy,
                 deadline,
             );
@@ -373,8 +381,14 @@ fn hydrate_declared_dependencies_unlocked(
             current: None,
             last_progress_ms_ago: None,
         });
-        let execution =
-            run_hydration_command(&plan.install, &provider_id, "installing", policy, deadline);
+        let execution = run_hydration_command(
+            &plan.install,
+            &provider_id,
+            "installing",
+            &environment,
+            policy,
+            deadline,
+        );
         if execution.termination != DependencyHydrationTermination::Completed {
             outcomes.push(hydration_outcome(
                 workspace,
@@ -456,6 +470,7 @@ fn run_hydration_command(
     command: &provider::DependencyProviderCommand,
     provider_id: &str,
     phase: &str,
+    environment: &[(String, String)],
     policy: &DependencyHydrationPolicy,
     deadline: Instant,
 ) -> HydrationCommandExecution {
@@ -486,6 +501,9 @@ fn run_hydration_command(
         process.env_remove(name);
     }
     process.envs(&policy.environment.set);
+    // Extension execution context is authoritative, like CI below: inject it
+    // after clear/remove/set so even a clean environment retains component context.
+    process.envs(environment.iter().map(|(key, value)| (key, value)));
     process
         .args(&command.args)
         .current_dir(&command.cwd)
@@ -1428,6 +1446,115 @@ mod tests {
             }"#,
         )
         .expect("composer adapter");
+    }
+
+    #[test]
+    fn extension_hydration_receives_effective_settings_and_consumer_path() {
+        crate::test_support::with_isolated_home(|home| {
+            crate::extension::component_script::register_component_script_runner();
+            let root = tempfile::tempdir().unwrap();
+            let consumer = root.path().join("packages/consumer");
+            std::fs::create_dir_all(&consumer).unwrap();
+            let extension = home.path().join(".config/homeboy/extensions/fixture-deps");
+            std::fs::create_dir_all(&extension).unwrap();
+            std::fs::write(
+                extension.join("fixture-deps.json"),
+                r#"{
+                "name":"Fixture Deps", "version":"1.0.0",
+                "settings":[
+                    {"id":"default_only","type":"string","label":"Default","default":"manifest"},
+                    {"id":"overridden","type":"string","label":"Override","default":"default"}
+                ],
+                "deps":{"extension_script":"deps.sh"}
+            }"#,
+            )
+            .unwrap();
+            homeboy_test_support::write_executable(extension.join("deps.sh"), r#"#!/bin/sh
+case "$1" in
+  status) printf '{"package_manager":"fixture","packages":[]}' ;;
+  install-command) printf '{"command":["/bin/sh","-c","printf %%s \\"$HOMEBOY_SETTINGS_JSON\\" > settings.json; printf %%s \\"$HOMEBOY_COMPONENT_PATH\\" > component-path; printf %%s \\"$KEPT:$REMOVED:$PWD\\" > policy-env"]}' ;;
+  *) exit 64 ;;
+esac
+"#, 0o755).unwrap();
+            std::fs::write(
+                consumer.join("homeboy.json"),
+                r#"{
+                "id":"fixture", "extensions":{"fixture-deps":{"settings":{
+                    "overridden":"component", "local_workspace_dependencies":["../sibling"]
+                }}}
+            }"#,
+            )
+            .unwrap();
+            let policy = DependencyHydrationPolicy::default();
+            let outcomes =
+                hydrate_declared_dependencies(&consumer, "fixture", ".", &policy).unwrap();
+            assert_eq!(outcomes.len(), 1);
+            assert_eq!(
+                outcomes[0].status,
+                DependencyHydrationStatus::Succeeded,
+                "{outcomes:?}"
+            );
+            let expected = serde_json::json!({
+                "default_only":"manifest", "overridden":"component",
+                "local_workspace_dependencies":["../sibling"]
+            });
+            let check_context = |cwd: &Path| {
+                let settings: serde_json::Value = serde_json::from_str(
+                    &std::fs::read_to_string(cwd.join("settings.json")).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(settings, expected);
+                assert_eq!(
+                    std::fs::read_to_string(cwd.join("component-path")).unwrap(),
+                    consumer.display().to_string()
+                );
+            };
+            check_context(&consumer);
+
+            // Exercise the same provider environment with a hoisted install cwd,
+            // and verify it survives explicit environment policy operations.
+            let component =
+                component::resolve_effective(None, Some(&consumer.display().to_string()), None)
+                    .unwrap();
+            let providers = provider::resolve_dependency_providers(&component, &consumer).unwrap();
+            let provider = providers
+                .iter()
+                .find(|p| matches!(p, provider::DependencyProvider::Extension(_)))
+                .unwrap();
+            let environment = provider
+                .hydration_environment(&component, &consumer)
+                .unwrap();
+            let mut plan = provider
+                .hydration_plan(&component, &consumer, &CooperativeControl::unbounded())
+                .unwrap()
+                .unwrap();
+            plan.install.cwd = root.path().to_path_buf();
+            for clear in [false, true] {
+                let mut policy = DependencyHydrationPolicy::default();
+                policy.environment.clear = clear;
+                policy.environment.remove = vec!["REMOVED".into(), "HOMEBOY_COMPONENT_PATH".into()];
+                policy.environment.set = vec![
+                    ("KEPT".into(), "set-value".into()),
+                    ("HOMEBOY_SETTINGS_JSON".into(), "wrong".into()),
+                ]
+                .into_iter()
+                .collect();
+                let execution = run_hydration_command(
+                    &plan.install,
+                    "fixture",
+                    "installing",
+                    &environment,
+                    &policy,
+                    Instant::now() + policy.timeout,
+                );
+                assert_eq!(execution.exit_code, Some(0), "{}", execution.stderr);
+                check_context(root.path());
+                assert_eq!(
+                    std::fs::read_to_string(root.path().join("policy-env")).unwrap(),
+                    format!("set-value::{}", root.path().display())
+                );
+            }
+        });
     }
 
     #[test]
