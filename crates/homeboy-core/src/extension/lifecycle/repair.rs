@@ -1,7 +1,6 @@
 use super::is_git_url;
 use homeboy_core::config::{self, from_str};
 use homeboy_core::error::{Error, Result};
-use homeboy_core::extension::registry::ExtensionLifecycleValidation;
 use homeboy_core::git;
 use homeboy_core::paths;
 use homeboy_engine_primitives::local_files;
@@ -27,40 +26,30 @@ pub struct ReplaceResult {
     pub source_revision: Option<String>,
 }
 
-pub fn replace(
-    source: &str,
-    id_override: Option<&str>,
-    validation: ExtensionLifecycleValidation<'_>,
-) -> Result<ReplaceResult> {
-    replace_with_revision(source, id_override, None, validation)
+pub fn replace(source: &str, id_override: Option<&str>) -> Result<ReplaceResult> {
+    replace_with_revision(source, id_override, None)
 }
 
 pub fn replace_with_revision(
     source: &str,
     id_override: Option<&str>,
     revision: Option<&str>,
-    validation: ExtensionLifecycleValidation<'_>,
 ) -> Result<ReplaceResult> {
     if is_git_url(source) {
-        replace_from_url(source, id_override, revision, validation)
+        replace_from_url(source, id_override, revision)
     } else {
-        replace_from_path(source, id_override, false, revision, validation)
+        replace_from_path(source, id_override, false, revision)
     }
 }
 
-pub fn relink(
-    extension_id: &str,
-    source: &str,
-    validation: ExtensionLifecycleValidation<'_>,
-) -> Result<ReplaceResult> {
-    replace_from_path(source, Some(extension_id), true, None, validation)
+pub fn relink(extension_id: &str, source: &str) -> Result<ReplaceResult> {
+    replace_from_path(source, Some(extension_id), true, None)
 }
 
 fn replace_from_url(
     url: &str,
     id_override: Option<&str>,
     revision: Option<&str>,
-    validation: ExtensionLifecycleValidation<'_>,
 ) -> Result<ReplaceResult> {
     let extension_id = match id_override {
         Some(id) => slugify_id(id)?,
@@ -115,12 +104,6 @@ fn replace_from_url(
     }
 
     run_setup_or_restore(&extension_id, &extension_dir, &backup_dir)?;
-    validate_agent_runtime_discovery_or_restore(
-        &extension_id,
-        &extension_dir,
-        &backup_dir,
-        validation,
-    )?;
     remove_existing_install(&backup_dir)?;
     let manifest_path = paths::extension_manifest(&extension_id)?;
 
@@ -140,7 +123,6 @@ fn replace_from_path(
     id_override: Option<&str>,
     require_existing_link: bool,
     requested_revision: Option<&str>,
-    validation: ExtensionLifecycleValidation<'_>,
 ) -> Result<ReplaceResult> {
     let mut source = resolve_local_source(source_path)?;
     let extension_id = local_extension_id(&source, source_path, id_override)?;
@@ -203,10 +185,7 @@ fn replace_from_path(
         restore_relinked_install(&extension_dir, &backup_dir, &metadata);
         return Err(err);
     }
-    if let Err(err) = validation.validate_installed_extension(&extension_id) {
-        restore_relinked_install(&extension_dir, &backup_dir, &metadata);
-        return Err(err);
-    }
+
     remove_existing_install(&backup_dir)?;
     let manifest_path = paths::extension_manifest(&extension_id)?;
 
@@ -484,21 +463,6 @@ fn run_setup_or_restore(extension_id: &str, extension_dir: &Path, backup_dir: &P
     Ok(())
 }
 
-fn validate_agent_runtime_discovery_or_restore(
-    extension_id: &str,
-    extension_dir: &Path,
-    backup_dir: &Path,
-    validation: ExtensionLifecycleValidation<'_>,
-) -> Result<()> {
-    if let Err(err) = validation.validate_installed_extension(extension_id) {
-        let _ = remove_existing_install(extension_dir);
-        let _ = restore_existing_install(backup_dir, extension_dir);
-        return Err(err);
-    }
-
-    Ok(())
-}
-
 fn clean_replace_temp(path: &Path) -> Result<()> {
     if path_exists_or_symlink(path) {
         remove_existing_install(path)?;
@@ -577,7 +541,7 @@ mod tests {
     };
     use crate::extension::catalog::load_extension;
     use crate::extension::lifecycle::{install, read_source_revision, read_source_url};
-    use crate::extension::registry::ExtensionLifecycleValidation;
+
     use homeboy_core::test_support::{
         with_isolated_home, write_extension_fixture, write_extension_fixture_with_version,
     };
@@ -821,19 +785,11 @@ mod tests {
             write_extension_fixture(&old_source, "swift");
             write_extension_fixture_with_version(&new_source, "swift", "2.0.0");
 
-            install(
-                &old_source.join("swift").to_string_lossy(),
-                Some("swift"),
-                ExtensionLifecycleValidation::declaration_only(),
-            )
-            .expect("install linked extension");
+            install(&old_source.join("swift").to_string_lossy(), Some("swift"))
+                .expect("install linked extension");
 
-            let result = relink(
-                "swift",
-                &new_source.join("swift").to_string_lossy(),
-                ExtensionLifecycleValidation::declaration_only(),
-            )
-            .expect("relink should replace symlink");
+            let result = relink("swift", &new_source.join("swift").to_string_lossy())
+                .expect("relink should replace symlink");
 
             let installed_path = home.join(".config/homeboy/extensions/swift");
             assert!(installed_path.is_symlink());
@@ -866,12 +822,8 @@ mod tests {
             let short_revision = git_output(&worktree, &["rev-parse", "--short", "HEAD"])
                 .expect("short worktree revision");
 
-            install(
-                &durable_source.join("pi").to_string_lossy(),
-                Some("pi"),
-                ExtensionLifecycleValidation::declaration_only(),
-            )
-            .expect("install durable linked extension");
+            install(&durable_source.join("pi").to_string_lossy(), Some("pi"))
+                .expect("install durable linked extension");
             let metadata_dir = home.join(".config/homeboy/extensions");
             fs::write(
                 metadata_dir.join(".pi.source-requested-ref"),
@@ -879,12 +831,7 @@ mod tests {
             )
             .expect("durable requested ref");
 
-            relink(
-                "pi",
-                &worktree.join("pi").to_string_lossy(),
-                ExtensionLifecycleValidation::declaration_only(),
-            )
-            .expect("relink to git worktree");
+            relink("pi", &worktree.join("pi").to_string_lossy()).expect("relink to git worktree");
 
             let installed = metadata_dir.join("pi");
             assert_eq!(
@@ -924,14 +871,12 @@ mod tests {
             install(
                 &old_source.join("wordpress").to_string_lossy(),
                 Some("wordpress"),
-                ExtensionLifecycleValidation::declaration_only(),
             )
             .expect("install linked extension");
 
             let err = replace(
                 &new_source.join("wordpress").to_string_lossy(),
                 Some("wordpress"),
-                ExtensionLifecycleValidation::declaration_only(),
             )
             .expect_err("replace should fail invalid provider declaration");
 
@@ -960,16 +905,11 @@ mod tests {
             install(
                 &old_source.join("wordpress").to_string_lossy(),
                 Some("wordpress"),
-                ExtensionLifecycleValidation::declaration_only(),
             )
             .expect("install linked extension");
 
-            relink(
-                "wordpress",
-                &new_source.join("wordpress").to_string_lossy(),
-                ExtensionLifecycleValidation::declaration_only(),
-            )
-            .expect("relink should materialize shared runtime");
+            relink("wordpress", &new_source.join("wordpress").to_string_lossy())
+                .expect("relink should materialize shared runtime");
 
             assert!(home
                 .join(".config/homeboy/agent-runtimes/sample-runtime/scripts/agent/sample-runtime-agent-task-executor.cjs")
@@ -993,19 +933,14 @@ mod tests {
             fs::create_dir_all(&boundary_source).expect("boundary source");
             write_shared_asset_manifest(&boundary_source, &[]);
 
-            install(
-                &old_source.join("pi").to_string_lossy(),
-                Some("pi"),
-                ExtensionLifecycleValidation::declaration_only(),
-            )
-            .expect("install linked extension");
+            install(&old_source.join("pi").to_string_lossy(), Some("pi"))
+                .expect("install linked extension");
             crate::runtime_package::refresh_shared_assets(&boundary_source)
                 .expect("activate runtime generation boundary");
 
             relink(
                 "pi",
                 &new_source.join("agent-runtimes/pi").to_string_lossy(),
-                ExtensionLifecycleValidation::declaration_only(),
             )
             .expect("relink should publish declared runtime assets");
 
@@ -1034,12 +969,8 @@ mod tests {
             fs::create_dir_all(&boundary_source).expect("boundary source");
             write_shared_asset_manifest(&boundary_source, &[]);
 
-            install(
-                &old_source.join("pi").to_string_lossy(),
-                Some("pi"),
-                ExtensionLifecycleValidation::declaration_only(),
-            )
-            .expect("install linked extension");
+            install(&old_source.join("pi").to_string_lossy(), Some("pi"))
+                .expect("install linked extension");
             crate::runtime_package::refresh_shared_assets(&boundary_source)
                 .expect("activate runtime generation boundary");
             let current = fs::read_link(home.join(".config/homeboy/runtime-generations/current"))
@@ -1048,7 +979,6 @@ mod tests {
             relink(
                 "pi",
                 &new_source.join("agent-runtimes/pi").to_string_lossy(),
-                ExtensionLifecycleValidation::declaration_only(),
             )
             .expect_err("malformed root manifest should reject relink");
 
@@ -1078,16 +1008,11 @@ mod tests {
             install(
                 &old_source.join("wordpress").to_string_lossy(),
                 Some("wordpress"),
-                ExtensionLifecycleValidation::declaration_only(),
             )
             .expect("install linked extension");
 
-            replace(
-                &new_source.to_string_lossy(),
-                Some("wordpress"),
-                ExtensionLifecycleValidation::declaration_only(),
-            )
-            .expect("replace should resolve monorepo root and materialize shared runtime");
+            replace(&new_source.to_string_lossy(), Some("wordpress"))
+                .expect("replace should resolve monorepo root and materialize shared runtime");
 
             let installed_path = home.join(".config/homeboy/extensions/wordpress");
             assert!(installed_path.is_symlink());
@@ -1116,7 +1041,6 @@ mod tests {
             install(
                 &old_source.join("wordpress").to_string_lossy(),
                 Some("wordpress"),
-                ExtensionLifecycleValidation::declaration_only(),
             )
             .expect("install linked extension");
 
@@ -1124,7 +1048,6 @@ mod tests {
                 &new_source.to_string_lossy(),
                 Some("wordpress"),
                 Some("fix/runtime-contract-preservation"),
-                ExtensionLifecycleValidation::declaration_only(),
             )
             .expect("replace should preserve requested revision");
 
@@ -1148,12 +1071,8 @@ mod tests {
                 "bash {{extension_path}}/scripts/build/setup.sh",
             );
 
-            install(
-                &old_source.join("swift").to_string_lossy(),
-                Some("swift"),
-                ExtensionLifecycleValidation::declaration_only(),
-            )
-            .expect("install linked extension");
+            install(&old_source.join("swift").to_string_lossy(), Some("swift"))
+                .expect("install linked extension");
             let metadata_dir = home.join(".config/homeboy/extensions");
             fs::write(
                 metadata_dir.join(".swift.source-requested-ref"),
@@ -1166,12 +1085,8 @@ mod tests {
             )
             .expect("old source revision");
 
-            let err = relink(
-                "swift",
-                &new_source.join("swift").to_string_lossy(),
-                ExtensionLifecycleValidation::declaration_only(),
-            )
-            .expect_err("relink should fail when setup fails");
+            let err = relink("swift", &new_source.join("swift").to_string_lossy())
+                .expect_err("relink should fail when setup fails");
 
             assert_eq!(err.message, "IO error");
             assert!(err.details.to_string().contains("Setup command failed"));
@@ -1210,24 +1125,16 @@ mod tests {
             };
             let remote_url = remote.path().join("extension.git");
 
-            let install_result = install(
-                &remote_url.to_string_lossy(),
-                Some("swift"),
-                ExtensionLifecycleValidation::declaration_only(),
-            )
-            .expect("install copied extension");
+            let install_result = install(&remote_url.to_string_lossy(), Some("swift"))
+                .expect("install copied extension");
             assert!(!install_result.path.is_symlink());
 
             write_extension_fixture_with_version(&source, "swift", "2.0.0");
             assert!(commit_all(&source, "update extension"));
             assert!(run_git(&source, &["push", "origin", "HEAD"]));
 
-            let result = replace(
-                &remote_url.to_string_lossy(),
-                Some("swift"),
-                ExtensionLifecycleValidation::declaration_only(),
-            )
-            .expect("replace copied extension");
+            let result = replace(&remote_url.to_string_lossy(), Some("swift"))
+                .expect("replace copied extension");
 
             assert_eq!(result.extension_id, "swift");
             assert_eq!(result.old_path, install_result.path);
@@ -1259,12 +1166,8 @@ mod tests {
             };
             let remote_url = remote.path().join("extension.git");
 
-            install(
-                &remote_url.to_string_lossy(),
-                Some("swift"),
-                ExtensionLifecycleValidation::declaration_only(),
-            )
-            .expect("install copied extension");
+            install(&remote_url.to_string_lossy(), Some("swift"))
+                .expect("install copied extension");
 
             write_extension_fixture_with_version(&source, "swift", "2.0.0");
             assert!(commit_all(&source, "update extension"));
@@ -1274,7 +1177,6 @@ mod tests {
                 &remote_url.to_string_lossy(),
                 Some("swift"),
                 Some(&pinned_revision),
-                ExtensionLifecycleValidation::declaration_only(),
             )
             .expect("replace copied extension at pinned revision");
 

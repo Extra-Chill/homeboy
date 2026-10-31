@@ -21,7 +21,7 @@ see [`docs/architecture/provider-fanout-boundary.md`](../architecture/provider-f
 
 | Subcommand | Purpose |
 |---|---|
-| `run-plan` | Run an `AgentTaskPlan` through extension-declared executor providers. |
+| `run-plan` | Run an `AgentTaskPlan` through the built-in Pi executor. |
 | `run <run-id>` | Execute one exact durable run id, bypassing older queued work. |
 | `status <run-id> [--exact] [--watch]` | Read durable run status; `--exact` bypasses Cook alias resolution to inspect that concrete lifecycle record. `--watch` emits changed snapshots and exits when terminal or timed out. |
 | `list [--latest] [--limit <n>] [--cursor <cursor>] [--branch <branch>]` | List durable runs, newest first; `--latest` returns the newest record matching the supplied filters. |
@@ -702,7 +702,7 @@ processes start. Compact `agent-task status` includes `execution_location` as
 
 | Subcommand | Purpose |
 |---|---|
-| `providers` | List extension-declared executor providers and optional secret/backend readiness. |
+| `providers` | List the built-in Pi executor and optional secret/backend readiness. |
 | `contract` | Export Homeboy's machine-readable agent-task core contract metadata. |
 | `auth` | Configure and inspect provider authentication secrets. |
 
@@ -956,10 +956,8 @@ materializes no workload workspace — and its dispatch is bounded
 (`HOMEBOY_LAB_PROVIDER_DISCOVERY_DISPATCH_TIMEOUT_SECS`, default 90s) so it
 returns a labelled timeout with durable runner/job identity instead of hanging.
 
-Per-runtime revision probes (`git rev-parse HEAD`) are bounded too. A wedged
-runtime checkout yields a partial catalog plus an
-`agent_runtime_manifest.revision_probe_timeout` diagnostic naming the runtime,
-rather than an unbounded discovery.
+Pi provider discovery is built in and reads no extension manifests or runtime
+checkout revisions. Installing the agent-runtimes extension is not required.
 
 Use `homeboy agent-task providers --backend <backend> --validate-readiness` to
 fail fast when the selected backend is registered but its declared runner

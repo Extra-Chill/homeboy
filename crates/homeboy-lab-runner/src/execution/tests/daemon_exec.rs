@@ -11,7 +11,6 @@
 
 use homeboy_core::api_jobs::{Job, JobEventKind, JobStatus, JobStore};
 use homeboy_core::daemon::route_with_body;
-use homeboy_core::extension::registry::ExtensionLifecycleValidation;
 use homeboy_core::observation::ObservationStore;
 use homeboy_core::test_support::{direct_exec_body, HomeGuard};
 
@@ -608,7 +607,6 @@ fn daemon_exec_injects_extension_env_and_redacts_provider_secret() {
     homeboy_core::extension::lifecycle::install(
         &extension.path().display().to_string(),
         Some("fixture"),
-        ExtensionLifecycleValidation::declaration_only(),
     )
     .expect("install fixture extension");
     let store = JobStore::default();

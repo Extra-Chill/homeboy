@@ -221,6 +221,25 @@ fn isolated_cook_rejects_source_identity_drift_before_snapshotting() {
 }
 
 #[test]
+fn scheduler_dispatches_builtin_pi_event_stream_without_extensions() {
+    let _home = super::common::artifact_home();
+    let command = format!(
+        "node {}",
+        script("process.stdout.write(JSON.stringify({type:'message_end',message:{role:'assistant',stopReason:'stop',content:[{type:'text',text:'ok'}]}})+'\\n');")
+    );
+    let (mut request, _) = request("native-pi", command);
+    request.executor.backend = "pi".to_string();
+    let providers = super::super::discovery::discover_agent_task_executor_providers();
+    assert_eq!(providers.len(), 1);
+    let outcome = run_provider_command_once(&request, &providers[0]);
+    assert_eq!(
+        outcome.status,
+        AgentTaskOutcomeStatus::Succeeded,
+        "{outcome:?}"
+    );
+}
+
+#[test]
 fn scheduler_dispatches_extension_provider_command() {
     let command = format!(
         "node {}",
@@ -1367,10 +1386,10 @@ fn provider_can_return_timeout_payload_during_wrapper_grace() {
 fn provider_command_receives_executor_config_env() {
     let command = format!(
         "node {}",
-        script("let fs=require('fs'); let req=JSON.parse(fs.readFileSync(0,'utf8')); let config=JSON.parse(process.env.HOMEBOY_AGENT_TASK_EXECUTOR_CONFIG_JSON); process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:config.marker==='configured'?'succeeded':'failed',summary:process.env.HOMEBOY_AGENT_TASK_PROVIDER_ID}));")
+        script("let config=JSON.parse(process.env.HOMEBOY_AGENT_TASK_EXECUTOR_CONFIG_JSON); if(config.marker!=='configured') process.exit(1); process.stdout.write(JSON.stringify({type:'message_end',message:{role:'assistant',stopReason:'stop',content:[{type:'text',text:process.env.HOMEBOY_AGENT_TASK_PROVIDER_ID}]}})+'\\n');")
     );
     let (mut request, mut provider) = request("task-config", command);
-    request.executor.config = json!({ "marker": "configured" });
+    request.executor.config["marker"] = json!("configured");
     provider.extension_id = Some("wordpress".to_string());
     provider.extension_path = Some("/tmp/homeboy-extension".to_string());
     let scheduler = AgentTaskScheduler::new(Arc::new(
@@ -1379,7 +1398,7 @@ fn provider_command_receives_executor_config_env() {
 
     let aggregate = scheduler.run(AgentTaskPlan::new("plan-config", vec![request]));
 
-    assert_eq!(aggregate.totals.succeeded, 1);
+    assert_eq!(aggregate.totals.succeeded, 1, "{aggregate:?}");
     assert_eq!(
         aggregate.outcomes[0].summary.as_deref(),
         Some("test.provider")
@@ -1786,14 +1805,13 @@ fn is_transient_provider_error_classifies_transient_and_permanent_text() {
 fn transient_then_success_script(state_path: &Path, fail_until: u32) -> String {
     let state = state_path.to_string_lossy().replace('\\', "\\\\");
     script(&format!(
-        "let fs=require('fs'); let req=JSON.parse(fs.readFileSync(0,'utf8')); \
+        "let fs=require('fs'); \
          let p='{state}'; let n=0; try {{ n=parseInt(fs.readFileSync(p,'utf8'))||0; }} catch(e) {{}} \
          n+=1; fs.writeFileSync(p, String(n)); \
-         if (n <= {fail_until}) {{ \
-           process.stdout.write(JSON.stringify({{schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:'provider_error',summary:'Network error ... cURL error 28: Operation timed out after 15000ms',failure_classification:'provider'}})); \
-         }} else {{ \
-           process.stdout.write(JSON.stringify({{schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:'succeeded',summary:'recovered'}})); \
-         }}",
+         let message = n <= {fail_until} \
+           ? {{role:'assistant',stopReason:'error',errorMessage:'Network error ... cURL error 28: Operation timed out after 15000ms',content:[]}} \
+           : {{role:'assistant',stopReason:'stop',content:[{{type:'text',text:'recovered'}}]}}; \
+         process.stdout.write(JSON.stringify({{type:'message_end',message}})+'\\n');", 
     ))
 }
 
@@ -1802,10 +1820,10 @@ fn transient_then_success_script(state_path: &Path, fail_until: u32) -> String {
 fn permanent_error_script(state_path: &Path) -> String {
     let state = state_path.to_string_lossy().replace('\\', "\\\\");
     script(&format!(
-        "let fs=require('fs'); let req=JSON.parse(fs.readFileSync(0,'utf8')); \
+        "let fs=require('fs'); \
          let p='{state}'; let n=0; try {{ n=parseInt(fs.readFileSync(p,'utf8'))||0; }} catch(e) {{}} \
          n+=1; fs.writeFileSync(p, String(n)); \
-         process.stdout.write(JSON.stringify({{schema:'homeboy/agent-task-outcome/v1',task_id:req.task_id,status:'provider_error',summary:'401 Unauthorized: invalid token',failure_classification:'provider'}}));",
+         process.stdout.write(JSON.stringify({{type:'message_end',message:{{role:'assistant',stopReason:'error',errorMessage:'401 Unauthorized: invalid token',content:[]}}}})+'\\n');",
     ))
 }
 

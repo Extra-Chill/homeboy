@@ -121,52 +121,6 @@ fn provider_manifest_defaults_executable_readiness_env_when_omitted() {
 }
 
 #[test]
-fn runtime_manifest_normalizes_codex_invocation_argv() {
-    let runtime_dir = "/runtime/codex";
-    let runtime: agent_runtime_manifest::AgentRuntimeManifest = serde_json::from_value(json!({
-        "schema": homeboy_core::agent_runtime_manifest::AGENT_RUNTIME_MANIFEST_SCHEMA,
-        "id": "codex",
-        "runtime_path": runtime_dir,
-        "agent_task_executors": [{
-            "schema": AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA,
-            "id": "codex.agent-task-executor",
-            "backend": "codex",
-            "invocation": {
-                "schema": homeboy_core::command_invocation::COMMAND_INVOCATION_SCHEMA,
-                "argv": ["codex-agent-task-executor", "--json"]
-            }
-        }]
-    }))
-    .expect("runtime manifest");
-    let provider = discovery::agent_task_executor_providers_from_runtime_manifests(
-        vec![runtime],
-        &mut Vec::new(),
-    )
-    .into_iter()
-    .next()
-    .expect("codex provider discovered");
-
-    assert!(provider.command.is_empty());
-    assert!(provider.command_argv.is_empty());
-    assert_eq!(
-        provider.invocation.schema.as_deref(),
-        Some(homeboy_core::command_invocation::COMMAND_INVOCATION_SCHEMA)
-    );
-    assert_eq!(
-        provider.invocation.argv,
-        vec![
-            "codex-agent-task-executor".to_string(),
-            "--json".to_string()
-        ]
-    );
-
-    let (program, args, cwd) = provider_command_parts(&provider).expect("command parts");
-    assert_eq!(program, "codex-agent-task-executor");
-    assert_eq!(args, vec!["--json"]);
-    assert_eq!(cwd, None);
-}
-
-#[test]
 fn provider_missing_chains_matching_runtime_discovery_diagnostics() {
     let _home = artifact_home();
     let (mut request, _provider) = request("missing-pi", "unused".to_string());
@@ -266,27 +220,6 @@ fn provider_readiness_invocation_defaults_and_validates_its_total_timeout() {
     assert!(error
         .to_string()
         .contains("readiness_invocation.timeout_ms"));
-}
-
-#[test]
-fn provider_readiness_timeout_uses_an_injected_zero_duration() {
-    let (_, mut provider) = request("timed-readiness", "node ignored.js".to_string());
-    provider.readiness_invocation = Some(
-        CommandInvocation {
-            argv: vec!["node".to_string(), script("setInterval(() => {}, 1000);")],
-            ..CommandInvocation::default()
-        }
-        .into(),
-    );
-
-    let error = run_provider_readiness_invocation_with_test_timeout(
-        &provider,
-        &Value::Null,
-        Duration::ZERO,
-    )
-    .expect_err("zero injected duration must time out without sleeping");
-
-    assert!(error.contains("timed out after 0 ms"), "{error}");
 }
 
 #[test]
@@ -1390,8 +1323,11 @@ if read input; then exit 77; fi
 printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","stopReason":"stop","content":[{{"type":"text","text":"Native Pi completed."}}]}}}}'
 "#, observed.display())).unwrap();
     std::fs::set_permissions(&pi, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let (mut request, mut provider) = request("native-pi", "node /does/not/exist.cjs".into());
-    provider.backend = "pi".into();
+    let _home = artifact_home();
+    let (mut request, _) = request("native-pi", String::new());
+    let provider = discovery::discover_agent_task_executor_providers().remove(0);
+    assert!(provider.extension_id.is_none());
+    assert!(provider.runtime_path.is_none());
     request.executor.backend = "pi".into();
     request.executor.config = json!({"command":pi,"model":"roadie/test"});
     request.workspace.root = Some(temp.path().display().to_string());

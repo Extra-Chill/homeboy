@@ -586,18 +586,3 @@ fn default_backend_reads_component_scoped_extension_policy() {
         Some("component-policy")
     );
 }
-
-#[test]
-fn provider_command_interpolates_runtime_path_separately_from_extension_path() {
-    let (_, mut provider) = request(
-        "task-a",
-        "{{runtime_path}}/bin/provider --extension {{extension_path}}".to_string(),
-    );
-    provider.extension_path = Some("/extensions/project-type".to_string());
-    provider.runtime_path = Some("/agent-runtimes/example".to_string());
-
-    assert_eq!(
-        render_provider_command_display(&provider),
-        "/agent-runtimes/example/bin/provider --extension /extensions/project-type"
-    );
-}
