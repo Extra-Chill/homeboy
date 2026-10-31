@@ -2,6 +2,7 @@
   "name": "Managed Preview",
   "id": "managed-preview",
   "version": "0.1.0",
+  "source_url": "https://github.com/Extra-Chill/homeboy",
   "icon": "globe",
   "description": "Provider command helpers for Homeboy managed service public previews",
   "author": "Extra Chill",

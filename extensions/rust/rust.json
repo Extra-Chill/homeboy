@@ -1,6 +1,7 @@
 {
   "name": "Rust",
   "version": "1.37.10",
+  "source_url": "https://github.com/Extra-Chill/homeboy",
   "icon": "gearshape.2.fill",
   "description": "Cargo CLI integration for Rust components",
   "author": "Extra Chill",
