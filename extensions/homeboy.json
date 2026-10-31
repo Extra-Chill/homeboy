@@ -26,6 +26,7 @@
       "node tests/extension-shape-lint-toolchain-probes.test.mjs",
       "node tests/extension-shape-lint-consumer-files.test.mjs",
       "node tests/runtime-settings-helper-declaration-contract.mjs",
+      "bash tests/nodejs-node-test-summary-smoke.sh",
       "bash tests/settings-helper-smoke.sh",
       "bash tests/wordpress-install-command-smoke.sh",
       "bash tests/wordpress-release-artifact-version-smoke.sh",

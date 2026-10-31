@@ -12,7 +12,7 @@ set -euo pipefail
 #   3. Built-in default: `node --test` (Node 18+ test runner)
 #
 # Result-count parsing strategy: tee the runner output to a tempfile,
-# detect known runner formats (vitest, jest, node:test, mocha-tap), and
+# detect known runner formats (vitest, jest, node:test TAP/spec, mocha-tap), and
 # emit homeboy's TestResults envelope. Unknown formats fall back to
 # {total: ?, passed: ?, failed: 0|1 based on exit code, partial: "unknown-runner"}.
 # Exit code remains the primary signal — the JSON is decoration.
@@ -45,6 +45,8 @@ source "$SETTINGS_HELPER"
 homeboy_runner_harness_source_command_capture
 # shellcheck source=../lib/node-helpers.sh
 source "${SCRIPT_DIR}/../lib/node-helpers.sh"
+# shellcheck source=../lib/node-test-summary.sh
+source "${SCRIPT_DIR}/../lib/node-test-summary.sh"
 homeboy_require_package_json
 homeboy_detect_package_manager
 homeboy_ensure_node_dependencies
@@ -255,16 +257,13 @@ if [ $PARSED -eq 0 ] && echo "$OUTPUT" | grep -qE "^Tests:[[:space:]]+.*[0-9]+ t
     PARSED=1
 fi
 
-# node --test TAP-ish summary:
-#   # tests 42
-#   # pass  41
-#   # fail  1
-#   # skipped 0
-if [ $PARSED -eq 0 ] && echo "$OUTPUT" | grep -qE "^# tests[[:space:]]+[0-9]+"; then
-    TOTAL=$(echo "$OUTPUT" | grep -oE "^# tests[[:space:]]+[0-9]+" | grep -oE "[0-9]+" | head -1 || echo 0)
-    PASSED=$(echo "$OUTPUT" | grep -oE "^# pass[[:space:]]+[0-9]+" | grep -oE "[0-9]+" | head -1 || echo 0)
-    FAILED=$(echo "$OUTPUT" | grep -oE "^# fail[[:space:]]+[0-9]+" | grep -oE "[0-9]+" | head -1 || echo 0)
-    SKIPPED=$(echo "$OUTPUT" | grep -oE "^# skipped[[:space:]]+[0-9]+" | grep -oE "[0-9]+" | head -1 || echo 0)
+# node --test summary, TAP (`# tests 42`) or spec (`ℹ tests 42`) reporter.
+# See lib/node-test-summary.sh.
+if [ $PARSED -eq 0 ] && homeboy_node_test_parse_summary "$OUTPUT"; then
+    TOTAL="$NODE_TEST_TOTAL"
+    PASSED="$NODE_TEST_PASSED"
+    FAILED="$NODE_TEST_FAILED"
+    SKIPPED="$NODE_TEST_SKIPPED"
     PARSED=1
 fi
 
