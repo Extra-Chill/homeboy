@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.23.4] - 2026-10-31
+
+### Fixed
+- bound artifact names so multi-component deploys stop failing after success
+
 ## [2.23.3] - 2026-10-31
 
 ### Changed
