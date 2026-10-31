@@ -14,31 +14,24 @@ set -euo pipefail
 #      actually boots, so CI must install the same one or validation
 #      dependencies that require a newer PHP silently fail to resolve.
 #   2. The `Requires PHP` header of the theme (style.css) or the first plugin
-#      main file. This is the component's declared minimum.
+#      main file (else composer.json), raised to any already-present local
+#      validation dependency's floor. PHPCS still uses the component floor.
 #
 # An empty object is emitted when nothing is declared so core can fall back
 # to extension defaults.
 
-python3 - <<'PY'
+# Dependencies may not be fetched yet. Inspect explicit local paths only: env
+# detection must not clone or fail on unresolved slugs. PHPStan checks the full
+# materialized graph later, including dependencies unavailable at detect time.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+python3 - "${SCRIPT_DIR}/../lib" <<'PY'
 import json
 import re
+import sys
 from pathlib import Path
 
-
-def header_value(path, key):
-    try:
-        with path.open("r", encoding="utf-8", errors="ignore") as handle:
-            for index, line in enumerate(handle):
-                if index >= 100:
-                    break
-                marker = key + ":"
-                if marker in line:
-                    value = line.split(marker, 1)[1].strip()
-                    if value:
-                        return value
-    except OSError:
-        return None
-    return None
+sys.path.insert(0, sys.argv[1])
+from php_floor import declared_floor, local_dependency_paths, version
 
 
 def homeboy_runtime_php(root):
@@ -64,16 +57,11 @@ root = Path.cwd()
 php = homeboy_runtime_php(root)
 
 if php is None:
-    style = root / "style.css"
-    if style.exists() and header_value(style, "Theme Name"):
-        php = header_value(style, "Requires PHP")
-
-if php is None:
-    for candidate in sorted(root.glob("*.php")):
-        if not header_value(candidate, "Plugin Name"):
-            continue
-        php = header_value(candidate, "Requires PHP")
-        break
+    php = declared_floor(root)
+    for dependency in local_dependency_paths(root):
+        floor = declared_floor(dependency)
+        if floor and (not php or version(floor) > version(php)):
+            php = floor
 
 output = {}
 if php:

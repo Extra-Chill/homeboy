@@ -442,7 +442,9 @@ if [ -n "$TEXT_DOMAIN" ] && [ "${HOMEBOY_DEBUG:-}" = "1" ]; then
     echo "DEBUG: Detected text domain: $TEXT_DOMAIN"
 fi
 
-# Auto-detect PHP version for PHPCS and PHPStan.
+# Auto-detect the component compatibility target for PHPCS and PHPStan.
+# Do not raise this to validation dependencies' floors: those constrain the
+# interpreter, checked separately by phpstan-runner.sh, not component support.
 # Priority: HOMEBOY_PHP_VERSION env var > Requires PHP header > composer.json require.php > default
 PHP_VERSION=""
 if [ -n "${HOMEBOY_PHP_VERSION:-}" ]; then

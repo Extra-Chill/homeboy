@@ -130,6 +130,17 @@ case "$WORDPRESS_LINT_ROLE" in
         ;;
 esac
 
+# PHPStan's executable uses /usr/bin/env php. Check that interpreter, not
+# HOMEBOY_PHP_VERSION (the analysis/PHPCS compatibility target). Never require
+# dependency declarations before checking their runtime floor.
+# Best-effort: unresolved dependencies are reported (and fail, where required)
+# by the existing resolution paths below, so do not abort or duplicate here.
+VALIDATION_DEPENDENCY_PATHS=$(homeboy_resolve_validation_dependency_paths "$PLUGIN_PATH" 2>/dev/null || true)
+PHPSTAN_RUNTIME_VERSION=$(php -r 'echo PHP_MAJOR_VERSION, ".", PHP_MINOR_VERSION;')
+if ! printf '%s\n' "$VALIDATION_DEPENDENCY_PATHS" | python3 "${SCRIPT_DIR}/../lib/php_floor.py" "$PHPSTAN_RUNTIME_VERSION"; then
+    exit 1
+fi
+
 PHPSTAN_BIN="${EXTENSION_PATH}/vendor/bin/phpstan"
 PHPSTAN_DEFAULT_CONFIG="${EXTENSION_PATH}/phpstan.neon.dist"
 PHPSTAN_COMPONENT_CONFIG=""
