@@ -11,8 +11,26 @@ pub struct CandidateBundleError {
     pub expected: String,
     pub observed: String,
 }
+/// The candidate bundle could not be transferred from the runner, but nothing
+/// proves it is gone: the runner workspace and artifact remain, so promotion
+/// can be retried (Extra-Chill/homeboy#16842).
+pub const CANDIDATE_BUNDLE_TRANSPORT_INTERRUPTED: &str = "transport_interrupted";
+
+impl CandidateBundleError {
+    pub fn retryable(&self) -> bool {
+        self.kind == CANDIDATE_BUNDLE_TRANSPORT_INTERRUPTED
+    }
+}
+
 impl std::fmt::Display for CandidateBundleError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.retryable() {
+            return write!(
+                f,
+                "retryable: run {} candidate bundle {}: expected {}, observed {}; the runner still holds the candidate, so retry acquisition with `homeboy agent-task recover {}`",
+                self.run_id, self.kind, self.expected, self.observed, self.run_id
+            );
+        }
         write!(
             f,
             "non-recoverable: run {} candidate bundle {}: expected {}, observed {}",
@@ -23,7 +41,7 @@ impl std::fmt::Display for CandidateBundleError {
 impl std::error::Error for CandidateBundleError {}
 impl From<CandidateBundleError> for Error {
     fn from(error: CandidateBundleError) -> Self {
-        Error::new(homeboy_core::ErrorCode::ValidationInvalidArgument, error.to_string(), serde_json::json!({"field":"source.candidate", "run_id":error.run_id, "kind":error.kind, "expected":error.expected, "observed":error.observed})).with_retryable(false).with_source(error)
+        Error::new(homeboy_core::ErrorCode::ValidationInvalidArgument, error.to_string(), serde_json::json!({"field":"source.candidate", "run_id":error.run_id, "kind":error.kind, "expected":error.expected, "observed":error.observed})).with_retryable(error.retryable()).with_source(error)
     }
 }
 fn bundle_error(run_id: &str, kind: &'static str, expected: &str, observed: String) -> Error {
@@ -284,7 +302,19 @@ fn fetch_run_candidates_internal(
             &outcome.task_id,
             record.runner_id().zip(record.runner_job_id()),
         )
-        .map_err(|e| unavailable(e.to_string()))?;
+        .map_err(|e| {
+            // A transfer that broke mid-stream is not a missing candidate.
+            if e.retryable == Some(true) {
+                bundle_error(
+                    &record.run_id,
+                    CANDIDATE_BUNDLE_TRANSPORT_INTERRUPTED,
+                    &candidate.candidate_sha,
+                    e.to_string(),
+                )
+            } else {
+                unavailable(e.to_string())
+            }
+        })?;
         let root = plan
             .tasks
             .iter()
@@ -541,6 +571,30 @@ mod tests {
             assert!(spans.span("promote.wait").unwrap().duration_ms.unwrap() >= 4.0);
             assert!(spans.span("promote.acquire").unwrap().is_ok());
         });
+    }
+
+    #[test]
+    fn interrupted_bundle_transfer_is_retryable_not_non_recoverable() {
+        // homeboy#16842: a mid-stream decode failure stranded a finished Lab
+        // candidate as non-recoverable although the runner still held it.
+        let error: Error = CandidateBundleError {
+            run_id: "run-1".into(),
+            kind: CANDIDATE_BUNDLE_TRANSPORT_INTERRUPTED,
+            expected: "abc".into(),
+            observed: "read runner artifact response: error decoding response body".into(),
+        }
+        .into();
+        assert_eq!(error.retryable, Some(true));
+        assert!(
+            !error.message.contains("non-recoverable"),
+            "{}",
+            error.message
+        );
+        assert!(error.message.contains("homeboy agent-task recover run-1"));
+        assert_eq!(
+            error.details["kind"],
+            CANDIDATE_BUNDLE_TRANSPORT_INTERRUPTED
+        );
     }
 
     #[test]
