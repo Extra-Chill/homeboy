@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.53.12] - 2026-10-31
+
+### Fixed
+- respect validation dependencies' PHP floor in env detect and PHPStan
+
 ## [3.53.11] - 2026-10-31
 
 ### Fixed
