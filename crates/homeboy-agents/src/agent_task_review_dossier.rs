@@ -70,7 +70,6 @@ pub struct AgentTaskReviewVerifiedCommand {
     pub status: String,
     pub candidate_commit: String,
     pub candidate_tree: String,
-    pub candidate_sha256: String,
     pub evidence_ref: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total: Option<u64>,
@@ -539,7 +538,6 @@ pub(crate) fn verified_commands_from_promotion(
                 status: format!("{:?}", gate.status).to_ascii_lowercase(),
                 candidate_commit: candidate.commit.clone(),
                 candidate_tree: candidate.tree.clone(),
-                candidate_sha256: candidate.candidate_sha256.clone(),
                 evidence_ref: gate.id.clone(),
                 total,
                 passed,
@@ -1289,10 +1287,9 @@ fn render_verification(dossier: &AgentTaskReviewDossier) -> Option<String> {
                     _ => String::new(),
                 };
                 format!(
-                    "- Gate {}: tree `{}`, fingerprint `{}`{counts}",
+                    "- Gate {}: tree `{}`{counts}",
                     position + 1,
                     code(&command.candidate_tree),
-                    code(&command.candidate_sha256),
                 )
             })
             .collect::<Vec<_>>()
@@ -2393,18 +2390,16 @@ mod tests {
                 "exit_code": 0,
                 "stdout": "test result: FAILED. 175 passed; 2 failed; 0 ignored",
                 "candidate_checkout": {
-                    "schema": "homeboy/agent-task-gate-candidate-checkout/v1",
+                    "schema": "homeboy/agent-task-gate-candidate-checkout/v2",
                     "commit": "candidate-commit",
-                    "tree": candidate_tree,
-                    "candidate_sha256": "candidate-fingerprint"
+                    "tree": candidate_tree
                 }
             }],
             "provenance": {
                 "candidate_checkout": {
-                    "schema": "homeboy/agent-task-gate-candidate-checkout/v1",
+                    "schema": "homeboy/agent-task-gate-candidate-checkout/v2",
                     "commit": "candidate-commit",
-                    "tree": candidate_tree,
-                    "candidate_sha256": "candidate-fingerprint"
+                    "tree": candidate_tree
                 }
             },
             "operator_notification": { "status": "completed", "message": "fixture" }
@@ -2817,8 +2812,6 @@ mod tests {
             status: "succeeded".into(),
             candidate_commit: "cf5ddd58adabe779d1c9d26b16d90d83be16805b".into(),
             candidate_tree: "645eaae2998d0612cd2f08c977a31b49c06fec7d".into(),
-            candidate_sha256: "4b49e0e6e704327986856461f073ca59ecd76115d918d95a670b2a76394357b2"
-                .into(),
             evidence_ref: "gate-1".into(),
             total: Some(65),
             passed: Some(65),

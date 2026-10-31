@@ -172,30 +172,18 @@ impl AgentTaskAcceptanceVerifier for PromotionDriftVerifier {
 }
 
 fn applied_acceptance_promotion(candidate: &str, base: &str) -> Value {
-    applied_acceptance_promotion_with_fingerprint(
-        candidate,
-        base,
-        "candidate-sha",
-        "candidate-tree",
-    )
+    applied_acceptance_promotion_with_fingerprint(candidate, base, "candidate-tree")
 }
 
-fn applied_acceptance_promotion_with_fingerprint(
-    candidate: &str,
-    base: &str,
-    sha256: &str,
-    tree: &str,
-) -> Value {
+fn applied_acceptance_promotion_with_fingerprint(candidate: &str, base: &str, tree: &str) -> Value {
     json!({
         "status": "applied",
         "verified_base": { "sha": base },
         "provenance": { "candidate": { "fingerprint": {
-            "schema": "homeboy/agent-task-candidate-fingerprint/v1",
+            "schema": "homeboy/agent-task-candidate-fingerprint/v2",
             "target_path": "/repo",
             "head": candidate,
-            "base": "candidate-parent",
             "changed_files": ["src/lib.rs"],
-            "sha256": sha256,
             "tree": tree,
         } } },
     })
@@ -3271,12 +3259,7 @@ fn acceptance_invalidates_a_dirty_candidate_replacement_at_the_same_head() {
     record_promotion_in_store(
         &lifecycle_store,
         run_id,
-        applied_acceptance_promotion_with_fingerprint(
-            "unchanged-head",
-            "base-a",
-            "clean-sha256",
-            "clean-tree",
-        ),
+        applied_acceptance_promotion_with_fingerprint("unchanged-head", "base-a", "clean-tree"),
     )
     .expect("clean promotion recorded");
     let _verifier = AcceptanceVerifierTestGuard::install(Box::new(FixtureAcceptanceVerifier));
@@ -3295,7 +3278,6 @@ fn acceptance_invalidates_a_dirty_candidate_replacement_at_the_same_head() {
         applied_acceptance_promotion_with_fingerprint(
             "unchanged-head",
             "base-a",
-            "dirty-replacement-sha256",
             "dirty-replacement-tree",
         ),
     )
@@ -3303,7 +3285,6 @@ fn acceptance_invalidates_a_dirty_candidate_replacement_at_the_same_head() {
     let acceptance = replaced.acceptance.expect("acceptance record");
     assert_eq!(acceptance.verdict, AgentTaskAcceptanceVerdict::Pending);
     assert_eq!(acceptance.candidate.head, "unchanged-head");
-    assert_eq!(acceptance.candidate.sha256, "dirty-replacement-sha256");
     assert_eq!(acceptance.candidate.tree, "dirty-replacement-tree");
     assert_eq!(acceptance.history.len(), 1);
 }

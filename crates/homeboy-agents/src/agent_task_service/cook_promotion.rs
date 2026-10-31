@@ -1471,7 +1471,7 @@ pub(super) fn validate_replacement_promotion_in_store(
 
 /// Older failed promotions did not retain the checkout used by their gates.
 /// Their immutable candidate fingerprint remains sufficient to authenticate a
-/// replacement checkout, but only when its tree and candidate digest match.
+/// replacement checkout, but only when its content tree matches.
 fn validate_legacy_replacement_candidate_checkout(
     run_id: &str,
     original: &AgentTaskPromotionReport,
@@ -1508,18 +1508,11 @@ fn validate_legacy_replacement_candidate_checkout(
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
         .ok_or_else(|| failed("legacy_candidate_fingerprint"))?;
-    let sha256 = fingerprint
-        .get("sha256")
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| failed("legacy_candidate_fingerprint"))?;
     let checkout = replacement
         .provenance
         .get("candidate_checkout")
         .ok_or_else(|| failed("legacy_candidate_checkout"))?;
-    if checkout.get("tree").and_then(Value::as_str) != Some(tree)
-        || checkout.get("candidate_sha256").and_then(Value::as_str) != Some(sha256)
-    {
+    if checkout.get("tree").and_then(Value::as_str) != Some(tree) {
         return Err(failed("legacy_candidate_checkout_fingerprint"));
     }
     if replacement.provenance.get("candidate") != original.provenance.get("candidate") {
@@ -2380,7 +2373,7 @@ fn is_exact_rebased_candidate(
         return Ok(false);
     };
     if current.head == expected.head
-        || current.base != *fresh_base
+        || git_output(path, &["rev-parse", &format!("{}^", current.head)])?.trim() != fresh_base
         || git_changed_files(path, fresh_base, &current.tree)?
             != git_changed_files(path, prior_base, &expected.tree)?
     {
@@ -4142,11 +4135,9 @@ mod no_change_recovery_tests {
         serde_json::from_value(json!({
             "kind": "git",
             "fingerprint": {
-                "schema": "homeboy/agent-task-candidate-fingerprint/v1",
+                "schema": "homeboy/agent-task-candidate-fingerprint/v2",
                 "target_path": "/fixture",
                 "head": head,
-                "base": "parent-head",
-                "sha256": "candidate-sha",
                 "tree": "candidate-tree",
                 "changed_files": changed_files
             }
@@ -6913,7 +6904,7 @@ mod gate_failure_diagnostic_tests {
                 "id": "gate-1", "status": "failed", "command": ["sh", "-lc", "cargo test"],
                 "exit_code": 125, "termination": "no_progress", "elapsed_ms": 12000,
                 "last_progress_ms_ago": 11000,
-                "candidate_checkout": {"commit":"abc", "tree":"tree", "candidate_sha256":"digest"},
+                "candidate_checkout": {"commit":"abc", "tree":"tree"},
                 "failure_evidence": {"command":"cargo test", "exit_code":125,
                     "stdout_tail":"last test output", "stderr_tail":"stalled"}
             }]

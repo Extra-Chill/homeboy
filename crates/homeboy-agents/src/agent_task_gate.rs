@@ -757,7 +757,6 @@ pub struct AgentTaskGateCandidateCheckout {
     pub schema: String,
     pub commit: String,
     pub tree: String,
-    pub candidate_sha256: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2423,6 +2422,7 @@ fn run_gate_argv(
         let scope = crate::agent_task_promotion::active_gate_supervision();
         let supervision = execution.supervision.or(scope.as_deref());
         let request = placement::LabGateRequest {
+            schema: placement::LabGateRequestSchema::V2,
             preflight_only: false,
             toolchains: vec![],
             runner_id,

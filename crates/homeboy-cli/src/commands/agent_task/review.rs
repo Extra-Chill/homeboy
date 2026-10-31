@@ -3682,6 +3682,7 @@ mod tests {
             let mut dead = fake.provider();
             dead.secret_env_requirements = credential_declaring_provider().secret_env_requirements;
             let catalog = provider_catalog(vec![dead]);
+            let before = homeboy::core::defaults::load_config();
 
             let error = write_default_backend_from_readiness(&catalog)
                 .expect_err("no declared backend passes a live readiness probe");
@@ -3694,8 +3695,11 @@ mod tests {
             // A written default that cannot dispatch is worse than the
             // explicit `selection_required` failure it would replace.
             let after = homeboy::core::defaults::load_config();
-            assert_eq!(after.agent_task.default_backend, None);
-            assert_eq!(after.agent_task.rotation, None);
+            assert_eq!(
+                after.agent_task.default_backend,
+                before.agent_task.default_backend
+            );
+            assert_eq!(after.agent_task.rotation, before.agent_task.rotation);
         });
     }
 

@@ -419,7 +419,6 @@ fn promote_no_op_outcome_uses_audited_committed_candidate() {
         report.provenance["candidate"]["fingerprint"]["head"],
         git_head(&repo, "HEAD")
     );
-    assert_eq!(report.provenance["candidate"]["fingerprint"]["base"], base);
     assert_eq!(report.deterministic_gates.len(), 1);
     assert!(provider.apply_calls.is_empty());
     assert_eq!(provider.verify_calls.len(), 1);
@@ -1572,10 +1571,6 @@ fn promotion_runs_gates_in_the_destination_workspace() {
     assert_eq!(
         checkout.tree,
         report.provenance["candidate_checkout"]["tree"]
-    );
-    assert_eq!(
-        checkout.candidate_sha256,
-        report.provenance["candidate_checkout"]["candidate_sha256"]
     );
 }
 

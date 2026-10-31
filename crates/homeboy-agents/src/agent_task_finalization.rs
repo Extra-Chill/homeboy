@@ -809,8 +809,7 @@ fn validate_durable_acceptance(
                 !candidate.schema.trim().is_empty()
                     && !candidate.target_path.trim().is_empty()
                     && !candidate.head.trim().is_empty()
-                    && !candidate.base.trim().is_empty()
-                    && !candidate.sha256.trim().is_empty()
+                    && !candidate.tree.trim().is_empty()
                     && !candidate.tree.trim().is_empty()
             },
         )
@@ -1042,16 +1041,14 @@ fn inherit_promotion_gates(
             None,
         ));
     };
-    if candidate.schema != "homeboy/agent-task-gate-candidate-checkout/v1"
+    if candidate.schema != "homeboy/agent-task-gate-candidate-checkout/v2"
         || candidate.commit.trim().is_empty()
         || candidate.tree.trim().is_empty()
-        || candidate.candidate_sha256.trim().is_empty()
         || candidate.tree != fingerprint.tree
-        || candidate.candidate_sha256 != fingerprint.sha256
     {
         return Err(Error::validation_invalid_argument(
             "cook_delivery.artifacts.promotion.provenance.candidate_checkout",
-            "green promotion gate checkout does not match the exact promoted candidate tree and digest; run fresh verification",
+            "green promotion gate checkout does not match the exact promoted candidate tree; run fresh verification",
             None,
             None,
         ));

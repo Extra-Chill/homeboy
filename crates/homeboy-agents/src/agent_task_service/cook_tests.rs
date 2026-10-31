@@ -14786,10 +14786,9 @@ fn adopt_green_candidate_missing_review_form(
     gate_proof["changed_files"] = serde_json::json!(["lib.rs"]);
     gate_proof["verified_base"] = serde_json::json!({ "base": "main", "sha": base });
     let candidate_checkout = serde_json::json!({
-        "schema": "homeboy/agent-task-gate-candidate-checkout/v1",
+        "schema": "homeboy/agent-task-gate-candidate-checkout/v2",
         "commit": candidate,
         "tree": "fixture-candidate-tree",
-        "candidate_sha256": "fixture-candidate-sha",
     });
     gate_proof["deterministic_gates"][0]["command"] =
         serde_json::json!(["sh", "-c", "test \"$(cat lib.rs)\" = candidate"]);
@@ -17588,11 +17587,11 @@ pub(crate) fn promotion(run_id: &str) -> AgentTaskPromotionReport {
             "target": {"worktree": "homeboy@8058", "path": worktree_path},
             "candidate": {"base_sha": "base", "candidate_sha": "patch", "tree_sha": "fixture-patch-sha"},
             "changed_files": ["src/lib.rs"],
-            "deterministic_gates": [{"id": "gate", "visibility": "visible", "reveal_policy": "full_evidence", "status": "succeeded", "command": ["sh", "-c", "cargo test --locked agent_task_promotion --lib"], "exit_code": 0, "candidate_checkout": {"schema": "homeboy/agent-task-gate-candidate-checkout/v1", "commit": "candidate", "tree": "candidate-tree", "candidate_sha256": "candidate-sha"}}],
+            "deterministic_gates": [{"id": "gate", "visibility": "visible", "reveal_policy": "full_evidence", "status": "succeeded", "command": ["sh", "-c", "cargo test --locked agent_task_promotion --lib"], "exit_code": 0, "candidate_checkout": {"schema": "homeboy/agent-task-gate-candidate-checkout/v2", "commit": "candidate", "tree": "candidate-tree"}}],
             "gate_results": [{"id": "gate", "name": "cargo test --locked agent_task_promotion --lib", "kind": "command", "status": "passed"}],
             "operator_notification": {"status": "completed", "message": "complete"},
             "verified_base": {"base": "main", "sha": "verified-base"},
-            "provenance": {"worktree_path": worktree_path, "candidate_checkout": {"schema": "homeboy/agent-task-gate-candidate-checkout/v1", "commit": "candidate", "tree": "candidate-tree", "candidate_sha256": "candidate-sha"}}
+            "provenance": {"worktree_path": worktree_path, "candidate_checkout": {"schema": "homeboy/agent-task-gate-candidate-checkout/v2", "commit": "candidate", "tree": "candidate-tree"}}
         })).unwrap()
 }
 
@@ -23066,12 +23065,10 @@ fn candidate_recoverable_manual_preflight_binds_canonical_candidate_and_recovers
         promotion.provenance["candidate"] = serde_json::json!({
             "kind": "git",
             "fingerprint": {
-                "schema": "homeboy/agent-task-candidate-fingerprint/v1",
+                "schema": "homeboy/agent-task-candidate-fingerprint/v2",
                 "target_path": target.path(),
                 "head": "candidate-sha",
-                "base": "main",
                 "tree": "candidate-tree",
-                "sha256": "candidate-sha",
                 "changed_files": ["src/lib.rs"]
             }
         });
@@ -24058,7 +24055,7 @@ fn replacement_gate_proof_recovers_failed_candidate_without_hiding_evidence_or_r
         failed.deterministic_gates[0].status = crate::agent_task_gate::AgentTaskGateStatus::Failed;
         failed.deterministic_gates[0].exit_code = 1;
         failed.deterministic_gates[0].stderr = "rustup infrastructure failure".to_string();
-        failed.provenance["candidate"] = serde_json::json!({"kind": "git", "fingerprint": {"head": "candidate", "tree": "candidate-tree", "sha256": "candidate-sha"}});
+        failed.provenance["candidate"] = serde_json::json!({"kind": "git", "fingerprint": {"head": "candidate", "tree": "candidate-tree"}});
         let legacy_checkout = failed.provenance["candidate_checkout"].take();
         agent_task_lifecycle::record_promotion(run_id, serde_json::to_value(&failed).unwrap())
             .expect("record immutable failed evidence");
@@ -24132,7 +24129,7 @@ fn replacement_gate_proof_recovers_failed_candidate_without_hiding_evidence_or_r
         let mut unrelated_legacy_checkout = replacement.clone();
         unrelated_legacy_checkout.provenance["candidate_checkout"]["tree"] =
             serde_json::json!("other-tree");
-        unrelated_legacy_checkout.provenance["candidate_checkout"]["candidate_sha256"] =
+        unrelated_legacy_checkout.provenance["candidate_checkout"]["tree"] =
             serde_json::json!("other-sha");
         unrelated_legacy_checkout.deterministic_gates[0].candidate_checkout = Some(
             serde_json::from_value(

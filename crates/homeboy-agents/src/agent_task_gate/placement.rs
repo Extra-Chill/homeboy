@@ -78,8 +78,15 @@ pub fn verify_extension_resource_closure(
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum LabGateRequestSchema {
+    #[serde(rename = "homeboy/agent-task-lab-gate-request/v2")]
+    V2,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LabGateRequest {
+    pub schema: LabGateRequestSchema,
     #[serde(default)]
     pub preflight_only: bool,
     #[serde(default)]
@@ -136,7 +143,7 @@ impl LabGateRequest {
     }
 
     /// Snapshot materialization may change the index projection and absolute
-    /// path, but must retain the recorded HEAD, base and exact candidate tree.
+    /// path, but must retain the recorded HEAD and exact candidate tree.
     pub fn verify_materialized_candidate(&self, cwd: &Path) -> Result<()> {
         let actual = candidate_fingerprint(&cwd.display().to_string())?;
         match (&self.candidate, actual) {
@@ -148,7 +155,6 @@ impl LabGateRequest {
                     fingerprint: actual,
                 },
             ) if expected.head == actual.head
-                && expected.base == actual.base
                 && !expected.tree.is_empty()
                 && expected.tree == actual.tree =>
             {
@@ -391,6 +397,7 @@ pub(super) fn preflight(
     timeout: Duration,
 ) -> Result<()> {
     let request = LabGateRequest {
+        schema: LabGateRequestSchema::V2,
         preflight_only: true,
         toolchains: toolchains.to_vec(),
         runner_id: runner_id.to_string(),
@@ -898,6 +905,7 @@ mod tests {
 
     fn request(root: &Path) -> LabGateRequest {
         LabGateRequest {
+            schema: LabGateRequestSchema::V2,
             preflight_only: false,
             toolchains: vec![],
             runner_id: "lab".to_string(),
@@ -922,6 +930,16 @@ mod tests {
             timeout_seconds: 30,
             no_progress_timeout_seconds: 30,
         }
+    }
+
+    #[test]
+    fn request_schema_rejects_skewed_runners() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut value = serde_json::to_value(request(temp.path())).unwrap();
+        assert_eq!(value["schema"], "homeboy/agent-task-lab-gate-request/v2");
+        serde_json::from_value::<LabGateRequest>(value.clone()).unwrap();
+        value["schema"] = serde_json::json!("homeboy/agent-task-lab-gate-request/v1");
+        assert!(serde_json::from_value::<LabGateRequest>(value).is_err());
     }
 
     #[test]

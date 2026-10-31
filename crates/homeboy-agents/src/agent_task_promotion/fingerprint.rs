@@ -1,5 +1,4 @@
 use homeboy_core::error::{Error, Result};
-use sha2::{Digest, Sha256};
 use std::path::Path;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -7,13 +6,8 @@ pub struct AgentTaskCandidateFingerprint {
     pub schema: String,
     pub target_path: String,
     pub head: String,
-    pub base: String,
     pub changed_files: Vec<String>,
-    pub sha256: String,
-    /// The tree produced by applying the candidate to its recorded HEAD without
-    /// changing the real index. It binds a later recovery commit to the exact
-    /// promoted content.
-    #[serde(default)]
+    /// Full workspace content, without changing the real index.
     pub tree: String,
 }
 
@@ -30,8 +24,7 @@ pub enum AgentTaskPromotionCandidate {
     },
 }
 
-/// Hash the exact Git candidate state. Index and worktree diffs remain separate
-/// so staged and unstaged overlap cannot collapse into one candidate state.
+/// Identify the Git workspace by HEAD and its final content tree.
 pub fn candidate_fingerprint(path: &str) -> Result<AgentTaskPromotionCandidate> {
     let root = Path::new(path);
     let metadata = match std::fs::metadata(root) {
@@ -67,74 +60,89 @@ pub fn candidate_fingerprint(path: &str) -> Result<AgentTaskPromotionCandidate> 
 
     let git = |args: &[&str]| run_git(path, args);
     let head = text(git(&["rev-parse", "HEAD"])?).trim().to_string();
-    let parents = text(git(&["rev-list", "--parents", "-n", "1", "HEAD"])?);
-    let parent_ids = parents.split_whitespace().collect::<Vec<_>>();
-    if parent_ids.first() != Some(&head.as_str()) {
-        return Err(Error::git_command_failed(
-            "git rev-list returned a HEAD different from git rev-parse".to_string(),
-        ));
-    }
-    // A root commit has no parent; unlike `HEAD^` failure, this is unambiguous.
-    let base = parent_ids.get(1).copied().unwrap_or(&head).to_string();
     reject_gitlinks(&git)?;
-    let staged = git(&["diff", "--binary", "--cached"])?;
-    let unstaged = git(&["diff", "--binary"])?;
     let untracked = paths(git(&["ls-files", "--others", "--exclude-standard", "-z"])?);
     let mut changed_files = changed_paths(&git, &untracked)?;
-    let tree = candidate_tree(path)?;
-    let mut hasher = Sha256::new();
-    hash_record(&mut hasher, b"staged", &staged);
-    hash_record(&mut hasher, b"unstaged", &unstaged);
     for relative in &untracked {
-        hash_untracked(&mut hasher, path, relative)?;
+        validate_untracked(path, relative)?;
     }
+    let tree = candidate_tree(path)?;
     changed_files.sort();
     changed_files.dedup();
     Ok(AgentTaskPromotionCandidate::Git {
         fingerprint: AgentTaskCandidateFingerprint {
-            schema: "homeboy/agent-task-candidate-fingerprint/v1".to_string(),
+            schema: "homeboy/agent-task-candidate-fingerprint/v2".to_string(),
             target_path: std::fs::canonicalize(root)
                 .map_err(|error| Error::internal_io(error.to_string(), Some(path.to_string())))?
                 .display()
                 .to_string(),
             head,
-            base,
             changed_files,
-            sha256: format!("{:x}", hasher.finalize()),
             tree,
         },
     })
 }
 
-/// The candidate tree must be a pure function of the working tree, because it
+/// The candidate tree overlays the working tree on the real index's content. It
 /// authenticates a candidate across time: a promotion records it, and
 /// moving-base recovery re-derives it to prove the destination still holds the
 /// exact promoted content.
 ///
-/// Seeding the scratch index from `HEAD` rather than copying the live index is
-/// what makes that true. A copied index carries Git's stat cache, and `git add`
-/// skips any file whose stat still matches its cached entry — so a file that
-/// was modified without a stat change keeps its stale blob and the tree
-/// silently describes content that is not on disk. `read-tree` writes entries
-/// with no stat data, so every working-tree file is re-hashed.
+/// The scratch index is seeded from the real index's tree, not from `HEAD`, so
+/// force-added ignored paths absent from `HEAD` stay in the tree. That tree is
+/// written from a copy of the real index: `git write-tree` rewrites the index
+/// it reads and needs its lock, and a fingerprint must neither mutate the
+/// workspace nor fail while another Git process holds `index.lock`.
+///
+/// Only the tree crosses into the scratch index, never the copied stat cache.
+/// `git add` skips any file whose stat still matches a cached entry, so a file
+/// modified without a stat change would keep its stale blob and the tree would
+/// describe content that is not on disk. `read-tree` writes entries with no
+/// stat data, so every working-tree file is re-hashed.
 fn candidate_tree(path: &str) -> Result<String> {
-    let temporary = tempfile::NamedTempFile::new()
-        .map_err(|error| Error::internal_io(error.to_string(), Some(path.to_string())))?;
-    let index = [(
-        "GIT_INDEX_FILE".to_string(),
-        temporary.path().display().to_string(),
-    )];
-    let git = |args: &[&str], context: &str| {
-        homeboy_core::git::run_git_bytes_with_env(Path::new(path), args, context, &index)
+    let scratch = |context: &str| {
+        tempfile::NamedTempFile::new()
+            .map_err(|error| Error::internal_io(error.to_string(), Some(context.to_string())))
+    };
+    let real_index = text(run_git(
+        path,
+        &["rev-parse", "--path-format=absolute", "--git-path", "index"],
+    )?);
+    let real_index = Path::new(real_index.trim());
+    let candidate = scratch(path)?;
+    let git = |index: &tempfile::NamedTempFile, args: &[&str], context: &str| {
+        homeboy_core::git::run_git_bytes_with_env(
+            Path::new(path),
+            args,
+            context,
+            &[(
+                "GIT_INDEX_FILE".to_string(),
+                index.path().display().to_string(),
+            )],
+        )
+    };
+    // A checkout without an index (for example `worktree add --no-checkout`)
+    // has staged nothing beyond `HEAD`.
+    let staged_tree = if real_index.exists() {
+        let staged = scratch(path)?;
+        std::fs::copy(real_index, staged.path()).map_err(|error| {
+            Error::internal_io(error.to_string(), Some(real_index.display().to_string()))
+        })?;
+        text(git(&staged, &["write-tree"], "write real index tree")?)
+    } else {
+        "HEAD".to_string()
     };
     git(
-        &["read-tree", "HEAD"],
-        "seed candidate tree index from HEAD",
+        &candidate,
+        &["read-tree", staged_tree.trim()],
+        "seed candidate tree index from real index tree",
     )?;
-    git(&["add", "-A"], "stage candidate tree")?;
-    Ok(text(git(&["write-tree"], "write candidate tree")?)
-        .trim()
-        .to_string())
+    git(&candidate, &["add", "-A"], "stage candidate tree")?;
+    Ok(
+        text(git(&candidate, &["write-tree"], "write candidate tree")?)
+            .trim()
+            .to_string(),
+    )
 }
 
 fn is_git_worktree(path: &str) -> Result<bool> {
@@ -198,7 +206,7 @@ fn paths(bytes: Vec<u8>) -> Vec<String> {
         .collect()
 }
 
-fn hash_untracked(hasher: &mut Sha256, root: &str, relative: &str) -> Result<()> {
+fn validate_untracked(root: &str, relative: &str) -> Result<()> {
     let file = Path::new(root).join(relative);
     let metadata = std::fs::symlink_metadata(&file)
         .map_err(|error| Error::internal_io(error.to_string(), Some(file.display().to_string())))?;
@@ -206,35 +214,9 @@ fn hash_untracked(hasher: &mut Sha256, root: &str, relative: &str) -> Result<()>
     if kind.is_symlink() || !kind.is_file() {
         return Err(Error::validation_invalid_argument("candidate", "untracked candidate entries must be regular files; symlinks, directories, and special files are unsupported", Some(relative.to_string()), None));
     }
-    hash_record(hasher, b"untracked-path", relative.as_bytes());
-    #[cfg(unix)]
-    hash_record(
-        hasher,
-        b"untracked-mode",
-        format!(
-            "{:o}",
-            std::os::unix::fs::MetadataExt::mode(&metadata) & 0o111
-        )
-        .as_bytes(),
-    );
-    #[cfg(not(unix))]
-    hash_record(hasher, b"untracked-mode", b"0");
-    hash_record(
-        hasher,
-        b"untracked-bytes",
-        &std::fs::read(&file).map_err(|error| {
-            Error::internal_io(error.to_string(), Some(file.display().to_string()))
-        })?,
-    );
     Ok(())
 }
 
-fn hash_record(hasher: &mut Sha256, kind: &[u8], bytes: &[u8]) {
-    hasher.update((kind.len() as u64).to_be_bytes());
-    hasher.update(kind);
-    hasher.update((bytes.len() as u64).to_be_bytes());
-    hasher.update(bytes);
-}
 fn text(bytes: Vec<u8>) -> String {
     String::from_utf8_lossy(&bytes).to_string()
 }
@@ -312,10 +294,6 @@ mod tests {
             first,
             candidate_fingerprint(dir.path().to_str().unwrap()).unwrap()
         );
-        let AgentTaskPromotionCandidate::Git { fingerprint } = first else {
-            panic!("git")
-        };
-        assert_eq!(fingerprint.head, fingerprint.base);
     }
     #[test]
     fn non_git_target_is_an_explicit_capability() {
@@ -328,20 +306,60 @@ mod tests {
         );
     }
     #[test]
-    fn untracked_content_and_mode_change_fingerprint() {
+    fn untracked_content_changes_tree() {
         let dir = repo();
         commit(&dir, "base");
         std::fs::write(dir.path().join("a"), "one").unwrap();
-        let first = candidate_fingerprint(dir.path().to_str().unwrap()).unwrap();
+        let first = fingerprint(&dir);
         std::fs::write(dir.path().join("a"), "two").unwrap();
-        assert_ne!(
-            first,
-            candidate_fingerprint(dir.path().to_str().unwrap()).unwrap()
-        );
+        assert_ne!(first.tree, fingerprint(&dir).tree);
     }
 
     #[test]
-    fn staged_then_unstaged_edits_change_fingerprint() {
+    fn fingerprint_leaves_a_locked_real_index_untouched() {
+        let dir = repo();
+        commit(&dir, "base");
+        std::fs::write(dir.path().join("base"), "edited").unwrap();
+        let index = dir.path().join(".git/index");
+        let before = std::fs::read(&index).unwrap();
+        std::fs::write(dir.path().join(".git/index.lock"), "").unwrap();
+        let locked = fingerprint(&dir);
+        assert_eq!(before, std::fs::read(&index).unwrap());
+        std::fs::remove_file(dir.path().join(".git/index.lock")).unwrap();
+        assert_eq!(locked, fingerprint(&dir));
+    }
+
+    #[test]
+    fn added_content_changes_tree() {
+        for (name, ignored, staged) in [
+            ("staged", false, true),
+            ("untracked", false, false),
+            ("ignored", true, true),
+        ] {
+            let dir = repo();
+            commit(&dir, "base");
+            if ignored {
+                std::fs::write(dir.path().join(".git/info/exclude"), name).unwrap();
+            }
+            let clean = fingerprint(&dir);
+            std::fs::write(dir.path().join(name), "one").unwrap();
+            if staged {
+                assert!(Command::new("git")
+                    .args(["add", "-f", name])
+                    .current_dir(dir.path())
+                    .status()
+                    .unwrap()
+                    .success());
+            }
+            let added = fingerprint(&dir);
+            assert_ne!(clean.tree, added.tree, "{name}");
+            std::fs::write(dir.path().join(name), "two").unwrap();
+            assert_ne!(added.tree, fingerprint(&dir).tree, "{name} edited");
+        }
+    }
+
+    #[test]
+    fn staged_then_unstaged_edits_change_tree() {
         let dir = repo();
         commit(&dir, "tracked");
         std::fs::write(dir.path().join("tracked"), "staged").unwrap();
@@ -352,7 +370,7 @@ mod tests {
             .unwrap();
         let staged = fingerprint(&dir);
         std::fs::write(dir.path().join("tracked"), "unstaged").unwrap();
-        assert_ne!(staged.sha256, fingerprint(&dir).sha256);
+        assert_ne!(staged.tree, fingerprint(&dir).tree);
     }
 
     #[cfg(unix)]
@@ -367,7 +385,7 @@ mod tests {
         let mut permissions = std::fs::metadata(&path).unwrap().permissions();
         permissions.set_mode(0o755);
         std::fs::set_permissions(path, permissions).unwrap();
-        assert_ne!(first.sha256, fingerprint(&dir).sha256);
+        assert_ne!(first.tree, fingerprint(&dir).tree);
     }
 
     #[cfg(unix)]
@@ -420,7 +438,7 @@ mod tests {
         commit(&dir, "base");
         let clean = fingerprint(&dir);
         std::fs::remove_file(dir.path().join("base")).unwrap();
-        assert_ne!(clean.sha256, fingerprint(&dir).sha256);
+        assert_ne!(clean.tree, fingerprint(&dir).tree);
     }
 
     #[test]
@@ -430,7 +448,7 @@ mod tests {
         let clean = fingerprint(&dir);
         std::fs::rename(dir.path().join("old"), dir.path().join("new")).unwrap();
         let renamed = fingerprint(&dir);
-        assert_ne!(clean.sha256, renamed.sha256);
+        assert_ne!(clean.tree, renamed.tree);
         assert_eq!(renamed.changed_files, vec!["new", "old"]);
     }
 

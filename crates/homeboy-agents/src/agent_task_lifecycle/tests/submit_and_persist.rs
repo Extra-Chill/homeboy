@@ -2292,12 +2292,10 @@ fn rooted_applied_promotion() -> Value {
         "status": "applied",
         "verified_base": { "sha": "rooted-base" },
         "provenance": { "candidate": { "fingerprint": {
-            "schema": "homeboy/agent-task-candidate-fingerprint/v1",
+            "schema": "homeboy/agent-task-candidate-fingerprint/v2",
             "target_path": "/repo",
             "head": "rooted-candidate",
-            "base": "rooted-candidate-parent",
             "changed_files": ["src/lib.rs"],
-            "sha256": "rooted-candidate-sha",
             "tree": "rooted-candidate-tree",
         } } },
     })
