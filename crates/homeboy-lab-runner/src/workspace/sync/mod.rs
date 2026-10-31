@@ -2694,27 +2694,12 @@ struct RunnerWorkspaceDiskProbe {
     total_bytes: u64,
 }
 
-/// Capacity needed while snapshot transport has both the archive-preparation
-/// tree and the runner's atomic destination temporary alive.  The fixed margin
-/// covers tar metadata and bounded control files; the multiplier deliberately
-/// models the two live copies rather than relying on the destination mount's
-/// aggregate free space.
+/// Bytes and inodes a snapshot needs on the runner destination: the assembled
+/// size of the planned roots plus the blobs the runner reported missing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SnapshotFilesystemRequirement {
     bytes: u64,
     inodes: u64,
-}
-
-fn snapshot_filesystem_requirement(
-    logical_bytes: u64,
-    entry_count: u64,
-) -> SnapshotFilesystemRequirement {
-    const SAFETY_BYTES: u64 = 64 * 1024 * 1024;
-    const SAFETY_INODES: u64 = 128;
-    SnapshotFilesystemRequirement {
-        bytes: logical_bytes.saturating_mul(2).saturating_add(SAFETY_BYTES),
-        inodes: entry_count.saturating_mul(2).saturating_add(SAFETY_INODES),
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -4626,10 +4611,9 @@ mod tests {
 
     use super::{
         is_runner_git_auth_or_network_failure, retry_idempotent_ssh_operation,
-        runner_workspace_disk_is_critical, snapshot_capacity_error,
-        snapshot_filesystem_requirement, snapshot_reservation_store, RunnerWorkspaceDiskProbe,
-        SnapshotFilesystemAdmission, SnapshotFilesystemProbe, SnapshotFilesystemRequirement,
-        SNAPSHOT_RESERVATION_NAMESPACE, SNAPSHOT_RESERVATION_TTL,
+        runner_workspace_disk_is_critical, snapshot_capacity_error, snapshot_reservation_store,
+        RunnerWorkspaceDiskProbe, SnapshotFilesystemAdmission, SnapshotFilesystemProbe,
+        SnapshotFilesystemRequirement, SNAPSHOT_RESERVATION_NAMESPACE, SNAPSHOT_RESERVATION_TTL,
     };
     use homeboy_core::error::{Error, ErrorCode};
     use homeboy_core::server::CommandOutput;
@@ -4777,23 +4761,6 @@ mod tests {
                 total_bytes: 500 * 1024 * 1024 * 1024,
             }
         ));
-    }
-
-    #[test]
-    fn snapshot_requirement_models_two_live_copies_and_inode_margin() {
-        let requirement = snapshot_filesystem_requirement(5 * 1024 * 1024 * 1024, 257_000);
-        assert_eq!(
-            requirement.bytes,
-            10 * 1024 * 1024 * 1024 + 64 * 1024 * 1024
-        );
-        assert_eq!(requirement.inodes, 514_128);
-    }
-
-    #[test]
-    fn snapshot_requirement_rejects_inode_exhaustion_independently_of_bytes() {
-        let requirement = snapshot_filesystem_requirement(1024, 10_000);
-        assert!(requirement.bytes < 64 * 1024 * 1024 + 4096);
-        assert!(requirement.inodes > 10_000);
     }
 
     fn probe(identity: &str, bytes: u64, inodes: u64) -> SnapshotFilesystemProbe {
