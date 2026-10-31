@@ -423,13 +423,14 @@ fn expected_state_dir() -> String {
     )
 }
 
-/// `(state_dir, argv)` for each daemon invocation that carried a state dir.
+/// `(state_dir, argv)` for each `daemon ...` invocation. Other subcommands
+/// (`self identity`) are not daemon commands and carry no pinned state dir.
 fn daemon_invocations(log: &Path) -> Vec<(String, String)> {
     std::fs::read_to_string(log)
         .unwrap_or_default()
         .lines()
         .filter_map(|line| line.split_once('|'))
-        .filter(|(state_dir, _)| !state_dir.is_empty())
+        .filter(|(state_dir, argv)| !state_dir.is_empty() && argv.starts_with("daemon "))
         .map(|(state_dir, argv)| (state_dir.to_string(), argv.to_string()))
         .collect()
 }
