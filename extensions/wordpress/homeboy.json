@@ -115,6 +115,7 @@
       "bash tests/component-env-detector-smoke.sh",
       "node tests/editor-canvas-probes-smoke.js",
       "bash tests/eslint-eqeqeq-null-smoke.sh",
+      "bash tests/eslint-runner-json-stdin-smoke.sh",
       "bash tests/fixtures/runtime-agent-driver/runtime-agent-driver-smoke.sh",
       "node tests/fuzz-manifest-contracts-smoke.js",
       "node tests/fuzz-runner-installed-runtime-path-smoke.js",

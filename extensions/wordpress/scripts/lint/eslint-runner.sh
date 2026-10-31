@@ -266,7 +266,7 @@ fi
 # not.
 if [ -n "$json_output" ] && command -v node &> /dev/null; then
     json_output=$(node -e '
-        const data = JSON.parse(process.argv[1]);
+        const data = JSON.parse(require("fs").readFileSync(0, "utf8"));
         const ignoredNotice = (msg) => !msg.ruleId
             && /^File ignored because of a matching ignore pattern\b/.test(msg.message || "");
         for (const file of data) {
@@ -276,7 +276,7 @@ if [ -n "$json_output" ] && command -v node &> /dev/null; then
             file.warningCount = Math.max(0, (file.warningCount || 0) - dropped);
         }
         process.stdout.write(JSON.stringify(data));
-    ' "$json_output")
+    ' <<<"$json_output")
 fi
 
 # Write ESLint lint findings sidecar for homeboy baseline and drill-down.
@@ -289,9 +289,9 @@ if [ -n "$ESLINT_FINDINGS_FILE" ] && [ -n "$json_output" ] && command -v node &>
         const fs = require("fs");
         const path = require("path");
 
-        const data = JSON.parse(process.argv[1]);
-        const componentPath = process.argv[2] || "";
-        const outputFile = process.argv[3];
+        const data = JSON.parse(require("fs").readFileSync(0, "utf8"));
+        const componentPath = process.argv[1] || "";
+        const outputFile = process.argv[2];
         const readExcerpt = (filePath, line) => {
             if (!filePath || !line) return null;
             try {
@@ -335,7 +335,7 @@ if [ -n "$ESLINT_FINDINGS_FILE" ] && [ -n "$json_output" ] && command -v node &>
             }
         }
         fs.writeFileSync(outputFile, JSON.stringify(findings) + "\n");
-    ' "$json_output" "$PLUGIN_PATH" "$ESLINT_FINDINGS_TMPFILE" 2>/dev/null || true
+    ' "$PLUGIN_PATH" "$ESLINT_FINDINGS_TMPFILE" <<<"$json_output" 2>/dev/null || true
     # Best-effort observability; never fail the gate on a sidecar write.
     write_eslint_findings_sidecar "$ESLINT_FINDINGS_FILE" "$ESLINT_FINDINGS_TMPFILE" || true
 fi
@@ -343,7 +343,7 @@ fi
 # Parse JSON and print summary header (only if issues exist)
 if [ -n "$json_output" ] && command -v node &> /dev/null; then
     summary=$(node -e '
-        const data = JSON.parse(process.argv[1]);
+        const data = JSON.parse(require("fs").readFileSync(0, "utf8"));
         let errors = 0, warnings = 0, fixable = 0, filesWithIssues = 0;
         data.forEach(file => {
             errors += file.errorCount || 0;
@@ -357,7 +357,7 @@ if [ -n "$json_output" ] && command -v node &> /dev/null; then
             console.log(`Fixable: ${fixable} | Files with issues: ${filesWithIssues} of ${data.length}`);
             console.log("============================================");
         }
-    ' "$json_output" 2>/dev/null)
+    ' <<<"$json_output" 2>/dev/null)
 
     if [ -n "$summary" ]; then
         echo ""
@@ -369,7 +369,7 @@ fi
 if [[ "${HOMEBOY_SUMMARY_MODE:-}" == "1" ]]; then
     if [ -n "$json_output" ] && command -v node &> /dev/null; then
         top_violations=$(node -e '
-            const data = JSON.parse(process.argv[1]);
+            const data = JSON.parse(require("fs").readFileSync(0, "utf8"));
             const rules = {};
             data.forEach(file => {
                 (file.messages || []).forEach(msg => {
@@ -384,7 +384,7 @@ if [[ "${HOMEBOY_SUMMARY_MODE:-}" == "1" ]]; then
                     console.log(`  ${rule.padEnd(55)} ${count.toString().padStart(5)}`);
                 });
             }
-        ' "$json_output" 2>/dev/null)
+        ' <<<"$json_output" 2>/dev/null)
 
         if [ -n "$top_violations" ]; then
             echo "$top_violations"
