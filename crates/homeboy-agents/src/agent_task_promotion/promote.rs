@@ -3040,10 +3040,9 @@ impl CandidateGateCheckout {
             path,
             allocation,
             identity: AgentTaskGateCandidateCheckout {
-                schema: "homeboy/agent-task-gate-candidate-checkout/v1".to_string(),
+                schema: "homeboy/agent-task-gate-candidate-checkout/v2".to_string(),
                 commit,
                 tree: fingerprint.tree,
-                candidate_sha256: fingerprint.sha256,
             },
         };
         let status = git_output(

@@ -644,9 +644,7 @@ mod tests {
                 schema: "test".into(),
                 target_path: "/repo".into(),
                 head: "candidate".into(),
-                base: "base".into(),
                 changed_files: vec!["src/lib.rs".into()],
-                sha256: "candidate-sha256".into(),
                 tree: "candidate-tree".into(),
             },
             base_sha: "base".into(),
@@ -762,7 +760,6 @@ mod tests {
         let output: CommandAcceptanceVerdict =
             serde_json::from_str(&signed_output(&request)).unwrap();
         let mut replacement = request.clone();
-        replacement.candidate.sha256 = "dirty-replacement-sha256".into();
         replacement.candidate.tree = "dirty-replacement-tree".into();
 
         let error = verifier(vec!["unused".into()], 500)

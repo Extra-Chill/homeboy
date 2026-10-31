@@ -7433,8 +7433,6 @@ fn candidate_is_complete(
     !candidate.schema.trim().is_empty()
         && !candidate.target_path.trim().is_empty()
         && !candidate.head.trim().is_empty()
-        && !candidate.base.trim().is_empty()
-        && !candidate.sha256.trim().is_empty()
         && !candidate.tree.trim().is_empty()
 }
 
@@ -7443,9 +7441,7 @@ fn empty_acceptance_candidate() -> crate::agent_task_promotion::AgentTaskCandida
         schema: String::new(),
         target_path: String::new(),
         head: String::new(),
-        base: String::new(),
         changed_files: Vec::new(),
-        sha256: String::new(),
         tree: String::new(),
     }
 }

@@ -1688,10 +1688,9 @@ fn requires_a_real_durable_run_unless_manual_mode_is_selected() {
 #[test]
 fn manual_finalization_inherits_only_exact_green_candidate_bound_promotion_gates() {
     let candidate = json!({
-        "schema": "homeboy/agent-task-gate-candidate-checkout/v1",
+        "schema": "homeboy/agent-task-gate-candidate-checkout/v2",
         "commit": "candidate-sha",
-        "tree": "candidate-tree",
-        "candidate_sha256": "candidate-digest"
+        "tree": "candidate-tree"
     });
     let mut promotion: AgentTaskPromotionReport = serde_json::from_value(json!({
         "status": "applied",
@@ -1710,12 +1709,10 @@ fn manual_finalization_inherits_only_exact_green_candidate_bound_promotion_gates
             "candidate": {
                 "kind": "git",
                 "fingerprint": {
-                    "schema": "homeboy/agent-task-candidate-fingerprint/v1",
+                    "schema": "homeboy/agent-task-candidate-fingerprint/v2",
                     "target_path": "/repo",
                     "head": "candidate-parent",
-                    "base": "base-parent",
                     "changed_files": ["src/lib.rs"],
-                    "sha256": "candidate-digest",
                     "tree": "candidate-tree"
                 }
             },
@@ -3693,12 +3690,10 @@ fn successful_gate_proof() -> AgentTaskPrDurableGateProof {
                 "candidate": {
                     "kind": "git",
                     "fingerprint": {
-                        "schema": "homeboy/agent-task-candidate-fingerprint/v1",
+                        "schema": "homeboy/agent-task-candidate-fingerprint/v2",
                         "target_path": "/repo",
                         "head": "7f76933ef002d195ee1cc5bf21069e0f40b1c972",
-                        "base": "6f76933ef002d195ee1cc5bf21069e0f40b1c972",
                         "changed_files": ["src/lib.rs"],
-                        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                         "tree": "5f76933ef002d195ee1cc5bf21069e0f40b1c972"
                     }
                 }

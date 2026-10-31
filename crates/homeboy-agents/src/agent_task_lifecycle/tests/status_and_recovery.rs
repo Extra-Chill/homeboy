@@ -2095,7 +2095,7 @@ fn corrected_promotion_replaces_gate_failed_latest_proof() {
         "candidate": { "base_sha": "base", "candidate_sha": "first.patch", "tree_sha": "tree" },
         "changed_files": ["src/lib.rs"],
         "gate_results": [{ "id": "test", "name": "cargo test", "kind": "command", "status": "failed" }],
-        "provenance": { "candidate": { "kind": "git", "fingerprint": { "schema": "homeboy/agent-task-candidate-fingerprint/v1", "target_path": "/repo", "head": "base", "base": "base", "changed_files": ["src/lib.rs"], "sha256": "first" } } },
+        "provenance": { "candidate": { "kind": "git", "fingerprint": { "schema": "homeboy/agent-task-candidate-fingerprint/v2", "target_path": "/repo", "head": "base", "changed_files": ["src/lib.rs"], "tree": "first" } } },
         "operator_notification": { "status": "blocked", "message": "gates failed" }
     });
     let corrected = json!({
@@ -2107,7 +2107,7 @@ fn corrected_promotion_replaces_gate_failed_latest_proof() {
         "candidate": { "base_sha": "base", "candidate_sha": "corrected.patch", "tree_sha": "corrected-tree" },
         "changed_files": ["src/lib.rs"],
         "gate_results": [{ "id": "test", "name": "cargo test", "kind": "command", "status": "passed" }],
-        "provenance": { "candidate": { "kind": "git", "fingerprint": { "schema": "homeboy/agent-task-candidate-fingerprint/v1", "target_path": "/repo", "head": "base", "base": "base", "changed_files": ["src/lib.rs"], "sha256": "corrected" } } },
+        "provenance": { "candidate": { "kind": "git", "fingerprint": { "schema": "homeboy/agent-task-candidate-fingerprint/v2", "target_path": "/repo", "head": "base", "changed_files": ["src/lib.rs"], "tree": "corrected" } } },
         "operator_notification": { "status": "completed", "message": "gates passed" }
     });
 

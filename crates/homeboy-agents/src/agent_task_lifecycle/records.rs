@@ -1641,16 +1641,16 @@ mod tests {
         };
         let mut acceptance = AgentTaskAcceptanceRecord::pending(
             requirement,
-            acceptance_candidate("candidate-a", "candidate-a-sha", "candidate-a-tree"),
+            acceptance_candidate("candidate-a", "candidate-a-tree"),
             "base-a".to_string(),
         );
         assert_eq!(acceptance.verdict, AgentTaskAcceptanceVerdict::Pending);
         assert!(acceptance.matches_candidate(
-            &acceptance_candidate("candidate-a", "candidate-a-sha", "candidate-a-tree"),
+            &acceptance_candidate("candidate-a", "candidate-a-tree"),
             "base-a"
         ));
         assert!(!acceptance.matches_candidate(
-            &acceptance_candidate("candidate-a", "replacement-sha", "replacement-tree"),
+            &acceptance_candidate("candidate-a", "replacement-tree"),
             "base-a"
         ));
 
@@ -1669,7 +1669,7 @@ mod tests {
                 authority: "review-service".to_string(),
                 policy: "release".to_string(),
             },
-            acceptance_candidate("candidate-a", "candidate-a-sha", "candidate-a-tree"),
+            acceptance_candidate("candidate-a", "candidate-a-tree"),
             "base-a".to_string(),
         );
         acceptance.verdict = AgentTaskAcceptanceVerdict::Rejected;
@@ -1678,8 +1678,7 @@ mod tests {
         acceptance.evidence_refs = vec!["review://finding/1".to_string()];
         acceptance.archive();
         acceptance.verdict = AgentTaskAcceptanceVerdict::Pending;
-        acceptance.candidate =
-            acceptance_candidate("candidate-b", "candidate-b-sha", "candidate-b-tree");
+        acceptance.candidate = acceptance_candidate("candidate-b", "candidate-b-tree");
 
         assert_eq!(acceptance.history.len(), 1);
         assert_eq!(
@@ -1695,16 +1694,13 @@ mod tests {
 
     fn acceptance_candidate(
         head: &str,
-        sha256: &str,
         tree: &str,
     ) -> crate::agent_task_promotion::AgentTaskCandidateFingerprint {
         crate::agent_task_promotion::AgentTaskCandidateFingerprint {
             schema: "test".to_string(),
             target_path: "/repo".to_string(),
             head: head.to_string(),
-            base: "candidate-base".to_string(),
             changed_files: vec!["src/lib.rs".to_string()],
-            sha256: sha256.to_string(),
             tree: tree.to_string(),
         }
     }
