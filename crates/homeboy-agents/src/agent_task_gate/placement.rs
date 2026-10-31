@@ -176,8 +176,6 @@ impl LabGateRequest {
                 {
                     error.details["expected_head"] = serde_json::json!(expected.head);
                     error.details["actual_head"] = serde_json::json!(actual.head);
-                    error.details["expected_base"] = serde_json::json!(expected.base);
-                    error.details["actual_base"] = serde_json::json!(actual.base);
                     error.details["expected_tree"] = serde_json::json!(expected.tree);
                     error.details["actual_tree"] = serde_json::json!(actual.tree);
                     // Canonical candidate commits travel in the Git closure. Do not
