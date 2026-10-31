@@ -12,6 +12,8 @@ set -euo pipefail
 #   2. Consumer composer.lock vendor package, when present and plugin-shaped
 #   3. homeboy component show → local_path (if homeboy is available)
 #   4. Git clone from GitHub org (shallow, cached across steps)
+#      Select plugins/<slug>, themes/<slug>, or packages/<slug> when the
+#      repository root is not itself a plugin.
 #      Org inferred from: HOMEBOY_DEPENDENCY_GITHUB_ORG → git remote origin
 #   5. Warn and skip
 #
@@ -244,6 +246,9 @@ _homeboy_resolve_validation_dependency_entry_path() {
             repo=$(printf '%s' "$entry" | jq -r '.repo // .repository // .source // empty')
             resolved=$(_homeboy_clone_catalog_github_dependency "$repo" "$slug" "$revision" || true)
             package_root=$(_homeboy_validation_dependency_package_root "$resolved" "$package_path" || true)
+            if [ -n "$package_root" ] && [ -z "$package_path" ]; then
+                package_root=$(_homeboy_cloned_dependency_member_root "$package_root" "$slug")
+            fi
             [ -n "$package_root" ] && [ -d "$package_root" ] && printf '%s\n' "$package_root" && return 0
             ;;
         wp.org|wporg|wordpress.org|wp.org-zip|wordpress.org-zip)
@@ -952,6 +957,28 @@ _homeboy_get_dep_cache_dir() {
     return 1
 }
 
+# Prefer a standalone plugin root, otherwise select a runnable monorepo member
+# by the requested slug. Do not pick an arbitrary sibling plugin. Keep the
+# original root when no member matches (dependencies may also be PHP libraries).
+_homeboy_cloned_dependency_member_root() {
+    local repo_root="${1:-}"
+    local slug="${2:-}"
+    local container candidate
+
+    [ -n "$repo_root" ] && [ -d "$repo_root" ] || return 1
+    if ! _homeboy_is_plugin_shaped_path "$repo_root" && [ -n "$slug" ] && [[ "$slug" != */* ]] && [ "$slug" != '.' ] && [ "$slug" != '..' ]; then
+        for container in plugins themes packages; do
+            candidate="${repo_root%/}/${container}/${slug}"
+            if _homeboy_is_plugin_shaped_path "$candidate"; then
+                printf '%s\n' "$candidate"
+                return 0
+            fi
+        done
+    fi
+
+    printf '%s\n' "$repo_root"
+}
+
 # Clone a dependency from GitHub by slug.
 # Uses shallow clone (--depth 1) for speed.
 # Returns the clone path if successful, empty otherwise.
@@ -1197,6 +1224,7 @@ homeboy_resolve_validation_dependency_path() {
             local cloned_path
             cloned_path=$(_homeboy_clone_dependency "$dependency" "$github_org" || true)
             if [ -n "$cloned_path" ] && [ -d "$cloned_path" ]; then
+                cloned_path=$(_homeboy_cloned_dependency_member_root "$cloned_path" "$dependency")
                 _homeboy_report_resolved_dependency "$dependency" "git clone from ${github_org}/${dependency}" "$cloned_path"
                 printf '%s\n' "$cloned_path"
                 return 0

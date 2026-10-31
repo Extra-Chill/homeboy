@@ -91,4 +91,57 @@ if ! grep -F "via direct path: ${COMPONENT_DIR}/bbpress" <<< "$explicit_output" 
     fail "explicit relative path should resolve verbatim: ${explicit_output}"
 fi
 
+# 4. GitHub fallback selects a monorepo member on fresh and cached clones.
+# No network or ambient component registry is used by these fixtures.
+(
+    export HOMEBOY_CACHE_DIR="${TMPDIR}/monorepo-cache"
+    export HOMEBOY_DEPENDENCY_GITHUB_ORG=Example
+    unset _HOMEBOY_DEP_CACHE_DIR
+    fixture="${TMPDIR}/monorepo-fixture"
+    mkdir -p "$fixture/plugins/extrachill-network" "$fixture/plugins/unrelated"
+    printf '<?php /* Plugin Name: Network */\n' > "$fixture/plugins/extrachill-network/extrachill-network.php"
+    printf '<?php /* Plugin Name: Unrelated */\n' > "$fixture/plugins/unrelated/unrelated.php"
+    homeboy() { printf '%s\n' '{"data":{"entity":{}}}'; }
+    git() {
+        if [ "${1:-}" = clone ]; then
+            mkdir -p "${@: -1}"
+            cp -R "$fixture/." "${@: -1}/"
+            printf 'clone\n' >> "${TMPDIR}/clone-calls"
+            return 0
+        fi
+        return 1
+    }
+
+    expected="${HOMEBOY_CACHE_DIR}/homeboy-deps/extrachill-network/plugins/extrachill-network"
+    for attempt in fresh cached; do
+        actual=$(homeboy_resolve_validation_dependency_path extrachill-network)
+        [ "$actual" = "$expected" ] || fail "$attempt monorepo clone resolved to '$actual'"
+        slug=$(homeboy_get_validation_dependency_slug "$actual")
+        [ "$slug" = extrachill-network ] || fail "member plugin slug changed: $slug"
+        # This is the pluginFile path consumed by the recipe, not the repo root.
+        [ -f "$actual/$slug.php" ] || fail 'resolved recipe pluginFile does not exist'
+        main_file=$(homeboy_find_validation_dependency_plugin_main_file "$actual")
+        [ "$main_file" = "$actual/$slug.php" ] || fail 'member main file not discovered'
+    done
+    [ "$(wc -l < "${TMPDIR}/clone-calls")" -eq 1 ] || fail 'cached clone was not reused'
+
+    catalog_actual=$(_homeboy_resolve_validation_dependency_entry_path \
+        '{"source_type":"github","repo":"Example/network","slug":"extrachill-network"}')
+    [ "$catalog_actual" = "${HOMEBOY_CACHE_DIR}/homeboy-deps/extrachill-network-default/plugins/extrachill-network" ] || fail 'GitHub catalog did not select member'
+    explicit_actual=$(_homeboy_resolve_validation_dependency_entry_path \
+        '{"source_type":"github","repo":"Example/network","slug":"extrachill-network","package_path":"plugins/unrelated"}')
+    [ "$explicit_actual" = "${HOMEBOY_CACHE_DIR}/homeboy-deps/extrachill-network-default/plugins/unrelated" ] || fail 'explicit package_path was not preserved'
+
+    for container in plugins themes packages; do
+        root="${TMPDIR}/layout-${container}"
+        mkdir -p "$root/$container/member" "$root/plugins/other"
+        printf '<?php /* Plugin Name: Member */\n' > "$root/$container/member/custom-entry.php"
+        printf '<?php /* Plugin Name: Other */\n' > "$root/plugins/other/other.php"
+        [ "$(_homeboy_cloned_dependency_member_root "$root" member)" = "$root/$container/member" ] || fail "$container member not found"
+        [ "$(_homeboy_cloned_dependency_member_root "$root" missing)" = "$root" ] || fail 'selected unrelated sibling'
+        printf '<?php /* Plugin Name: Standalone */\n' > "$root/standalone.php"
+        [ "$(_homeboy_cloned_dependency_member_root "$root" member)" = "$root" ] || fail 'standalone root must take priority'
+    done
+)
+
 echo "Validation dependency resolution regression smoke passed"

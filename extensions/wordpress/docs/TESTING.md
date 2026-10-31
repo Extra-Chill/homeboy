@@ -223,6 +223,19 @@ If your plugin depends on other local plugins at runtime, declare them:
 Dependencies are mounted alongside the plugin under test and their entry
 files are loaded during the `load_deps` bootstrap stage.
 
+For GitHub-cloned dependencies, a root PHP file with a `Plugin Name:` header
+keeps the repository root as the dependency path. Otherwise, the resolver checks
+`plugins/<slug>`, `themes/<slug>`, and `packages/<slug>` in that order for a
+plugin-shaped member. This also applies to cached clones. It never selects an
+unrelated sibling; if no member matches, the original root is retained for
+existing non-plugin dependencies and downstream diagnostics.
+
+GitHub catalog entries can override discovery with an explicit `package_path`:
+
+```json
+{"source_type":"github","repo":"Extra-Chill/extrachill-network","slug":"extrachill-network","package_path":"plugins/extrachill-network"}
+```
+
 Declared validation dependencies are activated first, in declaration order,
 and the plugin under review is activated last. Both appear in the recipe's
 setup and activation evidence
