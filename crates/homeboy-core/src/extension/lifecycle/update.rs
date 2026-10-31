@@ -301,7 +301,12 @@ fn update_extracted_extension(
     }
 
     let requested_ref = read_source_requested_ref(extension_dir);
-    git::clone_repo_at_ref(source_url, &clone_dir, requested_ref.as_deref())?;
+    super::sparse_clone::clone_extension(
+        source_url,
+        &clone_dir,
+        requested_ref.as_deref(),
+        extension_id,
+    )?;
     let source_revision = git::short_head_revision(&clone_dir);
 
     let result = resolve_cloned_extension(&clone_dir, extension_id, &staged_dir, source_url);
