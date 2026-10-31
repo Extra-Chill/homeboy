@@ -39,14 +39,14 @@ fn foreign_worktree_never_becomes_controller_executable_provenance() {
         .current_dir(foreign.path())
         .output()
         .expect("read foreign revision");
-    let foreign_revision = String::from_utf8(foreign_revision.stdout)
+    let _foreign_revision = String::from_utf8(foreign_revision.stdout)
         .expect("foreign revision is UTF-8")
         .trim()
         .to_string();
 
     let plan = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/agent_task_smoke_plan.json");
-    let mut run = context.controller_runtime_command(TestBinary::HomeboyFixture);
+    let mut run = context.command(TestBinary::HomeboyFixture);
     run.current_dir(foreign.path()).args([
         "--placement",
         "local",
@@ -76,30 +76,11 @@ fn foreign_worktree_never_becomes_controller_executable_provenance() {
         homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots())
             .read_record("foreign-runtime-provenance")
             .expect("durable lifecycle record for the recorded run");
-    let source = &record.metadata
-        [homeboy::core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY]["originating"]
-        ["source"];
-
+    let runtime = &record.metadata["controller_runtime"];
     assert_eq!(
-        source["repository"],
-        "https://github.com/Extra-Chill/homeboy"
+        runtime["originating"]["build_identity"],
+        homeboy_core::build_identity::current().display
     );
-    assert_eq!(source["verification"], "build_metadata");
-    assert_ne!(source["repository"], foreign_origin);
-    assert_ne!(source["revision"], foreign_revision);
-    assert_ne!(source["verification"], "observed_from_process_cwd");
-    assert!(
-        record.metadata[homeboy::core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY]
-            ["originating"]["sha256"]
-            .as_str()
-            .is_some_and(|digest| !digest.is_empty()),
-        "immutable executable hash evidence is retained"
-    );
-    assert!(
-        record.metadata[homeboy::core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY]
-            ["originating"]["build_identity"]
-            .as_str()
-            .is_some_and(|identity| !identity.is_empty()),
-        "build identity evidence is retained"
-    );
+    assert!(runtime["originating"]["pinned_executable"].is_null());
+    assert!(!context.data_dir().join("controller-runtimes").exists());
 }

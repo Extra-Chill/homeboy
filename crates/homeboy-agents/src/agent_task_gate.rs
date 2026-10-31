@@ -46,7 +46,6 @@ const PLAYWRIGHT_CACHE_SUBPATH: &str = if cfg!(target_os = "macos") {
 pub(crate) const COOK_SUPERVISOR_PRIVATE_ENV_VARS: &[&str] = &[
     homeboy_core::daemon::step_job::LOCAL_COOK_SUPERVISOR_JOB_ID_ENV,
     "HOMEBOY_COOK_STARTUP_LAUNCHER_ID",
-    "HOMEBOY_COOK_PINNED_CONTROLLER_RUNTIME",
     "HOMEBOY_AGENT_TASK_PROVIDER_LAUNCH_CONTEXT_JSON",
 ];
 

@@ -32,8 +32,7 @@ use homeboy_lab_contract::lab::transport_failure::LabTransportAttemptReceipt;
 use super::super::CmdResult;
 use super::args::{
     ActiveArgs, CancelArgs, DiagnoseArgs, EvidenceArgs, LifecycleReadArgs, ListArgs, LogsArgs,
-    QuarantineArgs, RearmArgs, ReconcileArgs, ReplayProviderBoundaryArgs, RuntimeValidateArgs,
-    StatusArgs,
+    QuarantineArgs, RearmArgs, ReconcileArgs, ReplayProviderBoundaryArgs, StatusArgs,
 };
 use super::candidate::{canonical_candidate_projection, classify_candidates};
 use crate::commands::utils::response::{
@@ -4173,19 +4172,6 @@ fn attach_collection_budget(
         "output_budget".to_string(),
         serde_json::to_value(metadata).unwrap_or(Value::Null),
     );
-}
-
-pub(super) fn validate_runtime(args: RuntimeValidateArgs) -> CmdResult<Value> {
-    let lifecycle_store =
-        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
-    let record = homeboy::agents::agent_task_lifecycle::validate_controller_runtime_in_store(
-        &lifecycle_store,
-        &args.run_id,
-    )?;
-    Ok((
-        json!({ "schema": "homeboy/controller-runtime-validation/v1", "run_id": record.run_id, "state": record.state(), "executable": true }),
-        0,
-    ))
 }
 
 pub(super) fn replay_provider_boundary(args: ReplayProviderBoundaryArgs) -> CmdResult<Value> {

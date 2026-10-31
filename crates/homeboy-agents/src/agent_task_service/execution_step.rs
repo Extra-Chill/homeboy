@@ -762,11 +762,7 @@ pub(super) fn pin_execution_generation_or_defer(
     store: &AgentTaskLifecycleStore,
     run_id: &str,
 ) -> Result<Option<homeboy_core::runtime_promotion::RuntimeGenerationPinGuard>> {
-    let record = store.read_record(run_id)?;
-    match homeboy_core::runtime_promotion::try_pin_cook_generation(
-        run_id,
-        &record.metadata["controller_runtime"],
-    ) {
+    match homeboy_core::runtime_promotion::try_pin_cook_generation(run_id) {
         Ok(pin) => Ok(Some(pin)),
         Err(error)
             if error.code == homeboy_core::ErrorCode::RuntimePromotionWaitTimeout
@@ -784,11 +780,7 @@ pub(super) fn pin_execution_generation_or_defer(
             } else {
                 // Provider execution already happened, so the attempt cannot be
                 // requeued. Wait out the owner within the bounded Cook budget.
-                homeboy_core::runtime_promotion::pin_cook_runtime_generation(
-                    run_id,
-                    &record.metadata["controller_runtime"],
-                )
-                .map(Some)
+                homeboy_core::runtime_promotion::pin_cook_generation(run_id).map(Some)
             }
         }
         Err(error) => Err(error),

@@ -903,35 +903,6 @@ struct ActiveWorktrees {
     available: bool,
 }
 
-/// Executables selected by durable controller recovery. A selected executable
-/// inside a rebuildable target is still an active recovery dependency.
-#[derive(Debug, Default)]
-struct ProtectedControllerExecutables {
-    paths: HashSet<PathBuf>,
-}
-
-impl ProtectedControllerExecutables {
-    fn resolve() -> Result<Self> {
-        Ok(Self {
-            paths: crate::controller_runtime::protected_executables()?
-                .into_iter()
-                .map(|path| canonical_or_owned(&path))
-                .collect(),
-        })
-    }
-
-    fn resolve_for_inventory() -> Result<Self> {
-        Ok(Self {
-            paths: Default::default(),
-        })
-    }
-
-    fn contains_in(&self, artifact: &Path) -> bool {
-        let artifact = canonical_or_owned(artifact);
-        self.paths.iter().any(|path| path.starts_with(&artifact))
-    }
-}
-
 impl ActiveWorktrees {
     fn resolve() -> Self {
         let Ok(listing) = crate::worktree::list_unlocked() else {
@@ -1221,7 +1192,6 @@ fn collect_worktree_candidates(
     worktree: &WorktreeInfo,
     options: &ArtifactCleanupOptions,
     active: &ActiveWorktrees,
-    protected: &ProtectedControllerExecutables,
     deadline: Option<Instant>,
     inspection_limit: Option<usize>,
     automatic_policy: Option<AutomaticArtifactRetentionPolicy>,
@@ -1231,7 +1201,6 @@ fn collect_worktree_candidates(
         worktree,
         options,
         active,
-        protected,
         deadline,
         inspection_limit,
         None,
@@ -1245,7 +1214,6 @@ fn collect_worktree_candidates_bounded(
     worktree: &WorktreeInfo,
     options: &ArtifactCleanupOptions,
     active: &ActiveWorktrees,
-    protected: &ProtectedControllerExecutables,
     deadline: Option<Instant>,
     inspection_limit: Option<usize>,
     measurement_step_limit: Option<usize>,
@@ -1416,15 +1384,6 @@ fn collect_worktree_candidates_bounded(
                 } else {
                     "checkout is a registered active task worktree"
                 },
-            ));
-            continue;
-        }
-        if declaration.kind == "rust_target" && protected.contains_in(&artifact_path) {
-            skipped.push(skip_row(
-                worktree,
-                &declaration,
-                display_path,
-                "artifact contains an executable selected by active controller runtime recovery",
             ));
             continue;
         }
@@ -1685,7 +1644,6 @@ fn cleanup_artifacts_in_worktrees(
     // Durable pin references are resolved again at the apply boundary. The
     // full lifecycle-store read is deliberately excluded from inventory so a
     // bounded page cannot spend its entire deadline before its first cursor.
-    let protected = ProtectedControllerExecutables::resolve_for_inventory()?;
     if !registry_quarantines.is_empty() {
         active.available = false;
     }
@@ -1733,7 +1691,6 @@ fn cleanup_artifacts_in_worktrees(
             worktree,
             options,
             &active,
-            &protected,
             deadline,
             remaining_inspections,
             measurement_step_limit,
@@ -2400,18 +2357,6 @@ fn apply_artifact_candidate_with_before_remove(
         );
     }
     let path = Path::new(&candidate.path);
-    if candidate.kind == "rust_target" {
-        let protected = match ProtectedControllerExecutables::resolve() {
-            Ok(protected) => protected,
-            Err(error) => return ArtifactCleanupCandidateApplyOutcome::Failed(error),
-        };
-        if protected.contains_in(path) {
-            return ArtifactCleanupCandidateApplyOutcome::Skipped(
-                "artifact became selected by active controller runtime recovery before removal"
-                    .to_string(),
-            );
-        }
-    }
     if !path.exists() {
         return ArtifactCleanupCandidateApplyOutcome::Skipped(
             "artifact no longer exists after discovery".to_string(),
@@ -3782,7 +3727,6 @@ mod tests {
                 },
                 &ArtifactCleanupOptions::default(),
                 &ActiveWorktrees::default(),
-                &ProtectedControllerExecutables::default(),
                 Some(Instant::now()),
                 Some(1),
                 Some(AutomaticArtifactRetentionPolicy {
@@ -3948,7 +3892,6 @@ mod tests {
                 },
                 &ArtifactCleanupOptions::default(),
                 &ActiveWorktrees::default(),
-                &ProtectedControllerExecutables::default(),
                 None,
                 None,
                 None,
@@ -3989,7 +3932,6 @@ mod tests {
                 },
                 &ArtifactCleanupOptions::default(),
                 &ActiveWorktrees::default(),
-                &ProtectedControllerExecutables::default(),
                 None,
                 None,
                 None,
@@ -4042,7 +3984,6 @@ mod tests {
                     ..Default::default()
                 },
                 &ActiveWorktrees::default(),
-                &ProtectedControllerExecutables::default(),
                 None,
                 None,
                 None,
@@ -4082,7 +4023,6 @@ mod tests {
                 },
                 &ArtifactCleanupOptions::default(),
                 &ActiveWorktrees::default(),
-                &ProtectedControllerExecutables::default(),
                 None,
                 None,
                 None,
@@ -5622,7 +5562,6 @@ mod tests {
             },
             &ArtifactCleanupOptions::default(),
             &ActiveWorktrees::default(),
-            &ProtectedControllerExecutables::default(),
             None,
             None,
             None,
@@ -6082,7 +6021,6 @@ mod tests {
                     ..ArtifactCleanupOptions::default()
                 },
                 &ActiveWorktrees::default(),
-                &ProtectedControllerExecutables::default(),
                 None,
                 None,
                 None,

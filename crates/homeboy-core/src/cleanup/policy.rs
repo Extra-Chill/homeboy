@@ -4,7 +4,7 @@
 //! --include <category>`) and through a set of category specialists (`homeboy
 //! runs artifact cleanup-persisted`, `homeboy runs artifact cleanup-downloads`,
 //! `homeboy self cleanup-runtime-tmp`, `homeboy runner workspace prune`,
-//! `homeboy runner cache-prune`, `homeboy runtime controller-prune`). Every one
+//! `homeboy runner cache-prune`). Every one
 //! of those is a delete path, so every one of them needs the *same* answer to
 //! "how old is old enough" and "how much may a single invocation touch".
 //!
@@ -14,9 +14,7 @@
 //! `retention.runtime_tmp_days` to 30, `homeboy self cleanup-runtime-tmp
 //! --apply` still deleted at 7 days. Configured retention was silently ignored
 //! by the specialist while the aggregate honored it. This module is the single
-//! place those windows become concrete numbers, following the precedent
-//! [`crate::controller_runtime::resolve_cleanup_options`] set for controller
-//! runtimes in #10288.
+//! place those windows become concrete numbers.
 //!
 //! # Safety contract
 //!
@@ -174,8 +172,7 @@ impl CleanupPolicy {
     /// Fails closed: a limit that cannot be represented resolves to zero
     /// inspected records, never to `usize::MAX`. Widening a delete budget
     /// because a conversion failed is exactly the fail-open shape cleanup must
-    /// not have. [`crate::controller_runtime`] has always converted this way;
-    /// the CLI aggregate used to widen to `usize::MAX` instead.
+    /// not have.
     #[must_use]
     pub fn scan_limit(self) -> usize {
         usize::try_from(self.limit).unwrap_or(0)

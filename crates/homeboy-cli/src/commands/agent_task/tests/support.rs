@@ -31,7 +31,7 @@ pub(crate) use homeboy::agents::agent_tasks::scheduler::{
     AgentTaskAggregate, AgentTaskExecutorAdapter, AgentTaskPlan,
 };
 
-pub(crate) use crate::test_support::{controller_runtime_test_executable, with_isolated_home};
+pub(crate) use crate::test_support::with_isolated_home;
 pub(crate) use homeboy::agents::agent_tasks::lifecycle::{
     self as agent_task_lifecycle, reconcile_status as lifecycle_status, AgentTaskRunRecord,
     AgentTaskRunState,

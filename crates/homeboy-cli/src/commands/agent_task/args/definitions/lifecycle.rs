@@ -141,12 +141,6 @@ pub struct DiagnoseArgs {
     #[arg(long)]
     pub full: bool,
 }
-#[derive(Args, Debug)]
-pub struct RuntimeValidateArgs {
-    /// Durable run to validate without executing its provider lifecycle.
-    pub run_id: String,
-}
-
 #[cfg(test)]
 mod tests {
     use clap::{CommandFactory, Parser};

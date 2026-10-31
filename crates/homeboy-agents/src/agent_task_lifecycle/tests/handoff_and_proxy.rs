@@ -504,15 +504,14 @@ fn submit_plan_persists_queued_status() {
         assert_eq!(loaded.state(), AgentTaskRunState::Queued);
         assert_eq!(
             loaded.metadata[homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY]
-                ["requested"],
+                ["originating"]["build_identity"],
             homeboy_core::build_identity::current().display
         );
         assert!(
-            loaded.metadata[homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY]
-                ["originating"]["pinned_executable"]
-                .as_str()
-                .is_some()
+            loaded.metadata["controller_runtime"]["originating"]["pinned_executable"].is_null()
         );
+        let roots = homeboy_core::paths::PathRoots::from_environment().unwrap();
+        assert!(!roots.data().join("controller-runtimes").exists());
         assert_eq!(loaded.tasks[0].task_id, "task-a");
         assert_eq!(
             loaded.tasks[0].provider_ref.as_deref(),
@@ -550,16 +549,7 @@ fn submit_plan_persists_safe_route_resolution_without_a_destination() {
 fn stamp_stale_controller_runtime(run_id: &str, stale_identity: &str) {
     rewrite_record_for_test(run_id, |record| {
         record.metadata[homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY] = json!({
-            "schema": "homeboy/controller-runtime-pin/v2",
-            "requested": stale_identity,
-            "originating": {
-                "build_identity": stale_identity,
-                "executable": "/legacy/homeboy",
-                "pinned_executable": "/legacy/homeboy",
-                "sha256": "0".repeat(64),
-            },
-            "current": stale_identity,
-            "executed": stale_identity,
+            "originating": { "build_identity": stale_identity }
         });
     })
     .expect("stamp stale controller runtime");

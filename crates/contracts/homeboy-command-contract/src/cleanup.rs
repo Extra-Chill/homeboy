@@ -78,7 +78,6 @@ pub enum CleanupCategoryArg {
     RuntimeTmp,
     ControllerScratch,
     SharedCargoTargets,
-    ControllerRuntimes,
     /// Isolated test homes abandoned by killed test processes. Proven by a
     /// filename marker plus the liveness of the PID stamped into it, so it can
     /// plan and apply with the observation store shut (#11073).

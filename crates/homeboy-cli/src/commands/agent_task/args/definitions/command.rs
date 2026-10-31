@@ -22,7 +22,7 @@ use super::lifecycle::{
     AdoptArgs, CancelArgs, DiagnoseArgs, EvidenceArgs, FinalizePrArgs, GateFeedbackArgs,
     LifecycleReadArgs, LogsArgs, PlacementUpdateArgs, PromoteArgs, QuarantineArgs, RearmArgs,
     RecoverArgs, ReplayProviderBoundaryArgs, ResumeArgs, RetryArgs, ReviewArgs, RunArgs,
-    RunPlanArgs, RuntimeValidateArgs, StatusArgs, ValidatePlanArgs,
+    RunPlanArgs, StatusArgs, ValidatePlanArgs,
 };
 
 pub use super::super::auth::{
@@ -141,7 +141,6 @@ pub enum AgentTaskCommand {
     /// Next actions are derived from the failure classification, not from prose.
     Diagnose(DiagnoseArgs),
     /// Validate controller runtime eligibility without executing provider work.
-    RuntimeValidate(RuntimeValidateArgs),
     /// Hydrate the latest raw executor input and print provider-boundary fields
     /// without relaunching a provider.
     ///

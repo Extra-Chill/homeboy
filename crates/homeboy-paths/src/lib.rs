@@ -38,7 +38,6 @@ pub fn homeboy_root_env_default_under_home(name: &str, home: &Path) -> Option<Pa
     }
 }
 pub const CARGO_TARGETS_STORE: &str = "cargo-targets";
-pub const CONTROLLER_RUNTIMES_STORE: &str = "controller-runtimes";
 pub const CONTROLLER_SCRATCH_STORE: &str = "controller-scratch";
 
 /// Observation-store file name, scoped to its schema version.
@@ -411,11 +410,6 @@ pub fn homeboy_data_store(name: &str) -> Result<PathBuf> {
 /// per-workload would fragment the cache it exists to share.
 pub fn cargo_targets_store() -> Result<PathBuf> {
     homeboy_data_store(CARGO_TARGETS_STORE)
-}
-
-/// Controller runtimes store below an already-resolved data root.
-pub fn controller_runtimes_store_in_root(data_root: &Path) -> PathBuf {
-    data_root.join(CONTROLLER_RUNTIMES_STORE)
 }
 
 /// Controller scratch store.

@@ -180,7 +180,7 @@ fn repository_cleanliness_fixture_cook_leaves_only_the_provider_edit() {
         &std::env::var_os("PATH").expect("test PATH"),
     )))
     .expect("fixture PATH");
-    let mut command = context.controller_runtime_command(TestBinary::HomeboyFixture);
+    let mut command = context.command(TestBinary::HomeboyFixture);
     command.env("PATH", path);
     // Pin a quiet load reading so local admission does not depend on how busy
     // the host is (see cook_lab_handoff_test, homeboy#14984).

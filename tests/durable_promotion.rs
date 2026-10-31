@@ -5,12 +5,12 @@ use homeboy_agents::agent_tasks::lifecycle::{
     record_completed_run, record_promotion, run_id_for_aggregate_path, status,
 };
 use homeboy_agents::agent_tasks::scheduler::{AgentTaskAggregate, AgentTaskPlan};
-use homeboy_core::test_support::{HomeGuard, TestBinary};
+use homeboy_core::test_support::HomeGuard;
 use serde_json::json;
 
 #[test]
 fn aggregate_promotion_persists_a_restart_safe_idempotent_finalization_proof() {
-    let _home = HomeGuard::with_controller_runtime(TestBinary::HomeboyFixture);
+    let _home = HomeGuard::new();
     let run_id = "cook-8399-attempt-1";
     let plan: AgentTaskPlan = serde_json::from_value(json!({
         "plan_id": "issue-8399",
@@ -90,7 +90,7 @@ fn aggregate_promotion_persists_a_restart_safe_idempotent_finalization_proof() {
 /// publish a gated candidate).
 #[test]
 fn an_externalized_promotion_report_reads_back_as_the_report() {
-    let _home = HomeGuard::with_controller_runtime(TestBinary::HomeboyFixture);
+    let _home = HomeGuard::new();
     let run_id = "cook-16664-attempt-1";
     let (plan, aggregate) = plan_and_aggregate("issue-16664", "task-16664");
     record_completed_run(&plan, &aggregate, Some(run_id)).expect("completed run");

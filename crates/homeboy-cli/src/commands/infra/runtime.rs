@@ -1,8 +1,6 @@
 use clap::{Args, Subcommand};
-use homeboy::core::controller_runtime::ControllerRuntimeRetentionOverrides;
 use serde::Serialize;
 
-use crate::commands::utils::args::MutationArgs;
 use crate::commands::CmdResult;
 
 #[derive(Args)]
@@ -33,12 +31,6 @@ enum RuntimeCommand {
     },
     /// Explicitly archive a proven dead or expired runtime-promotion lease.
     PromotionTakeover,
-    /// Plan or apply pruning for unreferenced immutable controller runtimes.
-    ControllerPrune {
-        // Delete pins not retained by nonterminal durable runs.
-        #[command(flatten)]
-        mutation: MutationArgs,
-    },
 }
 
 #[derive(Subcommand)]
@@ -60,7 +52,6 @@ pub enum RuntimeOutput {
     HelperPath(RuntimeHelperPathOutput),
     RuntimePackageRefresh(RuntimePackageRefreshOutput),
     RuntimePromotionTakeover(RuntimePromotionTakeoverOutput),
-    ControllerPrune(ControllerRuntimePruneOutput),
 }
 
 #[derive(Serialize)]
@@ -90,16 +81,6 @@ pub struct RuntimePromotionTakeoverOutput {
     archived_path: String,
 }
 
-#[derive(Serialize)]
-pub struct ControllerRuntimePruneOutput {
-    command: String,
-    apply: bool,
-    limit: usize,
-    retained: Vec<String>,
-    eligible: Vec<String>,
-    removed: Vec<String>,
-}
-
 pub fn run(args: RuntimeArgs) -> CmdResult<RuntimeOutput> {
     match args.command {
         RuntimeCommand::Helper { command } => match command {
@@ -111,7 +92,6 @@ pub fn run(args: RuntimeArgs) -> CmdResult<RuntimeOutput> {
             revision,
         } => refresh_runtime_package(&runtime_id, &source, revision.as_deref()),
         RuntimeCommand::PromotionTakeover => promotion_takeover(),
-        RuntimeCommand::ControllerPrune { mutation } => controller_prune(mutation.is_apply()),
     }
 }
 
@@ -120,9 +100,7 @@ pub(crate) fn is_plain_mode(args: &RuntimeArgs) -> bool {
         RuntimeCommand::Helper { command } => match command {
             RuntimeHelperCommand::Path { plain, .. } => *plain,
         },
-        RuntimeCommand::Refresh { .. }
-        | RuntimeCommand::PromotionTakeover
-        | RuntimeCommand::ControllerPrune { .. } => false,
+        RuntimeCommand::Refresh { .. } | RuntimeCommand::PromotionTakeover => false,
     }
 }
 
@@ -140,36 +118,10 @@ pub(crate) fn run_plain_text(args: RuntimeArgs) -> homeboy::core::Result<(String
                 Ok((format!("{}\n", path.to_string_lossy()), 0))
             }
         },
-        RuntimeCommand::Refresh { .. }
-        | RuntimeCommand::PromotionTakeover
-        | RuntimeCommand::ControllerPrune { .. } => {
+        RuntimeCommand::Refresh { .. } | RuntimeCommand::PromotionTakeover => {
             unreachable!("runtime mutation has no plain mode")
         }
     }
-}
-
-fn controller_prune(apply: bool) -> CmdResult<RuntimeOutput> {
-    let overrides = ControllerRuntimeRetentionOverrides::default();
-    let policy = homeboy::core::controller_runtime::resolve_cleanup_options(apply, overrides);
-    let result =
-        homeboy::agents::agent_tasks::lifecycle::prune_controller_runtime_pins(apply, overrides)?;
-    let stringify = |paths: Vec<std::path::PathBuf>| {
-        paths
-            .into_iter()
-            .map(|path| path.to_string_lossy().to_string())
-            .collect()
-    };
-    Ok((
-        RuntimeOutput::ControllerPrune(ControllerRuntimePruneOutput {
-            command: "runtime.controller_prune".to_string(),
-            apply,
-            limit: policy.limit,
-            retained: stringify(result.retained),
-            eligible: stringify(result.eligible),
-            removed: stringify(result.removed),
-        }),
-        0,
-    ))
 }
 
 fn promotion_takeover() -> CmdResult<RuntimeOutput> {

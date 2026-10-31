@@ -607,10 +607,6 @@ pub(crate) fn cancel_exact_run_in_store_with_provenance(
             &lifecycle_store.artifact_root(),
             &run_id,
         )?;
-        homeboy_core::controller_runtime::cancel_admission_at(
-            &lifecycle_store.data_root().join("controller-runtimes"),
-            &run_id,
-        )?;
     }
     Ok(record)
 }
@@ -1209,10 +1205,6 @@ fn cancel_resolved_run_in_store(
             &lifecycle_store.artifact_root(),
             &record.run_id,
         )?;
-        homeboy_core::controller_runtime::cancel_admission_at(
-            &lifecycle_store.data_root().join("controller-runtimes"),
-            &record.run_id,
-        )?;
         return Ok(CancelResolvedOutcome::Cancelled(record));
     }
     if record.state().is_terminal() {
@@ -1370,10 +1362,6 @@ pub(super) fn reconcile_controller_job_cancellation_in_store(
     crate::controller_scratch::finalize_run_at_explicit_roots(
         &lifecycle_store.data_root(),
         &lifecycle_store.artifact_root(),
-        &record.run_id,
-    )?;
-    homeboy_core::controller_runtime::cancel_admission_at(
-        &lifecycle_store.data_root().join("controller-runtimes"),
         &record.run_id,
     )?;
     Ok(true)

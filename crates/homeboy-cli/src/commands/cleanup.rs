@@ -9,7 +9,6 @@ use homeboy::core::cleanup::{
     self, ArtifactCleanupOptions, ArtifactCleanupScope, ArtifactCleanupSort, CleanupPolicy,
     CleanupPolicyOverrides,
 };
-use homeboy::core::controller_runtime::{self, ControllerRuntimeRetentionOverrides};
 use homeboy::core::daemon::controller_job_driver::{
     self, ControllerJobDriver, ControllerJobHandle, ControllerJobPublicError,
 };
@@ -131,7 +130,7 @@ struct AutomaticRetentionControllerOutput {
 /// the scan limit; the newest release of every repository is structurally
 /// unreachable; and everything it can remove is a local copy of bytes already
 /// published to an immutable GitHub Release tag.
-const AUTOMATIC_RETENTION_CATEGORIES: [CleanupCategoryArg; 11] = [
+const AUTOMATIC_RETENTION_CATEGORIES: [CleanupCategoryArg; 10] = [
     CleanupCategoryArg::TerminalRuns,
     CleanupCategoryArg::PersistedRunArtifacts,
     CleanupCategoryArg::OrphanedArtifactBytes,
@@ -139,7 +138,6 @@ const AUTOMATIC_RETENTION_CATEGORIES: [CleanupCategoryArg; 11] = [
     CleanupCategoryArg::LeakedTestHomes,
     CleanupCategoryArg::ReleaseArtifacts,
     CleanupCategoryArg::ControllerScratch,
-    CleanupCategoryArg::ControllerRuntimes,
     CleanupCategoryArg::RemoteLabWorkspaces,
     CleanupCategoryArg::RunnerBinaryCaches,
     CleanupCategoryArg::ExternalStorage,
@@ -801,25 +799,6 @@ fn retained_storage_report(
     }
 
     let mut records = Vec::new();
-    retained_storage_progress("controller_runtimes");
-    let runtime = controller_runtime::retention_report()?;
-    for snapshot in runtime.snapshots {
-        if snapshot.eligible() {
-            continue;
-        }
-        records.push(RetainedStorageRecord {
-            category: "controller_runtimes".to_string(),
-            reason: snapshot.retention_reasons().join(", "),
-            owner: snapshot.identity,
-            run_id: None,
-            liveness: "lifecycle_pinned".to_string(),
-            age: age_bucket(snapshot.age_seconds),
-            age_seconds: Some(snapshot.age_seconds),
-            size_bytes: snapshot.size_bytes,
-            reference: snapshot.path.display().to_string(),
-        });
-    }
-
     // The report reads the same resolved policy the delete paths use, so an
     // operator cannot be shown a window cleanup would not actually apply.
     retained_storage_progress("shared_cargo_targets");
@@ -1195,11 +1174,6 @@ fn filesystem_entry_with_budget(
             "shared_cargo_targets",
             "managed/shared",
             "homeboy cleanup --include shared-cargo-targets",
-        ),
-        homeboy::core::paths::CONTROLLER_RUNTIMES_STORE => (
-            "controller_runtimes",
-            "managed",
-            "homeboy cleanup --include controller-runtimes",
         ),
         homeboy::core::paths::CONTROLLER_SCRATCH_STORE => (
             "controller_scratch",
@@ -1605,7 +1579,6 @@ fn build_retained_storage_report(
         safe_next_commands: vec![
             "homeboy cleanup --include runtime-tmp".to_string(),
             "homeboy cleanup --include controller-scratch".to_string(),
-            "homeboy cleanup --include controller-runtimes".to_string(),
             "homeboy cleanup --include shared-cargo-targets".to_string(),
             "homeboy cleanup --include persisted-run-artifacts".to_string(),
             "homeboy cleanup --include runner-downloads".to_string(),
@@ -1845,14 +1818,6 @@ const SHARED_CARGO_TARGETS_METADATA: CleanupInventoryCategoryMetadata =
         include_arg: "shared-cargo-targets",
         dry_run_command: "homeboy cleanup --include shared-cargo-targets",
         apply_command: "homeboy cleanup --include shared-cargo-targets --apply",
-    };
-
-const CONTROLLER_RUNTIMES_METADATA: CleanupInventoryCategoryMetadata =
-    CleanupInventoryCategoryMetadata {
-        category: "controller_runtimes",
-        include_arg: "controller-runtimes",
-        dry_run_command: "homeboy runtime controller-prune",
-        apply_command: "homeboy runtime controller-prune --apply",
     };
 
 /// One slot in the unattended pass's rotation.
@@ -2244,7 +2209,7 @@ fn observe_cleanup<T>(
 }
 
 /// The order an aggregate sweep visits its categories in.
-const CLEANUP_CATEGORY_ORDER: [CleanupCategoryArg; 15] = [
+const CLEANUP_CATEGORY_ORDER: [CleanupCategoryArg; 14] = [
     CleanupCategoryArg::RepoArtifacts,
     CleanupCategoryArg::TaskWorktrees,
     CleanupCategoryArg::TerminalRuns,
@@ -2257,7 +2222,6 @@ const CLEANUP_CATEGORY_ORDER: [CleanupCategoryArg; 15] = [
     CleanupCategoryArg::LeakedTestHomes,
     CleanupCategoryArg::ReleaseArtifacts,
     CleanupCategoryArg::ControllerScratch,
-    CleanupCategoryArg::ControllerRuntimes,
     CleanupCategoryArg::SharedCargoTargets,
     CleanupCategoryArg::ExternalStorage,
 ];
@@ -2276,7 +2240,6 @@ fn cleanup_category_metadata(category: CleanupCategoryArg) -> CleanupInventoryCa
         CleanupCategoryArg::LeakedTestHomes => LEAKED_TEST_HOMES_METADATA,
         CleanupCategoryArg::ReleaseArtifacts => RELEASE_ARTIFACTS_METADATA,
         CleanupCategoryArg::ControllerScratch => CONTROLLER_SCRATCH_METADATA,
-        CleanupCategoryArg::ControllerRuntimes => CONTROLLER_RUNTIMES_METADATA,
         CleanupCategoryArg::SharedCargoTargets => SHARED_CARGO_TARGETS_METADATA,
         CleanupCategoryArg::ExternalStorage => EXTERNAL_STORAGE_METADATA,
     }
@@ -2970,45 +2933,6 @@ fn run_cleanup_category(
                 },
             );
         }
-        CleanupCategoryArg::ControllerRuntimes => {
-            isolate_cleanup_category_bounded(
-                categories,
-                CONTROLLER_RUNTIMES_METADATA,
-                apply,
-                &args,
-                deadline,
-                CleanupCategoryCommandOverrides::default(),
-                || {
-                    // Policy is resolved by core so this path and `homeboy runtime
-                    // controller-prune` cannot drift apart again (#10288).
-                    let output =
-                        controller_runtime::cleanup(controller_runtime::resolve_cleanup_options(
-                            apply,
-                            ControllerRuntimeRetentionOverrides { limit: Some(limit) },
-                        ))?;
-                    // Counts come from core rather than being re-derived here, so
-                    // the advertised reclaim is exactly what an apply achieves. A
-                    // locally recomputed count is how this category advertised
-                    // 143 MB it could never free (#14222).
-                    let candidate_count = output.candidate_count();
-                    let estimated_bytes = output.candidate_bytes();
-                    category_from_output(
-                        CONTROLLER_RUNTIMES_METADATA,
-                        apply,
-                        CleanupCategoryMetrics {
-                            candidate_count,
-                            applied_count: output.removed_identities.len(),
-                            skipped_count: output.retained.len(),
-                            estimated_bytes,
-                            reclaimed_bytes: output.reclaimed_bytes,
-                        },
-                        output,
-                    )
-                    .map(|category| vec![category])
-                },
-            );
-        }
-
         CleanupCategoryArg::SharedCargoTargets => {
             isolate_cleanup_category_bounded(
                 categories,
@@ -3192,7 +3116,6 @@ fn cleanup_category_arg_name(category: &CleanupCategoryArg) -> &'static str {
         CleanupCategoryArg::RuntimeTmp => "runtime-tmp",
         CleanupCategoryArg::ControllerScratch => "controller-scratch",
         CleanupCategoryArg::SharedCargoTargets => "shared-cargo-targets",
-        CleanupCategoryArg::ControllerRuntimes => "controller-runtimes",
         CleanupCategoryArg::LeakedTestHomes => "leaked-test-homes",
         CleanupCategoryArg::ReleaseArtifacts => "release-artifacts",
         CleanupCategoryArg::ExternalStorage => "external-storage",
@@ -5019,10 +4942,10 @@ mod count_unit_tests {
     /// got zero bytes, and had no signal that anything was unusual (#14222).
     #[test]
     fn an_apply_that_reclaims_none_of_its_candidates_is_not_reported_as_completed() {
-        assert_eq!(category("controller-runtimes", 1, 0).outcome, "no_effect");
-        assert_eq!(category("controller-runtimes", 1, 1).outcome, "completed");
+        assert_eq!(category("controller-scratch", 1, 0).outcome, "no_effect");
+        assert_eq!(category("controller-scratch", 1, 1).outcome, "completed");
         // Nothing to do is a genuine clean pass, not a no-effect apply.
-        assert_eq!(category("controller-runtimes", 0, 0).outcome, "completed");
+        assert_eq!(category("controller-scratch", 0, 0).outcome, "completed");
     }
 
     /// A dry run applies nothing by definition, so naming candidates in one is
@@ -5031,11 +4954,11 @@ mod count_unit_tests {
     fn a_dry_run_that_names_candidates_is_still_completed() {
         let dry_run = category_from_command(
             CleanupCategoryCommands {
-                category: "controller-runtimes",
+                category: "controller-scratch",
                 apply: false,
-                canonical_cleanup_command: "homeboy cleanup --include controller-runtimes"
+                canonical_cleanup_command: "homeboy cleanup --include controller-scratch"
                     .to_string(),
-                specialist_command: "homeboy runtime controller-prune".to_string(),
+                specialist_command: "homeboy cleanup --include controller-scratch".to_string(),
             },
             CleanupCategoryMetrics {
                 candidate_count: 3,
@@ -5055,7 +4978,7 @@ mod count_unit_tests {
     /// the category, the sweep, or the scheduler that runs it.
     #[test]
     fn a_no_effect_apply_is_not_treated_as_a_failure() {
-        let categories = vec![category("controller-runtimes", 1, 0)];
+        let categories = vec![category("controller-scratch", 1, 0)];
 
         assert_eq!(categories[0].outcome, "no_effect");
         assert!(categories[0].failure.is_none());
@@ -5377,7 +5300,7 @@ mod tests {
     fn retained_storage_aggregation_is_bounded_and_groups_lifecycle_dimensions() {
         let records = vec![
             RetainedStorageRecord {
-                category: "controller_runtimes".to_string(),
+                category: "controller_scratch".to_string(),
                 reason: "referenced by recoverable run".to_string(),
                 owner: "runtime-a".to_string(),
                 run_id: Some("run-1".to_string()),
@@ -5767,7 +5690,7 @@ mod tests {
     fn filesystem_usage_deduplicates_hard_links_in_root_totals() {
         let root = TempDir::new().expect("storage root");
         let first = root.path().join("cargo-targets");
-        let second = root.path().join("controller-runtimes");
+        let second = root.path().join("controller-scratch");
         std::fs::create_dir_all(&first).expect("first store");
         std::fs::create_dir_all(&second).expect("second store");
         let original = first.join("shared");
@@ -5997,13 +5920,12 @@ mod tests {
         // #9824 only reports filesystem attribution and names the same owner.
         // Cargo remains a separate budgeted automatic pass, so it must not enter
         // the aggregate category sweep.
-        assert!(AUTOMATIC_RETENTION_CATEGORIES.contains(&CleanupCategoryArg::ControllerRuntimes));
         assert!(!AUTOMATIC_RETENTION_CATEGORIES.contains(&CleanupCategoryArg::SharedCargoTargets));
 
         let report =
             build_retained_storage_report(Vec::new(), 1, None, test_sqlite(), test_filesystem());
         for command in [
-            "homeboy cleanup --include controller-runtimes",
+            "homeboy cleanup --include controller-scratch",
             "homeboy cleanup --include shared-cargo-targets",
         ] {
             assert!(
@@ -6129,14 +6051,14 @@ mod tests {
         );
         isolate_cleanup_category(
             &mut categories,
-            CONTROLLER_RUNTIMES_METADATA,
+            CONTROLLER_SCRATCH_METADATA,
             true,
             None,
             None,
             || {
-                executed.push("controller_runtimes");
+                executed.push("controller_scratch");
                 category_from_output(
-                    CONTROLLER_RUNTIMES_METADATA,
+                    CONTROLLER_SCRATCH_METADATA,
                     true,
                     CleanupCategoryMetrics {
                         candidate_count: 1,
@@ -6153,7 +6075,7 @@ mod tests {
 
         assert_eq!(
             executed,
-            ["runtime_tmp", "controller_scratch", "controller_runtimes"]
+            ["runtime_tmp", "controller_scratch", "controller_scratch"]
         );
         assert_eq!(categories.len(), 3);
         assert_eq!(categories[0].category, "runtime_tmp");
@@ -6198,7 +6120,6 @@ mod tests {
                     include: vec![
                         CleanupCategoryArg::RuntimeTmp,
                         CleanupCategoryArg::ControllerScratch,
-                        CleanupCategoryArg::ControllerRuntimes,
                     ],
                     exclude: Vec::new(),
                     include_untagged: false,
@@ -6225,7 +6146,7 @@ mod tests {
             assert_eq!(output["execution"]["durable"], false);
             assert_eq!(output["failed_category_count"], 1);
             let categories = output["categories"].as_array().expect("categories");
-            assert_eq!(categories.len(), 3);
+            assert_eq!(categories.len(), 2);
             assert_eq!(categories[0]["category"], "runtime_tmp");
             assert_eq!(categories[0]["failure"]["code"], "internal.io_error");
             assert_eq!(
@@ -6234,8 +6155,6 @@ mod tests {
             );
             assert_eq!(categories[1]["category"], "controller_scratch");
             assert!(categories[1]["failure"].is_null());
-            assert_eq!(categories[2]["category"], "controller_runtimes");
-            assert!(categories[2]["failure"].is_null());
         });
     }
 
@@ -6318,7 +6237,7 @@ mod tests {
                 CleanupArgs {
                     apply: true,
                     include: vec![CleanupCategoryArg::RepoArtifacts],
-                    exclude: vec![CleanupCategoryArg::ControllerRuntimes],
+                    exclude: Vec::new(),
                     include_untagged: true,
                     older_than_days: Some(7),
                     runtime_tmp_managed_older_than_days: None,
@@ -6355,7 +6274,7 @@ mod tests {
             assert_eq!(envelope.next_actions.len(), 1);
             assert_eq!(
                 envelope.next_actions[0].command,
-                "homeboy cleanup --include repo-artifacts --exclude controller-runtimes --include-untagged --apply --older-than-days 7 --limit 3 --cursor 'next page' --full"
+                "homeboy cleanup --include repo-artifacts --include-untagged --apply --older-than-days 7 --limit 3 --cursor 'next page' --full"
             );
         });
     }
@@ -6637,7 +6556,6 @@ mod tests {
             CleanupCategoryArg::RuntimeTmp,
             CleanupCategoryArg::ControllerScratch,
             CleanupCategoryArg::SharedCargoTargets,
-            CleanupCategoryArg::ControllerRuntimes,
         ] {
             assert!(
                 bare.includes(category),
@@ -6926,11 +6844,11 @@ mod tests {
                 "homeboy cleanup --include shared-cargo-targets --apply",
             ),
             (
-                CONTROLLER_RUNTIMES_METADATA,
-                "controller_runtimes",
-                "controller-runtimes",
-                "homeboy runtime controller-prune",
-                "homeboy runtime controller-prune --apply",
+                CONTROLLER_SCRATCH_METADATA,
+                "controller_scratch",
+                "controller-scratch",
+                "homeboy cleanup --include controller-scratch",
+                "homeboy cleanup --include controller-scratch --apply",
             ),
             (
                 LEAKED_TEST_HOMES_METADATA,
