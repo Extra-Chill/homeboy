@@ -1354,10 +1354,16 @@ mod tests {
     #[test]
     fn process_local_cache_deduplicates_phases_without_reusing_stale_credentials() {
         let _home = stable_identity_home();
-        let root = tempfile::tempdir().expect("tempdir");
-        let count = root.path().join("count");
-        let provider = provider(&readiness_script(root.path()), &count);
-        let config = json!({ "model": "ready" });
+        let fake = super::super::test_pi::FakePi::with_probes(
+            "exit 1",
+            "printf 'test-pi\\n'",
+            "printf 'probe\\n' >> \"$COUNT\"; printf 'test model\\n'",
+        );
+        let count = fake.root.path().join("count");
+        let provider = fake.provider();
+        let mut config = fake.config();
+        config["model"] = json!("test/model");
+        config["runtime_env"] = json!({"COUNT":count});
         let mut compile_cache = ProviderRuntimeReadinessCache::process_local();
         let mut admission_cache = ProviderRuntimeReadinessCache::process_local();
 
@@ -1383,7 +1389,13 @@ mod tests {
         )
         .expect("rotated-credential phase verdict");
 
-        assert_eq!(std::fs::read_to_string(count).expect("probe count"), "2");
+        assert_eq!(
+            std::fs::read_to_string(count)
+                .expect("probe count")
+                .lines()
+                .count(),
+            2
+        );
     }
 
     #[test]
@@ -1645,23 +1657,25 @@ mod tests {
     #[test]
     fn concurrent_exact_key_probes_singleflight() {
         let _home = stable_identity_home();
-        let root = tempfile::tempdir().expect("tempdir");
-        let count = root.path().join("count");
-        let script = root.path().join("singleflight.js");
-        std::fs::write(
-            &script,
-            "const fs=require('fs');const count=process.argv[2];fs.appendFileSync(count,'probe\\n');Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,100);process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:true,classification:'ready',retryable:false,remediation:'',reason:'',cache_key:'shared',identity:{account:'shared'}}));",
-        )
-        .expect("readiness script");
-        let provider = provider(&script, &count);
+        let fake = super::super::test_pi::FakePi::with_probes(
+            "exit 1",
+            "printf 'test-pi\\n'",
+            "printf 'probe\\n' >> \"$COUNT\"; sleep 0.1; printf 'test model\\n'",
+        );
+        let count = fake.root.path().join("count");
+        let provider = fake.provider();
+        let mut config = fake.config();
+        config["model"] = json!("test/model");
+        config["runtime_env"] = json!({"COUNT": count});
         let cache = test_cache();
         std::thread::scope(|scope| {
             for _ in 0..2 {
                 let provider = provider.clone();
                 let mut cache = cache.clone();
+                let config = config.clone();
                 scope.spawn(move || {
                     assert!(
-                        readiness_verdict(&provider, &json!({"model":"same"}), &mut cache)
+                        readiness_verdict(&provider, &config, &mut cache)
                             .expect("readiness")
                             .ready
                     );

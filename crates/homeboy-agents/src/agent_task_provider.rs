@@ -10,6 +10,8 @@ mod pi;
 pub(crate) mod pi_response;
 #[cfg(test)]
 mod pi_tests;
+#[cfg(test)]
+pub(crate) mod test_pi;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};

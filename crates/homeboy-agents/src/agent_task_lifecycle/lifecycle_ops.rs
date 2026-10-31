@@ -5921,6 +5921,7 @@ pub fn list_records_with_health_in_store(
 ///
 /// Exact-match discovery uses this path so filtering happens before a result is
 /// selected rather than against the ordinary bounded display snapshot.
+#[cfg(test)]
 pub(crate) fn read_all_records_with_health(
 ) -> Result<(Vec<AgentTaskRunRecord>, AgentTaskRecordHealthSummary)> {
     let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;

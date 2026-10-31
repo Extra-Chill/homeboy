@@ -3160,15 +3160,6 @@ fn render_provider_command_argv(provider: &AgentTaskExecutorProvider) -> Vec<Str
         .collect()
 }
 
-fn render_provider_invocation_argv(provider: &AgentTaskExecutorProvider) -> Vec<String> {
-    provider
-        .invocation
-        .argv
-        .iter()
-        .map(|arg| render_provider_command_template(arg, provider))
-        .collect()
-}
-
 pub fn provider_command_parts(
     provider: &AgentTaskExecutorProvider,
 ) -> Option<(String, Vec<String>, Option<PathBuf>)> {

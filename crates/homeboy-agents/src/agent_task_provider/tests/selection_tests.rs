@@ -27,13 +27,9 @@ fn provider_preflight_reports_missing_command_before_spawn() {
 
 #[test]
 fn provider_preflight_reports_missing_secret_readiness() {
-    let (request, mut provider) = request(
-        "missing-secret",
-        std::env::current_exe()
-            .expect("current exe")
-            .display()
-            .to_string(),
-    );
+    let fake = super::super::test_pi::FakePi::success();
+    let request = fake.request("missing-secret");
+    let mut provider = fake.provider();
     provider.secret_requirements = vec![AgentTaskProviderSecretRequirement {
         name: None,
         env: vec!["HOMEBOY_TEST_PROVIDER_SECRET_THAT_SHOULD_NOT_EXIST".to_string()],
@@ -63,18 +59,13 @@ fn provider_preflight_reports_missing_secret_readiness() {
 fn provider_nonzero_exit_preserves_bounded_redacted_process_diagnostics() {
     let secret_value = "super-secret-provider-token";
     std::env::set_var("HOMEBOY_TEST_PROVIDER_SECRET", secret_value);
-    let script = script(&format!(
-        r#"cat <<'JSON'
-{{"schema":"{AGENT_TASK_OUTCOME_SCHEMA}","task_id":"codex-failed","status":"failed","summary":"Codex CLI exited with status 1.","failure_classification":"provider","artifacts":[],"typed_artifacts":[],"evidence_refs":[],"diagnostics":[],"outputs":null,"workflow":null,"follow_up":null,"metadata":null}}
-JSON
-printf '%s\n' 'Codex stderr: quota exhausted; token={secret_value}' >&2
-exit 1
-"#
+    let fake = super::super::test_pi::FakePi::new(&format!(
+        "{}\nprintf '%s\\n' 'Pi stderr: quota exhausted; token={secret_value}' >&2\nexit 1",
+        super::super::test_pi::FakePi::answer("Pi CLI exited with status 1."),
     ));
-    let (mut request, mut provider) = request("codex-failed", format!("sh {script}"));
+    let mut request = fake.request("pi-failed");
+    let provider = fake.provider();
     request.executor.secret_env = vec!["HOMEBOY_TEST_PROVIDER_SECRET".to_string()];
-    provider.id = "codex.provider".to_string();
-    provider.backend = "codex".to_string();
 
     let outcome = run_provider_command_once(&request, &provider);
 
@@ -85,11 +76,11 @@ exit 1
         .iter()
         .find(|diagnostic| diagnostic.class == "agent_task.provider_process_failed")
         .expect("process failure diagnostic");
-    assert!(diagnostic.message.contains("codex.provider"));
-    assert!(diagnostic.message.contains("codex"));
+    assert!(diagnostic.message.contains("pi.agent-task-executor"));
+    assert!(diagnostic.message.contains("pi"));
     assert!(diagnostic.message.contains("status 1"));
-    assert_eq!(diagnostic.data["provider"], "codex.provider");
-    assert_eq!(diagnostic.data["provider_backend"], "codex");
+    assert_eq!(diagnostic.data["provider"], "pi.agent-task-executor");
+    assert_eq!(diagnostic.data["provider_backend"], "pi");
     assert_eq!(diagnostic.data["exit_code"], 1);
     let stderr = diagnostic.data["stderr"].as_str().expect("stderr tail");
     assert!(stderr.contains("quota exhausted"));
@@ -98,7 +89,7 @@ exit 1
     assert!(diagnostic.data["stdout"]
         .as_str()
         .expect("stdout tail")
-        .contains("Codex CLI exited with status 1."));
+        .contains("Pi CLI exited with status 1."));
     assert!(diagnostic.data["remediation_hints"]
         .as_array()
         .expect("remediation hints")

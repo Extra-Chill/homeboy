@@ -223,12 +223,8 @@ fn isolated_cook_rejects_source_identity_drift_before_snapshotting() {
 #[test]
 fn scheduler_dispatches_builtin_pi_event_stream_without_extensions() {
     let _home = super::common::artifact_home();
-    let command = format!(
-        "node {}",
-        script("process.stdout.write(JSON.stringify({type:'message_end',message:{role:'assistant',stopReason:'stop',content:[{type:'text',text:'ok'}]}})+'\\n');")
-    );
-    let (mut request, _) = request("native-pi", command);
-    request.executor.backend = "pi".to_string();
+    let fake = super::super::test_pi::FakePi::success();
+    let request = fake.request("native-pi");
     let providers = super::super::discovery::discover_agent_task_executor_providers();
     assert_eq!(providers.len(), 1);
     let outcome = run_provider_command_once(&request, &providers[0]);
@@ -794,8 +790,9 @@ fn provider_empty_stdout_records_failed_run_with_executor_evidence() {
 
 #[test]
 fn provider_timeout_returns_structured_outcome() {
-    let command = format!("node {}", script("setInterval(() => {}, 1000);"));
-    let (mut request, provider) = request("task-timeout", command);
+    let fake = super::super::test_pi::FakePi::new("sleep 20");
+    let mut request = fake.request("task-timeout");
+    let provider = fake.provider();
     request.limits.timeout_ms = Some(50);
     let scheduler = AgentTaskScheduler::new(Arc::new(
         ExtensionProviderAgentTaskExecutor::with_providers(vec![provider]),
@@ -914,8 +911,9 @@ fn provider_default_timeout_returns_structured_outcome_without_explicit_timeout(
         .lock()
         .expect("default timeout env lock");
     let _override = DefaultTimeoutOverride::set("50");
-    let command = format!("node {}", script("setInterval(() => {}, 1000);"));
-    let (mut request, provider) = request("task-default-timeout", command);
+    let fake = super::super::test_pi::FakePi::new("sleep 20");
+    let mut request = fake.request("task-default-timeout");
+    let provider = fake.provider();
     // This test is specifically about the *default*, so drop the explicit
     // timeout the shared fixture now pins.
     request.limits.timeout_ms = None;
@@ -995,8 +993,9 @@ fn stalled_provider_is_killed_and_rotates_to_configured_fallback() {
 
 #[test]
 fn silent_provider_hits_liveness_deadline_before_wall_timeout() {
-    let command = format!("node {}", script("setInterval(() => {}, 1_000);"));
-    let (mut request, provider) = request("task-liveness-silent", command);
+    let fake = super::super::test_pi::FakePi::new("sleep 20");
+    let mut request = fake.request("task-liveness-silent");
+    let provider = fake.provider();
     request.limits.timeout_ms = Some(500);
     request.limits.liveness_timeout_ms = Some(50);
 
@@ -1021,8 +1020,9 @@ fn silent_provider_hits_liveness_deadline_before_wall_timeout() {
 
 #[test]
 fn silent_provider_uses_default_liveness_deadline_before_wall_timeout() {
-    let command = format!("node {}", script("setInterval(() => {}, 1_000);"));
-    let (mut request, provider) = request("task-liveness-default", command);
+    let fake = super::super::test_pi::FakePi::new("sleep 20");
+    let mut request = fake.request("task-liveness-default");
+    let provider = fake.provider();
     request.limits.timeout_ms = Some(500);
     request.limits.liveness_timeout_ms = None;
 
@@ -1049,8 +1049,9 @@ fn silent_provider_uses_default_liveness_deadline_before_wall_timeout() {
 
 #[test]
 fn wall_timeout_precedes_an_equal_default_liveness_deadline() {
-    let command = format!("node {}", script("setInterval(() => {}, 1_000);"));
-    let (mut request, provider) = request("task-liveness-timeout-precedence", command);
+    let fake = super::super::test_pi::FakePi::new("sleep 20");
+    let mut request = fake.request("task-liveness-timeout-precedence");
+    let provider = fake.provider();
     request.limits.timeout_ms = Some(50);
     request.limits.liveness_timeout_ms = None;
 
@@ -1074,11 +1075,9 @@ fn wall_timeout_precedes_an_equal_default_liveness_deadline() {
 
 #[test]
 fn parent_visible_progress_keeps_provider_alive_until_wall_deadline() {
-    let command = format!(
-        "node {}",
-        script("setInterval(() => process.stderr.write('.'), 10);")
-    );
-    let (mut request, provider) = request("task-liveness-progress", command);
+    let fake = super::super::test_pi::FakePi::new("while :; do printf '.' >&2; sleep 0.01; done");
+    let mut request = fake.request("task-liveness-progress");
+    let provider = fake.provider();
     request.limits.timeout_ms = Some(500);
     request.limits.liveness_timeout_ms = Some(300);
 
@@ -1384,14 +1383,13 @@ fn provider_can_return_timeout_payload_during_wrapper_grace() {
 
 #[test]
 fn provider_command_receives_executor_config_env() {
-    let command = format!(
-        "node {}",
-        script("let config=JSON.parse(process.env.HOMEBOY_AGENT_TASK_EXECUTOR_CONFIG_JSON); if(config.marker!=='configured') process.exit(1); process.stdout.write(JSON.stringify({type:'message_end',message:{role:'assistant',stopReason:'stop',content:[{type:'text',text:process.env.HOMEBOY_AGENT_TASK_PROVIDER_ID}]}})+'\\n');")
-    );
-    let (mut request, mut provider) = request("task-config", command);
+    let fake = super::super::test_pi::FakePi::new(&format!(
+        "test \"$HOMEBOY_AGENT_TASK_PROVIDER_ID\" = pi.agent-task-executor || exit 23\nprintf '%s' \"$HOMEBOY_AGENT_TASK_EXECUTOR_CONFIG_JSON\" | grep configured >/dev/null || exit 24\n{}",
+        super::super::test_pi::FakePi::answer("pi.agent-task-executor"),
+    ));
+    let mut request = fake.request("task-config");
+    let provider = fake.provider();
     request.executor.config["marker"] = json!("configured");
-    provider.extension_id = Some("wordpress".to_string());
-    provider.extension_path = Some("/tmp/homeboy-extension".to_string());
     let scheduler = AgentTaskScheduler::new(Arc::new(
         ExtensionProviderAgentTaskExecutor::with_providers(vec![provider]),
     ));
@@ -1401,7 +1399,7 @@ fn provider_command_receives_executor_config_env() {
     assert_eq!(aggregate.totals.succeeded, 1, "{aggregate:?}");
     assert_eq!(
         aggregate.outcomes[0].summary.as_deref(),
-        Some("test.provider")
+        Some("pi.agent-task-executor")
     );
 }
 
