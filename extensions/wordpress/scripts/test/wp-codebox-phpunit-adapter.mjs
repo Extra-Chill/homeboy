@@ -169,6 +169,7 @@ const activationPlan = [
 if (!discoveryOnly) {
   await requireHarness(harnessSource);
 }
+const extraPlugins = canonicalExtraPlugins(settings.wp_codebox_extra_plugins);
 const options = clean({
   wordpressVersion: settings.wordpress_runtime_version,
   phpVersion: settings.wordpress_runtime_php_version,
@@ -177,9 +178,9 @@ const options = clean({
   pluginSlug: slug,
   extra_plugins: [
     ...activationPlan.map(({ role, ...plugin }) => clean({ ...plugin, activate: true })),
-    ...canonicalExtraPlugins(settings.wp_codebox_extra_plugins),
+    ...extraPlugins,
   ],
-  dependencyMounts: [...new Set([sandboxPluginDirectory(slug), ...dependencies.map(({ sandboxDirectory }) => sandboxDirectory)])],
+  dependencyMounts: managedDependencyMounts(),
   selectedTestFile: discoveryOnly ? '' : selectedTestFile,
   changedTestFiles: discoveryOnly ? [] : suiteChangedScopeBySuite.get(activeSuite).sandbox,
   discoveryOnly,
@@ -706,6 +707,8 @@ function phpunitChangedTestFiles() {
 function canonicalMounts(value) {
   return Array.isArray(value) ? value : [];
 }
+// A relative extra-plugin source is a path inside the component checkout, not
+// inside the adapter's temporary working directory.
 function canonicalExtraPlugins(value) {
   if (value === undefined) {
     return [];
@@ -717,8 +720,24 @@ function canonicalExtraPlugins(value) {
     if (!isObject(plugin) || typeof plugin.source !== 'string' || plugin.source.trim() === '' || typeof plugin.slug !== 'string' || plugin.slug.trim() === '') {
       throw new Error(`wp_codebox_extra_plugins[${index}] requires non-empty source and slug`);
     }
-    return clean(plugin);
+    return clean({ ...plugin, source: path.resolve(componentPath, plugin.source) });
   });
+}
+// The managed PHPUnit bootstrap loads `dependencyMounts` in order and
+// activates them before the component, so this list is the bootstrap's load
+// and activation plan. Declared must-use extra plugins load first (they shape
+// the environment every plugin activates into), then other extra plugins and
+// validation dependencies, and the target comes last, matching the recipe
+// phase's activation contract. The target stays listed so it is mounted.
+function managedDependencyMounts() {
+  const muPlugins = extraPlugins.filter((plugin) => plugin.loadAs === 'mu-plugin');
+  const plugins = extraPlugins.filter((plugin) => plugin.loadAs !== 'mu-plugin');
+  return [...new Set([
+    ...muPlugins.map((plugin) => sandboxPluginDirectory(plugin.slug)),
+    ...plugins.map((plugin) => sandboxPluginDirectory(plugin.slug)),
+    ...dependencies.map(({ sandboxDirectory }) => sandboxDirectory),
+    sandboxPluginDirectory(slug),
+  ])];
 }
 function managedPreloadFiles(bootstrapMode, preloadFiles) {
   const configured = Array.isArray(preloadFiles) ? preloadFiles : [];

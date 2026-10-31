@@ -56,6 +56,7 @@ try {
       wp_codebox_bench_mounts: [{ source: path.join(component, 'db.php'), target: '/wordpress/wp-content/db.php', mode: 'readonly' }],
       wordpress_runtime_prepare_steps: [{ command: 'wordpress.wp-cli', args: ['command=option get home'] }],
       wordpress_runtime_post_steps: [{ command: 'wordpress.browser-probe', args: ['url=/'] }],
+      wp_codebox_extra_plugins: [{ source: 'tests/support/harness-mu', slug: 'harness-mu', loadAs: 'mu-plugin' }],
     }),
   };
   const extension = path.resolve(import.meta.dirname, '..');
@@ -69,8 +70,11 @@ try {
     ['recipe', 'build'], ['recipe-run', '--recipe'], ['recipe', 'build'], ['recipe-run', '--recipe'],
   ]);
   const options = entries.filter((entry) => entry.options).map((entry) => entry.options);
+  // A relative extra-plugin source resolves inside the component checkout.
+  const harnessMu = { source: path.join(component, 'tests/support/harness-mu'), slug: 'harness-mu', loadAs: 'mu-plugin' };
   assert.deepEqual(options[0].extra_plugins, [
     { source: '/workspace/monorepo', sourceSubpath: 'plugins/canonical-plugin', slug: 'canonical-plugin', activate: false },
+    harnessMu,
   ]);
   assert.deepEqual(options[0].mounts, [
     { source: path.join(component, 'db.php'), target: '/wordpress/wp-content/db.php', mode: 'readonly' },
@@ -82,10 +86,15 @@ try {
   assert.deepEqual(options[1].extra_plugins, [
     { source: dependency, slug: 'db-touching-dependency', activate: true, composer: 'install' },
     { source: '/workspace/monorepo', sourceSubpath: 'plugins/canonical-plugin', slug: 'canonical-plugin', activate: true },
+    harnessMu,
   ]);
+  // dependencyMounts is the managed PHPUnit bootstrap's load/activation order:
+  // declared mu-plugins first so every activation sees the environment they
+  // shape, then validation dependencies, and the target last.
   assert.deepEqual(options[1].dependencyMounts, [
-    '/wordpress/wp-content/plugins/canonical-plugin',
+    '/wordpress/wp-content/plugins/harness-mu',
     '/wordpress/wp-content/plugins/db-touching-dependency',
+    '/wordpress/wp-content/plugins/canonical-plugin',
   ]);
   assert.deepEqual(options[1].mounts, [
     { source: path.join(extension, 'vendor'), target: '/wp-codebox-vendor', mode: 'readonly' },

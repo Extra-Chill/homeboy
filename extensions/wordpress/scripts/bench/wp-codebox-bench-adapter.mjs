@@ -39,7 +39,7 @@ const options = clean({
   blueprint: settings.wordpress_runtime_blueprint,
   componentId: process.env.COMPONENT_ID,
   pluginSlug: slug,
-  extra_plugins: [{ source: root, sourceSubpath: subpath, slug, activate: false }, ...(settings.wp_codebox_extra_plugins || [])],
+  extra_plugins: [{ source: root, sourceSubpath: subpath, slug, activate: false }, ...(settings.wp_codebox_extra_plugins || []).map((plugin) => (plugin && typeof plugin.source === 'string' && plugin.source !== '' ? { ...plugin, source: path.resolve(componentPath, plugin.source) } : plugin))],
   iterations: integer(process.env.HOMEBOY_BENCH_ITERATIONS, 3),
   warmupIterations: integer(process.env.HOMEBOY_BENCH_WARMUP_ITERATIONS, 1),
   env: settings.bench_env,

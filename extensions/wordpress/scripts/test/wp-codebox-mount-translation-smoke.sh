@@ -152,7 +152,7 @@ for (const expected of [
   'env-json={"HOMEBOY_FLAG":"yes"}',
   'wp-config-defines-json={"WP_DEBUG":true,"CUSTOM_NUMBER":7}',
   'autoload-file=/wp-codebox-vendor/autoload.php',
-  'dependency-mounts=/wordpress/wp-content/plugins/example,/wordpress/wp-content/plugins/dep-plugin',
+  'dependency-mounts=/wordpress/wp-content/plugins/dep-plugin,/wordpress/wp-content/plugins/example',
   'multisite=1',
 ]) {
   if (!(step.args || []).includes(expected)) {

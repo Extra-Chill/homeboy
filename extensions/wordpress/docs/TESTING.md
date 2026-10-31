@@ -243,6 +243,27 @@ setup and activation evidence
 so a run can be checked against the topology it claims to have booted. Leaving
 the target inactive excludes it from Composer autoloader preloading and from
 the activation phase, which produces a sandbox where no test can execute.
+The managed PHPUnit bootstrap follows the same order: it loads and activates
+`dependencyMounts` (validation dependencies, then the target) before PHPUnit
+starts.
+
+### Harness plugins (`wp_codebox_extra_plugins`)
+
+A test-only plugin that must shape the environment before anything activates
+(for example, seeding multisite sites or required network options) can be
+declared as an extra plugin. A relative `source` resolves inside the component
+checkout:
+
+```json
+{"wp_codebox_extra_plugins": [{"source": "tests/support/harness", "slug": "my-harness", "loadAs": "mu-plugin"}]}
+```
+
+Extra plugins are loaded by recipe setup steps and by the managed PHPUnit
+bootstrap. In the bootstrap, must-use extra plugins load first, then other
+extra plugins, then validation dependencies, and the target last. The bootstrap
+loads them while it installs the test site and fires each plugin's
+`activate_{plugin}` hook directly, so a harness that needs tables should seed
+on the first activation hook rather than on `init`.
 
 ## Changed-file PHPUnit scope and zero-test diagnosis
 
