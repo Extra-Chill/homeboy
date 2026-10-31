@@ -1729,10 +1729,15 @@ pub(crate) struct DaemonTerminalObservation {
 pub(crate) fn observe_daemon_job_until_terminal(
     runner_id: &str,
     runner_job_id: &str,
-    accepted_daemon_identity: Option<&str>,
+    accepted_session: Option<&RunnerSession>,
     budget: Duration,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<DaemonTerminalObservation> {
+    // A refreshed endpoint is verified against the admitting daemon's build
+    // identity. The session's lease id names a daemon generation, not a build,
+    // so passing it here made every refreshed endpoint mismatch (#16699).
+    let accepted_daemon_identity =
+        accepted_session.and_then(|session| session.homeboy_build_identity.as_deref());
     let client = Client::builder()
         .no_proxy()
         .timeout(Duration::from_secs(10))
