@@ -1,8 +1,6 @@
 use serde_json::Value;
 
-use super::agent_task::candidate::{
-    changed_files_for_artifact, classify_candidates, CandidateState,
-};
+use super::agent_task::candidate::{classify_candidates, CandidateState};
 use super::agent_task::{AgentTaskArgs, AgentTaskCommand};
 use super::summary_json::{array_len, string_value, u64_value, usize_value, value_at};
 
@@ -1033,7 +1031,18 @@ fn selected_candidate_patch(payload: &Value) -> Option<PatchArtifact> {
         .get("changed_files")
         .and_then(Value::as_array)
         .map(Vec::len)
-        .or_else(|| resolve_changed_files(artifact));
+        .or_else(|| {
+            artifact
+                .pointer("/metadata/changed_files")
+                .and_then(Value::as_array)
+                .map(Vec::len)
+        })
+        .or_else(|| {
+            artifact
+                .pointer("/metadata/changed_file_count")
+                .and_then(Value::as_u64)
+                .and_then(|count| usize::try_from(count).ok())
+        });
     Some(PatchArtifact {
         size_bytes: candidate
             .get("size_bytes")
@@ -1041,17 +1050,6 @@ fn selected_candidate_patch(payload: &Value) -> Option<PatchArtifact> {
             .or_else(|| u64_value(artifact, &["size_bytes"])),
         changed_files,
     })
-}
-
-/// Resolve the number of files a patch artifact changes.
-///
-/// Prefers authoritative metadata (`changed_files` list or
-/// `changed_file_count`). When metadata is absent, falls back to parsing the
-/// unified-diff content at the artifact `path`. Returns `None` when the count
-/// cannot be determined so callers can render `unknown` instead of a misleading
-/// zero for a substantive patch (#9742).
-fn resolve_changed_files(artifact: &Value) -> Option<usize> {
-    changed_files_for_artifact(artifact)
 }
 
 /// A run whose lifecycle state is `succeeded` but that produced zero promotion
@@ -1401,6 +1399,7 @@ mod tests {
     #[test]
     fn cook_summary_leads_with_run_status_and_review_next_step() {
         let payload = json!({
+            "canonical_candidate": {"schema": "homeboy/agent-task-candidate/v1", "state": "patch_available", "counts": {"patch_available": 1}, "diff_bytes": 128, "changed_files": 0, "changed_files_unknown_patches": 1},
             "run_id": "homeboy-4345",
             "state": "succeeded",
             "task_count": 1,
@@ -1574,6 +1573,7 @@ mod tests {
         // Reproduces the #4610 cook summary: 3 succeeded cells, but every patch
         // artifact is 0 bytes. The summary must not advertise success.
         let payload = json!({
+            "canonical_candidate": {"schema": "homeboy/agent-task-candidate/v1", "state": "empty", "counts": {"empty": 3}, "diff_bytes": 0, "changed_files": 0, "changed_files_unknown_patches": 0},
             "run_id": "agent-task-abe47e4d",
             "state": "succeeded",
             "task_count": 3,
@@ -1633,6 +1633,7 @@ mod tests {
     #[test]
     fn cook_summary_keeps_a_canonical_candidate_after_an_empty_retry() {
         let payload = json!({
+            "canonical_candidate": {"schema": "homeboy/agent-task-candidate/v1", "state": "patch_available", "counts": {"patch_available": 1}, "diff_bytes": 32318, "changed_files": 0, "changed_files_unknown_patches": 1},
             "run_id": "agent-task-canonical",
             "state": "succeeded",
             "task_count": 2,
@@ -1672,6 +1673,7 @@ mod tests {
     #[test]
     fn finalized_pr_summary_is_not_reported_as_an_unpromoted_empty_patch() {
         let payload = json!({
+            "canonical_candidate": {"schema": "homeboy/agent-task-candidate/v1", "state": "finalized", "counts": {}, "diff_bytes": 0, "changed_files": 0, "changed_files_unknown_patches": 0},
             "run_id": "agent-task-finalized",
             "state": "succeeded",
             "task_count": 1,
@@ -1695,6 +1697,8 @@ mod tests {
             )
             .collect::<Vec<_>>();
         let payload = json!({
+            "canonical_candidate": {"schema": "homeboy/agent-task-candidate/v1", "state": "unknown", "scan": {"artifacts_omitted": 1}},
+
             "run_id": "agent-task-truncated",
             "state": "succeeded",
             "task_count": 1,
@@ -1711,6 +1715,7 @@ mod tests {
     #[test]
     fn cook_summary_treats_unknown_size_patch_as_zero_candidates() {
         let payload = json!({
+            "canonical_candidate": {"schema": "homeboy/agent-task-candidate/v1", "state": "unknown", "counts": {"unknown": 1}, "diff_bytes": 0, "changed_files": 0, "changed_files_unknown_patches": 0},
             "run_id": "homeboy-4345",
             "state": "succeeded",
             "task_count": 1,
@@ -1732,6 +1737,7 @@ mod tests {
     #[test]
     fn cook_summary_counts_empty_change_evidence_as_empty_not_candidate() {
         let payload = json!({
+            "canonical_candidate": {"schema": "homeboy/agent-task-candidate/v1", "state": "empty", "counts": {"empty": 1}, "diff_bytes": 0, "changed_files": 0, "changed_files_unknown_patches": 0},
             "run_id": "homeboy-4345",
             "state": "succeeded",
             "task_count": 1,
@@ -1757,6 +1763,7 @@ mod tests {
     #[test]
     fn cook_summary_surfaces_changed_files_and_diff_bytes_from_metadata() {
         let payload = json!({
+            "canonical_candidate": {"schema": "homeboy/agent-task-candidate/v1", "state": "patch_available", "counts": {"patch_available": 1}, "diff_bytes": 256, "changed_files": 2, "changed_files_unknown_patches": 0},
             "run_id": "homeboy-4345",
             "state": "succeeded",
             "task_count": 1,
@@ -1779,51 +1786,6 @@ mod tests {
         assert!(summary.contains("Patch candidates: 1 non-empty / 0 empty\n"));
         assert!(summary.contains("Changed files: 2\n"));
         assert!(summary.contains("Diff bytes: 256\n"));
-    }
-
-    #[test]
-    fn cook_summary_parses_changed_files_from_patch_when_metadata_absent() {
-        // Regression for #9742: a substantive patch with no changed-file
-        // metadata must report the real count parsed from patch content, not 0.
-        crate::test_support::with_isolated_home(|_| {
-            let root = homeboy::core::artifact_root().expect("artifact root");
-            std::fs::create_dir_all(&root).expect("create artifact root");
-            let patch_path = root.join("patch.diff");
-            let patch = "diff --git a/crates/a/src/x.rs b/crates/a/src/x.rs\n\
-             --- a/crates/a/src/x.rs\n+++ b/crates/a/src/x.rs\n@@ -1 +1 @@\n-a\n+b\n\
-             diff --git a/crates/a/src/y.rs b/crates/a/src/y.rs\n\
-             --- a/crates/a/src/y.rs\n+++ b/crates/a/src/y.rs\n@@ -1 +1 @@\n-c\n+d\n\
-             diff --git a/crates/a/src/z.rs b/crates/a/src/z.rs\n\
-             --- a/crates/a/src/z.rs\n+++ b/crates/a/src/z.rs\n@@ -1 +1 @@\n-e\n+f\n";
-            std::fs::write(&patch_path, patch).expect("write patch");
-
-            let payload = json!({
-                "run_id": "agent-task-9742",
-                "state": "succeeded",
-                "task_count": 1,
-                "aggregate": {
-                    "outcomes": [{
-                        "task_id": "agent-task-9742",
-                        "artifacts": [{
-                            "id": "patch",
-                            "kind": "patch",
-                            "path": patch_path.to_str().unwrap(),
-                            "size_bytes": patch.len(),
-                            "url": "homeboy://agent-task/run/agent-task-9742/artifacts#task=agent-task-9742&artifact=patch",
-                            "metadata": { "executor_artifact_finalized": true }
-                        }]
-                    }]
-                }
-            });
-
-            let summary = render_agent_task_summary(AgentTaskSummaryKind::Cook, &payload).unwrap();
-
-            assert!(summary.contains("Patch candidates: 1 non-empty / 0 empty\n"));
-            assert!(
-                summary.contains("Changed files: 3\n"),
-                "expected 3 changed files parsed from patch content, got: {summary}"
-            );
-        });
     }
 
     #[test]
@@ -1905,6 +1867,7 @@ mod tests {
     #[test]
     fn review_summary_counts_recoverable_candidate_artifacts() {
         let payload = json!({
+            "canonical_candidate": {"schema": "homeboy/agent-task-candidate/v1", "state": "patch_available", "counts": {"patch_available": 1}, "diff_bytes": 7635, "changed_files": 3, "changed_files_unknown_patches": 0},
             "run_id": "agent-task-11805-recoverable",
             "state": "partial_failure",
             "aggregate_review": {
@@ -1949,6 +1912,8 @@ mod tests {
         })
         .collect::<Vec<_>>();
         let review = json!({
+            "canonical_candidate": {"schema": "homeboy/agent-task-candidate/v1", "state": "patch_available", "counts": {"patch_available": 3}, "diff_bytes": 97048, "changed_files": 9, "changed_files_unknown_patches": 0},
+
             "run_id": "selection-required",
             "state": "candidate_recoverable",
             "record": { "metadata": { "provider_executions_consumed": 3 } },
@@ -1981,6 +1946,7 @@ mod tests {
         // Non-empty patch, no metadata, and an unreadable path: report unknown
         // rather than a misleading verified zero.
         let payload = json!({
+            "canonical_candidate": {"schema": "homeboy/agent-task-candidate/v1", "state": "patch_available", "counts": {"patch_available": 1}, "diff_bytes": 256, "changed_files": 0, "changed_files_unknown_patches": 1},
             "run_id": "agent-task-9742-unknown",
             "state": "succeeded",
             "task_count": 1,
@@ -2036,6 +2002,7 @@ mod tests {
     #[test]
     fn review_summary_surfaces_patch_candidate_before_next_command() {
         let payload = json!({
+            "canonical_candidate": {"schema": "homeboy/agent-task-candidate/v1", "state": "patch_available", "counts": {"patch_available": 1}, "diff_bytes": 128, "changed_files": 0, "changed_files_unknown_patches": 1},
             "run_id": "homeboy-4345",
             "state": "succeeded",
             "aggregate_review": {
@@ -2156,6 +2123,7 @@ mod tests {
     #[test]
     fn review_summary_marks_no_op_when_apply_candidates_are_empty_patches() {
         let payload = json!({
+            "canonical_candidate": {"schema": "homeboy/agent-task-candidate/v1", "state": "empty", "counts": {"empty": 3}, "diff_bytes": 0, "changed_files": 0, "changed_files_unknown_patches": 0},
             "run_id": "homeboy-4345",
             "state": "succeeded",
             "aggregate_review": {
@@ -2194,6 +2162,7 @@ mod tests {
     #[test]
     fn review_summary_treats_unknown_size_patch_as_not_promotable() {
         let payload = json!({
+            "canonical_candidate": {"schema": "homeboy/agent-task-candidate/v1", "state": "unknown", "counts": {"unknown": 1}, "diff_bytes": 0, "changed_files": 0, "changed_files_unknown_patches": 0},
             "run_id": "homeboy-4345",
             "state": "succeeded",
             "aggregate_review": {
@@ -2635,6 +2604,7 @@ mod tests {
     #[test]
     fn code_production_metrics_skips_rejected_and_non_apply_artifacts_in_cook_outcomes() {
         let payload = json!({
+            "canonical_candidate": {"schema": "homeboy/agent-task-candidate/v1", "state": "patch_available", "counts": {"patch_available": 1, "empty": 1}, "diff_bytes": 64, "changed_files": 2, "changed_files_unknown_patches": 0},
             "aggregate": {
                 "outcomes": [{
                     "task_id": "cell-1",

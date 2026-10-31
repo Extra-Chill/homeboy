@@ -3884,6 +3884,29 @@ impl<L: EventLookup> OrchestrationService<L> {
     }
 }
 
+/// Project candidate evidence from the same durable record and aggregate used by status.
+pub fn canonical_candidate_from_durable_record(
+    record: &AgentTaskRunRecord,
+    aggregate: Option<&crate::agent_tasks::AgentTaskAggregate>,
+) -> homeboy_core::Result<Value> {
+    let snapshot = RunSnapshot {
+        record: record.clone(),
+        plan: None,
+        aggregate: aggregate.cloned(),
+    };
+    let resource = project_snapshot(&snapshot, false)
+        .map_err(|error| homeboy_core::Error::internal_unexpected(error.message))?;
+    let delivery = CookDelivery::from_run_metadata(&record.metadata);
+    let review = aggregate.map(|aggregate| {
+        crate::agent_tasks::AgentTaskAggregateReport::from(aggregate.outcomes.clone())
+    });
+    Ok(review_canonical_candidate(
+        delivery.as_ref(),
+        review.as_ref(),
+        &resource,
+    ))
+}
+
 /// Read one canonical run resource from the current controller installation.
 pub fn run_exact_from_current_environment(run_id: &str) -> homeboy_core::Result<ControlPlaneRun> {
     let requested_id = parse_run_id(run_id)?;
@@ -7961,6 +7984,11 @@ mod tests {
                 let review = service
                     .review(&run, &ControlPlaneRunReviewRequest::default())
                     .expect("review durable receipt");
+                assert_eq!(
+                    crate::orchestration::canonical_candidate_from_durable_record(&persisted, None)
+                        .expect("status projection"),
+                    review.evidence["canonical_candidate"],
+                );
                 let detail = service.run(&run).expect("detail");
                 let listed = service
                     .runs(&ControlPlaneRunListRequest {

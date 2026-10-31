@@ -103,7 +103,7 @@ fn from_run_metadata_reads_every_persisted_delivery_shape() {
         Case {
             name: "gates deferred",
             metadata: json!({ "promotion": promotion(
-                "gate_deferred",
+                "gates_deferred",
                 json!([{ "id": "lab-test", "status": "deferred" }]),
             ) }),
             state: State::Blocked,
