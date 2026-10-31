@@ -28,8 +28,9 @@
 //!
 //! Reaching the runner is transport only when it has a recorded session:
 //! [`connection::ensure_transport`] re-establishes the tunnel to the recorded
-//! daemon and never restarts it. The full `connect` runs only for a runner
-//! with no daemon session at all. Treating it as
+//! daemon and never restarts it. The full `connect` (idempotent
+//! `ensure-running`) runs only for a runner with no daemon session, or when
+//! the recorded daemon is unreachable. Treating it as
 //! eligible turns a silent skip into the "attempted and failed" outcome the
 //! issue asks for, without touching the reasoning that fences a *reachable*
 //! but unprovable daemon.
@@ -597,6 +598,22 @@ mod tests {
 
     /// Only a runner with no daemon session at all falls back to `connect`.
     #[test]
+    fn an_unreachable_recorded_daemon_falls_back_to_connect() {
+        let connected = std::cell::Cell::new(0);
+        connection::reach_runner_with(
+            "homeboy-lab",
+            |_| Ok(true),
+            |_| Err(transport_failure(connection::TransportFailure::Unreachable)),
+            |_| {
+                connected.set(connected.get() + 1);
+                Ok(())
+            },
+        )
+        .expect("connect brings the runner's one daemon back");
+        assert_eq!(connected.get(), 1);
+    }
+
+    #[test]
     fn placement_without_any_session_falls_back_to_connect() {
         let connected = std::cell::Cell::new(0);
         connection::reach_runner_with(
@@ -627,7 +644,7 @@ mod tests {
     /// A typed transport failure is the placement answer: it is never retried
     /// through `connect`, and its fallback reason says what it proves.
     #[test]
-    fn a_typed_transport_failure_falls_back_to_local_without_connect() {
+    fn a_typed_transport_failure_falls_back_to_local() {
         for (failure, expected) in [
             (
                 connection::TransportFailure::Ssh,
@@ -656,7 +673,16 @@ mod tests {
                         runner_id,
                         |_| Ok(true),
                         |_| Err(transport_failure(failure)),
-                        |_| panic!("a {failure:?} transport failure must never reach connect"),
+                        |_| {
+                            // Only an unreachable recorded daemon may be
+                            // (re)started by connect; here connect fails too.
+                            assert_eq!(
+                                failure,
+                                connection::TransportFailure::Unreachable,
+                                "a {failure:?} transport failure must never reach connect"
+                            );
+                            Err(transport_failure(failure))
+                        },
                     )
                 },
                 || panic!("a failed reconnect must never consult post-reconnect readiness"),

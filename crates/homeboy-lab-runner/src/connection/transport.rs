@@ -109,12 +109,15 @@ pub fn transport_is_live(session: &RunnerSession, timeout: Duration) -> bool {
 
 /// Re-establish a transport for placement or admission.
 ///
-/// A runner with a recorded current session only gets its transport back
-/// through [`ensure_transport`]; whatever that reports, typed, is the answer,
-/// and the full [`connect`] is never tried in its place, so an unreachable or
-/// mismatched daemon is never restarted. Only a runner with no daemon session
-/// at all falls back to the full `connect`, which may discover or start the
-/// runner's one daemon.
+/// A runner with a recorded current session first gets its transport back
+/// through [`ensure_transport`]. Only when the recorded daemon is
+/// [`TransportFailure::Unreachable`] (for example after the runner host
+/// rebooted) does it fall back to the full [`connect`]. `connect` runs the
+/// idempotent `ensure-running` on the one state dir: it adopts a live daemon
+/// and starts a dead one, and it never restarts a live daemon in place. An SSH
+/// failure (liveness unknown) or an identity mismatch (another daemon answered)
+/// is the answer and never reaches `connect`. A runner with no daemon session
+/// at all goes straight to `connect`.
 pub(crate) fn reach_runner(runner_id: &str) -> Result<()> {
     reach_runner_with(
         runner_id,
@@ -132,10 +135,14 @@ pub(crate) fn reach_runner_with(
     ensure: impl FnOnce(&str) -> Result<()>,
     connect: impl FnOnce(&str) -> Result<()>,
 ) -> Result<()> {
-    if has_recorded_session(runner_id)? {
-        ensure(runner_id)
-    } else {
-        connect(runner_id)
+    if !has_recorded_session(runner_id)? {
+        return connect(runner_id);
+    }
+    match ensure(runner_id) {
+        Err(error) if TransportFailure::of(&error) == Some(TransportFailure::Unreachable) => {
+            connect(runner_id)
+        }
+        result => result,
     }
 }
 
