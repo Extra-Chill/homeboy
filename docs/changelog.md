@@ -4,6 +4,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.437.3] - 2026-10-31
+
+### Changed
+- carry the typed candidate on Cook delivery
+- Remove dead code flagged by the compiler
+- placement, status and doctor reach the runner through ensure_transport
+
 ## [0.437.2] - 2026-10-31
 
 ### Changed
