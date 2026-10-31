@@ -538,6 +538,16 @@ pub(super) fn connect(id: &str, input: RunnerConnectInput) -> CmdResult<RunnerOu
         _ if reconcile_unleased_candidates => {
             runner::connect_with_unleased_candidate_reconciliation(id)?
         }
+        // A plain connect brings the runner binary to the controller's
+        // release first. Explicit recovery adopts exact daemons and keeps the
+        // configured binary untouched.
+        _ if adopt_orphan_lease.is_none()
+            && confirm_untracked_child_dead.is_empty()
+            && !reconcile_leaseless_orphans
+            && recover_missing_lease_state.is_none() =>
+        {
+            runner::connect_converging_binary(id)?
+        }
         _ => runner::connect_with_orphan_adoption(
             id,
             adopt_orphan_lease.as_deref(),

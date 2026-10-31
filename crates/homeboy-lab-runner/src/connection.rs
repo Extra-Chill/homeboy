@@ -322,6 +322,24 @@ pub fn connect(runner_id: &str) -> Result<(RunnerConnectReport, i32)> {
     )
 }
 
+/// `homeboy runner connect`: first bring the runner's configured Homeboy
+/// binary to the controller's release, then attach exactly like [`connect`]
+/// on the direct or service-managed path.
+///
+/// Convergence installs through `refresh-homeboy`'s verified release path,
+/// which takes and releases its own runtime-promotion lease and replaces the
+/// daemon through its existing reconnect mechanism. Only afterwards does the
+/// attach below take connect's lease, so the two never nest. Refresh's own
+/// reconnect attaches through the non-converging entry points, so convergence
+/// never re-enters itself. Convergence never fails connect: its outcome is
+/// reported on [`RunnerConnectReport::binary_convergence`].
+pub fn connect_converging_binary(runner_id: &str) -> Result<(RunnerConnectReport, i32)> {
+    let convergence = binary_convergence::converge_runner_binary(runner_id);
+    let (mut report, exit_code) = connect(runner_id)?;
+    report.binary_convergence = Some(convergence);
+    Ok((report, exit_code))
+}
+
 /// Reach a runner for placement or admission. Lives here, beside [`connect`],
 /// because unlike the transport module it may start the runner's daemon.
 ///
@@ -553,6 +571,7 @@ fn restart_direct_daemon_in_place(
             failure_kind: None,
             failure_message: None,
             failure_evidence: None,
+            binary_convergence: None,
         },
         0,
     ))
@@ -1527,6 +1546,7 @@ fn connect_with_orphan_adoption_and_live_lease(
             failure_kind: None,
             failure_message: None,
             failure_evidence: None,
+            binary_convergence: None,
         },
         0,
     ))
@@ -3535,6 +3555,7 @@ mod status_read_purity_tests {
     }
 }
 
+mod binary_convergence;
 mod legacy_layout;
 pub(crate) mod remote_daemon;
 mod replacement_journal;

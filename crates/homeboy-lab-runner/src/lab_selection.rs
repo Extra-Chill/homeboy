@@ -1217,6 +1217,7 @@ fn connected_runner_connect_report(
             failure_kind: None,
             failure_message: None,
             failure_evidence: None,
+            binary_convergence: None,
         },
         0,
     ))

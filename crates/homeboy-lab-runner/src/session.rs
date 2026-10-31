@@ -445,6 +445,43 @@ pub struct RunnerConnectFailureEvidence {
     pub failure_evidence_ref: Option<RunnerConnectFailureEvidenceRef>,
 }
 
+/// How `homeboy runner connect` reconciled the runner's configured Homeboy
+/// binary with the controller's own release before attaching.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RunnerBinaryConvergenceStatus {
+    /// The controller's release was installed and the daemon replaced.
+    Converged,
+    /// The configured binary already runs the controller's release version.
+    AlreadyCurrent,
+    /// The daemon has active jobs; a later connect converges.
+    PendingActiveJobs,
+    /// The controller is not a published release build.
+    SkippedDevBuild,
+    /// The configured binary is newer than the controller; never downgraded.
+    SkippedRemoteNewer,
+    /// The configured binary's identity could not be read.
+    SkippedUnverifiable,
+    /// Installing the controller's release failed; connect used the existing binary.
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RunnerBinaryConvergence {
+    pub status: RunnerBinaryConvergenceStatus,
+    /// The configured runner binary's identity before convergence.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    /// The controller release identity convergence targets (or installed).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub to: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// Active daemon jobs that hold convergence pending.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocking_job_ids: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct RunnerConnectReport {
     pub runner_id: String,
@@ -488,6 +525,10 @@ pub struct RunnerConnectReport {
     pub failure_message: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failure_evidence: Option<RunnerConnectFailureEvidence>,
+    /// Present only for `homeboy runner connect`, which converges the runner
+    /// binary to the controller's release before attaching.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub binary_convergence: Option<RunnerBinaryConvergence>,
 }
 
 /// A read-only indexed snapshot of one runner's persisted active jobs, built

@@ -755,6 +755,7 @@ pub(crate) fn connect_service_runner(runner_id: &str) -> Result<(RunnerConnectRe
             failure_kind: None,
             failure_message: None,
             failure_evidence: None,
+            binary_convergence: None,
         },
         0,
     ))

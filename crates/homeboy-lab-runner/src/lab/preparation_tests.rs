@@ -71,6 +71,7 @@ fn lab_runner_preparation_falls_back_for_unreachable_default_runner() {
                     failure_kind: Some(super::super::RunnerFailureKind::SshFailure),
                     failure_message: Some("SSH connectivity check failed".to_string()),
                     failure_evidence: None,
+                    binary_convergence: None,
                 },
                 20,
             ))
@@ -1284,6 +1285,7 @@ fn lab_runner_preparation_connects_disconnected_runner() {
                     state_loss_recovery: None,
                     leaseless_recovery_evidence: None,
                     failure_evidence: None,
+                    binary_convergence: None,
                     failure_kind: None,
                     failure_message: None,
                 },
@@ -1351,6 +1353,7 @@ fn lab_runner_preparation_errors_for_unreachable_explicit_runner() {
                     failure_kind: Some(super::super::RunnerFailureKind::SshFailure),
                     failure_message: Some("SSH connectivity check failed".to_string()),
                     failure_evidence: None,
+                    binary_convergence: None,
                 },
                 20,
             ))
@@ -1489,6 +1492,7 @@ fn connected_direct_connect_report(runner_id: &str) -> RunnerConnectReport {
         failure_kind: None,
         failure_message: None,
         failure_evidence: None,
+        binary_convergence: None,
     }
 }
 

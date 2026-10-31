@@ -2012,6 +2012,7 @@ pub(super) fn failed_connect(
                 health_attempts: Vec::new(),
                 failure_evidence_ref: None,
             }),
+            binary_convergence: None,
         },
         20,
     )
