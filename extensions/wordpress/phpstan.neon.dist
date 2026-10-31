@@ -1,0 +1,122 @@
+includes:
+    - vendor/szepeviktor/phpstan-wordpress/extension.neon
+
+parameters:
+    customRulesetUsed: false
+
+    # WordPress defines these request-context flags at runtime. Treating a
+    # value observed by the analysis bootstrap as immutable creates false
+    # always-true findings for canonical `defined() && CONSTANT` guards.
+    dynamicConstantNames:
+        - DOING_AJAX
+        - DOING_CRON
+        - REST_REQUEST
+        - WP_IMPORTING
+        - XMLRPC_REQUEST
+
+    # Don't treat unmatched ignoreErrors patterns as failures.
+    # These are config hygiene issues, not component code problems.
+    # Reporting them as errors creates false failure signals (see #137).
+    reportUnmatchedIgnoredErrors: false
+
+    ignoreErrors:
+        -
+            identifier: return.void
+        -
+            message: '#Constant [A-Z_]+_(PATH|URL|VERSION|DIR|FILE) not found#'
+
+        # missingType.* family: level 7 requires explicit iterable value types
+        # and return types on every function/method. WP plugins follow WP core's
+        # loose array conventions and rarely annotate `array<string, mixed>` on
+        # every hook callback. Suppressing these keeps the signal-to-noise ratio
+        # high: level 7's real value is argument.type / property.nonObject /
+        # return.type flow analysis (e.g. "false flows into strtotime(string)"),
+        # not "you didn't type this array literal." Teams that want strict
+        # iterable typing can override by dropping these identifiers locally.
+        # See homeboy-extensions#225 for the analysis that led to this config.
+        -
+            identifier: missingType.iterableValue
+        -
+            identifier: missingType.return
+        -
+            identifier: missingType.parameter
+        -
+            identifier: missingType.generics
+
+    # Pull `wordpress-stubs.php` into the project symbol graph as a `scanFiles:`
+    # entry, in addition to szepeviktor's `bootstrapFiles:` registration.
+    # Both mechanisms ship the same WP function/class signatures, but PHPStan
+    # resolves them with very different precedence:
+    #
+    #   - `bootstrapFiles:` declarations lose to project-source declarations.
+    #     A `function get_post_types($args = array()) {}` shim defined inside
+    #     `if ( ! function_exists('get_post_types') )` in a host-smoke test
+    #     file shadows the canonical 3-arg WP signature, producing false
+    #     `arguments.count` errors on real plugin code.
+    #
+    #   - `scanFiles:` declarations are scanned alongside project source and
+    #     win during signature resolution, so the real WP arity always
+    #     governs analysis regardless of what test scaffolding redefines.
+    #
+    # Host-smoke files redefining WP functions inside `function_exists` guards
+    # is idiomatic for isolated PHP test runs (the runner's own
+    # `homeboy_wordpress_runtime_lint_file()` already classifies `tests/*` as
+    # non-runtime). Pulling the WP stubs into the project symbol graph here
+    # keeps both patterns compatible without forcing plugins to refactor
+    # their tests or disable WP API analysis. See homeboy-extensions#393.
+    #
+    # `stubFiles:` was tried first but did not win against project-source
+    # declarations in the presence of szepeviktor's `bootstrapFiles:` entry
+    # for the same file — `scanFiles:` is the path that actually fixes the
+    # symbol-resolution shadowing.
+    scanFiles:
+        - vendor/php-stubs/wordpress-stubs/wordpress-stubs.php
+        - vendor/php-stubs/wp-cli-stubs/wp-cli-stubs.php
+        - vendor/php-stubs/wp-cli-stubs/wp-cli-commands-stubs.php
+        - vendor/php-stubs/wp-cli-stubs/wp-cli-i18n-stubs.php
+        - vendor/php-stubs/woocommerce-stubs/woocommerce-stubs.php
+        - vendor/php-stubs/woocommerce-stubs/woocommerce-packages-stubs.php
+        - stubs/wordpress-api-overrides.stub.php
+
+    # Level 7 unlocks argument type flow analysis (union narrowing, false/null
+    # leakage into strict-typed callees). Levels 5 and 6 miss the exact class
+    # of bug in [WordPress/wordpress-develop#11387](https://github.com/WordPress/wordpress-develop/pull/11387) —
+    # `max()` called on a possibly-empty array. Level 7 catches it on the
+    # callsite as `Parameter #1 ...$arg1 of function max expects non-empty-array`.
+    # Components with a lot of pre-existing findings can capture a baseline at
+    # `<component>/phpstan-baseline.neon`; the harness auto-detects and includes
+    # it so the level bump doesn't block in-flight work.
+    level: 7
+
+    paths:
+        - %currentWorkingDirectory%
+
+    # Tests are analyzed by default so findings like "test passes $result:
+    # array|false|string to strtotime(string)" (homeboy-extensions#225) surface
+    # locally instead of in reviewer comments. Components with test fixtures
+    # that extend WP_UnitTestCase or rely on test-only globals can opt out
+    # per-file with @phpstan-ignore-next-line or per-directory via component-
+    # level excludePaths in their own phpstan.neon.
+    excludePaths:
+        - */vendor/*
+        - */vendor_prefixed/*
+        - */node_modules/*
+        - */build/*
+        - */dist/*
+        - */tools/*
+        - */scoper.inc.php
+        # Standalone smoke harnesses run under plain `php`, so they declare
+        # bare stand-ins for the classes and functions they touch. Anything
+        # listed here is excluded from analysis *and* discovery; if harnesses
+        # were only excluded from analysis, those stand-ins would still enter
+        # the symbol graph as project source, outrank the real Composer or
+        # dependency declarations, and turn every real member access in
+        # production code into a bogus finding
+        # (Extra-Chill/data-machine#3474). The harness role is already never
+        # an analysis target (see wordpress_lint_role_for_path()).
+        - */tests/*-smoke.php
+        - */tests/smoke-*.php
+        - */tests/**/*-smoke.php
+
+    parallel:
+        maximumNumberOfProcesses: 2

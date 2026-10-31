@@ -1,0 +1,56 @@
+name: Render Runtime Workflow Inputs
+description: Render generic runtime/profile/tool-profile inputs into selected-runtime workflow inputs.
+inputs:
+  runtime:
+    description: Agent runtime id.
+    required: true
+  runtime_profile:
+    description: Runtime profile id or JSON runtime profile object.
+    required: true
+  runtime_profiles:
+    description: JSON object keyed by runtime profile id.
+    required: false
+    default: '{}'
+  tool_profile:
+    description: JSON generic runtime tool profile.
+    required: false
+    default: '{}'
+  runtime_mounts:
+    description: JSON array of selected-runtime mounts.
+    required: false
+    default: '[]'
+  runtime_state_mounts:
+    description: JSON array of selected-runtime state mounts.
+    required: false
+    default: '[]'
+  runtime_config_mounts:
+    description: JSON array of selected-runtime config mounts.
+    required: false
+    default: '[]'
+outputs:
+  runtime:
+    description: Rendered runtime id.
+    value: ${{ steps.render.outputs.runtime }}
+  profile:
+    description: Rendered runtime profile id.
+    value: ${{ steps.render.outputs.profile }}
+  runtime_profiles:
+    description: Rendered runtime profile JSON object.
+    value: ${{ steps.render.outputs.runtime_profiles }}
+  workflow_inputs:
+    description: Full rendered workflow input JSON object.
+    value: ${{ steps.render.outputs.workflow_inputs }}
+runs:
+  using: composite
+  steps:
+    - id: render
+      shell: bash
+      env:
+        RUNTIME: ${{ inputs.runtime }}
+        PROFILE: ${{ inputs.runtime_profile }}
+        RUNTIME_PROFILES: ${{ inputs.runtime_profiles }}
+        TOOL_PROFILE: ${{ inputs.tool_profile }}
+        RUNTIME_MOUNTS: ${{ inputs.runtime_mounts }}
+        RUNTIME_STATE_MOUNTS: ${{ inputs.runtime_state_mounts }}
+        RUNTIME_CONFIG_MOUNTS: ${{ inputs.runtime_config_mounts }}
+      run: node "$GITHUB_ACTION_PATH/../../scripts/runtime-agent-full-run/render-runtime-workflow-inputs.cjs"

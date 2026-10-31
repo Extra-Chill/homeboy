@@ -1,0 +1,386 @@
+{
+  "name": "Node.js",
+  "version": "3.8.4",
+  "icon": "server.rack",
+  "description": "Node.js project type — discovery, lint/test runners, and npm release lifecycle",
+  "author": "Extra Chill",
+  "provides": {
+    "file_extensions": ["js", "jsx", "ts", "tsx", "mjs", "cjs", "json"],
+    "discovery_markers": [
+      { "all": ["package.json"] }
+    ]
+  },
+  "composition": {
+    "includes": []
+  },
+  "source_snapshot": {
+    "sync_excludes": ["node_modules/", "node_modules/**"]
+  },
+  "structured_sidecars": {
+    "lint.findings": true,
+    "test.results": true,
+    "test.failures": true,
+    "test.coverage": false,
+    "bench.results": true,
+    "trace.results": true,
+    "trace.artifacts": true,
+    "fix.results": true,
+    "fuzz.results": true,
+    "fuzz.artifacts": true,
+    "annotations": false
+  },
+  "diagnostics": {
+    "tools": [
+      {
+        "id": "node",
+        "version_args": ["--version"],
+        "remediation": "Install Node.js and ensure node is on PATH"
+      },
+      {
+        "id": "npm",
+        "version_args": ["--version"],
+        "remediation": "Install npm and ensure npm is on PATH"
+      },
+      {
+        "id": "pnpm",
+        "version_args": ["--version"],
+        "remediation": "Install pnpm and ensure pnpm is on PATH when the project uses pnpm"
+      }
+    ]
+  },
+  "contract_producers": [
+    {
+      "id": "nodejs.lint-results",
+      "phase": "result",
+      "invocation": { "script": "scripts/lint/lint-runner.sh" },
+      "produces": [
+        { "kind": "artifact", "name": "lint.findings" }
+      ]
+    },
+    {
+      "id": "nodejs.test-results",
+      "phase": "result",
+      "invocation": { "script": "scripts/test/test-runner.sh" },
+      "produces": [
+        { "kind": "artifact", "name": "test.results" },
+        { "kind": "artifact", "name": "test.failures" }
+      ]
+    },
+    {
+      "id": "nodejs.bench-results",
+      "phase": "result",
+      "invocation": {
+        "script": "scripts/bench/bench-runner.sh",
+        "output_schema": "homeboy/bench-results/v1"
+      },
+      "produces": [
+        {
+          "kind": "artifact",
+          "name": "bench.results",
+          "schema": "homeboy/bench-results/v1"
+        }
+      ]
+    },
+    {
+      "id": "nodejs.trace-results",
+      "phase": "result",
+      "invocation": { "script": "scripts/trace/trace-runner.sh" },
+      "produces": [
+        { "kind": "artifact", "name": "trace.results" },
+        { "kind": "artifact", "name": "trace.artifacts" }
+      ]
+    },
+    {
+      "id": "nodejs.fuzz-results",
+      "phase": "result",
+      "invocation": { "script": "scripts/fuzz/fuzz-runner.sh" },
+      "produces": [
+        {
+          "kind": "artifact",
+          "name": "fuzz.results",
+          "schema": "homeboy/fuzz-campaign/v1"
+        }
+      ]
+    }
+  ],
+  "scripts": {
+    "format": "scripts/format.sh"
+  },
+  "deps": {
+    "extension_script": "scripts/deps/deps-runner.sh"
+  },
+  "component_env": {
+    "detect_script": "scripts/env/detect.sh"
+  },
+  "platform": {
+    "discovery": {
+      "find_command": "find /home -name 'package.json' -type f 2>/dev/null | xargs grep -l '\"name\"' 2>/dev/null",
+      "base_path_transform": "dirname",
+      "display_name_command": "cd {{basePath}} && node -e \"console.log(require('./package.json').name)\" 2>/dev/null || basename {{basePath}}"
+    },
+    "default_pinned_files": ["package.json", "tsconfig.json", ".npmrc", ".env.example"]
+  },
+  "settings": [
+    {
+      "id": "access",
+      "label": "Publish Access",
+      "type": "string",
+      "default": "public",
+      "description": "npm publish access level: 'public' or 'restricted'"
+    },
+    {
+      "id": "registry",
+      "label": "npm Registry",
+      "type": "string",
+      "default": "https://registry.npmjs.org",
+      "description": "npm registry URL for publishing"
+    },
+    {
+      "id": "release_package_script",
+      "label": "Release Package Script",
+      "type": "string",
+      "default": "",
+      "description": "Optional package.json script that emits a terminal JSON artifact manifest. Its artifacts are merged with the canonical npm tarball."
+    },
+    {
+      "id": "targeted_test_script",
+      "label": "Targeted Test Script",
+      "type": "string",
+      "default": "",
+      "description": "npm script to run when homeboy test receives passthrough test args, for example 'test:unit'"
+    },
+    {
+      "id": "bench_env",
+      "label": "Bench Environment",
+      "type": "object",
+      "default": {},
+      "description": "Additional non-secret environment values consumed by Node.js bench workloads."
+    },
+    {
+      "id": "fuzz_script",
+      "label": "Fuzz Script",
+      "type": "string",
+      "default": "",
+      "description": "Package.json script to run when Node.js fuzz is invoked without a rig workload path. Defaults to scripts.fuzz when present."
+    },
+    {
+      "id": "local_workspace_dependencies",
+      "label": "Local workspace dependency overrides",
+      "type": "array",
+      "default": [],
+      "description": "Declared local (unpublished) workspace package dependencies to build from source, pack, and install into the consumer as a self-contained built tarball before the build runs. Installing a built tarball (not a file: symlink) lets peer dependencies such as React dedupe to the consumer's single copy. Each entry is an object: name (required package name), path (required source path relative to the component, may reference sibling repos), and optional package_dir (monorepo subpackage to pack), build (explicit build command run in path; defaults to install + run build script), and package_manager (npm|pnpm|yarn, auto-detected by default)."
+    }
+  ],
+  "ci": {
+    "profiles": {
+      "pr": {
+        "label": "Pull request checks",
+        "jobs": ["lint", "typecheck", "test", "build"]
+      },
+      "baseline": {
+        "label": "Baseline local reproduction",
+        "jobs": ["lint", "test", "build"]
+      }
+    },
+    "jobs": {
+      "lint": {
+        "check_names": ["Lint", "lint"],
+        "command": "lint",
+        "env": { "CI": "1" },
+        "provider": "github-actions",
+        "workflow": "ci.yml",
+        "fidelity": "local-equivalent",
+        "limitations": []
+      },
+      "typecheck": {
+        "check_names": ["Typecheck", "Lint and typecheck", "typecheck"],
+        "command": "lint",
+        "env": {
+          "CI": "1",
+          "HOMEBOY_NODE_LINT_COMMAND": "__homeboy_typecheck"
+        },
+        "provider": "github-actions",
+        "workflow": "ci.yml",
+        "fidelity": "local-partial",
+        "limitations": ["Requires a package.json scripts.typecheck command; alternate project-specific typecheck script names are not inferred."]
+      },
+      "test": {
+        "check_names": ["Test", "Tests", "test"],
+        "command": "test",
+        "env": { "CI": "1" },
+        "provider": "github-actions",
+        "workflow": "ci.yml",
+        "fidelity": "local-equivalent",
+        "limitations": []
+      },
+      "build": {
+        "check_names": ["Build", "build"],
+        "command": "build",
+        "env": { "CI": "1" },
+        "provider": "github-actions",
+        "workflow": "ci.yml",
+        "fidelity": "local-equivalent",
+        "limitations": []
+      }
+    }
+  },
+  "build": {
+    "command_template": "bash {{script}}",
+    "extension_script": "scripts/build/build-runner.sh",
+    "cleanup_paths": [
+      "node_modules",
+      "dist"
+    ],
+    "lockfile_paths": [
+      "package-lock.json",
+      "yarn.lock",
+      "pnpm-lock.yaml"
+    ]
+  },
+  "lint": {
+    "extension_script": "scripts/lint/lint-runner.sh"
+  },
+  "test": {
+    "extension_script": "scripts/test/test-runner.sh",
+    "runtime_helpers": [
+      { "id": "runtime-settings" }
+    ],
+    "changed_file_routing": {
+      "strategy": "file_args"
+    }
+  },
+  "bench": {
+    "extension_script": "scripts/bench/bench-runner.sh"
+  },
+  "trace": {
+    "extension_script": "scripts/trace/trace-runner.sh"
+  },
+  "fuzz": {
+    "extension_script": "scripts/fuzz/fuzz-runner.sh",
+    "capabilities": ["nodejs-fuzz-workload"],
+    "workload_json_probes": [
+      {
+        "path": "package.json",
+        "pointer": "/scripts/fuzz",
+        "id": "package-script-fuzz",
+        "label": "package.json scripts.fuzz",
+        "description": "The package.json fuzz script executed by the Node.js fuzz runner."
+      }
+    ],
+    "runtime_helpers": [
+      { "id": "runtime-settings" }
+    ],
+    "env": [
+      "HOMEBOY_FUZZ_RESULTS_FILE",
+      "HOMEBOY_FUZZ_EXECUTION_REQUEST_FILE",
+      "HOMEBOY_FUZZ_SEQUENCE_PLAN_FILE",
+      "HOMEBOY_FUZZ_ARTIFACTS_DIR",
+      "HOMEBOY_FUZZ_WORKLOAD_ID",
+      "HOMEBOY_FUZZ_WORKLOAD_PATH",
+      "HOMEBOY_FUZZ_WORKLOAD_ROOT",
+      "HOMEBOY_FUZZ_RUN_ID",
+      "HOMEBOY_FUZZ_SEED",
+      "HOMEBOY_FUZZ_INVENTORY_FILE",
+      "HOMEBOY_FUZZ_SHARED_STATE",
+      "HOMEBOY_FUZZ_MAX_DURATION",
+      "HOMEBOY_FUZZ_GATE_PROFILE",
+      "HOMEBOY_FUZZ_ALLOW_DESTRUCTIVE",
+      "HOMEBOY_FUZZ_ISOLATION"
+    ]
+  },
+  "workloads": {
+    "fuzz": {
+      "script": "scripts/workload/fuzz-workload.sh",
+      "env": ["HOMEBOY_NODE_FUZZ_COMMAND", "HOMEBOY_NODE_FUZZ_SCRIPT"],
+      "runtime_helpers": [
+        { "id": "runtime-settings" }
+      ],
+      "list_probes": [
+        {
+          "type": "json_pointer",
+          "path": "package.json",
+          "pointer": "/scripts/fuzz",
+          "id": "package-script-fuzz",
+          "label": "package.json scripts.fuzz",
+          "description": "The package.json fuzz script executed by the Node.js fuzz runner."
+        }
+      ],
+      "result_schema": "homeboy/fuzz-campaign/v1",
+      "replay_command": "bash \"$HOMEBOY_EXTENSION_PATH/scripts/workload/fuzz-case.sh\"",
+      "minimize_command": "bash \"$HOMEBOY_EXTENSION_PATH/scripts/workload/fuzz-case.sh\"",
+      "compare": {
+        "metrics": [
+          { "name": "cases_failed", "direction": "lower_is_better" },
+          { "name": "findings_open", "direction": "lower_is_better" }
+        ],
+        "findings_key": "fingerprint"
+      },
+      "safety_class": "read_only"
+    }
+  },
+  "actions": [
+    {
+      "id": "release.package",
+      "label": "Package release artifacts",
+      "type": "command",
+      "command": "bash \"{{extension_path}}/scripts/release/build.sh\"",
+      "payload": {
+        "release": "{{payload.release}}",
+        "config": "{{payload.config}}"
+      }
+    },
+    {
+      "id": "release.build",
+      "label": "Build package",
+      "type": "command",
+      "command": "bash \"{{extension_path}}/scripts/release/build.sh\"",
+      "payload": {
+        "release": "{{payload.release}}",
+        "config": "{{payload.config}}"
+      }
+    },
+    {
+      "id": "release.validate",
+      "label": "Validate package",
+      "type": "command",
+      "command": "bash \"{{extension_path}}/scripts/release/validate.sh\"",
+      "payload": {
+        "release": "{{payload.release}}",
+        "config": "{{payload.config}}"
+      }
+    },
+    {
+      "id": "release.publish",
+      "label": "Publish to npm registry",
+      "type": "command",
+      "command": "bash \"{{extension_path}}/scripts/release/publish.sh\"",
+      "payload": {
+        "release": "{{payload.release}}",
+        "config": "{{payload.config}}"
+      }
+    },
+    {
+      "id": "browser.playwright.setup",
+      "label": "Install Playwright browser utility",
+      "type": "command",
+      "command": "bash \"{{extension_path}}/scripts/browser/playwright.sh\" setup",
+      "payload": {}
+    },
+    {
+      "id": "browser.playwright.status",
+      "label": "Show Playwright browser utility readiness",
+      "type": "command",
+      "command": "bash \"{{extension_path}}/scripts/browser/playwright.sh\" status",
+      "payload": {}
+    },
+    {
+      "id": "browser.playwright.execute",
+      "label": "Execute a Playwright module",
+      "type": "command",
+      "command": "bash \"{{extension_path}}/scripts/browser/playwright.sh\" action-execute",
+      "payload": {
+        "selected": "{{selected}}"
+      }
+    }
+  ]
+}

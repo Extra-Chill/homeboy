@@ -1,0 +1,43 @@
+{
+  "schema": "homeboy-extension/dependency-adapter-manifest/v1",
+  "id": "wordpress-dependency-helpers",
+  "version": 2,
+  "ecosystem": "wordpress",
+  "description": "WordPress extension helper surface for composing PHP, JavaScript, and WP-CLI dependency preparation.",
+  "project_signals": {
+    "root_files": ["wp-content", "wp-includes"],
+    "root_match": "all",
+    "optional_files": ["composer.json", "package.json", "wp-cli.yml"]
+  },
+  "capabilities": {
+    "discover_project_root": true,
+    "select_package_manager": true,
+    "install_dependencies": true,
+    "run_named_scripts": true,
+    "execute_bins": true,
+    "prepare_runtime_helpers": true
+  },
+  "helpers": [
+    {
+      "id": "wordpress-php-dependencies",
+      "description": "Prepare PHP dependencies when a WordPress project or extension declares Composer metadata.",
+      "requires": ["composer-package-manager"],
+      "outputs": [
+        { "kind": "directory", "path": "vendor", "required": false },
+        { "kind": "file", "path": "vendor/autoload.php", "required": false }
+      ]
+    },
+    {
+      "id": "wordpress-js-dependencies",
+      "description": "Prepare JavaScript dependencies and scripts when a WordPress project or extension declares package metadata.",
+      "requires": ["nodejs-package-managers"],
+      "outputs": [{ "kind": "directory", "path": "node_modules", "required": false }]
+    },
+    {
+      "id": "wordpress-cli-helper",
+      "description": "Expose WP-CLI as a runtime helper after the caller supplies a WordPress runtime.",
+      "requires": ["wordpress-runtime"],
+      "outputs": [{ "kind": "runtime-capability", "path": "wp-cli", "required": false }]
+    }
+  ]
+}

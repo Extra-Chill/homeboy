@@ -1,0 +1,330 @@
+import Combine
+import Foundation
+
+/// Centralized file system observer for all configuration changes.
+/// Single source of truth for configuration change events in the app.
+@MainActor
+final class ConfigurationObserver: ObservableObject {
+    static let shared = ConfigurationObserver()
+
+    /// Published change stream for Combine subscribers
+    @Published private(set) var lastChange: ConfigurationChangeType?
+
+    // File system watchers keyed by watch identifier
+    private var watchers: [String: DispatchSourceFileSystemObject] = [:]
+    private var descriptors: [String: Int32] = [:]
+
+    // Debouncing
+    private var debounceWorkItems: [String: DispatchWorkItem] = [:]
+    private let debounceInterval: TimeInterval = 0.3
+
+    // Snapshots for change detection (file path -> encoded data)
+    private var projectSnapshots: [String: Data] = [:]
+    private var serverSnapshots: [String: Data] = [:]
+    private var extensionManifestSnapshots: [String: Data] = [:]
+
+
+    private let fileManager = FileManager.default
+    private let jsonDecoder: JSONDecoder = {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        return decoder
+    }()
+    private let jsonEncoder: JSONEncoder = {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        return encoder
+    }()
+
+    private var projectsDir: URL {
+        AppPaths.projects
+    }
+
+    private var serversDir: URL {
+        AppPaths.servers
+    }
+
+    private var extensionsDir: URL {
+        AppPaths.extensions
+    }
+
+    private init() {
+        setupWatchers()
+        refreshAllSnapshots()
+    }
+
+    // Note: No deinit needed - this is a singleton that lives for app lifetime
+
+    // MARK: - Public API
+
+    /// Manually publish a change (called by ConfigurationManager during project switch)
+    func publish(_ change: ConfigurationChangeType) {
+        lastChange = change
+    }
+
+    // MARK: - File Watching Setup
+
+    private func setupWatchers() {
+        // Watch directories for add/remove/modify
+        watchDirectory(AppPaths.projects, key: "projects")
+        watchDirectory(AppPaths.servers, key: "servers")
+        watchDirectory(AppPaths.extensions, key: "extensions")
+    }
+
+    private func watchFile(_ url: URL, key: String) {
+        guard fileManager.fileExists(atPath: url.path) else { return }
+
+        let fd = open(url.path, O_EVTONLY)
+        guard fd >= 0 else { return }
+
+        let source = DispatchSource.makeFileSystemObjectSource(
+            fileDescriptor: fd,
+            eventMask: [.write, .extend, .rename],
+            queue: .main
+        )
+
+        source.setEventHandler { [weak self] in
+            self?.handleFileSystemEvent(key: key)
+        }
+
+        source.setCancelHandler {
+            close(fd)
+        }
+
+        source.resume()
+
+        watchers[key] = source
+        descriptors[key] = fd
+    }
+
+    private func watchDirectory(_ url: URL, key: String) {
+        // Create directory if it doesn't exist
+        if !fileManager.fileExists(atPath: url.path) {
+            try? fileManager.createDirectory(at: url, withIntermediateDirectories: true)
+        }
+
+        let fd = open(url.path, O_EVTONLY)
+        guard fd >= 0 else { return }
+
+        let source = DispatchSource.makeFileSystemObjectSource(
+            fileDescriptor: fd,
+            eventMask: [.write],
+            queue: .main
+        )
+
+        source.setEventHandler { [weak self] in
+            self?.handleFileSystemEvent(key: key)
+        }
+
+        source.setCancelHandler {
+            close(fd)
+        }
+
+        source.resume()
+
+        watchers[key] = source
+        descriptors[key] = fd
+    }
+
+    private func stopAllWatchers() {
+        for (_, source) in watchers {
+            source.cancel()
+        }
+        watchers.removeAll()
+        descriptors.removeAll()
+    }
+
+    // MARK: - Event Handling
+
+    private func handleFileSystemEvent(key: String) {
+        debounceWorkItems[key]?.cancel()
+
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.detectAndPublishChanges(source: key)
+        }
+
+        debounceWorkItems[key] = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + debounceInterval, execute: workItem)
+    }
+
+    private func detectAndPublishChanges(source: String) {
+        switch source {
+        case "projects":
+            detectProjectChanges()
+        case "servers":
+            detectServerChanges()
+        case "extensions":
+            detectExtensionChanges()
+        default:
+            break
+        }
+    }
+
+    // MARK: - Snapshot Management
+
+    private func refreshAllSnapshots() {
+        projectSnapshots = loadAllProjectData()
+        serverSnapshots = loadAllServerData()
+        extensionManifestSnapshots = loadAllExtensionManifestData()
+    }
+
+
+    private func loadAllProjectData() -> [String: Data] {
+        loadAllJsonData(from: projectsDir)
+    }
+
+    private func loadAllServerData() -> [String: Data] {
+        loadAllJsonData(from: serversDir)
+    }
+
+    private func loadAllExtensionManifestData() -> [String: Data] {
+        var result: [String: Data] = [:]
+        guard let extensionIds = try? fileManager.contentsOfDirectory(atPath: extensionsDir.path) else {
+            return result
+        }
+        for extensionId in extensionIds {
+            let manifestPath = extensionsDir.appendingPathComponent(extensionId).appendingPathComponent("\(extensionId).json")
+            if let data = try? Data(contentsOf: manifestPath) {
+                result[extensionId] = data
+            }
+        }
+        return result
+    }
+
+
+    private func loadAllJsonData(from directory: URL) -> [String: Data] {
+        var result: [String: Data] = [:]
+        guard let files = try? fileManager.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) else {
+            return result
+        }
+        for file in files where file.pathExtension == "json" {
+            let id = file.deletingPathExtension().lastPathComponent
+            if let data = try? Data(contentsOf: file) {
+                result[id] = data
+            }
+        }
+        return result
+    }
+
+    // MARK: - Change Detection
+
+
+    private func detectProjectChanges() {
+        let currentProjects = loadAllProjectData()
+        let currentIds = Set(currentProjects.keys)
+        let previousIds = Set(projectSnapshots.keys)
+
+        // Check for modifications to existing projects
+        for projectId in currentIds.intersection(previousIds) {
+            guard let newData = currentProjects[projectId],
+                  let oldData = projectSnapshots[projectId],
+                  newData != oldData else { continue }
+
+            let fields = detectModifiedFields(oldData: oldData, newData: newData)
+            if !fields.isEmpty {
+                publish(.projectModified(projectId: projectId, fields: fields))
+            }
+        }
+
+        // Note: Added/removed projects are handled by ConfigurationManager's directory watching
+        // which updates availableProjects. We only track modifications here.
+
+        projectSnapshots = currentProjects
+    }
+
+    private func detectServerChanges() {
+        let currentServers = loadAllServerData()
+        let currentIds = Set(currentServers.keys)
+        let previousIds = Set(serverSnapshots.keys)
+
+        // Added servers
+        for serverId in currentIds.subtracting(previousIds) {
+            publish(.serverAdded(serverId: serverId))
+        }
+
+        // Removed servers
+        for serverId in previousIds.subtracting(currentIds) {
+            publish(.serverRemoved(serverId: serverId))
+        }
+
+        // Modified servers
+        for serverId in currentIds.intersection(previousIds) {
+            if let newData = currentServers[serverId],
+               let oldData = serverSnapshots[serverId],
+               newData != oldData {
+                publish(.serverModified(serverId: serverId))
+            }
+        }
+
+        serverSnapshots = currentServers
+    }
+
+    private func detectExtensionChanges() {
+        let currentManifests = loadAllExtensionManifestData()
+        let currentIds = Set(currentManifests.keys)
+        let previousIds = Set(extensionManifestSnapshots.keys)
+
+        // Added extensions
+        for extensionId in currentIds.subtracting(previousIds) {
+            publish(.extensionAdded(extensionId: extensionId))
+        }
+
+        // Removed extensions
+        for extensionId in previousIds.subtracting(currentIds) {
+            publish(.extensionRemoved(extensionId: extensionId))
+        }
+
+        // Modified manifests
+        for extensionId in currentIds.intersection(previousIds) {
+            if let newData = currentManifests[extensionId],
+               let oldData = extensionManifestSnapshots[extensionId],
+               newData != oldData {
+                publish(.extensionModified(extensionId: extensionId))
+            }
+        }
+
+        extensionManifestSnapshots = currentManifests
+    }
+
+    // MARK: - Field Detection
+
+    /// Detect which fields changed between old and new project configs
+    private func detectModifiedFields(oldData: Data, newData: Data) -> Set<ProjectField> {
+        guard let oldConfig = try? jsonDecoder.decode(ProjectConfiguration.self, from: oldData),
+              let newConfig = try? jsonDecoder.decode(ProjectConfiguration.self, from: newData) else {
+            return []
+        }
+
+        var fields = Set<ProjectField>()
+
+        if oldConfig.serverId != newConfig.serverId {
+            fields.insert(.server)
+        }
+        if oldConfig.basePath != newConfig.basePath {
+            fields.insert(.basePath)
+        }
+        if oldConfig.componentIds != newConfig.componentIds {
+            fields.insert(.components)
+        }
+        if oldConfig.subTargets != newConfig.subTargets {
+            fields.insert(.subTargets)
+        }
+        if oldConfig.remoteFiles != newConfig.remoteFiles {
+            fields.insert(.remoteFiles)
+        }
+        if !isEqual(oldConfig.tools, newConfig.tools) {
+            fields.insert(.tools)
+        }
+
+        return fields
+    }
+
+    /// Compare Codable values by encoding to JSON
+    private func isEqual<T: Codable>(_ lhs: T, _ rhs: T) -> Bool {
+        guard let lhsData = try? jsonEncoder.encode(lhs),
+              let rhsData = try? jsonEncoder.encode(rhs) else {
+            return false
+        }
+        return lhsData == rhsData
+    }
+}

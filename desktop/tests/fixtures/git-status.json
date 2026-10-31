@@ -1,0 +1,12 @@
+{
+  "success": true,
+  "data": {
+    "action": "status",
+    "component_id": "homeboy-desktop",
+    "exit_code": 0,
+    "path": "/Users/chubes/Developer/homeboy-desktop@feat-git-github-workspace",
+    "stderr": "",
+    "stdout": "",
+    "success": true
+  }
+}

@@ -1,0 +1,304 @@
+import AppKit
+import Combine
+import Foundation
+import SwiftUI
+
+/// ViewModel for managing a single extension's execution state
+@MainActor
+class ExtensionViewModel: ObservableObject, ConfigurationObserving {
+
+    var cancellables = Set<AnyCancellable>()
+    let extensionId: String
+    
+    @Published var inputValues: [String: String] = [:]
+    @Published var selectedNetworkSite: String?
+    @Published var isRunning = false
+    @Published var isSettingUp = false
+    @Published var consoleOutput = ""
+    @Published var results: [[String: AnyCodableValue]] = []
+    @Published var selectedRows: Set<Int> = []
+    @Published var error: (any DisplayableError)?
+    @Published var actionResult: String?
+    @Published var isPerformingAction = false
+    
+
+    private let configManager = ConfigurationManager.shared
+    
+    /// Current extension from manager (always up-to-date)
+    private var currentExtension: LoadedExtension? {
+        ExtensionManager.shared.loadedExtension(withId: extensionId)
+    }
+    
+    /// Whether this extension is a CLI extension with subtarget support
+    var isCLIExtension: Bool {
+        currentExtension?.manifest.runtime?.type == .cli
+    }
+    
+    /// Whether the current project has subtargets (for showing site selector)
+    var hasSubTargets: Bool {
+        configManager.safeActiveProject.hasSubTargets
+    }
+    
+    /// Available subtargets for CLI extensions (e.g., multisite blogs)
+    var subTargets: [SubTarget] {
+        configManager.safeActiveProject.subTargets
+    }
+    
+    init(extensionId: String) {
+        self.extensionId = extensionId
+        observeConfiguration()
+    }
+
+    // MARK: - Configuration Observation
+
+    func handleConfigChange(_ change: ConfigurationChangeType) {
+        switch change {
+        case .projectDidSwitch:
+            // Full reset on project switch
+            results = []
+            selectedRows = []
+            consoleOutput = ""
+            error = nil
+            actionResult = nil
+            selectedNetworkSite = nil
+        case .projectModified:
+            // Trigger UI refresh for subtarget changes
+            objectWillChange.send()
+        default:
+            break
+        }
+    }
+    
+    /// Initialize input values from extension manifest
+    func initializeInputValues(from currentExtension: LoadedExtension) {
+        // Set default network site for CLI extensions
+        if currentExtension.manifest.runtime?.type == .cli {
+            selectedNetworkSite = currentExtension.manifest.runtime?.defaultSite ?? "main"
+        }
+        
+        // Set default input values
+        for input in currentExtension.manifest.inputs ?? [] {
+            if let defaultValue = input.default {
+                inputValues[input.id] = defaultValue.stringValue
+            } else {
+                inputValues[input.id] = ""
+            }
+        }
+    }
+    
+    // MARK: - Extension Execution
+    
+    func run(extension currentExtension: LoadedExtension) {
+        guard !isRunning && !isSettingUp else { return }
+        
+        consoleOutput = ""
+        results = []
+        selectedRows = []
+        error = nil
+        actionResult = nil
+        isRunning = true
+        
+        Task {
+            await ExtensionManager.shared.runExtension(
+                extensionId: currentExtension.id,
+                inputs: inputValues,
+                onOutput: { [weak self] line in
+                    Task { @MainActor in
+                        self?.consoleOutput += line
+                    }
+                }
+            )
+
+            let output = parseScriptOutput(from: consoleOutput)
+            handleRunResult(output, extension: currentExtension)
+        }
+    }
+    
+    private func parseScriptOutput(from output: String) -> Result<ScriptOutput, Error> {
+        // Find JSON in output - extensions may output non-JSON before the result
+        guard let jsonStart = output.lastIndex(of: "{"),
+              let jsonEnd = output.lastIndex(of: "}"),
+              jsonStart < jsonEnd else {
+            return .failure(NSError(domain: "ExtensionViewModel", code: 1, userInfo: [NSLocalizedDescriptionKey: "No JSON output found"]))
+        }
+
+        let jsonString = String(output[jsonStart...jsonEnd])
+        guard let data = jsonString.data(using: .utf8) else {
+            return .failure(NSError(domain: "ExtensionViewModel", code: 2, userInfo: [NSLocalizedDescriptionKey: "Invalid UTF-8 in output"]))
+        }
+
+        do {
+            let decoder = JSONDecoder()
+            decoder.keyDecodingStrategy = .convertFromSnakeCase
+            let scriptOutput = try decoder.decode(ScriptOutput.self, from: data)
+            return .success(scriptOutput)
+        } catch {
+            return .failure(error)
+        }
+    }
+
+    private func handleRunResult(_ result: Result<ScriptOutput, Error>, extension currentExtension: LoadedExtension) {
+        isRunning = false
+        
+        switch result {
+        case .success(let output):
+            if output.success {
+                results = output.results ?? []
+                // Auto-select all rows if selectable
+                if currentExtension.manifest.output?.selectable == true {
+                    selectedRows = Set(results.indices)
+                }
+                if let errors = output.errors, !errors.isEmpty {
+                    consoleOutput += "\nWarnings:\n" + errors.joined(separator: "\n")
+                }
+            } else {
+                var message = "Script completed but reported failure"
+                if let errors = output.errors, !errors.isEmpty {
+                    message += ": " + errors.joined(separator: ", ")
+                }
+                error = AppError(message, source: "Extension: \(extensionId)")
+            }
+            
+        case .failure(let err):
+            error = AppError(err.localizedDescription, source: "Extension: \(extensionId)")
+        }
+    }
+    
+    func cancel() {
+        isRunning = false
+    }
+    
+    // MARK: - Extension Setup
+    
+    func setup(extension currentExtension: LoadedExtension) {
+        guard !isSettingUp && !isRunning else { return }
+        
+        isSettingUp = true
+        consoleOutput = ""
+        error = nil
+        
+        Task {
+            do {
+                try await ExtensionManager.shared.setupExtension(extensionId: currentExtension.id)
+                ExtensionManager.shared.updateExtensionState(extensionId: currentExtension.id, state: .ready)
+            } catch {
+                self.error = error.toDisplayableError(source: "Extension: \(extensionId)")
+            }
+
+            isSettingUp = false
+        }
+    }
+    
+    // MARK: - Row Selection
+    
+    func toggleRowSelection(_ index: Int) {
+        if selectedRows.contains(index) {
+            selectedRows.remove(index)
+        } else {
+            selectedRows.insert(index)
+        }
+    }
+    
+    func selectAll() {
+        selectedRows = Set(results.indices)
+    }
+    
+    func deselectAll() {
+        selectedRows.removeAll()
+    }
+    
+    var selectedResults: [[String: AnyCodableValue]] {
+        selectedRows.sorted().compactMap { index in
+            guard index < results.count else { return nil }
+            return results[index]
+        }
+    }
+    
+    // MARK: - Actions
+    
+    func performAction(_ action: ActionConfig, extension currentExtension: LoadedExtension) async {
+        isPerformingAction = true
+        actionResult = nil
+        
+        switch action.type {
+        case .builtin:
+            performBuiltinAction(action, extension: currentExtension)
+        case .command:
+            actionResult = "Command actions are not implemented in the desktop runner yet."
+        }
+        
+        isPerformingAction = false
+    }
+    
+    private func performBuiltinAction(_ action: ActionConfig, extension currentExtension: LoadedExtension) {
+        guard let builtin = action.builtin else { return }
+        
+        switch builtin {
+        case .copyColumn:
+            guard let column = action.column else { return }
+            let values = selectedResults.compactMap { $0[column]?.stringValue }
+            let text = values.joined(separator: "\n")
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(text, forType: .string)
+            actionResult = "Copied \(values.count) values to clipboard"
+            
+        case .exportCsv:
+            exportToCsv(extension: currentExtension)
+            
+        case .copyJson:
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            if let data = try? encoder.encode(selectedResults),
+               let json = String(data: data, encoding: .utf8) {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(json, forType: .string)
+                actionResult = "Copied \(selectedResults.count) rows as JSON"
+            }
+        }
+    }
+    
+    private func exportToCsv(extension currentExtension: LoadedExtension) {
+        guard !results.isEmpty else { return }
+        
+        let columns = currentExtension.manifest.output?.schema.items?.keys.sorted() ?? []
+        guard !columns.isEmpty else { return }
+        
+        var csv = columns.joined(separator: ",") + "\n"
+        
+        for row in selectedResults {
+            let values = columns.map { col in
+                let value = row[col]?.stringValue ?? ""
+                // Escape quotes and wrap in quotes if contains comma
+                let escaped = value.replacingOccurrences(of: "\"", with: "\"\"")
+                return escaped.contains(",") || escaped.contains("\n") ? "\"\(escaped)\"" : escaped
+            }
+            csv += values.joined(separator: ",") + "\n"
+        }
+        
+        // Show save panel
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.commaSeparatedText]
+        panel.nameFieldStringValue = "\(currentExtension.id)-export.csv"
+        
+        if panel.runModal() == .OK, let url = panel.url {
+            do {
+                try csv.write(to: url, atomically: true, encoding: .utf8)
+                actionResult = "Exported \(selectedResults.count) rows to \(url.lastPathComponent)"
+            } catch {
+                self.error = AppError("Failed to save CSV: \(error.localizedDescription)", source: "Extension: \(extensionId)")
+            }
+        }
+    }
+    
+    // MARK: - Console
+    
+    func copyConsoleOutput() {
+        let extensionName = currentExtension?.name ?? extensionId
+        ConsoleOutput(consoleOutput, source: "Extension: \(extensionName)").copyToClipboard()
+    }
+    
+    func clearConsole() {
+        consoleOutput = ""
+    }
+    
+}

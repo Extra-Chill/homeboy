@@ -1,0 +1,67 @@
+TAP version 13
+# Subtest: passes
+ok 1 - passes
+  ---
+  duration_ms: 0.934836
+  type: 'test'
+  ...
+# Subtest: skipped
+ok 2 - skipped # SKIP
+  ---
+  duration_ms: 0.122512
+  type: 'test'
+  ...
+# Subtest: todo
+ok 3 - todo # TODO
+  ---
+  duration_ms: 0.118332
+  type: 'test'
+  ...
+# Subtest: fails
+not ok 4 - fails
+  ---
+  duration_ms: 0.886865
+  type: 'test'
+  location: '/project/a.test.mjs:6:1'
+  failureType: 'testCodeFailure'
+  error: |-
+    Expected values to be strictly equal:
+    
+    1 !== 2
+    
+  code: 'ERR_ASSERTION'
+  name: 'AssertionError'
+  expected: 2
+  actual: 1
+  operator: 'strictEqual'
+  stack: |-
+    TestContext.<anonymous> (file:///project/a.test.mjs:6:28)
+    Test.runInAsyncScope (node:async_hooks:226:14)
+    Test.run (node:internal/test_runner/test:1120:25)
+    Test.processPendingSubtests (node:internal/test_runner/test:789:18)
+    Test.postRun (node:internal/test_runner/test:1249:19)
+    Test.run (node:internal/test_runner/test:1177:12)
+    async Test.processPendingSubtests (node:internal/test_runner/test:789:7)
+  ...
+# Subtest: suite
+    # Subtest: nested passes
+    ok 1 - nested passes
+      ---
+      duration_ms: 0.327127
+      type: 'test'
+      ...
+    1..1
+ok 5 - suite
+  ---
+  duration_ms: 0.718036
+  type: 'test'
+  ...
+1..5
+# tests 6
+# suites 0
+# pass 3
+# fail 1
+# cancelled 0
+# skipped 1
+# todo 1
+# duration_ms 77.431971

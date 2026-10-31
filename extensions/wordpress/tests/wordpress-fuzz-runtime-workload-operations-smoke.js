@@ -1,0 +1,416 @@
+'use strict';
+
+const assert = require('node:assert/strict');
+
+const {
+	WORDPRESS_FUZZ_RUNTIME_WORKLOAD_OPERATION_SCHEMA,
+	WORDPRESS_FUZZ_RUNTIME_WORKLOAD_OPERATION_VALIDATION_SCHEMA,
+	attachWordPressFuzzRuntimeWorkloadOperationDescriptor,
+	buildWordPressFuzzRuntimeWorkloadOperationDescriptor,
+	mapWordPressRuntimeActionToCodeboxContract,
+	requiredCapabilitiesForWordPressFuzzRuntimeOperation,
+	summarizeWordPressFuzzRuntimeWorkloadOperations,
+	validateWordPressFuzzRuntimeWorkloadOperationDescriptor,
+} = require('../lib/wordpress-fuzz-runtime-workload-operations');
+const {
+	buildWordPressFuzzMutationLifecycleContract,
+} = require('../lib/wordpress-fuzz-mutation-lifecycle');
+
+function actionContract(action) {
+	return {
+		schema: 'wp-codebox/wordpress-runtime-action/v1',
+		action,
+		ability: `wp-codebox/runtime-action/${action}`,
+		input_schema: `wp-codebox/wordpress-runtime-action/${action}/input/v1`,
+		output_schema: `wp-codebox/wordpress-runtime-action/${action}/output/v1`,
+	};
+}
+
+const runtimeActionContracts = {
+	schema: 'wp-codebox/wordpress-runtime-action-contracts/v1',
+	schemas: {
+		wordpressRuntime: {
+			disposableMutation: 'wp-codebox/wordpress-disposable-mutation/v1',
+			resourceCrudMutation: 'wp-codebox/wordpress-resource-crud-mutation/v1',
+			actionAuth: 'wp-codebox/wordpress-action-auth/v1',
+			adminAction: 'wp-codebox/wordpress-admin-action/v1',
+			ajaxAction: 'wp-codebox/wordpress-ajax-action/v1',
+			adminPost: 'wp-codebox/wordpress-admin-post/v1',
+			hookRun: 'wp-codebox/wordpress-hook-run/v1',
+			cronEvent: 'wp-codebox/wordpress-cron-event/v1',
+			wpCli: 'wp-codebox/wordpress-wp-cli/v1',
+			restFixture: 'wp-codebox/wordpress-rest-fixture/v1',
+			browserCorpus: 'wp-codebox/wordpress-browser-corpus/v1',
+			nonce: 'wp-codebox/wordpress-nonce/v1',
+			session: 'wp-codebox/wordpress-session/v1',
+		},
+		wordpressObservability: {
+			queryObservation: 'wp-codebox/wordpress-query-observation/v1',
+			cacheObservation: 'wp-codebox/wordpress-cache-observation/v1',
+			writeObservation: 'wp-codebox/wordpress-write-observation/v1',
+		},
+		wordpressDb: {
+			operation: 'wp-codebox/wordpress-db-operation/v1',
+			mutation: 'wp-codebox/wordpress-db-mutation/v1',
+		},
+	},
+	actions: Object.fromEntries([
+		'rest_request',
+		'crud_operation',
+		'admin_page_load',
+		'admin_action',
+		'ajax_action',
+		'admin_post',
+		'frontend_page_load',
+		'block_render',
+		'block_editor',
+		'db_query',
+		'db_operation',
+		'query_observation',
+		'cache_observation',
+		'write_observation',
+		'resource_crud',
+		'wp_cli',
+		'hook_run',
+		'cron_event',
+		'rest_fixture',
+		'browser_corpus',
+		'action_auth',
+		'login_as',
+		'nonce_for',
+		'nonce',
+		'session',
+		'checkpoint',
+		'restore',
+		'reset_state',
+		'replay_case',
+		'minimize_case',
+	].map((action) => [action, actionContract(action)])),
+};
+
+const crudCase = {
+	id: 'case:create-post',
+	intent: 'create-post',
+	operation_id: 'post:create',
+	operation: {
+		schema: 'homeboy/wordpress-crud-operation/v1',
+		action: 'create',
+		resource_type: 'post',
+		input: { post_type: 'post' },
+	},
+	metadata: { crud: { action: 'create' } },
+};
+
+const crudDescriptor = buildWordPressFuzzRuntimeWorkloadOperationDescriptor(crudCase, {
+	runtimeCapabilities: { capabilities: ['crud'] },
+	runtimeReadiness: { schema: 'wp-codebox/fuzz-runner-readiness/v1', status: 'ready', operationKinds: ['mutation'], disposable: true, isolation: { runtime_backed: true, disposable: true } },
+	codeboxRuntimeContracts: runtimeActionContracts,
+});
+assert.equal(crudDescriptor.schema, WORDPRESS_FUZZ_RUNTIME_WORKLOAD_OPERATION_SCHEMA);
+assert.equal(crudDescriptor.family, 'crud');
+assert.equal(crudDescriptor.action, 'crud_operation');
+assert.equal(crudDescriptor.command, 'wordpress.crud-operation');
+assert.equal(crudDescriptor.wp_codebox_command, undefined);
+assert.equal(crudDescriptor.wp_codebox_ability, 'wp-codebox/runtime-action/crud_operation');
+assert.equal(crudDescriptor.wp_codebox_input_schema, 'wp-codebox/wordpress-runtime-action/crud_operation/input/v1');
+assert.equal(crudDescriptor.wp_codebox_mutation_contract_schema, 'wp-codebox/wordpress-disposable-mutation/v1');
+assert.equal(crudDescriptor.metadata.wp_codebox_ability, 'wp-codebox/runtime-action/crud_operation');
+assert.equal(crudDescriptor.status, 'ready');
+assert.equal(crudDescriptor.validation.schema, WORDPRESS_FUZZ_RUNTIME_WORKLOAD_OPERATION_VALIDATION_SCHEMA);
+assert.equal(crudDescriptor.validation.ok, true);
+assert.deepEqual(crudDescriptor.required_capabilities, ['crud']);
+
+const missingContractDescriptor = buildWordPressFuzzRuntimeWorkloadOperationDescriptor(crudCase, {
+	runtimeCapabilities: { capabilities: ['crud'] },
+});
+assert.equal(missingContractDescriptor.status, 'blocked');
+assert.equal(missingContractDescriptor.skip_reason, 'wp-codebox-runtime-action-contracts-missing');
+assert.equal(missingContractDescriptor.blockers[0].code, 'wp-codebox-runtime-action-contracts-missing');
+
+const unsupportedContractDescriptor = buildWordPressFuzzRuntimeWorkloadOperationDescriptor(crudCase, {
+	runtimeCapabilities: { capabilities: ['crud'] },
+	codeboxRuntimeContracts: { schema: 'wp-codebox/wordpress-runtime-action-contracts/v1', actions: { rest_request: actionContract('rest_request') } },
+});
+assert.equal(unsupportedContractDescriptor.status, 'blocked');
+assert.equal(unsupportedContractDescriptor.skip_reason, 'unsupported-wordpress-runtime-action');
+assert.equal(unsupportedContractDescriptor.blockers[0].code, 'unsupported-wordpress-runtime-action');
+assert(unsupportedContractDescriptor.blockers[0].missing_contract_fields.includes('actions.crud_operation'));
+assert.deepEqual(unsupportedContractDescriptor.blockers[0].supported_actions, ['rest_request']);
+
+const missingMutationContractDescriptor = buildWordPressFuzzRuntimeWorkloadOperationDescriptor(crudCase, {
+	runtimeCapabilities: { capabilities: ['crud'] },
+	codeboxRuntimeContracts: { schema: 'wp-codebox/wordpress-runtime-action-contracts/v1', actions: { crud_operation: actionContract('crud_operation') } },
+});
+assert.equal(missingMutationContractDescriptor.status, 'blocked');
+assert.equal(missingMutationContractDescriptor.skip_reason, 'wp-codebox-runtime-mutation-contract-missing');
+assert.deepEqual(missingMutationContractDescriptor.blockers[0].missing_contract_fields, ['schemas.wordpressRuntime.disposableMutation', 'schemas.wordpressRuntime.crudMutation', 'mutationContracts.crud_operation']);
+
+assert.deepEqual(mapWordPressRuntimeActionToCodeboxContract('rest_request', runtimeActionContracts), {
+	action: 'rest_request',
+	ability: 'wp-codebox/runtime-action/rest_request',
+	input_schema: 'wp-codebox/wordpress-runtime-action/rest_request/input/v1',
+	output_schema: 'wp-codebox/wordpress-runtime-action/rest_request/output/v1',
+	contract_schema: 'wp-codebox/wordpress-runtime-action/v1',
+	target: { kind: 'runtime-action', id: 'runtime-action:rest_request', entrypoint: 'rest_request' },
+});
+
+const explicitPrimitiveContract = {
+	schema: 'wp-codebox/wordpress-runtime-action-contracts/v1',
+	schemas: {
+		wordpressRuntime: {
+			resourceCrud: 'wp-codebox/wordpress-resource-crud/v1',
+			hookRun: 'wp-codebox/wordpress-hook-run/v1',
+			cronEvent: 'wp-codebox/wordpress-cron-event/v1',
+			wpCli: 'wp-codebox/wordpress-wp-cli/v1',
+			restFixture: 'wp-codebox/wordpress-rest-fixture/v1',
+			browserCorpus: 'wp-codebox/wordpress-browser-corpus/v1',
+		},
+		wordpressObservability: {
+			queryObservation: 'wp-codebox/wordpress-query-observation/v1',
+			cacheObservation: 'wp-codebox/wordpress-cache-observation/v1',
+			writeObservation: 'wp-codebox/wordpress-write-observation/v1',
+		},
+	},
+};
+assert.equal(mapWordPressRuntimeActionToCodeboxContract('query_observation', explicitPrimitiveContract).contract_schema, 'wp-codebox/wordpress-query-observation/v1');
+assert.equal(mapWordPressRuntimeActionToCodeboxContract('cache_observation', explicitPrimitiveContract).contract_schema, 'wp-codebox/wordpress-cache-observation/v1');
+assert.equal(mapWordPressRuntimeActionToCodeboxContract('write_observation', explicitPrimitiveContract).contract_schema, 'wp-codebox/wordpress-write-observation/v1');
+assert.equal(mapWordPressRuntimeActionToCodeboxContract('resource_crud', explicitPrimitiveContract).contract_schema, 'wp-codebox/wordpress-resource-crud/v1');
+assert.equal(mapWordPressRuntimeActionToCodeboxContract('hook_run', explicitPrimitiveContract).contract_schema, 'wp-codebox/wordpress-hook-run/v1');
+assert.equal(mapWordPressRuntimeActionToCodeboxContract('cron_event', explicitPrimitiveContract).contract_schema, 'wp-codebox/wordpress-cron-event/v1');
+assert.equal(mapWordPressRuntimeActionToCodeboxContract('wp_cli', explicitPrimitiveContract).contract_schema, 'wp-codebox/wordpress-wp-cli/v1');
+assert.equal(mapWordPressRuntimeActionToCodeboxContract('rest_fixture', explicitPrimitiveContract).contract_schema, 'wp-codebox/wordpress-rest-fixture/v1');
+assert.equal(mapWordPressRuntimeActionToCodeboxContract('browser_corpus', explicitPrimitiveContract).contract_schema, 'wp-codebox/wordpress-browser-corpus/v1');
+
+const restDescriptor = buildWordPressFuzzRuntimeWorkloadOperationDescriptor({
+	id: 'case:rest',
+	intent: 'request-rest-route',
+	operation: { method: 'GET', route: '/wp/v2/posts' },
+}, { runtimeCapabilities: { capabilities: ['rest'] }, codeboxRuntimeContracts: runtimeActionContracts });
+assert.equal(restDescriptor.family, 'rest');
+assert.equal(restDescriptor.action, 'rest_request');
+assert.equal(restDescriptor.command, 'wordpress.rest-request');
+assert.deepEqual(restDescriptor.input, { method: 'GET', route: '/wp/v2/posts' });
+
+const readinessSupportedRestDescriptor = buildWordPressFuzzRuntimeWorkloadOperationDescriptor({
+	id: 'case:rest-readiness',
+	intent: 'request-rest-route',
+	operation: { method: 'GET', route: '/wp/v2/posts' },
+}, {
+	runtimeCapabilities: { capabilities: ['rest'] },
+	runtimeReadiness: { schema: 'wp-codebox/fuzz-runner-readiness/v1', status: 'ready', operationKinds: ['read'] },
+	codeboxRuntimeContracts: runtimeActionContracts,
+});
+assert.equal(readinessSupportedRestDescriptor.status, 'ready');
+
+const readinessUnsupportedCrudDescriptor = buildWordPressFuzzRuntimeWorkloadOperationDescriptor(crudCase, {
+	runtimeCapabilities: { capabilities: ['crud'] },
+	runtimeReadiness: { schema: 'wp-codebox/fuzz-runner-readiness/v1', status: 'ready', operationKinds: ['read'] },
+	codeboxRuntimeContracts: runtimeActionContracts,
+});
+assert.equal(readinessUnsupportedCrudDescriptor.status, 'planned');
+assert.equal(readinessUnsupportedCrudDescriptor.skip_reason, 'unsupported-runtime-workload-operation-kind');
+assert.deepEqual(readinessUnsupportedCrudDescriptor.blockers.map((blocker) => blocker.code), ['unsupported-runtime-workload-operation-kind']);
+
+const readinessMissingCommandDescriptor = buildWordPressFuzzRuntimeWorkloadOperationDescriptor(crudCase, {
+	runtimeCapabilities: { capabilities: ['crud'] },
+	runtimeReadiness: { schema: 'wp-codebox/fuzz-runner-readiness/v1', status: 'blocked', command_available: false },
+	codeboxRuntimeContracts: runtimeActionContracts,
+});
+assert.equal(readinessMissingCommandDescriptor.status, 'blocked');
+assert.equal(readinessMissingCommandDescriptor.skip_reason, 'wp-codebox-fuzz-readiness-command-unavailable');
+
+const adminDescriptor = buildWordPressFuzzRuntimeWorkloadOperationDescriptor({ intent: 'request-admin-page', operation: { path: '/wp-admin/edit.php' } }, { runtimeCapabilities: { capabilities: ['admin'] }, codeboxRuntimeContracts: runtimeActionContracts });
+assert.equal(adminDescriptor.family, 'admin_page');
+assert.equal(adminDescriptor.action, 'admin_page_load');
+assert.equal(adminDescriptor.command, 'wordpress.admin-page-load');
+
+const adminMutationDescriptor = buildWordPressFuzzRuntimeWorkloadOperationDescriptor({
+	id: 'case:admin-post',
+	intent: 'plan-admin-page-mutation',
+	operation: { path: '/wp-admin/edit.php', method: 'POST', interaction_kind: 'form', interaction_id: 'bulk-action', selector: '#posts-filter', fields: { action: 'edit' } },
+	destructive_reasons: ['form_mutation'],
+	metadata: {
+		capability_context: { required: ['edit_posts'] },
+		nonce_context: { required: true, action: 'bulk-posts', field: '_wpnonce' },
+		mutation_lifecycle: buildWordPressFuzzMutationLifecycleContract({ kind: 'admin', method: 'POST' }),
+	},
+}, { runtimeCapabilities: { capabilities: ['admin'] }, codeboxRuntimeContracts: runtimeActionContracts });
+assert.equal(adminMutationDescriptor.status, 'ready');
+assert.equal(adminMutationDescriptor.skip_reason, undefined);
+assert.deepEqual(adminMutationDescriptor.required_capabilities, ['admin']);
+assert.equal(adminMutationDescriptor.action, 'admin_action');
+assert.equal(adminMutationDescriptor.command, undefined);
+assert.equal(adminMutationDescriptor.wp_codebox_contract_schema, 'wp-codebox/wordpress-runtime-action/v1');
+assert.equal(adminMutationDescriptor.wp_codebox_mutation_contract_schema, 'wp-codebox/wordpress-disposable-mutation/v1');
+assert.equal(adminMutationDescriptor.input.interaction_kind, 'form');
+assert.equal(adminMutationDescriptor.input.selector, '#posts-filter');
+assert.deepEqual(adminMutationDescriptor.input.fields, { action: 'edit' });
+assert.deepEqual(adminMutationDescriptor.input.capability_context, { required: ['edit_posts'] });
+assert.deepEqual(adminMutationDescriptor.input.nonce_context, { required: true, action: 'bulk-posts', field: '_wpnonce' });
+
+const pageDescriptor = buildWordPressFuzzRuntimeWorkloadOperationDescriptor({ intent: 'request-frontend-page', metadata: { surface: { type: 'frontend-url' } }, operation: { path: '/' } }, { runtimeCapabilities: { capabilities: ['browser'] }, codeboxRuntimeContracts: runtimeActionContracts });
+assert.equal(pageDescriptor.family, 'frontend_page');
+assert.equal(pageDescriptor.action, 'frontend_page_load');
+assert.equal(pageDescriptor.command, 'wordpress.frontend-page-load');
+
+const blockDescriptor = buildWordPressFuzzRuntimeWorkloadOperationDescriptor({ intent: 'render-block', operation: { block_name: 'core/paragraph', lifecycle: 'render' } }, { runtimeCapabilities: { capabilities: ['block'] }, codeboxRuntimeContracts: runtimeActionContracts });
+assert.equal(blockDescriptor.family, 'block');
+assert.equal(blockDescriptor.action, 'block_render');
+assert.equal(blockDescriptor.command, 'wordpress.block-render');
+assert.deepEqual(requiredCapabilitiesForWordPressFuzzRuntimeOperation({ intent: 'insert-block-in-editor', operation: { block_name: 'core/paragraph' } }), ['block', 'block-editor', 'browser']);
+
+const dbDescriptor = buildWordPressFuzzRuntimeWorkloadOperationDescriptor({ intent: 'profile-database-query', operation: { query: 'SELECT ID FROM wp_posts' } }, { runtimeCapabilities: { capabilities: ['database', 'query-observation'] }, codeboxRuntimeContracts: runtimeActionContracts });
+assert.equal(dbDescriptor.family, 'database');
+assert.equal(dbDescriptor.action, 'db_query');
+assert.equal(dbDescriptor.command, 'wordpress.db-query');
+assert.deepEqual(dbDescriptor.required_capabilities, ['database', 'query-observation']);
+
+const dbMutationDescriptor = buildWordPressFuzzRuntimeWorkloadOperationDescriptor({
+	intent: 'mutate-database-table',
+	operation: { table: 'wp_posts', mutation: 'insert' },
+	destructive_reasons: ['db-mutation'],
+	metadata: { mutation_lifecycle: buildWordPressFuzzMutationLifecycleContract({ kind: 'database' }) },
+}, { runtimeCapabilities: { capabilities: ['database'] }, codeboxRuntimeContracts: runtimeActionContracts });
+assert.equal(dbMutationDescriptor.status, 'ready');
+assert.equal(dbMutationDescriptor.skip_reason, undefined);
+assert.deepEqual(dbMutationDescriptor.required_capabilities, ['database']);
+assert.equal(dbMutationDescriptor.action, 'db_operation');
+assert.equal(dbMutationDescriptor.command, 'wordpress.db-operation');
+assert.equal(dbMutationDescriptor.wp_codebox_mutation_contract_schema, 'wp-codebox/wordpress-db-mutation/v1');
+
+const capabilityOnlyMutationDescriptor = buildWordPressFuzzRuntimeWorkloadOperationDescriptor({
+	id: 'case:rest-post-capability-only',
+	intent: 'request-rest-route',
+	operation: { method: 'POST', route: '/example/v1/items' },
+	metadata: { mutation_lifecycle: buildWordPressFuzzMutationLifecycleContract({ kind: 'rest', method: 'POST' }) },
+}, { runtimeCapabilities: { capabilities: ['rest'] }, codeboxRuntimeContracts: runtimeActionContracts });
+assert.equal(capabilityOnlyMutationDescriptor.status, 'ready');
+assert.equal(capabilityOnlyMutationDescriptor.skip_reason, undefined);
+
+const mutationLifecycle = buildWordPressFuzzMutationLifecycleContract({ kind: 'rest', method: 'DELETE' });
+const mutatingDescriptor = buildWordPressFuzzRuntimeWorkloadOperationDescriptor({
+	id: 'case:rest-delete',
+	intent: 'request-rest-route',
+	operation: { method: 'DELETE', route: '/wp/v2/posts/1' },
+	metadata: { mutation_lifecycle: mutationLifecycle },
+}, { runtimeCapabilities: { capabilities: ['rest'] }, codeboxRuntimeContracts: runtimeActionContracts });
+assert.equal(mutatingDescriptor.mutation_lifecycle.delete_boundary_required, true);
+assert.equal(mutatingDescriptor.metadata.mutation_lifecycle.kind, 'rest');
+
+const mutationIsolationBlockedDescriptor = buildWordPressFuzzRuntimeWorkloadOperationDescriptor({
+	id: 'case:rest-post-no-isolation',
+	intent: 'request-rest-route',
+	operation: { method: 'POST', route: '/example/v1/items' },
+	metadata: { mutation_lifecycle: buildWordPressFuzzMutationLifecycleContract({ kind: 'rest', method: 'POST' }) },
+}, {
+	runtimeCapabilities: { capabilities: ['rest', 'checkpoint', 'rest-rollback'] },
+	runtimeReadiness: { schema: 'wp-codebox/fuzz-runner-readiness/v1', status: 'ready', operationKinds: ['mutation'] },
+	codeboxRuntimeContracts: runtimeActionContracts,
+});
+assert.equal(mutationIsolationBlockedDescriptor.status, 'blocked');
+assert.equal(mutationIsolationBlockedDescriptor.skip_reason, 'wp-codebox-fuzz-mutation-isolation-unsupported');
+assert.equal(mutationIsolationBlockedDescriptor.blockers[0].code, 'wp-codebox-fuzz-mutation-isolation-unsupported');
+
+const disposableDeleteDescriptor = buildWordPressFuzzRuntimeWorkloadOperationDescriptor({
+	id: 'case:rest-delete-disposable',
+	intent: 'request-rest-route',
+	operation: { method: 'DELETE', route: '/example/v1/items/42' },
+	metadata: { mutation_lifecycle: buildWordPressFuzzMutationLifecycleContract({ kind: 'rest', method: 'DELETE' }) },
+}, {
+	runtimeCapabilities: { capabilities: ['rest'] },
+	runtimeReadiness: { schema: 'wp-codebox/fuzz-runner-readiness/v1', status: 'ready', operationKinds: ['mutation'], disposable: true, isolation: { runtime_backed: true, disposable: true } },
+	codeboxRuntimeContracts: runtimeActionContracts,
+});
+assert.equal(disposableDeleteDescriptor.status, 'ready');
+assert.equal(disposableDeleteDescriptor.skip_reason, undefined);
+assert.equal(disposableDeleteDescriptor.mutation_lifecycle.delete_boundary_required, true);
+
+const readyMutationDescriptor = buildWordPressFuzzRuntimeWorkloadOperationDescriptor({
+	id: 'case:rest-delete-ready',
+	intent: 'request-rest-route',
+	operation: { method: 'DELETE', route: '/example/v1/items/42' },
+	metadata: { mutation_lifecycle: buildWordPressFuzzMutationLifecycleContract({ kind: 'rest', method: 'DELETE' }) },
+}, {
+	runtimeCapabilities: { capabilities: ['rest'] },
+	runtimeReadiness: { schema: 'wp-codebox/fuzz-runner-readiness/v1', status: 'ready', operationKinds: ['mutation'], disposable: true, isolation: { runtime_backed: true, disposable: true } },
+	codeboxRuntimeContracts: runtimeActionContracts,
+});
+assert.equal(readyMutationDescriptor.status, 'ready');
+
+const runtimeActionCases = [
+	[{ target: { kind: 'runtime-action' }, operation: { runtime_action: 'wp_cli', args: ['plugin', 'list'] } }, 'wp_cli', { args: ['plugin', 'list'] }],
+	[{ target: { kind: 'runtime-action' }, operation: { runtime_action: 'query_observation', query: 'SELECT ID FROM wp_posts' } }, 'query_observation', { query: 'SELECT ID FROM wp_posts' }],
+	[{ target: { kind: 'runtime-action' }, operation: { runtime_action: 'cache_observation', cache_key: 'products', cache_group: 'fixture' } }, 'cache_observation', { cache_key: 'products', cache_group: 'fixture' }],
+	[{ target: { kind: 'runtime-action' }, operation: { runtime_action: 'write_observation', operation: 'option-update', option: 'fixture_option' } }, 'write_observation', { operation: 'option-update', option: 'fixture_option' }],
+	[{ target: { kind: 'runtime-action' }, operation: { runtime_action: 'resource_crud', action: 'read', resource_type: 'post', id: 1 } }, 'resource_crud', { action: 'read', resource_type: 'post', id: 1 }],
+	[{ target: { kind: 'runtime-action' }, operation: { runtime_action: 'hook_run', hook: 'init', args: [] } }, 'hook_run', { hook: 'init', args: [] }],
+	[{ target: { kind: 'runtime-action' }, operation: { runtime_action: 'cron_event', hook: 'fixture_cron', schedule: 'now' } }, 'cron_event', { hook: 'fixture_cron', schedule: 'now' }],
+	[{ target: { kind: 'runtime-action' }, operation: { runtime_action: 'rest_fixture', route: '/wp/v2/posts', method: 'GET' } }, 'rest_fixture', { route: '/wp/v2/posts', method: 'GET' }],
+	[{ target: { kind: 'runtime-action' }, operation: { runtime_action: 'browser_corpus', urls: ['/'] } }, 'browser_corpus', { urls: ['/'] }],
+	[{ target: { kind: 'runtime-action' }, operation: { runtime_action: 'login_as', user: 1 } }, 'login_as', { user: 1 }],
+	[{ target: { kind: 'runtime-action' }, operation: { runtime_action: 'nonce_for', action: 'bulk-posts' } }, 'nonce_for', { action: 'bulk-posts' }],
+	[{ target: { kind: 'runtime-action' }, operation: { runtime_action: 'action_auth', action: 'bulk-posts', nonce: 'abc' } }, 'action_auth', { action: 'bulk-posts', nonce: 'abc' }],
+	[{ target: { kind: 'runtime-action' }, operation: { runtime_action: 'nonce', action: 'bulk-posts' } }, 'nonce', { action: 'bulk-posts' }],
+	[{ target: { kind: 'runtime-action' }, operation: { runtime_action: 'session', scope: 'admin' } }, 'session', { scope: 'admin' }],
+	[{ target: { kind: 'runtime-action' }, operation: { runtime_action: 'checkpoint', label: 'before' } }, 'checkpoint', { label: 'before' }],
+	[{ target: { kind: 'runtime-action' }, operation: { runtime_action: 'restore', checkpoint_id: 'cp-1' } }, 'restore', { checkpoint_id: 'cp-1' }],
+	[{ target: { kind: 'runtime-action' }, operation: { runtime_action: 'reset_state', scope: 'database' } }, 'reset_state', { scope: 'database' }],
+	[{ target: { kind: 'runtime-action' }, operation: { runtime_action: 'replay_case', case: { id: 'case-1' } } }, 'replay_case', { case: { id: 'case-1' } }],
+	[{ target: { kind: 'runtime-action' }, operation: { runtime_action: 'minimize_case', case: { id: 'case-2' } } }, 'minimize_case', { case: { id: 'case-2' } }],
+];
+for (const [testCase, expectedAction, expectedInput] of runtimeActionCases) {
+	const descriptor = buildWordPressFuzzRuntimeWorkloadOperationDescriptor(testCase, { codeboxRuntimeContracts: runtimeActionContracts });
+	assert.equal(descriptor.action, expectedAction);
+	assert.equal(descriptor.status, 'ready');
+	assert.equal(descriptor.wp_codebox_ability, `wp-codebox/runtime-action/${expectedAction}`);
+	assert.deepEqual(descriptor.input, expectedInput);
+}
+
+const missingPrimitiveContractDescriptor = buildWordPressFuzzRuntimeWorkloadOperationDescriptor({ target: { kind: 'runtime-action' }, operation: { runtime_action: 'browser_corpus', urls: ['/'] } }, {
+	codeboxRuntimeContracts: { schema: 'wp-codebox/wordpress-runtime-action-contracts/v1', actions: { rest_request: actionContract('rest_request') } },
+});
+assert.equal(missingPrimitiveContractDescriptor.status, 'blocked');
+assert.equal(missingPrimitiveContractDescriptor.skip_reason, 'unsupported-wordpress-runtime-action');
+assert.deepEqual(missingPrimitiveContractDescriptor.blockers[0].missing_contract_fields, ['actions.browser_corpus', 'runtime_actions.browser_corpus', 'wordpress_runtime_actions.browser_corpus', 'schemas.wordpressRuntime.browserCorpus']);
+
+const skipped = attachWordPressFuzzRuntimeWorkloadOperationDescriptor({
+	id: 'case:block',
+	intent: 'render-block',
+	operation: { block_name: 'core/paragraph' },
+	skip_reasons: ['existing-reason'],
+	metadata: {},
+}, { runtimeCapabilities: { capabilities: [] }, codeboxRuntimeContracts: runtimeActionContracts });
+assert.equal(skipped.executable, false);
+assert.equal(skipped.execution_tier, 'plan_only');
+assert.equal(skipped.runtime_operation.status, 'planned');
+assert.deepEqual(skipped.runtime_operation.missing_capabilities, ['block']);
+assert.deepEqual(skipped.runtime_operation.blockers.map((blocker) => blocker.code), ['missing-runtime-workload-capability']);
+assert.deepEqual(skipped.skip_reasons, ['existing-reason', 'missing-runtime-workload-capability']);
+assert.deepEqual(skipped.required_capabilities, ['block']);
+assert.equal(skipped.metadata.runtime_workload_capability_gated, true);
+
+const invalid = attachWordPressFuzzRuntimeWorkloadOperationDescriptor({
+	id: 'case:invalid-rest',
+	intent: 'request-rest-route',
+	operation: { method: 'GET' },
+}, { runtimeCapabilities: { capabilities: ['rest'] }, codeboxRuntimeContracts: runtimeActionContracts });
+assert.equal(invalid.executable, false);
+assert.equal(invalid.execution_tier, 'plan_only');
+assert.equal(invalid.runtime_operation.status, 'blocked');
+assert.equal(invalid.runtime_operation.validation.ok, false);
+assert.deepEqual(invalid.runtime_operation.blockers.map((blocker) => blocker.code), ['missing-runtime-workload-operation-field']);
+assert.deepEqual(invalid.skip_reasons, ['invalid-runtime-workload-operation']);
+assert.equal(invalid.metadata.runtime_workload_operation_blocked, true);
+assert.equal(validateWordPressFuzzRuntimeWorkloadOperationDescriptor(invalid.runtime_operation).ok, false);
+
+const summary = summarizeWordPressFuzzRuntimeWorkloadOperations({
+	targets: [{ cases: [crudDescriptor, skipped.runtime_operation, invalid.runtime_operation, readinessUnsupportedCrudDescriptor, readinessMissingCommandDescriptor, missingContractDescriptor, unsupportedContractDescriptor].map((runtime_operation) => ({ runtime_operation })) }],
+});
+assert.equal(summary.schema, 'homeboy/wordpress-fuzz-runtime-workload-operation-summary/v1');
+assert.equal(summary.total, 7);
+assert.deepEqual(summary.by_status, { ready: 1, planned: 2, blocked: 4 });
+assert.deepEqual(summary.by_family_status.crud, { ready: 1, planned: 1, blocked: 3 });
+assert.equal(summary.blockers.length, 6);
+
+console.log('WordPress fuzz runtime workload operations smoke passed.');

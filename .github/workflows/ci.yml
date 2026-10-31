@@ -8,6 +8,11 @@ name: CI
 on:
   pull_request:
     types: [opened, synchronize, reopened, edited]
+    # Extension- and desktop-only changes have their own workflows
+    # (extensions-self-checks.yml); core CI runs when anything else changes.
+    paths-ignore:
+      - 'extensions/**'
+      - 'desktop/**'
   workflow_dispatch:
 
 concurrency:

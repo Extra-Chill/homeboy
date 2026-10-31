@@ -1,0 +1,125 @@
+{
+  "schema": "homeboy/agent-runtime-manifest/v1",
+  "id": "fixture-runtime",
+  "name": "Fixture Agent Runtime",
+  "version": "1.0.0",
+  "description": "Static manifest fixture for Homeboy contract tests.",
+  "agent_task_executors": [
+    {
+      "schema": "homeboy/agent-task-executor-provider/v1",
+      "id": "fixture-runtime.agent-task-executor",
+      "label": "Fixture agent task executor",
+      "backend": "fixture-runtime",
+      "invocation": {
+        "schema": "homeboy/command-invocation/v1",
+        "argv": [
+          "node",
+          "{{runtime_path}}/scripts/agent/fixture-agent-task-executor.cjs"
+        ],
+        "display": "node {{runtime_path}}/scripts/agent/fixture-agent-task-executor.cjs"
+      },
+      "request_schema": "homeboy/agent-task-request/v1",
+      "outcome_schema": "homeboy/agent-task-outcome/v1",
+      "request_required_fields": [
+        "schema",
+        "task_id",
+        "executor.backend",
+        "instructions"
+      ],
+      "outcome_statuses": [
+        "succeeded",
+        "failed",
+        "no_op",
+        "timeout",
+        "provider_error"
+      ],
+      "failure_classifications": [
+        "request_validation",
+        "provider",
+        "transient",
+        "timeout",
+        "execution_failed"
+      ],
+      "redacted_metadata_keys": [
+        "secret_env_values",
+        "secretEnvValues",
+        "secrets"
+      ],
+      "capabilities": [
+        "workspace_materialization",
+        "structured_outcome",
+        "diagnostic_artifacts",
+        "ability_execution",
+        "agent_bundle_execution"
+      ],
+      "runtime_execution_contracts": {
+        "ability": {
+          "ability_field": "runtime_task_ability",
+          "required_capabilities": ["ability_execution"]
+        },
+        "bundle": {
+          "ability_field": "runtime_bundle_ability",
+          "required_capabilities": ["agent_bundle_execution"]
+        }
+      },
+      "runner_readiness": [],
+      "role_aliases": {
+        "artifact_kinds": {
+          "patch": ["fixture-runtime-patch"]
+        }
+      },
+      "tool_presets": [
+        "runner_workspace",
+        "publication"
+      ],
+      "workspace_tools": {
+        "readonly": [
+          "workspace_ls",
+          "workspace_read",
+          "workspace_git_status"
+        ],
+        "readwrite": [
+          "workspace_run",
+          "workspace_write",
+          "workspace_edit",
+          "workspace_apply_patch",
+          "workspace_delete",
+          "workspace_git_add"
+        ]
+      },
+      "publication_tools": [
+        "publication_prepare",
+        "publication_publish",
+        "publication_status"
+      ],
+      "workspace_materialization": {
+        "cwd": "git_checkout",
+        "requires_git": true,
+        "write_scope": "artifacts",
+        "artifact_paths": [
+          ".homeboy/fixture-runtime"
+        ]
+      },
+      "secret_requirements": [],
+      "secret_env_requirements": [],
+      "provider_defaults": {
+        "fixture-runtime": {
+          "secret_env": []
+        }
+      },
+      "diagnostics": {
+        "outcome_fields": [
+          "diagnostics",
+          "artifacts",
+          "metadata"
+        ],
+        "artifact_kinds": [
+          "fixture-runtime-outcome",
+          "fixture-runtime-transcript"
+        ]
+      },
+      "status": "experimental",
+      "integration_contract": "homeboy-generic-agent-runtime/v1"
+    }
+  ]
+}

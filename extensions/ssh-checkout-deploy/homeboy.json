@@ -1,0 +1,19 @@
+{
+  "id": "ssh-checkout-deploy",
+  "changelog_target": "docs/CHANGELOG.md",
+  "version_targets": [
+    {
+      "file": "ssh-checkout-deploy.json",
+      "pattern": "\"version\":\\s*\"([0-9.]+)\""
+    }
+  ],
+  "self_checks": {
+    "lint": [
+      "jq empty ssh-checkout-deploy.json",
+      "find scripts tests -name '*.mjs' -print0 | xargs -0 -r -n1 node --check"
+    ],
+    "test": [
+      "node tests/ssh-checkout-deploy.test.mjs"
+    ]
+  }
+}

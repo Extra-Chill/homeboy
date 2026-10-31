@@ -1,0 +1,8 @@
+{
+  "name": "workload-fuzz-fixture",
+  "private": true,
+  "scripts": {
+    "fuzz": "node fuzz.mjs",
+    "fuzz:replay": "node replay.mjs"
+  }
+}

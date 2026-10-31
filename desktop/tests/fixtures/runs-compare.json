@@ -1,0 +1,55 @@
+{
+  "success": true,
+  "data": {
+    "command": "runs.compare",
+    "kind": "bench",
+    "component_id": "homeboy-desktop",
+    "rig_id": "desktop-smoke",
+    "scenario_id": "cold-launch",
+    "metrics": ["total_elapsed_ms", "p95_ms"],
+    "rows": [
+      {
+        "run": {
+          "id": "run-bench-001",
+          "kind": "bench",
+          "status": "pass",
+          "started_at": "2026-05-04T12:00:00Z",
+          "finished_at": "2026-05-04T12:00:08Z",
+          "component_id": "homeboy-desktop",
+          "rig_id": "desktop-smoke",
+          "git_sha": "abc123def456",
+          "command": "homeboy bench homeboy-desktop",
+          "cwd": "/Users/chubes/Developer/homeboy-desktop",
+          "status_note": null
+        },
+        "artifact_count": 1,
+        "scenario_id": "cold-launch",
+        "metrics": {
+          "total_elapsed_ms": 1200.5,
+          "p95_ms": 14.25
+        }
+      },
+      {
+        "run": {
+          "id": "run-bench-000",
+          "kind": "bench",
+          "status": "pass",
+          "started_at": "2026-05-03T12:00:00Z",
+          "finished_at": "2026-05-03T12:00:09Z",
+          "component_id": "homeboy-desktop",
+          "rig_id": "desktop-smoke",
+          "git_sha": "000abc111def",
+          "command": "homeboy bench homeboy-desktop",
+          "cwd": "/Users/chubes/Developer/homeboy-desktop",
+          "status_note": null
+        },
+        "artifact_count": 1,
+        "scenario_id": "cold-launch",
+        "metrics": {
+          "total_elapsed_ms": 1301.0,
+          "p95_ms": null
+        }
+      }
+    ]
+  }
+}

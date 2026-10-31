@@ -1,0 +1,12 @@
+{
+  "name": "homeboy-agent-runtime-wp-codebox",
+  "version": "1.2.0",
+  "private": true,
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js"
+  },
+  "engines": {
+    "node": ">=18.12.0"
+  }
+}

@@ -1,0 +1,54 @@
+{
+  "data": {
+    "body": {
+      "ok": true,
+      "resource": {
+        "operations": [
+          "get_capabilities",
+          "list_missions",
+          "get_mission",
+          "submit_run",
+          "list_runs",
+          "get_run",
+          "list_run_tasks",
+          "get_run_task",
+          "list_task_attempts",
+          "get_task_attempt",
+          "list_attempt_executions",
+          "get_attempt_execution",
+          "list_run_artifacts",
+          "get_run_artifact",
+          "register_run_artifact",
+          "list_run_evidence",
+          "get_run_evidence",
+          "register_run_evidence",
+          "list_run_external_references",
+          "get_run_external_reference",
+          "register_run_external_reference",
+          "get_run_events",
+          "get_run_event_retention",
+          "append_run_event",
+          "get_run_review",
+          "execute_run_action"
+        ],
+        "resources": [
+          "mission",
+          "run",
+          "task",
+          "attempt",
+          "execution",
+          "artifact",
+          "evidence",
+          "external_reference",
+          "event",
+          "review"
+        ],
+        "schema": "homeboy/control-plane-capabilities/v1"
+      },
+      "schema": "homeboy/control-plane-result/v1"
+    },
+    "endpoint": "control_plane.capabilities",
+    "status": 200
+  },
+  "success": true
+}

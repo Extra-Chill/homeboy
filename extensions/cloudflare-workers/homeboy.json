@@ -1,0 +1,10 @@
+{
+  "id": "cloudflare-workers",
+  "changelog_target": "docs/CHANGELOG.md",
+  "version_targets": [
+    {
+      "file": "cloudflare-workers.json",
+      "pattern": "\"version\":\\s*\"([0-9.]+)\""
+    }
+  ]
+}

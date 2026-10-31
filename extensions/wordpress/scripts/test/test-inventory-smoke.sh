@@ -1,0 +1,269 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Extra-Chill/homeboy#12394 — WordPress test inventory producer.
+#
+# Sharded execution needs the suite enumerated without running it. Homeboy core
+# re-derives both fingerprints itself and refuses anything that does not match,
+# so the producer's only job is to agree with core exactly. Two properties carry
+# that agreement and are asserted here:
+#
+#   * the workspace fingerprint responds to declared files and ignores
+#     everything else, including skipped directories;
+#   * `inventory_fingerprint` is the sha256 of
+#     `json.dumps(record_without_that_key, sort_keys=True, separators=(",",":"))`,
+#     which is the byte layout core reproduces by hand.
+#
+# Enumeration must also match the runner's default release gates: canonical
+# PHPUnit discovery plus the convention-discovered standalone PHP smokes
+# (tests/**/*-smoke.php), and nothing else.
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+EXTENSION_PATH="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+PRODUCER="${SCRIPT_DIR}/test-inventory.py"
+RUNNER="${SCRIPT_DIR}/test-runner.sh"
+WORKDIR="$(mktemp -d)"
+trap 'rm -rf "$WORKDIR"' EXIT
+
+fail() {
+    printf 'FAIL: %s\n' "$1" >&2
+    exit 1
+}
+
+plugin="${WORKDIR}/plugin"
+mkdir -p "${plugin}/tests/nested" "${plugin}/custom-suite" "${plugin}/inc" "${plugin}/vendor/pkg/tests" "${plugin}/node_modules/x"
+printf '{}\n' > "${plugin}/composer.json"
+printf '<phpunit/>\n' > "${plugin}/phpunit.xml.dist"
+printf '<?php\n' > "${plugin}/inc/Runtime.php"
+
+runner_prelude="${WORKDIR}/runner-prelude.sh"
+cat > "$runner_prelude" <<'SH'
+homeboy_runner_init() {
+    EXTENSION_PATH="${HOMEBOY_EXTENSION_PATH:?HOMEBOY_EXTENSION_PATH is required}"
+    COMPONENT_PATH="${HOMEBOY_COMPONENT_PATH:?HOMEBOY_COMPONENT_PATH is required}"
+    PLUGIN_PATH="$COMPONENT_PATH"
+}
+SH
+
+default_discovery="${WORKDIR}/default-discovery.json"
+custom_discovery="${WORKDIR}/custom-discovery.json"
+jq -cn '{schema:"wp-codebox/phpunit-discovery/v1",plugin_slug:"fixture-plugin",phpunit_xml:"/wordpress/wp-content/plugins/fixture-plugin/phpunit.xml.dist",test_root:"/wordpress/wp-content/plugins/fixture-plugin/tests",selected_testsuites:[],files:["/wordpress/wp-content/plugins/fixture-plugin/tests/ZetaTest.php","/wordpress/wp-content/plugins/fixture-plugin/tests/test-eta.php"]}' > "$default_discovery"
+jq -cn '{schema:"wp-codebox/phpunit-discovery/v1",plugin_slug:"fixture-plugin",phpunit_xml:"/wordpress/wp-content/plugins/fixture-plugin/tests/custom/phpunit.xml.dist",test_root:"/wordpress/wp-content/plugins/fixture-plugin/tests/custom",selected_testsuites:[],files:["/wordpress/wp-content/plugins/fixture-plugin/tests/custom/behavior-spec.php"]}' > "$custom_discovery"
+discovery_stub="${WORKDIR}/wp-codebox-discovery.sh"
+cat > "$discovery_stub" <<SH
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "\${HOMEBOY_SETTINGS_JSON:-}" == *'wp_codebox_phpunit_test_root'* ]]; then
+    cat "$custom_discovery"
+else
+    cat "$default_discovery"
+fi
+SH
+chmod +x "$discovery_stub"
+
+# PHP smokes under tests/ are standalone members by convention, nested or not;
+# JS/shell smokes and node tests are not inventory members.
+printf '<?php\n' > "${plugin}/tests/alpha-smoke.php"
+printf '<?php\n' > "${plugin}/tests/nested/beta-smoke.php"
+printf '// js\n'  > "${plugin}/tests/gamma-smoke.js"
+printf '# sh\n'   > "${plugin}/tests/delta-smoke.sh"
+printf '// node\n' > "${plugin}/tests/epsilon.test.js"
+printf '<?php\n'  > "${plugin}/tests/ZetaTest.php"
+printf '<?php\n'  > "${plugin}/tests/test-eta.php"
+printf '<?php\n'  > "${plugin}/custom-suite/behavior-spec.php"
+
+# Fixtures, support files, and skipped dependencies are not members either.
+printf '<?php\n' > "${plugin}/tests/fixture-data.php"
+printf '<?php\n' > "${plugin}/tests/nested/test-helper.php"
+printf '<?php\n' > "${plugin}/vendor/pkg/tests/vendor-smoke.php"
+printf '// dep\n' > "${plugin}/node_modules/x/dep-smoke.js"
+
+run_producer() {
+    HOMEBOY_COMPONENT_ID=fixture-plugin \
+    HOMEBOY_COMPONENT_PATH="$plugin" \
+    HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
+    HOMEBOY_RUNTIME_RUNNER_PRELUDE="$runner_prelude" \
+    HOMEBOY_RUNTIME_TEST_RUNNER_WP_CODEBOX="$discovery_stub" \
+    HOMEBOY_TEST_INVENTORY_FILE="$1" \
+    HOMEBOY_TEST_INVENTORY_ONLY=1 \
+        bash "$RUNNER"
+}
+
+run_producer "${WORKDIR}/inventory.json" > "${WORKDIR}/inventory.out" || fail "runner exited non-zero"
+inventory="${WORKDIR}/inventory.json"
+cmp -s "$inventory" "${WORKDIR}/inventory.out" || fail "runner stdout does not exactly match the inventory file"
+
+python3 - "$inventory" <<'PY' || fail "inventory contract assertions failed"
+import hashlib, json, sys
+
+doc = json.load(open(sys.argv[1]))
+
+assert doc["schema"] == "homeboy/test-inventory/v1", doc["schema"]
+assert doc["runner"] == "wordpress", doc["runner"]
+for key in ("runner_fingerprint", "workspace_fingerprint", "inventory_fingerprint"):
+    value = doc[key]
+    assert len(value) == 64 and value == value.lower(), f"{key}={value!r}"
+    int(value, 16)
+
+# Core rebuilds the canonical form without `inventory_fingerprint` and with no
+# `fallback_reason`, so the producer must not emit one.
+assert "fallback_reason" not in doc, "producer must not emit fallback_reason"
+
+ids = [t["id"] for t in doc["tests"]]
+assert len(ids) == len(set(ids)), "test ids must be unique"
+
+expected = {
+    "tests/ZetaTest.php": ("test", "phpunit"),
+    "tests/test-eta.php": ("test", "phpunit"),
+    "tests/alpha-smoke.php": ("test", "standalone-php"),
+    "tests/nested/beta-smoke.php": ("test", "standalone-php"),
+}
+assert ids == sorted(ids), f"members are not sorted: {ids}"
+assert set(ids) == set(expected), f"enumerated {sorted(ids)}"
+
+by_id = {t["id"]: t for t in doc["tests"]}
+for test_id, (kind, target) in expected.items():
+    entry = by_id[test_id]
+    assert entry["target_kind"] == kind, (test_id, entry)
+    assert entry["target"] == target, (test_id, entry)
+    assert entry["expected_outcome"] == "executed", entry
+    assert entry["package"] == "fixture-plugin", entry
+    assert entry["name"] and entry["name"] == test_id.rsplit("/", 1)[-1], entry
+
+# The fingerprint identity core re-derives.
+record = {k: v for k, v in doc.items() if k != "inventory_fingerprint"}
+canonical = json.dumps(record, sort_keys=True, separators=(",", ":"))
+assert hashlib.sha256(canonical.encode()).hexdigest() == doc["inventory_fingerprint"], \
+    "inventory_fingerprint is not the canonical digest core will recompute"
+
+print(f"PASS: enumerated {len(ids)} canonical full-suite tests, fingerprints are canonical")
+PY
+
+custom_settings="$(jq -cn --arg source "${plugin}/custom-suite" \
+    '{standalone_php_test_paths:[],wp_codebox_phpunit_test_root:"/wordpress/wp-content/plugins/fixture-plugin/tests/custom",wp_codebox_phpunit_mounts:[{source:$source,target:"/wordpress/wp-content/plugins/fixture-plugin/tests/custom"}]}')"
+HOMEBOY_SETTINGS_JSON="$custom_settings" run_producer "${WORKDIR}/custom.json" > /dev/null || fail "configured test-root inventory failed"
+python3 - "${WORKDIR}/custom.json" <<'PY' || fail "configured test-root assertions failed"
+import json, sys
+doc = json.load(open(sys.argv[1]))
+assert [test["id"] for test in doc["tests"]] == ["custom-suite/behavior-spec.php"], doc["tests"]
+print("PASS: configured PHPUnit root defines canonical inventory membership; explicit [] selects no standalone smokes")
+PY
+
+# Determinism: identical input must produce an identical document, or a shard
+# plan cannot be replayed.
+run_producer "${WORKDIR}/again.json" > "${WORKDIR}/again.out" || fail "second runner run exited non-zero"
+cmp -s "$inventory" "${WORKDIR}/again.json" || fail "producer is not deterministic"
+cmp -s "${WORKDIR}/again.json" "${WORKDIR}/again.out" || fail "second runner stdout does not exactly match the inventory file"
+printf 'PASS: producer is deterministic across runs\n'
+
+before_ws="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["workspace_fingerprint"])' "$inventory")"
+
+# A skipped directory must not move the workspace fingerprint.
+printf '<?php\n// noise\n' > "${plugin}/vendor/pkg/Ignored.php"
+run_producer "${WORKDIR}/skipped.json" > /dev/null || fail "producer failed after vendor write"
+after_skip="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["workspace_fingerprint"])' "${WORKDIR}/skipped.json")"
+[ "$before_ws" = "$after_skip" ] || fail "vendor/ is skipped but changed the workspace fingerprint"
+printf 'PASS: skipped directories do not move the workspace fingerprint\n'
+
+# An undeclared extension must not move it either.
+printf 'notes\n' > "${plugin}/inc/notes.md"
+run_producer "${WORKDIR}/md.json" > /dev/null || fail "producer failed after markdown write"
+after_md="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["workspace_fingerprint"])' "${WORKDIR}/md.json")"
+[ "$before_ws" = "$after_md" ] || fail "markdown is undeclared but changed the workspace fingerprint"
+printf 'PASS: undeclared extensions do not move the workspace fingerprint\n'
+
+# A declared source file must move it, or the fingerprint proves nothing.
+printf '<?php\n// changed\n' > "${plugin}/inc/Runtime.php"
+run_producer "${WORKDIR}/changed.json" > /dev/null || fail "producer failed after php edit"
+after_php="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["workspace_fingerprint"])' "${WORKDIR}/changed.json")"
+[ "$before_ws" != "$after_php" ] || fail "a declared PHP source edit did not move the workspace fingerprint"
+printf 'PASS: declared source edits move the workspace fingerprint\n'
+
+# PHPUnit configuration defines canonical membership and must invalidate stale
+# shard manifests even when all previously assigned files still exist.
+printf '<phpunit cacheResult="false"/>\n' > "${plugin}/phpunit.xml.dist"
+run_producer "${WORKDIR}/phpunit-config.json" > /dev/null || fail "producer failed after PHPUnit config edit"
+after_phpunit_config="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["workspace_fingerprint"])' "${WORKDIR}/phpunit-config.json")"
+[ "$after_php" != "$after_phpunit_config" ] || fail "a PHPUnit config edit did not move the workspace fingerprint"
+printf 'PASS: PHPUnit config edits move the workspace fingerprint\n'
+
+# Extra-Chill/homeboy#13494 — the concatenation order is core's, and core hashes
+# in `Ord for PathBuf` order, which compares path components. Sorting the joined
+# text instead disagrees whenever a directory name is a prefix of a sibling
+# followed by a byte below "/" (`inc/auth/` beside `inc/auth-tokens/`, which is
+# what `extrachill-users` has). Same files, different order, different digest —
+# and core then rejected every inventory this producer wrote, permanently.
+mkdir -p "${plugin}/inc/auth" "${plugin}/inc/auth-tokens"
+printf '<?php\n// auth\n' > "${plugin}/inc/auth/handler.php"
+printf '<?php\n// auth-tokens\n' > "${plugin}/inc/auth-tokens/token.php"
+run_producer "${WORKDIR}/ordered.json" > /dev/null || fail "producer failed with sibling-prefix directories"
+python3 - "${WORKDIR}/ordered.json" "$plugin" "$EXTENSION_PATH" <<'PY' || fail "workspace fingerprint ordering assertions failed"
+import hashlib, json, os, sys
+from pathlib import Path
+
+doc = json.load(open(sys.argv[1]))
+root = Path(sys.argv[2]).resolve()
+config = json.loads((Path(sys.argv[3]) / "wordpress.json").read_text())["test"]["inventory"]
+names = set(config["fingerprint_names"])
+extensions = set(config["fingerprint_extensions"])
+skip = set(config["fingerprint_skip_dirs"])
+
+selected = []
+for directory, subdirectories, files in os.walk(root):
+    subdirectories[:] = [name for name in subdirectories if name not in skip]
+    for name in files:
+        path = Path(directory) / name
+        if path.is_file() and (path.name in names or (path.suffix and path.suffix[1:] in extensions)):
+            selected.append(path.relative_to(root))
+
+def digest(order):
+    return hashlib.sha256(
+        "".join(f"{path}\0{(root / path).read_text()}\0" for path in order).encode()
+    ).hexdigest()
+
+by_components = sorted(selected, key=lambda path: path.parts)
+by_joined_text = sorted(selected, key=str)
+assert by_components != by_joined_text, "fixture no longer discriminates between the two orders"
+assert digest(by_components) != digest(by_joined_text), "fixture contents no longer discriminate"
+assert doc["workspace_fingerprint"] == digest(by_components), \
+    "producer must concatenate in path-component order, which is what core re-derives"
+print("PASS: workspace fingerprint orders by path components, not by the joined path text")
+PY
+
+# An empty enumeration is refused: it cannot be told apart from a broken
+# producer, and sharding nothing would report a green suite that ran no tests.
+empty="${WORKDIR}/empty"
+mkdir -p "${empty}"
+printf '{}\n' > "${empty}/composer.json"
+if python3 "$PRODUCER" --project "$empty" --extension-path "$EXTENSION_PATH" \
+    --runner wordpress --discovery-file "$default_discovery" --output "${WORKDIR}/empty.json" >/dev/null 2>&1; then
+    fail "producer accepted a component with no tests"
+fi
+printf 'PASS: an empty enumeration is refused\n'
+
+# An undeclared runner has no version command and therefore no identity.
+if python3 "$PRODUCER" --project "$plugin" --extension-path "$EXTENSION_PATH" \
+    --runner not-declared --discovery-file "$default_discovery" --output "${WORKDIR}/bad-runner.json" >/dev/null 2>&1; then
+    fail "producer accepted an undeclared runner"
+fi
+printf 'PASS: an undeclared runner is refused\n'
+
+# The runner must emit its document only after the producer has succeeded. A
+# failing producer leaves stdout empty and does not replace the requested file.
+printf 'existing inventory\n' > "${WORKDIR}/failed.json"
+if HOMEBOY_COMPONENT_ID=fixture-plugin \
+    HOMEBOY_COMPONENT_PATH="$plugin" \
+    HOMEBOY_EXTENSION_PATH="$EXTENSION_PATH" \
+    HOMEBOY_RUNTIME_RUNNER_PRELUDE="$runner_prelude" \
+    HOMEBOY_RUNTIME_TEST_RUNNER_WP_CODEBOX="$discovery_stub" \
+    HOMEBOY_TEST_INVENTORY_FILE="${WORKDIR}/failed.json" \
+    HOMEBOY_TEST_INVENTORY_ONLY=1 \
+    HOMEBOY_WORDPRESS_INVENTORY_RUNNER=not-declared \
+        bash "$RUNNER" > "${WORKDIR}/failed.out" 2> "${WORKDIR}/failed.err"; then
+    fail "runner accepted an undeclared inventory runner"
+fi
+[ ! -s "${WORKDIR}/failed.out" ] || fail "failing runner emitted partial inventory JSON"
+[ "$(<"${WORKDIR}/failed.json")" = "existing inventory" ] || fail "failing runner replaced the requested inventory file"
+printf 'PASS: runner failure emits no inventory JSON and preserves the requested file\n'
+
+printf 'All WordPress test inventory checks passed.\n'

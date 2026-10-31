@@ -1,0 +1,21 @@
+{
+  "id": "swift",
+  "changelog_target": "docs/CHANGELOG.md",
+  "version_targets": [
+    {
+      "file": "swift.json",
+      "pattern": "\"version\":\\s*\"([0-9.]+)\""
+    }
+  ],
+  "self_checks": {
+    "lint": [
+      "jq empty swift.json",
+      "find . -name '*.sh' -print0 | xargs -0 -r -n1 bash -n"
+    ],
+    "test": [
+      "bash tests/swift-extension-smoke.sh",
+      "bash tests/lint-runner-smoke.sh",
+      "bash tests/script-runner-smoke.sh"
+    ]
+  }
+}

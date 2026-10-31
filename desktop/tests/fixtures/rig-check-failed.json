@@ -1,0 +1,26 @@
+{
+  "success": false,
+  "data": {
+    "command": "rig.check",
+    "pipeline": {
+      "failed": 1,
+      "name": "check",
+      "passed": 1,
+      "steps": [
+        {
+          "kind": "check",
+          "label": "Docker daemon running",
+          "status": "pass"
+        },
+        {
+          "error": "Command exited 1 (expected 0)",
+          "kind": "check",
+          "label": "Live proc_open end-to-end",
+          "status": "fail"
+        }
+      ]
+    },
+    "rig_id": "studio",
+    "success": false
+  }
+}

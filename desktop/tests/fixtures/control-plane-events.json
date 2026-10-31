@@ -1,0 +1,279 @@
+{
+  "data": {
+    "body": {
+      "ok": true,
+      "resource": {
+        "events": [
+          {
+            "data": {
+              "message": "task submitted",
+              "progress": {
+                "attempt": 1
+              },
+              "source_schema": "homeboy/agent-task-aggregate/v1",
+              "state": "queued",
+              "task_id": "cook-wp-codebox"
+            },
+            "event": "cook-detached-1b9a02ee-40d4-40df-94b9-9dd8ba2800f7-attempt-1-5361759d:event:1",
+            "kind": "task.state_changed",
+            "run": "cook-detached-1b9a02ee-40d4-40df-94b9-9dd8ba2800f7-attempt-1-5361759d",
+            "schema": "homeboy/control-plane-event/v1",
+            "sequence": 1,
+            "source": {
+              "component": "agent-task"
+            },
+            "task": "cook-wp-codebox"
+          },
+          {
+            "data": {
+              "message": "provider execution running",
+              "progress": {
+                "attempt": 1
+              },
+              "source_schema": "homeboy/agent-task-aggregate/v1",
+              "state": "running",
+              "task_id": "cook-wp-codebox"
+            },
+            "event": "cook-detached-1b9a02ee-40d4-40df-94b9-9dd8ba2800f7-attempt-1-5361759d:event:2",
+            "kind": "task.state_changed",
+            "run": "cook-detached-1b9a02ee-40d4-40df-94b9-9dd8ba2800f7-attempt-1-5361759d",
+            "schema": "homeboy/control-plane-event/v1",
+            "sequence": 2,
+            "source": {
+              "component": "agent-task"
+            },
+            "task": "cook-wp-codebox"
+          },
+          {
+            "data": {
+              "message": "provider execution failed",
+              "progress": {
+                "attempt": 1
+              },
+              "source_schema": "homeboy/agent-task-aggregate/v1",
+              "state": "failed",
+              "task_id": "cook-wp-codebox"
+            },
+            "event": "cook-detached-1b9a02ee-40d4-40df-94b9-9dd8ba2800f7-attempt-1-5361759d:event:3",
+            "kind": "task.state_changed",
+            "run": "cook-detached-1b9a02ee-40d4-40df-94b9-9dd8ba2800f7-attempt-1-5361759d",
+            "schema": "homeboy/control-plane-event/v1",
+            "sequence": 3,
+            "source": {
+              "component": "agent-task"
+            },
+            "task": "cook-wp-codebox"
+          },
+          {
+            "data": {
+              "message": "provider execution running",
+              "progress": {
+                "attempt": 2
+              },
+              "source_schema": "homeboy/agent-task-aggregate/v1",
+              "state": "running",
+              "task_id": "cook-wp-codebox"
+            },
+            "event": "cook-detached-1b9a02ee-40d4-40df-94b9-9dd8ba2800f7-attempt-1-5361759d:event:4",
+            "kind": "task.state_changed",
+            "run": "cook-detached-1b9a02ee-40d4-40df-94b9-9dd8ba2800f7-attempt-1-5361759d",
+            "schema": "homeboy/control-plane-event/v1",
+            "sequence": 4,
+            "source": {
+              "component": "agent-task"
+            },
+            "task": "cook-wp-codebox"
+          },
+          {
+            "data": {
+              "message": "provider execution timed_out",
+              "progress": {
+                "attempt": 2
+              },
+              "source_schema": "homeboy/agent-task-aggregate/v1",
+              "state": "timed_out",
+              "task_id": "cook-wp-codebox"
+            },
+            "event": "cook-detached-1b9a02ee-40d4-40df-94b9-9dd8ba2800f7-attempt-1-5361759d:event:5",
+            "kind": "task.state_changed",
+            "run": "cook-detached-1b9a02ee-40d4-40df-94b9-9dd8ba2800f7-attempt-1-5361759d",
+            "schema": "homeboy/control-plane-event/v1",
+            "sequence": 5,
+            "source": {
+              "component": "agent-task"
+            },
+            "task": "cook-wp-codebox"
+          },
+          {
+            "data": {
+              "message": null,
+              "progress": {
+                "attempt": 1
+              },
+              "source_schema": "homeboy/agent-task-aggregate/v1",
+              "state": "queued",
+              "task_id": "cook-wp-codebox"
+            },
+            "event": "cook-detached-1b9a02ee-40d4-40df-94b9-9dd8ba2800f7-attempt-1-5361759d:event:6",
+            "kind": "task.state_changed",
+            "run": "cook-detached-1b9a02ee-40d4-40df-94b9-9dd8ba2800f7-attempt-1-5361759d",
+            "schema": "homeboy/control-plane-event/v1",
+            "sequence": 6,
+            "source": {
+              "component": "agent-task"
+            },
+            "task": "cook-wp-codebox"
+          },
+          {
+            "data": {
+              "message": null,
+              "progress": {
+                "attempt": 1
+              },
+              "source_schema": "homeboy/agent-task-aggregate/v1",
+              "state": "running",
+              "task_id": "cook-wp-codebox"
+            },
+            "event": "cook-detached-1b9a02ee-40d4-40df-94b9-9dd8ba2800f7-attempt-1-5361759d:event:7",
+            "kind": "task.state_changed",
+            "run": "cook-detached-1b9a02ee-40d4-40df-94b9-9dd8ba2800f7-attempt-1-5361759d",
+            "schema": "homeboy/control-plane-event/v1",
+            "sequence": 7,
+            "source": {
+              "component": "agent-task"
+            },
+            "task": "cook-wp-codebox"
+          },
+          {
+            "data": {
+              "message": "provider 'opencode.agent-task-executor' produced no process output, structured runtime progress, or workspace file activity before liveness_timeout_ms=300000",
+              "progress": {
+                "attempt": 1
+              },
+              "source_schema": "homeboy/agent-task-aggregate/v1",
+              "state": "failed",
+              "task_id": "cook-wp-codebox"
+            },
+            "event": "cook-detached-1b9a02ee-40d4-40df-94b9-9dd8ba2800f7-attempt-1-5361759d:event:8",
+            "kind": "task.state_changed",
+            "run": "cook-detached-1b9a02ee-40d4-40df-94b9-9dd8ba2800f7-attempt-1-5361759d",
+            "schema": "homeboy/control-plane-event/v1",
+            "sequence": 8,
+            "source": {
+              "component": "agent-task"
+            },
+            "task": "cook-wp-codebox"
+          },
+          {
+            "data": {
+              "message": "provider rotation queued: entry 1 of 4; backend=opencode, model=opencode-go/glm-5.3-flash",
+              "progress": {
+                "attempt": 2
+              },
+              "source_schema": "homeboy/agent-task-aggregate/v1",
+              "state": "queued",
+              "task_id": "cook-wp-codebox"
+            },
+            "event": "cook-detached-1b9a02ee-40d4-40df-94b9-9dd8ba2800f7-attempt-1-5361759d:event:9",
+            "kind": "task.state_changed",
+            "run": "cook-detached-1b9a02ee-40d4-40df-94b9-9dd8ba2800f7-attempt-1-5361759d",
+            "schema": "homeboy/control-plane-event/v1",
+            "sequence": 9,
+            "source": {
+              "component": "agent-task"
+            },
+            "task": "cook-wp-codebox"
+          },
+          {
+            "data": {
+              "message": "provider route unavailable: backend=opencode, model=opencode-go/glm-5.3-flash, state=capacity_exhausted; skipping without spending an execution",
+              "progress": {
+                "attempt": 2
+              },
+              "source_schema": "homeboy/agent-task-aggregate/v1",
+              "state": "queued",
+              "task_id": "cook-wp-codebox"
+            },
+            "event": "cook-detached-1b9a02ee-40d4-40df-94b9-9dd8ba2800f7-attempt-1-5361759d:event:10",
+            "kind": "task.state_changed",
+            "run": "cook-detached-1b9a02ee-40d4-40df-94b9-9dd8ba2800f7-attempt-1-5361759d",
+            "schema": "homeboy/control-plane-event/v1",
+            "sequence": 10,
+            "source": {
+              "component": "agent-task"
+            },
+            "task": "cook-wp-codebox"
+          },
+          {
+            "data": {
+              "message": null,
+              "progress": {
+                "attempt": 2
+              },
+              "source_schema": "homeboy/agent-task-aggregate/v1",
+              "state": "running",
+              "task_id": "cook-wp-codebox"
+            },
+            "event": "cook-detached-1b9a02ee-40d4-40df-94b9-9dd8ba2800f7-attempt-1-5361759d:event:11",
+            "kind": "task.state_changed",
+            "run": "cook-detached-1b9a02ee-40d4-40df-94b9-9dd8ba2800f7-attempt-1-5361759d",
+            "schema": "homeboy/control-plane-event/v1",
+            "sequence": 11,
+            "source": {
+              "component": "agent-task"
+            },
+            "task": "cook-wp-codebox"
+          },
+          {
+            "data": {
+              "message": "deadline expired; cancellation requested and bounded grace started",
+              "progress": {
+                "attempt": 2
+              },
+              "source_schema": "homeboy/agent-task-aggregate/v1",
+              "state": "running",
+              "task_id": "cook-wp-codebox"
+            },
+            "event": "cook-detached-1b9a02ee-40d4-40df-94b9-9dd8ba2800f7-attempt-1-5361759d:event:12",
+            "kind": "task.state_changed",
+            "run": "cook-detached-1b9a02ee-40d4-40df-94b9-9dd8ba2800f7-attempt-1-5361759d",
+            "schema": "homeboy/control-plane-event/v1",
+            "sequence": 12,
+            "source": {
+              "component": "agent-task"
+            },
+            "task": "cook-wp-codebox"
+          },
+          {
+            "data": {
+              "message": "provider timed out after producing a recoverable candidate; promote the fingerprinted patch through controller gates",
+              "progress": {
+                "attempt": 2
+              },
+              "source_schema": "homeboy/agent-task-aggregate/v1",
+              "state": "candidate_recoverable",
+              "task_id": "cook-wp-codebox"
+            },
+            "event": "cook-detached-1b9a02ee-40d4-40df-94b9-9dd8ba2800f7-attempt-1-5361759d:event:13",
+            "kind": "task.state_changed",
+            "run": "cook-detached-1b9a02ee-40d4-40df-94b9-9dd8ba2800f7-attempt-1-5361759d",
+            "schema": "homeboy/control-plane-event/v1",
+            "sequence": 13,
+            "source": {
+              "component": "agent-task"
+            },
+            "task": "cook-wp-codebox"
+          }
+        ],
+        "has_more": false,
+        "next_cursor": "eyJzY2hlbWEiOiJob21lYm95L2NvbnRyb2wtcGxhbmUtZXZlbnQtY3Vyc29yL3YyIiwicnVuX2lkIjoiY29vay1kZXRhY2hlZC0xYjlhMDJlZS00MGQ0LTQwZGYtOTRiOS05ZGQ4YmEyODAwZjctYXR0ZW1wdC0xLTUzNjE3NTlkIiwic2VxdWVuY2UiOjEzLCJzdHJlYW0iOiJob21lYm95L2R1cmFibGUtcHJvZ3Jlc3MvdjEifQ",
+        "run": "cook-detached-1b9a02ee-40d4-40df-94b9-9dd8ba2800f7-attempt-1-5361759d",
+        "schema": "homeboy/control-plane-event-page/v1"
+      },
+      "schema": "homeboy/control-plane-result/v1"
+    },
+    "endpoint": "control_plane.runs.events",
+    "status": 200
+  },
+  "success": true
+}

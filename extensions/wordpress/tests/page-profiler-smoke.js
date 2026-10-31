@@ -1,0 +1,897 @@
+'use strict';
+
+/* eslint-disable no-console */
+
+/**
+ * External dependencies
+ */
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+
+/**
+ * Internal dependencies
+ */
+const {
+	classifyResourceUrl,
+	classifyWordPressRestPreloadOpportunities,
+	buildWordPressAdminPageSweepSummary,
+	compareWordPressRestNetworkWaterfalls,
+	compareWordPressRestWaterfalls,
+	diagnoseWordPressPageProfile,
+	diagnoseWordPressRestPreloadMisses,
+	formatWordPressAdminPageSweepMarkdownReport,
+	formatWordPressPerformanceGateReport,
+	formatWordPressRestMatrixMarkdownReport,
+	formatWordPressRestNetworkDiffMarkdownReport,
+	formatWordPressRestPayloadBudgetMarkdownReport,
+	formatWordPressRestWaterfallMarkdownReport,
+	DEFAULT_THIRD_PARTY_WATERFALL_GROUPS,
+	normalizeBrowserAction,
+	normalizePageManifest,
+	normalizeWordPressPageMatrixManifest,
+	profileWordPressPage,
+	profileWordPressPageMatrix,
+	profileWordPressPages,
+	profileWordPressRestMatrix,
+	recommendWordPressPerformanceGates,
+	resourceFamily,
+	resolveWordPressUrl,
+	runBrowserActions,
+	summarizeWordPressPageMatrix,
+	summarizeThirdPartyWaterfall,
+	summarizeWordPressAdminPageProfile,
+	summarizeWordPressRestNetworkRows,
+	summarizeWordPressRestWaterfall,
+	summarizeResourceTimings,
+	WORDPRESS_PAGE_PROFILER_PRODUCT_ADAPTERS,
+} = require('../lib/page-profiler');
+
+class FakeFrame {
+	constructor(calls) {
+		this.calls = calls;
+	}
+
+	async waitForLoadState(state) {
+		this.calls.push(['frame.waitForLoadState', state]);
+	}
+
+	async waitForSelector(selector) {
+		this.calls.push(['frame.waitForSelector', selector]);
+	}
+
+	async waitForFunction(fn) {
+		this.calls.push(['frame.waitForFunction', typeof fn]);
+	}
+}
+
+class FakePage {
+	constructor(resources) {
+		this.resources = resources;
+		this.calls = [];
+		this.fakeFrame = new FakeFrame(this.calls);
+	}
+
+	async goto(url, options) {
+		this.calls.push(['goto', url, options.waitUntil]);
+		return { status: () => 200 };
+	}
+
+	async waitForLoadState(state) {
+		this.calls.push(['waitForLoadState', state]);
+	}
+
+	async waitForSelector(selector) {
+		this.calls.push(['waitForSelector', selector]);
+	}
+
+	async click(selector) {
+		this.calls.push(['click', selector]);
+	}
+
+	locator(selector) {
+		this.calls.push(['locator', selector]);
+		return new FakeLocator(this.calls, selector);
+	}
+
+	getByRole(role, options) {
+		this.calls.push(['getByRole', role, options?.name]);
+		return new FakeLocator(this.calls, `role:${role}`);
+	}
+
+	getByText(text, options) {
+		this.calls.push(['getByText', text, options?.exact]);
+		return new FakeLocator(this.calls, `text:${text}`);
+	}
+
+	async waitForResponse(predicate) {
+		this.calls.push(['waitForResponse']);
+		const response = {
+			url: () => 'https://example.test/wp-json/datamachine/v1/jobs',
+			status: () => 200,
+			request: () => ({ method: () => 'GET' }),
+		};
+		if (!predicate(response)) {
+			throw new Error('response predicate did not match');
+		}
+		return response;
+	}
+
+	frame(query) {
+		this.calls.push(['frame', query?.name || query]);
+		return this.fakeFrame;
+	}
+
+	async evaluate() {
+		return this.resources;
+	}
+}
+
+class FakeLocator {
+	constructor(calls, selector) {
+		this.calls = calls;
+		this.selector = selector;
+	}
+
+	nth(index) {
+		this.calls.push(['locator.nth', this.selector, index]);
+		return this;
+	}
+
+	async click() {
+		this.calls.push(['locator.click', this.selector]);
+	}
+
+	async fill(value) {
+		this.calls.push(['locator.fill', this.selector, value]);
+	}
+
+	async selectOption(value) {
+		this.calls.push(['locator.selectOption', this.selector, value]);
+	}
+
+	async waitFor(options) {
+		this.calls.push(['locator.waitFor', this.selector, options?.state]);
+	}
+}
+
+class FakeRestMatrixPage {
+	constructor(responses) {
+		this.responses = responses;
+		this.requests = [];
+	}
+
+	async evaluate(fn, request) {
+		void fn;
+		this.requests.push(request);
+		const response = this.responses.shift();
+		return {
+			status: response.status,
+			durationMs: response.durationMs,
+			contentType: response.contentType || 'application/json',
+			bodyText: JSON.stringify(response.body),
+		};
+	}
+}
+
+assert.equal(resolveWordPressUrl('https://example.test/site', '/wp-admin/index.php'), 'https://example.test/wp-admin/index.php');
+assert.equal(classifyResourceUrl('https://example.test/wp-json/wp/v2/posts?context=edit'), 'rest');
+assert.equal(classifyResourceUrl('https://example.test/wp-admin/load-styles.php'), 'admin');
+assert.equal(classifyResourceUrl('https://example.test/wp-content/themes/theme/style.css'), 'content-asset');
+assert.equal(resourceFamily('https://example.test/wp-includes/js/dist/block-editor.min.js?ver=1'), '/wp-includes/js/dist/block-editor.js');
+assert.equal(resourceFamily('https://example.test/wp-content/plugins/example-plugin/assets/admin.js?ver=1'), '/wp-content/plugins/example-plugin');
+assert.equal(DEFAULT_THIRD_PARTY_WATERFALL_GROUPS.some((group) => group.id === 'woocommerce-store-api'), false);
+assert.deepEqual(WORDPRESS_PAGE_PROFILER_PRODUCT_ADAPTERS, {});
+
+const manifest = normalizePageManifest({
+	pages: [
+		{ id: 'dashboard', path: '/wp-admin/index.php', ready: '#dashboard-widgets' },
+		{
+			id: 'site-editor',
+			path: '/wp-admin/site-editor.php',
+			ready: { selector: 'iframe[name="editor-canvas"]', frameName: 'editor-canvas', frameSelector: '[data-block]', frameFunction: () => true },
+			interactions: [
+				{ name: 'open_admin', clickRole: { role: 'button', name: 'Admin' } },
+				{ waitForSelector: '.datamachine-jobs-admin-modal' },
+				{ select: { selector: '.datamachine-jobs-admin-modal select', index: 0, value: 'flow' } },
+				{ select: { selector: '.datamachine-jobs-admin-modal select', index: 1, optionIndex: 1 } },
+				{ fill: { selector: '.datamachine-filter', value: 'queued' } },
+				{ waitForResponse: { substring: '/wp-json/datamachine/v1/jobs', status: 200 } },
+			],
+		},
+	],
+});
+assert.equal(manifest.length, 2);
+assert.equal(manifest[0].ready.selector, '#dashboard-widgets');
+assert.equal(manifest[1].ready.frameSelector, '[data-block]');
+assert.equal(normalizeBrowserAction({ clickText: 'Save' }, 0).target, 'text:Save');
+
+const resources = [
+	{
+		name: 'https://example.test/wp-json/wp/v2/posts?context=edit',
+		initiatorType: 'fetch',
+		startTime: 20,
+		duration: 180,
+		requestStart: 30,
+		responseStart: 140,
+		responseEnd: 200,
+		transferSize: 600000,
+		encodedBodySize: 580000,
+		decodedBodySize: 580000,
+	},
+	{
+		name: 'https://example.test/wp-content/themes/twentytwentyfive/style.css',
+		initiatorType: 'link',
+		startTime: 5,
+		duration: 20,
+		requestStart: 6,
+		responseStart: 10,
+		responseEnd: 25,
+		transferSize: 2000,
+	},
+	{
+		name: 'https://example.test/favicon.ico',
+		initiatorType: 'img',
+		startTime: 8,
+		duration: 5,
+	},
+	{
+		name: 'https://example.test/wp-json/wp/v2/settings',
+		initiatorType: 'fetch',
+		startTime: 1300,
+		duration: 90,
+		requestStart: 1310,
+		responseStart: 1360,
+		responseEnd: 1390,
+		transferSize: 3000,
+	},
+];
+
+const summary = summarizeResourceTimings(resources.map((entry) => ({ ...entry, kind: classifyResourceUrl(entry.name) })));
+	assert.equal(summary.count, 4);
+	assert.equal(summary.countsByKind.rest, 2);
+	assert.equal(summary.resources[0].responseEndMs, 200);
+
+	const diagnosis = diagnoseWordPressPageProfile(
+		{
+			id: 'admin-dashboard',
+			readyMs: 1200,
+			resources: summary,
+		},
+		{
+			browserMetrics: {
+				admin_dashboard_ready_ms: 1500,
+				browser_network_idle_ms: 4700,
+				browser_request_count: 120,
+				browser_failed_request_count: 1,
+			},
+			networkRequests: [
+				{ url: 'https://example.test/wp-json/wp/v2/fail', method: 'GET', status: 500, failed: true, duration_ms: 120 },
+			],
+		}
+	);
+	assert.equal(diagnosis.summary.networkIdleAfterReadyMs, 3200);
+	assert.equal(diagnosis.summary.lateRequestCount, 1);
+	assert.equal(diagnosis.summary.restAfterReadyCount, 1);
+	assert.equal(diagnosis.summary.failedRequestCount, 1);
+	assert.equal(diagnosis.assets.heavyFamilies[0].family, '/wp-json/wp/v2/posts');
+	assert.equal(diagnosis.findings.some((finding) => finding.code === 'network-active-after-ready'), true);
+	assert.equal(diagnosis.findings.some((finding) => finding.code === 'rest-after-ready'), true);
+
+	const baselineWaterfall = summarizeWordPressRestWaterfall({
+		readyMs: 1000,
+		apiFetchAttempts: [
+			{ source: 'apiFetch', path: '/wp/v2/template-parts/twentytwentyfive//header?context=edit', method: 'GET', startedAtMs: 1100 },
+			{ source: 'apiFetch', path: '/wp/v2/users/me?context=edit', method: 'GET', startedAtMs: 1150 },
+		],
+		networkRequests: [
+			{ url: 'https://example.test/wp-json/wp/v2/template-parts/twentytwentyfive//header?context=edit', method: 'GET', status: 200, start_ms: 1102, duration_ms: 180 },
+			{ url: 'https://example.test/wp-json/wp/v2/users/me?context=edit', method: 'GET', status: 200, start_ms: 1152, duration_ms: 90 },
+		],
+	});
+	const candidateWaterfall = summarizeWordPressRestWaterfall({
+		readyMs: 900,
+		restPreloads: [
+			{ path: '/wp/v2/template-parts/twentytwentyfive//header?context=edit', body: { ok: true } },
+			{ path: '/wp/v2/posts?context=edit&per_page=10', payloadBytes: 256 },
+		],
+		apiFetchAttempts: [
+			{ source: 'apiFetch', path: '/wp/v2/template-parts/twentytwentyfive//header?context=edit', method: 'GET', startedAtMs: 950, durationMs: 2 },
+			{ source: 'apiFetch', path: '/wp/v2/users/me?context=edit', method: 'GET', startedAtMs: 980 },
+		],
+		networkRequests: [
+			{ url: 'https://example.test/wp-json/wp/v2/users/me?context=edit', method: 'GET', status: 200, start_ms: 982, duration_ms: 90 },
+		],
+	});
+	assert.equal(baselineWaterfall.counts.network, 2);
+	assert.equal(candidateWaterfall.counts.preloadedOrCache, 1);
+	assert.equal(candidateWaterfall.counts.usedPreload, 1);
+	assert.equal(candidateWaterfall.counts.unusedPreloadCount, 1);
+	assert.equal(candidateWaterfall.counts.preloadPayloadBytes, 267);
+	assert.equal(candidateWaterfall.counts.remainingRestNetworkCount, 1);
+	assert.equal(candidateWaterfall.metrics.unused_preload_count, 1);
+	assert.equal(candidateWaterfall.metrics.preload_payload_bytes, 267);
+	assert.equal(candidateWaterfall.metrics.remaining_rest_network_count, 1);
+	const preloadMissWaterfall = summarizeWordPressRestWaterfall({
+		restPreloads: [
+			{ path: '/wp/v2/settings', method: 'OPTIONS', body: { ok: true } },
+			{ path: '/wp/v2/wp_pattern_category?_fields=id%2Cname&context=view&per_page=-1', body: [] },
+			{ path: '/wp/v2/menus?context=view&per_page=-1', body: [] },
+		],
+		apiFetchAttempts: [
+			{ source: 'apiFetch', path: '/wp/v2/settings', method: 'OPTIONS', startedAtMs: 10, durationMs: 1 },
+			{ source: 'apiFetch', path: '/wp/v2/settings?_locale=user', method: 'OPTIONS', startedAtMs: 20, durationMs: 100, status: 200 },
+			{ source: 'apiFetch', path: '/wp/v2/wp_pattern_category?_fields=id%2Cname&_locale=user&context=view&per_page=100', method: 'GET', startedAtMs: 30, durationMs: 100, status: 200 },
+			{ source: 'apiFetch', path: '/wp/v2/menus?_locale=user&context=view&per_page=100', method: 'GET', startedAtMs: 40, durationMs: 100, status: 200 },
+			{ source: 'apiFetch', path: '/wp/v2/users/me?_locale=user', method: 'GET', startedAtMs: 50, durationMs: 100, status: 200 },
+		],
+		networkRequests: [
+			{ url: 'https://example.test/wp-json/wp/v2/settings?_locale=user', method: 'OPTIONS', status: 200, start_ms: 20, duration_ms: 100 },
+			{ url: 'https://example.test/wp-json/wp/v2/wp_pattern_category?_fields=id%2Cname&_locale=user&context=view&per_page=100', method: 'GET', status: 200, start_ms: 30, duration_ms: 100 },
+			{ url: 'https://example.test/wp-json/wp/v2/menus?_locale=user&context=view&per_page=100', method: 'GET', status: 200, start_ms: 40, duration_ms: 100 },
+			{ url: 'https://example.test/wp-json/wp/v2/users/me?_locale=user', method: 'GET', status: 200, start_ms: 50, duration_ms: 100 },
+		],
+	});
+	assert.equal(preloadMissWaterfall.preloadDiagnostics.count, 4);
+	assert.equal(preloadMissWaterfall.preloadDiagnostics.countsByReason['locale-query-mismatch'], 3);
+	assert.equal(preloadMissWaterfall.preloadDiagnostics.countsByReason['fetch-all-per-page-mismatch'], 2);
+	assert.equal(preloadMissWaterfall.preloadDiagnostics.countsByReason['locale-query-mismatch-after-preload-hit'], 1);
+	assert.equal(preloadMissWaterfall.preloadDiagnostics.countsByReason['no-matching-preload'], 1);
+	const directPreloadDiagnostics = diagnoseWordPressRestPreloadMisses({
+		networkRows: [{ url: 'https://example.test/wp-json/wp/v2/posts?_locale=user&per_page=100', method: 'GET' }],
+		preloads: [{ path: '/wp/v2/posts?per_page=-1', method: 'GET' }],
+	});
+	assert.equal(directPreloadDiagnostics.rows[0].reasons.includes('fetch-all-per-page-mismatch'), true);
+	const exactMissDiagnostics = diagnoseWordPressRestPreloadMisses({
+		networkRows: [{ url: 'https://example.test/wp-json/wp/v2/taxonomies?_locale=user&context=view', method: 'GET' }],
+		preloads: [{ path: '/wp/v2/taxonomies?_locale=user&context=view', method: 'GET' }],
+		preloadChecks: [{ path: '/wp/v2/taxonomies?_locale=user&context=view', method: 'GET', hit: false, nextUrl: '/wp/v2/taxonomies?_locale=user&context=view' }],
+	});
+	assert.equal(exactMissDiagnostics.rows[0].primaryReason, 'exact-preload-check-missed');
+	assert.equal(exactMissDiagnostics.rows[0].evidence.exactPreloadChecks[0].hit, false);
+	assert.equal(exactMissDiagnostics.rows[0].serverDeclarationSuggestions[0].declaration, "'/wp/v2/taxonomies?_locale=user&context=view'");
+	const optionsDeclarationDiagnostics = diagnoseWordPressRestPreloadMisses({
+		networkRows: [{ url: 'https://example.test/wp-json/wp/v2/settings?_locale=user', method: 'OPTIONS' }],
+		apiFetchAttempts: [{ source: 'apiFetch', path: '/wp/v2/settings', method: 'OPTIONS', stackFrames: ['at canUser (core-data/resolvers.js:704:21)'] }],
+		preloadChecks: [{ path: '/wp/v2/settings', method: 'OPTIONS', hit: false, nextUrl: '/wp/v2/settings', stackFrames: ['at createPreloadingMiddleware (api-fetch/preloading.js:45:10)'] }],
+	});
+	assert.equal(optionsDeclarationDiagnostics.rows[0].serverDeclarationSuggestions[0].declaration, "array( '/wp/v2/settings', 'OPTIONS' )");
+	assert.equal(optionsDeclarationDiagnostics.rows[0].attribution.apiFetchPreMiddleware[0].caller, 'at canUser (core-data/resolvers.js:704:21)');
+	assert.equal(optionsDeclarationDiagnostics.rows[0].attribution.preloadChecks[0].caller, 'at createPreloadingMiddleware (api-fetch/preloading.js:45:10)');
+	const payloadBudgetResult = diagnoseWordPressPageProfile({
+		id: 'payload-budget',
+		readyMs: 500,
+		resources: { resources: [], restCount: 0 },
+		restWaterfall: summarizeWordPressRestWaterfall({
+			apiFetchAttempts: [
+				{ path: '/datamachine/v1/pipelines?per_page=100', method: 'GET', status: 200, responseBodyBytes: 2000, durationMs: 120 },
+				{ path: '/wp/v2/users/me', method: 'GET', status: 200, responseBodyBytes: 600, durationMs: 40 },
+			],
+		}),
+		budgets: {
+			rest: {
+				maxResponseBytes: 1000,
+				maxTotalResponseBytes: 1500,
+				allow: ['/wp/v2/users/me'],
+				routes: {
+					'/datamachine/v1/pipelines*': { maxResponseBytes: 1500 },
+				},
+			},
+		},
+	});
+	assert.equal(payloadBudgetResult.restPayloadBudgets.findings.length, 2);
+	assert.equal(payloadBudgetResult.findings.some((finding) => finding.code === 'wordpress.rest.max_response_bytes'), true);
+	assert.equal(payloadBudgetResult.findings.some((finding) => finding.code === 'wordpress.rest.max_total_response_bytes'), true);
+	for (const finding of payloadBudgetResult.restPayloadBudgets.findings) {
+		assert.equal(finding.context_label, 'profile:wordpress-rest');
+		assert.equal(finding.passed, false);
+		assert.equal(typeof finding.expected, 'number');
+	}
+	assert.equal(payloadBudgetResult.restPayloadBudgets.topPayloadRows[0].responseBytes, 2000);
+	assert.match(formatWordPressRestPayloadBudgetMarkdownReport(payloadBudgetResult.restPayloadBudgets), /REST payload budgets/);
+	const truncatedSampleBudgetResult = diagnoseWordPressPageProfile({
+		id: 'truncated-sample-budget',
+		readyMs: 500,
+		resources: { resources: [], restCount: 0 },
+		restWaterfall: summarizeWordPressRestWaterfall({
+			apiFetchAttempts: [
+				{
+					path: '/datamachine/v1/pipelines?per_page=100',
+					method: 'GET',
+					status: 200,
+					responseBodyBytes: 4096,
+					responseBodySampleTruncated: true,
+					decodedBodySize: 2000000,
+				},
+			],
+		}),
+		budgets: { rest: { maxResponseBytes: 250000 } },
+	});
+	const truncatedSampleFinding = truncatedSampleBudgetResult.findings.find((finding) => finding.code === 'wordpress.rest.max_response_bytes');
+	assert.equal(truncatedSampleFinding.context_label, 'profile:wordpress-rest');
+	assert.equal(truncatedSampleFinding.passed, false);
+	assert.equal(typeof truncatedSampleFinding.expected, 'number');
+	assert.equal(truncatedSampleFinding.actual, 2000000);
+	assert.equal(truncatedSampleBudgetResult.restPayloadBudgets.topPayloadRows[0].responseBytes, 2000000);
+	assert.equal(candidateWaterfall.usedPreloadRows[0].url, '/wp/v2/template-parts/twentytwentyfive//header?context=edit');
+	assert.equal(candidateWaterfall.unusedPreloadRows[0].url, '/wp/v2/posts?context=edit&per_page=10');
+	assert.equal(candidateWaterfall.preloadedOrCacheRows[0].url, '/wp/v2/template-parts/twentytwentyfive//header?context=edit');
+	const invalidJsonWaterfall = summarizeWordPressRestWaterfall({
+		apiFetchAttempts: [
+			{
+				source: 'apiFetch',
+				path: '/datamachine/v1/pipelines',
+				method: 'GET',
+				failed: true,
+				error: 'The response is not a valid JSON response.',
+				errorCode: 'invalid_json',
+			},
+			{
+				source: 'fetch',
+				url: 'https://example.test/wp-json/datamachine/v1/pipelines',
+				method: 'GET',
+				status: 200,
+				responseContentType: 'text/html; charset=UTF-8',
+				responseBodySample: '<br />Unexpected debug output{"ok":true}',
+			},
+		],
+	});
+	assert.equal(invalidJsonWaterfall.apiFetchAttempts.length, 1);
+	assert.equal(invalidJsonWaterfall.apiFetchAttempts[0].errorCode, 'invalid_json');
+	assert.match(invalidJsonWaterfall.rows[0].responseBodySample, /Unexpected debug output/);
+	const objectPreloadWaterfall = summarizeWordPressRestWaterfall({
+		apiFetchAttempts: [{ path: '/wp/v2/settings', method: 'GET' }],
+		preloadMetadata: { '/wp/v2/settings': { body: { setting: true } } },
+	});
+	assert.equal(objectPreloadWaterfall.counts.usedPreload, 1);
+	const comparison = compareWordPressRestWaterfalls({ baseline: baselineWaterfall, candidate: candidateWaterfall });
+	assert.equal(comparison.counts.removedNetwork, 1);
+	assert.equal(comparison.remainingNetworkOpportunities[0].classification, 'client-state');
+	assert.equal(comparison.unusedPreloadRows.length, 1);
+	const opportunities = classifyWordPressRestPreloadOpportunities(baselineWaterfall);
+	assert.equal(opportunities.safeDeterministic.length, 1);
+	assert.equal(opportunities.clientState.length, 1);
+	assert.match(formatWordPressRestWaterfallMarkdownReport(comparison), /REST waterfall comparison/);
+	assert.match(formatWordPressRestWaterfallMarkdownReport(comparison), /Unused REST preloads/);
+
+	const baselineRestNetwork = [
+		{ url: 'https://example.test/wp-json/wp/v2/template-parts/twentytwentyfive//header?context=edit&_locale=user', method: 'GET', status: 200, duration_ms: 340 },
+		{ url: 'https://example.test/wp-json/wp/v2/template-parts/twentytwentyfive//footer?context=edit&_locale=user', method: 'GET', status: 200, duration_ms: 320 },
+		{ url: 'https://example.test/wp-json/wp/v2/posts?context=edit&per_page=3&_locale=user', method: 'GET', status: 200, duration_ms: 360 },
+		{ url: 'https://example.test/wp-json/wp/v2/settings?_locale=user', method: 'OPTIONS', status: 200, duration_ms: 120 },
+		{ url: 'https://example.test/wp-json/wp/v2/pages?context=view&parent=0&per_page=100&_locale=user', method: 'GET', status: 200, duration_ms: 210 },
+		{ url: 'https://example.test/wp-json/wp/v2/users/me?context=edit&_locale=user', method: 'GET', status: 200, duration_ms: 80 },
+		{ url: 'https://example.test/wp-json/wp/v2/wp_pattern_category?context=view&per_page=100&_fields=id%2Cname&_locale=user', method: 'GET', status: 200, duration_ms: 90 },
+	];
+	const candidateRestNetwork = [
+		{ url: 'https://candidate.test/wp-json/wp/v2/settings?_locale=user', method: 'OPTIONS', status: 200, duration_ms: 100 },
+		{ url: 'https://candidate.test/wp-json/wp/v2/pages?context=view&parent=0&per_page=100&_locale=user', method: 'GET', status: 200, duration_ms: 190 },
+		{ url: 'https://candidate.test/wp-json/wp/v2/users/me?context=edit&_locale=user', method: 'GET', status: 200, duration_ms: 70 },
+		{ url: 'https://candidate.test/wp-json/wp/v2/wp_pattern_category?context=view&per_page=100&_fields=id%2Cname&_locale=user', method: 'GET', status: 200, duration_ms: 95 },
+		{ url: 'https://candidate.test/wp-json/wp/v2/navigation?context=edit&_locale=user', method: 'GET', status: 200, duration_ms: 150 },
+	];
+	const baselineRestSummary = summarizeWordPressRestNetworkRows(baselineRestNetwork);
+	assert.equal(baselineRestSummary.count, 7);
+	assert.equal(baselineRestSummary.uniqueCount, 7);
+	assert.equal(baselineRestSummary.routes.find((row) => row.url.includes('/template-parts/')).classification, 'template-data');
+	assert.equal(baselineRestSummary.routes.find((row) => row.method === 'OPTIONS').classification, 'options-schema');
+	assert.equal(baselineRestSummary.routes.find((row) => row.url.includes('/pages')).classification, 'page-tree');
+	assert.equal(baselineRestSummary.routes.find((row) => row.url.includes('/users/me')).classification, 'current-user');
+	assert.equal(baselineRestSummary.routes.find((row) => row.url.includes('wp_pattern_category')).classification, 'pattern-data');
+	const restNetworkDiff = compareWordPressRestNetworkWaterfalls({ baseline: baselineRestNetwork, candidate: candidateRestNetwork });
+	assert.equal(restNetworkDiff.counts.baseline, 7);
+	assert.equal(restNetworkDiff.counts.candidate, 5);
+	assert.equal(restNetworkDiff.counts.removed, 3);
+	assert.equal(restNetworkDiff.counts.removedUnique, 3);
+	assert.equal(restNetworkDiff.counts.added, 1);
+	assert.equal(restNetworkDiff.removedRoutes.some((row) => row.url.includes('/posts')), true);
+	assert.equal(restNetworkDiff.addedRoutes[0].classification, 'navigation-state');
+	assert.match(formatWordPressRestNetworkDiffMarkdownReport(restNetworkDiff), /WordPress REST network diff/);
+	assert.match(formatWordPressRestNetworkDiffMarkdownReport(restNetworkDiff), /template-data/);
+
+	const baselineProfile = {
+		readyMs: 1000,
+		restWaterfall: baselineWaterfall,
+		diagnosis: {
+			summary: {
+				failedRequestCount: 0,
+				networkIdleAfterReadyMs: 1200,
+				restAfterReadyCount: baselineWaterfall.counts.afterReady,
+			},
+		},
+		metrics: {
+			consoleErrorCount: 0,
+		},
+		correlation: {
+			correlated: [
+				{ wordpressDurationMs: 90 },
+			],
+		},
+	};
+	const candidateProfile = {
+		readyMs: 1100,
+		restWaterfall: candidateWaterfall,
+		diagnosis: {
+			summary: {
+				failedRequestCount: 0,
+				networkIdleAfterReadyMs: 1300,
+				restAfterReadyCount: candidateWaterfall.counts.afterReady,
+			},
+		},
+		metrics: {
+			consoleErrorCount: 0,
+			unusedPreloadCount: 0,
+			preloadPayloadBytes: 12000,
+		},
+		correlation: {
+			correlated: [
+				{ wordpressDurationMs: 120 },
+			],
+		},
+	};
+	const gateRecommendations = recommendWordPressPerformanceGates({
+		baseline: baselineProfile,
+		candidate: candidateProfile,
+		comparison,
+	});
+	assert.equal(gateRecommendations.recommendations.length, 9);
+	assert.equal(gateRecommendations.recommended.length, 9);
+	assert.equal(gateRecommendations.recommendations.find((gate) => gate.id === 'wordpress.rest_network_count').threshold, 2);
+	assert.equal(gateRecommendations.recommendations.find((gate) => gate.id === 'wordpress.ready_ms').threshold, 1250);
+	assert.equal(gateRecommendations.recommendations.find((gate) => gate.id === 'wordpress.server_request_duration_ms').threshold, 190);
+	assert.match(formatWordPressPerformanceGateReport(gateRecommendations), /WordPress performance gate recommendations/);
+	assert.match(formatWordPressPerformanceGateReport(gateRecommendations), /wordpress_rest_network_count/);
+
+	const skippedGateRecommendations = recommendWordPressPerformanceGates({ comparison });
+	assert.equal(skippedGateRecommendations.recommendations.find((gate) => gate.id === 'wordpress.rest_network_count').status, 'recommended');
+	assert.equal(skippedGateRecommendations.recommendations.find((gate) => gate.id === 'wordpress.late_rest_count').status, 'skipped');
+	assert.match(formatWordPressPerformanceGateReport(skippedGateRecommendations), /Skipped gates/);
+
+function writeJson(filePath, value) {
+	fs.mkdirSync(path.dirname(filePath), { recursive: true });
+	fs.writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`);
+}
+
+function writeJsonl(filePath, rows) {
+	fs.mkdirSync(path.dirname(filePath), { recursive: true });
+	fs.writeFileSync(filePath, `${rows.map((row) => JSON.stringify(row)).join('\n')}\n`);
+}
+
+async function main() {
+	const actionPage = new FakePage(resources);
+	const actionEvidence = await runBrowserActions(actionPage, [
+		{ click: '.button-primary' },
+		{ clickText: { text: 'Open', exact: true } },
+		{ sleep: 1 },
+	]);
+	assert.equal(actionEvidence.actions.length, 3);
+	assert.equal(actionEvidence.actions[0].status, 'passed');
+	assert.equal(actionPage.calls.some((call) => call[0] === 'click' && call[1] === '.button-primary'), true);
+
+	const page = new FakePage(resources);
+	const result = await profileWordPressPage({
+		page,
+		baseUrl: 'https://example.test',
+		spec: manifest[1],
+		wordpressProfilerRows: [
+			{ event: 'request.start', request_id: 'r1', method: 'GET', uri: '/wp-json/wp/v2/posts?context=edit', t_ms: 0 },
+			{ event: 'shutdown', request_id: 'r1', method: 'GET', uri: '/wp-json/wp/v2/posts?context=edit', t_ms: 95 },
+		],
+	});
+
+	assert.equal(result.id, 'site-editor');
+	assert.equal(result.status, 200);
+	assert.equal(typeof result.readiness.commitMs, 'number');
+	assert.equal(typeof result.readiness.selectorMs, 'number');
+	assert.equal(typeof result.readiness.frameSelectorMs, 'number');
+	assert.equal(typeof result.readiness.frameFunctionMs, 'number');
+	assert.equal(result.readyMs, result.readiness.readyMs);
+	assert.equal(result.resources.restCount, 2);
+	assert.equal(result.initialResources.restCount, 2);
+	assert.equal(result.interactions.actions.length, 6);
+	assert.equal(result.interactionResources.restCount, 2);
+	assert.equal(result.interactionRestWaterfall.counts.total, 2);
+	assert.equal(result.correlation.correlated.length, 1);
+	assert.equal(page.calls.some((call) => call[0] === 'frame.waitForSelector' && call[1] === '[data-block]'), true);
+	assert.equal(page.calls.some((call) => call[0] === 'frame.waitForFunction'), true);
+	assert.equal(page.calls.some((call) => call[0] === 'getByRole' && call[1] === 'button' && call[2] === 'Admin'), true);
+	assert.equal(page.calls.some((call) => call[0] === 'locator.selectOption' && call[2]?.index === 1), true);
+
+	const adminSummary = summarizeWordPressAdminPageProfile({ profile: result, spec: manifest[1] });
+	assert.equal(adminSummary.id, 'site-editor');
+	assert.equal(adminSummary.interactionStatus, 'passed');
+	assert.equal(adminSummary.restCount, 2);
+	assert.equal(adminSummary.restBytes, 603000);
+	assert.equal(adminSummary.failureCount, 0);
+	assert.equal(adminSummary.slowestRestRows[0].url, '/wp/v2/posts?context=edit');
+
+	const failedAdminSummary = summarizeWordPressAdminPageProfile({
+		...result,
+		id: 'failed-admin-page',
+		label: 'Failed admin page',
+		readyMs: 2500,
+		interactions: { actions: [{ status: 'failed' }], failed: true },
+		restWaterfall: {
+			rows: [
+				{ method: 'GET', url: '/wp/v2/users', status: 500, failed: true, durationMs: 300, transferSize: 1000 },
+			],
+		},
+		interactionRestWaterfall: {
+			rows: [
+				{ method: 'GET', url: '/wp/v2/settings', status: 200, durationMs: 120, transferSize: 500 },
+			],
+		},
+		diagnosis: {
+			findings: [
+				{ severity: 'error', code: 'wordpress.rest.max_response_bytes' },
+				{ severity: 'warn', code: 'rest-after-ready' },
+			],
+		},
+	});
+	assert.equal(failedAdminSummary.restCount, 2);
+	assert.equal(failedAdminSummary.failedRequestCount, 1);
+	assert.equal(failedAdminSummary.failureFindingCount, 1);
+	assert.equal(failedAdminSummary.failureCount, 2);
+	assert.equal(failedAdminSummary.interactionStatus, 'failed');
+
+	const sweepSummary = buildWordPressAdminPageSweepSummary({ pages: [adminSummary, failedAdminSummary] });
+	assert.equal(sweepSummary.totals.pageCount, 2);
+	assert.equal(sweepSummary.totals.failedPageCount, 1);
+	assert.equal(sweepSummary.pages[0].id, 'failed-admin-page');
+	assert.match(formatWordPressAdminPageSweepMarkdownReport(sweepSummary), /WordPress admin page sweep/);
+	assert.match(formatWordPressAdminPageSweepMarkdownReport(sweepSummary), /Slowest REST requests/);
+
+	const artifactRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-wp-codebox-browser-profile-'));
+	try {
+		const browserDirectory = path.join(artifactRoot, 'files', 'browser');
+		const fakeWpCodebox = path.join(artifactRoot, 'wp-codebox');
+		fs.writeFileSync(fakeWpCodebox, `#!/usr/bin/env node
+const output = {
+  schema: 'wp-codebox/browser-metrics/v1',
+  bundleDirectory: process.argv[process.argv.indexOf('--bundle') + 1],
+  hasBrowserMetrics: true,
+  metrics: { browser_resource_count: 3 },
+  artifacts: { performance: { path: 'files/browser/performance.json', kind: 'json' } },
+};
+process.stdout.write(JSON.stringify(output) + '\\n');
+`);
+		fs.chmodSync(fakeWpCodebox, 0o755);
+		writeJson(path.join(browserDirectory, 'summary.json'), {
+			schema: 'wp-codebox/browser-probe/v1',
+			requestedUrl: 'https://example.test/wp-admin/site-editor.php',
+			finalUrl: 'https://example.test/wp-admin/site-editor.php',
+			waitFor: 'selector:.edit-site',
+			startedAt: '2026-01-01T00:00:00.000Z',
+			finishedAt: '2026-01-01T00:00:01.250Z',
+			summary: {
+				networkEvents: 3,
+				performance: { resources: 3, longTasks: 1 },
+			},
+		});
+		writeJson(path.join(browserDirectory, 'performance.json'), {
+			schema: 'wp-codebox/browser-performance/v1',
+			final: {
+				resources: { count: 3, transferSizeBytes: 4096 },
+				longTasks: { count: 1, totalDurationMs: 55 },
+				dom: { nodes: 99, iframes: 1 },
+			},
+			peak: { resources: 3, transferSizeBytes: 4096, longTasks: 1, longTaskDurationMs: 55 },
+		});
+		const browserNetworkRows = [
+			{ type: 'response', url: 'https://example.test/wp-admin/site-editor.php', method: 'GET', resourceType: 'document', status: 200, transferSize: 800, timestamp: '2026-01-01T00:00:00.100Z' },
+			{ type: 'response', url: 'https://example.test/wp-json/wp/v2/templates?context=edit', method: 'GET', resourceType: 'fetch', status: 200, transferSize: 600, contentType: 'application/json', timestamp: '2026-01-01T00:00:00.650Z' },
+			{ type: 'response', url: 'https://example.test/wp-json/wc/store/cart', method: 'GET', resourceType: 'fetch', status: 200, transferSize: 1200, contentType: 'application/json', timestamp: '2026-01-01T00:00:00.700Z' },
+			{ type: 'response', url: 'https://example.test/wp-content/themes/theme/style.css', method: 'GET', resourceType: 'stylesheet', status: 200, transferSize: 300, timestamp: '2026-01-01T00:00:00.300Z' },
+			{ type: 'request', url: 'https://js.stripe.com/v3/', method: 'GET', resourceType: 'script', timestamp: '2026-01-01T00:00:00.350Z' },
+			{ type: 'response', url: 'https://js.stripe.com/v3/', method: 'GET', resourceType: 'script', status: 200, transferSize: 5000, timestamp: '2026-01-01T00:00:00.450Z' },
+			{ type: 'response', url: 'https://merchant-ui-api.stripe.com/elements/wallet-config', method: 'POST', resourceType: 'fetch', status: 200, transferSize: 2100, timestamp: '2026-01-01T00:00:00.500Z' },
+			{ type: 'response', url: 'https://r.stripe.com/b', method: 'POST', resourceType: 'fetch', status: 200, transferSize: 700, timestamp: '2026-01-01T00:00:00.550Z' },
+			{ type: 'response', url: 'https://fonts.gstatic.com/s/inter.woff2', method: 'GET', resourceType: 'font', status: 200, transferSize: 4000, timestamp: '2026-01-01T00:00:00.580Z' },
+			{ type: 'response', url: 'https://cdn.example-cdn.test/widget.js?id=1', method: 'GET', resourceType: 'script', status: 200, transferSize: 1100, timestamp: '2026-01-01T00:00:00.590Z' },
+			{ type: 'response', url: 'https://cdn.example-cdn.test/widget.js?id=2', method: 'GET', resourceType: 'script', status: 200, transferSize: 900, timestamp: '2026-01-01T00:00:00.595Z' },
+		];
+		writeJsonl(path.join(browserDirectory, 'network.jsonl'), browserNetworkRows);
+		const standaloneAttribution = summarizeThirdPartyWaterfall(browserNetworkRows, {
+			baseUrl: 'https://example.test',
+			groups: [
+				{ id: 'payments', label: 'Payments', domains: ['stripe.com', 'stripe.network'] },
+			],
+		});
+		assert.equal(standaloneAttribution.groups.find((group) => group.id === 'payments').responseCount, 3);
+		assert.equal(standaloneAttribution.groups.find((group) => group.id === 'same-origin').responseCount, 4);
+		assert.equal(standaloneAttribution.groups.find((group) => group.id === 'woocommerce-store-api'), undefined);
+		const woocommerceAttribution = summarizeThirdPartyWaterfall(browserNetworkRows, {
+			baseUrl: 'https://example.test',
+			productAdapters: [{
+				waterfallGroups: [{ id: 'woocommerce-store-api', label: 'WooCommerce Store API', urlIncludes: ['/wp-json/wc/store/', 'rest_route=/wc/store/'] }],
+				firstPartyWaterfallGroupIds: ['woocommerce-store-api'],
+			}],
+		});
+		assert.equal(woocommerceAttribution.groups.find((group) => group.id === 'woocommerce-store-api').responseCount, 1);
+		assert.equal(woocommerceAttribution.thirdPartyGroupCount, 3);
+		writeJson(path.join(browserDirectory, 'action-summary.json'), {
+			schema: 'wp-codebox/browser-actions/v1',
+			startedAt: '2026-01-01T00:00:01.250Z',
+			finishedAt: '2026-01-01T00:00:01.500Z',
+			finalUrl: 'https://example.test/wp-admin/site-editor.php',
+		});
+		writeJsonl(path.join(browserDirectory, 'actions.jsonl'), [
+			{ index: 0, action: { type: 'click', selector: '.edit-site-sidebar__panel-tab' }, status: 'ok' },
+		]);
+
+		const artifactProfile = await profileWordPressPage({
+			baseUrl: 'https://example.test',
+			spec: { id: 'site-editor-root', path: '/wp-admin/site-editor.php', ready: '.edit-site' },
+			wpCodeboxArtifactsDirectory: artifactRoot,
+			wpCodeboxBin: fakeWpCodebox,
+			wordpressProfilerRows: [
+				{ event: 'request.start', request_id: 'r2', method: 'GET', uri: '/wp-json/wp/v2/templates?context=edit', t_ms: 0 },
+				{ event: 'shutdown', request_id: 'r2', method: 'GET', uri: '/wp-json/wp/v2/templates?context=edit', t_ms: 45 },
+			],
+		});
+		assert.equal(artifactProfile.wpCodebox.artifactBacked, true);
+		assert.equal(artifactProfile.status, 200);
+		assert.equal(artifactProfile.readyMs, 1250);
+		assert.equal(artifactProfile.resources.restCount, 2);
+		assert.equal(artifactProfile.restWaterfall.counts.network, 2);
+		assert.equal(artifactProfile.interactions.actions[0].status, 'passed');
+		assert.equal(artifactProfile.browserMetrics.browser_resource_count, 3);
+		assert.equal(artifactProfile.thirdPartyWaterfall.groups.find((group) => group.id === 'stripe').responseCount, 3);
+		assert.equal(artifactProfile.thirdPartyWaterfall.groups.find((group) => group.id === 'stripe').requestCount, 1);
+		assert.equal(artifactProfile.thirdPartyWaterfall.groups.find((group) => group.id === 'stripe').transferSizeBytes, 7800);
+		assert.equal(artifactProfile.thirdPartyWaterfall.groups.find((group) => group.id === 'wordpress-assets').responseCount, 4);
+		assert.equal(artifactProfile.thirdPartyWaterfall.groups.find((group) => group.id === 'woocommerce-store-api'), undefined);
+		assert.equal(artifactProfile.thirdPartyWaterfall.groups.find((group) => group.id === 'google').resourceTypes.font, 1);
+		assert.equal(artifactProfile.thirdPartyWaterfall.groups.find((group) => group.id === 'third-party:cdn.example-cdn.test').duplicateUrlPatterns[0].count, 2);
+		assert.equal(artifactProfile.browserMetrics.browser_network_stripe_transfer_size_bytes, 7800);
+		assert.equal(artifactProfile.browserArtifacts.thirdPartyWaterfall.inline.schema, 'homeboy/third-party-waterfall/v1');
+		assert.match(artifactProfile.wpCodebox.upstreamGaps[0], /network\.jsonl/);
+	} finally {
+		fs.rmSync(artifactRoot, { recursive: true, force: true });
+	}
+
+	const neutralArtifactRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'homeboy-browser-profile-artifacts-'));
+	try {
+		writeJson(path.join(neutralArtifactRoot, 'summary.json'), {
+			schema: 'homeboy/browser-summary/v1',
+			requestedUrl: 'https://example.test/wp-admin/plugins.php',
+			finalUrl: 'https://example.test/wp-admin/plugins.php',
+			waitFor: 'selector:#wpbody-content',
+			startedAt: '2026-01-01T00:00:00.000Z',
+			finishedAt: '2026-01-01T00:00:00.875Z',
+		});
+		writeJson(path.join(neutralArtifactRoot, 'metrics.json'), {
+			metrics: { browser_resource_count: 7 },
+		});
+		writeJsonl(path.join(neutralArtifactRoot, 'network.jsonl'), [
+			{ type: 'response', url: 'https://example.test/wp-admin/plugins.php', method: 'GET', resourceType: 'document', status: 200, transferSize: 900, timestamp: '2026-01-01T00:00:00.050Z' },
+			{ type: 'response', url: 'https://example.test/wp-json/wp/v2/plugins?context=edit', method: 'GET', resourceType: 'fetch', status: 200, transferSize: 500, contentType: 'application/json', timestamp: '2026-01-01T00:00:00.400Z' },
+		]);
+		writeJsonl(path.join(neutralArtifactRoot, 'actions.jsonl'), [
+			{ index: 0, action: { type: 'click', selector: '.plugin-title' }, status: 'ok' },
+		]);
+
+		const neutralArtifactProfile = await profileWordPressPage({
+			baseUrl: 'https://example.test',
+			spec: { id: 'plugins-root', path: '/wp-admin/plugins.php', ready: '#wpbody-content' },
+			artifactRefs: [
+				{ role: 'browser_summary', path: path.join(neutralArtifactRoot, 'summary.json') },
+				{ role: 'browser_network', path: path.join(neutralArtifactRoot, 'network.jsonl') },
+				{ role: 'browser_actions', path: path.join(neutralArtifactRoot, 'actions.jsonl') },
+				{ role: 'browser_metrics', path: path.join(neutralArtifactRoot, 'metrics.json'), capabilities: ['browser_metrics'] },
+			],
+			wpCodeboxArtifactsDirectory: path.join(neutralArtifactRoot, 'missing-codebox-bundle'),
+		});
+		assert.equal(neutralArtifactProfile.artifactProfile.source, 'provider-neutral-browser-artifacts');
+		assert.equal(neutralArtifactProfile.wpCodebox, undefined);
+		assert.equal(neutralArtifactProfile.readyMs, 875);
+		assert.equal(neutralArtifactProfile.resources.restCount, 1);
+		assert.equal(neutralArtifactProfile.browserMetrics.browser_resource_count, 7);
+		assert.equal(neutralArtifactProfile.interactions.actions[0].status, 'passed');
+	} finally {
+		fs.rmSync(neutralArtifactRoot, { recursive: true, force: true });
+	}
+
+	const multiPage = new FakePage(resources);
+	const multi = await profileWordPressPages({
+		page: multiPage,
+		baseUrl: 'https://example.test',
+		manifest,
+		fixtures: [{ id: 'profile-ready', type: 'wp-cli', command: 'option update profile_ready 1' }],
+		fixtureExecutionRoute: 'host',
+		runCli: async (command) => ({ exitCode: 0, stdout: command, stderr: '' }),
+	});
+	assert.equal(multi.pages.length, 2);
+	assert.equal(multi.fixtureSetup.steps[0].label, 'profile-ready');
+	assert.equal(multi.topRestWaterfalls[0].restCount, 2);
+
+	const matrixManifest = normalizeWordPressPageMatrixManifest({
+		defaultPaths: '/',
+		paths: '/wp-admin/index.php,admin-menu\n/wp-admin/site-editor.php?canvas=edit',
+		pages: [{ path: '/wp-admin/plugins.php', label: 'Plugins' }],
+	});
+	assert.equal(matrixManifest.includeAdminMenu, true);
+	assert.equal(matrixManifest.pages.length, 4);
+	assert.equal(matrixManifest.pages[0].metricName, 'front_page');
+	assert.equal(matrixManifest.pages[2].metricName, 'wp_admin_site_editor_php_canvas_edit');
+
+	const matrixSummary = summarizeWordPressPageMatrix({
+		baseUrl: 'https://example.test',
+		pages: [
+			{
+				id: 'dashboard',
+				path: '/wp-admin/index.php',
+				url: 'https://example.test/wp-admin/index.php',
+				finalUrl: 'https://example.test/wp-admin/index.php?_wpnonce=secret',
+				status: 200,
+				readyMs: 250,
+				resources: { count: 2, restCount: 1, resources: [{ url: '/wp-json/wp/v2/posts', durationMs: 100 }] },
+				matrixRequests: [
+					{ url: 'https://example.test/wp-json/wp/v2/posts?context=edit', method: 'GET', status: 200, durationMs: 80, resourceType: 'fetch' },
+					{ url: 'https://third-party.example.test/api', method: 'POST', status: 500, durationMs: 120, resourceType: 'xhr' },
+				],
+			},
+			{
+				id: 'login-leak',
+				path: '/wp-admin/plugins.php',
+				status: 200,
+				readyMs: 300,
+				loginFormSeen: 1,
+				matrixRequests: [],
+			},
+		],
+	});
+	assert.equal(matrixSummary.totals.pageCount, 2);
+	assert.equal(matrixSummary.totals.failingPageCount, 2);
+	assert.equal(matrixSummary.metrics.page_wp_admin_index_php_ready_ms, 250);
+	assert.equal(matrixSummary.pages[0].finalUrl, '/wp-admin/index.php');
+	assert.equal(matrixSummary.pages[0].requests[0].failed, true);
+	assert.equal(matrixSummary.pages[0].requests[0].url, '/api');
+
+	const pageMatrix = await profileWordPressPageMatrix({
+		page: new FakePage(resources),
+		baseUrl: 'https://example.test',
+		paths: ['/wp-admin/index.php'],
+	});
+	assert.equal(pageMatrix.pages.length, 1);
+	assert.equal(pageMatrix.summary.metrics.page_wp_admin_index_php_status, 200);
+
+	const matrixPage = new FakeRestMatrixPage([
+		{ status: 200, durationMs: 80, body: [{ id: 1 }, { id: 2 }] },
+		{ status: 500, durationMs: 1200, body: { code: 'server_error' } },
+	]);
+	const matrix = await profileWordPressRestMatrix({
+		page: matrixPage,
+		baseUrl: 'https://example.test',
+		restMatrix: [
+			{ method: 'GET', path: '/datamachine/v1/pipelines', params: { per_page: 100 }, budget: { expectedStatus: 200, maxBytes: 50, maxMs: 1000, maxItemCount: 1 } },
+			{ method: 'POST', path: '/datamachine/v1/flows', body: { pipeline_id: 1 }, budget: { expectedStatus: 201, maxBytes: 100, maxMs: 1000 } },
+		],
+	});
+	assert.equal(matrix.results.length, 2);
+	assert.equal(matrix.results[0].normalizedUrl, '/datamachine/v1/pipelines?per_page=100');
+	assert.equal(matrix.results[0].jsonShape.type, 'array');
+	assert.equal(matrix.results[0].itemCount, 2);
+	assert.equal(matrix.findings.some((finding) => finding.code === 'wordpress.rest_matrix.max_item_count'), true);
+	assert.equal(matrix.findings.some((finding) => finding.code === 'wordpress.rest_matrix.expected_status'), true);
+	assert.equal(matrix.findings.some((finding) => finding.code === 'wordpress.rest_matrix.max_ms'), true);
+	for (const finding of matrix.findings) {
+		assert.equal(finding.context_label, 'profile:wordpress-rest-matrix');
+		assert.equal(finding.passed, false);
+		assert.equal(typeof finding.expected, 'number');
+	}
+	const expectedStatusFinding = matrix.findings.find((finding) => finding.code === 'wordpress.rest_matrix.expected_status');
+	assert.equal(expectedStatusFinding.expected, 201);
+	assert.deepEqual(expectedStatusFinding.expectedStatuses, [201]);
+	assert.match(formatWordPressRestMatrixMarkdownReport(matrix), /REST endpoint matrix/);
+
+	assert.throws(() => normalizePageManifest({ pages: [{ id: 'bad' }] }), /requires url or path/);
+
+	console.log('WordPress page profiler smoke passed.');
+}
+
+main().catch((error) => {
+	console.error(error);
+	process.exit(1);
+});

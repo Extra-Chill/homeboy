@@ -1,0 +1,58 @@
+{
+  "name": "Swift",
+  "version": "2.8.5",
+  "icon": "swift",
+  "description": "Swift testing infrastructure for macOS, iOS, and Swift CLI projects",
+  "author": "Extra Chill",
+  "provides": {
+    "file_extensions": ["swift", "xcodeproj", "xcworkspace", "yml"],
+    "discovery_markers": [
+      { "any": ["Package.swift", "project.yml", "*.xcodeproj", "*.xcworkspace"] }
+    ]
+  },
+  "composition": {
+    "includes": []
+  },
+  "structured_sidecars": {
+    "lint.findings": true,
+    "test.results": false,
+    "test.failures": true,
+    "test.coverage": false,
+    "annotations": false
+  },
+  "platform": {
+    "discovery": {
+      "find_command": "find /Users /home /var/www /srv -maxdepth 6 \\( -name 'project.yml' -o -name '*.xcodeproj' -o -name '*.xcworkspace' -o -name '*.swift' \\) 2>/dev/null | sed -E 's#/(Sources|Tests|tests|[^/]+\\.xcodeproj|[^/]+\\.xcworkspace|[^/]+\\.swift).*##' | sort -u | head -20",
+      "base_path_transform": "identity",
+      "display_name_command": "basename {{basePath}}"
+    }
+  },
+  "settings": [
+    {
+      "id": "test_type",
+      "label": "Test Type",
+      "type": "string",
+      "default": "script",
+      "description": "Test type: 'script' (swift scripts) or 'xcodebuild' (XCTest)"
+    }
+  ],
+  "lint": {
+    "extension_script": "scripts/lint-runner.sh"
+  },
+  "test": {
+    "extension_script": "scripts/test-runner.sh",
+    "drift": {
+      "source_dirs": [".", "Sources"],
+      "test_dirs": ["tests", "Tests"],
+      "file_extensions": ["swift"],
+      "inline_tests": false
+    }
+  },
+  "executable": {
+    "runtime": {
+      "setup_command": "bash {{extension_path}}/scripts/setup.sh",
+      "ready_check": "which swift",
+      "run_command": "bash {{extension_path}}/scripts/test-runner.sh"
+    }
+  }
+}

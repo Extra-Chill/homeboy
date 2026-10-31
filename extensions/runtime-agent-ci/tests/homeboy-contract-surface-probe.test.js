@@ -1,0 +1,164 @@
+'use strict';
+
+const assert = require('node:assert/strict');
+const path = require('node:path');
+
+process.env.HOMEBOY_RUNTIME_CONTRACT_CONSTANTS_FIXTURE = path.join(
+  __dirname,
+  'fixtures',
+  'homeboy-runtime-contract-constants.generated.json'
+);
+
+const {
+  CORE_PUBLISHED_CONTRACT_CONSTANTS,
+  LOCAL_ARTIFACT_MANIFEST_CONSTANTS,
+  probeHomeboyContractSurface,
+} = require('../lib/homeboy-contract-surface-probe.cjs');
+const {
+  RUN_OUTCOME_ENVELOPE_SCHEMA,
+  RUNTIME_CONTRACT_CONSTANTS,
+  runtimeContractConstantsFromHomeboyOutput,
+} = require('../lib/runtime-contracts.cjs');
+const {
+  checkHomeboyContractExportFixtures,
+  compareSchemaCatalogFixture,
+} = require('../scripts/check-homeboy-contract-export-fixtures.cjs');
+const missing = probeHomeboyContractSurface({
+  homeboyCommand: 'homeboy',
+  spawnSync: () => ({ status: 2, stdout: '', stderr: "error: unrecognized subcommand 'constants'" }),
+});
+
+assert.equal(missing.status, 'failed');
+assert.match(missing.message, /no supported Homeboy contract command is available/);
+
+const releasedContractShape = probeHomeboyContractSurface({
+  homeboyCommand: 'homeboy',
+  spawnSync: () => ({
+    status: 0,
+    stdout: JSON.stringify({
+      success: true,
+      data: {
+        constants: CORE_PUBLISHED_CONTRACT_CONSTANTS,
+        contract_id: 'all',
+        schema: 'homeboy/contract-constants/v1',
+      },
+    }),
+    stderr: '',
+  }),
+});
+
+assert.equal(releasedContractShape.status, 'passed');
+assert.deepEqual(releasedContractShape.argv, ['contract', 'constants', 'all']);
+assert.equal(RUN_OUTCOME_ENVELOPE_SCHEMA, 'homeboy/run-outcome-envelope/v1');
+assert.equal(RUNTIME_CONTRACT_CONSTANTS.run_outcome_envelope.schema_id, RUN_OUTCOME_ENVELOPE_SCHEMA);
+
+assert.deepEqual(runtimeContractConstantsFromHomeboyOutput({
+  data: {
+    constants: {
+      pathMaterializationPlan: { schema_id: 'homeboy/path-materialization-plan/v1' },
+      runOutcomeEnvelope: { schema_id: 'homeboy/run-outcome-envelope/v1' },
+    },
+  },
+}), {
+  path_materialization_plan: { schema_id: 'homeboy/path-materialization-plan/v1' },
+  run_outcome_envelope: { schema_id: 'homeboy/run-outcome-envelope/v1' },
+});
+
+const singleContractShape = probeHomeboyContractSurface({
+  homeboyCommand: 'homeboy',
+  spawnSync: (_command, argv) => ({
+    status: argv[2] === 'artifact-manifest' ? 0 : 2,
+    stdout: argv[2] === 'artifact-manifest' ? JSON.stringify({
+      success: true,
+      data: {
+        constants: LOCAL_ARTIFACT_MANIFEST_CONSTANTS,
+        contract_id: 'artifact-manifest',
+        schema: 'homeboy/contract-constants/v1',
+      },
+    }) : '',
+    stderr: '',
+  }),
+});
+
+assert.equal(singleContractShape.status, 'passed');
+assert.deepEqual(singleContractShape.argv, ['contract', 'constants', 'artifact-manifest']);
+
+const missingPathMaterializationPlan = probeHomeboyContractSurface({
+  homeboyCommand: 'homeboy',
+  spawnSync: () => ({
+    status: 0,
+    stdout: JSON.stringify({
+      success: true,
+      data: {
+        constants: {
+          artifact_manifest: CORE_PUBLISHED_CONTRACT_CONSTANTS.artifact_manifest,
+          secret_env_plan: CORE_PUBLISHED_CONTRACT_CONSTANTS.secret_env_plan,
+          run_location_index: CORE_PUBLISHED_CONTRACT_CONSTANTS.run_location_index,
+          artifact_paths: CORE_PUBLISHED_CONTRACT_CONSTANTS.artifact_paths,
+          runner_artifact_manifest_ref: CORE_PUBLISHED_CONTRACT_CONSTANTS.runner_artifact_manifest_ref,
+          run_outcome_envelope: CORE_PUBLISHED_CONTRACT_CONSTANTS.run_outcome_envelope,
+        },
+        contract_id: 'all',
+        schema: 'homeboy/contract-constants/v1',
+      },
+    }),
+    stderr: '',
+  }),
+});
+
+assert.equal(missingPathMaterializationPlan.status, 'failed');
+assert.match(missingPathMaterializationPlan.message, /path_materialization_plan\.schema_id is missing/);
+
+const drift = probeHomeboyContractSurface({
+  homeboyCommand: 'homeboy',
+  spawnSync: () => ({
+    status: 0,
+    stdout: JSON.stringify({
+      constants: {
+        secret_env_plan: CORE_PUBLISHED_CONTRACT_CONSTANTS.secret_env_plan,
+        ...LOCAL_ARTIFACT_MANIFEST_CONSTANTS,
+        schema_id: 'homeboy/artifact-manifest/v2',
+      },
+    }),
+    stderr: '',
+  }),
+});
+
+assert.equal(drift.status, 'failed');
+assert.match(drift.message, /artifact_manifest\.schema_id expected homeboy\/artifact-manifest\/v1/);
+
+const fixtureDrift = compareSchemaCatalogFixture({
+  schema: 'homeboy/contract-schema-catalog/v1',
+  contracts: [
+    {
+      id: 'homeboy/runner-workload/v1',
+      example: { schema: 'homeboy/runner-workload/v1' },
+    },
+  ],
+}, {
+  schema: 'homeboy/contract-schema-catalog/v1',
+  contract_ids: ['homeboy/runner-workload/v1'],
+  examples: {
+    'homeboy/runner-workload/v1': { schema: 'homeboy/runner-workload/v2' },
+  },
+});
+
+assert.match(fixtureDrift.join('; '), /homeboy\/runner-workload\/v2/);
+
+const live = probeHomeboyContractSurface();
+if (live.status === 'passed') {
+  assert.equal(live.status, 'passed', live.message);
+  process.stdout.write(`${live.message}\n`);
+} else {
+  process.stdout.write(`${live.message}\n`);
+}
+
+const exportFixtures = checkHomeboyContractExportFixtures();
+if (exportFixtures.status === 'skipped') {
+  process.stdout.write(`${exportFixtures.message}\n`);
+} else {
+  assert.equal(exportFixtures.status, 'passed', exportFixtures.message);
+  process.stdout.write(`${exportFixtures.message}\n`);
+}
+
+process.stdout.write('Homeboy contract surface probe check passed\n');

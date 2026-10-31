@@ -1,0 +1,15 @@
+{
+  "success": true,
+  "data": {
+    "command": "rig.list",
+    "rigs": [
+      {
+        "component_count": 2,
+        "description": "Studio dev rig",
+        "id": "studio",
+        "pipelines": ["check", "down", "up"],
+        "service_count": 1
+      }
+    ]
+  }
+}

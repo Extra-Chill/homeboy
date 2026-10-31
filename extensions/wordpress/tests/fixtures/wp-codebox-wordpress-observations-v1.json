@@ -1,0 +1,76 @@
+{
+  "schema": "wp-codebox/wordpress-observations/v1",
+  "id": "wp-codebox-observation-fixture",
+  "label": "WP Codebox SQL/cache/write observations fixture",
+  "sql_observations": [
+    {
+      "case_id": "rest-list-posts",
+      "operation_id": "GET /wp/v2/posts",
+      "fingerprint": "SELECT * FROM wp_posts WHERE post_type = ?",
+      "table": "wp_posts",
+      "count": 12,
+      "metric": "query_count"
+    },
+    {
+      "case_id": "rest-list-posts",
+      "operation_id": "GET /wp/v2/posts",
+      "category": "table",
+      "table": "wp_options",
+      "count": 7,
+      "metric": "query_count"
+    },
+    {
+      "case_id": "rest-list-posts",
+      "operation_id": "GET /wp/v2/posts",
+      "category": "duplicate_query_group",
+      "fingerprint": "SELECT option_value FROM wp_options WHERE option_name = ?",
+      "count": 4,
+      "metric": "query_count"
+    }
+  ],
+  "cache_observations": [
+    {
+      "case_id": "rest-list-posts",
+      "operation_id": "GET /wp/v2/posts",
+      "cache_group": "posts",
+      "cache_key": "last_changed",
+      "sets": 5
+    },
+    {
+      "case_id": "rest-list-posts",
+      "operation_id": "GET /wp/v2/posts",
+      "cache_group": "transient",
+      "cache_key": "_transient_feed_mod_example",
+      "transient": true,
+      "sets": 6
+    }
+  ],
+  "write_observations": [
+    {
+      "case_id": "update-settings",
+      "operation_id": "POST /wp/v2/settings",
+      "table": "wp_options",
+      "option": "blog_public",
+      "autoload": true,
+      "rows": 3
+    },
+    {
+      "case_id": "create-post",
+      "operation_id": "POST /wp/v2/posts",
+      "table": "wp_posts",
+      "write_family": "insert",
+      "rows": 5
+    }
+  ],
+  "action_correlations": [
+    {
+      "action": "save_post",
+      "case_id": "create-post",
+      "workload_id": "post-crud-workload",
+      "count": 2
+    }
+  ],
+  "metadata": {
+    "contract": "HBEX explicit fixture pending WP Codebox SQL/cache/write observation PR"
+  }
+}

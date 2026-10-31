@@ -1,0 +1,15 @@
+{
+  "success": true,
+  "data": {
+    "command": "version show",
+    "component_id": "homeboy-desktop",
+    "version": "0.11.3",
+    "path": "/Users/chubes/Developer/homeboy-desktop",
+    "targets": [
+      {
+        "file": "Homeboy/Core/Config/AppConfiguration.swift",
+        "pattern": "version = \\\"([0-9.]+)\\\""
+      }
+    ]
+  }
+}

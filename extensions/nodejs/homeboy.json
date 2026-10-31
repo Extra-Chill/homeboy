@@ -1,0 +1,52 @@
+{
+  "id": "nodejs",
+  "changelog_target": "docs/CHANGELOG.md",
+  "version_targets": [
+    {
+      "file": "nodejs.json",
+      "pattern": "\"version\":\\s*\"([0-9.]+)\""
+    }
+  ],
+  "self_checks": {
+    "lint": [
+      "jq empty nodejs.json",
+      "find . -name '*.sh' -print0 | xargs -0 -r -n1 bash -n",
+      "find . \\( -name '*.mjs' -o -name '*.cjs' -o -name '*.js' \\) -not -path './node_modules/*' -print0 | xargs -0 -r -n1 node --check"
+    ],
+    "test": [
+      "node scripts/bench/browser-profile-diff-smoke.mjs",
+      "bash scripts/bench/nodejs-bench-artifact-context-smoke.sh",
+      "bash scripts/bench/nodejs-bench-artifacts-smoke.sh",
+      "bash scripts/bench/nodejs-bench-custom-metrics-smoke.sh",
+      "bash scripts/bench/nodejs-bench-warmup-smoke.sh",
+      "bash scripts/bench/nodejs-bench-workload-context-smoke.sh",
+      "bash scripts/bench/nodejs-browser-helper-smoke.sh",
+      "bash scripts/bench/nodejs-browser-page-scenario-smoke.sh",
+      "bash scripts/bench/nodejs-browser-performance-profiler-smoke.sh",
+      "bash scripts/bench/nodejs-package-script-bench-smoke.sh",
+      "bash scripts/bench/nodejs-standalone-workload-smoke.sh",
+      "bash scripts/bench/nodejs-workload-progress-forwarding-smoke.sh",
+      "bash scripts/bench/nodejs-workload-utils-smoke.sh",
+      "bash scripts/build/build-runner-shell-smoke.sh",
+      "bash tests/release-package-manifest-smoke.sh",
+      "bash tests/component-env-detect-smoke.sh",
+      "bash scripts/runtime/nodejs-invocation-runtime-smoke.sh",
+      "node scripts/trace/trace-helpers-smoke.mjs",
+      "bash tests/local-workspace-deps-smoke.sh",
+      "bash tests/node-helpers-packaged-project-scripts-smoke.sh",
+      "bash tests/nodejs-dev-overlay-browser-result-shapes-smoke.sh",
+      "cd .. && bash nodejs/tests/playwright-utility-smoke.sh",
+      "bash ../tests/nodejs-deps-provider-smoke.sh",
+      "bash scripts/lint/lint-fix-results-smoke.sh",
+      "bash scripts/lint/nodejs-lint-findings-sidecar-smoke.sh",
+      "bash scripts/lint/typecheck-ci-command-smoke.sh",
+      "bash scripts/test/nodejs-changed-scope-smoke.sh",
+      "bash scripts/test/nodejs-nx-vitest-timeout-smoke.sh",
+      "bash scripts/test/nodejs-targeted-script-smoke.sh",
+      "bash scripts/test/typescript-test-loader-smoke.sh",
+      "bash scripts/trace/nodejs-trace-runner-smoke.sh",
+      "bash scripts/fuzz/nodejs-fuzz-runner-smoke.sh",
+      "bash scripts/workload/nodejs-fuzz-workload-smoke.sh"
+    ]
+  }
+}
