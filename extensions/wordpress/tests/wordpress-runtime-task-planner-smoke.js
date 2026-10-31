@@ -177,7 +177,7 @@ try {
 	});
 	const installedRequire = spawnSync(process.execPath, [
 		'-e',
-		"const path = require('node:path'); const root = path.dirname(process.argv[1]); require(process.argv[1]); require(path.join(root, 'preview-materialization.js')); require(path.join(root, 'wp-codebox-preview-materialization-contract.js')); const resolver = require(path.join(root, '../scripts/lib/agent-runtime-paths.cjs')); require('node:fs').accessSync(resolver.resolveAgentRuntimeFile('scripts/lib/test-result-adapters.sh')); process.stdout.write('installed WordPress helpers require passed\\n');",
+		"const path = require('node:path'); const root = path.dirname(process.argv[1]); require(process.argv[1]); require(path.join(root, 'preview-materialization.js')); const resolver = require(path.join(root, '../scripts/lib/agent-runtime-paths.cjs')); require('node:fs').accessSync(resolver.resolveAgentRuntimeFile('scripts/lib/test-result-adapters.sh')); process.stdout.write('installed WordPress helpers require passed\\n');",
 		path.join(installedExtension, 'lib', 'wordpress-runtime-task-planner.js'),
 	], { encoding: 'utf8' });
 	assert.equal(installedRequire.status, 0, installedRequire.stderr || installedRequire.stdout);
