@@ -1954,7 +1954,7 @@ mod tests {
             "fixture",
             "--changed-since",
             "main",
-            "--summary",
+            "--json-summary",
         ]);
         for review in [&test_before, &test_after] {
             let Some(ReviewCommand::Test(args)) = review.command.as_ref() else {

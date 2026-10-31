@@ -5076,14 +5076,6 @@ mod tests {
                 "argv: {argv:?}"
             );
         }
-
-        let matches = Cli::command_with_scoped_lab_args()
-            .try_get_matches_from(["homeboy", "self", "inspect"])
-            .expect("parse self identity alias");
-        assert_eq!(
-            command_identity_from_matches(&matches),
-            output::CommandIdentity::with_operation("self", "identity")
-        );
     }
 
     struct EnvGuard {
@@ -5947,20 +5939,14 @@ mod tests {
         );
     }
 
-    /// One compact-output convention must work across the `review` umbrella and
-    /// every phase subcommand. Before #10428 `review lint --summary` parsed while
-    /// `review test --summary` failed and clap suggested `-- --summary`, which
-    /// would have forwarded the flag to the underlying test runner instead.
-    ///
-    /// `--summary` is the umbrella's own compact-output selector, and
-    /// `review/mod.rs` already maps it onto `json_summary` for the test
-    /// phase and onto `summary` for lint — so accepting it directly on each
-    /// phase makes the phase surface agree with the umbrella that drives it.
+    /// Compact output parses on the `review` umbrella and every phase. The
+    /// umbrella's `--summary` maps onto `json_summary` for the test phase; the
+    /// test phase itself spells it `--json-summary` only, since #16788 deleted
+    /// its `--summary` alias.
     #[test]
     fn summary_is_accepted_across_the_review_umbrella_and_every_phase() {
         let phases: &[&[&str]] = &[
             &["homeboy", "review", "lint", "homeboy", "--summary"],
-            &["homeboy", "review", "test", "homeboy", "--summary"],
             &["homeboy", "review", "lint", "homeboy", "--json-summary"],
             &["homeboy", "review", "test", "homeboy", "--json-summary"],
         ];
@@ -5975,11 +5961,11 @@ mod tests {
             .expect("review --summary must parse");
     }
 
-    /// The alias must select Homeboy output formatting, never leak into the
-    /// runner passthrough after `--`.
+    /// `--json-summary` selects Homeboy output formatting and never leaks into
+    /// the runner passthrough after `--`.
     #[test]
-    fn summary_alias_sets_the_same_field_as_json_summary() {
-        for spelling in ["--summary", "--json-summary"] {
+    fn json_summary_sets_the_field_without_leaking_into_passthrough() {
+        for spelling in ["--json-summary"] {
             let cli = Cli::try_parse_from(["homeboy", "review", "test", "homeboy", spelling])
                 .expect("parse review test summary flag");
             let Commands::Review(review) = cli.command else {

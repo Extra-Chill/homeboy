@@ -1167,7 +1167,14 @@ mod tests {
             std::fs::create_dir_all(&directory).expect("directory");
             std::fs::write(directory.join("summary.json"), b"{}").expect("summary");
             store
-                .record_directory_artifact(&run.id, "fuzz_artifacts", &directory)
+                .record_directory_artifact_with_metadata(
+                    &run.id,
+                    "fuzz_artifacts",
+                    &directory,
+                    // A public URL is presentable only with recorded reachability
+                    // evidence (#16785).
+                    serde_json::json!({ "public_url_validation": { "reachable": true } }),
+                )
                 .expect("directory artifact");
 
             let (output, _) = evidence(&run.id).expect("evidence");
