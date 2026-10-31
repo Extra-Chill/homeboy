@@ -1669,14 +1669,38 @@ fn run_materialized_provider_command_once_contained(
             );
         }
     }
-    let parsed: Result<AgentTaskOutcome, serde_json::Error> = Ok(super::pi::outcome(
-        &serde_json::to_value(&provider_request.request).expect("serializable request"),
+    let pi_request = serde_json::to_value(&provider_request.request).expect("serializable request");
+    let mut pi_outcome = super::pi::outcome(
+        &pi_request,
         &stdout,
         &stderr,
         status.code(),
         &program,
         cwd.as_deref(),
-    ));
+    );
+    // The resume runs in the same launch environment as the first process.
+    let mut resume = Command::new(&program);
+    let resume = launch_context
+        .apply_declared_environment(&mut resume)
+        .is_ok()
+        .then(|| {
+            resume.envs(
+                env.iter()
+                    .map(|(key, value)| (key.as_str(), value.as_str())),
+            );
+            if let Some(cwd) = &cwd {
+                resume.current_dir(cwd);
+            }
+            resume
+        });
+    super::pi::resume_for_missing_outputs(
+        &mut pi_outcome,
+        &pi_request,
+        &args,
+        &request.artifacts_path,
+        resume,
+    );
+    let parsed: Result<AgentTaskOutcome, serde_json::Error> = Ok(pi_outcome);
     match parsed {
         Ok(mut outcome) => {
             if outcome.schema != AGENT_TASK_OUTCOME_SCHEMA {

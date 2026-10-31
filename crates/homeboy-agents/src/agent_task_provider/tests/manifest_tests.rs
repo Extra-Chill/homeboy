@@ -412,6 +412,26 @@ fn provider_validates_declared_outputs() {
         .iter()
         .any(|diagnostic| diagnostic.class == "pi.required_outputs_missing"));
 
+    // A final answer that omits a required output resumes the same session
+    // once, tool-less, and keeps what that reply supplies (#16821).
+    let resumed_pi = FakePi::new(&format!(
+        "case \"$*\" in\n*--no-tools*)\n{}\n;;\n*)\n{}\n;;\nesac",
+        FakePi::answer(r#"{"outputs":{"inspection":{"verdict":"pass"}}}"#),
+        FakePi::answer(r#"{"outputs":{"other":"present"}}"#),
+    ));
+    request.executor.config = resumed_pi.config();
+    let resumed = run_provider_command_once(&request, &provider);
+    assert_eq!(resumed.status, AgentTaskOutcomeStatus::Succeeded);
+    assert_eq!(resumed.outputs["inspection"]["verdict"], "pass");
+    assert!(resumed
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.class == "pi.required_outputs_resumed"));
+    assert!(!resumed
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.class == "pi.required_outputs_missing"));
+
     let malformed_pi = FakePi::new(&FakePi::answer(
         r#"{"outputs":{"inspection":{"verdict":42}}}"#,
     ));
