@@ -218,7 +218,7 @@ pub(crate) fn resolve_cloned_extension(
 
         // Cloned installs copy: the clone temp dir is discarded after install,
         // so the shared trees must be materialized as standalone copies.
-        install_shared_assets_from_root(&source_root, extension_dir, SharedAssetMode::Copy, None)?;
+        install_shared_assets_from_root(&source_root, extension_dir, SharedAssetMode::Copy)?;
 
         // Move just the subdirectory to the final extension location.
         rename_dir(&subdir, extension_dir)?;
@@ -288,23 +288,9 @@ fn install_shared_assets_from_root(
     source_root: &Path,
     extension_dir: &Path,
     mode: SharedAssetMode,
-    revision: Option<&str>,
 ) -> Result<()> {
-    let root_manifest = source_root.join(ROOT_MANIFEST);
     let shared_assets = shared_assets_for_root(source_root);
-    if root_manifest.is_file() && runtime_generation_boundary_active()? {
-        // Once runtime generations are active, extension refreshes publish a
-        // successor generation rather than writing through the stable link.
-        homeboy_core::runtime_package::refresh_shared_assets_with_revision(source_root, revision)?;
-    }
     for shared_dir in shared_assets {
-        if matches!(
-            shared_dir.as_str(),
-            "agent-runtimes" | "agent-task-contracts" | "runtime-agent-ci"
-        ) && runtime_generation_boundary_active()?
-        {
-            continue;
-        }
         let source = source_root.join(&shared_dir);
         if !source.is_dir() {
             continue;
@@ -328,13 +314,6 @@ fn install_shared_assets_from_root(
     }
 
     Ok(())
-}
-
-fn runtime_generation_boundary_active() -> Result<bool> {
-    Ok(std::fs::read_link(paths::agent_runtimes()?).ok().as_deref()
-        == Some(std::path::Path::new(
-            "runtime-generations/current/agent-runtimes",
-        )))
 }
 
 fn persist_installed_root_manifest(source_root: &Path, extension_dir: &Path) -> Result<()> {
@@ -457,37 +436,19 @@ pub(crate) fn install_linked_shared_assets(
     source: &Path,
     extension_dir: &Path,
     source_root: Option<&Path>,
-    revision: Option<&str>,
 ) -> Result<()> {
     if let Some(source_root) = source_root {
         return install_shared_assets_from_root(
             source_root,
             extension_dir,
             SharedAssetMode::Symlink,
-            revision,
-        );
-    }
-
-    if let Some(source_root) = runtime_package_source_root(source) {
-        return install_shared_assets_from_root(
-            source_root,
-            extension_dir,
-            SharedAssetMode::Symlink,
-            revision,
         );
     }
 
     if let Some(parent) = source.parent() {
-        install_shared_assets_from_root(parent, extension_dir, SharedAssetMode::Symlink, revision)?;
+        install_shared_assets_from_root(parent, extension_dir, SharedAssetMode::Symlink)?;
     }
     Ok(())
-}
-
-fn runtime_package_source_root(source: &Path) -> Option<&Path> {
-    let runtime_packages = source.parent()?;
-    (runtime_packages.file_name()?.to_str()? == "agent-runtimes")
-        .then(|| runtime_packages.parent())
-        .flatten()
 }
 
 /// Scan a cloned repo for subdirectories that contain a matching manifest file.
@@ -670,7 +631,7 @@ pub(super) fn install_from_path(
 
     local_files::ensure_app_dirs()?;
 
-    install_linked_shared_assets(&source, &extension_dir, source_root, None)?;
+    install_linked_shared_assets(&source, &extension_dir, source_root)?;
 
     // Create symlink
     #[cfg(unix)]

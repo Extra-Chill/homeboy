@@ -112,10 +112,6 @@ pub(crate) struct LabRuntimeMaterializationOutput {
     pub(crate) extension_overlays: serde_json::Value,
     pub(crate) extension_runtime_root: String,
     pub(crate) extension_runtime_home: Option<String>,
-    pub(crate) runtime_generation:
-        Option<crate::runtime_materializer::ResolvedAgentRuntimeGeneration>,
-    pub(crate) runtime_env: Vec<(String, String)>,
-    pub(crate) runtime_evidence: Option<crate::runtime_materializer::AgentRuntimeExecutionEvidence>,
     pub(crate) remapped_args: Vec<String>,
     pub(crate) command: Vec<String>,
     pub(crate) remote_command: Vec<String>,
@@ -130,13 +126,11 @@ pub(crate) fn materialize_lab_runtime<F>(
     synced_local_path: &str,
     source_snapshot: &SourceSnapshot,
     workspace_snapshot_identity: &str,
-    workspace_remaps: &[(String, String)],
     runner_required_extensions: &[String],
-    agent_task_run_id: Option<&str>,
     mut plan: HomeboyPlan,
-    mut remapped_args: Vec<String>,
-    mut command: Vec<String>,
-    mut remote_command: Vec<String>,
+    remapped_args: Vec<String>,
+    command: Vec<String>,
+    remote_command: Vec<String>,
     mut check_cancelled: F,
 ) -> Result<LabRuntimeMaterializationOutput>
 where
@@ -188,48 +182,6 @@ where
     let extension_runtime_home =
         (!extension_overlays.is_empty()).then(|| format!("{extension_runtime_root}/home"));
 
-    let mut runtime_operations = RunnerRuntimeMaterializerOperations::new(runner.clone());
-    let resolved_runtime = resolve_lab_agent_runtime(
-        &mut runtime_operations,
-        runner,
-        &remapped_args,
-        workspace_remaps,
-        agent_task_run_id.unwrap_or("lab-offload"),
-    )?;
-    check_cancelled()?;
-    let runtime_generation = resolved_runtime
-        .as_ref()
-        .and_then(|resolved| resolved.generation.clone());
-    let runtime_env = resolved_runtime
-        .as_ref()
-        .map(|resolved| resolved.env.clone())
-        .unwrap_or_default();
-    if let Some(resolved) = resolved_runtime {
-        let prior_args = remapped_args.clone();
-        remapped_args = resolved.args;
-        rewrite_dispatched_runtime_args(
-            &prior_args,
-            &remapped_args,
-            &mut command,
-            &mut remote_command,
-        );
-        plan = with_step(
-            plan,
-            PlanStep::ready(
-                "lab.materialize_agent_runtime",
-                "lab.materialize_agent_runtime",
-            )
-            .inputs(PlanValues::new().json("generation", &runtime_generation))
-            .build(),
-        );
-    }
-    let runtime_evidence = runtime_generation
-        .as_ref()
-        .map(|generation| {
-            runtime_execution_evidence(generation, &remapped_args, runner.id.as_str())
-        })
-        .transpose()?;
-
     Ok(LabRuntimeMaterializationOutput {
         remote_cwd: remote_cwd.to_string(),
         plan,
@@ -243,9 +195,6 @@ where
         })?,
         extension_runtime_root,
         extension_runtime_home,
-        runtime_generation,
-        runtime_env,
-        runtime_evidence,
         remapped_args,
         command,
         remote_command,
@@ -377,11 +326,6 @@ pub(crate) fn preflight_lab_offload_remote_dispatch_paths(
     )
 }
 
-pub(crate) struct LabProviderPreflightContext {
-    pub(crate) command_prefix_argv: Vec<String>,
-    pub(crate) runner_homeboy: serde_json::Value,
-}
-
 pub(crate) struct LabDispatchExecutionContext<'a> {
     pub(crate) request: &'a LabOffloadRequest<'a>,
     pub(crate) selection: &'a LabRunnerSelection,
@@ -393,7 +337,6 @@ pub(crate) struct LabDispatchExecutionContext<'a> {
     pub(crate) remote_cwd: String,
     pub(crate) command: Vec<String>,
     pub(crate) remote_command: Vec<String>,
-    pub(crate) remapped_args: Vec<String>,
     pub(crate) accepted_extension_settings: Vec<String>,
     pub(crate) secret_preflight_args: Vec<String>,
     pub(crate) agent_task_run_id: Option<String>,
@@ -406,7 +349,6 @@ pub(crate) struct LabDispatchExecutionContext<'a> {
     pub(crate) source_snapshot: Option<SourceSnapshot>,
     pub(crate) path_materialization_plan: Option<PathMaterializationPlan>,
     pub(crate) capability_preflight: Option<RunnerCapabilityPreflight>,
-    pub(crate) provider_preflight: Option<LabProviderPreflightContext>,
     pub(crate) path_remaps: Vec<LabPathRemap>,
     pub(crate) workspace_mapping_metadata: serde_json::Value,
     pub(crate) materialized_workspace: Option<MaterializedWorkspace>,
@@ -603,40 +545,6 @@ pub(crate) fn exec_lab_context(
                 &env,
             )?;
         }
-    }
-    if let (Some(provider), Some(runner), Some(source_snapshot)) = (
-        context.provider_preflight.as_ref(),
-        context.runner,
-        context.source_snapshot.as_ref(),
-    ) {
-        if let Some(run_id) = context.agent_task_run_id.as_deref() {
-            agent_task_lifecycle::record_lab_offload_phase_in_store(
-                &lab_lifecycle_store,
-                agent_task_lifecycle::LabOffloadPhaseRecord {
-                    requested_run_id: run_id,
-                    runner_id: runner_id,
-                    phase: "provider_preflight",
-                    remote_workspace: Some(&remote_cwd),
-                    source_checkout: source_checkout.as_ref(),
-                    provider_rotation: None,
-                    durable_plan: request.durable_agent_task_plan,
-                },
-            )?;
-        }
-        preflight_agent_task_provider_on_runner(
-            runner_id,
-            &provider.command_prefix_argv,
-            &context.remote_cwd,
-            &context.source_path,
-            &context.remapped_args,
-            env.clone(),
-            Some(source_snapshot.clone()),
-            contract.required_extensions.clone(),
-            context.capability_preflight.clone(),
-            &provider.runner_homeboy,
-            context.runner_status,
-        )?;
-        let _ = runner;
     }
     preflight_lab_offload_remote_dispatch_paths(
         runner_id,
@@ -1959,24 +1867,6 @@ pub(crate) fn run_lab_offload_inner(
         redact_argv_shell_display(&command_prefix.argv),
         runner_id,
     );
-    // Validate the selected provider on the runner before any workspace, runtime,
-    // or overlay materialization. This invokes the provider's portable readiness
-    // contract without spawning the provider process or reserving a Lab slot.
-    let mut provider_admission_env = crate::effective_env(runner_id)?;
-    provider_admission_env.extend(request.job_overrides.env.clone());
-    preflight_agent_task_provider_on_runner(
-        runner_id,
-        &command_prefix.argv,
-        &runner_workspace_root,
-        &source_path,
-        request.normalized_args,
-        provider_admission_env,
-        None,
-        Vec::new(),
-        None,
-        &runner_homeboy,
-        &runner_status,
-    )?;
     // Public preflight constructs the same typed routed command before entering
     // this compiler, so no admission requirement can diverge at this boundary.
     let mut admission_plan = crate::lab_selection::compile_execution_lab_admission_plan(
@@ -2261,15 +2151,6 @@ pub(crate) fn run_lab_offload_inner(
         cleanup_policy,
     );
 
-    let workspace_remaps = workspace_mapping
-        .iter()
-        .map(|entry| {
-            (
-                entry.local_path().to_string(),
-                entry.remote_path().to_string(),
-            )
-        })
-        .collect::<Vec<_>>();
     let runtime = materialize_lab_runtime(
         &runner,
         &homeboy_path,
@@ -2278,9 +2159,7 @@ pub(crate) fn run_lab_offload_inner(
         &synced.local_path,
         &source_snapshot,
         &synced.snapshot_identity,
-        &workspace_remaps,
         &runner_required_extensions,
-        agent_task_run_id.as_deref(),
         plan,
         remapped_args,
         command,
@@ -2292,9 +2171,6 @@ pub(crate) fn run_lab_offload_inner(
     let rig_registry_root = runtime.rig_registry_root;
     let extension_overlays = runtime.extension_overlays;
     let extension_runtime_home = runtime.extension_runtime_home;
-    let runtime_generation = runtime.runtime_generation;
-    let runtime_env = runtime.runtime_env;
-    let runtime_evidence = runtime.runtime_evidence;
     remapped_args = runtime.remapped_args;
     command = runtime.command;
     remote_command = runtime.remote_command;
@@ -2457,15 +2333,8 @@ pub(crate) fn run_lab_offload_inner(
     }
     // These are job-scoped provider inputs. They never update the runner's
     // global environment or a previously admitted generation.
-    for (name, value) in &runtime_env {
-        env_delta.insert(name.clone(), value.clone());
-    }
     let env_delta_before_secret_handoff = env_delta.clone();
     lab_metadata["runtime_overlays"] = runtime_overlay_metadata;
-    lab_metadata["resolved_agent_runtime_generation"] =
-        serde_json::to_value(&runtime_generation).unwrap_or(serde_json::json!(null));
-    lab_metadata["runtime_evidence"] =
-        serde_json::to_value(&runtime_evidence).unwrap_or(serde_json::json!(null));
     let mut secret_env_handoff = build_lab_secret_env_handoff_plan(
         contract.secret_env_sources,
         &changed_since_preflight.args,
@@ -2507,8 +2376,6 @@ pub(crate) fn run_lab_offload_inner(
     // Preserve the evidence with the serialized workload envelope as well as
     // Lab metadata, so runner evidence retains the exact
     // dispatch identity without widening the stable workload contract.
-    lab_metadata["runner_workload"]["runtime_evidence"] =
-        serde_json::to_value(&runtime_evidence).unwrap_or(serde_json::json!(null));
     lab_metadata["rig_component_path_env"] = rig_component_path_env;
     lab_metadata["declared_dependency_paths_env"] = declared_dependency_paths_env;
     lab_metadata["rig_component_path_overrides"] =
@@ -2653,7 +2520,6 @@ pub(crate) fn run_lab_offload_inner(
         remote_cwd,
         command,
         remote_command,
-        remapped_args,
         accepted_extension_settings,
         secret_preflight_args: changed_since_preflight.args,
         agent_task_run_id,
@@ -2681,10 +2547,6 @@ pub(crate) fn run_lab_offload_inner(
         source_snapshot: Some(source_snapshot),
         path_materialization_plan: Some(path_materialization_plan),
         capability_preflight,
-        provider_preflight: Some(LabProviderPreflightContext {
-            command_prefix_argv: command_prefix.argv,
-            runner_homeboy,
-        }),
         path_remaps,
         workspace_mapping_metadata,
         materialized_workspace: Some(materialized_workspace),
@@ -2792,26 +2654,6 @@ pub(crate) fn detached_staging_submission_output(
         }
     }
     output
-}
-
-/// Keep the generated direct command and the remote command in lockstep when
-/// resolving a controller policy into a runner generation.
-fn rewrite_dispatched_runtime_args(
-    prior_args: &[String],
-    resolved_args: &[String],
-    command: &mut [String],
-    remote_command: &mut [String],
-) {
-    for (prior, resolved) in prior_args.iter().zip(resolved_args) {
-        if prior == resolved {
-            continue;
-        }
-        for arg in command.iter_mut().chain(remote_command.iter_mut()) {
-            if *arg == *prior {
-                *arg = resolved.clone();
-            }
-        }
-    }
 }
 
 fn direct_daemon_admission_coordinates<'a>(
@@ -3115,25 +2957,6 @@ mod tests {
     }
 
     #[test]
-    fn resolved_runtime_policy_rewrites_local_and_remote_dispatch_commands() {
-        let controller_policy =
-            "--resolved-provider-policy={\"runtime_identity\":{\"runtime_path\":\"/controller/runtime\"}}"
-                .to_string();
-        let runner_policy =
-            "--resolved-provider-policy={\"runtime_identity\":{\"runtime_path\":\"/runner/generation/runtime\"}}"
-                .to_string();
-        let prior = vec!["agent-task".to_string(), controller_policy.clone()];
-        let resolved = vec!["agent-task".to_string(), runner_policy.clone()];
-        let mut command = vec!["homeboy".to_string(), controller_policy.clone()];
-        let mut remote_command = vec!["homeboy".to_string(), controller_policy];
-
-        rewrite_dispatched_runtime_args(&prior, &resolved, &mut command, &mut remote_command);
-
-        assert_eq!(command[1], runner_policy);
-        assert_eq!(remote_command[1], runner_policy);
-    }
-
-    #[test]
     fn final_dispatch_reasserts_the_admitted_rig_registry_root() {
         let root = "/runner/app-homeboy-artifacts/rig-registry".to_string();
         let args = Vec::new();
@@ -3186,7 +3009,6 @@ mod tests {
             remote_cwd: "/runner/app".to_string(),
             command: vec!["/runner/admitted-homeboy".to_string(), "bench".to_string()],
             remote_command: Vec::new(),
-            remapped_args: Vec::new(),
             accepted_extension_settings: Vec::new(),
             secret_preflight_args: Vec::new(),
             agent_task_run_id: None,
@@ -3208,7 +3030,6 @@ mod tests {
             source_snapshot: None,
             path_materialization_plan: None,
             capability_preflight: None,
-            provider_preflight: None,
             path_remaps: Vec::new(),
             workspace_mapping_metadata: serde_json::json!({}),
             materialized_workspace: None,

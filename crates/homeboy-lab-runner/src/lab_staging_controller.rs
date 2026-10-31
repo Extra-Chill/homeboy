@@ -3474,10 +3474,6 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
             field("remote_command")?,
             "Lab staging remote command is invalid",
         )?;
-        let agent_task_run_id: Option<String> = decode_workspace_field(
-            field("agent_task_run_id")?,
-            "Lab staging agent-task identity is invalid",
-        )?;
         let plan: homeboy_core::plan::HomeboyPlan =
             decode_workspace_field(field("plan")?, "Lab staging plan is invalid")?;
         let runner = crate::load(&request.recipe.runner_id)?;
@@ -3492,9 +3488,7 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
             &runtime_input.synced_local_path,
             &runtime_input.source_snapshot,
             &runtime_input.workspace_snapshot_identity,
-            &runtime_input.workspace_remaps,
             &required_extensions,
-            agent_task_run_id.as_deref(),
             plan,
             remapped_args,
             command,
@@ -3502,11 +3496,7 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
             || Self::check_cancelled(cancellation),
         )?;
         Self::check_cancelled(cancellation)?;
-        let runtime_id = output
-            .runtime_generation
-            .as_ref()
-            .map(|generation| generation.generation_identity.clone())
-            .unwrap_or_else(|| format!("runtime:workspace:{}", workspace.workspace_id));
+        let runtime_id = format!("runtime:workspace:{}", workspace.workspace_id);
         let durable = DurableLabRuntimeStage {
             schema: "homeboy/durable-lab-runtime-stage/v1".to_string(),
             run_id: request.recipe.run_id.clone(),

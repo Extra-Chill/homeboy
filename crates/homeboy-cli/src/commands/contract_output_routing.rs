@@ -7,7 +7,7 @@
 
 use crate::cli_surface::Commands;
 use crate::command_contract::CommandSpec;
-use crate::commands::{adapter, review, runner, runtime, ssh, trace};
+use crate::commands::{adapter, review, runner, ssh, trace};
 
 use crate::command_contract::{
     CommandDescriptor, CommandJsonFamily, CommandOutputContractKind, CommandOutputDescriptor,
@@ -89,9 +89,6 @@ impl Commands {
                 output_file_mode,
                 CommandOutputContractKind::JsonEnvelope,
             ),
-            Commands::Runtime(args) if runtime::is_plain_mode(args) => {
-                raw_ops_descriptor(CommandRawOutputMode::PlainText, output_file_mode)
-            }
             Commands::Bench(args) => args.output_descriptor(output_file_mode),
             Commands::Fuzz(args) => args.output_descriptor(output_file_mode),
             Commands::Workload(args) => args.output_descriptor(output_file_mode),

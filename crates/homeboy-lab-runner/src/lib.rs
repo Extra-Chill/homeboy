@@ -160,7 +160,6 @@ mod rig_materialization;
 mod runner_cache;
 pub mod runner_probe_gate;
 mod runtime_materialization_status;
-pub mod runtime_materializer;
 mod runtime_overlay_freshness;
 mod session;
 mod shell_quote;

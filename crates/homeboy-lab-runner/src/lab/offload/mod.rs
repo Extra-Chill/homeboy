@@ -116,9 +116,6 @@ use super::super::{
     RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
     WorkspaceCleanupPolicy, WorkspaceTerminalOutcome,
 };
-use crate::runtime_materializer::{
-    resolve_lab_agent_runtime, runtime_execution_evidence, RunnerRuntimeMaterializerOperations,
-};
 
 #[cfg(test)]
 pub(super) use inner::accepted_runner_job_id_with;
@@ -139,7 +136,6 @@ use super::fallback::{
     is_build_command, local_execution_denied_error, skipped_automatic_run_local,
     skipped_automatic_run_local_with_selection, unsupported_build_lab_error,
 };
-use super::provider_preflight::preflight_agent_task_provider_on_runner;
 use super::secrets::{
     build_lab_secret_env_handoff_plan, merge_managed_service_secret_env,
     preflight_agent_task_runner_secret_env_plan, preflight_lab_secret_env_handoff,

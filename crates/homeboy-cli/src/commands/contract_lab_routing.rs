@@ -8,7 +8,7 @@ use crate::cli_surface::Commands;
 use crate::command_contract::{
     AGENT_TASK_AUTH_STATUS_LAB_LABEL, AGENT_TASK_FANOUT_COOK_BATCH_LAB_LABEL,
     AGENT_TASK_PROMOTE_LAB_LABEL, AGENT_TASK_PROVIDERS_LAB_LABEL, AGENT_TASK_RUN_LAB_LABEL,
-    AGENT_TASK_STATUS_LAB_LABEL, RUNTIME_REFRESH_LAB_LABEL,
+    AGENT_TASK_STATUS_LAB_LABEL,
 };
 use crate::commands::agent_task;
 use crate::core::engine::execution_context::{self, ResolveOptions};
@@ -232,9 +232,6 @@ impl Commands {
             }
             Commands::Extension(args) if args.is_runner_resident_read_command() => {
                 LabCommandContract::runner_resident(args.runner_resident_read_command_label())
-            }
-            Commands::Runtime(args) if args.is_refresh_command() => {
-                LabCommandContract::explicit_runner_simple(RUNTIME_REFRESH_LAB_LABEL)
             }
             Commands::Worktree(args) => {
                 return CommandPortabilityContract::lab_optional(args.lab_contract());

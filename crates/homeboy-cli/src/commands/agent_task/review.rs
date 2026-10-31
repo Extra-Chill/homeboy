@@ -18,10 +18,9 @@ use homeboy::agents::agent_tasks::gate::VerifyGateOptions;
 use homeboy::agents::agent_tasks::lifecycle as agent_task_lifecycle;
 use homeboy::agents::agent_tasks::promotion::{AgentTaskPromotionReport, AgentTaskPromotionStatus};
 use homeboy::agents::agent_tasks::provider::{
-    evaluate_provider_dispatchability, evaluate_provider_dispatchability_with_config,
-    provider_credential_readiness, resolve_provider_for_backend, AgentTaskExecutorProvider,
-    AgentTaskProviderCatalog, ExtensionProviderAgentTaskExecutor, ProviderResolution,
-    ProviderRuntimeReadinessCache,
+    evaluate_provider_dispatchability_with_config, provider_credential_readiness,
+    resolve_provider_for_backend, AgentTaskExecutorProvider, AgentTaskProviderCatalog,
+    ExtensionProviderAgentTaskExecutor, ProviderResolution, ProviderRuntimeReadinessCache,
 };
 use homeboy::agents::agent_tasks::review_dossier::{
     homeboy_tool_disclosure, resolve_review_profile, validate_issue_reference,
@@ -2619,16 +2618,21 @@ fn dispatchable_backend_choices(
     catalog: &AgentTaskProviderCatalog,
     probe_runtime: bool,
 ) -> Vec<ProviderSelectionChoice> {
+    let provider_config =
+        effective_provider_catalog_config().unwrap_or_else(|_| serde_json::json!({}));
+    let mut cache = ProviderRuntimeReadinessCache::default();
     let mut backends = catalog
         .providers()
         .iter()
         .filter(|provider| {
-            evaluate_provider_dispatchability(
+            evaluate_provider_dispatchability_with_config(
                 catalog,
                 &provider.backend,
                 Some(&provider.id),
                 None,
+                &provider_config,
                 probe_runtime,
+                &mut cache,
             )
             .ready
         })
@@ -3172,6 +3176,7 @@ pub(crate) fn read_promotion_source(
 mod tests {
     use super::*;
     use crate::commands::agent_task::fake_pi_test::FakePi;
+    use homeboy::agents::agent_tasks::provider::evaluate_provider_dispatchability;
 
     use crate::commands::agent_task_summary::{render_agent_task_summary, AgentTaskSummaryKind};
     use clap::Parser;
@@ -3639,6 +3644,9 @@ mod tests {
     #[test]
     fn providers_set_default_leads_with_pi() {
         crate::test_support::with_isolated_home(|_| {
+            let pi =
+                super::super::fake_pi_test::FakePi::with_probes("exit 0", "printf 'test model\\n'");
+            pi.install_catalog_config();
             let ready = |id: &str, backend: &str| {
                 let mut provider = provider(id, backend);
                 provider.readiness_invocation = Some(
@@ -3649,10 +3657,7 @@ mod tests {
                 );
                 provider
             };
-            let catalog = provider_catalog(vec![
-                ready("alpha.provider", "alpha"),
-                ready("pi.agent-task-executor", "pi"),
-            ]);
+            let catalog = provider_catalog(vec![ready("alpha.provider", "alpha"), pi.provider()]);
             let output = write_default_backend_from_readiness(&catalog)
                 .expect("pi is live-ready")
                 .0;
