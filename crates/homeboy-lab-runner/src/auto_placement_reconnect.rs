@@ -5,15 +5,14 @@
 //! observation: it is the answer many read-only callers (`homeboy status`,
 //! `runner status`, diagnostics) depend on being safe to call from any
 //! context, including one that must never open a tunnel as a side effect of
-//! merely asking a question (`status_with_admission_projection_until_in_roots`
-//! documents this split explicitly). Reconnecting is a distinct *admission*
+//! merely asking a question (`connection::status_until` documents this split
+//! explicitly). Reconnecting is a distinct *admission*
 //! action, so it belongs only on the path that is actually about to commit to
 //! a placement — this module is that one bounded, safety-gated attempt.
 //!
 //! The safety gate is [`crate::RunnerStatusReport::admission_action`], which
-//! already encodes the exact reasoning documented at `session.rs:975`:
-//! retained generations and terminal ownership uncertainty return `None`
-//! (no automatic action), and only a plain, unblocked `runner.connect`
+//! already encodes the exact reasoning documented in `session.rs`: terminal
+//! ownership uncertainty returns `None` (no automatic action), and only a plain, unblocked `runner.connect`
 //! recommendation is treated as "reachable, session merely stale" here. Any
 //! other recommendation (orphan-lease adoption, reconciliation, a refresh) is
 //! left exactly as before — named to the operator, never auto-executed by a
@@ -169,7 +168,7 @@ fn attempt_with(
             observed.clone(),
             AutoPlacementReconnect::none(Some(
                 "every configured Lab runner is disconnected and blocked from automatic \
-                 reconnect (retained generations or terminal ownership uncertainty); see \
+                 reconnect (active daemon jobs or terminal ownership uncertainty); see \
                  `homeboy runner status --full`"
                     .to_string(),
             )),
@@ -216,7 +215,7 @@ enum ReconnectCandidate {
 /// recommends a plain `runner.connect`, or when the only reason no action was
 /// recommended is that the runner could not be reached at all (see the module
 /// doc). Every other reason — a reachable daemon with no typed ownership
-/// proof, retained generations — is `Blocked`, preserved exactly.
+/// proof, active daemon jobs — is `Blocked`, preserved exactly.
 fn reconnect_eligible_candidates(deadline: Instant) -> Result<Vec<ReconnectCandidate>> {
     let preferred = homeboy_core::defaults::load_config().lab.preferred_runner;
     let mut runner_ids = crate::configured_lab_runner_ids()?;
@@ -446,7 +445,7 @@ mod tests {
         assert_eq!(resolved, observed);
     }
 
-    /// Acceptance case: retained generations or terminal ownership
+    /// Acceptance case: active daemon jobs or terminal ownership
     /// uncertainty (session.rs:975) must still block dispatch exactly as
     /// before. No candidate is eligible, so no reconnect is attempted at all,
     /// and the existing operator action remains the answer.

@@ -6,8 +6,7 @@ use homeboy::core::{EntityCrudOutput, EntityRows};
 use homeboy::runner::readonly_probe::ReadOnlyProbeDegradation;
 use homeboy::runner::runners::{
     PeerSessionMaintenanceReport, Runner, RunnerAdmissionSummary, RunnerAvailability,
-    RunnerConnectReport, RunnerDaemonGenerationStatus, RunnerDisconnectReport, RunnerExecOutput,
-    RunnerStatusReport,
+    RunnerConnectReport, RunnerDisconnectReport, RunnerExecOutput, RunnerStatusReport,
 };
 
 use std::collections::BTreeMap;
@@ -20,7 +19,7 @@ use crate::commands::utils::response::CommandActionableMetadata;
 #[derive(Debug, Serialize)]
 pub struct RunnerExtra {
     pub variant: &'static str,
-    /// Postcondition of a mutating generation reconciliation. This is distinct
+    /// Postcondition of a mutating session reconciliation. This is distinct
     /// from the command envelope: only `converged` restores runner admission.
     /// It intentionally precedes status detail so compact output leads with the
     /// operation's changed state, remaining blocker, and next action.
@@ -39,17 +38,13 @@ pub struct RunnerExtra {
     #[serde(rename = "status", skip_serializing_if = "Option::is_none")]
     pub disconnect_status: Option<RunnerDisconnectStatus>,
     /// The compact authoritative "ready now / safe to rotate" answer. Leads the
-    /// status output; the full generation inventory below is detail behind it.
+    /// status output; the session detail below is behind it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub admission_summary: Option<RunnerAdmissionSummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub inspection: Option<RunnerStatusInspection>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub sessions: Vec<RunnerStatusReport>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub generation_inventory: Vec<RunnerDaemonGenerationStatus>,
-    /// Idle drained generations, with the blocker or null when ready to stop.
-    pub retirement_readiness: BTreeMap<String, homeboy::runner::GenerationRetirementVerdict>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub operator_hints: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -92,8 +87,6 @@ impl Default for RunnerExtra {
             admission_summary: None,
             inspection: None,
             sessions: Vec::new(),
-            generation_inventory: Vec::new(),
-            retirement_readiness: BTreeMap::new(),
             operator_hints: Vec::new(),
             operator_commands: Vec::new(),
             operator_summary: None,
@@ -110,16 +103,13 @@ impl Default for RunnerExtra {
 /// Bounded postcondition for `runner reconcile`.
 #[derive(Debug, Serialize, PartialEq, Eq)]
 pub struct RunnerReconciliationOutcome {
-    /// What this invocation changed. `unchanged` means no generation could be
-    /// retired from the observed state.
-    pub changed_state: String,
-    /// State plane that owns direct-runner generation reconciliation.
+    /// State plane that owns direct-runner session reconciliation.
     pub owner: &'static str,
-    /// The one runner and its persisted daemon generations inspected here.
+    /// The one runner and its current daemon session inspected here.
     pub scope: String,
     /// State guaranteed only when `status` is `converged`.
     pub postcondition: &'static str,
-    /// `converged`, `partial_progress`, or `blocked`.
+    /// `converged` or `blocked`.
     pub status: RunnerReconciliationStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remaining_blocker: Option<String>,
@@ -129,20 +119,6 @@ pub struct RunnerReconciliationOutcome {
     /// make additional progress. This prevents an unbounded self-recommendation.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub retry_predicate: Option<String>,
-    pub retired_generation_count: usize,
-    pub retirement_blockers: std::collections::BTreeMap<String, String>,
-    pub retained_evidence_generation_count: usize,
-    /// Generations retired under `--release-unverified-evidence`, each with the
-    /// verification failure it was released despite (#15653).
-    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
-    pub released_unverified_evidence: std::collections::BTreeMap<String, String>,
-    /// Job owners released from proven-stopped draining generations under
-    /// `--confirm-workload-processes-absent`, by retired generation (#15779).
-    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
-    pub released_stopped_generation_jobs: std::collections::BTreeMap<String, Vec<String>>,
-    /// IDs retired by this reconciliation operation under the generation lock.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub retired_generation_ids: Vec<String>,
 }
 
 /// Terminality of a `runner reconcile` result.
@@ -150,7 +126,6 @@ pub struct RunnerReconciliationOutcome {
 #[serde(rename_all = "snake_case")]
 pub enum RunnerReconciliationStatus {
     Converged,
-    PartialProgress,
     Blocked,
 }
 
@@ -302,15 +277,9 @@ pub struct LabRunnerConnectionCapability {
 
 #[derive(Debug, Serialize)]
 pub struct RunnerTruncation {
-    pub omitted_generations: usize,
-    #[serde(skip_serializing_if = "is_zero")]
     pub omitted_sessions: usize,
     pub evidence_ref: String,
     pub full_command: String,
-}
-
-fn is_zero(value: &usize) -> bool {
-    *value == 0
 }
 
 #[derive(Debug, Serialize)]
@@ -579,8 +548,7 @@ pub struct RecipeRunProvidersOutput {
         Vec<homeboy_extension_contract::api::v1::ExtensionApiRecipeRunProviderInventoryEntry>,
 }
 
-/// An authoritative job observation or a retained generation ownership record.
-/// Retained projections deliberately omit fields the daemon no longer provides.
+/// One authoritative job observation from the runner's current daemon.
 #[derive(Debug, Serialize, PartialEq, Eq)]
 pub struct RunnerJobListEntry {
     pub job_id: String,
@@ -596,8 +564,6 @@ pub struct RunnerJobListEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub correlation: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub generation: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub started_at_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub logs_command: Option<String>,
@@ -612,9 +578,6 @@ pub struct RunnerJobListOutput {
     pub runner_id: String,
     /// Live entries are a read-only daemon/broker observation at invocation time.
     pub live_daemon_job_count: usize,
-    /// Retained entries are durable generation ownership records, not evidence
-    /// that a process is still running.
-    pub retained_durable_projection_count: usize,
     pub jobs: Vec<RunnerJobListEntry>,
 }
 

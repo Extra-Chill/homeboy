@@ -231,7 +231,6 @@ impl RunnerContinuationProvider for RunnerContinuation {
             Ok(snapshot) => runner_live_job_authority_from_admission(
                 snapshot.summary.active_job_count,
                 snapshot.summary.safe_to_rotate,
-                snapshot.summary.unresolved_retained_projection_count,
             ),
             Err(_) => RunnerLiveJobAuthority::Unknown,
         }
@@ -260,7 +259,6 @@ impl RunnerContinuationProvider for RunnerContinuation {
 fn runner_live_job_authority_from_admission(
     active_job_count: Option<usize>,
     safe_to_rotate: bool,
-    unresolved_retained_projection_count: usize,
 ) -> RunnerLiveJobAuthority {
     let Some(active_job_count) = active_job_count else {
         return RunnerLiveJobAuthority::Unknown;
@@ -268,7 +266,7 @@ fn runner_live_job_authority_from_admission(
     if active_job_count > 0 {
         return RunnerLiveJobAuthority::Busy;
     }
-    if safe_to_rotate && unresolved_retained_projection_count == 0 {
+    if safe_to_rotate {
         return RunnerLiveJobAuthority::Idle;
     }
     RunnerLiveJobAuthority::Unknown
@@ -463,19 +461,19 @@ mod tests {
     #[test]
     fn live_job_authority_maps_reconciled_idle_busy_and_unknown_admission() {
         assert_eq!(
-            runner_live_job_authority_from_admission(Some(0), true, 0),
+            runner_live_job_authority_from_admission(Some(0), true),
             RunnerLiveJobAuthority::Idle
         );
         assert_eq!(
-            runner_live_job_authority_from_admission(Some(2), false, 0),
+            runner_live_job_authority_from_admission(Some(2), false),
             RunnerLiveJobAuthority::Busy
         );
         assert_eq!(
-            runner_live_job_authority_from_admission(Some(0), true, 1),
+            runner_live_job_authority_from_admission(None, true),
             RunnerLiveJobAuthority::Unknown
         );
         assert_eq!(
-            runner_live_job_authority_from_admission(Some(0), false, 0),
+            runner_live_job_authority_from_admission(Some(0), false),
             RunnerLiveJobAuthority::Unknown
         );
     }

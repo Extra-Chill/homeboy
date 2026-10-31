@@ -21,14 +21,14 @@ The controller checks the selected lease, response schema and agreement between
 count, freshness and job identities before using the observation.
 
 Direct runner status feeds this observation into the existing
-`RunnerAdmissionSnapshot` consumed by status, doctor and placement. The current
-service is the authority for its current jobs; retained generation counts remain
-historical ownership/evidence and cannot overwrite that service count. Proven
-activity on another generation still fences rotation and admission.
+`RunnerAdmissionSnapshot` consumed by status, doctor and placement. The runner's
+one current session names the daemon whose jobs count; that service is the sole
+authority for its active jobs, and no historical ownership record is added to
+or substituted for its count.
 
-Status serialization renders captured facts only and never re-reads the
-generation store. Historical generation detail is exposed separately through
-the snapshot's `generation_inventory` and bounded admission summary.
+Status serialization renders captured facts only. The snapshot carries the
+status report and its bounded admission summary: connected, the current lease,
+and active jobs.
 
 Unavailable job observation is **unknown**, not authoritative zero.
 `RunnerAdmissionSummary` and Runner API readiness omit `active_job_count` when
@@ -39,15 +39,15 @@ does not establish an idle job observation.
 
 The service-observation endpoint is required for this direct path. A runner that
 does not serve it is unobserved, rather than silently falling back to a second
-truth path. Existing transport and generation lifecycle remain
-separate delivery boundaries under #13881; this observation change does not
-claim runner-owned upgrades or automatic retirement of historical generations.
+truth path. Existing transport and daemon lifecycle remain separate delivery
+boundaries under #13881; this observation change does not claim runner-owned
+upgrades.
 
 Explicit managed refresh of a pre-describe runner-owned service has a separate
 bounded migration authority. Owned, fresh, idle health reads bracket a complete
 typed job inventory; each read must match the selected lease, PID and build.
 The inventory covers every service job regardless of controller alias. Live or
-stale jobs, missing inventories, drifted identity, and conflicting generation
+stale jobs, missing inventories, drifted identity, and conflicting lease
 ownership refuse migration. Refresh revalidates after acquiring its promotion
 lease and immediately before service replacement. This operation-local evidence
 does not change normal status or workload admission. Missing describe capability

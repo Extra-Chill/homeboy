@@ -4,10 +4,7 @@ use std::cell::RefCell;
 use std::time::{Duration, Instant};
 
 use super::*;
-use crate::{
-    RollingDrainState, RunnerActiveJobState, RunnerDaemonGenerationStatus, RunnerExecMode,
-    RunnerSessionState, RunnerStatusReport,
-};
+use crate::{RunnerActiveJobState, RunnerExecMode, RunnerSessionState, RunnerStatusReport};
 use homeboy_core::daemon::{DaemonFreshnessReport, DaemonStaleReasonCode};
 use homeboy_core::error::Error;
 
@@ -75,52 +72,15 @@ fn freshness(
     }
 }
 
-fn generation(
-    name: &str,
-    admission_owner: bool,
-    active_job_count: usize,
-) -> RunnerDaemonGenerationStatus {
-    RunnerDaemonGenerationStatus {
-        generation: name.to_string(),
-        admission_owner,
-        drain_state: if admission_owner {
-            RollingDrainState::Admitting
-        } else {
-            RollingDrainState::Draining
-        },
-        active_job_count,
-        observed_active_job_count: Some(active_job_count),
-        active_job_count_authoritative: true,
-        job_owner_count: active_job_count,
-        run_owner_count: 0,
-        artifact_owner_count: 0,
-        homeboy_build_identity: None,
-        remote_daemon_lease_id: Some(name.to_string()),
-        remote_daemon_address: None,
-        local_url: None,
-    }
-}
-
 #[test]
-fn refresh_readiness_reports_active_draining_generation_with_its_exact_owner() {
+fn refresh_readiness_does_not_fence_a_ready_daemon_on_its_own_live_jobs() {
     let mut report = readiness_report(freshness(true, None));
     report.active_job_count = 1;
-    let readiness = refresh_readiness_from_status(
-        "homeboy-lab",
-        &report,
-        &[
-            generation("lease-old", false, 1),
-            generation("lease-new", true, 0),
-        ],
-        &[],
-    );
+    let readiness = refresh_readiness_from_status("homeboy-lab", &report);
 
-    assert_eq!(readiness.state, HomeboyRefreshReadinessState::Draining);
-    assert_eq!(readiness.owners, ["lease-old"]);
-    assert_eq!(
-        readiness.continuation.as_deref(),
-        Some("homeboy runner reconcile homeboy-lab")
-    );
+    assert_eq!(readiness.state, HomeboyRefreshReadinessState::Ready);
+    assert!(readiness.owners.is_empty());
+    assert!(readiness.continuation.is_none());
 }
 
 #[test]
@@ -131,8 +91,6 @@ fn refresh_readiness_blocks_a_post_refresh_binary_hash_mismatch() {
             false,
             Some(DaemonStaleReasonCode::BinaryHashMismatch),
         )),
-        &[generation("lease-new", true, 0)],
-        &[],
     );
 
     assert_eq!(readiness.state, HomeboyRefreshReadinessState::Blocked);
@@ -151,12 +109,8 @@ fn refresh_readiness_blocks_a_post_refresh_binary_hash_mismatch() {
 
 #[test]
 fn refresh_readiness_certifies_immediate_admission_only_when_ready() {
-    let readiness = refresh_readiness_from_status(
-        "homeboy-lab",
-        &readiness_report(freshness(true, None)),
-        &[generation("lease-new", true, 0)],
-        &[],
-    );
+    let readiness =
+        refresh_readiness_from_status("homeboy-lab", &readiness_report(freshness(true, None)));
 
     assert_eq!(readiness.state, HomeboyRefreshReadinessState::Ready);
     assert!(readiness.daemon_fresh);
@@ -166,26 +120,22 @@ fn refresh_readiness_certifies_immediate_admission_only_when_ready() {
 
 #[test]
 fn incomplete_readiness_does_not_rewrite_daemon_refresh_compatibility_facts() {
-    let mut report = readiness_report(freshness(true, None));
-    report.active_job_count = 1;
     let readiness = refresh_readiness_from_status(
         "homeboy-lab",
-        &report,
-        &[
-            generation("lease-old", false, 1),
-            generation("lease-new", true, 0),
-        ],
-        &[],
+        &readiness_report(freshness(
+            false,
+            Some(DaemonStaleReasonCode::VersionMismatch),
+        )),
     );
 
-    assert_eq!(readiness.state, HomeboyRefreshReadinessState::Draining);
+    assert_eq!(readiness.state, HomeboyRefreshReadinessState::Blocked);
     // A completed rotation remains a completed daemon operation. The non-ready
     // readiness state and nonzero refresh result express incomplete convergence.
     assert!(!reconnect_required_after_refresh(true));
     assert!(reconnect_required_after_refresh(false));
     assert_eq!(
         readiness.continuation.as_deref(),
-        Some("homeboy runner reconcile homeboy-lab")
+        Some("homeboy runner status homeboy-lab --full")
     );
 }
 
@@ -389,8 +339,6 @@ fn unconverged_readiness_produces_a_named_failure_not_a_silent_exit() {
             false,
             Some(DaemonStaleReasonCode::VersionMismatch),
         )),
-        &[generation("lease-new", true, 0)],
-        &[],
     );
     assert_eq!(readiness.state, HomeboyRefreshReadinessState::Blocked);
 
@@ -416,12 +364,8 @@ fn unconverged_readiness_produces_a_named_failure_not_a_silent_exit() {
 #[test]
 fn converged_or_absent_readiness_never_synthesizes_a_failure() {
     let (plan, execution) = unconverged_refresh_fixture();
-    let ready = refresh_readiness_from_status(
-        "homeboy-lab",
-        &readiness_report(freshness(true, None)),
-        &[generation("lease-new", true, 0)],
-        &[],
-    );
+    let ready =
+        refresh_readiness_from_status("homeboy-lab", &readiness_report(freshness(true, None)));
     assert_eq!(ready.state, HomeboyRefreshReadinessState::Ready);
 
     assert!(unconverged_refresh_failure(&plan, &execution, true, Some(&ready)).is_none());
@@ -435,27 +379,21 @@ fn converged_or_absent_readiness_never_synthesizes_a_failure() {
 fn unconverged_readiness_message_names_state_owners_and_next_action() {
     let readiness = refresh_readiness_from_status(
         "homeboy-lab",
-        &{
-            let mut report = readiness_report(freshness(true, None));
-            report.active_job_count = 1;
-            report
-        },
-        &[
-            generation("lease-old", false, 1),
-            generation("lease-new", true, 0),
-        ],
-        &[],
+        &readiness_report(freshness(
+            false,
+            Some(DaemonStaleReasonCode::VersionMismatch),
+        )),
     );
-    assert_eq!(readiness.state, HomeboyRefreshReadinessState::Draining);
+    assert_eq!(readiness.state, HomeboyRefreshReadinessState::Blocked);
 
     let message = unconverged_readiness_message("homeboy-lab", &readiness);
     assert!(message.contains("homeboy-lab"));
-    assert!(message.contains("Draining"));
+    assert!(message.contains("Blocked"));
     assert!(message.contains("accepting_jobs=false"));
-    assert!(message.contains("daemon_fresh=true"));
-    assert!(message.contains("lease-old"), "must name the fencing owner");
+    assert!(message.contains("daemon_fresh=false"));
+    assert!(message.contains("lease-new"), "must name the fencing owner");
     assert!(
-        message.contains("homeboy runner reconcile homeboy-lab"),
+        message.contains("homeboy runner status homeboy-lab --full"),
         "must surface the exact continuation command"
     );
 }

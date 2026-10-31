@@ -193,7 +193,7 @@ pub(crate) fn validate_controller_artifact(artifact: &ArtifactRecord) -> Result<
     validate_controller_artifact_bytes(artifact)
 }
 
-pub(crate) fn validate_controller_artifact_bytes(artifact: &ArtifactRecord) -> Result<()> {
+fn validate_controller_artifact_bytes(artifact: &ArtifactRecord) -> Result<()> {
     if !matches!(artifact.artifact_type.as_str(), "file" | "directory") {
         return Err(Error::validation_invalid_argument(
             "artifact.type",
@@ -414,9 +414,7 @@ pub fn refresh_mirrored_daemon_evidence(
         },
         crate::connection::close_reconnected_job_log_owner,
     )?;
-    refresh_snapshot(store, run, &runner, snapshot, || {
-        super::super::generation_store::reconcile(&runner_id).map(|_| ())
-    })
+    refresh_snapshot(store, run, &runner, snapshot)
 }
 
 fn mirrored_last_sequence(run: &RunRecord) -> u64 {
@@ -439,7 +437,6 @@ pub(super) fn refresh_snapshot(
     run: &RunRecord,
     runner: &Runner,
     snapshot: (RunnerJobLogSnapshot, bool),
-    reconcile: impl FnOnce() -> Result<()>,
 ) -> Result<homeboy_core::observation::runs_service::runner_evidence::MirroredRunRefresh> {
     use homeboy_core::observation::runs_service::runner_evidence::MirroredRunRefresh;
     let run_id = run.id.as_str();
@@ -487,16 +484,7 @@ pub(super) fn refresh_snapshot(
     );
     request.existing = Some(run);
     request.cursor = Some((next, count));
-    let runs = refresh_mirrored_daemon_evidence_with(store, request, || {
-        if matches!(
-            job.status,
-            JobStatus::Succeeded | JobStatus::Failed | JobStatus::Cancelled
-        ) {
-            reconcile()?;
-        }
-        Ok(())
-    })?
-    .unwrap_or_default();
+    let runs = refresh_mirrored_daemon_evidence_with(store, request)?.unwrap_or_default();
     let updated = runs
         .iter()
         .find(|row| row.id == run.id)
@@ -541,17 +529,12 @@ pub(super) fn incremental_job_snapshot(
     Ok((RunnerJobLogSnapshot { job, events }, events_pending))
 }
 
-pub(super) fn refresh_mirrored_daemon_evidence_with<F>(
+pub(super) fn refresh_mirrored_daemon_evidence_with(
     store: &ObservationStore,
     request: MirrorEvidenceRequest<'_>,
-    reconcile: F,
-) -> Result<Option<Vec<RunRecord>>>
-where
-    F: FnOnce() -> Result<()>,
-{
+) -> Result<Option<Vec<RunRecord>>> {
     let local_job_run = mirror_job_run_request(store, request)?;
     let result = (|| {
-        reconcile()?;
         let remote_runs = mirror_remote_observation_runs(
             store,
             request.runner,

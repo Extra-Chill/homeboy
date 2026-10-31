@@ -324,8 +324,8 @@ pub fn connect(runner_id: &str) -> Result<(RunnerConnectReport, i32)> {
 /// Restart the runner's daemon in place after a binary refresh: the same
 /// state directory under a new lease. The caller has proven every active job
 /// is re-adoptable, so the restarted daemon continues them from its job store.
-/// The controller ledger then moves the stopped lease's jobs, runs and
-/// artifacts onto the restarted lease, so observers follow them through the
+/// Jobs, runs and artifacts route through the runner's one current session, so
+/// publishing the restarted session lets observers follow them through the
 /// new tunnel instead of reporting a lost job, a dead lease or a replaced
 /// daemon.
 ///
@@ -585,11 +585,7 @@ fn connect_with_orphan_adoption_and_live_lease(
     // runtime state and takes no promotion lease. Waiting on that lease would
     // block every reconnect behind any running Cook's generation pin.
     if load(runner_id)?.settings.service_managed {
-        let result = service::connect_service_runner(runner_id)?;
-        if result.1 == 0 {
-            retire_drained_generations(&load(runner_id)?)?;
-        }
-        return Ok(result);
+        return service::connect_service_runner(runner_id);
     }
     // Reconnect replaces daemon runtime state. It shares the promotion lease
     // with binary selection so a second session cannot reconnect against a
@@ -677,16 +673,12 @@ fn connect_with_orphan_adoption_and_live_lease(
     };
     // A malformed local record is not ownership evidence. It remains fail
     // closed unless an operator supplies an exact live-lease expectation.
-    let previous_session = match read_session_or_live_peer(runner_id) {
+    // The runner's one current session is the reconnect target.
+    let mut previous_session = match read_session_or_live_peer(runner_id) {
         Ok(session) => session,
         Err(error) if error.code == homeboy_core::error::ErrorCode::ConfigInvalidJson => None,
         Err(error) => return Err(error),
     };
-    // A controller can lose its local tunnel after B became admission owner.
-    // Rehydrate B from the durable ledger rather than treating the session
-    // record (which may still name draining A) as the reconnect target.
-    let mut previous_session =
-        super::generation_store::admission_session(runner_id)?.or(previous_session);
     let mut pending_replacement = replacement_journal::pending_replacement(runner_id)?;
     let mut replacement_operation_id = None;
     if let Some(pending) = pending_replacement.as_ref() {
@@ -731,7 +723,7 @@ fn connect_with_orphan_adoption_and_live_lease(
 
     let mut leaseless_recovery = None;
     let mut state_loss_recovery = None;
-    // Recovery creates a new immutable generation. Its endpoint, not the
+    // Recovery creates a new immutable daemon. Its endpoint, not the
     // previous session, is the only safe reconnect target for this attempt.
     let mut recovery_daemon = pending_replacement
         .as_ref()
@@ -1214,7 +1206,7 @@ fn connect_with_orphan_adoption_and_live_lease(
 
     // The remote recovery response is the first point at which B's immutable
     // coordinates exist. Journal them before opening a tunnel so interruption
-    // retries can authenticate B rather than touching the prior generation.
+    // retries can authenticate B rather than touching the prior daemon.
     if pending_replacement.is_none() {
         if let Some(daemon) = recovery_daemon.as_ref() {
             replacement_journal::record_pending_replacement(
@@ -1233,7 +1225,7 @@ fn connect_with_orphan_adoption_and_live_lease(
     let daemon = match recovery_daemon {
         Some(daemon) => Ok(daemon),
         // Normal reconnects must inspect the live daemon first: a reachable,
-        // compatible generation reattaches, while an idle stale generation
+        // compatible daemon reattaches, while an idle stale daemon
         // follows ReplaceIdleStale instead of bypassing its fenced lifecycle.
         None => crate::admission_fence::with_admission_fence(
             runner_id,
@@ -1321,7 +1313,7 @@ fn connect_with_orphan_adoption_and_live_lease(
     // Ordinary ensure-running and exact-owner replacement also cross the
     // mutation boundary. Persist the returned immutable coordinates before
     // opening a tunnel so health or endpoint-identity failure can never strand
-    // an unpublished daemon generation.
+    // an unpublished daemon.
     if pending_replacement.is_none()
         && replacement_journal::replacement_operation_replay(runner_id)?.is_some()
     {
@@ -1417,8 +1409,8 @@ fn connect_with_orphan_adoption_and_live_lease(
             .and_then(|e| serde_json::to_value(e).ok()),
     };
     // The tunnel health check above re-proved the exact remote lease and PID.
-    // Persist its generation before the controller session so a later session
-    // drift still has authenticated promotion provenance to reconcile safely.
+    // Settle the replacement journal, then publish the authenticated daemon as
+    // the runner's one current session.
     if let Err(error) = promotion_lease
         .assert_generation()
         .and_then(|_| replacement_journal::promote_pending_replacement(runner_id, &session))
@@ -1447,7 +1439,6 @@ fn connect_with_orphan_adoption_and_live_lease(
     // without agent-task support resolve this as an inert no-op.
     drop(promotion_lease);
     super::runner_probe_gate::invalidate_runner_probes(runner_id);
-    retire_drained_generations(&runner)?;
     Ok((
         RunnerConnectReport {
             runner_id: runner.id,
@@ -1865,39 +1856,16 @@ fn fenced_remote_mutation(
 }
 
 pub fn status(runner_id: &str) -> Result<RunnerStatusReport> {
-    status_with_admission_projection(runner_id).map(|(status, _, _)| status)
-}
-
-pub(crate) fn status_until(runner_id: &str, deadline: Instant) -> Result<RunnerStatusReport> {
-    status_with_admission_projection_until(runner_id, deadline).map(|(status, _, _)| status)
-}
-
-/// Capture status and the generation ledger together so callers that need an
-/// admission answer cannot observe a second, racing persisted generation state.
-pub(crate) fn status_with_admission_projection(
-    runner_id: &str,
-) -> Result<(
-    RunnerStatusReport,
-    Vec<super::RunnerDaemonGenerationStatus>,
-    Vec<super::RunnerGenerationJobOwners>,
-)> {
-    status_with_admission_projection_until(
+    status_until(
         runner_id,
         Instant::now() + crate::readonly_probe::readonly_probe_timeout(),
     )
 }
 
-/// Capture status and its admission ledger under one caller-owned deadline.
-/// Network observations must share this budget so diagnostic callers retain
-/// their envelope even when individual endpoints stall.
-pub(crate) fn status_with_admission_projection_until(
-    runner_id: &str,
-    deadline: Instant,
-) -> Result<(
-    RunnerStatusReport,
-    Vec<super::RunnerDaemonGenerationStatus>,
-    Vec<super::RunnerGenerationJobOwners>,
-)> {
+/// Capture the runner's current session status under one caller-owned
+/// deadline. Network observations must share this budget so diagnostic
+/// callers retain their envelope even when individual endpoints stall.
+pub(crate) fn status_until(runner_id: &str, deadline: Instant) -> Result<RunnerStatusReport> {
     let runner = load(runner_id)?;
     let session_path = session_path(runner_id)?;
     // Status is an observation path. In particular, a stale direct-SSH record
@@ -2017,11 +1985,8 @@ pub(crate) fn status_with_admission_projection_until(
     }
     let selected_active_job_count =
         reconciled_active_job_count(active_jobs.len(), direct_daemon_active_jobs);
-    // This is strictly the selected daemon's live count. The admission summary
-    // separately reports durable ownership and unidentified retained counters.
+    // This is strictly the selected daemon's live count.
     let active_job_count = selected_active_job_count;
-    let (generation_inventory, generation_owners) =
-        super::generation_store::status_admission_projection(runner_id)?;
     let stale_runner_job_count = stale_jobs.len();
     let active_runner_jobs = active_jobs.iter().map(Into::into).collect();
     let stale_runner_jobs = stale_jobs.iter().map(Into::into).collect();
@@ -2044,135 +2009,65 @@ pub(crate) fn status_with_admission_projection_until(
         active_job_recovery_evidence: None,
         session_path: session_path.display().to_string(),
     };
-    Ok((status, generation_inventory, generation_owners))
+    Ok(status)
 }
 
 /// Apply the bounded reconciliation that status intentionally only projects.
-/// This is an explicit lifecycle command because it may persist observations,
-/// promote admission, stop a drained daemon, and terminate its local tunnel.
+/// This is an explicit lifecycle command because it may persist the current
+/// session's observed daemon metadata and settle its terminal jobs. The
+/// returned report is a fresh postcondition observation.
 pub fn reconcile_status(runner_id: &str) -> Result<RunnerStatusReport> {
-    reconcile_status_with_outcome(runner_id).map(|outcome| outcome.status)
-}
-
-/// Reconcile a runner and retain the exact generations this operation retired.
-/// The report is a fresh postcondition observation; retirement IDs come only
-/// from the generation reconciler's locked removal path.
-pub fn reconcile_status_with_outcome(runner_id: &str) -> Result<RunnerReconcileStatusOutcome> {
-    reconcile_status_with_outcome_in_roots_with_policy(
-        runner_id,
-        super::generation_store::GenerationReconcilePolicy::default(),
-    )
-}
-
-/// [`reconcile_status_with_outcome`] with explicit operator choices, such as
-/// releasing idle generations whose retained evidence cannot be verified.
-pub fn reconcile_status_with_outcome_with_policy(
-    runner_id: &str,
-    policy: super::generation_store::GenerationReconcilePolicy,
-) -> Result<RunnerReconcileStatusOutcome> {
-    reconcile_status_with_outcome_in_roots_with_policy(runner_id, policy)
-}
-
-/// Lifecycle hook shared by reconnect, refresh, and upgrade (which refreshes).
-/// Use the normal reconciler and its default, fail-closed evidence policy.
-pub(crate) fn retire_drained_generations(runner: &Runner) -> Result<()> {
-    let policy = super::generation_store::GenerationReconcilePolicy::default();
-    if let Ok(Some((_, _, client))) = remote_daemon::resolve_ssh_runner(runner) {
-        super::generation_store::reconcile_with_ssh_and_policy(&runner.id, &client, policy)?;
-    } else {
-        super::generation_store::reconcile_with_policy(&runner.id, policy)?;
-    }
-    Ok(())
-}
-
-fn reconcile_status_with_outcome_in_roots_with_policy(
-    runner_id: &str,
-    policy: super::generation_store::GenerationReconcilePolicy,
-) -> Result<RunnerReconcileStatusOutcome> {
     let runner = load(runner_id)?;
     let mut report = status(runner_id)?;
-    if report.connected {
-        reconcile_session_metadata_with_observed_daemon(&runner, &mut report.session, true)?;
+    // Terminal-job settlement needs a live session transport; a disconnected
+    // runner reports its reconnect action from the observation instead.
+    if !report.connected {
+        return Ok(report);
     }
-    // Terminal-job settlement needs a live session transport. Generation
-    // reconciliation below can instead inspect a disconnected SSH runner, so
-    // do not let the terminal-job preflight block its advertised recovery path.
-    if report.connected {
-        reconcile_terminal_jobs(runner_id)?;
+    reconcile_session_metadata_with_observed_daemon(&runner, &mut report.session, true)?;
+    reconcile_terminal_jobs(runner_id)?;
+    // Jobs admitted before this observation started are terminal once the
+    // session's daemon reports zero active jobs.
+    let observed_since_ms = Utc::now().timestamp_millis();
+    let postcondition = status(runner_id)?;
+    if postcondition.connected
+        && postcondition.active_job_state == RunnerActiveJobState::Available
+        && postcondition.active_job_count == 0
+    {
+        crate::runner_state_lock::with_runner_registry_lock(runner_id, || {
+            crate::admission_fence::release_admitted_jobs_observed_idle_locked(
+                runner_id,
+                observed_since_ms,
+            )
+        })?;
     }
-    let generation_reconcile =
-        if let Ok(Some((_, _, client))) = remote_daemon::resolve_ssh_runner(&runner) {
-            super::generation_store::reconcile_with_ssh_and_policy(runner_id, &client, policy)?
-        } else {
-            super::generation_store::reconcile_with_policy(runner_id, policy)?
-        };
-    if report.connected {
-        if let (Some(session), Some(_)) =
-            (report.session.as_ref(), report.daemon_freshness.as_ref())
-        {
-            super::generation_store::reconcile_admission_session(runner_id, session)?;
-        }
-    }
-    Ok(RunnerReconcileStatusOutcome {
-        status: status(runner_id)?,
-        retired_generation_ids: generation_reconcile.retired_generation_ids,
-        retirement_blockers: generation_reconcile.retirement_blockers,
-        retained_evidence_generation_count: generation_reconcile.retained_evidence_generation_count,
-        evidence_blocked_generation_ids: generation_reconcile.evidence_blocked_generation_ids,
-        released_unverified_evidence: generation_reconcile.released_unverified_evidence,
-        stopped_generation_job_owner_ids: generation_reconcile.stopped_generation_job_owner_ids,
-        released_stopped_generation_jobs: generation_reconcile.released_stopped_generation_jobs,
-    })
-}
-
-#[derive(Debug)]
-pub struct RunnerReconcileStatusOutcome {
-    pub status: RunnerStatusReport,
-    pub retired_generation_ids: Vec<String>,
-    pub retirement_blockers: std::collections::BTreeMap<String, String>,
-    pub retained_evidence_generation_count: usize,
-    /// Idle generations blocked only by retained-evidence verification.
-    pub evidence_blocked_generation_ids: std::collections::BTreeSet<String>,
-    /// Generations retired under `--release-unverified-evidence`, with reasons.
-    pub released_unverified_evidence: std::collections::BTreeMap<String, String>,
-    /// Proven-stopped draining generations still pinned by job owners that
-    /// only a workload-absence attestation can release (#15779).
-    pub stopped_generation_job_owner_ids: std::collections::BTreeMap<String, Vec<String>>,
-    /// Job owners released under that attestation, by retired generation.
-    pub released_stopped_generation_jobs: std::collections::BTreeMap<String, Vec<String>>,
+    Ok(postcondition)
 }
 
 /// The result of a reconcile that was allowed to apply the operator-attested
-/// remote dead-lease recovery: the post-attestation reconcile outcome plus the
-/// exact remote recovery that ran, if one did.
+/// remote dead-lease recovery: the post-attestation status plus the exact
+/// remote recovery that ran, if one did.
 #[derive(Debug)]
 pub struct RunnerReconcileWithAttestationOutcome {
-    pub outcome: RunnerReconcileStatusOutcome,
+    pub status: RunnerStatusReport,
     pub attested: Option<dead_lease_attestation::RemoteAttestedReconcileApplied>,
 }
 
-/// Reconcile a runner, and when that reconcile is blocked by a remote
-/// generation whose daemon PID is dead and whose active jobs lack automatic
-/// proof, apply the operator-attested remote dead-lease recovery
+/// Reconcile a runner, and when the session's daemon lacks ownership evidence
+/// for its active jobs, apply the operator-attested remote dead-lease recovery
 /// (`daemon reconcile-dead-lease-orphans` on the runner, bound to that exact
-/// generation), then re-run the reconcile (#15556).
+/// lease), then re-run the reconcile (#15556).
 ///
-/// Without the blocker this is exactly [`reconcile_status_with_outcome`]. A
-/// refusal from the runner side — a live daemon PID, a live child, or a changed
-/// job set — is surfaced verbatim and nothing is retried.
-pub fn reconcile_status_with_outcome_with_remote_attestation(
+/// Without the blocker this is exactly [`reconcile_status`]. A refusal from the
+/// runner side — a live daemon PID, a live child, or a changed job set — is
+/// surfaced verbatim and nothing is retried.
+pub fn reconcile_status_with_remote_attestation(
     runner_id: &str,
 ) -> Result<RunnerReconcileWithAttestationOutcome> {
-    let first = reconcile_status_with_outcome(runner_id)?;
-    // Two blocked states can come from a dead generation whose jobs have no
-    // automatic proof: the admission daemon itself lacks ownership evidence,
-    // or a draining generation cannot retire (the Lab inventory incident,
-    // chaos case 8). Anything else has nothing to attest.
-    let blocked = dead_lease_attestation::blocked_by_daemon_ownership_evidence(&first.status)
-        || !first.retirement_blockers.is_empty();
-    if !blocked {
+    let first = reconcile_status(runner_id)?;
+    if !dead_lease_attestation::blocked_by_daemon_ownership_evidence(&first) {
         return Ok(RunnerReconcileWithAttestationOutcome {
-            outcome: first,
+            status: first,
             attested: None,
         });
     }
@@ -2180,15 +2075,14 @@ pub fn reconcile_status_with_outcome_with_remote_attestation(
     // The fresh observation is the authoritative postcondition: the attested
     // recovery terminalized the exact job set, so the same reconcile that was
     // blocked now reports the recovered state.
-    let outcome = reconcile_status_with_outcome(runner_id)?;
     Ok(RunnerReconcileWithAttestationOutcome {
-        outcome,
+        status: reconcile_status(runner_id)?,
         attested: Some(attested),
     })
 }
 
 /// Return the controller-side session projection with bounded liveness
-/// observation, without reconnecting or reconciling generation state.
+/// observation, without reconnecting or reconciling the daemon.
 pub fn persisted_status(runner_id: &str) -> Result<RunnerStatusReport> {
     persisted_status_until(
         runner_id,
@@ -2227,7 +2121,7 @@ pub fn persisted_status_until(
 }
 
 /// Bounded, observation-only doctor projection. Unlike `status`, this never
-/// reconciles jobs, generations, sessions, or tunnels, but a disconnected
+/// reconciles jobs, sessions, or tunnels, but a disconnected
 /// session still receives remote lease recovery evidence when SSH is available.
 pub fn diagnostic_status(runner_id: &str) -> Result<RunnerStatusReport> {
     let mut report = persisted_status(runner_id)?;
@@ -2264,7 +2158,7 @@ fn reconnect_job_owner(runner_id: &str) -> Result<RunnerSession> {
     };
     let daemon = RemoteDaemon {
         address: owner.remote_daemon_address.clone().ok_or_else(|| {
-            Error::internal_unexpected("job-owning daemon generation has no remote address")
+            Error::internal_unexpected("job-owning daemon session has no remote address")
         })?,
         pid: owner.remote_daemon_pid,
         lease_id: owner.remote_daemon_lease_id.clone(),
@@ -2307,7 +2201,7 @@ fn job_owner_reattach_error(runner_id: &str, report: RunnerConnectReport) -> Err
     let message = report
         .failure_message
         .clone()
-        .unwrap_or_else(|| "unable to reattach the job-owning daemon generation".to_string());
+        .unwrap_or_else(|| "unable to reattach the job-owning daemon".to_string());
     let unreachable = report.failure_kind == Some(RunnerFailureKind::TunnelFailure)
         || report
             .failure_evidence
@@ -3627,15 +3521,11 @@ pub fn persisted_statuses() -> Result<Vec<RunnerStatusReport>> {
 }
 
 /// A latency-bounded snapshot of each runner's active jobs — a single `/jobs`
-/// query on the current session, with **no generation reconcile**.
+/// query on the current session, with no daemon freshness probe.
 ///
-/// `status()` reconciles the full generation ledger, which issues one blocking
-/// HTTP call per *draining* generation (5s timeout each) and can take minutes
-/// with hundreds of generations. Callers that only need the current active-job
-/// view must not pay that cost or scan unbounded
-/// history (#9522). This queries the connected session's `/jobs` endpoint once
-/// per runner — bounded work regardless of how much generation history has
-/// accumulated — and skips the per-generation reconcile entirely. Stale-job
+/// Callers that only need the current active-job view must not pay for the
+/// full `status()` observation (#9522). This queries the connected session's
+/// `/jobs` endpoint once per runner — bounded work per runner. Stale-job
 /// detection is a reconcile concern and is intentionally omitted here.
 pub fn statuses_indexed() -> Result<Vec<RunnerActiveJobsSnapshot>> {
     let mut snapshots = Vec::new();
@@ -3695,8 +3585,7 @@ mod status_read_purity_tests {
 
         for mutation in [
             "reconcile_session_metadata_with_observed_daemon",
-            "generation_store::reconcile",
-            "generation_store::reconcile_admission_session",
+            "reconcile_terminal_jobs(",
             "write_session(",
             "adopt",
             "read_session_or_live_peer",

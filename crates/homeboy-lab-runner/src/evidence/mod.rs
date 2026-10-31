@@ -25,8 +25,8 @@ pub use mirror::{
     refresh_mirrored_daemon_evidence, runner_job_log_snapshot, terminalize_mirrored_daemon_job,
 };
 pub(crate) use mirror::{
-    mirror_daemon_evidence, mirror_daemon_job_progress_with_ownership,
-    validate_controller_artifact_bytes, MirrorEvidenceRequest, MirrorRunOwnership,
+    mirror_daemon_evidence, mirror_daemon_job_progress_with_ownership, MirrorEvidenceRequest,
+    MirrorRunOwnership,
 };
 pub use mirror::{runner_job_log_snapshot_for_session, runner_job_log_snapshot_for_session_until};
 pub(crate) use util::{local_job_run_id, runner_exec_run_label};

@@ -990,6 +990,7 @@ fn live_peer_session_in(
 /// runner directory has its own schema and must not be parsed as a session.
 fn is_controller_session_file(path: &std::path::Path) -> bool {
     const RESERVED_SIDECARS: &[&str] = &[
+        // Left in place by earlier controllers; never parsed as a session.
         "generations.json",
         "pending-replacement.json",
         "replacement-operation.json",

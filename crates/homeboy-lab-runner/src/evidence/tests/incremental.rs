@@ -58,10 +58,7 @@ fn incremental_poll_counts_routes_and_skips_unchanged_metadata() {
         if poll == 1 {
             connection.execute_batch("CREATE TRIGGER no_metadata_write BEFORE UPDATE ON runs BEGIN SELECT RAISE(ABORT, 'unexpected metadata write'); END;").unwrap();
         }
-        let refresh = refresh_snapshot(&store, &run, &runner, snapshot, || {
-            panic!("running job must not reconcile generations")
-        })
-        .unwrap();
+        let refresh = refresh_snapshot(&store, &run, &runner, snapshot).unwrap();
         assert_eq!(refresh.job.unwrap().id, job.id);
         run = refresh.run;
     }
@@ -113,7 +110,6 @@ fn result_summary_survives_an_empty_incremental_page_without_a_write() {
             },
             false,
         ),
-        || Ok(()),
     )
     .unwrap();
     rusqlite::Connection::open(&db).unwrap().execute_batch("CREATE TRIGGER no_metadata_write BEFORE UPDATE ON runs BEGIN SELECT RAISE(ABORT, 'unexpected metadata write'); END;").unwrap();
@@ -128,7 +124,6 @@ fn result_summary_survives_an_empty_incremental_page_without_a_write() {
             },
             false,
         ),
-        || Ok(()),
     )
     .unwrap();
     assert_eq!(
@@ -152,7 +147,7 @@ fn bounded_terminal_pages_preserve_result_until_reconciliation() {
             if path == format!("/jobs/{id}") { return Ok(json!({"body": {"job": job}})); }
             Ok(json!({"body": {"events": [{"sequence": sequence, "kind": "result", "timestamp_ms": 1, "data": {"exit_code": 0}}], "terminal": terminal}}))
         }).unwrap();
-        let refresh = refresh_snapshot(&store, &run, &runner, snapshot, || Ok(())).unwrap();
+        let refresh = refresh_snapshot(&store, &run, &runner, snapshot).unwrap();
         let settled = homeboy_core::observation::runs_service::reconcile_owned_stale_running_run_with_snapshot(&store, &refresh.run, refresh.reconciliation_job()).unwrap();
         run = if settled.is_some() {
             store.get_run(&run.id).unwrap().unwrap()

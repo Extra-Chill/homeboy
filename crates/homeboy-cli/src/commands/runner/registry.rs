@@ -186,8 +186,7 @@ fn runner_inventory_summary(
     let is_local = configured.kind == RunnerKind::Local;
     let operator = status.map(super::status::operator_summary);
     let admission = status.map(|status| {
-        homeboy::runner::runner_admission_snapshot_for_status(status.clone())
-            .map(|snapshot| snapshot.summary)
+        homeboy::runner::runner_admission_snapshot_for_status(status.clone()).summary
     });
     RunnerInventorySummary {
         identity: identity.clone(),
@@ -202,10 +201,10 @@ fn runner_inventory_summary(
         admission_state: if is_local {
             "local".to_string()
         } else if let Some(admission) = admission {
-            match admission {
-                Ok(summary) if summary.accepting_jobs => "accepting".to_string(),
-                Ok(_) => "blocked".to_string(),
-                Err(_) => "unknown".to_string(),
+            if admission.accepting_jobs {
+                "accepting".to_string()
+            } else {
+                "blocked".to_string()
             }
         } else {
             "blocked".to_string()

@@ -160,7 +160,8 @@ pub(crate) fn disconnect_with_session(
         // The runner's one current session is the only daemon this controller
         // routes to. Resolve the current daemon via SSH and clean up the local
         // tunnel only after its stop.
-        let retained_generations = vec![session.clone()];
+        let recorded_session = session.clone();
+        let recorded = std::slice::from_ref(&recorded_session);
         let authoritative_status = match probe_authoritative_daemon_status(runner_id) {
             Ok(status) => status,
             Err(error) => {
@@ -169,11 +170,9 @@ pub(crate) fn disconnect_with_session(
         };
         if remote_daemon::authoritative_stale_generations_are_dead(
             &authoritative_status,
-            &eligible_stale_generation_leases(&retained_generations).unwrap_or_default(),
+            &eligible_stale_generation_leases(recorded).unwrap_or_default(),
         ) {
-            let leases =
-                eligible_stale_generation_leases(&retained_generations).unwrap_or_default();
-            super::super::generation_store::tombstone_dead_direct_generations(runner_id, &leases)?;
+            // The session's daemon is proven dead and idle: clear it.
             remove_session(runner_id)?;
             remove_ownership(runner_id)?;
             return Ok(RunnerDisconnectReport {
@@ -188,7 +187,7 @@ pub(crate) fn disconnect_with_session(
         }
         let authoritative_session = match reconcile_authoritative_idle_stale_generations(
             runner_id,
-            &retained_generations,
+            recorded,
             &authoritative_status,
         ) {
             Ok(session) => session,
@@ -198,56 +197,34 @@ pub(crate) fn disconnect_with_session(
         };
         let authoritative_rebind = authoritative_session.is_some();
         if let Some(authoritative_session) = authoritative_session {
-            *session = authoritative_session.clone();
+            *session = authoritative_session;
         }
-        let reconciled_tunnels = retained_generations
-            .iter()
-            .filter(|generation| {
-                generation.remote_daemon_lease_id != session.remote_daemon_lease_id
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        let generations = vec![session.clone()];
-        let mut unresolved = Vec::new();
-        for generation in generations {
-            if generation.mode == RunnerTunnelMode::DirectSsh {
-                let stop = if authoritative_rebind {
-                    // A rebound lease belongs to the SSH authority, while this
-                    // retained session's local tunnel targets an older generation.
-                    verify_remote_daemon_stopped(&generation, force)
-                } else {
-                    disconnect_remote_daemon(&generation, force)
-                };
-                if let Err(error) = stop {
-                    unresolved.push(serde_json::json!({
-                        "lease_id": generation.remote_daemon_lease_id,
-                        "pid": generation.remote_daemon_pid,
-                        "address": generation.remote_daemon_address,
-                        "error": error,
-                    }));
-                    continue;
-                }
-            }
-            terminate_tunnel_if_owned(&generation);
-        }
-        if !unresolved.is_empty() {
+        let stop = if authoritative_rebind {
+            // A rebound lease belongs to the SSH authority, while the recorded
+            // session's local tunnel targets the daemon it replaced.
+            verify_remote_daemon_stopped(session, force)
+        } else {
+            disconnect_remote_daemon(session, force)
+        };
+        if let Err(error) = stop {
+            let unresolved = serde_json::json!({
+                "lease_id": session.remote_daemon_lease_id,
+                "pid": session.remote_daemon_pid,
+                "address": session.remote_daemon_address,
+                "error": error,
+            });
             return partial_disconnect_report(
                 runner_id,
                 session.clone().into(),
                 format!(
-                    "remote daemon stop was not proven; sessions and ledger were retained: {}",
-                    unresolved
-                        .into_iter()
-                        .map(|entry| entry.to_string())
-                        .collect::<Vec<_>>()
-                        .join(", ")
+                    "remote daemon stop was not proven; the session was retained: {unresolved}"
                 ),
             );
         }
-        for session in reconciled_tunnels {
-            terminate_tunnel_if_owned(&session);
+        terminate_tunnel_if_owned(session);
+        if recorded_session.remote_daemon_lease_id != session.remote_daemon_lease_id {
+            terminate_tunnel_if_owned(&recorded_session);
         }
-        super::super::generation_store::clear(runner_id)?;
         let ownership = read_ownership(runner_id)?;
         if should_stop_remote_daemon(session, ownership.as_ref(), has_live_peer_session(session)?) {
             remove_ownership(runner_id)?;
@@ -289,8 +266,8 @@ fn probe_authoritative_daemon_status(runner_id: &str) -> Result<remote_daemon::R
     Ok(status)
 }
 
-/// A refresh can inherit a ledger from interrupted rotations while the remote
-/// runner has one different, authoritative idle daemon. Reconcile only after
+/// An interrupted rotation can leave the recorded session naming a lease while
+/// the remote runner has one different, authoritative idle daemon. Reconcile only after
 /// the remote status and typed jobs probe prove the exact lease is safe to stop.
 fn reconcile_authoritative_idle_stale_generations(
     runner_id: &str,
@@ -358,9 +335,8 @@ fn stable_generation_owner_identity(generation: &RunnerSession) -> String {
         .expect("persisted runner sessions must have a stable serialized identity")
 }
 
-/// Clearing the ledger is safe only when every generation is represented by a
-/// lease-bearing direct SSH endpoint. Any other generation remains on the
-/// normal per-generation disconnect path.
+/// Clearing a recorded session is safe only when it is a lease-bearing direct
+/// SSH endpoint. Any other session remains on the normal disconnect path.
 pub(in crate::connection) fn eligible_stale_generation_leases(
     generations: &[RunnerSession],
 ) -> Option<Vec<String>> {

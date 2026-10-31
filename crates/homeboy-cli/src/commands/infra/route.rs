@@ -937,31 +937,23 @@ pub(crate) fn cook_admission_decision(
     };
     let runner_id = &runner.runner_id;
     let snapshot = homeboy::runner::runners::persisted_status(runner_id)
-        .and_then(homeboy::runner::runners::runner_admission_snapshot_for_status)
+        .map(homeboy::runner::runners::runner_admission_snapshot_for_status)
         .ok();
-    let unresolved = snapshot.as_ref().is_some_and(|s| {
-        s.summary.unresolved_retained_projection_count > 0
-            || !s.summary.unresolved_generation_ids.is_empty()
-    });
     let ready = preflight.lab_readiness.as_ref().is_some_and(|r| {
         r.state == "connected_ready"
             && r.selected_runner_id.as_ref() == Some(runner_id)
             && r.available_runner_ids.contains(runner_id)
     });
-    if !unresolved && ready {
+    if ready {
         return CookAdmissionDecision::Admitted;
     }
     if let Some(snapshot) = snapshot {
         let outcome = crate::commands::runner::reconciliation_outcome(
             runner_id,
-            Vec::new(),
             &snapshot.status,
             &snapshot.summary,
         );
-        if let Some(reason) = outcome
-            .remaining_blocker
-            .or_else(|| unresolved.then(|| "unresolved_generation_projection".into()))
-        {
+        if let Some(reason) = outcome.remaining_blocker {
             return CookAdmissionDecision::Blocked {
                 reason,
                 next_action: outcome.next_action,

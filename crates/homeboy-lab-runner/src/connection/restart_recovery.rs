@@ -41,7 +41,8 @@ pub(crate) fn with_restart_recovery_lock<T>(
 /// directory, and those route through the current session, so nothing is
 /// moved: the session the restart connected is the new owner of all of it.
 /// Republishing an already-published session is a no-op, so a retried rebind
-/// is idempotent.
+/// is idempotent. A current session that names neither the stopped lease nor
+/// the restarted one belongs to a different daemon, and is never overwritten.
 pub(crate) fn rebind_restarted_lease(
     runner_id: &str,
     previous_lease: &str,
@@ -53,15 +54,24 @@ pub(crate) fn rebind_restarted_lease(
         .filter(|lease_id| !lease_id.is_empty())
         .ok_or_else(|| Error::internal_unexpected("restarted daemon session has no lease ID"))?;
     crate::runner_state_lock::with_runner_registry_lock(runner_id, || {
-        if read_session(runner_id)?.as_ref() != Some(restarted) {
-            write_session(restarted)?;
+        let current = read_session(runner_id)?;
+        if current.as_ref() == Some(restarted) {
+            return Ok(());
         }
-        crate::generation_store::adopt_restarted_lease_locked(
-            runner_id,
-            previous_lease,
-            &restarted_lease,
-            restarted,
-        )
+        let current_lease = current
+            .as_ref()
+            .and_then(|session| session.remote_daemon_lease_id.as_deref());
+        if current_lease.is_some_and(|lease| lease != previous_lease && lease != restarted_lease) {
+            return Err(Error::validation_invalid_argument(
+                "runner",
+                format!(
+                    "runner session moved to another daemon while lease `{previous_lease}` was restarting; refusing to publish the restarted lease"
+                ),
+                Some(runner_id.to_string()),
+                None,
+            ));
+        }
+        write_session(restarted)
     })
 }
 
@@ -187,15 +197,18 @@ mod tests {
             rebind_restarted_lease("runner-a", "lease-old", &restarted).expect("rebind again");
 
             assert_eq!(read_session("runner-a").expect("read"), Some(restarted));
-            let ledger = crate::generation_store::read("runner-a")
-                .expect("read ledger")
-                .expect("ledger");
-            assert_eq!(
-                ledger.generations.keys().collect::<Vec<_>>(),
-                vec!["lease-new"],
-                "the stopped lease is not left behind"
-            );
-            assert_eq!(ledger.admission_owner, "lease-new");
+        });
+    }
+
+    #[test]
+    fn a_rebind_never_overwrites_a_session_of_another_daemon() {
+        crate::test_support::with_isolated_home(|_| {
+            let other = session("lease-other", Some(101));
+            write_session(&other).expect("another daemon's session");
+
+            let restarted = session("lease-new", Some(202));
+            assert!(rebind_restarted_lease("runner-a", "lease-old", &restarted).is_err());
+            assert_eq!(read_session("runner-a").expect("read"), Some(other));
         });
     }
 

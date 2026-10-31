@@ -145,12 +145,6 @@ pub use recovery::{
     RunnerExecRecoveryDiagnostic,
 };
 
-/// Retire a completed direct daemon generation only after controller-owned
-/// evidence has been checkpointed and projected.
-pub fn reconcile_runner_generation_after_evidence(runner_id: &str) -> Result<()> {
-    super::generation_store::reconcile(runner_id).map(|_| ())
-}
-
 #[derive(Debug, Clone)]
 pub struct RunnerExecOptions {
     /// Typed execution authority supplied by the dispatch boundary. It is never
@@ -189,11 +183,10 @@ pub struct RunnerExecOptions {
     pub print_handoff: bool,
     /// This runner exec is a read-only retrieval of evidence that a completed
     /// run or artifact already retains on the runner (for example, hydrating a
-    /// retained matrix result). It reads through the generation that owns the
-    /// retained run/artifact and must never rotate, disconnect, or rewrite a
-    /// draining generation. When set, a stale admission daemon no longer blocks
-    /// the read: retrieval routes to the retained owner instead of the mutable
-    /// current admission session (Extra-Chill/homeboy#9420).
+    /// retained matrix result). It reads through the runner's current daemon
+    /// session and must never rotate, disconnect, or rewrite that daemon. When
+    /// set, a stale admission daemon no longer blocks the read
+    /// (Extra-Chill/homeboy#9420).
     pub read_only_artifact_access: bool,
 }
 

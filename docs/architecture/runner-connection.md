@@ -40,20 +40,17 @@ failure evidence may add `durability_stage`; existing health attempt fields are
 preserved. `health_attempt_count` and `health_attempts` contain failed initial
 health probes and failed durability observations, not successful observations.
 
-## Rolling Generations
+## Current Session
 
-The runner-layer rolling-generation primitive models daemon replacement as
-generations. A validated candidate starts on its own endpoint before it becomes
-the admission owner. Existing jobs remain owned by the draining generation,
-including their logs, cancellation, artifacts, and reconciliation records. A
-draining generation retires only after its authoritative active-job count reaches
-zero.
-
-Its serializable status names the admission owner and each generation's endpoint,
-active-job count, and `admitting` or `draining` state. A failed candidate startup
-is removed without changing the prior owner; repeating a refresh for the active
-generation is idempotent. Older single-generation records remain valid as one
-admitting generation.
+A controller tracks exactly one current session per runner. Jobs, runs, logs,
+cancellation, and artifacts route through that session's daemon; there is no
+ledger of earlier daemons. Replacing the daemon publishes the new session under
+the runner state lock only while the recorded lease is still the one being
+replaced, and an in-place restart rebinds the same session to the restarted
+lease. A stop that cannot prove the remote daemon stopped keeps the session; a
+session whose daemon is proven dead is cleared. Controllers no longer read or
+write `generations.json` or `retirement-verdicts.state`; files left by earlier
+versions are ignored and not deleted.
 
 ## Runner-Owned Service
 
@@ -77,10 +74,10 @@ For a service-managed runner:
 
 - **Connect** waits for the service's fresh lease, opens the tunnel, and
   writes the session. It takes no runtime promotion lease, so attaching never
-  waits behind a running Cook's generation pin.
+  waits behind a running Cook's runtime pin.
 - **Disconnect** closes the tunnel and removes the session. The daemon and its
   jobs keep running.
-- **Refresh** never rotates generations. It builds the new binary, drains
+- **Refresh** never rotates daemons. It builds the new binary, drains
   through the active-job guard, repoints the unit's link, and restarts the
   unit. The daemon's own startup recovers anything a previous owner left
   behind.

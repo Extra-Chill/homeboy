@@ -82,7 +82,7 @@ pub(super) enum RunsCommand {
     Hotspots(RunsHotspotsArgs),
     /// Reconcile running observation records. `--dry-run` previews the bounded
     /// observation-record scope; without it, only reported orphaned records are
-    /// marked stale. Runner generations and durable agent-task records have
+    /// marked stale. Runner sessions and durable agent-task records have
     /// their own reconcilers.
     Reconcile(RunsReconcileArgs),
     /// Block and stream a run's status until it reaches a terminal state,

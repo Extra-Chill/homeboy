@@ -3060,7 +3060,7 @@ fn upgrade_admission_dedupes_linked_parent_and_attempt_recovery_commands() {
             controller_upgrade_admission_for_records(&records, health, chrono::Utc::now());
         assert_eq!(admission.blockers.len(), 1);
         assert_eq!(admission.blockers[0].run_id, cook_id);
-        assert_eq!(admission.blockers[0].owner, "runner_generations");
+        assert_eq!(admission.blockers[0].owner, "runner_session");
         assert_eq!(admission.blockers[0].action, "homeboy runner reconcile lab");
     });
 }
@@ -3158,7 +3158,7 @@ fn upgrade_admission_keeps_configured_disconnected_runner_ownership() {
         let admission =
             controller_upgrade_admission_for_records(&records, health, chrono::Utc::now());
         assert_eq!(admission.blockers.len(), 1);
-        assert_eq!(admission.blockers[0].owner, "runner_generations");
+        assert_eq!(admission.blockers[0].owner, "runner_session");
         assert_eq!(
             admission.blockers[0].action,
             "homeboy runner reconcile fixture-lab"
@@ -3620,7 +3620,7 @@ fn upgrade_admission_keeps_ownerless_queued_runner_record_on_runner_plane_withou
         let admission =
             controller_upgrade_admission_for_records(&records, health, chrono::Utc::now());
         assert_eq!(admission.blockers.len(), 1);
-        assert_eq!(admission.blockers[0].owner, "runner_generations");
+        assert_eq!(admission.blockers[0].owner, "runner_session");
         assert_eq!(
             admission.blockers[0].action,
             "homeboy runner reconcile homeboy-lab"
@@ -3697,7 +3697,7 @@ fn upgrade_admission_keeps_provider_unavailable_runner_ownership() {
         let admission =
             controller_upgrade_admission_for_records(&records, health, chrono::Utc::now());
         assert_eq!(admission.blockers.len(), 1);
-        assert_eq!(admission.blockers[0].owner, "runner_generations");
+        assert_eq!(admission.blockers[0].owner, "runner_session");
         assert_eq!(
             admission.blockers[0].action,
             "homeboy runner reconcile fixture-lab"
@@ -4679,8 +4679,8 @@ fn controller_upgrade_admission_uses_liveness_and_active_record_health() {
 fn stale_runner_blocker_clears_only_with_direct_zero_job_evidence() {
     let blocker = homeboy_upgrade::upgrade::ControllerUpgradeBlocker {
         run_id: "stale-run".to_string(),
-        owner: "runner_generations".to_string(),
-        scope: "runner `lab` and its persisted daemon generations".to_string(),
+        owner: "runner_session".to_string(),
+        scope: "runner `lab` and its current daemon session".to_string(),
         postcondition: "idle".to_string(),
         liveness: "stale",
         reason: "runner_heartbeat_stale".to_string(),

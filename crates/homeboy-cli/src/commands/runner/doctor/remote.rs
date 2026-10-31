@@ -27,13 +27,13 @@ pub fn report(
 
     // Lab doctor needs the same full admission observation as `runner status`:
     // a persisted session alone has no active-job view and must fail closed.
-    // The snapshot captures the live status and its generation ledger together,
+    // The snapshot captures the live status and its admission summary together,
     // while the Lab status probes retain their read-only bounds within doctor.
     let admission_snapshot = if scoped {
         runner::runner_admission_snapshot_until(runner_id, observation_deadline).ok()
     } else {
         runner::persisted_status_until(runner_id, observation_deadline)
-            .and_then(runner::runner_admission_snapshot_for_status)
+            .map(runner::runner_admission_snapshot_for_status)
             .ok()
     };
     let persisted_status = admission_snapshot.as_ref().map(|snapshot| &snapshot.status);

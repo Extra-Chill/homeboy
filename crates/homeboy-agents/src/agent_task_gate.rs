@@ -6444,13 +6444,13 @@ mod tests {
         assert_eq!(one_recovery.command, "cargo test selected_test -- --exact");
 
         let module = cargo_selection(
-            "cargo test generation_store",
+            "cargo test session_store",
             &[
                 "sh".to_string(),
                 "-lc".to_string(),
-                "cargo test generation_store".to_string(),
+                "cargo test session_store".to_string(),
             ],
-            "test generation_store::tests::first ... ok\ntest generation_store::tests::second ... ok\n",
+            "test session_store::tests::first ... ok\ntest session_store::tests::second ... ok\n",
             "",
             None,
         )

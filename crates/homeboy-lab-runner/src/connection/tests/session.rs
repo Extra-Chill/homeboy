@@ -1511,22 +1511,13 @@ fn connect_reports_local_runner_as_unsupported() {
 }
 
 #[test]
-fn full_status_projection_leaves_large_shared_state_and_observation_db_unchanged() {
+fn full_status_projection_leaves_shared_state_and_observation_db_unchanged() {
     crate::test_support::with_isolated_home(|home| {
         crate::create(r#"{"id":"homeboy-lab","kind":"local"}"#, false).expect("create runner");
         homeboy_core::observation::ObservationStore::open_initialized()
             .expect("initialize shared observation database");
         let session = direct_ssh_session("lease-000");
         write_session(&session).expect("write disconnected direct session");
-        let mut generations = crate::RollingGenerations::new("lease-000", session.clone());
-        for index in 1..=70 {
-            let generation = format!("lease-{index:03}");
-            let mut endpoint = session.clone();
-            endpoint.remote_daemon_lease_id = Some(generation.clone());
-            generations.begin(generation, endpoint);
-        }
-        crate::generation_store::write("homeboy-lab", &generations)
-            .expect("write generation registry");
         let before = snapshot_directory(home.path());
 
         let report = status("homeboy-lab").expect("full runner status projection");
@@ -1538,33 +1529,25 @@ fn full_status_projection_leaves_large_shared_state_and_observation_db_unchanged
 }
 
 #[test]
-fn disconnected_generation_reconcile_action_passes_reconcile_preflight() {
+fn disconnected_session_reconcile_passes_reconcile_preflight() {
     crate::test_support::with_isolated_home(|_| {
         crate::create(r#"{"id":"homeboy-lab","kind":"local"}"#, false).expect("create runner");
         let mut session = direct_ssh_session("lease-stale");
-        // The persisted stale generation has no local tunnel to probe. This
+        // The persisted stale session has no local tunnel to probe. This
         // keeps the fixture focused on disconnected recovery preflight.
         session.local_url = None;
         session.local_port = None;
         write_session(&session).expect("write disconnected direct session");
-        let generations = crate::RollingGenerations::new("lease-stale", session);
-        crate::generation_store::write("homeboy-lab", &generations)
-            .expect("persist stale generation evidence");
 
         let status = status("homeboy-lab").expect("read disconnected status");
         assert!(!status.connected);
-        let inventory = crate::generation_store::status_projection("homeboy-lab")
-            .expect("read persisted generation evidence");
         assert_eq!(
-            status
-                .admission_summary_with_generations(&inventory, &[], inventory.len())
-                .next_action
-                .as_deref(),
+            status.admission_summary().next_action.as_deref(),
             Some("homeboy runner connect homeboy-lab")
         );
 
-        let reconciled = reconcile_status("homeboy-lab")
-            .expect("status-recommended reconciliation accepts a disconnected runner");
+        let reconciled =
+            reconcile_status("homeboy-lab").expect("reconciliation accepts a disconnected runner");
         assert!(!reconciled.connected);
     });
 }
@@ -1820,7 +1803,7 @@ fn fixture_request_reader_times_out_without_a_request() {
 }
 
 #[test]
-fn status_admission_uses_one_runner_observation_despite_stale_ledger() {
+fn status_admission_uses_one_runner_observation_of_the_current_session() {
     crate::test_support::with_isolated_home(|_| {
         let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
         listener
@@ -1905,21 +1888,13 @@ fn status_admission_uses_one_runner_observation_despite_stale_ledger() {
         session.local_port = Some(address.port());
         session.tunnel_pid = Some(std::process::id());
         write_session(&session).expect("write session");
-        let mut generations = crate::RollingGenerations::new("lease-live", session);
-        let admission = generations
-            .generations
-            .get_mut("lease-live")
-            .expect("admission generation");
-        admission.observed_active_jobs = Some(7);
-        crate::generation_store::write("homeboy-lab", &generations)
-            .expect("write generation ledger");
 
-        let (report, generations, owners) = status_with_admission_projection_until(
+        let report = status_until(
             "homeboy-lab",
             std::time::Instant::now() + Duration::from_secs(30),
         )
         .expect("status observation");
-        let summary = report.admission_summary_with_generations(&generations, &owners, 0);
+        let summary = report.admission_summary();
 
         assert_eq!(report.active_job_count, 1);
         assert_eq!(report.active_jobs.len(), 1);
@@ -1930,37 +1905,6 @@ fn status_admission_uses_one_runner_observation_despite_stale_ledger() {
         );
         assert_eq!(summary.active_job_count, Some(1));
         assert!(!report.admission_availability(Some(32)).accepts_jobs);
-
-        let mut mismatched = crate::generation_store::read("homeboy-lab")
-            .expect("read generation ledger")
-            .expect("generation ledger");
-        let admission_owner = mismatched.admission_owner.clone();
-        mismatched
-            .generations
-            .get_mut(&admission_owner)
-            .expect("admission generation")
-            .observed_active_jobs = Some(2);
-        crate::generation_store::write("homeboy-lab", &mismatched)
-            .expect("write mismatched ledger");
-
-        let (mismatched_report, mismatched_generations, mismatched_owners) =
-            status_with_admission_projection_until(
-                "homeboy-lab",
-                std::time::Instant::now() + Duration::from_secs(30),
-            )
-            .expect("mismatched status observation");
-        let mismatch = mismatched_report.admission_summary_with_generations(
-            &mismatched_generations,
-            &mismatched_owners,
-            0,
-        );
-        assert_eq!(mismatched_report.active_job_count, 1);
-        assert_eq!(mismatched_report.active_jobs.len(), 1);
-        assert!(mismatched_report.active_job_error.is_none());
-        assert!(
-            !mismatch.accepting_jobs,
-            "ledger changes cannot clear binary compatibility"
-        );
 
         stop.store(true, std::sync::atomic::Ordering::Release);
         server.join().expect("daemon server");
@@ -2117,9 +2061,9 @@ fn pre_describe_upgrade_requires_stable_owned_idle_http_evidence() {
             RunnerActiveJobState::Unavailable,
             "upgrade evidence never changes normal observation"
         );
-        assert_eq!(status.admission_summary(0).active_job_count, None);
+        assert_eq!(status.admission_summary().active_job_count, None);
         if let Ok(upgrade) = result {
-            assert!(upgrade.admission_summary(0).safe_to_rotate);
+            assert!(upgrade.admission_summary().safe_to_rotate);
         }
     }
 }

@@ -132,9 +132,8 @@ pub(super) enum RunnerCommand {
         ///
         /// The default is a compact row per runner. A long-lived controller's
         /// full listing carries every configured environment, serialized
-        /// settings, dev-sync extension metadata, and every historical draining
-        /// generation — which truncates in agent and terminal output and buries
-        /// the answer (#9487).
+        /// settings, and dev-sync extension metadata — which truncates in agent
+        /// and terminal output and buries the answer (#9487).
         #[arg(long)]
         full: bool,
     },
@@ -302,14 +301,7 @@ pub(super) enum RunnerCommand {
         /// Runner ID. Omit to show all runner session states.
         id: Option<String>,
 
-        /// Include the full historical draining-generation inventory. By
-        /// default status leads with the compact authoritative admission
-        /// summary and omits the expanded per-generation ledger, which can run
-        /// to thousands of lines on a long-lived runner.
-        #[arg(long)]
-        generations: bool,
-
-        /// Return complete status, runtime diagnostics, followups, and generation detail.
+        /// Return complete status, runtime diagnostics, and followups.
         #[arg(long)]
         full: bool,
     },
@@ -326,33 +318,24 @@ pub(super) enum RunnerCommand {
         #[arg(long)]
         apply: bool,
     },
-    /// Reconcile one runner's persisted daemon generations and retire verified
-    /// drained daemons. Success means that runner accepts jobs with no
-    /// unresolved generation projection; durable agent-task records and
-    /// observation runs have separate reconcilers.
+    /// Reconcile one runner's current daemon session and settle its terminal
+    /// jobs. Success means that runner accepts jobs; durable agent-task
+    /// records and observation runs have separate reconcilers.
     Reconcile {
         /// Runner ID
         id: String,
 
-        /// Attest that the workload processes of a blocked remote generation
+        /// Attest that the workload processes of the blocked remote daemon
         /// were inspected and are absent. When the reconcile is blocked by a
-        /// generation whose daemon PID is dead and whose active jobs lack
-        /// automatic proof, this runs the attested
+        /// daemon whose PID is dead and whose active jobs lack automatic
+        /// proof, this runs the attested
         /// `daemon reconcile-dead-lease-orphans` on the runner — bound to that
-        /// exact generation's state directory, lease, and active job set — and
+        /// exact daemon's state directory, lease, and active job set — and
         /// then re-runs the reconcile. A live daemon PID, a live recorded
         /// child, or a changed job set is still refused, with the runner-side
         /// refusal surfaced verbatim (#15556).
         #[arg(long)]
         confirm_workload_processes_absent: bool,
-
-        /// Retire idle draining generations whose retained evidence cannot be
-        /// verified (legacy evidence custody, unreachable source inventory).
-        /// Their run and artifact ownership stays recorded as retired
-        /// evidence, and nothing is deleted. Each release is reported with
-        /// the exact verification failure (#15653).
-        #[arg(long)]
-        release_unverified_evidence: bool,
     },
     /// Close a runner tunnel and remove its persisted session state
     Disconnect {
@@ -594,17 +577,13 @@ pub(super) enum RunnerJobCommand {
         #[arg(long, conflicts_with_all = ["active", "queued"])]
         terminal: bool,
 
-        /// Include observed terminal jobs and retained durable projections
-        #[arg(long, visible_alias = "retained")]
+        /// Include observed terminal jobs
+        #[arg(long)]
         all: bool,
 
         /// Emit the complete structured JSON response instead of the compact table
         #[arg(long)]
         json: bool,
-
-        /// Include only jobs owned by this daemon generation
-        #[arg(long)]
-        generation: Option<String>,
 
         /// Match a job ID, durable run ID, or command summary
         #[arg(long)]
@@ -779,8 +758,6 @@ mod tests {
             "list",
             "lab",
             "--active",
-            "--generation",
-            "generation-a",
             "--correlation",
             "run-11770",
         ])
@@ -804,9 +781,7 @@ mod tests {
             "homeboy", "runner", "job", "list", "lab", "--active", "--queued"
         ])
         .is_err());
-        assert!(
-            Cli::try_parse_from(["homeboy", "runner", "job", "list", "lab", "--retained"]).is_ok()
-        );
+        assert!(Cli::try_parse_from(["homeboy", "runner", "job", "list", "lab", "--all"]).is_ok());
     }
 
     #[test]

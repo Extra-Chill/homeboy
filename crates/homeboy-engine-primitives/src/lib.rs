@@ -24,7 +24,6 @@ pub mod measurement;
 pub mod output_parse;
 pub mod phase_timing;
 pub mod provider_registry;
-pub mod rolling_generation;
 pub mod shell;
 pub mod template;
 pub mod test_execution;

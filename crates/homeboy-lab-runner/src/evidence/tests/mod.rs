@@ -2371,7 +2371,6 @@ fn failed_refresh_discards_its_synthetic_run_after_artifact_projection_error() {
             None,
             None,
         ),
-        || Ok(()),
     )
     .expect_err("malformed terminal artifact fails refresh");
     assert!(store
@@ -2422,7 +2421,6 @@ fn failed_refresh_preserves_a_concurrent_synthetic_winner() {
             None,
             None,
         ),
-        || Ok(()),
     )
     .expect_err("malformed terminal artifact fails refresh");
     assert!(store.get_run(&winner.id).expect("winner lookup").is_some());

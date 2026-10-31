@@ -58,32 +58,15 @@ mod execution;
 mod execution_bundle;
 mod extension_materialization;
 pub mod gate_transport;
-mod generation_store;
-pub use generation_store::GenerationReconcilePolicy;
-pub use generation_store::{
-    persisted_retirement_verdicts, GenerationRetirementBlockerKind, GenerationRetirementDecision,
-    GenerationRetirementVerdict,
-};
 pub mod lab_staging_controller;
 pub mod runner_staging_operation;
 pub mod runner_staging_store;
-pub fn runner_generation_inventory(runner_id: &str) -> Result<Vec<RunnerDaemonGenerationStatus>> {
-    generation_store::status_projection(runner_id)
-}
-
-/// Durable job identities grouped by generation, from the persisted ledger.
-pub fn runner_generation_job_owners(runner_id: &str) -> Result<Vec<RunnerGenerationJobOwners>> {
-    generation_store::status_job_owners(runner_id)
-}
-
 /// The complete read-only admission projection for a runner. Command surfaces
 /// enrich this snapshot with their own diagnostics but must not recalculate
 /// compatibility or rotation safety from a partial observation.
 #[derive(Debug)]
 pub struct RunnerAdmissionSnapshot {
     pub status: RunnerStatusReport,
-    pub generation_inventory: Vec<RunnerDaemonGenerationStatus>,
-    pub generation_owners: Vec<RunnerGenerationJobOwners>,
     pub summary: RunnerAdmissionSummary,
 }
 
@@ -106,31 +89,14 @@ pub fn runner_secret_identity_inventory(runner_id: &str) -> Result<RunnerSecretI
 }
 
 impl RunnerAdmissionSnapshot {
-    fn from_status_and_generations(
-        status: RunnerStatusReport,
-        generation_inventory: Vec<RunnerDaemonGenerationStatus>,
-        generation_owners: Vec<RunnerGenerationJobOwners>,
-    ) -> Self {
-        let summary = status.admission_summary_with_generations(
-            &generation_inventory,
-            &generation_owners,
-            generation_inventory
-                .iter()
-                .filter(|generation| !generation.admission_owner)
-                .count(),
-        );
-
-        Self {
-            status,
-            generation_inventory,
-            generation_owners,
-            summary,
-        }
+    fn from_status(status: RunnerStatusReport) -> Self {
+        let summary = status.admission_summary();
+        Self { status, summary }
     }
 }
 
-/// Observe a runner once, then derive every admission fact from that status and
-/// its matching generation ledger.
+/// Observe a runner once, then derive every admission fact from that status:
+/// its one current session and the daemon's live job view.
 pub fn runner_admission_snapshot(runner_id: &str) -> Result<RunnerAdmissionSnapshot> {
     runner_admission_snapshot_until(
         runner_id,
@@ -144,28 +110,16 @@ pub fn runner_admission_snapshot_until(
     runner_id: &str,
     deadline: std::time::Instant,
 ) -> Result<RunnerAdmissionSnapshot> {
-    let (status, generation_inventory, generation_owners) =
-        connection::status_with_admission_projection_until(runner_id, deadline)?;
-    Ok(RunnerAdmissionSnapshot::from_status_and_generations(
-        status,
-        generation_inventory,
-        generation_owners,
+    Ok(RunnerAdmissionSnapshot::from_status(
+        connection::status_until(runner_id, deadline)?,
     ))
 }
 
 /// Build the admission projection from an already-observed status report.
 /// This avoids repeating remote inspection when a caller also needs status
 /// details.
-pub fn runner_admission_snapshot_for_status(
-    status: RunnerStatusReport,
-) -> Result<RunnerAdmissionSnapshot> {
-    let (generation_inventory, generation_owners) =
-        generation_store::status_admission_projection(&status.runner_id)?;
-    Ok(RunnerAdmissionSnapshot::from_status_and_generations(
-        status,
-        generation_inventory,
-        generation_owners,
-    ))
+pub fn runner_admission_snapshot_for_status(status: RunnerStatusReport) -> RunnerAdmissionSnapshot {
+    RunnerAdmissionSnapshot::from_status(status)
 }
 
 pub mod auto_placement_reconnect;
@@ -203,7 +157,6 @@ pub mod readonly_probe;
 mod remote_error;
 mod resource_metrics;
 mod rig_materialization;
-mod rolling_generation;
 mod runner_cache;
 pub mod runner_probe_gate;
 mod runtime_materialization_status;
@@ -361,10 +314,9 @@ pub use connection::{
     connect_with_orphan_adoption, connect_with_unleased_candidate_reconciliation,
     diagnostic_status, disconnect, disconnect_local_recovery, peer_session_maintenance,
     persisted_status, persisted_status_until, persisted_statuses, reconcile_status,
-    reconcile_status_with_outcome, reconcile_status_with_outcome_with_policy,
-    reconcile_status_with_outcome_with_remote_attestation, reconcile_terminal_jobs,
-    reconnect_job_log_owner, remote_lifecycle_plan, runner_artifact_content, status, statuses,
-    statuses_indexed, PeerSessionMaintenanceReport, RunnerReconcileWithAttestationOutcome,
+    reconcile_status_with_remote_attestation, reconcile_terminal_jobs, reconnect_job_log_owner,
+    remote_lifecycle_plan, runner_artifact_content, status, statuses, statuses_indexed,
+    PeerSessionMaintenanceReport, RunnerReconcileWithAttestationOutcome,
 };
 pub(crate) use connection::{
     configured_runner_homeboy_build_identity, configured_runner_homeboy_handshake_evidence,
@@ -392,7 +344,6 @@ pub use execution::{
     finish_scheduled_terminal_runner_exec_recovery, probe_extension_parity_from_show,
     promote_runner_exec_artifact_dirs_in_store, promote_runner_exec_artifacts_in_store,
     promote_runner_exec_summaries_in_store, promoted_output,
-    reconcile_runner_generation_after_evidence,
     record_scheduled_terminal_runner_exec_recovery_child_spawn_failure,
     record_scheduled_terminal_runner_exec_recovery_spawn_failure,
     run_scheduled_terminal_runner_exec_recovery, run_scheduled_terminal_runner_exec_recovery_child,
@@ -452,9 +403,6 @@ pub use resource_metrics::{
     RunnerCgroupMemoryEvidence, RunnerResourceGuardLimits, RunnerResourceGuardViolation,
     RunnerResourceMetrics,
 };
-pub use rolling_generation::{
-    RollingDrainState, RollingGeneration, RollingGenerations, RollingStart,
-};
 pub use runner_staging_store::{
     register_runner_staging_provider, resolve_runner_staging_transport,
 };
@@ -462,13 +410,12 @@ pub use runtime_materialization_status::{RunnerBinarySource, RuntimeMaterializat
 pub use session::{
     LabRunnerHandoff, RunnerActiveJobError, RunnerActiveJobSource, RunnerActiveJobState,
     RunnerActiveJobsSnapshot, RunnerAdmissionSummary, RunnerArtifactRef, RunnerAvailability,
-    RunnerChangedRuntimePath, RunnerConnectReport, RunnerDaemonGenerationStatus,
-    RunnerDaemonLeaseVerdict, RunnerDaemonVerification, RunnerDisconnectReport, RunnerFailureKind,
-    RunnerGenerationJobOwners, RunnerJob, RunnerLeaselessRecoveryContract,
-    RunnerLeaselessRecoveryEvidence, RunnerLifecycleOwner, RunnerMutationArtifacts,
-    RunnerNamedWorkspaceLease, RunnerRecoveryState, RunnerResult, RunnerSession, RunnerSessionRole,
-    RunnerSessionState, RunnerStaleDaemonWarning, RunnerStaleRuntimePath, RunnerStatusReport,
-    RunnerTunnelMode, RunnerTunnelProcessStartIdentity, RunnerUnresolvedJobOwner,
+    RunnerChangedRuntimePath, RunnerConnectReport, RunnerDaemonLeaseVerdict,
+    RunnerDaemonVerification, RunnerDisconnectReport, RunnerFailureKind, RunnerJob,
+    RunnerLeaselessRecoveryContract, RunnerLeaselessRecoveryEvidence, RunnerLifecycleOwner,
+    RunnerMutationArtifacts, RunnerNamedWorkspaceLease, RunnerRecoveryState, RunnerResult,
+    RunnerSession, RunnerSessionRole, RunnerSessionState, RunnerStaleDaemonWarning,
+    RunnerStaleRuntimePath, RunnerStatusReport, RunnerTunnelMode, RunnerTunnelProcessStartIdentity,
     RunnerWorkspaceLease, RunnerWorkspaceLeaseSet,
 };
 pub use tool_registry::{RunnerToolRegistry, RunnerToolSpec};
@@ -1060,8 +1007,8 @@ fn lab_runner_admission_candidate(
     exact_version: bool,
 ) -> DefaultLabRunnerCandidate {
     let lease_verdict = status.daemon_lease_verdict(None);
-    // A freshness observation without a published generation identity cannot
-    // prove that the observed daemon is the session's current generation. Keep
+    // A freshness observation without a published lease identity cannot
+    // prove that the observed daemon is the session's current daemon. Keep
     // it unverified (not stale); `admission_fresh` still fences all work until
     // the lease is published and matched.
     let unverified_daemon = !lease_verdict.lease_published;
@@ -1877,7 +1824,7 @@ mod tests {
     }
 
     #[test]
-    fn admission_snapshot_keeps_identity_and_rotation_decisions_on_one_ledger() {
+    fn admission_snapshot_keeps_identity_and_rotation_decisions_on_one_observation() {
         let status = RunnerStatusReport {
             runner_id: "homeboy-lab".to_string(),
             connected: true,
@@ -1919,40 +1866,11 @@ mod tests {
             active_job_recovery_evidence: None,
             session_path: "test".to_string(),
         };
-        let generations = vec![RunnerDaemonGenerationStatus {
-            generation: "lease-current".to_string(),
-            admission_owner: true,
-            drain_state: RollingDrainState::Admitting,
-            active_job_count: 0,
-            observed_active_job_count: Some(0),
-            active_job_count_authoritative: true,
-            job_owner_count: 0,
-            run_owner_count: 0,
-            artifact_owner_count: 0,
-            homeboy_build_identity: None,
-            remote_daemon_lease_id: Some("lease-current".to_string()),
-            remote_daemon_address: None,
-            local_url: None,
-        }];
-
-        let snapshot =
-            RunnerAdmissionSnapshot::from_status_and_generations(status, generations, Vec::new());
+        let snapshot = RunnerAdmissionSnapshot::from_status(status);
 
         assert!(!snapshot.summary.daemon_compatible);
         assert!(snapshot.summary.safe_to_rotate);
-        assert_eq!(snapshot.summary.draining_generation_count, 0);
-        assert_eq!(
-            snapshot.summary,
-            snapshot.status.admission_summary_with_generations(
-                &snapshot.generation_inventory,
-                &snapshot.generation_owners,
-                snapshot
-                    .generation_inventory
-                    .iter()
-                    .filter(|generation| !generation.admission_owner)
-                    .count(),
-            )
-        );
+        assert_eq!(snapshot.summary, snapshot.status.admission_summary());
     }
 
     #[test]
@@ -1993,8 +1911,7 @@ mod tests {
             session_path: "test".to_string(),
         };
 
-        let snapshot =
-            RunnerAdmissionSnapshot::from_status_and_generations(status, Vec::new(), Vec::new());
+        let snapshot = RunnerAdmissionSnapshot::from_status(status);
 
         assert!(snapshot.summary.accepting_jobs);
     }
@@ -2049,8 +1966,7 @@ mod tests {
             session_path: "test".to_string(),
         };
 
-        let snapshot =
-            RunnerAdmissionSnapshot::from_status_and_generations(status, Vec::new(), Vec::new());
+        let snapshot = RunnerAdmissionSnapshot::from_status(status);
 
         assert!(!snapshot.summary.accepting_jobs);
         assert!(snapshot.summary.safe_to_rotate);

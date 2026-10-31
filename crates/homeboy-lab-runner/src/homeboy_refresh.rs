@@ -174,8 +174,8 @@ pub struct HomeboyBinaryRefreshOutput {
     pub reconnect_required: bool,
     pub followup_commands: Vec<String>,
     /// The observed admission postcondition after a reconnect. A rotated daemon
-    /// may be healthy while older generations still own work, so daemon startup
-    /// alone is not convergence.
+    /// may be running yet still refuse admission, so daemon startup alone is
+    /// not convergence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub readiness: Option<HomeboyRefreshReadiness>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -221,7 +221,7 @@ pub struct HomeboyRefreshReadiness {
     pub state: HomeboyRefreshReadinessState,
     pub accepting_jobs: bool,
     pub daemon_fresh: bool,
-    /// Exact generation or lease owners that still fence convergence.
+    /// The exact daemon lease that still fences convergence.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub owners: Vec<String>,
     /// One command that resumes the blocked lifecycle from its current state.
@@ -404,13 +404,7 @@ pub fn refresh_homeboy_binary(
 ) -> Result<(HomeboyBinaryRefreshOutput, i32)> {
     let roots = &homeboy_core::paths::PathRoots::from_environment()?;
     let _identities = super::connection::StagingIdentityScope::suspend();
-    let should_retire = !options.dry_run;
-    let runner_id = options.runner_id.clone();
-    let result = refresh_homeboy_binary_inner_in_roots(roots, options)?;
-    if should_retire && result.1 == 0 {
-        super::connection::retire_drained_generations(&load(&runner_id)?)?;
-    }
-    Ok(result)
+    refresh_homeboy_binary_inner_in_roots(roots, options)
 }
 
 fn refresh_homeboy_binary_inner_in_roots(
@@ -531,7 +525,7 @@ fn refresh_homeboy_binary_inner_in_roots(
     let previous_homeboy_path = runner.settings.homeboy_path.clone();
     let service_managed = runner.settings.service_managed;
     let fresh_ssh_bootstrap = fresh_ssh_bootstrap_eligible_in_roots(&runner)?;
-    // Reconciliation settles retained generation counts from the daemon's typed
+    // Reconciliation settles the session's active jobs from the daemon's typed
     // job view. Consume that postcondition rather than immediately replacing it
     // with a new observation that can include this recovery operation's records.
     let admission = (!fresh_ssh_bootstrap)
@@ -1222,7 +1216,7 @@ fn disconnect_before_reconnect(
 }
 
 /// A disconnect that could not prove the remote daemon stopped returns `Ok`
-/// with `partial: true` and retains the session and generation ledger. Treating
+/// with `partial: true` and retains the session. Treating
 /// that report as a completed `disconnect` phase let refresh reconnect onto the
 /// very daemon it was meant to retire.
 fn require_completed_disconnect(
@@ -1250,29 +1244,18 @@ fn require_completed_disconnect(
 }
 
 /// Evaluate refresh completion from the admission authority, not from daemon
-/// process startup. This is intentionally shared with `runner status`'s status
-/// and generation projections so refresh cannot certify a state status rejects.
+/// process startup. This is intentionally shared with `runner status`'s
+/// admission projection so refresh cannot certify a state status rejects.
 fn refresh_readiness_postcondition(runner_id: &str) -> Result<HomeboyRefreshReadiness> {
     let admission = super::runner_admission_snapshot(runner_id)?;
-    Ok(refresh_readiness_from_status(
-        runner_id,
-        &admission.status,
-        &admission.generation_inventory,
-        &admission.generation_owners,
-    ))
+    Ok(refresh_readiness_from_status(runner_id, &admission.status))
 }
 
 fn refresh_readiness_from_status(
     runner_id: &str,
     report: &super::RunnerStatusReport,
-    generations: &[super::RunnerDaemonGenerationStatus],
-    owners: &[super::RunnerGenerationJobOwners],
 ) -> HomeboyRefreshReadiness {
-    let draining_count = generations
-        .iter()
-        .filter(|generation| !generation.admission_owner)
-        .count();
-    let summary = report.admission_summary_with_generations(generations, owners, draining_count);
+    let summary = report.admission_summary();
     if summary.accepting_jobs {
         return HomeboyRefreshReadiness {
             state: HomeboyRefreshReadinessState::Ready,
@@ -1282,50 +1265,24 @@ fn refresh_readiness_from_status(
             continuation: None,
         };
     }
-    let owners = generations
-        .iter()
-        .filter(|generation| !generation.admission_owner && generation.active_job_count > 0)
-        .map(|generation| {
-            generation
-                .remote_daemon_lease_id
-                .clone()
-                .unwrap_or_else(|| generation.generation.clone())
+    // The owner fencing convergence is the runner's one current daemon: the
+    // lease it reports, or the lease the current session names.
+    let current_lease = report
+        .daemon_freshness
+        .as_ref()
+        .and_then(|freshness| freshness.lease_id.clone())
+        .or_else(|| {
+            report
+                .session
+                .as_ref()
+                .and_then(|session| session.remote_daemon_lease_id.clone())
         })
-        .collect::<Vec<_>>();
-    if !owners.is_empty() {
-        return HomeboyRefreshReadiness {
-            state: HomeboyRefreshReadinessState::Draining,
-            accepting_jobs: false,
-            daemon_fresh: summary.daemon_fresh,
-            owners,
-            continuation: Some(format!("homeboy runner reconcile {}", shell_arg(runner_id))),
-        };
-    }
+        .filter(|lease| !lease.is_empty());
     HomeboyRefreshReadiness {
         state: HomeboyRefreshReadinessState::Blocked,
         accepting_jobs: false,
         daemon_fresh: summary.daemon_fresh,
-        owners: generations
-            .iter()
-            .filter(|generation| generation.admission_owner)
-            .map(|generation| {
-                generation
-                    .remote_daemon_lease_id
-                    .clone()
-                    .unwrap_or_else(|| generation.generation.clone())
-            })
-            .chain(
-                generations
-                    .is_empty()
-                    .then(|| {
-                        report
-                            .daemon_freshness
-                            .as_ref()
-                            .and_then(|freshness| freshness.lease_id.clone())
-                    })
-                    .flatten(),
-            )
-            .collect(),
+        owners: current_lease.into_iter().collect(),
         continuation: Some(
             summary.next_action.unwrap_or_else(|| {
                 format!("homeboy runner status {} --full", shell_arg(runner_id))
@@ -1790,11 +1747,11 @@ fn reconciled_refresh_admission_in_roots(
         let runner = load(runner_id)?;
         if runner.settings.service_managed {
             let upgrade_status = super::connection::pre_describe_upgrade_status(&admission.status)?;
-            let upgrade = super::runner_admission_snapshot_for_status(upgrade_status)?;
+            let upgrade = super::runner_admission_snapshot_for_status(upgrade_status);
             if !upgrade.summary.safe_to_rotate {
                 return Err(Error::validation_invalid_argument(
                     "upgrade_ownership",
-                    "verified idle service still has conflicting generation or rotation ownership",
+                    "verified idle service still has conflicting rotation ownership",
                     Some(runner_id.to_string()),
                     None,
                 ));
@@ -1812,10 +1769,10 @@ fn reconciled_refresh_admission_with<Reconcile, Project>(
 ) -> Result<super::RunnerAdmissionSnapshot>
 where
     Reconcile: FnOnce(&str) -> Result<super::RunnerStatusReport>,
-    Project: FnOnce(super::RunnerStatusReport) -> Result<super::RunnerAdmissionSnapshot>,
+    Project: FnOnce(super::RunnerStatusReport) -> super::RunnerAdmissionSnapshot,
 {
     set_refresh_live_sub_phase("reconcile");
-    project(reconcile(runner_id)?)
+    Ok(project(reconcile(runner_id)?))
 }
 
 #[derive(Debug, Clone)]

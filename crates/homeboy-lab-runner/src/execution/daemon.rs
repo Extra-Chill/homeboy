@@ -1790,7 +1790,6 @@ pub(crate) fn observe_daemon_job_until_terminal(
             .min(DAEMON_TERMINAL_WAIT_MAX_BACKOFF);
     };
     let events = fetch_daemon_events(&client, &endpoint, runner_job_id)?;
-    super::super::generation_store::reconcile(runner_id)?;
     Ok(DaemonTerminalObservation { job, events })
 }
 

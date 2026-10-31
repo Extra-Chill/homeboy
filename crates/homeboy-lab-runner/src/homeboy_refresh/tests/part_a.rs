@@ -2,8 +2,8 @@
 
 use super::*;
 use crate::{
-    RunnerActiveJobState, RunnerAdmissionSnapshot, RunnerDaemonGenerationStatus,
-    RunnerGenerationJobOwners, RunnerSessionState, RunnerStaleDaemonWarning, RunnerStatusReport,
+    RunnerActiveJobState, RunnerAdmissionSnapshot, RunnerSessionState, RunnerStaleDaemonWarning,
+    RunnerStatusReport,
 };
 use crate::{RunnerSession, RunnerSessionRole, RunnerTunnelMode};
 use homeboy_core::daemon::{DaemonFreshnessReport, DaemonStaleReasonCode};
@@ -334,8 +334,8 @@ fn connected_refresh_rotates_before_connecting_the_promoted_binary() {
 
 /// #12418: materialization begins from a disconnected observation, but another
 /// controller can connect the old daemon before this refresh obtains promotion
-/// ownership. The post-lease session must drive retirement, and active work
-/// remains owned by the draining generation rather than being interrupted.
+/// ownership. The post-lease session must drive retirement, and re-adoptable
+/// active work restarts in place rather than being interrupted.
 #[test]
 fn materialization_race_restarts_the_newly_connected_daemon_and_preserves_active_work() {
     let materialization_snapshot = refreshed_daemon_status(false, None);
@@ -917,7 +917,7 @@ fn stale_daemon_admission_snapshot(
     });
     status.active_job_count = active_job_count;
     status.active_job_state = RunnerActiveJobState::Available;
-    RunnerAdmissionSnapshot::from_status_and_generations(status, Vec::new(), Vec::new())
+    RunnerAdmissionSnapshot::from_status(status)
 }
 
 #[test]
@@ -933,11 +933,7 @@ fn refresh_routing_preserves_disconnected_ssh_execution_and_fences_unsafe_stale_
         resources: Default::default(),
         policy: Default::default(),
     };
-    let disconnected = RunnerAdmissionSnapshot::from_status_and_generations(
-        refreshed_daemon_status(false, None),
-        Vec::new(),
-        Vec::new(),
-    );
+    let disconnected = RunnerAdmissionSnapshot::from_status(refreshed_daemon_status(false, None));
 
     let route = refresh_execution_route(&runner, &disconnected)
         .expect("disconnected SSH refresh retains diagnostic execution");
@@ -971,7 +967,7 @@ fn refresh_routing_preserves_disconnected_ssh_execution_and_fences_unsafe_stale_
 }
 
 #[test]
-fn reconcile_then_refresh_uses_the_idle_postcondition_without_counting_retained_observations() {
+fn reconcile_then_refresh_uses_the_idle_postcondition() {
     let runner = crate::Runner {
         id: "lab".to_string(),
         kind: RunnerKind::Ssh,
@@ -994,23 +990,12 @@ fn reconcile_then_refresh_uses_the_idle_postcondition_without_counting_retained_
         },
         |status| {
             operations.borrow_mut().push("project");
-            Ok(RunnerAdmissionSnapshot::from_status_and_generations(
-                status,
-                Vec::new(),
-                vec![RunnerGenerationJobOwners {
-                    generation: "lease-current".to_string(),
-                    job_ids: vec![
-                        "retained-observation-a".to_string(),
-                        "retained-observation-b".to_string(),
-                    ],
-                }],
-            ))
+            RunnerAdmissionSnapshot::from_status(status)
         },
     )
     .expect("reconciled refresh admission");
 
     assert_eq!(operations.into_inner(), ["reconcile", "project"]);
-    assert_eq!(admission.summary.retained_durable_job_count, 2);
     assert!(admission.summary.safe_to_rotate);
     assert_eq!(
         refresh_execution_route(&runner, &admission).expect("idle stale daemon routes over SSH"),
@@ -1036,110 +1021,12 @@ fn reconcile_then_refresh_fails_closed_when_the_postcondition_has_a_live_job() {
     let admission = reconciled_refresh_admission_with(
         "lab",
         |_| Ok(live),
-        |status| {
-            Ok(RunnerAdmissionSnapshot::from_status_and_generations(
-                status,
-                Vec::new(),
-                Vec::new(),
-            ))
-        },
+        RunnerAdmissionSnapshot::from_status,
     )
     .expect("live postcondition projects");
 
     assert!(!admission.summary.safe_to_rotate);
     assert!(refresh_execution_route(&runner, &admission).is_err());
-}
-
-fn unproven_retained_generation() -> RunnerDaemonGenerationStatus {
-    RunnerDaemonGenerationStatus {
-        generation: "lease-old".to_string(),
-        admission_owner: false,
-        drain_state: crate::RollingDrainState::Draining,
-        active_job_count: 3,
-        observed_active_job_count: None,
-        active_job_count_authoritative: false,
-        job_owner_count: 0,
-        run_owner_count: 0,
-        artifact_owner_count: 0,
-        homeboy_build_identity: None,
-        remote_daemon_lease_id: Some("lease-old".to_string()),
-        remote_daemon_address: None,
-        local_url: None,
-    }
-}
-
-fn proven_non_owner_generation() -> RunnerDaemonGenerationStatus {
-    RunnerDaemonGenerationStatus {
-        generation: "lease-active".to_string(),
-        admission_owner: false,
-        drain_state: crate::RollingDrainState::Draining,
-        active_job_count: 2,
-        observed_active_job_count: Some(2),
-        active_job_count_authoritative: true,
-        job_owner_count: 2,
-        run_owner_count: 0,
-        artifact_owner_count: 0,
-        homeboy_build_identity: None,
-        remote_daemon_lease_id: Some("lease-active".to_string()),
-        remote_daemon_address: None,
-        local_url: None,
-    }
-}
-
-#[test]
-fn refresh_execution_route_uses_diagnostic_ssh_for_incompatible_idle_unproven_generations() {
-    let runner = crate::Runner {
-        id: "lab".to_string(),
-        kind: RunnerKind::Ssh,
-        server_id: None,
-        workspace_root: None,
-        settings: Default::default(),
-        env: Default::default(),
-        secret_env: Default::default(),
-        resources: Default::default(),
-        policy: Default::default(),
-    };
-    let status = stale_daemon_admission_snapshot(0, Some("lease-current"), Some(1)).status;
-    let admission = RunnerAdmissionSnapshot::from_status_and_generations(
-        status,
-        vec![unproven_retained_generation()],
-        Vec::new(),
-    );
-
-    assert!(!admission.summary.daemon_compatible);
-    assert_eq!(admission.summary.active_job_count, Some(0));
-    assert!(admission.summary.safe_to_rotate);
-    assert_eq!(
-        refresh_execution_route(&runner, &admission).expect("recovered incompatible daemon"),
-        RefreshExecutionRoute::DiagnosticSsh
-    );
-}
-
-#[test]
-fn refresh_execution_route_still_errors_for_proven_non_owner_work() {
-    let runner = crate::Runner {
-        id: "lab".to_string(),
-        kind: RunnerKind::Ssh,
-        server_id: None,
-        workspace_root: None,
-        settings: Default::default(),
-        env: Default::default(),
-        secret_env: Default::default(),
-        resources: Default::default(),
-        policy: Default::default(),
-    };
-    let status = stale_daemon_admission_snapshot(0, Some("lease-current"), Some(1)).status;
-    let admission = RunnerAdmissionSnapshot::from_status_and_generations(
-        status,
-        vec![proven_non_owner_generation()],
-        Vec::new(),
-    );
-
-    assert!(!admission.summary.safe_to_rotate);
-    let error = refresh_execution_route(&runner, &admission)
-        .expect_err("authoritative non-owner work remains fenced");
-    assert_eq!(error.code.as_str(), "validation.invalid_argument");
-    assert!(error.message.contains("permits daemon rotation"));
 }
 
 #[test]

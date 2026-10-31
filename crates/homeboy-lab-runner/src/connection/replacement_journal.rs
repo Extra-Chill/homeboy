@@ -474,12 +474,12 @@ fn retire_rejected_replacement(
 /// PID, version, and build identity. Keeping the pending record until this
 /// locked transaction commits makes every interruption retry B first.
 pub(super) fn promote_pending_replacement(runner_id: &str, session: &RunnerSession) -> Result<()> {
-    let generation = session.remote_daemon_lease_id.as_deref().ok_or_else(|| {
+    let lease = session.remote_daemon_lease_id.as_deref().ok_or_else(|| {
         Error::internal_unexpected("authenticated daemon session has no lease ID")
     })?;
     with_runner_registry_lock(runner_id, || {
         if let Some(pending) = pending_replacement(runner_id)? {
-            if pending.remote_daemon_lease_id.as_deref() != Some(generation)
+            if pending.remote_daemon_lease_id.as_deref() != Some(lease)
                 || pending.remote_daemon_pid != session.remote_daemon_pid
                 || pending.remote_daemon_address != session.remote_daemon_address
             {
@@ -491,9 +491,6 @@ pub(super) fn promote_pending_replacement(runner_id: &str, session: &RunnerSessi
                 ));
             }
         }
-        crate::generation_store::record_authenticated_admission_locked(
-            runner_id, session, generation,
-        )?;
         let path = pending_replacement_path(runner_id)?;
         if path.exists() {
             std::fs::remove_file(&path).map_err(|error| {
