@@ -173,23 +173,44 @@ pub(crate) fn registered_base_at(config_root: Option<&Path>) -> Result<Vec<Compo
     let projects = projects_at(config_root).unwrap_or_default();
     let mut components = Vec::new();
     let mut seen = HashSet::new();
+    let mut standalone: std::collections::HashMap<String, Component> =
+        standalone_base_at(config_root)?
+            .into_iter()
+            .map(|component| (component.id.clone(), component))
+            .collect();
 
     for project in projects {
         for attachment in project.components {
             if seen.insert(attachment.id.clone()) {
-                let mut component = Component::new(
-                    attachment.id,
-                    attachment.local_path,
-                    attachment.remote_path.unwrap_or_default(),
-                    None,
-                );
-                component.deployment_provider = attachment.deployment_provider;
+                // A project attachment only carries placement (checkout,
+                // deploy target, provider). Repository identity such as
+                // `remote_url` and `aliases` lives in the standalone
+                // registration, so overlay the attachment onto it the same
+                // way full resolution does (#16787). Dropping it made a
+                // renamed repository fall back to the component ID.
+                let mut component = match standalone.remove(&attachment.id) {
+                    Some(mut registered) => {
+                        if !attachment.local_path.trim().is_empty() {
+                            registered.local_path = attachment.local_path;
+                        }
+                        registered
+                    }
+                    None => {
+                        Component::new(attachment.id, attachment.local_path, String::new(), None)
+                    }
+                };
+                if let Some(remote_path) = attachment.remote_path {
+                    component.remote_path = remote_path;
+                }
+                if attachment.deployment_provider.is_some() {
+                    component.deployment_provider = attachment.deployment_provider;
+                }
                 components.push(component);
             }
         }
     }
 
-    for component in standalone_base_at(config_root)? {
+    for component in standalone.into_values() {
         if seen.insert(component.id.clone()) {
             components.push(component);
         }

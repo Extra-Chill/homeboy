@@ -1218,3 +1218,70 @@ fn write_standalone_rejects_preserved_invalid_remote_url() {
         "validation.invalid_argument"
     );
 }
+
+#[test]
+fn registered_base_keeps_standalone_identity_for_project_attached_component() {
+    // #16787: a project attachment carries placement only. The base inventory
+    // must keep the standalone registration's repository identity, otherwise a
+    // component whose repository was renamed falls back to its ID.
+    let dir = temp_home_dir();
+    let attached_repo = dir.path().join("attached-checkout");
+    fs::create_dir_all(&attached_repo).unwrap();
+    let _home = with_home_override(dir.path());
+    let components = crate::paths::components().unwrap();
+    fs::create_dir_all(&components).unwrap();
+    fs::write(
+        components.join("platform-network.json"),
+        serde_json::json!({
+            "local_path": dir.path().join("registered-checkout"),
+            "remote_url": "https://github.com/Example/platform.git",
+            "aliases": ["platform-net"],
+            "remote_path": "wp-content/plugins/registered",
+        })
+        .to_string(),
+    )
+    .unwrap();
+    crate::project::save(&Project {
+        id: "site".to_string(),
+        components: vec![
+            ProjectComponentAttachment {
+                id: "platform-network".to_string(),
+                local_path: attached_repo.to_string_lossy().to_string(),
+                remote_path: Some("wp-content/plugins/attached".to_string()),
+                ..Default::default()
+            },
+            ProjectComponentAttachment {
+                id: "attachment-only".to_string(),
+                local_path: attached_repo.to_string_lossy().to_string(),
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    })
+    .unwrap();
+
+    let rows = registered_base().expect("base registry rows");
+    let network = rows
+        .iter()
+        .find(|row| row.id == "platform-network")
+        .expect("attached component row");
+    assert_eq!(
+        network.remote_url.as_deref(),
+        Some("https://github.com/Example/platform.git")
+    );
+    assert_eq!(network.aliases, vec!["platform-net".to_string()]);
+    assert_eq!(network.local_path, attached_repo.to_string_lossy());
+    assert_eq!(network.remote_path, "wp-content/plugins/attached");
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row.id == "platform-network")
+            .count(),
+        1
+    );
+
+    let bare = rows
+        .iter()
+        .find(|row| row.id == "attachment-only")
+        .expect("attachment-only row");
+    assert!(bare.remote_url.is_none());
+}
