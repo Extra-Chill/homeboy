@@ -2984,10 +2984,7 @@ fn run_cleanup_category(
                     let output =
                         controller_runtime::cleanup(controller_runtime::resolve_cleanup_options(
                             apply,
-                            ControllerRuntimeRetentionOverrides {
-                                limit: Some(limit),
-                                ignore_retention: false,
-                            },
+                            ControllerRuntimeRetentionOverrides { limit: Some(limit) },
                         ))?;
                     // Counts come from core rather than being re-derived here, so
                     // the advertised reclaim is exactly what an apply achieves. A

@@ -32,8 +32,8 @@ use homeboy_lab_contract::lab::transport_failure::LabTransportAttemptReceipt;
 use super::super::CmdResult;
 use super::args::{
     ActiveArgs, CancelArgs, DiagnoseArgs, EvidenceArgs, LifecycleReadArgs, ListArgs, LogsArgs,
-    QuarantineArgs, RearmArgs, ReconcileArgs, ReplayProviderBoundaryArgs, RuntimeRecoverArgs,
-    RuntimeValidateArgs, StatusArgs,
+    QuarantineArgs, RearmArgs, ReconcileArgs, ReplayProviderBoundaryArgs, RuntimeValidateArgs,
+    StatusArgs,
 };
 use super::candidate::{canonical_candidate_projection, classify_candidates};
 use crate::commands::utils::response::{
@@ -2734,17 +2734,13 @@ struct DiagnosedFailure {
     classification: AgentTaskFailureClassification,
     phase: Option<String>,
     provider_boundary_exists: bool,
-    controller_runtime_recovery_available: bool,
     provider_budget_consumed: bool,
 }
 
 /// Collect the distinct failure classifications a run actually recorded, first
 /// implicated task wins. Successful and no-op outcomes are never a failure
 /// signal even if a stale classification survived on them.
-fn diagnosed_failures(
-    record: &AgentTaskRunRecord,
-    aggregate: &AgentTaskAggregate,
-) -> Vec<DiagnosedFailure> {
+fn diagnosed_failures(aggregate: &AgentTaskAggregate) -> Vec<DiagnosedFailure> {
     let mut failures: Vec<DiagnosedFailure> = Vec::new();
     for outcome in &aggregate.outcomes {
         if matches!(
@@ -2774,7 +2770,6 @@ fn diagnosed_failures(
                 .evidence_refs
                 .iter()
                 .any(|evidence| evidence.kind == "executor-input"),
-            controller_runtime_recovery_available: controller_runtime_recovery_available(record),
             provider_budget_consumed: outcome.metadata["provider_budget_consumed"] == true,
         });
     }
@@ -2823,7 +2818,7 @@ fn attach_diagnose_actionable(
         .state()
         .is_available();
     let failures = aggregate
-        .map(|aggregate| diagnosed_failures(record, aggregate))
+        .map(|aggregate| diagnosed_failures(aggregate))
         .unwrap_or_default();
     let (next_actions, basis) = if current_lifecycle_denial {
         (
@@ -2979,17 +2974,6 @@ fn classification_next_actions(
 
     if failure.phase.as_deref() == Some("controller_admission") {
         let mut actions = vec![failure_evidence];
-        if failure.controller_runtime_recovery_available {
-            actions.push(
-                CommandNextAction::new(
-                    "recover the pinned controller runtime from a trusted source checkout",
-                    format!(
-                        "homeboy agent-task runtime-recover {run} --source <trusted-source-checkout>"
-                    ),
-                )
-                .with_kind(CommandNextActionKind::Repair),
-            );
-        }
         actions.push(
             CommandNextAction::new(
                 "show the controller admission record and runtime pin",
@@ -3802,7 +3786,6 @@ mod diagnose_actionable_tests {
             classification,
             phase: None,
             provider_boundary_exists: true,
-            controller_runtime_recovery_available: false,
             provider_budget_consumed: false,
         }
     }
@@ -3990,7 +3973,6 @@ mod diagnose_actionable_tests {
             classification: AgentTaskFailureClassification::InvalidInput,
             phase: None,
             provider_boundary_exists: false,
-            controller_runtime_recovery_available: false,
             provider_budget_consumed: false,
         };
 
@@ -4001,31 +3983,6 @@ mod diagnose_actionable_tests {
         assert_eq!(
             commands(&actions),
             vec!["homeboy agent-task evidence run-1 --task task-a --failure-only"]
-        );
-    }
-
-    #[test]
-    fn controller_admission_uses_runtime_recovery_only_when_a_pin_is_recoverable() {
-        let failure = DiagnosedFailure {
-            task_id: "task-a".to_string(),
-            classification: AgentTaskFailureClassification::InvalidInput,
-            phase: Some("controller_admission".to_string()),
-            provider_boundary_exists: false,
-            controller_runtime_recovery_available: true,
-            provider_budget_consumed: false,
-        };
-
-        let (actions, basis) =
-            diagnose_next_actions("run-1", &[failure], &[], None, None, false, false);
-
-        assert_eq!(basis, DIAGNOSE_ACTION_BASIS_DIAGNOSIS);
-        assert_eq!(
-            commands(&actions),
-            vec![
-                "homeboy agent-task evidence run-1 --task task-a --failure-only",
-                "homeboy agent-task runtime-recover run-1 --source <trusted-source-checkout>",
-                "homeboy agent-task status run-1",
-            ]
         );
     }
 
@@ -4138,7 +4095,6 @@ mod diagnose_actionable_tests {
                 classification: AgentTaskFailureClassification::InvalidInput,
                 phase: None,
                 provider_boundary_exists: true,
-                controller_runtime_recovery_available: false,
                 provider_budget_consumed: false,
             }],
             &[],
@@ -4217,21 +4173,6 @@ fn attach_collection_budget(
         "output_budget".to_string(),
         serde_json::to_value(metadata).unwrap_or(Value::Null),
     );
-}
-
-pub(super) fn recover_runtime(args: RuntimeRecoverArgs) -> CmdResult<Value> {
-    let lifecycle_store =
-        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
-    let recovered = homeboy::agents::agent_task_lifecycle::recover_controller_runtime_in_store(
-        &lifecycle_store,
-        &args.run_id,
-        args.artifact.as_deref().map(std::path::Path::new),
-        args.source.as_deref().map(std::path::Path::new),
-    )?;
-    Ok((
-        json!({ "schema": "homeboy/controller-runtime-recovery/v1", "run_id": args.run_id, "recovered": recovered }),
-        0,
-    ))
 }
 
 pub(super) fn validate_runtime(args: RuntimeValidateArgs) -> CmdResult<Value> {
@@ -6063,20 +6004,6 @@ fn diagnostic_owner(class: &str, source: &str, data: &Value) -> &'static str {
     } else {
         "agent_task"
     }
-}
-
-fn controller_runtime_recovery_available(record: &AgentTaskRunRecord) -> bool {
-    let runtime = record
-        .metadata
-        .get(homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY);
-    runtime
-        .and_then(|runtime| runtime.pointer("/originating/pinned_executable"))
-        .and_then(Value::as_str)
-        .is_some_and(|path| !path.trim().is_empty())
-        && runtime
-            .and_then(|runtime| runtime.pointer("/originating/sha256"))
-            .and_then(Value::as_str)
-            .is_some_and(|digest| !digest.trim().is_empty())
 }
 
 fn missing_artifact_summaries(aggregate: &AgentTaskAggregate) -> Vec<Value> {

@@ -218,10 +218,6 @@ pub struct RetentionConfig {
     pub runtime_run_max_bytes: u64,
     #[serde(default = "default_runtime_run_max_count")]
     pub runtime_run_max_count: usize,
-    #[serde(default = "default_controller_runtime_retention_days")]
-    pub controller_runtime_days: u64,
-    #[serde(default = "default_controller_runtime_max_bytes")]
-    pub controller_runtime_max_bytes: u64,
     /// Age after which a terminal run's controller scratch recovery directory
     /// (`<artifact_root>/controller-scratch-recovery/<run>`) is reclaimable.
     #[serde(default = "default_controller_scratch_recovery_days")]
@@ -297,8 +293,6 @@ impl Default for RetentionConfig {
             runtime_tmp_days: default_runtime_tmp_retention_days(),
             runtime_run_max_bytes: default_runtime_run_max_bytes(),
             runtime_run_max_count: default_runtime_run_max_count(),
-            controller_runtime_days: default_controller_runtime_retention_days(),
-            controller_runtime_max_bytes: default_controller_runtime_max_bytes(),
             controller_scratch_recovery_days: default_controller_scratch_recovery_days(),
             release_artifact_max_count: default_release_artifact_max_count(),
             release_artifact_max_bytes: default_release_artifact_max_bytes(),
@@ -337,14 +331,6 @@ fn default_runtime_run_max_count() -> usize {
     100
 }
 
-fn default_controller_runtime_retention_days() -> u64 {
-    30
-}
-
-fn default_controller_runtime_max_bytes() -> u64 {
-    2 * 1024 * 1024 * 1024
-}
-
 fn default_controller_scratch_recovery_days() -> u64 {
     14
 }
@@ -362,7 +348,7 @@ fn default_release_artifact_max_count() -> usize {
     5
 }
 
-/// Two GiB per repository, matching `controller_runtime_max_bytes`.
+/// Two GiB per repository.
 ///
 /// At the ~435 MB per-build size that filled a host in #14223 this retains four
 /// builds; at the few-megabyte size most repositories publish it never binds and

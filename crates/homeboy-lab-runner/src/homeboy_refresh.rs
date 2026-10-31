@@ -171,10 +171,6 @@ pub struct HomeboyBinaryRefreshOutput {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub interrupted_job_ids: Vec<String>,
     pub selected_binary_path: String,
-    /// Explicit controller-side work needed before the stale controller can
-    /// continue with this verified runner candidate.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub next_actions: Vec<HomeboyControllerContinuationAction>,
     pub reconnect_required: bool,
     pub followup_commands: Vec<String>,
     /// The observed admission postcondition after a reconnect. A rotated daemon
@@ -209,16 +205,6 @@ pub struct HomeboyBinaryRefreshArtifacts {
     pub build_log: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_log: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct HomeboyControllerContinuationAction {
-    pub label: String,
-    pub command: Vec<String>,
-    pub source: String,
-    pub commit: String,
-    pub identity: String,
-    pub invocation: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -513,7 +499,6 @@ fn refresh_homeboy_binary_inner_in_roots(
         daemon_refreshed: false,
         interrupted_job_ids: Vec::new(),
         selected_binary_path: plan.binary_path.clone(),
-        next_actions: Vec::new(),
         reconnect_required: !plan.reconnect,
         followup_commands: plan.followup_commands.clone(),
         readiness: None,
@@ -1043,7 +1028,6 @@ fn refresh_homeboy_binary_inner_in_roots(
         .and_then(|readiness| readiness.continuation.clone())
         .map(|continuation| vec![continuation])
         .unwrap_or_else(|| plan.followup_commands.clone());
-    let next_actions = controller_continuation_actions(&plan, &identity, Vec::new())?;
     // Every mechanical phase above can report `succeeded` while the runner's
     // own admission state still refuses to converge (e.g. a drift predicate
     // trips again immediately after reconnect). A non-zero exit must always
@@ -1056,7 +1040,6 @@ fn refresh_homeboy_binary_inner_in_roots(
             phase_summary,
             daemon_refreshed,
             interrupted_job_ids,
-            next_actions,
             reconnect_required: reconnect_required_after_refresh(daemon_refreshed),
             followup_commands,
             readiness,
@@ -2995,30 +2978,17 @@ fn refresh_reconnect_failure(
 /// retry that can rematerialize or select a different executable.
 fn refresh_reconnect_failure_with_message(
     plan: &HomeboyBinaryRefreshPlan,
-    identity: &Value,
+    _identity: &Value,
     execution: &RunnerExecOutput,
     reconnect_error: &str,
 ) -> Result<HomeboyBinaryRefreshFailure> {
     let mut failure = refresh_failure(plan, execution.clone(), 1);
-    let invocation = vec![
+    let recovery_command = vec![
+        "homeboy".to_string(),
         "runner".to_string(),
         "connect".to_string(),
         plan.runner_id.clone(),
     ];
-    let recovery_command = if plan.mode == "materialize" {
-        controller_continuation_actions(plan, identity, invocation)?
-            .into_iter()
-            .next()
-            .expect("materialized candidate continuation is present")
-            .command
-    } else {
-        vec![
-            "homeboy".to_string(),
-            "runner".to_string(),
-            "connect".to_string(),
-            plan.runner_id.clone(),
-        ]
-    };
     failure.recovery_actions = vec![
         homeboy_core::runner_execution_envelope::RunnerExecutionNextAction {
             label: "reconnect_after_promotion".to_string(),
@@ -3072,73 +3042,6 @@ fn build_local_homeboy_binary(
     }
     target.publish()?;
     Ok((target.target_dir().join("release/homeboy"), Some(target)))
-}
-
-fn controller_continuation_actions(
-    plan: &HomeboyBinaryRefreshPlan,
-    identity: &Value,
-    invocation: Vec<String>,
-) -> Result<Vec<HomeboyControllerContinuationAction>> {
-    if plan.mode != "materialize" {
-        return Ok(Vec::new());
-    }
-    let source = plan.source.as_deref().ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "controller_continuation",
-            "a controller continuation needs the verified candidate source URL",
-            Some(plan.runner_id.clone()),
-            None,
-        )
-    })?;
-    let expected = identity
-        .get("data")
-        .unwrap_or(identity)
-        .get("display")
-        .and_then(Value::as_str)
-        .ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "identity",
-                "refresh did not report a candidate build identity",
-                Some(plan.runner_id.clone()),
-                None,
-            )
-        })?;
-    let exact_commit = identity
-        .get("data")
-        .unwrap_or(identity)
-        .get("git_commit")
-        .and_then(Value::as_str)
-        .ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "identity",
-                "refresh did not report the candidate Git commit",
-                Some(plan.runner_id.clone()),
-                None,
-            )
-        })?;
-    let mut command = vec![
-        "homeboy".to_string(),
-        "runtime".to_string(),
-        "materialize-controller".to_string(),
-        "--source".to_string(),
-        source.to_string(),
-        "--commit".to_string(),
-        exact_commit.to_string(),
-        "--identity".to_string(),
-        expected.to_string(),
-    ];
-    if !invocation.is_empty() {
-        command.push("--".to_string());
-        command.extend(invocation.iter().cloned());
-    }
-    Ok(vec![HomeboyControllerContinuationAction {
-        label: "materialize_controller_candidate".to_string(),
-        command,
-        source: source.to_string(),
-        commit: exact_commit.to_string(),
-        identity: expected.to_string(),
-        invocation,
-    }])
 }
 
 const RUNNER_SOURCE_SNAPSHOT_SCHEMA: &str = "homeboy/runner-dev-source-snapshot/v1";

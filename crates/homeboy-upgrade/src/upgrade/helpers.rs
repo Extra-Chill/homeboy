@@ -824,11 +824,6 @@ fn run_controller_upgrade_with_operation(
     controller_mutation_lease.assert_generation()?;
     let upgrade_completed = !superseded && should_sync_after_upgrade(new_version.as_deref());
     if upgrade_completed {
-        // This is deliberately a short switch, not a drain: records admitted
-        // before it retain their immutable runtime pin and remain executable.
-        operation.set_phase_durable("rotating_controller_generation")?;
-        let installed_executable = super::execution::active_binary_path()?;
-        homeboy_core::controller_runtime::activate_installed_generation(&installed_executable)?;
         if success {
             operation.mark_controller_promoted_durable("controller installation completed")?;
         }

@@ -113,8 +113,6 @@ own arguments.
 - `runtime_run_max_bytes` — Maximum aggregate failed runtime-run evidence retained (default: 1 GiB).
 - `runtime_run_max_count` — Maximum failed runtime-run directories retained (default: 100).
 - `limit` — Maximum records inspected per cleanup invocation (default: 1000).
-- `controller_runtime_days` — Age threshold before an unreferenced controller runtime identity is eligible (default: 30).
-- `controller_runtime_max_bytes` — Byte budget above which unreferenced controller runtime identities are reclaimed regardless of age.
 - `controller_scratch_recovery_days` — Age after which a terminal run's controller scratch recovery directory (`<artifact_root>/controller-scratch-recovery/<run>`) is reclaimed by the `controller-scratch` cleanup category (default: 14). A run that is still active, or that still has a scratch lease on disk, keeps its recovery.
 - `release_artifact_max_count` — Maximum published versions retained per repository in the durable release artifact store (default: 5). The newest release of every repository is always retained regardless of this value.
 - `release_artifact_max_bytes` — Byte budget for retained release artifacts, per repository (default: 2 GiB). Applies alongside `release_artifact_max_count`; the stricter bound wins. A count alone cannot bound this store because per-release payloads span two orders of magnitude across repositories (#14223).

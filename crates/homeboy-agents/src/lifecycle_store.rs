@@ -661,7 +661,7 @@ impl AgentTaskLifecycleStore {
         let plan = read_json(&path).map_err(|error| {
             Error::internal_io(
                 format!(
-                    "authoritative controller-owned plan for agent-task run `{run_id}` is unavailable at {}; lifecycle record plan_path is runner execution transport and cannot be used for controller readback: {}",
+                    "authoritative controller-owned plan for agent-task run `{run_id}` is unavailable at {}; lifecycle record plan_path is runner execution transport and cannot be used for controller readback: {}; re-cook this work with the current binary",
                     path.display(),
                     error.message
                 ),
@@ -3084,7 +3084,7 @@ pub(crate) fn snapshot_from_run(run: &RunRecord) -> Result<AgentTaskRunRecord> {
         return Err(Error::validation_invalid_argument(
             "agent_task_run.schema",
             format!(
-                "unsupported durable agent-task run schema `{}`; this Homeboy build supports `{}`",
+                "unsupported durable agent-task run schema `{}`; this Homeboy build supports `{}`; re-cook this work with the current binary",
                 record.schema,
                 super::records::schemas::RUN
             ),
@@ -3125,7 +3125,7 @@ fn parse_record_from_run(run: &RunRecord) -> Result<AgentTaskRunRecord> {
     serde_json::from_value(value.clone()).map_err(|error| {
         Error::internal_json(
             error.to_string(),
-            Some(format!("parse agent-task run {}", run.id)),
+            Some(format!("parse agent-task run {}; incompatible record shape: re-cook this work with the current binary", run.id)),
         )
     })
 }
@@ -3137,7 +3137,7 @@ fn normalize_decoded_record(
     if let Some(problem) = record.lab_handoff_validation_error() {
         return Err(Error::internal_json(
             problem,
-            Some(format!("validate agent-task Lab handoff {}", run.id)),
+            Some(format!("validate agent-task Lab handoff {}; incompatible record shape: re-cook this work with the current binary", run.id)),
         ));
     }
     if let Some(identity) = record.workspace_identity.as_ref() {

@@ -3306,8 +3306,9 @@ mod tests {
             upgrade
                 .drain_for_binary_replacement(Duration::from_secs(1), |_| {})
                 .expect("binary replacement does not drain immutable execution");
-            let future = controller_runtime::activate_installed_generation(
+            let future = controller_runtime::pin_executable(
                 &crate::test_support::controller_runtime_test_executable(),
+                &crate::build_identity::current().display,
             )
             .expect("publish future generation");
             assert_ne!(
@@ -3315,10 +3316,7 @@ mod tests {
                 runtime["originating"]["pinned_executable"]
             );
             drop(upgrade);
-            let purge = ControllerRuntimeRetentionOverrides {
-                ignore_retention: true,
-                limit: None,
-            };
+            let purge = ControllerRuntimeRetentionOverrides { limit: None };
             let retained =
                 controller_runtime::prune_pins(true, purge).expect("real cleanup while executing");
             assert!(!retained.removed.contains(&binary));

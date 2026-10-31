@@ -72,10 +72,6 @@ pub fn recover_transport_proxy_in_store(
     run_id: &str,
 ) -> Result<Option<TransportProxyRecovery>> {
     let mut record = lifecycle_store.read_record(&sanitize_run_id(run_id))?;
-    homeboy_core::controller_runtime::validate_for_mutation(
-        &record.metadata,
-        &homeboy_core::build_identity::current().display,
-    )?;
     if !is_transport_proxy(&record) {
         return Ok(None);
     }
@@ -136,18 +132,6 @@ pub fn recover_transport_proxy_in_store(
 /// the file that owns them.
 pub fn recover_terminal_transport_proxy_evidence(run_id: &str) -> Result<bool> {
     let mut record = store::read_record(&sanitize_run_id(run_id))?;
-    let runtime = record
-        .metadata
-        .get(homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY)
-        .ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "controller_runtime",
-                "durable run has no controller runtime pin",
-                Some(record.run_id.clone()),
-                None,
-            )
-        })?;
-    homeboy_core::controller_runtime::validate(runtime)?;
     if !record.state().is_terminal() || !is_authenticated_transport_recovery_record(&record) {
         return Ok(false);
     }
