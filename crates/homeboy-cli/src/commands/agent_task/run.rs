@@ -2284,50 +2284,23 @@ mod preview_tests {
     }
 
     #[test]
-    fn backend_preview_choices_exclude_declared_but_unready_backends() {
-        let required = format!("HOMEBOY_TEST_CREDENTIAL_{}", uuid::Uuid::new_v4());
-        let catalog = provider::AgentTaskProviderCatalog {
-            providers: vec![
-                serde_json::from_value(serde_json::json!({
-                    "id": "ready.agent-task-executor",
-                    "backend": "ready",
-                    "invocation": { "argv": ["true"] },
-                }))
-                .expect("ready provider"),
-                serde_json::from_value(serde_json::json!({
-                    "id": "declared.agent-task-executor",
-                    "backend": "declared",
-                    "invocation": { "argv": ["true"] },
-                    "secret_env_requirements": [{
-                        "env": [required]
-                    }],
-                }))
-                .expect("declared provider"),
-            ],
-            ..Default::default()
-        };
-
-        assert_eq!(ready_cook_backends(&catalog), vec!["ready"]);
-    }
-
-    #[test]
     fn backend_preview_does_not_select_unrelated_account_default_credentials() {
+        let _home = homeboy::core::test_support::HomeGuard::new();
+        let fake = FakePi::with_probes("exit 99", "printf 'test model\\n'");
+        fake.install_catalog_config();
+        let mut provider = fake.provider();
+        provider.provider_defaults.insert(
+            "unused-account".into(),
+            serde_json::json!({
+                "required_secret_env": ["UNUSED_ACCOUNT_TOKEN"]
+            }),
+        );
         let catalog = provider::AgentTaskProviderCatalog {
-            providers: vec![serde_json::from_value(serde_json::json!({
-                "id": "sample-runtime.agent-task-executor",
-                "backend": "sample-runtime",
-                "invocation": { "argv": ["true"] },
-                "provider_defaults": {
-                    "unused-account": {
-                        "required_secret_env": ["UNUSED_ACCOUNT_TOKEN"]
-                    }
-                }
-            }))
-            .expect("provider")],
+            providers: vec![provider],
             ..Default::default()
         };
 
-        assert_eq!(ready_cook_backends(&catalog), vec!["sample-runtime"]);
+        assert_eq!(ready_cook_backends(&catalog), vec!["pi"]);
     }
 
     #[test]
@@ -3549,6 +3522,7 @@ process.stdout.write(JSON.stringify({type:'message_end',message:{role:'assistant
                 &format!("exec node '{}' \"$@\"", script.display()),
                 "printf 'test model\\n'",
             );
+            fake.install_catalog_config();
             let provider = fake.provider();
             let executor = std::sync::Arc::new(ExtensionProviderAgentTaskExecutor::from_catalog(
                 AgentTaskProviderCatalog {

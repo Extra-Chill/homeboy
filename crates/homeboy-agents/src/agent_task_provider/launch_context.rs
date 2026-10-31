@@ -228,7 +228,8 @@ mod tests {
         serde_json::from_value(json!({
             "task_id": task_id,
             "executor": {
-                "backend": "test",
+                "backend": "pi",
+                "model": "test/model",
                 "secret_env": [secret_name]
             },
             "instructions": "run"
@@ -236,20 +237,17 @@ mod tests {
         .expect("request")
     }
 
-    fn provider(secret_name: &str) -> AgentTaskExecutorProvider {
-        serde_json::from_value(json!({
-            "id": "test.provider",
-            "backend": "test",
-            "runtime_id": "test-runtime",
-            "invocation": {
-                "argv": ["true"],
-                "env": [
-                    { "name": secret_name, "source": "secret_env", "redacted": true },
-                    { "name": "PROVIDER_MODE", "value": "test" }
-                ]
-            }
-        }))
-        .expect("provider")
+    fn provider(
+        secret_name: &str,
+        fake: &super::super::test_pi::FakePi,
+    ) -> AgentTaskExecutorProvider {
+        let mut provider = fake.provider();
+        provider.invocation.env = serde_json::from_value(json!([
+            { "name": secret_name, "source": "secret_env", "redacted": true },
+            { "name": "PROVIDER_MODE", "value": "test" }
+        ]))
+        .expect("provider environment");
+        provider
     }
 
     #[test]
@@ -258,8 +256,10 @@ mod tests {
         let secret_name = format!("HOMEBOY_TEST_LAUNCH_SECRET_{}", std::process::id());
         let secret_value = format!("launch-secret-value-{}", std::process::id());
         let _secret = homeboy_core::test_support::EnvVarGuard::set(&secret_name, &secret_value);
-        let request = request("launch-context-task", &secret_name);
-        let provider = provider(&secret_name);
+        let mut request = request("launch-context-task", &secret_name);
+        let fake = super::super::test_pi::FakePi::success();
+        request.executor.config = fake.config();
+        let provider = provider(&secret_name, &fake);
         let run_id = "launch-context-run";
         let plan = AgentTaskPlan::new("launch-context-plan", vec![request.clone()]);
         crate::agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("durable run");
@@ -276,11 +276,11 @@ mod tests {
         let record = store.read_record(run_id).expect("durable record");
         let context = &record.metadata["provider_executions"][0]["launch_context"];
         assert_eq!(context["schema"], AGENT_TASK_PROVIDER_LAUNCH_CONTEXT_SCHEMA);
-        assert_eq!(context["provider_id"], "test.provider");
+        assert_eq!(context["provider_id"], "pi.agent-task-executor");
         assert_eq!(context["public_env"]["PROVIDER_MODE"], "test");
         assert_eq!(
             context["public_env"]["HOMEBOY_AGENT_TASK_PROVIDER_ID"],
-            "test.provider"
+            "pi.agent-task-executor"
         );
         assert_eq!(context["portable"], false);
         assert!(context["portability_blockers"][0]

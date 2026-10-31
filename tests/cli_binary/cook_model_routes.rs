@@ -7,8 +7,8 @@ use tempfile::TempDir;
 const PRIMARY: &str = "zai-coding-plan/glm-5.3-flash";
 const ALTERNATIVE: &str = "anthropic/claude-sonnet-5";
 const OUTSIDE: &str = "openai/gpt-6-luna";
-const BLOCKED_MODEL: &str = "blocked-model";
-const READY_MODEL: &str = "ready-model";
+const BLOCKED_MODEL: &str = "test/blocked-model";
+const READY_MODEL: &str = "test/ready-model";
 
 #[test]
 fn cook_preview_uses_cli_ack_policy_for_configured_and_outside_models() {
@@ -56,43 +56,15 @@ fn cook_preview_uses_cli_ack_policy_for_configured_and_outside_models() {
 }
 
 /// An unacknowledged configured rotation whose first entry fails provider
-/// readiness (credentials rejected) must not let preview name that entry as
+/// readiness (model unavailable) must not let preview name that entry as
 /// the model: readiness binds the first trusted entry instead, and the JSON
 /// and stderr disclose the bound route, the skipped entries, and their
 /// reasons (#15854).
 #[test]
 fn cook_preview_reports_the_readiness_bound_rotation_route() {
     let home = tempfile::tempdir().expect("isolated Homeboy home");
-    let config_root = home.path().join(".config/homeboy");
-    let runtime_root = config_root.join("agent-runtimes/proof");
-    std::fs::create_dir_all(&runtime_root).expect("runtime catalog directory");
-    let readiness = home.path().join("readiness.js");
-    std::fs::write(
-        &readiness,
-        "const fs=require('fs');const input=JSON.parse(fs.readFileSync(0,'utf8'));const model=input.effective_config.model;const ready=model==='ready-model';process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready,classification:ready?'ready':'auth_failure',retryable:false,remediation:'rotate to a configured credential',reason:ready?'':'authentication_rejected',cache_key:String(model),identity:{model}}));",
-    )
-    .expect("readiness script");
-    std::fs::write(
-        runtime_root.join("proof.json"),
-        serde_json::to_vec(&json!({
-            "schema": "homeboy/agent-runtime-manifest/v1",
-            "id": "proof",
-            "agent_task_executors": [{
-                "schema": "homeboy/agent-task-executor-provider/v1",
-                "id": "proof.agent-task-executor",
-                "backend": "proof",
-                "invocation": { "schema": "homeboy/command-invocation/v1", "argv": ["true"] },
-                "readiness_invocation": { "argv": [
-                    "node",
-                    readiness.to_str().expect("readiness path")
-                ] }
-            }]
-        }))
-        .expect("runtime manifest"),
-    )
-    .expect("write runtime declaration");
-    // Rotation entries for this runtime are proof-backend entries the shared
-    // fixture-backend helper cannot express.
+    let path = super::fake_pi::install(home.path(), "test ready-model");
+    // Pi advertises only the fallback model; the primary is unavailable.
     let result = Command::new(homeboy_bin())
         .args([
             "config",
@@ -100,8 +72,8 @@ fn cook_preview_reports_the_readiness_bound_rotation_route() {
             "/agent_task/rotation",
             &serde_json::to_string(&json!({
                 "entries": [
-                    { "backend": "proof", "model": BLOCKED_MODEL },
-                    { "backend": "proof", "model": READY_MODEL },
+                    { "backend": "pi", "model": BLOCKED_MODEL },
+                    { "backend": "pi", "model": READY_MODEL },
                 ]
             }))
             .expect("rotation JSON"),
@@ -118,7 +90,7 @@ fn cook_preview_reports_the_readiness_bound_rotation_route() {
             "config",
             "set",
             "/agent_task/default_backend",
-            "proof",
+            "pi",
             "--string",
         ])
         .env("HOME", home.path())
@@ -132,6 +104,7 @@ fn cook_preview_reports_the_readiness_bound_rotation_route() {
     let repo = home.path().join("repo");
     initialize_git_repository(&repo);
     let output = Command::new(homeboy_bin())
+        .env("PATH", path)
         .args([
             "agent-task",
             "cook",
@@ -173,26 +146,30 @@ fn cook_preview_reports_the_readiness_bound_rotation_route() {
     assert_eq!(readiness_projection["binding_owner"], "controller");
     assert_eq!(
         readiness_projection["route_order"],
-        json!(["proof/blocked-model", "proof/ready-model"])
+        json!(["pi/test/blocked-model", "pi/test/ready-model"])
     );
     assert_eq!(readiness_projection["selected_route"]["model"], READY_MODEL);
     let skipped = readiness_projection["skipped"]
         .as_array()
         .expect("skipped readiness evidence");
     assert_eq!(skipped[0]["model"], BLOCKED_MODEL);
-    assert_eq!(skipped[0]["classification"], "auth_failure");
+    assert_eq!(
+        skipped[0]["classification"],
+        "deterministic_incompatibility"
+    );
     assert!(skipped[0]["reason"]
         .as_str()
         .expect("skipped reason")
-        .contains("authentication_rejected"));
+        .contains("model_not_available"));
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("provider readiness bound route: proof/ready-model"),
+        stderr.contains("provider readiness bound route: pi/test/ready-model"),
         "stderr must disclose the bound route: {stderr}"
     );
     assert!(
-        stderr.contains("(auth_failure: ") && stderr.contains("authentication_rejected"),
+        stderr.contains("(deterministic_incompatibility: ")
+            && stderr.contains("model_not_available"),
         "stderr must disclose skipped entries and reasons: {stderr}"
     );
 }

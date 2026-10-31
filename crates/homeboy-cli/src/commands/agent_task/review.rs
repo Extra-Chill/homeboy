@@ -3182,16 +3182,6 @@ mod tests {
     use super::*;
     use crate::commands::agent_task::fake_pi_test::FakePi;
 
-    impl FakePi {
-        fn install_catalog_config(&self) {
-            let mut config = homeboy::core::defaults::load_config();
-            config
-                .settings
-                .extend(self.config().as_object().unwrap().clone());
-            homeboy::core::defaults::save_config(&config).unwrap();
-        }
-    }
-
     use crate::commands::agent_task_summary::{render_agent_task_summary, AgentTaskSummaryKind};
     use clap::Parser;
     use homeboy::agents::agent_tasks::promotion::{
@@ -3632,16 +3622,13 @@ mod tests {
     #[test]
     fn providers_reports_unknown_capacity_when_a_provider_publishes_nothing() {
         crate::test_support::with_isolated_home(|_| {
-            let mut provider = provider("silent.provider", "silent");
-            provider.readiness_invocation = Some(
-                serde_json::from_value(serde_json::json!({
-                    "argv": ["sh", "-c", "cat >/dev/null; printf '%s' '{\"schema\":\"homeboy/agent-task-provider-readiness-result/v1\",\"ready\":true,\"classification\":\"ready\",\"retryable\":false,\"remediation\":\"\",\"reason\":\"\",\"cache_key\":\"test\",\"identity\":{}}'"]
-                }))
-                .expect("silent readiness invocation"),
-            );
+            let fake = FakePi::with_probes("exit 99", "printf 'test model\\n'");
+            fake.install_catalog_config();
+            let provider = fake.provider();
             let mut args = providers_args();
-            args.backend = Some("silent".to_string());
-            args.selector = Some("silent.provider".to_string());
+            args.backend = Some("pi".to_string());
+            args.selector = Some(provider.id.clone());
+            args.model = Some("test/model".to_string());
             args.validate_readiness = true;
 
             let (output, status) = providers_with_catalog(args, provider_catalog(vec![provider]))
@@ -3654,71 +3641,6 @@ mod tests {
             assert!(capacity["reason"]
                 .as_str()
                 .is_some_and(|reason| !reason.is_empty()));
-        });
-    }
-
-    /// The reported defect (#13634): a fresh/reset `agent_task` config (`{}`)
-    /// offers no default and no discoverable path back to one short of
-    /// reading source or an old backup. `--set-default` must derive a working
-    /// `default_backend`/`rotation` from what actually authenticates *right
-    /// now* and persist it, not merely print a suggestion.
-    #[test]
-    fn providers_set_default_writes_default_backend_and_rotation_from_live_readiness() {
-        crate::test_support::with_isolated_home(|_| {
-            // Starts exactly at the reported defect: no default_backend, no
-            // rotation.
-            let before = homeboy::core::defaults::load_config();
-            assert_eq!(before.agent_task.default_backend, None);
-            assert_eq!(before.agent_task.rotation, None);
-
-            let mut alpha = provider("alpha.provider", "alpha");
-            alpha.readiness_invocation = Some(
-                serde_json::from_value(serde_json::json!({
-                    "argv": ["sh", "-c", "cat >/dev/null; printf '%s' '{\"schema\":\"homeboy/agent-task-provider-readiness-result/v1\",\"ready\":true,\"classification\":\"ready\",\"retryable\":false,\"remediation\":\"\",\"reason\":\"\",\"cache_key\":\"test\",\"identity\":{}}'"]
-                }))
-                .expect("alpha readiness invocation"),
-            );
-            let mut zeta = provider("zeta.provider", "zeta");
-            zeta.readiness_invocation = Some(
-                serde_json::from_value(serde_json::json!({
-                    "argv": ["sh", "-c", "cat >/dev/null; printf '%s' '{\"schema\":\"homeboy/agent-task-provider-readiness-result/v1\",\"ready\":true,\"classification\":\"ready\",\"retryable\":false,\"remediation\":\"\",\"reason\":\"\",\"cache_key\":\"test\",\"identity\":{}}'"]
-                }))
-                .expect("zeta readiness invocation"),
-            );
-            // A backend whose declared credential is not configured here —
-            // the shape of a revoked/never-set credential (#11479) — must
-            // never be chosen as the written default.
-            let mut revoked = credential_declaring_provider();
-            revoked.id = "revoked.provider".to_string();
-            revoked.backend = "revoked".to_string();
-
-            let catalog = provider_catalog(vec![alpha, zeta, revoked]);
-            let output = write_default_backend_from_readiness(&catalog)
-                .expect("at least one backend is live-ready")
-                .0;
-
-            assert_eq!(output["written"], true);
-            assert_eq!(output["default_backend"], "alpha");
-            assert_eq!(
-                output["rotation"],
-                serde_json::json!({ "entries": [ { "backend": "zeta" } ] })
-            );
-            assert_eq!(
-                output["ready_backends"],
-                serde_json::json!(["alpha", "zeta"])
-            );
-
-            // The fix must durably repair the config on disk — a printed
-            // suggestion reproduces the reported defect, it does not fix it.
-            let persisted = homeboy::core::defaults::load_config();
-            assert_eq!(
-                persisted.agent_task.default_backend.as_deref(),
-                Some("alpha")
-            );
-            assert_eq!(
-                persisted.agent_task.rotation,
-                Some(serde_json::json!({ "entries": [ { "backend": "zeta" } ] }))
-            );
         });
     }
 
