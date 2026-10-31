@@ -3930,3 +3930,83 @@ fn component_lint_gate_is_added_after_file_gates_are_snapshotted() {
         );
     });
 }
+
+#[test]
+fn cook_admits_a_project_attached_component_whose_repository_was_renamed() {
+    // #16787: `platform-network` was renamed on the forge to `platform`, and a
+    // stale component still holds the `platform` ID with a different remote.
+    with_isolated_home(|_| {
+        let network = tempfile::tempdir().expect("renamed repository checkout");
+        init_runtime_component_checkout(network.path());
+        add_remote(
+            network.path(),
+            "origin",
+            "https://github.com/example/platform.git",
+        );
+        let theme = tempfile::tempdir().expect("stale component checkout");
+        register_component(
+            "platform-network",
+            network.path(),
+            "https://github.com/example/platform.git",
+        );
+        register_component(
+            "platform",
+            theme.path(),
+            "https://github.com/example/platform-theme.git",
+        );
+        // A project attachment carries only placement; it must not erase the
+        // registered repository identity.
+        homeboy::core::project::save(&homeboy::core::project::Project {
+            id: "site".to_string(),
+            components: vec![homeboy::core::project::ProjectComponentAttachment {
+                id: "platform-network".to_string(),
+                local_path: network.path().display().to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .expect("save project");
+
+        let resolve = |argv: &[&str]| {
+            let mut command = vec![
+                "homeboy".to_string(),
+                "agent-task".to_string(),
+                "cook".to_string(),
+                "--prompt".to_string(),
+                "implement the fix".to_string(),
+            ];
+            command.extend(argv.iter().map(|arg| (*arg).to_string()));
+            command.push("--no-finalize".to_string());
+            let mut input = cook_args_from_cli(command);
+            crate::commands::agent_task::run::resolve_cook_repository(&mut input).map(|_| input)
+        };
+
+        // The replayed Lab admission form: repository name plus exact component.
+        let admitted = resolve(&["--repo", "platform", "--component", "platform-network"])
+            .expect("renamed repository admits its component");
+        assert_eq!(admitted.component.as_deref(), Some("platform-network"));
+
+        // The bare repository name is ambiguous between the stale ID and the
+        // remote, and must say so instead of selecting the stale component.
+        let Err(error) = resolve(&["--repo", "platform"]) else {
+            panic!("bare renamed repository name is ambiguous");
+        };
+        assert!(
+            error
+                .message
+                .contains("matches multiple configured component identities"),
+            "{error:?}"
+        );
+        assert!(
+            error.message.contains("platform-network (platform)"),
+            "{error:?}"
+        );
+        assert!(
+            error.message.contains("platform (platform-theme)"),
+            "{error:?}"
+        );
+
+        // An ID whose remote agrees with the requested name is unchanged.
+        resolve(&["--repo", "platform-network"]).expect("component ID still resolves");
+    });
+}

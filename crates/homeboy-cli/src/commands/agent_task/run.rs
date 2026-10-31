@@ -6819,6 +6819,38 @@ fn cook_components_for_repository_name(
     if let Some(component) =
         homeboy::core::component::inventory::registered_primary_by_id(&repository_name)?
     {
+        // The ID names this repository slug, but the component's own remote
+        // can name a different repository (a renamed repository whose old
+        // name is still a component ID, #16787). When another registered
+        // component's remote is the requested repository, the slug is
+        // ambiguous: report both rather than silently choosing the ID.
+        let id_repository = component
+            .remote_url
+            .as_deref()
+            .map(normalize_repository_name);
+        if id_repository
+            .as_deref()
+            .is_some_and(|repository| repository != repository_name)
+        {
+            let remote_matches = homeboy::core::component::inventory::registered_primary()?
+                .into_iter()
+                .filter(|candidate| candidate.id != component.id)
+                .filter(|candidate| {
+                    candidate
+                        .remote_url
+                        .as_deref()
+                        .is_some_and(|remote| normalize_repository_name(remote) == repository_name)
+                })
+                .collect::<Vec<_>>();
+            if !remote_matches.is_empty() {
+                let mut candidates = vec![component];
+                candidates.extend(remote_matches);
+                return Err(repository_component_identity_ambiguity_error(
+                    repository_name,
+                    &candidates,
+                ));
+            }
+        }
         return Ok(vec![component]);
     }
     let primary_matches = cook_components_matching_repository_name(
