@@ -43,6 +43,9 @@ mod maintenance;
 mod repair;
 mod source;
 pub mod source_metadata;
+mod sparse_clone;
+#[cfg(test)]
+mod sparse_clone_tests;
 
 pub use maintenance::update_all;
 pub use repair::{relink, replace, replace_with_revision, ReplaceResult};
@@ -2250,8 +2253,23 @@ exec '{}' "$@"
             fs::create_dir_all(&root).unwrap();
             write_extension_fixture_with_version(&root, "wordpress", "2.0.0");
             write_declared_runtime_shared_assets(&root);
+            fs::create_dir_all(nested_repo.join("crates/unrelated/src")).unwrap();
+            fs::write(
+                nested_repo.join("crates/unrelated/src/large"),
+                vec![b'x'; 2 * 1024 * 1024],
+            )
+            .unwrap();
             let nested_remote = prepare_git_repo(&nested_repo).expect("nested git fixture");
-            let nested_url = nested_remote.path().join("extension.git");
+            let nested_bare = nested_remote.path().join("extension.git");
+            assert!(run_git(
+                &nested_bare,
+                &["config", "uploadpack.allowFilter", "true"]
+            ));
+            assert!(run_git(
+                &nested_bare,
+                &["config", "uploadpack.allowAnyFilter", "true"]
+            ));
+            let nested_url = format!("file://{}", nested_bare.display());
 
             let flat = home.join("flat-repo");
             fs::create_dir_all(&flat).unwrap();
@@ -2259,7 +2277,7 @@ exec '{}' "$@"
             let manifest_path = flat.join("wordpress/wordpress.json");
             let mut manifest: serde_json::Value =
                 serde_json::from_str(&fs::read_to_string(&manifest_path).unwrap()).unwrap();
-            manifest["source_url"] = serde_json::json!(nested_url.to_string_lossy());
+            manifest["source_url"] = serde_json::json!(nested_url);
             fs::write(&manifest_path, serde_json::to_string(&manifest).unwrap()).unwrap();
             let flat_remote = prepare_git_repo(&flat).expect("flat git fixture");
             let flat_url = flat_remote.path().join("extension.git");
@@ -2271,8 +2289,14 @@ exec '{}' "$@"
                 .join(".config/homeboy/extensions/dependency-adapters/examples/nodejs.json")
                 .is_file());
             fs::remove_dir_all(&result.path).unwrap();
-            install(&nested_url.to_string_lossy(), Some("wordpress")).expect("nested URL install");
-            let error = install(&nested_url.to_string_lossy(), Some("missing")).unwrap_err();
+            let installed = install(&nested_url, Some("wordpress")).expect("nested URL install");
+            assert!(installed
+                .path
+                .join(".homeboy-extension-root.json")
+                .is_file());
+            update("wordpress", true, None).expect("forced nested source_url re-clone");
+            super::replace(&nested_url, Some("wordpress")).expect("nested URL repair");
+            let error = install(&nested_url, Some("missing")).unwrap_err();
             assert!(error.to_string().contains("wordpress"), "{error}");
         });
     }

@@ -145,12 +145,7 @@ pub(super) fn install_from_url(
         })?;
     }
 
-    git::clone_repo_at_ref_with_timeout(
-        url,
-        &temp_dir,
-        revision,
-        super::EXTENSION_SOURCE_PREPARE_TIMEOUT,
-    )?;
+    super::sparse_clone::clone_extension(url, &temp_dir, revision, &extension_id)?;
 
     // Capture source revision before resolve_cloned_extension may discard .git
     // (monorepo installs extract only the subdirectory, losing git history).
