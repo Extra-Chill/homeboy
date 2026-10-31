@@ -1,9 +1,9 @@
 //! Capacity inspection walks Pi model routes without running inference.
 use super::*;
+use crate::commands::agent_task::fake_pi_test::FakePi;
 use crate::commands::agent_task_summary::{render_agent_task_summary, AgentTaskSummaryKind};
 use homeboy::agents::agent_tasks::provider::AgentTaskExecutorProvider;
 use serde_json::json;
-include!("../fake_pi_test.rs");
 
 fn capacity_args() -> AgentTaskCapacityArgs {
     AgentTaskCapacityArgs {

@@ -1,11 +1,13 @@
-// Local equivalent of the agents crate's private FakePi fixture.
-struct FakePi {
+//! Fake `pi` CLI for agent-task command tests: a local equivalent of the
+//! agents crate's private `FakePi` fixture.
+
+pub(crate) struct FakePi {
     _root: tempfile::TempDir,
     command: std::path::PathBuf,
 }
 
 impl FakePi {
-    fn with_probes(body: &str, models: &str) -> Self {
+    pub(crate) fn with_probes(body: &str, models: &str) -> Self {
         let root = tempfile::tempdir().unwrap();
         let command = root.path().join("pi");
         std::fs::write(&command, format!("#!/bin/sh\ncase \"$1\" in\n--version) printf 'test-pi\\n'; exit 0;;\n--list-models) {models}; exit $?;;\nesac\n{body}\n")).unwrap();
@@ -20,11 +22,13 @@ impl FakePi {
         }
     }
 
-    fn config(&self) -> serde_json::Value {
+    pub(crate) fn config(&self) -> serde_json::Value {
         serde_json::json!({"command": self.command, "command_args": ["--mode", "json"]})
     }
 
-    fn provider(&self) -> homeboy::agents::agent_task_provider::AgentTaskExecutorProvider {
+    pub(crate) fn provider(
+        &self,
+    ) -> homeboy::agents::agent_task_provider::AgentTaskExecutorProvider {
         let mut provider =
             homeboy::agents::agent_task_provider::AgentTaskProviderCatalog::discover()
                 .providers

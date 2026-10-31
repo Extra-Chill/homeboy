@@ -1833,8 +1833,8 @@ fn preview_placement_policy(argv: &[String]) -> Value {
 #[cfg(test)]
 mod preview_tests {
     use super::*;
-    include!("fake_pi_test.rs");
     use crate::cli_surface::{Cli, Commands};
+    use crate::commands::agent_task::fake_pi_test::FakePi;
     use clap::Parser;
 
     /// Lab placement binds on the runner: preview names no selected route and

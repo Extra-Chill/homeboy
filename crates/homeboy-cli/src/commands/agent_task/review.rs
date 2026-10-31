@@ -3180,7 +3180,7 @@ pub(crate) fn read_promotion_source(
 #[cfg(test)]
 mod tests {
     use super::*;
-    include!("fake_pi_test.rs");
+    use crate::commands::agent_task::fake_pi_test::FakePi;
 
     impl FakePi {
         fn install_catalog_config(&self) {
