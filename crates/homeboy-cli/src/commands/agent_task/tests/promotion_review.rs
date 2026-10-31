@@ -125,7 +125,6 @@ fn promotion_recipe_reference_hydrates_exact_private_gate_contract() {
             ai_disclosure: homeboy::agents::agent_task_service::CookAiDisclosure {
                 ai_tool: "fixture".to_string(),
                 ai_model: None,
-                ai_used_for: "test".to_string(),
             },
             harvest_context: homeboy::agents::agent_task_scheduler::HarvestExecutionContext::from_current_process()
                 .expect("harvest context"),
@@ -875,7 +874,6 @@ fn run_direct_cook_promotion_resolves_recovered_patch_from_run_id_and_aggregate_
             ai_disclosure: homeboy::agents::agent_task_service::CookAiDisclosure {
                 ai_tool: "fixture".to_string(),
                 ai_model: Some("fixture-model".to_string()),
-                ai_used_for: "test".to_string(),
             },
             harvest_context: homeboy::agents::agent_task_scheduler::HarvestExecutionContext::from_current_process()
                 .expect("harvest context"),

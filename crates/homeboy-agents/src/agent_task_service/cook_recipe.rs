@@ -3047,7 +3047,6 @@ fn reconstruct_recipe_options(
                 .map_err(recipe_value_error("protected_branches"))?,
         },
         ai_disclosure: CookAiDisclosure {
-            ai_used_for: String::new(),
             ai_tool: serde_json::from_value(field("ai_tool")?)
                 .map_err(recipe_value_error("ai_tool"))?,
             ai_model: serde_json::from_value(field("ai_model")?)

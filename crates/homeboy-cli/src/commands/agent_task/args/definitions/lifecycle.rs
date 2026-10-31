@@ -844,9 +844,10 @@ pub struct FinalizePrArgs {
     /// Branch that must not be updated by finalization; repeat for multiple branches.
     #[arg(long = "protected-branch", default_values_t = review::default_protected_branches(), value_name = "BRANCH")]
     pub protected_branches: Vec<String>,
-    /// Ignored legacy disclosure slot.
-    #[arg(skip)]
-    pub ai_used_for: String,
+    /// Retired. Accepted so existing callers keep working; the value is ignored
+    /// and nothing renders it (#16765).
+    #[arg(long, hide = true, value_name = "TEXT")]
+    pub ai_used_for: Option<String>,
     /// Summary of the finalization candidate.
     #[arg(long, value_name = "TEXT")]
     pub summary: Option<String>,
@@ -856,9 +857,6 @@ pub struct FinalizePrArgs {
     /// Reviewer test step. Strict shape: COMMAND=>EXPECTED.
     #[arg(long = "test-step", value_name = "COMMAND=>EXPECTED")]
     pub test_steps: Vec<String>,
-    /// Compatibility notes for the finalization candidate.
-    #[arg(long, value_name = "TEXT")]
-    pub compatibility: Option<String>,
     /// Closing issue reference: #NUMBER, OWNER/REPO#NUMBER, or a github.com issue URL.
     #[arg(long = "closes", value_name = "ISSUE_REF")]
     pub closes: Vec<String>,

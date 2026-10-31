@@ -1908,7 +1908,6 @@ fn lab_run_retry_leaves_a_cook_child_for_controller_lifecycle() {
             ai_disclosure: crate::agents::agent_task_service::CookAiDisclosure {
                 ai_tool: "fixture".to_string(),
                 ai_model: None,
-                ai_used_for: "test".to_string(),
             },
             harvest_context:
                 homeboy::agents::agent_task_scheduler::HarvestExecutionContext::from_current_process()
@@ -2002,7 +2001,6 @@ fn recovered_terminal_work_waits_for_an_existing_claim_instead_of_reporting_comp
             ai_disclosure: crate::agents::agent_task_service::CookAiDisclosure {
                 ai_tool: "fixture".to_string(),
                 ai_model: None,
-                ai_used_for: "test".to_string(),
             },
             harvest_context:
                 homeboy::agents::agent_task_scheduler::HarvestExecutionContext::from_current_process()

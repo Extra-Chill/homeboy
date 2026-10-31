@@ -3821,7 +3821,6 @@ fn options() -> AgentTaskPrFinalizationOptions {
                 command: "cargo test agent_task_finalization".to_string(),
                 expected: "passes".to_string(),
             }],
-            compatibility: "No compatibility impact.".to_string(),
             evidence: Vec::new(),
             verified_commands: Vec::new(),
             changed_public_contracts: Vec::new(),
@@ -3831,8 +3830,6 @@ fn options() -> AgentTaskPrFinalizationOptions {
                 used: true,
                 tool: "Homeboy (Pi (GPT-5.5))".to_string(),
                 model: "GPT-5.5".to_string(),
-                used_for: "Traced the finalization contract change, implemented it, and confirmed with the recorded gate."
-                    .to_string(),
             },
             source_relationships: Vec::new(),
             overrides: Vec::new(),

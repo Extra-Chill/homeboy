@@ -3136,7 +3136,7 @@ fn cook_finalization_options_with_stores_and_review_form(
                 None,
             )
         })?;
-    let (mut review_dossier, composed_ai_model_disclosure, _) =
+    let (mut review_dossier, composed_ai_model_disclosure) =
         cook_review_dossier_with_stores_and_review_form(
             store,
             lifecycle_store,
@@ -4940,7 +4940,7 @@ fn cook_review_dossier_with_stores_and_review_form(
     promotion: &AgentTaskPromotionReport,
     successful_run_id: &str,
     review_form: Option<&AgentTaskSuppliedReviewForm>,
-) -> Result<(AgentTaskReviewDossier, bool, bool)> {
+) -> Result<(AgentTaskReviewDossier, bool)> {
     // A form-only run owns reviewer metadata but carries forward the durable
     // gate proof while its authenticated source owns candidate scope.
     let terminal_promotion = promotion;
@@ -5051,7 +5051,6 @@ fn cook_review_dossier_with_stores_and_review_form(
             summary: lineage.summary,
             what_changed: lineage.what_changed,
             how_to_test: Vec::new(),
-            compatibility: lineage.compatibility,
             // Deterministic evidence: orchestrator-owned. Each candidate-bound
             // gate renders once from `verified_commands`; `evidence` carries only
             // provenance that changes how a reviewer should read the result.
@@ -5066,25 +5065,20 @@ fn cook_review_dossier_with_stores_and_review_form(
                 used: true,
                 tool: lineage.tool,
                 model: lineage.model,
-                used_for: lineage.used_for,
             },
             source_relationships: Vec::new(),
             overrides: Vec::new(),
         },
         lineage.composed_model_disclosure,
-        lineage.preserve_used_for_disclosure,
     ))
 }
 
 struct CookAiLineage {
     summary: String,
     what_changed: Vec<String>,
-    compatibility: String,
     tool: String,
     model: String,
-    used_for: String,
     composed_model_disclosure: bool,
-    preserve_used_for_disclosure: bool,
 }
 
 struct CookAttemptExecution {
@@ -5680,21 +5674,17 @@ fn substantive_lineage(
         return Ok(CookAiLineage {
             summary: terminal_form.summary.clone(),
             what_changed: terminal_form.what_changed.clone(),
-            compatibility: terminal_form.compatibility.clone(),
             tool: crate::agent_task_review_dossier::homeboy_tool_disclosure(
                 &terminal.execution.tool,
             ),
             model,
-            used_for: terminal_form.used_for.clone(),
-            // This already includes response identity and tier attribution;
-            // finalization must not replace it with legacy metadata.model.
+            // This already includes response identity; finalization must not
+            // replace it with legacy metadata.model.
             composed_model_disclosure: true,
-            preserve_used_for_disclosure: false,
         });
     }
     let mut tools = Vec::new();
     let mut models = Vec::new();
-    let mut roles = Vec::new();
     for (index, contribution) in contributions.iter().enumerate() {
         let role = format!("Implementation {}", index + 1);
         let tool =
@@ -5702,19 +5692,13 @@ fn substantive_lineage(
         let model = required_execution_model(&contribution.execution, &contribution.run_id)?;
         tools.push(format!("{role}: {tool}"));
         models.push(format!("{role}: {model}"));
-        roles.push(format!(
-            "{role}: {tool} authored an authenticated contribution retained in the delivered candidate."
-        ));
     }
     Ok(CookAiLineage {
         summary: terminal_form.summary.clone(),
         what_changed: terminal_form.what_changed.clone(),
-        compatibility: terminal_form.compatibility.clone(),
         tool: tools.join("; "),
         model: models.join("; "),
-        used_for: roles.join(" "),
         composed_model_disclosure: true,
-        preserve_used_for_disclosure: true,
     })
 }
 
@@ -5871,28 +5855,15 @@ fn cook_ai_lineage_with_stores(
         .iter()
         .map(|path| format!("Updated `{path}` in the delivered candidate."))
         .collect::<Vec<_>>();
-    let (summary, what_changed, compatibility) = implementation
+    let (summary, what_changed) = implementation
         .form
-        .map(|form| (form.summary, form.what_changed, form.compatibility))
-        .unwrap_or_else(|| {
-            (
-                implementation.task_summary.clone(),
-                changed,
-                format!(
-                    "Delivered candidate verified with {} deterministic Cook gate(s); no separate compatibility assessment was recorded by the implementation attempt.",
-                    promotion.gate_results.len()
-                ),
-            )
-        });
-    let (tool, model, used_for) = implementation.model.map_or_else(
+        .map(|form| (form.summary, form.what_changed))
+        .unwrap_or_else(|| (implementation.task_summary.clone(), changed));
+    let (tool, model) = implementation.model.map_or_else(
         || {
-            let tool = crate::agent_task_review_dossier::homeboy_tool_disclosure(&terminal.tool);
             (
-                tool.clone(),
+                crate::agent_task_review_dossier::homeboy_tool_disclosure(&terminal.tool),
                 terminal_model.clone(),
-                format!(
-                    "Review form: {tool} reviewed the validated adopted candidate and supplied the reviewer metadata."
-                ),
             )
         },
         |implementation_model| {
@@ -5902,24 +5873,16 @@ fn cook_ai_lineage_with_stores(
                 crate::agent_task_review_dossier::homeboy_tool_disclosure(&terminal.tool);
             (
                 format!("Implementation: {implementation_tool}; review form: {terminal_tool}"),
-                format!(
-                    "Implementation: {implementation_model}; review form: {terminal_model}"
-                ),
-                format!(
-                    "Implementation: {implementation_tool} authored the delivered candidate changes and deterministic verification evidence. Review form: {terminal_tool} reviewed the validated candidate and supplied the reviewer metadata."
-                ),
+                format!("Implementation: {implementation_model}; review form: {terminal_model}"),
             )
         },
     );
     Ok(CookAiLineage {
         summary,
         what_changed,
-        compatibility,
         tool,
         model,
-        used_for,
         composed_model_disclosure: true,
-        preserve_used_for_disclosure: false,
     })
 }
 

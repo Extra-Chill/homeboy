@@ -33,8 +33,8 @@ Run metadata records `publication_identity` (`github_app:<app id>` or
 
 Callers may supply `HOMEBOY_REQUESTER`, a single-line opaque identity (up to 512
 bytes), alongside `HOMEBOY_CALLER_CONTEXT`. It is captured in `client_context`
-before dispatch, preserved across handoffs, and rendered as `Requested by: ...`
-in the PR body. No integration-specific identity interpretation is performed.
+before dispatch and preserved across handoffs as run metadata; it is not
+rendered in the PR body. No integration-specific identity interpretation is performed.
 
 **Merge safety:** `pull_requests:write` plus `contents:write` can merge through the
 API. For operator-only merging, configure branch protection that requires a

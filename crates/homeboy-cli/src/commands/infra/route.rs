@@ -1574,7 +1574,6 @@ fn admission_text_value_flag(flag: &str) -> bool {
             | "--deny-command"
             | "--allow-command"
             | "--ai-tool"
-            | "--ai-used-for"
             | "--acceptance-authority"
             | "--acceptance-policy"
             | "--gate-toolchain-spec"

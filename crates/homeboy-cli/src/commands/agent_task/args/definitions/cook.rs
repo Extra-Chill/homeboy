@@ -1733,13 +1733,6 @@ pub struct AgentTaskCookArgs {
     /// guard. Repeatable; defaults to the standard protected set.
     #[arg(long = "protected-branch", default_values_t = review::default_protected_branches(), value_name = "BRANCH")]
     pub protected_branches: Vec<String>,
-    /// Legacy AI-usage disclosure. The reviewer-facing "Used for" text is now
-    /// authored by the agent's `review_form.used_for` (a self-reflective process
-    /// description) and validated by the cook loop's review-form gate; this flag
-    /// no longer feeds the PR body. Retained only for recipe back-compatibility
-    /// and defaults empty (no canned platitude).
-    #[arg(skip)]
-    pub ai_used_for: String,
     /// Require a separate durable acceptance verdict before PR finalization.
     #[arg(long)]
     pub require_acceptance: bool,

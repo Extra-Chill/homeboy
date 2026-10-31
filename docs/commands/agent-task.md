@@ -382,7 +382,7 @@ commit, push, or pull-request mutation:
 ```bash
 homeboy agent-task recover cook-9750 --preflight
 homeboy agent-task recover cook-9750 \
-  --review-override 'compatibility=No public compatibility impact.@reviewed issue #9750'
+  --review-override 'summary=Guard the reload path.@reviewed issue #9750'
 ```
 
 An applied candidate that failed its deterministic gates takes the
@@ -449,15 +449,15 @@ homeboy agent-task finalize-pr ... \
 #### Review Dossier Migration
 
 `finalize-pr` accepts typed reviewer fields without breaking existing invocations.
-Explicit `--summary`, repeated `--what-changed`, `--test-step COMMAND=>EXPECTED`,
-and `--compatibility` take precedence. When omitted, Homeboy derives the dossier
+Explicit `--summary`, repeated `--what-changed`, and `--test-step COMMAND=>EXPECTED`
+take precedence. When omitted, Homeboy derives the dossier
 from the legacy fields: `--title` supplies Summary, `--attempt-summary` supplies
 What changed, each `--targeted-check-run` supplies a `COMMAND=>passes` test step,
 and `--manual-reviewer-check` supplies a reviewer command with its expected
-observation. Compatibility becomes an explicit legacy disclosure. `--closes` and
+observation. `--closes` and
 `--relates-to` are the only issue-relationship inputs; source URLs never imply
-closure. Use `--review-override TARGET=VALUE@PROVENANCE` only for `summary`,
-`what_changed`, or `compatibility`; override provenance remains in JSON output.
+closure. Use `--review-override TARGET=VALUE@PROVENANCE` only for `summary` or
+`what_changed`; override provenance remains in JSON output.
 Normal finalization hydrates `--run-id`; `--manual-finalization` is the explicit
 migration mode for a manually prepared candidate with no durable run.
 

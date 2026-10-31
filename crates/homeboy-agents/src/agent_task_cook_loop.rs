@@ -2454,9 +2454,7 @@ mod tests {
             pr_title: "Guard the reload render path".to_string(),
             summary: "Fix the reload crash.".to_string(),
             what_changed: vec!["Guard the null render path.".to_string()],
-            compatibility: "Internal only; no compatibility impact.".to_string(),
             verification: Vec::new(),
-            used_for: "Reproduced the crash, isolated the null path, added a guard, and verified with a focused gate before finalizing.".to_string(),
             completion: Some(crate::agent_task_review_dossier::AiReviewCompletion::Complete),
             incomplete_reason: String::new(),
         }
@@ -2742,7 +2740,7 @@ mod tests {
     #[test]
     fn green_change_with_invalid_review_form_requests_another_attempt_with_feedback() {
         let mut form = valid_review_form();
-        form.used_for = form.summary.clone(); // not a distinct reflection
+        form.what_changed.clear(); // a required slot is empty
         let report = evaluate_cook_loop(AgentTaskCookLoopOptions {
             source_request: source_request(),
             promotion_report: promotion_report(
@@ -2763,7 +2761,7 @@ mod tests {
         assert!(request.inputs["cook_loop"]["review_form_feedback"]
             .as_str()
             .unwrap_or_default()
-            .contains("distinct from summary"));
+            .contains("what_changed has no non-empty entries"));
     }
 
     #[test]

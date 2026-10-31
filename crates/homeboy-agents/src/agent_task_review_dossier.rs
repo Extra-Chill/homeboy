@@ -11,7 +11,6 @@ pub const AGENT_TASK_REVIEW_DOSSIER_SCHEMA: &str = "homeboy/agent-task-review-do
 pub enum AgentTaskReviewSectionId {
     Summary,
     WhatChanged,
-    Compatibility,
     /// Gate results, reviewer test steps, and the collapsed provenance block.
     Verification,
     /// The `Closes #N` / `Relates to …` lines at the top of the body.
@@ -122,8 +121,6 @@ pub struct AgentTaskReviewDossier {
     /// verification from `verified_commands` and leaves this empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub how_to_test: Vec<AgentTaskReviewTestStep>,
-    #[serde(default, skip_serializing)]
-    pub compatibility: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub evidence: Vec<AgentTaskReviewEvidence>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -156,8 +153,6 @@ pub struct AgentTaskReviewAiAssistance {
     pub used: bool,
     pub tool: String,
     pub model: String,
-    #[serde(default, skip_serializing)]
-    pub used_for: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -177,7 +172,6 @@ pub struct AgentTaskReviewIssueRelationship {
 pub enum AgentTaskReviewOverrideTarget {
     Summary,
     WhatChanged,
-    Compatibility,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentTaskReviewOverride {
@@ -235,9 +229,6 @@ pub struct AiFilledReviewForm {
     /// Bullet points of the concrete changes.
     #[serde(default, deserialize_with = "prose_lines")]
     pub what_changed: Vec<String>,
-    /// Ignored legacy provider field.
-    #[serde(default, deserialize_with = "prose_field", skip_serializing)]
-    pub compatibility: String,
     /// Optional numeric test claims. No longer requested by the dispatched
     /// prompt or declared output schema (#14733): the deterministic gate
     /// commands are controller-owned, so asking the agent to also run and
@@ -248,9 +239,6 @@ pub struct AiFilledReviewForm {
     /// verification entry solely from durable candidate gate evidence.
     #[serde(default)]
     pub verification: Vec<AiReviewVerificationClaim>,
-    /// Ignored legacy provider field.
-    #[serde(default, deserialize_with = "prose_field", skip_serializing)]
-    pub used_for: String,
     /// The agent's own verdict on whether the requested task is done. Gates
     /// prove the repository still passes, not that the task was completed;
     /// only the agent can declare that, and it must do so structurally rather
@@ -576,7 +564,6 @@ pub fn default_profile() -> AgentTaskReviewProfile {
         required_sections: vec![
             AgentTaskReviewSectionId::Summary,
             AgentTaskReviewSectionId::WhatChanged,
-            AgentTaskReviewSectionId::Compatibility,
             AgentTaskReviewSectionId::Verification,
         ],
         ..Default::default()
@@ -755,9 +742,6 @@ impl AgentTaskReviewDossier {
                 AgentTaskReviewOverrideTarget::Summary => self.summary = override_.value.clone(),
                 AgentTaskReviewOverrideTarget::WhatChanged => {
                     self.what_changed = vec![override_.value.clone()]
-                }
-                AgentTaskReviewOverrideTarget::Compatibility => {
-                    self.compatibility = override_.value.clone()
                 }
             }
         }
@@ -1049,7 +1033,9 @@ fn render_source_relationships(relationships: &[AgentTaskReviewIssueRelationship
 fn strip_model_tiers(model: &str) -> String {
     let mut display = model.to_string();
     while let Some(start) = display.find(" (tier ") {
-        let Some(end) = display[start..].find(')') else { break };
+        let Some(end) = display[start..].find(')') else {
+            break;
+        };
         display.replace_range(start..start + end + 1, "");
     }
     display
@@ -1234,7 +1220,6 @@ fn ordered_sections(profile: &AgentTaskReviewProfile) -> Vec<AgentTaskReviewSect
     for id in [
         AgentTaskReviewSectionId::Summary,
         AgentTaskReviewSectionId::WhatChanged,
-        AgentTaskReviewSectionId::Compatibility,
         AgentTaskReviewSectionId::Verification,
         AgentTaskReviewSectionId::SourceRelationships,
     ] {
@@ -1644,7 +1629,7 @@ fn unique_sections(field: &str, values: &[AgentTaskReviewSectionId]) -> Result<(
 fn builtin_section_name(id: &str) -> bool {
     matches!(
         id,
-        "summary" | "what_changed" | "compatibility" | "verification" | "source_relationships"
+        "summary" | "what_changed" | "verification" | "source_relationships"
     )
 }
 fn issue_pattern() -> Regex {
@@ -1977,8 +1962,6 @@ mod tests {
                 "summary": ["Adds the guard.", "Refs #12386."],
                 "pr_title": "Guard the reload render path",
                 "what_changed": ["one", "two"],
-                "compatibility": ["No breaking changes.", "Default is off."],
-                "used_for": ["Diagnosed the failure.", "Wrote the regression test."],
                 "completion": "complete",
             }
         });
@@ -1988,11 +1971,6 @@ mod tests {
             .expect("form present");
 
         assert_eq!(form.summary, "Adds the guard. Refs #12386.");
-        assert_eq!(form.compatibility, "No breaking changes. Default is off.");
-        assert_eq!(
-            form.used_for,
-            "Diagnosed the failure. Wrote the regression test."
-        );
         assert_eq!(
             form.what_changed,
             vec!["one".to_string(), "two".to_string()]
@@ -2011,8 +1989,6 @@ mod tests {
                 "pr_title": "Add a render-video ability",
                 "summary": "Adds a render plan.\n\nAlso adds\tsmoke tests for `<!-- wp:x /-->` and </p>.\r\n",
                 "what_changed": ["First line\nwraps here", "  ", "Second"],
-                "compatibility": "Additive.\nNo existing behavior changes.",
-                "used_for": "Read the issue.\n- Wrote the plan.\n- Ran lint.",
                 "completion": "complete",
             }
         });
@@ -2029,22 +2005,8 @@ mod tests {
             form.what_changed,
             vec!["First line wraps here".to_string(), "Second".to_string()]
         );
-        assert_eq!(
-            form.compatibility,
-            "Additive. No existing behavior changes."
-        );
-        assert_eq!(
-            form.used_for,
-            "Read the issue. - Wrote the plan. - Ran lint."
-        );
         form.validate().expect("flattened form is valid");
-        for (field, value) in [
-            ("summary", &form.summary),
-            ("compatibility", &form.compatibility),
-            ("ai_assistance.used_for", &form.used_for),
-        ] {
-            scalar(field, value).expect("flattened prose passes dossier validation");
-        }
+        scalar("summary", &form.summary).expect("flattened prose passes dossier validation");
         for entry in &form.what_changed {
             scalar("what_changed", entry).expect("flattened bullets pass dossier validation");
         }
@@ -2092,7 +2054,6 @@ mod tests {
             .expect("parses")
             .expect("form present");
         assert_eq!(form.summary, "s");
-        assert_eq!(form.compatibility, "c");
         assert_eq!(form.what_changed, vec!["one".to_string()]);
     }
 
@@ -2144,7 +2105,6 @@ mod tests {
         assert_eq!(form.pr_title, "Guard the reload render path");
         assert_eq!(form.summary, "Guard the reload path.");
         assert_eq!(form.what_changed, vec!["Guard reloads".to_string()]);
-        assert_eq!(form.compatibility, "Additive");
         let gap = form
             .validate()
             .expect_err("an absent verdict is incomplete");
@@ -2164,7 +2124,6 @@ mod tests {
                 command: "cargo test dossier".into(),
                 expected: "passes".into(),
             }],
-            compatibility: "No compatibility impact".into(),
             evidence: Vec::new(),
             verified_commands: Vec::new(),
             changed_public_contracts: Vec::new(),
@@ -2174,7 +2133,6 @@ mod tests {
                 used: true,
                 tool: "Pi".into(),
                 model: "openai/gpt-5.6-terra".into(),
-                used_for: "Isolated the failing path, implemented the guard, and verified with the recorded gate before finalizing.".into(),
             },
             source_relationships: vec![AgentTaskReviewIssueRelationship {
                 kind: AgentTaskReviewIssueRelationshipKind::Closes,
@@ -2190,22 +2148,18 @@ mod tests {
         value.summary.clear();
         value.what_changed.clear();
         value.how_to_test.clear();
-        value.compatibility.clear();
         value.ai_assistance.model = "unknown".to_string();
-        value.ai_assistance.used_for.clear();
 
         let error = value
             .validate_preflight_fields(&default_profile())
             .expect_err("all supplied dossier gaps are reported together");
-        assert!(error.message.contains("6 independent error(s)"));
+        assert!(error.message.contains("4 independent error(s)"));
         let diagnostics = error.details.to_string();
         for field in [
             "summary",
             "what_changed",
             "how_to_test",
-            "compatibility",
             "ai_assistance.model",
-            "ai_assistance.used_for",
         ] {
             assert!(
                 diagnostics.contains(field),
@@ -2219,9 +2173,7 @@ mod tests {
             pr_title: "Guard the reload render path".into(),
             summary: "Fix the widget so it renders on reload.".into(),
             what_changed: vec!["Guard the null path in render().".into()],
-            compatibility: "No compatibility impact; internal only.".into(),
             verification: Vec::new(),
-            used_for: "I traced the null deref to the reload path, added a guard, and verified with a focused test before finalizing.".into(),
             completion: Some(crate::agent_task_review_dossier::AiReviewCompletion::Complete),
             incomplete_reason: String::new(),
         }
@@ -2363,16 +2315,11 @@ mod tests {
     }
 
     #[test]
-    fn qualitative_compatibility_is_preserved_with_structured_verified_command() {
-        let mut form = valid_form();
-        // This is compatibility interpretation, not a command-result claim.
-        // It must not be subject to keyword/number prose policing.
-        form.compatibility = "Two previously failed deployment attempts are unrelated; the full suite remains the compatibility baseline.".into();
-        form.validate()
-            .expect("legitimate qualitative compatibility");
+    fn verified_commands_come_from_promotion_without_provider_claims() {
+        let form = valid_form();
         let verified = form
             .verify_against_promotion(&promotion("cargo test connection", "candidate-tree"))
-            .expect("qualitative compatibility needs no provider test claim");
+            .expect("no provider test claim is needed");
         assert_eq!(verified[0].candidate_tree, "candidate-tree");
         assert_eq!(verified[0].passed, Some(175));
         assert_eq!(verified[0].evidence_ref, "gate-connection");
@@ -2486,21 +2433,6 @@ mod tests {
     }
 
     #[test]
-    fn review_form_ignores_placeholder_used_for() {
-        let mut form = valid_form();
-        form.used_for =
-            "Drafted implementation and tests; Chris reviews and owns the change.".into();
-        form.validate().expect("legacy disclosure is ignored");
-    }
-
-    #[test]
-    fn review_form_ignores_used_for_equal_to_summary() {
-        let mut form = valid_form();
-        form.used_for = form.summary.clone();
-        form.validate().expect("legacy disclosure is ignored");
-    }
-
-    #[test]
     fn review_form_parses_from_outcome_outputs() {
         let outputs = serde_json::json!({ "review_form": valid_form() });
         let parsed = AiFilledReviewForm::from_outcome_outputs(&outputs)
@@ -2603,14 +2535,10 @@ mod tests {
             "Added unit and end-to-end tests for same-repo, cross-repo and external-tracker URLs.".into(),
         ];
         value.how_to_test.clear();
-        value.compatibility = "Additive. `Closes` validation is unchanged.".into();
         value.ai_assistance = AgentTaskReviewAiAssistance {
             used: true,
             tool: "Homeboy (pi)".into(),
             model: "anthropic-claude-opus-5-5".into(),
-            used_for:
-                "Implemented the mapping and the tests, then ran the formatting and test gates."
-                    .into(),
         };
         value.verified_commands = vec![AgentTaskReviewVerifiedCommand {
             command: gate_command.into(),
@@ -2727,10 +2655,7 @@ mod tests {
         let mut value = dossier();
         value.ai_assistance.model = served_model_disclosure(&record.served_models, "cook-heavy");
         let body = render_review_dossier(&value, &default_profile());
-        assert!(
-            body.contains("Model: gpt-6.1-sol"),
-            "{body}"
-        );
+        assert!(body.contains("Model: gpt-6.1-sol"), "{body}");
         assert!(!body.contains("claude-opus-5-5"), "{body}");
 
         value.ai_assistance.model = served_model_disclosure(&[], "cook-heavy");
@@ -2743,19 +2668,6 @@ mod tests {
             ),
             "gpt-6.1-sol, claude-opus-5-5"
         );
-    }
-
-    #[test]
-    fn disclosure_has_one_process_label() {
-        let mut value = dossier();
-        value.ai_assistance.used_for =
-            "AI disclosure: Implemented `StyleResolver` and tested `<html>`.".into();
-        let body = render_review_dossier(&value, &default_profile());
-        assert_eq!(body.matches("Used for:").count(), 0);
-        assert!(!body.contains("AI disclosure:"));
-        assert!(!body.contains("`StyleResolver`"));
-        assert!(!body.contains("`<html>`"));
-        assert!(!body.contains("\\`"));
     }
 
     #[test]
@@ -2798,7 +2710,10 @@ mod tests {
         value.ai_assistance.model = "served-model (tier heavy)".into();
         let body = render_review_dossier(&value, &default_profile());
         assert_eq!(body.matches("Tool:").count(), 1);
-        assert!(body.contains(&format!("Tool: {} · Model: served-model\n", value.ai_assistance.tool)));
+        assert!(body.contains(&format!(
+            "Tool: {} · Model: served-model\n",
+            value.ai_assistance.tool
+        )));
         assert!(!body.contains("## AI assistance"));
         assert!(!body.contains("Used for:"));
         assert!(!body.contains("(tier "));
@@ -2809,17 +2724,38 @@ mod tests {
     }
 
     #[test]
+    fn review_form_ignores_retired_used_for_and_compatibility_keys() {
+        let outputs = serde_json::json!({ "review_form": {
+            "pr_title": "Guard the reload path",
+            "summary": "Guard reloads.",
+            "what_changed": ["Added the guard."],
+            "compatibility": "Additive.",
+            "used_for": "Guard reloads.",
+            "completion": "complete"
+        }});
+        let form = AiFilledReviewForm::from_outcome_outputs(&outputs)
+            .expect("retired keys still parse")
+            .expect("form present");
+        form.validate().expect("retired keys are not validated");
+    }
+
+    #[test]
     fn minimal_review_form_does_not_require_legacy_fields() {
         let form: AiFilledReviewForm = serde_json::from_value(serde_json::json!({
             "pr_title": "Simplify review signatures",
             "summary": "Remove redundant reviewer fields.",
             "what_changed": ["Simplified the form."],
             "completion": "complete"
-        })).unwrap();
+        }))
+        .unwrap();
         form.validate().unwrap();
         let declaration = review_form_output_declaration();
-        assert!(declaration.structural_schema["properties"].get("used_for").is_none());
-        assert!(declaration.structural_schema["properties"].get("compatibility").is_none());
+        assert!(declaration.structural_schema["properties"]
+            .get("used_for")
+            .is_none());
+        assert!(declaration.structural_schema["properties"]
+            .get("compatibility")
+            .is_none());
     }
 
     #[test]
@@ -2874,23 +2810,6 @@ mod tests {
         let mut value = dossier();
         value.source_relationships[0].reference = "https://evil.test/issues/1".into();
         assert!(value.validate(&default_profile()).is_err());
-    }
-    #[test]
-    fn dossier_validate_ignores_legacy_used_for_on_every_path() {
-        let mut empty = dossier();
-        empty.ai_assistance.used_for = "  ".into();
-        assert!(
-            empty.validate(&default_profile()).is_ok(),
-            "legacy disclosure must not affect finalization"
-        );
-
-        let mut placeholder = dossier();
-        placeholder.ai_assistance.used_for =
-            "Drafted implementation and tests; Chris reviews and owns the change.".into();
-        assert!(
-            placeholder.validate(&default_profile()).is_ok(),
-            "legacy disclosure must not affect finalization"
-        );
     }
 
     #[test]
