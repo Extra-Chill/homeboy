@@ -18,6 +18,7 @@ struct FakeRecoveryOperations {
     reconnects: AtomicUsize,
     closed: std::sync::Mutex<Vec<u32>>,
     fail_persist: bool,
+    fail_open: Option<TransportFailure>,
 }
 
 #[cfg(unix)]
@@ -28,6 +29,7 @@ impl FakeRecoveryOperations {
             reconnects: AtomicUsize::new(0),
             closed: std::sync::Mutex::new(Vec::new()),
             fail_persist: false,
+            fail_open: None,
         })
     }
 
@@ -40,35 +42,55 @@ impl FakeRecoveryOperations {
     }
 
     fn recover(self: &Arc<Self>, runner_id: &str) -> Result<RunnerSession> {
-        let operations = Arc::clone(self);
-        reconnect_current_session_for_polling_with(
+        super::super::transport::ensure_transport_with(
             runner_id,
-            || Ok(operations.current(runner_id)),
-            |session| session.local_url.as_deref() == Some("http://live"),
-            || {
-                let mut session = operations.current(runner_id).expect("current session");
-                let sequence = operations.reconnects.fetch_add(1, Ordering::SeqCst);
-                session.local_url = Some("http://live".to_string());
-                session.tunnel_pid = Some(80_000 + sequence as u32);
-                Ok(session)
-            },
-            |session| {
-                if operations.fail_persist {
-                    return Err(Error::internal_unexpected("persist failed"));
-                }
-                Ok(operations
-                    .sessions
-                    .lock()
-                    .expect("sessions")
-                    .insert(runner_id.to_string(), session.clone())
-                    .expect("current session"))
-            },
-            |session| {
-                if let Some(pid) = session.tunnel_pid {
-                    operations.closed.lock().expect("closed").push(pid);
-                }
-            },
+            TransportLifetime::Persisted,
+            self.as_ref(),
         )
+    }
+}
+
+#[cfg(unix)]
+impl super::super::transport::TransportOperations for FakeRecoveryOperations {
+    fn current_session(&self, runner_id: &str) -> Result<Option<RunnerSession>> {
+        Ok(self.current(runner_id))
+    }
+
+    fn is_live(&self, session: &RunnerSession) -> bool {
+        session.local_url.as_deref() == Some("http://live")
+    }
+
+    fn open(&self, _runner_id: &str, owner: &RunnerSession) -> Result<RunnerSession> {
+        let sequence = self.reconnects.fetch_add(1, Ordering::SeqCst);
+        if let Some(failure) = self.fail_open {
+            return Err(super::super::transport::transport_error(
+                "runner-a",
+                failure,
+                format!("open failed: {failure:?}"),
+            ));
+        }
+        let mut session = owner.clone();
+        session.local_url = Some("http://live".to_string());
+        session.tunnel_pid = Some(80_000 + sequence as u32);
+        Ok(session)
+    }
+
+    fn persist(&self, runner_id: &str, session: &RunnerSession) -> Result<RunnerSession> {
+        if self.fail_persist {
+            return Err(Error::internal_unexpected("persist failed"));
+        }
+        Ok(self
+            .sessions
+            .lock()
+            .expect("sessions")
+            .insert(runner_id.to_string(), session.clone())
+            .expect("current session"))
+    }
+
+    fn close(&self, session: &RunnerSession) {
+        if let Some(pid) = session.tunnel_pid {
+            self.closed.lock().expect("closed").push(pid);
+        }
     }
 }
 
@@ -154,6 +176,7 @@ fn failed_recovery_persistence_closes_only_the_new_tunnel() {
             reconnects: AtomicUsize::new(0),
             closed: std::sync::Mutex::new(Vec::new()),
             fail_persist: true,
+            fail_open: None,
         });
 
         assert!(operations.recover("runner-a").is_err());
@@ -162,6 +185,103 @@ fn failed_recovery_persistence_closes_only_the_new_tunnel() {
             [80_000]
         );
     });
+}
+
+#[cfg(unix)]
+#[test]
+fn a_live_current_session_is_reused_without_opening_a_tunnel() {
+    crate::test_support::with_isolated_home(|_| {
+        let mut live = stale_recovery_session("lease-a", 101);
+        live.local_url = Some("http://live".to_string());
+        let operations = FakeRecoveryOperations::new([("runner-a".to_string(), live.clone())]);
+
+        assert_eq!(operations.recover("runner-a").expect("reuse"), live);
+        assert_eq!(operations.reconnects.load(Ordering::SeqCst), 0);
+        assert!(operations.closed.lock().expect("closed").is_empty());
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn a_temporary_transport_is_always_fresh_and_never_replaces_the_session() {
+    crate::test_support::with_isolated_home(|_| {
+        let mut live = stale_recovery_session("lease-a", 101);
+        live.local_url = Some("http://live".to_string());
+        let operations = FakeRecoveryOperations::new([("runner-a".to_string(), live.clone())]);
+
+        let temporary = super::super::transport::ensure_transport_with(
+            "runner-a",
+            TransportLifetime::Temporary,
+            operations.as_ref(),
+        )
+        .expect("temporary transport");
+
+        assert_eq!(temporary.tunnel_pid, Some(80_000));
+        assert_eq!(operations.current("runner-a"), Some(live));
+        assert!(
+            operations.closed.lock().expect("closed").is_empty(),
+            "the caller closes a temporary transport"
+        );
+    });
+}
+
+/// Reaching the daemon never restarts it: every failure class is returned
+/// typed after exactly one open, and the current session, which still names
+/// the one daemon, is neither replaced nor has its tunnel closed.
+#[cfg(unix)]
+#[test]
+fn a_failed_transport_never_restarts_or_replaces_the_daemon() {
+    for failure in [
+        TransportFailure::Ssh,
+        TransportFailure::Unreachable,
+        TransportFailure::IdentityMismatch,
+    ] {
+        crate::test_support::with_isolated_home(|_| {
+            let stale = stale_recovery_session("lease-a", 101);
+            let operations = Arc::new(FakeRecoveryOperations {
+                sessions: std::sync::Mutex::new(HashMap::from([(
+                    "runner-a".to_string(),
+                    stale.clone(),
+                )])),
+                reconnects: AtomicUsize::new(0),
+                closed: std::sync::Mutex::new(Vec::new()),
+                fail_persist: false,
+                fail_open: Some(failure),
+            });
+
+            let error = operations.recover("runner-a").expect_err("transport fails");
+
+            assert_eq!(TransportFailure::of(&error), Some(failure));
+            assert_eq!(operations.reconnects.load(Ordering::SeqCst), 1);
+            assert_eq!(operations.current("runner-a"), Some(stale));
+            assert!(operations.closed.lock().expect("closed").is_empty());
+        });
+    }
+}
+
+/// The transport has no path to daemon lifecycle: it cannot start, restart,
+/// repoint or reconnect-with-policy the daemon it reaches.
+#[test]
+fn the_transport_has_no_daemon_lifecycle_path() {
+    let source = include_str!("../transport.rs");
+    let production = &source[..source
+        .find("#[cfg(test)]")
+        .expect("transport tests follow production code")];
+    for lifecycle in [
+        "restart_daemon_in_place",
+        "repoint_and_restart",
+        "connect_service_runner",
+        "connect_with",
+        "ensure-running",
+        "ensure_running",
+        "remote_homeboy_identity",
+        "daemon stop",
+    ] {
+        assert!(
+            !production.contains(lifecycle),
+            "ensure_transport must never reach daemon lifecycle `{lifecycle}`"
+        );
+    }
 }
 
 #[test]
@@ -2431,7 +2551,7 @@ esac
 }
 
 #[test]
-fn job_owner_reattach_keeps_unreachable_daemon_failures_as_transport_loss() {
+fn transport_keeps_unreachable_daemon_failures_as_transport_loss() {
     let reattach = |kind: RunnerFailureKind, stage: Option<&str>| {
         let (mut report, _) = failed_connect(
             "lab",
@@ -2442,7 +2562,7 @@ fn job_owner_reattach_keeps_unreachable_daemon_failures_as_transport_loss() {
         if let Some(evidence) = report.failure_evidence.as_mut() {
             evidence.durability_stage = stage.map(str::to_string);
         }
-        job_owner_reattach_error("lab", report)
+        super::super::transport::report_error("lab", report)
     };
 
     for transient in [

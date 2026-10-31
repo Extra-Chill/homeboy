@@ -2132,154 +2132,6 @@ pub fn diagnostic_status(runner_id: &str) -> Result<RunnerStatusReport> {
     Ok(report)
 }
 
-/// Reopen a tunnel to the runner's one current daemon, which owns every job.
-///
-/// This deliberately never tests the recorded local port: a dead controller
-/// tunnel can have its port reused by an unrelated process. Instead it opens a
-/// fresh ephemeral tunnel and accepts it only when `/health` proves the exact
-/// persisted daemon lease and PID of the current session.
-fn reconnect_job_owner(runner_id: &str) -> Result<RunnerSession> {
-    let runner = load(runner_id)?;
-    let owner = read_session_or_live_peer(runner_id)?.ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "runner",
-            "runner has no current daemon session; run `homeboy runner connect <runner-id>` first",
-            Some(runner_id.to_string()),
-            None,
-        )
-    })?;
-    let Some((_server_id, server, _client)) = resolve_ssh_runner(&runner)? else {
-        return Err(Error::validation_invalid_argument(
-            "runner",
-            "job log recovery requires an SSH-backed runner",
-            Some(runner_id.to_string()),
-            None,
-        ));
-    };
-    let daemon = RemoteDaemon {
-        address: owner.remote_daemon_address.clone().ok_or_else(|| {
-            Error::internal_unexpected("job-owning daemon session has no remote address")
-        })?,
-        pid: owner.remote_daemon_pid,
-        lease_id: owner.remote_daemon_lease_id.clone(),
-        version: Some(owner.homeboy_version.clone()),
-        build_identity: owner.homeboy_build_identity.clone(),
-        inspected_freshness: None,
-    };
-    let session_path = session_path(runner_id)?;
-    let (local_port, tunnel_pid, tunnel_process_start_identity, local_url, daemon) =
-        connect_remote_daemon(connection_daemon::RemoteDaemonConnectRequest {
-            server: &server,
-            homeboy: "",
-            daemon,
-            expected_version: &owner.homeboy_version,
-            expected_identity: owner.homeboy_build_identity.as_deref().unwrap_or(""),
-            runner_id,
-            session_path: &session_path,
-        })
-        .map_err(|report| job_owner_reattach_error(runner_id, report.0))?;
-    let session = RunnerSession {
-        local_port: Some(local_port),
-        local_url: Some(local_url),
-        tunnel_pid,
-        tunnel_process_start_identity,
-        remote_daemon_address: Some(daemon.address),
-        remote_daemon_pid: daemon.pid,
-        remote_daemon_lease_id: daemon.lease_id,
-        ..owner
-    };
-    Ok(session)
-}
-
-/// A reattach that could not reach the job-owning daemon (the SSH tunnel did
-/// not open, or the daemon did not answer `/health` within the settle window)
-/// is the same transport loss the job poll already observed. It keeps the
-/// typed transport signal so the poll's grace window and the recoverable
-/// disconnect classification still apply. A daemon that answered with another
-/// identity is authoritative and stays a refusal.
-fn job_owner_reattach_error(runner_id: &str, report: RunnerConnectReport) -> Error {
-    let message = report
-        .failure_message
-        .clone()
-        .unwrap_or_else(|| "unable to reattach the job-owning daemon".to_string());
-    let unreachable = report.failure_kind == Some(RunnerFailureKind::TunnelFailure)
-        || report
-            .failure_evidence
-            .as_ref()
-            .and_then(|evidence| evidence.durability_stage.as_deref())
-            .is_some_and(|stage| matches!(stage, "health_settle" | "tunnel_durability"));
-    if !unreachable {
-        return Error::validation_invalid_argument(
-            "runner",
-            message,
-            Some(runner_id.to_string()),
-            None,
-        );
-    }
-    let mut error = super::daemon_http_get::daemon_transport_error(
-        super::daemon_http_get::DaemonHttpErrorKind::Connect,
-        "/health",
-        None,
-        &format!("reattach runner `{runner_id}` job-owning daemon"),
-        message,
-    );
-    error.details["runner_id"] = Value::String(runner_id.to_string());
-    error
-}
-
-/// Reopen and retain the direct tunnel to the runner's current daemon for a
-/// foreground-polled job. This refreshes only the local tunnel of the current
-/// session; it never changes which daemon that session names.
-pub(crate) fn reconnect_job_owner_for_polling(runner_id: &str) -> Result<RunnerSession> {
-    reconnect_current_session_for_polling_with(
-        runner_id,
-        || read_session_or_live_peer(runner_id),
-        session_is_live,
-        || reconnect_job_owner(runner_id),
-        |session| restart_recovery::persist_reconnected_session(runner_id, session),
-        close_reconnected_job_log_owner,
-    )
-}
-
-/// Run the durable recovery transaction while holding the runner's restart
-/// recovery lock. A restart in flight holds the same lock, so a poller that
-/// lost its tunnel waits for the restarted session instead of reattaching the
-/// stopped lease. The operation boundary keeps the coordination policy
-/// testable without opening SSH tunnels in unit tests.
-fn reconnect_current_session_for_polling_with<Session, IsLive, Reconnect, Persist, Close>(
-    runner_id: &str,
-    current_session: Session,
-    is_live: IsLive,
-    reconnect: Reconnect,
-    persist: Persist,
-    close: Close,
-) -> Result<RunnerSession>
-where
-    Session: Fn() -> Result<Option<RunnerSession>>,
-    IsLive: Fn(&RunnerSession) -> bool,
-    Reconnect: Fn() -> Result<RunnerSession>,
-    Persist: Fn(&RunnerSession) -> Result<RunnerSession>,
-    Close: Fn(&RunnerSession),
-{
-    restart_recovery::with_restart_recovery_lock(runner_id, || {
-        if let Some(session) = current_session()? {
-            if is_live(&session) {
-                return Ok(session);
-            }
-        }
-        let session = reconnect()?;
-        let replaced = match persist(&session) {
-            Ok(replaced) => replaced,
-            Err(error) => {
-                close(&session);
-                return Err(error);
-            }
-        };
-        close(&replaced);
-        Ok(session)
-    })
-}
-
 fn capture_tunnel_process_start_identity(
     pid: Option<u32>,
 ) -> Result<Option<RunnerTunnelProcessStartIdentity>> {
@@ -2359,18 +2211,6 @@ fn terminate_tunnel_with_identity<Inspect, Terminate>(
     {
         terminate(pid);
     }
-}
-
-/// Reopen a temporary tunnel to the runner's current daemon, which owns every
-/// job. Callers must close the returned tunnel when the one-shot read completes.
-pub fn reconnect_job_log_owner(runner_id: &str) -> Result<RunnerSession> {
-    reconnect_job_owner(runner_id)
-}
-
-/// Close the local tunnel opened exclusively for job log/cancel recovery. This
-/// never stops the remote daemon that owns the durable job.
-pub fn close_reconnected_job_log_owner(session: &RunnerSession) {
-    terminate_tunnel_if_owned(session);
 }
 
 /// Resolve a direct-SSH session for work admission. A readiness observation can
@@ -3603,6 +3443,7 @@ mod replacement_journal;
 mod restart_recovery;
 mod service;
 mod session_store;
+mod transport;
 
 #[cfg(test)]
 pub(crate) use remote_daemon::parse_json_from_mixed_stdout;
@@ -3618,6 +3459,7 @@ pub(crate) use service::{
 use session_store::*;
 pub(crate) use session_store::{controller_id, read_session};
 pub use session_store::{peer_session_maintenance, PeerSessionMaintenanceReport};
+pub use transport::{close_transport, ensure_transport, TransportFailure, TransportLifetime};
 
 #[cfg(test)]
 mod tests;

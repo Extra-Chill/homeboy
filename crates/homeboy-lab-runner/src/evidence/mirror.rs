@@ -406,13 +406,18 @@ pub fn refresh_mirrored_daemon_evidence(
         &runner_id,
         &job_id,
         || incremental_job_snapshot(&job_id, after, |path| daemon_api_get(&runner_id, path)),
-        crate::connection::reconnect_job_log_owner,
+        |runner_id| {
+            crate::connection::ensure_transport(
+                runner_id,
+                crate::connection::TransportLifetime::Temporary,
+            )
+        },
         |session, id| {
             incremental_job_snapshot(id, after, |path| {
                 crate::execution::daemon_api_get_for_session(session, path)
             })
         },
-        crate::connection::close_reconnected_job_log_owner,
+        crate::connection::close_transport,
     )?;
     refresh_snapshot(store, run, &runner, snapshot)
 }
