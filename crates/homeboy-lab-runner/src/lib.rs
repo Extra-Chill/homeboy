@@ -19,6 +19,7 @@ pub(crate) use homeboy_agents::agent_task_lifecycle::agent_task_lifecycle_event;
 // runner terminal result into a typed, contract-keyed handoff event so the
 // controller stops depending on the offloaded command's output format (#7530).
 pub(crate) use homeboy_agents::agent_task_lifecycle::agent_task_handoff_event;
+mod admission_fence;
 mod apply;
 pub mod artifact_attach;
 mod availability_provider;
@@ -189,6 +190,7 @@ mod lab_workspace_provenance_provider;
 mod lab_workspaces;
 mod lab_workspaces_deps;
 mod managed_source;
+mod runner_state_lock;
 mod workspace_root_provider;
 pub use managed_source::{
     plan_managed_runner_source_sync, plan_managed_runner_source_syncs, ManagedRunnerSourceSyncPlan,

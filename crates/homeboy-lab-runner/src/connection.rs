@@ -209,7 +209,7 @@ fn open_controller_proxy_forward(server: &Server) -> Result<Option<RunnerProxyFo
 /// Return the runner-loopback proxy URL for an explicitly requesting direct SSH
 /// job. The controller endpoint is read only here and never enters job data.
 pub(crate) fn controller_proxy_forward_for_job(runner_id: &str) -> Result<String> {
-    super::generation_store::with_runner_registry_lock(runner_id, || {
+    crate::runner_state_lock::with_runner_registry_lock(runner_id, || {
         let session = recorded_session(runner_id)?.ok_or_else(|| {
             Error::validation_invalid_argument(
                 "controller_proxy",
@@ -350,10 +350,10 @@ pub(crate) fn restart_daemon_in_place(
             )
         })?;
     let runner = load(runner_id)?;
-    // Pollers reattach a job through its owning lease's recovery lock. Holding
-    // it across the restart makes them wait for the rebind instead of trying
-    // to reattach the stopped lease and reporting the job lost.
-    super::generation_store::with_generation_recovery_lock(runner_id, &previous_lease, || {
+    // Pollers reattach through the runner's restart recovery lock. Holding it
+    // across the restart makes them wait for the restarted session instead of
+    // reattaching the stopped lease and reporting the job lost.
+    restart_recovery::with_restart_recovery_lock(runner_id, || {
         let (report, exit_code) = if runner.settings.service_managed {
             service::repoint_and_restart(runner_id, service_binary)?;
             terminate_tunnel_if_owned(previous);
@@ -367,7 +367,7 @@ pub(crate) fn restart_daemon_in_place(
                     "restarted daemon connected without a controller session",
                 )
             })?;
-            super::generation_store::rebind_restarted_lease(runner_id, &previous_lease, &session)?;
+            restart_recovery::rebind_restarted_lease(runner_id, &previous_lease, &session)?;
         }
         Ok((report, exit_code))
     })
@@ -687,7 +687,7 @@ fn connect_with_orphan_adoption_and_live_lease(
     // record (which may still name draining A) as the reconnect target.
     let mut previous_session =
         super::generation_store::admission_session(runner_id)?.or(previous_session);
-    let mut pending_replacement = super::generation_store::pending_replacement(runner_id)?;
+    let mut pending_replacement = replacement_journal::pending_replacement(runner_id)?;
     let mut replacement_operation_id = None;
     if let Some(pending) = pending_replacement.as_ref() {
         if let Ok(mut observed) = remote_daemon_status(&client, homeboy, runner_id) {
@@ -716,9 +716,8 @@ fn connect_with_orphan_adoption_and_live_lease(
                 if exact_unhealthy_idle {
                     previous_session = Some(pending.clone());
                 }
-                replacement_operation_id = Some(
-                    super::generation_store::retire_pending_replacement(runner_id)?,
-                );
+                replacement_operation_id =
+                    Some(replacement_journal::retire_pending_replacement(runner_id)?);
                 pending_replacement = None;
             }
         }
@@ -727,7 +726,7 @@ fn connect_with_orphan_adoption_and_live_lease(
     // even when the SSH command completed but its response was lost.
     let replacement_operation_id = match replacement_operation_id {
         Some(operation_id) => operation_id,
-        None => super::generation_store::replacement_operation(runner_id)?,
+        None => replacement_journal::replacement_operation(runner_id)?,
     };
 
     let mut leaseless_recovery = None;
@@ -742,7 +741,7 @@ fn connect_with_orphan_adoption_and_live_lease(
     // boundary but did not durably receive B's coordinates. Replay it before
     // inspecting A or selecting any ordinary replacement path.
     if recovery_daemon.is_none() {
-        let replay = super::generation_store::replacement_operation_replay(runner_id)?;
+        let replay = replacement_journal::replacement_operation_replay(runner_id)?;
         // An explicit recovery intent is authoritative over the stale automatic
         // ensure-running replay it is meant to resolve. Its exact validation
         // still runs below before the replay is terminalized.
@@ -773,7 +772,7 @@ fn connect_with_orphan_adoption_and_live_lease(
                 );
                 // Rebind the durable command to the verified selected binary
                 // before crossing the replay mutation boundary.
-                super::generation_store::record_replacement_operation_replay(
+                replacement_journal::record_replacement_operation_replay(
                     runner_id,
                     "ensure-running",
                     &command,
@@ -784,7 +783,6 @@ fn connect_with_orphan_adoption_and_live_lease(
             };
             let output = fenced_remote_mutation(
                 runner_id,
-                previous_session.as_ref(),
                 "replay_replacement_operation",
                 &client,
                 &command,
@@ -792,11 +790,11 @@ fn connect_with_orphan_adoption_and_live_lease(
             );
             if !output.success {
                 if kind == "state-loss" && is_terminal_state_loss_refusal(&output) {
-                    super::generation_store::retire_rejected_state_loss_replacement(
+                    replacement_journal::retire_rejected_state_loss_replacement(
                         runner_id, &output,
                     )?;
                 } else if kind == "ensure-running" && is_terminal_ensure_running_refusal(&output) {
-                    super::generation_store::retire_rejected_ensure_running_replacement(
+                    replacement_journal::retire_rejected_ensure_running_replacement(
                         runner_id,
                         output.exit_code,
                         output.timed_out,
@@ -826,7 +824,7 @@ fn connect_with_orphan_adoption_and_live_lease(
                         serde_json::from_value::<DaemonCandidateReconciliationResult>(data.clone())
                     {
                         if !recovery.applied {
-                            super::generation_store::terminalize_unleased_candidate_reconciliation(
+                            replacement_journal::terminalize_unleased_candidate_reconciliation(
                                 runner_id,
                             )?;
                             return Ok(failed_connect(
@@ -844,11 +842,11 @@ fn connect_with_orphan_adoption_and_live_lease(
             }
             if !envelope.success {
                 if kind == "state-loss" && is_terminal_state_loss_refusal(&output) {
-                    super::generation_store::retire_rejected_state_loss_replacement(
+                    replacement_journal::retire_rejected_state_loss_replacement(
                         runner_id, &output,
                     )?;
                 } else if kind == "ensure-running" && is_terminal_ensure_running_refusal(&output) {
-                    super::generation_store::retire_rejected_ensure_running_replacement(
+                    replacement_journal::retire_rejected_ensure_running_replacement(
                         runner_id,
                         output.exit_code,
                         output.timed_out,
@@ -894,7 +892,7 @@ fn connect_with_orphan_adoption_and_live_lease(
                             )
                         })?;
                     if !recovery.applied {
-                        super::generation_store::terminalize_unleased_candidate_reconciliation(
+                        replacement_journal::terminalize_unleased_candidate_reconciliation(
                             runner_id,
                         )?;
                         return Ok(failed_connect(
@@ -983,14 +981,13 @@ fn connect_with_orphan_adoption_and_live_lease(
                 recorded_endpoint,
                 &replacement_operation_id,
             );
-            super::generation_store::record_replacement_operation_replay(
+            replacement_journal::record_replacement_operation_replay(
                 runner_id,
                 "state-loss",
                 &command,
             )?;
             let recovery = fenced_remote_mutation(
                 runner_id,
-                previous_session.as_ref(),
                 "recover_missing_lease_state",
                 &client,
                 &command,
@@ -998,7 +995,7 @@ fn connect_with_orphan_adoption_and_live_lease(
             );
             if !recovery.success {
                 if is_terminal_state_loss_refusal(&recovery) {
-                    super::generation_store::retire_rejected_state_loss_replacement(
+                    replacement_journal::retire_rejected_state_loss_replacement(
                         runner_id, &recovery,
                     )?;
                 }
@@ -1017,7 +1014,7 @@ fn connect_with_orphan_adoption_and_live_lease(
             })?;
             if !envelope.success {
                 if is_terminal_state_loss_refusal(&recovery) {
-                    super::generation_store::retire_rejected_state_loss_replacement(
+                    replacement_journal::retire_rejected_state_loss_replacement(
                         runner_id, &recovery,
                     )?;
                 }
@@ -1051,7 +1048,7 @@ fn connect_with_orphan_adoption_and_live_lease(
             );
             // The negotiated command is persisted before its SSH mutation.
             // A write failure aborts before the remote operation.
-            if super::generation_store::record_replacement_operation_replay(
+            if replacement_journal::record_replacement_operation_replay(
                 runner_id,
                 "leaseless",
                 &command,
@@ -1070,7 +1067,6 @@ fn connect_with_orphan_adoption_and_live_lease(
             }
             fenced_remote_mutation(
                 runner_id,
-                previous_session.as_ref(),
                 "reconcile_leaseless_orphans",
                 &client,
                 &command,
@@ -1136,12 +1132,9 @@ fn connect_with_orphan_adoption_and_live_lease(
             shell::quote_arg(recovery_addr),
             shell::quote_arg(&replacement_operation_id),
         );
-        super::generation_store::record_unleased_candidate_reconciliation_replay(
-            runner_id, &command,
-        )?;
+        replacement_journal::record_unleased_candidate_reconciliation_replay(runner_id, &command)?;
         let output = fenced_remote_mutation(
             runner_id,
-            previous_session.as_ref(),
             "reconcile_unleased_candidates",
             &client,
             &command,
@@ -1157,7 +1150,7 @@ fn connect_with_orphan_adoption_and_live_lease(
             })
             .filter(|recovery| !recovery.applied)
         {
-            super::generation_store::terminalize_unleased_candidate_reconciliation(runner_id)?;
+            replacement_journal::terminalize_unleased_candidate_reconciliation(runner_id)?;
             return Ok(failed_connect(
                 runner_id,
                 session_path,
@@ -1196,7 +1189,7 @@ fn connect_with_orphan_adoption_and_live_lease(
             })?;
         if !envelope.success || !recovery.applied {
             if !recovery.applied {
-                super::generation_store::terminalize_unleased_candidate_reconciliation(runner_id)?;
+                replacement_journal::terminalize_unleased_candidate_reconciliation(runner_id)?;
             }
             return Ok(failed_connect(
                 runner_id,
@@ -1224,7 +1217,7 @@ fn connect_with_orphan_adoption_and_live_lease(
     // retries can authenticate B rather than touching the prior generation.
     if pending_replacement.is_none() {
         if let Some(daemon) = recovery_daemon.as_ref() {
-            super::generation_store::record_pending_replacement(
+            replacement_journal::record_pending_replacement(
                 runner_id,
                 &pending_replacement_session(
                     runner_id,
@@ -1242,9 +1235,8 @@ fn connect_with_orphan_adoption_and_live_lease(
         // Normal reconnects must inspect the live daemon first: a reachable,
         // compatible generation reattaches, while an idle stale generation
         // follows ReplaceIdleStale instead of bypassing its fenced lifecycle.
-        None => super::generation_store::with_admission_fence(
+        None => crate::admission_fence::with_admission_fence(
             runner_id,
-            previous_session.as_ref(),
             "ensure_remote_daemon",
             |admission_fence| {
                 ensure_remote_daemon(remote_daemon::RemoteDaemonEnsureRequest {
@@ -1277,7 +1269,7 @@ fn connect_with_orphan_adoption_and_live_lease(
             // Best-effort: the journal write above always precedes this exact
             // remote call, so the pending operation should match, but this
             // cleanup must never mask the real failure being reported below.
-            let _ = super::generation_store::retire_rejected_ensure_running_replacement(
+            let _ = replacement_journal::retire_rejected_ensure_running_replacement(
                 runner_id,
                 1,
                 false,
@@ -1331,9 +1323,9 @@ fn connect_with_orphan_adoption_and_live_lease(
     // opening a tunnel so health or endpoint-identity failure can never strand
     // an unpublished daemon generation.
     if pending_replacement.is_none()
-        && super::generation_store::replacement_operation_replay(runner_id)?.is_some()
+        && replacement_journal::replacement_operation_replay(runner_id)?.is_some()
     {
-        super::generation_store::record_pending_replacement(
+        replacement_journal::record_pending_replacement(
             runner_id,
             &pending_replacement_session(
                 runner_id,
@@ -1393,9 +1385,7 @@ fn connect_with_orphan_adoption_and_live_lease(
         ));
     }
     if live_lease_expectation.is_some() {
-        super::generation_store::terminalize_ensure_running_replay_for_live_lease_adoption(
-            runner_id,
-        )?;
+        replacement_journal::terminalize_ensure_running_replay_for_live_lease_adoption(runner_id)?;
     }
     let connection_warning = daemon
         .inspected_freshness
@@ -1431,7 +1421,7 @@ fn connect_with_orphan_adoption_and_live_lease(
     // drift still has authenticated promotion provenance to reconcile safely.
     if let Err(error) = promotion_lease
         .assert_generation()
-        .and_then(|_| super::generation_store::promote_pending_replacement(runner_id, &session))
+        .and_then(|_| replacement_journal::promote_pending_replacement(runner_id, &session))
         .and_then(|_| write_session(&session))
     {
         if let Some(proxy_forward) = &session.proxy_forward {
@@ -1842,31 +1832,25 @@ fn remote_state_loss_recovery_command(
 
 fn fenced_remote_mutation(
     runner_id: &str,
-    previous_session: Option<&RunnerSession>,
     operation_name: &str,
     client: &SshClient,
     command: &str,
     timeout: Duration,
 ) -> homeboy_core::server::CommandOutput {
-    match super::generation_store::with_admission_fence(
-        runner_id,
-        previous_session,
-        operation_name,
-        |fence| {
-            if let Some(fence) = fence {
-                return Err(Error::validation_invalid_argument(
+    match crate::admission_fence::with_admission_fence(runner_id, operation_name, |fence| {
+        if let Some(fence) = fence {
+            return Err(Error::validation_invalid_argument(
                     "reconnect",
                     format!(
-                        "runner `{runner_id}` generation `{}` has {} unresolved active job(s); refusing daemon recovery before terminal job evidence is available",
-                        fence.generation, fence.active_job_count,
+                        "runner `{runner_id}` has {} unresolved active job(s); refusing daemon recovery before terminal job evidence is available",
+                        fence.active_job_count,
                     ),
                     Some(runner_id.to_string()),
                     None,
                 ));
-            }
-            Ok(client.execute_with_timeout(command, timeout))
-        },
-    ) {
+        }
+        Ok(client.execute_with_timeout(command, timeout))
+    }) {
         Ok(output) => output,
         Err(error) => homeboy_core::server::CommandOutput {
             success: false,
@@ -2254,23 +2238,22 @@ pub fn diagnostic_status(runner_id: &str) -> Result<RunnerStatusReport> {
     Ok(report)
 }
 
-/// Reopen a tunnel to the durable generation which owns `job_id`.
+/// Reopen a tunnel to the runner's one current daemon, which owns every job.
 ///
 /// This deliberately never tests the recorded local port: a dead controller
 /// tunnel can have its port reused by an unrelated process. Instead it opens a
 /// fresh ephemeral tunnel and accepts it only when `/health` proves the exact
-/// persisted daemon lease and PID for the job-owning generation.
-fn reconnect_job_owner(runner_id: &str, job_id: &str) -> Result<RunnerSession> {
+/// persisted daemon lease and PID of the current session.
+fn reconnect_job_owner(runner_id: &str) -> Result<RunnerSession> {
     let runner = load(runner_id)?;
-    let current_session = read_session_or_live_peer(runner_id)?;
-    let owner = super::generation_store::endpoint_session(runner_id, Some(job_id), None, None)?
-    .or(current_session)
-    .ok_or_else(|| Error::validation_invalid_argument(
-        "runner",
-        "runner has no durable daemon generation binding for this job; run `homeboy runner connect <runner-id>` first",
-        Some(runner_id.to_string()),
-        None,
-    ))?;
+    let owner = read_session_or_live_peer(runner_id)?.ok_or_else(|| {
+        Error::validation_invalid_argument(
+            "runner",
+            "runner has no current daemon session; run `homeboy runner connect <runner-id>` first",
+            Some(runner_id.to_string()),
+            None,
+        )
+    })?;
     let Some((_server_id, server, _client)) = resolve_ssh_runner(&runner)? else {
         return Err(Error::validation_invalid_argument(
             "runner",
@@ -2350,45 +2333,28 @@ fn job_owner_reattach_error(runner_id: &str, report: RunnerConnectReport) -> Err
     error
 }
 
-/// Reopen and retain the direct tunnel for the durable generation which owns a
-/// foreground-polled job. This updates only that generation's endpoint; it
-/// never changes the admission generation used for new work.
-pub(crate) fn reconnect_job_owner_for_polling(
-    runner_id: &str,
-    job_id: &str,
-) -> Result<RunnerSession> {
-    let current_session = read_session_or_live_peer(runner_id)?;
-    let owner = super::generation_store::job_session(runner_id, job_id)?
-        .or(current_session)
-        .ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "runner",
-                "runner has no durable daemon generation binding for this job",
-                Some(runner_id.to_string()),
-                None,
-            )
-        })?;
-    let generation = owner.remote_daemon_lease_id.clone().ok_or_else(|| {
-        Error::internal_unexpected("job-owning daemon generation has no lease ID")
-    })?;
-    reconnect_generation_for_polling_with(
+/// Reopen and retain the direct tunnel to the runner's current daemon for a
+/// foreground-polled job. This refreshes only the local tunnel of the current
+/// session; it never changes which daemon that session names.
+pub(crate) fn reconnect_job_owner_for_polling(runner_id: &str) -> Result<RunnerSession> {
+    reconnect_current_session_for_polling_with(
         runner_id,
-        &generation,
-        || super::generation_store::job_session(runner_id, job_id),
+        || read_session_or_live_peer(runner_id),
         session_is_live,
-        || reconnect_job_owner(runner_id, job_id),
-        |session| super::generation_store::record_reconnected_job_owner(runner_id, session, job_id),
+        || reconnect_job_owner(runner_id),
+        |session| restart_recovery::persist_reconnected_session(runner_id, session),
         close_reconnected_job_log_owner,
     )
 }
 
-/// Run the durable recovery transaction while holding the owning generation's
-/// lock. The operation boundary keeps the coordination policy testable without
-/// opening SSH tunnels in unit tests.
-fn reconnect_generation_for_polling_with<Session, IsLive, Reconnect, Persist, Close>(
+/// Run the durable recovery transaction while holding the runner's restart
+/// recovery lock. A restart in flight holds the same lock, so a poller that
+/// lost its tunnel waits for the restarted session instead of reattaching the
+/// stopped lease. The operation boundary keeps the coordination policy
+/// testable without opening SSH tunnels in unit tests.
+fn reconnect_current_session_for_polling_with<Session, IsLive, Reconnect, Persist, Close>(
     runner_id: &str,
-    generation: &str,
-    session_for_job: Session,
+    current_session: Session,
     is_live: IsLive,
     reconnect: Reconnect,
     persist: Persist,
@@ -2401,8 +2367,8 @@ where
     Persist: Fn(&RunnerSession) -> Result<RunnerSession>,
     Close: Fn(&RunnerSession),
 {
-    super::generation_store::with_generation_recovery_lock(runner_id, generation, || {
-        if let Some(session) = session_for_job()? {
+    restart_recovery::with_restart_recovery_lock(runner_id, || {
+        if let Some(session) = current_session()? {
             if is_live(&session) {
                 return Ok(session);
             }
@@ -2501,14 +2467,14 @@ fn terminate_tunnel_with_identity<Inspect, Terminate>(
     }
 }
 
-/// Reopen a temporary tunnel to the durable generation which owns `job_id`.
-/// Callers must close the returned tunnel when the one-shot read completes.
-pub fn reconnect_job_log_owner(runner_id: &str, job_id: &str) -> Result<RunnerSession> {
-    reconnect_job_owner(runner_id, job_id)
+/// Reopen a temporary tunnel to the runner's current daemon, which owns every
+/// job. Callers must close the returned tunnel when the one-shot read completes.
+pub fn reconnect_job_log_owner(runner_id: &str) -> Result<RunnerSession> {
+    reconnect_job_owner(runner_id)
 }
 
 /// Close the local tunnel opened exclusively for job log/cancel recovery. This
-/// never stops the remote daemon generation that owns the durable job.
+/// never stops the remote daemon that owns the durable job.
 pub fn close_reconnected_job_log_owner(session: &RunnerSession) {
     terminate_tunnel_if_owned(session);
 }
@@ -3304,29 +3270,8 @@ fn reconcile_terminal_jobs_for_session<T>(
 /// Retrieve terminal job artifact bytes through the runner's active managed
 /// transport. Direct sessions read the daemon's persisted job result.
 pub fn runner_artifact_content(runner_id: &str, job_id: &str, artifact_id: &str) -> Result<Value> {
-    if super::generation_store::job_session(runner_id, job_id)?.is_none()
-        && super::generation_store::has_retired_evidence_owner(runner_id, None, Some(artifact_id))?
-    {
-        let store = homeboy_core::observation::ObservationStore::open_initialized()?;
-        let artifact = store.get_artifact(artifact_id)?.ok_or_else(|| {
-            Error::internal_unexpected(format!(
-                "retained controller artifact {artifact_id} is missing"
-            ))
-        })?;
-        super::evidence::validate_controller_artifact_bytes(&artifact)?;
-        let response = homeboy_core::http_api::handle(homeboy_core::http_api::HttpApiRequest {
-            method: homeboy_core::http_api::HttpMethod::Get,
-            path: format!(
-                "/runs/{}/artifacts/{}/content",
-                homeboy_core::execution_contract::encode_uri_component(&artifact.run_id),
-                homeboy_core::execution_contract::encode_uri_component(artifact_id)
-            ),
-            body: None,
-        })?;
-        return Ok(response.body);
-    }
     let report = status(runner_id)?;
-    let Some(current_session) = report.session.filter(|_| report.connected) else {
+    let Some(session) = report.session.filter(|_| report.connected) else {
         return Err(Error::validation_invalid_argument(
             "runner_id",
             format!("runner `{runner_id}` is not connected"),
@@ -3334,13 +3279,6 @@ pub fn runner_artifact_content(runner_id: &str, job_id: &str, artifact_id: &str)
             None,
         ));
     };
-    let session = super::generation_store::endpoint_session(
-        runner_id,
-        Some(job_id),
-        None,
-        Some(artifact_id),
-    )?
-    .unwrap_or(current_session);
     ensure_artifact_content_endpoint(&session)?;
     direct_daemon_job_artifact_content(runner_id, job_id, artifact_id)
 }
@@ -3772,6 +3710,8 @@ mod status_read_purity_tests {
 }
 
 pub(crate) mod remote_daemon;
+mod replacement_journal;
+mod restart_recovery;
 mod service;
 mod session_store;
 
@@ -3786,8 +3726,8 @@ pub(crate) use service::{
     observe_service_units, probe_runner_binary_version,
     service_unit_name as runner_service_unit_name, service_unit_scope, ServiceUnitObservation,
 };
-pub(crate) use session_store::controller_id;
 use session_store::*;
+pub(crate) use session_store::{controller_id, read_session};
 pub use session_store::{peer_session_maintenance, PeerSessionMaintenanceReport};
 
 #[cfg(test)]

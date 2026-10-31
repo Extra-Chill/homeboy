@@ -10,9 +10,11 @@ use std::sync::{
 
 use super::*;
 
+/// One current session per runner, reattached through the same
+/// runner-scoped restart recovery lock production pollers take.
 #[cfg(unix)]
 struct FakeRecoveryOperations {
-    jobs: std::sync::Mutex<HashMap<String, RunnerSession>>,
+    sessions: std::sync::Mutex<HashMap<String, RunnerSession>>,
     reconnects: AtomicUsize,
     closed: std::sync::Mutex<Vec<u32>>,
     fail_persist: bool,
@@ -20,36 +22,31 @@ struct FakeRecoveryOperations {
 
 #[cfg(unix)]
 impl FakeRecoveryOperations {
-    fn new(jobs: impl IntoIterator<Item = (String, RunnerSession)>) -> Arc<Self> {
+    fn new(sessions: impl IntoIterator<Item = (String, RunnerSession)>) -> Arc<Self> {
         Arc::new(Self {
-            jobs: std::sync::Mutex::new(jobs.into_iter().collect()),
+            sessions: std::sync::Mutex::new(sessions.into_iter().collect()),
             reconnects: AtomicUsize::new(0),
             closed: std::sync::Mutex::new(Vec::new()),
             fail_persist: false,
         })
     }
 
-    fn recover(
-        self: &Arc<Self>,
-        runner_id: &str,
-        generation: &str,
-        job_id: &str,
-    ) -> Result<RunnerSession> {
+    fn current(&self, runner_id: &str) -> Option<RunnerSession> {
+        self.sessions
+            .lock()
+            .expect("sessions")
+            .get(runner_id)
+            .cloned()
+    }
+
+    fn recover(self: &Arc<Self>, runner_id: &str) -> Result<RunnerSession> {
         let operations = Arc::clone(self);
-        let job_id = job_id.to_string();
-        reconnect_generation_for_polling_with(
+        reconnect_current_session_for_polling_with(
             runner_id,
-            generation,
-            || Ok(operations.jobs.lock().expect("jobs").get(&job_id).cloned()),
+            || Ok(operations.current(runner_id)),
             |session| session.local_url.as_deref() == Some("http://live"),
             || {
-                let mut session = operations
-                    .jobs
-                    .lock()
-                    .expect("jobs")
-                    .get(&job_id)
-                    .cloned()
-                    .expect("durable job");
+                let mut session = operations.current(runner_id).expect("current session");
                 let sequence = operations.reconnects.fetch_add(1, Ordering::SeqCst);
                 session.local_url = Some("http://live".to_string());
                 session.tunnel_pid = Some(80_000 + sequence as u32);
@@ -59,15 +56,12 @@ impl FakeRecoveryOperations {
                 if operations.fail_persist {
                     return Err(Error::internal_unexpected("persist failed"));
                 }
-                let mut jobs = operations.jobs.lock().expect("jobs");
-                let replaced = jobs.get(&job_id).cloned().expect("durable job");
-                let lease = session.remote_daemon_lease_id.clone();
-                for persisted in jobs.values_mut() {
-                    if persisted.remote_daemon_lease_id == lease {
-                        *persisted = session.clone();
-                    }
-                }
-                Ok(replaced)
+                Ok(operations
+                    .sessions
+                    .lock()
+                    .expect("sessions")
+                    .insert(runner_id.to_string(), session.clone())
+                    .expect("current session"))
             },
             |session| {
                 if let Some(pid) = session.tunnel_pid {
@@ -88,21 +82,19 @@ fn stale_recovery_session(lease: &str, pid: u32) -> RunnerSession {
 
 #[cfg(unix)]
 #[test]
-fn generation_recovery_deduplicates_two_jobs_to_one_physical_tunnel() {
+fn concurrent_pollers_of_one_runner_reattach_one_physical_tunnel() {
     crate::test_support::with_isolated_home(|_| {
-        let operations = FakeRecoveryOperations::new([
-            ("job-a".to_string(), stale_recovery_session("lease-a", 101)),
-            ("job-b".to_string(), stale_recovery_session("lease-a", 102)),
-        ]);
+        let operations = FakeRecoveryOperations::new([(
+            "runner-a".to_string(),
+            stale_recovery_session("lease-a", 101),
+        )]);
         let barrier = Arc::new(std::sync::Barrier::new(3));
-        let workers = ["job-a", "job-b"].map(|job_id| {
+        let workers = [0, 1].map(|_| {
             let operations = Arc::clone(&operations);
             let barrier = Arc::clone(&barrier);
             std::thread::spawn(move || {
                 barrier.wait();
-                operations
-                    .recover("runner-a", "lease-a", job_id)
-                    .expect("recover")
+                operations.recover("runner-a").expect("recover")
             })
         });
         barrier.wait();
@@ -110,59 +102,35 @@ fn generation_recovery_deduplicates_two_jobs_to_one_physical_tunnel() {
 
         assert_eq!(operations.reconnects.load(Ordering::SeqCst), 1);
         assert_eq!(recovered[0].tunnel_pid, recovered[1].tunnel_pid);
-        let closed = operations.closed.lock().expect("closed");
-        assert_eq!(closed.len(), 1, "only the replaced tunnel is retired");
-        assert!(matches!(closed.as_slice(), [101] | [102]));
+        assert_eq!(
+            operations.closed.lock().expect("closed").as_slice(),
+            [101],
+            "only the replaced tunnel is retired"
+        );
     });
 }
 
 #[cfg(unix)]
 #[test]
-fn generation_recovery_serializes_same_job_contention() {
-    crate::test_support::with_isolated_home(|_| {
-        let operations = FakeRecoveryOperations::new([(
-            "job-a".to_string(),
-            stale_recovery_session("lease-a", 101),
-        )]);
-        let barrier = Arc::new(std::sync::Barrier::new(3));
-        let workers = (0..2)
-            .map(|_| {
-                let operations = Arc::clone(&operations);
-                let barrier = Arc::clone(&barrier);
-                std::thread::spawn(move || {
-                    barrier.wait();
-                    operations
-                        .recover("runner-a", "lease-a", "job-a")
-                        .expect("recover")
-                })
-            })
-            .collect::<Vec<_>>();
-        barrier.wait();
-        for worker in workers {
-            worker.join().expect("worker");
-        }
-
-        assert_eq!(operations.reconnects.load(Ordering::SeqCst), 1);
-    });
-}
-
-#[cfg(unix)]
-#[test]
-fn generation_recovery_allows_different_generations_to_progress() {
+fn restart_recovery_lets_different_runners_progress_independently() {
     crate::test_support::with_isolated_home(|_| {
         let operations = FakeRecoveryOperations::new([
-            ("job-a".to_string(), stale_recovery_session("lease-a", 101)),
-            ("job-b".to_string(), stale_recovery_session("lease-b", 102)),
+            (
+                "runner-a".to_string(),
+                stale_recovery_session("lease-a", 101),
+            ),
+            (
+                "runner-b".to_string(),
+                stale_recovery_session("lease-b", 102),
+            ),
         ]);
         let barrier = Arc::new(std::sync::Barrier::new(3));
-        let workers = [("lease-a", "job-a"), ("lease-b", "job-b")].map(|(generation, job_id)| {
+        let workers = ["runner-a", "runner-b"].map(|runner_id| {
             let operations = Arc::clone(&operations);
             let barrier = Arc::clone(&barrier);
             std::thread::spawn(move || {
                 barrier.wait();
-                operations
-                    .recover("runner-a", generation, job_id)
-                    .expect("recover")
+                operations.recover(runner_id).expect("recover")
             })
         });
         barrier.wait();
@@ -179,8 +147,8 @@ fn generation_recovery_allows_different_generations_to_progress() {
 fn failed_recovery_persistence_closes_only_the_new_tunnel() {
     crate::test_support::with_isolated_home(|_| {
         let operations = Arc::new(FakeRecoveryOperations {
-            jobs: std::sync::Mutex::new(HashMap::from([(
-                "job-a".to_string(),
+            sessions: std::sync::Mutex::new(HashMap::from([(
+                "runner-a".to_string(),
                 stale_recovery_session("lease-a", 101),
             )])),
             reconnects: AtomicUsize::new(0),
@@ -188,7 +156,7 @@ fn failed_recovery_persistence_closes_only_the_new_tunnel() {
             fail_persist: true,
         });
 
-        assert!(operations.recover("runner-a", "lease-a", "job-a").is_err());
+        assert!(operations.recover("runner-a").is_err());
         assert_eq!(
             operations.closed.lock().expect("closed").as_slice(),
             [80_000]
@@ -314,7 +282,7 @@ fn reads_remote_active_job_count_from_daemon_freshness() {
 /// to start another daemon generation.
 #[cfg(unix)]
 #[test]
-fn connect_fences_two_active_jobs_before_starting_a_new_daemon_generation() {
+fn connect_fences_two_admitted_jobs_before_starting_a_new_daemon() {
     crate::test_support::with_isolated_home(|home| {
         let daemon = home.path().join("remote-homeboy");
         let ensure_running = home.path().join("ensure-running");
@@ -352,10 +320,9 @@ esac
             false,
         )
         .expect("create runner");
-        let active = direct_ssh_session("lease-active");
-        crate::generation_store::record_job("homeboy-lab", &active, "job-a")
+        crate::admission_fence::record_admitted_job("homeboy-lab", "job-a")
             .expect("record first active job");
-        crate::generation_store::record_job("homeboy-lab", &active, "job-b")
+        crate::admission_fence::record_admitted_job("homeboy-lab", "job-b")
             .expect("record second active job");
 
         let (report, exit_code) = connect("homeboy-lab").expect("connect result");
@@ -368,12 +335,8 @@ esac
             .is_some_and(|message| message.contains("2 unresolved active job(s)")));
         assert!(
             !ensure_running.exists(),
-            "active generation fence must prevent daemon ensure-running"
+            "the admitted job fence must prevent daemon ensure-running"
         );
-        let generations = crate::generation_store::status_projection("homeboy-lab")
-            .expect("generation projection");
-        assert_eq!(generations.len(), 1);
-        assert_eq!(generations[0].active_job_count, 2);
     });
 }
 
@@ -1413,9 +1376,10 @@ esac
         .expect("enable local runner");
 
         if legacy_replay {
-            let operation_id = crate::generation_store::replacement_operation("local-runner")
-                .expect("create legacy operation");
-            crate::generation_store::record_replacement_operation_replay(
+            let operation_id =
+                crate::connection::replacement_journal::replacement_operation("local-runner")
+                    .expect("create legacy operation");
+            crate::connection::replacement_journal::record_replacement_operation_replay(
                 "local-runner",
                 "state-loss",
                 &remote_state_loss_recovery_command(
@@ -1873,9 +1837,10 @@ esac
         )
         .expect("enable local runner");
 
-        let operation_id = crate::generation_store::replacement_operation("local-runner")
-            .expect("replacement operation");
-        crate::generation_store::record_replacement_operation_replay(
+        let operation_id =
+            crate::connection::replacement_journal::replacement_operation("local-runner")
+                .expect("replacement operation");
+        crate::connection::replacement_journal::record_replacement_operation_replay(
             "local-runner",
             "ensure-running",
             "obsolete-homeboy daemon ensure-running --replacement-operation-id old",
@@ -1899,7 +1864,7 @@ esac
         assert!(reconciliation_argv.contains("--apply"));
         assert!(reconciliation_argv.contains(&operation_id));
         assert_eq!(
-            crate::generation_store::replacement_operation_replay("local-runner")
+            crate::connection::replacement_journal::replacement_operation_replay("local-runner")
                 .expect("replacement replay")
                 .map(|(kind, _)| kind),
             Some("unleased-candidates".to_string())

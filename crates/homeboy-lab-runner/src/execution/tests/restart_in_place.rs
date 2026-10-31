@@ -394,10 +394,10 @@ fn connected_runner_with_re_adoptable_job(
         serde_json::to_vec(&previous).expect("serialize connected session"),
     )
     .expect("persist connected session");
-    crate::generation_store::record_job(RUNNER, &previous, &job_id)
-        .expect("the stopped lease owned the job");
+    crate::admission_fence::record_admitted_job(RUNNER, &job_id)
+        .expect("the stopped lease admitted the job");
     assert_eq!(
-        crate::generation_store::job_session(RUNNER, &job_id)
+        crate::connection::read_session(RUNNER)
             .expect("route job")
             .and_then(|session| session.remote_daemon_lease_id),
         Some(OLD_LEASE.to_string())
@@ -456,8 +456,8 @@ fn assert_single_state_dir() {
     );
 }
 
-/// The ledger is the restarted lease alone. It owns the re-adopted job, and
-/// the job routes to the restarted daemon's endpoint.
+/// The ledger is the restarted lease alone, and the re-adopted job routes
+/// through the current session to the restarted daemon's endpoint.
 fn assert_owner_rebound_to_restarted_lease(fixture: &RestartFixture) {
     let ledger = crate::generation_store::read(RUNNER)
         .expect("read ledger")
@@ -468,10 +468,9 @@ fn assert_owner_rebound_to_restarted_lease(fixture: &RestartFixture) {
         "no generation key is created and the stopped lease is not left draining"
     );
     assert_eq!(ledger.admission_owner, NEW_LEASE);
-    assert_eq!(ledger.job_owner(&fixture.job_id), Some(NEW_LEASE));
-    let owner = crate::generation_store::job_session(RUNNER, &fixture.job_id)
+    let owner = crate::connection::read_session(RUNNER)
         .expect("route job")
-        .expect("job owner");
+        .expect("current session");
     assert_eq!(owner.remote_daemon_lease_id.as_deref(), Some(NEW_LEASE));
     assert_eq!(owner.remote_daemon_pid, Some(NEW_PID));
     assert_eq!(owner.local_url, Some(fixture.daemon.url()));
@@ -501,13 +500,7 @@ fn assert_observer_follows_job_to_terminal(fixture: &RestartFixture) {
             &client,
             &endpoint,
             &fixture.job_id,
-            || {
-                super::super::daemon::refreshed_daemon_endpoint(
-                    RUNNER,
-                    &fixture.job_id,
-                    Some(OLD_IDENTITY),
-                )
-            },
+            || super::super::daemon::refreshed_daemon_endpoint(RUNNER, Some(OLD_IDENTITY)),
         )
         .expect("the re-adopted job stays observable across the restart");
         assert_eq!(job.id.to_string(), fixture.job_id);

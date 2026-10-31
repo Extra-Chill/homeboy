@@ -280,7 +280,7 @@ fn job_cancel(runner_id: &str, job_id: &str) -> CmdResult<RunnerJobOutput> {
     let (job, events) = match runner::runner_job_cancel(runner_id, job_id, CAUSE) {
         Ok(result) => result,
         Err(_) => {
-            let session = runner::reconnect_job_log_owner(runner_id, job_id)?;
+            let session = runner::reconnect_job_log_owner(runner_id)?;
             let result = runner::runner_job_cancel_for_session(&session, job_id, CAUSE);
             runner::close_reconnected_job_log_owner(&session);
             result?
@@ -340,7 +340,7 @@ fn job_logs(
             reconnects += 1;
             eprintln!("runner log transport lost; reconnecting to the authoritative job generation ({reconnects}/{MAX_RECONNECTS})");
             let session =
-                runner::reconnect_job_log_owner(runner_id, job_id).map_err(|reconnect_error| {
+                runner::reconnect_job_log_owner(runner_id).map_err(|reconnect_error| {
                     follow_recovery_error(
                         runner_id,
                         job_id,
@@ -397,8 +397,8 @@ fn job_logs(
                 if let Some(session) = recovery_session.take() {
                     runner::close_reconnected_job_log_owner(&session);
                 }
-                let session = runner::reconnect_job_log_owner(runner_id, job_id).map_err(
-                    |reconnect_error| {
+                let session =
+                    runner::reconnect_job_log_owner(runner_id).map_err(|reconnect_error| {
                         follow_recovery_error(
                             runner_id,
                             job_id,
@@ -406,8 +406,7 @@ fn job_logs(
                             poll_ms,
                             reconnect_error,
                         )
-                    },
-                )?;
+                    })?;
                 match runner::runner_job_log_snapshot_for_session(&session, job_id) {
                     Ok(snapshot) => {
                         recovery_session = Some(session);

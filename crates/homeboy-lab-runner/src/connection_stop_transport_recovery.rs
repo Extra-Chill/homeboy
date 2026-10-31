@@ -157,15 +157,10 @@ pub(crate) fn disconnect_with_session(
                 session_path: session_path(runner_id)?.display().to_string(),
             });
         }
-        // Retained generations are historical routing evidence, not authority
-        // to mutate every port they once used. Resolve one current daemon via
-        // SSH and clean up stale local tunnel processes only after its stop.
-        // An interrupted disconnect can delete the registry before the session;
-        // the session itself is then the only recorded generation.
-        let mut retained_generations = super::super::generation_store::live_sessions(runner_id)?;
-        if retained_generations.is_empty() {
-            retained_generations.push(session.clone());
-        }
+        // The runner's one current session is the only daemon this controller
+        // routes to. Resolve the current daemon via SSH and clean up the local
+        // tunnel only after its stop.
+        let retained_generations = vec![session.clone()];
         let authoritative_status = match probe_authoritative_daemon_status(runner_id) {
             Ok(status) => status,
             Err(error) => {
@@ -255,26 +250,6 @@ pub(crate) fn disconnect_with_session(
         super::super::generation_store::clear(runner_id)?;
         let ownership = read_ownership(runner_id)?;
         if should_stop_remote_daemon(session, ownership.as_ref(), has_live_peer_session(session)?) {
-            remove_ownership(runner_id)?;
-        }
-    } else {
-        // A prior lease-safe stop can remove the controller session before the
-        // historical registry is reconciled. Do not make reconnect create a
-        // new generation merely to clean that already-dead inventory.
-        let retained_generations = super::super::generation_store::live_sessions(runner_id)?;
-        let leases = eligible_stale_generation_leases(&retained_generations).unwrap_or_default();
-        let authoritative_status = if leases.is_empty() {
-            None
-        } else {
-            match probe_authoritative_daemon_status(runner_id) {
-                Ok(status) => Some(status),
-                Err(error) => return partial_disconnect_report(runner_id, None, error.message),
-            }
-        };
-        if authoritative_status.as_ref().is_some_and(|status| {
-            remote_daemon::authoritative_stale_generations_are_dead(status, &leases)
-        }) {
-            super::super::generation_store::tombstone_dead_direct_generations(runner_id, &leases)?;
             remove_ownership(runner_id)?;
         }
     }

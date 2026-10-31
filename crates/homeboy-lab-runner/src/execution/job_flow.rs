@@ -85,7 +85,6 @@ pub(super) fn complete_submitted_runner_job<
     Events,
     Mirror,
     AfterEvents,
-    Finalize,
 >(
     flow: SubmittedRunnerJobFlow<'_>,
     mut job: Job,
@@ -95,7 +94,6 @@ pub(super) fn complete_submitted_runner_job<
     mut events: Events,
     mirror: Mirror,
     mut after_events: AfterEvents,
-    mut finalize: Finalize,
 ) -> Result<RunnerExecCompletion>
 where
     Accepted: FnMut(&Job) -> Result<()>,
@@ -104,7 +102,6 @@ where
     Events: FnMut(&Job) -> Result<Vec<JobEvent>>,
     Mirror: FnOnce(&Job, &[JobEvent], &serde_json::Value) -> Result<Option<MirroredJobEvidence>>,
     AfterEvents: FnMut() -> Result<()>,
-    Finalize: FnMut(&Job, &[JobArtifactMetadata]) -> Result<()>,
 {
     if let Some(run_id) = flow.run_id.as_deref() {
         let binding = if flow.run_id_owns_generic_exec {
@@ -340,7 +337,7 @@ where
             )?;
         }
     }
-    settle_generation_job_ownership_after_terminal_snapshot(
+    settle_admitted_job_after_terminal_snapshot(
         &flow.runner.id,
         &terminal_snapshot,
         observed_terminal_daemon_job,
@@ -415,7 +412,6 @@ where
     let artifacts = mirrored
         .map(|evidence| evidence.artifacts)
         .unwrap_or_default();
-    finalize(&job, &artifacts)?;
     let mutation_artifacts = mutation_artifacts_from_job(&job, &result);
     if flow.print_handoff_output {
         print_lab_offload_handoff(
@@ -573,10 +569,10 @@ fn exact_attempt_terminal_job_status(
     }
 }
 
-/// Releases generation capacity only for a terminal daemon snapshot whose event
-/// read has already completed. Controller-derived terminality is not authority
-/// to settle the daemon job's durable owner.
-fn settle_generation_job_ownership_after_terminal_snapshot(
+/// Releases the job's admission fence only for a terminal daemon snapshot whose
+/// event read has already completed. Controller-derived terminality is not
+/// authority to settle the daemon job.
+fn settle_admitted_job_after_terminal_snapshot(
     runner_id: &str,
     terminal_snapshot: &RunnerJobLogSnapshot,
     observed_terminal_daemon_job: bool,
@@ -584,16 +580,12 @@ fn settle_generation_job_ownership_after_terminal_snapshot(
     if !observed_terminal_daemon_job || !terminal_snapshot.job.status.is_terminal() {
         return Ok(false);
     }
-    super::super::generation_store::settle_observed_terminal_job(
-        runner_id,
-        &terminal_snapshot.job.id.to_string(),
-    )
+    crate::admission_fence::settle_admitted_job(runner_id, &terminal_snapshot.job.id.to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{generation_store, RunnerSession, RunnerSessionRole, RunnerTunnelMode};
 
     #[test]
     fn failed_job_diagnostics_persistence_is_secondary() {
@@ -603,38 +595,11 @@ mod tests {
         assert!(preserve_failed_job_result(JobStatus::Succeeded, failure()).is_err());
     }
 
-    fn direct_session() -> RunnerSession {
-        RunnerSession {
-            runner_id: "runner-a".to_string(),
-            mode: RunnerTunnelMode::DirectSsh,
-            role: RunnerSessionRole::Controller,
-            server_id: Some("server-a".to_string()),
-            controller_id: Some("controller-a".to_string()),
-            broker_url: None,
-            remote_daemon_address: Some("daemon-a:4000".to_string()),
-            local_port: Some(4000),
-            local_url: Some("http://daemon-a:4000".to_string()),
-            tunnel_pid: None,
-            tunnel_process_start_identity: None,
-            proxy_forward: None,
-            remote_daemon_pid: Some(42),
-            remote_daemon_lease_id: Some("lease-a".to_string()),
-            homeboy_version: "test".to_string(),
-            homeboy_build_identity: Some("homeboy test+lease-a".to_string()),
-            connected_at: "2026-09-10T00:00:00Z".to_string(),
-            worker_identity: None,
-            worker_pid: None,
-            last_seen_at: None,
-            leaseless_recovery_evidence: None,
-        }
-    }
-
     #[test]
-    fn failed_read_only_terminal_snapshot_retains_evidence_and_releases_generation_capacity() {
+    fn failed_read_only_terminal_snapshot_retains_evidence_and_releases_the_admission_fence() {
         crate::test_support::with_isolated_home(|_| {
-            let session = direct_session();
             let job_id = uuid::Uuid::new_v4();
-            generation_store::record_job("runner-a", &session, &job_id.to_string())
+            crate::admission_fence::record_admitted_job("runner-a", &job_id.to_string())
                 .expect("record accepted job");
             let terminal = RunnerJobLogSnapshot {
                 job: Job {
@@ -670,23 +635,14 @@ mod tests {
                 terminal.job.operation, "runner.exec --read-only-artifact",
                 "terminal snapshot retains the failed retrieval identity"
             );
-            assert!(settle_generation_job_ownership_after_terminal_snapshot(
-                "runner-a", &terminal, true
-            )
-            .expect("settle terminal job-flow snapshot"));
-            assert!(generation_store::status_job_owners("runner-a")
-                .expect("read generation owners")
-                .iter()
-                .all(|owner| owner.job_ids.is_empty()));
-            generation_store::with_admission_fence(
-                "runner-a",
-                Some(&session),
-                "connect",
-                |fence| {
-                    assert!(fence.is_none(), "settled job must not block capacity");
-                    Ok(())
-                },
-            )
+            assert!(
+                settle_admitted_job_after_terminal_snapshot("runner-a", &terminal, true)
+                    .expect("settle terminal job-flow snapshot")
+            );
+            crate::admission_fence::with_admission_fence("runner-a", "connect", |fence| {
+                assert!(fence.is_none(), "settled job must not block capacity");
+                Ok(())
+            })
             .expect("check admission fence");
         });
     }
