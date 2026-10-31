@@ -1074,15 +1074,6 @@ impl ControllerUpgradeAdmissionProvider for AgentTaskControllerUpgradeAdmissionP
             homeboy_upgrade::upgrade::runner_direct_active_job_count(runner_id)
         }))
     }
-
-    fn recover_controller_upgrade_admission_for_verified_target(
-        &self,
-    ) -> Result<ControllerUpgradeAdmission> {
-        agent_task_lifecycle::quarantine_verified_fixture_runner_records()?;
-        // Cancellation is committed with its provenance in one write, so a
-        // cancelled run's stored state is already terminal; no repair pass.
-        self.controller_upgrade_admission()
-    }
 }
 
 pub(super) fn filter_idle_runner_stale_blockers(

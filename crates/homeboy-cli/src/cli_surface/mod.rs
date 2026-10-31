@@ -1516,9 +1516,6 @@ mod tests {
         assert!(agent_task.contains("preview by default"));
         assert!(agent_task.contains("--apply"));
         assert!(agent_task.contains("authoritative provider state"));
-
-        let self_help = scoped_help(&["self"]);
-        assert!(!self_help.contains("upgrade-admission"));
     }
 
     fn scoped_help(path: &[&str]) -> String {

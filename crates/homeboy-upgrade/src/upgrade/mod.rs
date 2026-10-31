@@ -14,10 +14,8 @@ pub mod update_check;
 mod validation;
 
 pub use admission::{
-    controller_upgrade_admission, ensure_controller_upgrade_admission,
-    ensure_verified_target_upgrade_admission, register_controller_upgrade_admission_provider,
+    controller_upgrade_admission, register_controller_upgrade_admission_provider,
     ControllerUpgradeAdmission, ControllerUpgradeAdmissionProvider, ControllerUpgradeBlocker,
-    VerifiedTargetUpgrade,
 };
 pub use execution::{
     controller_source_checkout, parse_build_identity_display, RELEASE_INSTALLER_SCRIPT,
