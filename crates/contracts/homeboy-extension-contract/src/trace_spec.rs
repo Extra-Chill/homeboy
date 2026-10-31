@@ -134,7 +134,7 @@ pub struct TraceNativePublicPreviewSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
 
-    /// Native preview ingress/broker URL consumed by `homeboy tunnel preview-client start`.
+    /// Native preview ingress/broker URL.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ingress_url: Option<String>,
 

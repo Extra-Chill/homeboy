@@ -476,7 +476,6 @@ fn exit_code_for_error(code: ErrorCode) -> i32 {
         | ErrorCode::DocsTopicNotFound
         | ErrorCode::RigNotFound
         | ErrorCode::RunnerNotFound
-        | ErrorCode::ServiceTunnelNotFound
         | ErrorCode::ProjectNoActive => 4,
 
         ErrorCode::RigPipelineFailed

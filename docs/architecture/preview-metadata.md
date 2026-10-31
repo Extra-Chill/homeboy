@@ -76,20 +76,7 @@ external provider command:
 ```
 
 `mode: "homeboy_native"` derives `https://{session_id}-tunnel.{operator_domain}`
-unless `native.public_host` or `public_origin` is supplied. Trace starts the
-native client with the minimal internal command contract:
-
-```sh
-homeboy tunnel preview-client start \
-  --public-host wc-stripe-real-wallet-tunnel.preview.example.test \
-  --local-origin http://127.0.0.1:49823 \
-  --session-id wc-stripe-real-wallet \
-  --ingress https://preview-broker.example.test \
-  --token-env HOMEBOY_PREVIEW_TUNNEL_TOKEN \
-  --ready-stdout
-```
-
-The client must print the ready public HTTPS origin to stdout before trace
+unless `native.public_host` or `public_origin` is supplied. The client must print the ready public HTTPS origin to stdout before trace
 collection starts. Trace then preflights required assets through the public URL,
 injects `HOMEBOY_PREVIEW_JSON`, `HOMEBOY_PREVIEW_PUBLIC_URL`, and
 `HOMEBOY_TRACE_PREVIEW_*` environment values into the workload, and terminates

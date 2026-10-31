@@ -341,8 +341,7 @@ fn not_found_response(
     let message = "no artifact resolved for this path; it did not match a run-scoped artifact \
                    route and no file exists at that path under the artifact root";
     let hint = "Run-scoped artifact IDs are not filenames; do not hand-build \
-                `/<run-id>/<uuid>-candidate.png`-style URLs. Resolve the real path with \
-                `homeboy tunnel artifact-origin inspect --path <file-or-url>`.";
+                `/<run-id>/<uuid>-candidate.png`-style URLs.";
     let body = serde_json::json!({
         "error": "not_found",
         "requested_path": requested,

@@ -120,7 +120,6 @@ pub enum ErrorCode {
     RunnerCapabilityMissing,
     RunnerWorkspaceOwnershipConflict,
     BrokerAuthDenied,
-    ServiceTunnelNotFound,
     RigPipelineFailed,
     RigServiceFailed,
     RigResourceConflict,
@@ -209,7 +208,6 @@ impl ErrorCode {
             ErrorCode::RunnerCapabilityMissing => "runner.capability_missing",
             ErrorCode::RunnerWorkspaceOwnershipConflict => "runner.workspace_ownership_conflict",
             ErrorCode::BrokerAuthDenied => "broker.auth_denied",
-            ErrorCode::ServiceTunnelNotFound => "service_tunnel.not_found",
             ErrorCode::RigPipelineFailed => "rig.pipeline_failed",
             ErrorCode::RigServiceFailed => "rig.service_failed",
             ErrorCode::RigResourceConflict => "rig.resource_conflict",
@@ -274,7 +272,6 @@ impl ErrorCode {
             "runner.capability_missing" => Self::RunnerCapabilityMissing,
             "runner.workspace_ownership_conflict" => Self::RunnerWorkspaceOwnershipConflict,
             "broker.auth_denied" => Self::BrokerAuthDenied,
-            "service_tunnel.not_found" => Self::ServiceTunnelNotFound,
             "rig.pipeline_failed" => Self::RigPipelineFailed,
             "rig.service_failed" => Self::RigServiceFailed,
             "rig.resource_conflict" => Self::RigResourceConflict,
@@ -1336,15 +1333,6 @@ impl Error {
             error = error.with_hint(hint);
         }
         error
-    }
-
-    pub fn service_tunnel_not_found(id: impl Into<String>, suggestions: Vec<String>) -> Self {
-        Self::entity_not_found(
-            ErrorCode::ServiceTunnelNotFound,
-            "Tunnel service",
-            id,
-            suggestions,
-        )
     }
 
     pub fn rig_pipeline_failed(

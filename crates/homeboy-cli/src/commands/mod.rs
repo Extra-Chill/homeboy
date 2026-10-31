@@ -259,7 +259,6 @@ pub mod ssh;
 pub mod status;
 pub mod test;
 pub mod trace;
-pub mod tunnel;
 pub mod upgrade;
 pub mod utils;
 pub mod workflow;
