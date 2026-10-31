@@ -1,0 +1,61 @@
+{
+  "schema": "homeboy/command-result/v3",
+  "command": "runner",
+  "operation": "status",
+  "success": true,
+  "exit_code": 0,
+  "status": "succeeded",
+  "data": {
+    "admission_summary": {
+      "accepting_jobs": false,
+      "active_job_count": 0,
+      "connected": true,
+      "daemon_build_identity": "homeboy 0.389.0+44f61138739beeb299566921871015da1d3c6085",
+      "daemon_compatible": false,
+      "daemon_fresh": true,
+      "draining_generation_count": 23,
+      "live_daemon_job_count": 0,
+      "next_action": "homeboy runner refresh-homeboy homeboy-lab --ref 79b345088b264fa4397d6e7c8754fad9611dd57a --reconnect",
+      "retained_durable_job_count": 0,
+      "runner_id": "homeboy-lab",
+      "safe_to_rotate": true,
+      "stale_job_count": 0,
+      "unresolved_retained_projection_count": 0
+    },
+    "command": "runner.status",
+    "execution_capabilities": {
+      "lab_runner_connection": {
+        "available": false,
+        "connected_runner_ids": [
+          "homeboy-lab"
+        ],
+        "next_action": "homeboy runner refresh-homeboy homeboy-lab --ref 79b345088b264fa4397d6e7c8754fad9611dd57a --reconnect",
+        "reasons": [
+          "stale_daemon",
+          "active_daemon_control_plane_version != job_command_binary_version"
+        ]
+      },
+      "local_placement": {
+        "available": true,
+        "next_action": "homeboy --placement local agent-task cook ...",
+        "state": "available"
+      }
+    },
+    "id": "homeboy-lab",
+    "operator_summary": {
+      "identity": "homeboy-lab",
+      "next_action": "homeboy runner refresh-homeboy homeboy-lab --ref 79b345088b264fa4397d6e7c8754fad9611dd57a --reconnect",
+      "risk": [
+        "stale_daemon",
+        "compatibility_skew: controller `homeboy 0.390.0+79b345088b264fa4397d6e7c8754fad9611dd57a`; configured executable `homeboy 0.390.0+79b345088b264fa4397d6e7c8754fad9611dd57a`; daemon `homeboy 0.389.0+44f61138739beeb299566921871015da1d3c6085`"
+      ],
+      "state": "connected"
+    },
+    "truncation": {
+      "evidence_ref": "runner:homeboy-lab:generation-inventory",
+      "full_command": "homeboy runner status homeboy-lab --full",
+      "omitted_generations": 24
+    },
+    "variant": "status"
+  }
+}

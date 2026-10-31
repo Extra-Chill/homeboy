@@ -1,0 +1,1060 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		023BC7FBF76D2C19E8B8559D /* DeployerViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2FB01E9289515A3AC24A927 /* DeployerViewModel.swift */; };
+		023E9AE450BF036FF40C0E76 /* ProjectConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = C794768AF4898995F64DB92D /* ProjectConfiguration.swift */; };
+		02AD314100925D82AE384CE8 /* GeneralSettingsTab.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8974EB4ED392FD3B52D70FD3 /* GeneralSettingsTab.swift */; };
+		04CC8776681CF107919B5B76 /* RigsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 95BEB3F1E5A208F98850D372 /* RigsView.swift */; };
+		0597F5E10CC3D748D36710F9 /* ConfigurationObserving.swift in Sources */ = {isa = PBXBuildFile; fileRef = B6676A7C26F7EE42CD5B9E7A /* ConfigurationObserving.swift */; };
+		0B1C053B8DCA686200739C43 /* ServerEditSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5D75CB92C4916A5B3A8DE34 /* ServerEditSheet.swift */; };
+		0D616728E30CB0C012851F18 /* GitOperationsViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3320B46DC4876237EA4C9ACE /* GitOperationsViewModel.swift */; };
+		166FD1AAF56BFE797F56E1C4 /* ShellCommandLineParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = 86CDDF5BF2C45E9687E5C07B /* ShellCommandLineParser.swift */; };
+		19F0A3B40B6B6BA59A201C7F /* HomeboyCLI+RunCommands.swift in Sources */ = {isa = PBXBuildFile; fileRef = BFAF5103FCB24063514E519F /* HomeboyCLI+RunCommands.swift */; };
+		1A164D8DD4607926F6964B95 /* CopyableContent.swift in Sources */ = {isa = PBXBuildFile; fileRef = D5BD1368E35CA013C4E064C8 /* CopyableContent.swift */; };
+		1A9C5FC30453DD2AFD03062D /* BenchView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 941D61AD6DA0DA2420DB13B8 /* BenchView.swift */; };
+		1AEFFA5D377D403DDA560237 /* RemoteFileEditorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70AE598B819DE3CDD73692D4 /* RemoteFileEditorView.swift */; };
+		1D8C5CFC6CC66D4D2059241A /* CLIError.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C0B9A725382C46F30D83C02 /* CLIError.swift */; };
+		1DBC1006D2D49099F3F78854 /* CookComposerModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2E1C365E20CFA8A1475CDAD2 /* CookComposerModel.swift */; };
+		22221233AC86561D48490886 /* RemoteFileBrowserView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7C2AF5C1F794564BF7DC0F4 /* RemoteFileBrowserView.swift */; };
+		278021F9D228BBDA95267231 /* HomeboyCLI.swift in Sources */ = {isa = PBXBuildFile; fileRef = D870E69E9C29278BC862CD04 /* HomeboyCLI.swift */; };
+		27D41F217F00E3A8171BEC63 /* AppWarning.swift in Sources */ = {isa = PBXBuildFile; fileRef = C489D03946456721B73D70EA /* AppWarning.swift */; };
+		29AC5918A42B81DE1D250360 /* ContentContext.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC77F3DE919D687C5088735B /* ContentContext.swift */; };
+		2B66E2C66072EA7F119F138A /* HomeboyLabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2734F8A242983E0642DBD72B /* HomeboyLabView.swift */; };
+		2BDBF9B46483155A6701C845 /* ConfigurationChangeType.swift in Sources */ = {isa = PBXBuildFile; fileRef = D4847DDB6175D9E32C423C8C /* ConfigurationChangeType.swift */; };
+		2FA2E2EB6635082599CF1172 /* RigsViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 35595CC7BEFD826A8FE56039 /* RigsViewModel.swift */; };
+		306DE99757A1BBA6E328A8FF /* HomeboyCLI+WorkspaceCommands.swift in Sources */ = {isa = PBXBuildFile; fileRef = A087DAB3F4E912476EC93E01 /* HomeboyCLI+WorkspaceCommands.swift */; };
+		30856C36D38963CB5A540EFC /* WarningView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20129FFBFEEBA4948B8DA194 /* WarningView.swift */; };
+		3188A425BBDAED4249534CE8 /* WordPressSettingsTab.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9172819247F48893F5F20EA2 /* WordPressSettingsTab.swift */; };
+		337BB8150B603A86CAECBE7F /* CopyButton.swift in Sources */ = {isa = PBXBuildFile; fileRef = B4784FCC0B29C23649013882 /* CopyButton.swift */; };
+		364E9DAE57B4B08D341D3E83 /* CookComposerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC5959FD60272D345EC59721 /* CookComposerView.swift */; };
+		36E2AEA91D720BC0FCE5D660 /* DeployerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E103FB783F1B8F1CF84750F4 /* DeployerView.swift */; };
+		38D566E59E85DF4E4D14C48F /* RemoteFileBrowser.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2E7289F91C0EA517A3DE5DB9 /* RemoteFileBrowser.swift */; };
+		3AE96B334740E1FD5BF12CE8 /* RemoteFileModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6F5E37F5EBA99C37980EFA58 /* RemoteFileModels.swift */; };
+		3CBF41346F060E438864152C /* AppError.swift in Sources */ = {isa = PBXBuildFile; fileRef = B59036A328B5EEE5B0D5DF9C /* AppError.swift */; };
+		3D5278E44CF446DC733DFDF7 /* ConsoleOutput.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1FDE17265BB36CD42258798 /* ConsoleOutput.swift */; };
+		4118594C23453F57B04D3C16 /* CommandBrowserViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = AE4CFBBE215C9D3D1250C8EF /* CommandBrowserViewModel.swift */; };
+		445A81283F88E81B8C1F0710 /* BackupService.swift in Sources */ = {isa = PBXBuildFile; fileRef = B6A9C1C6E1C766FEF2D21DE5 /* BackupService.swift */; };
+		46238C2E19607D4410D23FA2 /* HomeboyCLI+RigBenchReleaseCommands.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0DD2E86E7655D2ED45CB0E31 /* HomeboyCLI+RigBenchReleaseCommands.swift */; };
+		465D0E037B7E2705A578EAF2 /* RemotePathResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0EEE1B29B6CBCC9B7AE92D /* RemotePathResolver.swift */; };
+		4AC373868CADD6B52F177BF4 /* HomeboyCommandRegistry.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C6DEE1380754F77DA68EA8B /* HomeboyCommandRegistry.swift */; };
+		50C3063245F5FF6D48F45D65 /* ControlPlaneModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C3174A2A7BEDDBA90DED9D2 /* ControlPlaneModels.swift */; };
+		5312A3BDB64264012E062616 /* ExtensionInputsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3ACB611363480EC1ED86A127 /* ExtensionInputsView.swift */; };
+		543626E78A3C5502E448629E /* HomeboyDaemonLocator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F1B499BE056410BC2BD2A42 /* HomeboyDaemonLocator.swift */; };
+		57C3AE0D20A591DEE69B0FF0 /* HomeboyApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = BFEA6E42C1D9292B10447CDA /* HomeboyApp.swift */; };
+		583928D73E613923E310D2BD /* RunnersView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 16CE88667247CB091618C4F8 /* RunnersView.swift */; };
+		585F2338D58023625EBBA0B5 /* ExtensionsSettingsTab.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64DFC1DFC648B2D106BA5361 /* ExtensionsSettingsTab.swift */; };
+		58782E3C2B83E467318758D3 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = E134C3E1AFDFB8B9C3BFA989 /* Assets.xcassets */; };
+		58C9903BC07607162259D792 /* SSHKeyManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = BE9B567AD7EF6AEAFF4650E3 /* SSHKeyManager.swift */; };
+		59B9942920AA8A82C6687BA1 /* ExtensionActionsBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = F84CD4544E216646E96957DA /* ExtensionActionsBar.swift */; };
+		5A062EFBFD4AC1A479B90C02 /* HomeboyCLI+RunnerCommands.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E87D23CDA0D3B452F3CB752 /* HomeboyCLI+RunnerCommands.swift */; };
+		5A7E75D51012C3ED36EA7853 /* CLIExtensionTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = E32E869268148C1260D05F85 /* CLIExtensionTypes.swift */; };
+		5A9B1A9B7984F57035A97D82 /* KeychainService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D06A62D2DDC840DC6A12CC7 /* KeychainService.swift */; };
+		5B3425AA6A8A9C4C9EF5E29F /* FileBrowserSidebarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AD70F8136E9691D7528CB581 /* FileBrowserSidebarView.swift */; };
+		5BD322602F64CCA4E7A54FEF /* ConfigurationManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9BAE7C655CF0B3F2D679B188 /* ConfigurationManager.swift */; };
+		5BDE52F8E2A18B1F50AD060A /* JSONValue.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7E6E41FFC96012F3C390C094 /* JSONValue.swift */; };
+		5CA76C92A6AF0C42784FD35D /* ErrorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7BFAEBF8AA9E2BEC2A55EF0D /* ErrorView.swift */; };
+		5CEF2659D6426FC7150A96C7 /* QualityModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = D5F58D23C61F57585387766D /* QualityModels.swift */; };
+		5F95A53713A121D0D13A95B8 /* HomeboyCLI+FileCommands.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA9A201C8236CBE6A4033FD4 /* HomeboyCLI+FileCommands.swift */; };
+		6058DC822E13A3B7C56C64BF /* ExtensionSetupView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B16E4FF8E5939CE6EF12EFA2 /* ExtensionSetupView.swift */; };
+		61876E7ACDA5C3D7A5D2E40F /* AppPaths.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3C840B787B398287BC5EEE6 /* AppPaths.swift */; };
+		62A9E27245B3DB014810B662 /* MissionsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E1141AB6BCCA0B060BE60AB1 /* MissionsView.swift */; };
+		6EE34EF4328107EC9BDB609E /* CapacityView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 901FE67B6F52FCFB49871577 /* CapacityView.swift */; };
+		71419F89166E98CC7C4A3A98 /* SSHService.swift in Sources */ = {isa = PBXBuildFile; fileRef = AD23DCF3987518BDD613AA7A /* SSHService.swift */; };
+		72D058E4C987B44B3C2FE75F /* RemoteFileEntry.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0BBA2DD3A1B1041ACA3A049F /* RemoteFileEntry.swift */; };
+		761826050ADDBB5E4B00E1AC /* CLIVersionChecker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 811079398986364AA0E0542A /* CLIVersionChecker.swift */; };
+		76A91937D9017A5B0D9B0BA5 /* PinnableTabBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 66B3D28A100F2CAE93D7DE64 /* PinnableTabBar.swift */; };
+		790A549F1DA4887FA2EF100F /* ServersSettingsTab.swift in Sources */ = {isa = PBXBuildFile; fileRef = DF87669DD8D8EEF387C64926 /* ServersSettingsTab.swift */; };
+		79F089B7341476178AB41022 /* RemoteFileEditorViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 42681ABDD9AC38676CDB315E /* RemoteFileEditorViewModel.swift */; };
+		7EE844A0691D39F31A685114 /* ProjectSwitcherView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA62EB2C6FD0532AE4CCD204 /* ProjectSwitcherView.swift */; };
+		807E4729F90F95A12FAB99B7 /* CollapsibleSplitView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4ED098FFBF749CD6DD355B1B /* CollapsibleSplitView.swift */; };
+		8327EB6B86BD82A5A8F0E466 /* ServerConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3CBD189DF7919CB05353FDC9 /* ServerConfig.swift */; };
+		85A8C46096DE6DFF3BD11E63 /* FindableTextView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 385944CD36C9E1B61CE23EDE /* FindableTextView.swift */; };
+		85F4F94606B3D49BEFDC227F /* DeploymentService.swift in Sources */ = {isa = PBXBuildFile; fileRef = CEFAD6C5159792F08A987DC9 /* DeploymentService.swift */; };
+		86C712A03FB9FC626DC46371 /* ArtifactVersionParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = 60913533AA72054F3D79625C /* ArtifactVersionParser.swift */; };
+		88C7EDB2A9AB24DF64954AB6 /* MissionStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = C9C256A435452BB64539C8CE /* MissionStore.swift */; };
+		8B8811A6AB7570F644C36FC5 /* VersionParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = 13F8D60E3516F29F554438A0 /* VersionParser.swift */; };
+		8D62AD324E3C99747FA53FCB /* ComponentsSettingsTab.swift in Sources */ = {isa = PBXBuildFile; fileRef = 830D15DCC64EB9AF17F822E0 /* ComponentsSettingsTab.swift */; };
+		9057B57BD09E3D8A025D305D /* ExtensionManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = E12EA4D980446363E3B0B3D1 /* ExtensionManager.swift */; };
+		93B2772BA952451AE39491B3 /* ExtensionViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = ACBBAD050F5C69E93FA60880 /* ExtensionViewModel.swift */; };
+		969EDDA4900E1F2620099F30 /* WordPressSSHExtension.swift in Sources */ = {isa = PBXBuildFile; fileRef = E8A3033E40F9E3B41E1E41BB /* WordPressSSHExtension.swift */; };
+		999116DB4DB5B3DF3EA9C171 /* SidebarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C3C30739F765981B37603DD /* SidebarView.swift */; };
+		9CD0D78AD51869E4BCA3363C /* ComponentConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3E609811240E56A3A71CA778 /* ComponentConfiguration.swift */; };
+		9E83D8F4A47320D0DC38B248 /* ExtensionInstallSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCE83D5EB31A4A89A0764753 /* ExtensionInstallSheet.swift */; };
+		9EB8E162236E90FFB9585AC9 /* QualityView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B709FB776FF5A95CAE18A7D2 /* QualityView.swift */; };
+		A051F697BD41C8D9A5298333 /* DataTableColumn.swift in Sources */ = {isa = PBXBuildFile; fileRef = C503C8896286EA38288A139F /* DataTableColumn.swift */; };
+		A1F7848D131CBFFFEEB239D8 /* CommandBrowserView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BCD4DD433928D5A580EB66C8 /* CommandBrowserView.swift */; };
+		A34392C1F77DDF4B0B386D8C /* DataTableConstants.swift in Sources */ = {isa = PBXBuildFile; fileRef = F915FEEAF97ADD6EAADF6E4A /* DataTableConstants.swift */; };
+		A387D3BAF65EFBE5A44AA37C /* CommandBrowserEntry.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0075D42A490CE7EF713A874F /* CommandBrowserEntry.swift */; };
+		A40B645FCF64C59E6F1EC4FC /* HomeboyCLI+QualityCommands.swift in Sources */ = {isa = PBXBuildFile; fileRef = BC23AFFAB50FD8AFD042E644 /* HomeboyCLI+QualityCommands.swift */; };
+		A6C1285910873B6C02B4CE79 /* HomeboyDaemonClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1C1F6860A60F30A9D01D6E9A /* HomeboyDaemonClient.swift */; };
+		A95B5B17AF0093FD1108AF6D /* AppNavigationState.swift in Sources */ = {isa = PBXBuildFile; fileRef = C918023551483555FD875D7C /* AppNavigationState.swift */; };
+		AB378FCB8518F6BED6EEFB6F /* DisplayableError.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6C195A8A1462489E882BC187 /* DisplayableError.swift */; };
+		B1BC5D62A38657148E674B80 /* ExtensionConsoleView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3AC2128B1137A2702EEC2F55 /* ExtensionConsoleView.swift */; };
+		B1E8E656BDC1765CCF41A683 /* HomeboyCLI+ProjectPinCommands.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7FC07381EEBE0370CD636213 /* HomeboyCLI+ProjectPinCommands.swift */; };
+		B23886AC41FD2A725383EF45 /* ExtensionManifest.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5BA9BAC48CD6CC681F9FD2C5 /* ExtensionManifest.swift */; };
+		B27446E0A3706D997A75D1E9 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A690A4DC66BE109010668691 /* ContentView.swift */; };
+		B64B5A0883C3992694AF34A8 /* ControlPlaneClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 96EB68229A1B9B1265036A09 /* ControlPlaneClient.swift */; };
+		B6AC1E19666E9FC9AF76D431 /* CommandBrowserCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = 19D0AC4BB8035D3A38DF8F83 /* CommandBrowserCatalog.swift */; };
+		B9C42108AC64D21BAEEE580A /* DeployableComponent.swift in Sources */ = {isa = PBXBuildFile; fileRef = A705E0F3D07B94FCE1724761 /* DeployableComponent.swift */; };
+		BAEDE5ABE49EBE42C7C703DC /* RunHistoryViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = B73247BD443AB4A6932529E4 /* RunHistoryViewModel.swift */; };
+		C24FBE4BE4FE4BA046D565C3 /* RemotePathResolver+WordPress.swift in Sources */ = {isa = PBXBuildFile; fileRef = EFBA996DE0C810FC22480A51 /* RemotePathResolver+WordPress.swift */; };
+		C3156DBD6A7BA766221A1776 /* HomeboyCLI+MissionControlCommands.swift in Sources */ = {isa = PBXBuildFile; fileRef = BE4803F280F083C6A559169F /* HomeboyCLI+MissionControlCommands.swift */; };
+		C6F738277B8D48B8F03655CA /* bandcamp_scraper.cpython-314.pyc in Resources */ = {isa = PBXBuildFile; fileRef = 75262FFB3BBC6BC33A8AC4F3 /* bandcamp_scraper.cpython-314.pyc */; };
+		C727FE57ACE75A3152D4C972 /* NativeDataTable.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2800F57FE83EEBB76CC1F1A /* NativeDataTable.swift */; };
+		CC79CDB6AF19F24E74A11202 /* CodeTextView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA88D343E94C4C34E1069813 /* CodeTextView.swift */; };
+		CC892914AFEB03C734959003 /* HomeboyCLIModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = D8D33E39732C375690D3AC46 /* HomeboyCLIModels.swift */; };
+		CFD2A46F7153AF3F5A5F7BED /* ExtensionResultsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 01633F1529CE4E27B3570E07 /* ExtensionResultsView.swift */; };
+		D067D1266FD0989BC9E07C43 /* CLIBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 40736E67E0624C5F3AA5913C /* CLIBridge.swift */; };
+		D5421FF656190A21F439C40A /* HomeboyCLI+CommandBrowserCommands.swift in Sources */ = {isa = PBXBuildFile; fileRef = C3B52F387CC902FB445FC922 /* HomeboyCLI+CommandBrowserCommands.swift */; };
+		D94CC978855E31469979CD82 /* ExtensionContainerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F453DD64A8E42E312D5338B1 /* ExtensionContainerView.swift */; };
+		E1F7C14F08E1E4D8353F8064 /* CopyableTextView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4406A9EEECAF8249580937A7 /* CopyableTextView.swift */; };
+		E450CA4C790C609575070F05 /* ConfigGapsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 61EC8F9095C4AC67383B9F4A /* ConfigGapsView.swift */; };
+		E6130C3BA0E6F318EAB670A3 /* ConfigurationObserver.swift in Sources */ = {isa = PBXBuildFile; fileRef = E2FF4CDA2AE7652A449E74D8 /* ConfigurationObserver.swift */; };
+		E6403DF4F6747B97ED009C1A /* AppConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0CD2C75C18D0464C6428E5EE /* AppConfiguration.swift */; };
+		E832787BA1F926FB3A085E09 /* InlineErrorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 943FB329E82EA8D3985C41BE /* InlineErrorView.swift */; };
+		E8669A6388102A44C9D3B640 /* CookComposerViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = B86D61EA4DDF3007C98ABF11 /* CookComposerViewModel.swift */; };
+		EC7E0C50096E39206C199118 /* QualityViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6BBAE3837D9DF6634A72AAB1 /* QualityViewModel.swift */; };
+		EC9244E3C614561638C57AB7 /* RunHistoryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3AE68C48FE619E6E7F8BB5F1 /* RunHistoryView.swift */; };
+		EDE8694330029B75C53CBF95 /* ActivityView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C47343CB9B7F9993BBDEDAF1 /* ActivityView.swift */; };
+		EEA581470DC8B48027F54228 /* InlineWarningView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0DC18F8D8A50F464D296BB74 /* InlineWarningView.swift */; };
+		F34BB35C6C33E774792043ED /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 83B2C9499D9E9A17D32109EF /* SettingsView.swift */; };
+		FA9088059644CB053678418A /* HomeboyLabViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 53E7EFDB7496ED01FDCCC77B /* HomeboyLabViewModel.swift */; };
+		FB914712293D43F2D7D80F80 /* CreateProjectSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 91949A849E1F8F3490BBEC6A /* CreateProjectSheet.swift */; };
+		FDC7A36317A54E1EE4486D4A /* GitOperationsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2FC13102738FFBE2F5695F78 /* GitOperationsView.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		0075D42A490CE7EF713A874F /* CommandBrowserEntry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommandBrowserEntry.swift; sourceTree = "<group>"; };
+		01633F1529CE4E27B3570E07 /* ExtensionResultsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExtensionResultsView.swift; sourceTree = "<group>"; };
+		0BBA2DD3A1B1041ACA3A049F /* RemoteFileEntry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteFileEntry.swift; sourceTree = "<group>"; };
+		0CD2C75C18D0464C6428E5EE /* AppConfiguration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppConfiguration.swift; sourceTree = "<group>"; };
+		0DC18F8D8A50F464D296BB74 /* InlineWarningView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InlineWarningView.swift; sourceTree = "<group>"; };
+		0DD2E86E7655D2ED45CB0E31 /* HomeboyCLI+RigBenchReleaseCommands.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "HomeboyCLI+RigBenchReleaseCommands.swift"; sourceTree = "<group>"; };
+		13F8D60E3516F29F554438A0 /* VersionParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VersionParser.swift; sourceTree = "<group>"; };
+		16CE88667247CB091618C4F8 /* RunnersView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RunnersView.swift; sourceTree = "<group>"; };
+		19D0AC4BB8035D3A38DF8F83 /* CommandBrowserCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommandBrowserCatalog.swift; sourceTree = "<group>"; };
+		1C1F6860A60F30A9D01D6E9A /* HomeboyDaemonClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeboyDaemonClient.swift; sourceTree = "<group>"; };
+		20129FFBFEEBA4948B8DA194 /* WarningView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WarningView.swift; sourceTree = "<group>"; };
+		2734F8A242983E0642DBD72B /* HomeboyLabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeboyLabView.swift; sourceTree = "<group>"; };
+		2C3174A2A7BEDDBA90DED9D2 /* ControlPlaneModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ControlPlaneModels.swift; sourceTree = "<group>"; };
+		2E1C365E20CFA8A1475CDAD2 /* CookComposerModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CookComposerModel.swift; sourceTree = "<group>"; };
+		2E7289F91C0EA517A3DE5DB9 /* RemoteFileBrowser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteFileBrowser.swift; sourceTree = "<group>"; };
+		2FC13102738FFBE2F5695F78 /* GitOperationsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitOperationsView.swift; sourceTree = "<group>"; };
+		3320B46DC4876237EA4C9ACE /* GitOperationsViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitOperationsViewModel.swift; sourceTree = "<group>"; };
+		35595CC7BEFD826A8FE56039 /* RigsViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RigsViewModel.swift; sourceTree = "<group>"; };
+		385944CD36C9E1B61CE23EDE /* FindableTextView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FindableTextView.swift; sourceTree = "<group>"; };
+		3AC2128B1137A2702EEC2F55 /* ExtensionConsoleView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExtensionConsoleView.swift; sourceTree = "<group>"; };
+		3ACB611363480EC1ED86A127 /* ExtensionInputsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExtensionInputsView.swift; sourceTree = "<group>"; };
+		3AE68C48FE619E6E7F8BB5F1 /* RunHistoryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RunHistoryView.swift; sourceTree = "<group>"; };
+		3CBD189DF7919CB05353FDC9 /* ServerConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerConfig.swift; sourceTree = "<group>"; };
+		3D06A62D2DDC840DC6A12CC7 /* KeychainService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainService.swift; sourceTree = "<group>"; };
+		3E609811240E56A3A71CA778 /* ComponentConfiguration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComponentConfiguration.swift; sourceTree = "<group>"; };
+		40736E67E0624C5F3AA5913C /* CLIBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CLIBridge.swift; sourceTree = "<group>"; };
+		42681ABDD9AC38676CDB315E /* RemoteFileEditorViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteFileEditorViewModel.swift; sourceTree = "<group>"; };
+		4406A9EEECAF8249580937A7 /* CopyableTextView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CopyableTextView.swift; sourceTree = "<group>"; };
+		4C0B9A725382C46F30D83C02 /* CLIError.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CLIError.swift; sourceTree = "<group>"; };
+		4C3C30739F765981B37603DD /* SidebarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidebarView.swift; sourceTree = "<group>"; };
+		4ED098FFBF749CD6DD355B1B /* CollapsibleSplitView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CollapsibleSplitView.swift; sourceTree = "<group>"; };
+		4F1B499BE056410BC2BD2A42 /* HomeboyDaemonLocator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeboyDaemonLocator.swift; sourceTree = "<group>"; };
+		53E7EFDB7496ED01FDCCC77B /* HomeboyLabViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeboyLabViewModel.swift; sourceTree = "<group>"; };
+		5BA9BAC48CD6CC681F9FD2C5 /* ExtensionManifest.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExtensionManifest.swift; sourceTree = "<group>"; };
+		5E87D23CDA0D3B452F3CB752 /* HomeboyCLI+RunnerCommands.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "HomeboyCLI+RunnerCommands.swift"; sourceTree = "<group>"; };
+		60913533AA72054F3D79625C /* ArtifactVersionParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArtifactVersionParser.swift; sourceTree = "<group>"; };
+		61EC8F9095C4AC67383B9F4A /* ConfigGapsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConfigGapsView.swift; sourceTree = "<group>"; };
+		64DFC1DFC648B2D106BA5361 /* ExtensionsSettingsTab.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExtensionsSettingsTab.swift; sourceTree = "<group>"; };
+		66B3D28A100F2CAE93D7DE64 /* PinnableTabBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PinnableTabBar.swift; sourceTree = "<group>"; };
+		6BBAE3837D9DF6634A72AAB1 /* QualityViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QualityViewModel.swift; sourceTree = "<group>"; };
+		6C195A8A1462489E882BC187 /* DisplayableError.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DisplayableError.swift; sourceTree = "<group>"; };
+		6F5E37F5EBA99C37980EFA58 /* RemoteFileModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteFileModels.swift; sourceTree = "<group>"; };
+		70AE598B819DE3CDD73692D4 /* RemoteFileEditorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteFileEditorView.swift; sourceTree = "<group>"; };
+		75262FFB3BBC6BC33A8AC4F3 /* bandcamp_scraper.cpython-314.pyc */ = {isa = PBXFileReference; path = "bandcamp_scraper.cpython-314.pyc"; sourceTree = "<group>"; };
+		7BFAEBF8AA9E2BEC2A55EF0D /* ErrorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ErrorView.swift; sourceTree = "<group>"; };
+		7C6DEE1380754F77DA68EA8B /* HomeboyCommandRegistry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeboyCommandRegistry.swift; sourceTree = "<group>"; };
+		7E6E41FFC96012F3C390C094 /* JSONValue.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JSONValue.swift; sourceTree = "<group>"; };
+		7FC07381EEBE0370CD636213 /* HomeboyCLI+ProjectPinCommands.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "HomeboyCLI+ProjectPinCommands.swift"; sourceTree = "<group>"; };
+		811079398986364AA0E0542A /* CLIVersionChecker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CLIVersionChecker.swift; sourceTree = "<group>"; };
+		830D15DCC64EB9AF17F822E0 /* ComponentsSettingsTab.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComponentsSettingsTab.swift; sourceTree = "<group>"; };
+		833BBA3138BAD0CFB3557D6B /* Homeboy.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Homeboy.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		83B2C9499D9E9A17D32109EF /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		86CDDF5BF2C45E9687E5C07B /* ShellCommandLineParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShellCommandLineParser.swift; sourceTree = "<group>"; };
+		8974EB4ED392FD3B52D70FD3 /* GeneralSettingsTab.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GeneralSettingsTab.swift; sourceTree = "<group>"; };
+		901FE67B6F52FCFB49871577 /* CapacityView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CapacityView.swift; sourceTree = "<group>"; };
+		9172819247F48893F5F20EA2 /* WordPressSettingsTab.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WordPressSettingsTab.swift; sourceTree = "<group>"; };
+		91949A849E1F8F3490BBEC6A /* CreateProjectSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CreateProjectSheet.swift; sourceTree = "<group>"; };
+		941D61AD6DA0DA2420DB13B8 /* BenchView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BenchView.swift; sourceTree = "<group>"; };
+		943FB329E82EA8D3985C41BE /* InlineErrorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InlineErrorView.swift; sourceTree = "<group>"; };
+		95BEB3F1E5A208F98850D372 /* RigsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RigsView.swift; sourceTree = "<group>"; };
+		96EB68229A1B9B1265036A09 /* ControlPlaneClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ControlPlaneClient.swift; sourceTree = "<group>"; };
+		9BAE7C655CF0B3F2D679B188 /* ConfigurationManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConfigurationManager.swift; sourceTree = "<group>"; };
+		A087DAB3F4E912476EC93E01 /* HomeboyCLI+WorkspaceCommands.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "HomeboyCLI+WorkspaceCommands.swift"; sourceTree = "<group>"; };
+		A1FDE17265BB36CD42258798 /* ConsoleOutput.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConsoleOutput.swift; sourceTree = "<group>"; };
+		A2800F57FE83EEBB76CC1F1A /* NativeDataTable.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeDataTable.swift; sourceTree = "<group>"; };
+		A5D75CB92C4916A5B3A8DE34 /* ServerEditSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerEditSheet.swift; sourceTree = "<group>"; };
+		A690A4DC66BE109010668691 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		A705E0F3D07B94FCE1724761 /* DeployableComponent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeployableComponent.swift; sourceTree = "<group>"; };
+		ACBBAD050F5C69E93FA60880 /* ExtensionViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExtensionViewModel.swift; sourceTree = "<group>"; };
+		AD23DCF3987518BDD613AA7A /* SSHService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SSHService.swift; sourceTree = "<group>"; };
+		AD70F8136E9691D7528CB581 /* FileBrowserSidebarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileBrowserSidebarView.swift; sourceTree = "<group>"; };
+		AE4CFBBE215C9D3D1250C8EF /* CommandBrowserViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommandBrowserViewModel.swift; sourceTree = "<group>"; };
+		B16E4FF8E5939CE6EF12EFA2 /* ExtensionSetupView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExtensionSetupView.swift; sourceTree = "<group>"; };
+		B4784FCC0B29C23649013882 /* CopyButton.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CopyButton.swift; sourceTree = "<group>"; };
+		B59036A328B5EEE5B0D5DF9C /* AppError.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppError.swift; sourceTree = "<group>"; };
+		B6676A7C26F7EE42CD5B9E7A /* ConfigurationObserving.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConfigurationObserving.swift; sourceTree = "<group>"; };
+		B6A9C1C6E1C766FEF2D21DE5 /* BackupService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackupService.swift; sourceTree = "<group>"; };
+		B709FB776FF5A95CAE18A7D2 /* QualityView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QualityView.swift; sourceTree = "<group>"; };
+		B73247BD443AB4A6932529E4 /* RunHistoryViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RunHistoryViewModel.swift; sourceTree = "<group>"; };
+		B86D61EA4DDF3007C98ABF11 /* CookComposerViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CookComposerViewModel.swift; sourceTree = "<group>"; };
+		BA88D343E94C4C34E1069813 /* CodeTextView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodeTextView.swift; sourceTree = "<group>"; };
+		BB0EEE1B29B6CBCC9B7AE92D /* RemotePathResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemotePathResolver.swift; sourceTree = "<group>"; };
+		BC23AFFAB50FD8AFD042E644 /* HomeboyCLI+QualityCommands.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "HomeboyCLI+QualityCommands.swift"; sourceTree = "<group>"; };
+		BCD4DD433928D5A580EB66C8 /* CommandBrowserView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommandBrowserView.swift; sourceTree = "<group>"; };
+		BE4803F280F083C6A559169F /* HomeboyCLI+MissionControlCommands.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "HomeboyCLI+MissionControlCommands.swift"; sourceTree = "<group>"; };
+		BE9B567AD7EF6AEAFF4650E3 /* SSHKeyManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SSHKeyManager.swift; sourceTree = "<group>"; };
+		BFAF5103FCB24063514E519F /* HomeboyCLI+RunCommands.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "HomeboyCLI+RunCommands.swift"; sourceTree = "<group>"; };
+		BFEA6E42C1D9292B10447CDA /* HomeboyApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeboyApp.swift; sourceTree = "<group>"; };
+		C3B52F387CC902FB445FC922 /* HomeboyCLI+CommandBrowserCommands.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "HomeboyCLI+CommandBrowserCommands.swift"; sourceTree = "<group>"; };
+		C47343CB9B7F9993BBDEDAF1 /* ActivityView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActivityView.swift; sourceTree = "<group>"; };
+		C489D03946456721B73D70EA /* AppWarning.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppWarning.swift; sourceTree = "<group>"; };
+		C503C8896286EA38288A139F /* DataTableColumn.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DataTableColumn.swift; sourceTree = "<group>"; };
+		C794768AF4898995F64DB92D /* ProjectConfiguration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProjectConfiguration.swift; sourceTree = "<group>"; };
+		C918023551483555FD875D7C /* AppNavigationState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppNavigationState.swift; sourceTree = "<group>"; };
+		C9C256A435452BB64539C8CE /* MissionStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MissionStore.swift; sourceTree = "<group>"; };
+		CC77F3DE919D687C5088735B /* ContentContext.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentContext.swift; sourceTree = "<group>"; };
+		CEFAD6C5159792F08A987DC9 /* DeploymentService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeploymentService.swift; sourceTree = "<group>"; };
+		D4847DDB6175D9E32C423C8C /* ConfigurationChangeType.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConfigurationChangeType.swift; sourceTree = "<group>"; };
+		D5BD1368E35CA013C4E064C8 /* CopyableContent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CopyableContent.swift; sourceTree = "<group>"; };
+		D5F58D23C61F57585387766D /* QualityModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QualityModels.swift; sourceTree = "<group>"; };
+		D870E69E9C29278BC862CD04 /* HomeboyCLI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeboyCLI.swift; sourceTree = "<group>"; };
+		D8D33E39732C375690D3AC46 /* HomeboyCLIModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeboyCLIModels.swift; sourceTree = "<group>"; };
+		DF87669DD8D8EEF387C64926 /* ServersSettingsTab.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServersSettingsTab.swift; sourceTree = "<group>"; };
+		E103FB783F1B8F1CF84750F4 /* DeployerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeployerView.swift; sourceTree = "<group>"; };
+		E1141AB6BCCA0B060BE60AB1 /* MissionsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MissionsView.swift; sourceTree = "<group>"; };
+		E12EA4D980446363E3B0B3D1 /* ExtensionManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExtensionManager.swift; sourceTree = "<group>"; };
+		E134C3E1AFDFB8B9C3BFA989 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		E2FF4CDA2AE7652A449E74D8 /* ConfigurationObserver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConfigurationObserver.swift; sourceTree = "<group>"; };
+		E32E869268148C1260D05F85 /* CLIExtensionTypes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CLIExtensionTypes.swift; sourceTree = "<group>"; };
+		E7C2AF5C1F794564BF7DC0F4 /* RemoteFileBrowserView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteFileBrowserView.swift; sourceTree = "<group>"; };
+		E8A3033E40F9E3B41E1E41BB /* WordPressSSHExtension.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WordPressSSHExtension.swift; sourceTree = "<group>"; };
+		EA62EB2C6FD0532AE4CCD204 /* ProjectSwitcherView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProjectSwitcherView.swift; sourceTree = "<group>"; };
+		EFBA996DE0C810FC22480A51 /* RemotePathResolver+WordPress.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "RemotePathResolver+WordPress.swift"; sourceTree = "<group>"; };
+		F2FB01E9289515A3AC24A927 /* DeployerViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeployerViewModel.swift; sourceTree = "<group>"; };
+		F3C840B787B398287BC5EEE6 /* AppPaths.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppPaths.swift; sourceTree = "<group>"; };
+		F453DD64A8E42E312D5338B1 /* ExtensionContainerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExtensionContainerView.swift; sourceTree = "<group>"; };
+		F84CD4544E216646E96957DA /* ExtensionActionsBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExtensionActionsBar.swift; sourceTree = "<group>"; };
+		F915FEEAF97ADD6EAADF6E4A /* DataTableConstants.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DataTableConstants.swift; sourceTree = "<group>"; };
+		FA9A201C8236CBE6A4033FD4 /* HomeboyCLI+FileCommands.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "HomeboyCLI+FileCommands.swift"; sourceTree = "<group>"; };
+		FC5959FD60272D345EC59721 /* CookComposerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CookComposerView.swift; sourceTree = "<group>"; };
+		FCE83D5EB31A4A89A0764753 /* ExtensionInstallSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExtensionInstallSheet.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXGroup section */
+		12B88C4078F5290C35028EBB /* Extensions */ = {
+			isa = PBXGroup;
+			children = (
+				E12EA4D980446363E3B0B3D1 /* ExtensionManager.swift */,
+				5BA9BAC48CD6CC681F9FD2C5 /* ExtensionManifest.swift */,
+			);
+			path = Extensions;
+			sourceTree = "<group>";
+		};
+		144F0E432A914DE9F141CEFA /* Rigs */ = {
+			isa = PBXGroup;
+			children = (
+				95BEB3F1E5A208F98850D372 /* RigsView.swift */,
+				35595CC7BEFD826A8FE56039 /* RigsViewModel.swift */,
+			);
+			path = Rigs;
+			sourceTree = "<group>";
+		};
+		22BC7EA2CD85E94B830D44D8 /* Orchestration */ = {
+			isa = PBXGroup;
+			children = (
+				C47343CB9B7F9993BBDEDAF1 /* ActivityView.swift */,
+				901FE67B6F52FCFB49871577 /* CapacityView.swift */,
+				2E1C365E20CFA8A1475CDAD2 /* CookComposerModel.swift */,
+				FC5959FD60272D345EC59721 /* CookComposerView.swift */,
+				B86D61EA4DDF3007C98ABF11 /* CookComposerViewModel.swift */,
+				E1141AB6BCCA0B060BE60AB1 /* MissionsView.swift */,
+				16CE88667247CB091618C4F8 /* RunnersView.swift */,
+			);
+			path = Orchestration;
+			sourceTree = "<group>";
+		};
+		2DE44D1E578B8119641FCA42 /* SSH */ = {
+			isa = PBXGroup;
+			children = (
+				437AB78A7C7E8B4AD7DFAB36 /* Extensions */,
+				CEFAD6C5159792F08A987DC9 /* DeploymentService.swift */,
+				2E7289F91C0EA517A3DE5DB9 /* RemoteFileBrowser.swift */,
+				0BBA2DD3A1B1041ACA3A049F /* RemoteFileEntry.swift */,
+				BB0EEE1B29B6CBCC9B7AE92D /* RemotePathResolver.swift */,
+				EFBA996DE0C810FC22480A51 /* RemotePathResolver+WordPress.swift */,
+				BE9B567AD7EF6AEAFF4650E3 /* SSHKeyManager.swift */,
+				AD23DCF3987518BDD613AA7A /* SSHService.swift */,
+			);
+			path = SSH;
+			sourceTree = "<group>";
+		};
+		38FA3F3D4C5F5FD7C14C524A /* RunHistory */ = {
+			isa = PBXGroup;
+			children = (
+				3AE68C48FE619E6E7F8BB5F1 /* RunHistoryView.swift */,
+				B73247BD443AB4A6932529E4 /* RunHistoryViewModel.swift */,
+			);
+			path = RunHistory;
+			sourceTree = "<group>";
+		};
+		437AB78A7C7E8B4AD7DFAB36 /* Extensions */ = {
+			isa = PBXGroup;
+			children = (
+				E8A3033E40F9E3B41E1E41BB /* WordPressSSHExtension.swift */,
+			);
+			path = Extensions;
+			sourceTree = "<group>";
+		};
+		48A84FF4933780B2CA668D49 /* Resources */ = {
+			isa = PBXGroup;
+			children = (
+				5160882C4D72CD5AA9A7A214 /* Scripts */,
+			);
+			path = Resources;
+			sourceTree = "<group>";
+		};
+		48CA5756F2D78ADA9FCD0AFD /* Extensions */ = {
+			isa = PBXGroup;
+			children = (
+				F84CD4544E216646E96957DA /* ExtensionActionsBar.swift */,
+				3AC2128B1137A2702EEC2F55 /* ExtensionConsoleView.swift */,
+				F453DD64A8E42E312D5338B1 /* ExtensionContainerView.swift */,
+				3ACB611363480EC1ED86A127 /* ExtensionInputsView.swift */,
+				01633F1529CE4E27B3570E07 /* ExtensionResultsView.swift */,
+				B16E4FF8E5939CE6EF12EFA2 /* ExtensionSetupView.swift */,
+			);
+			path = Extensions;
+			sourceTree = "<group>";
+		};
+		4BDB07D9D753035E631EE571 /* Models */ = {
+			isa = PBXGroup;
+			children = (
+				0075D42A490CE7EF713A874F /* CommandBrowserEntry.swift */,
+				6F5E37F5EBA99C37980EFA58 /* RemoteFileModels.swift */,
+			);
+			path = Models;
+			sourceTree = "<group>";
+		};
+		5160882C4D72CD5AA9A7A214 /* Scripts */ = {
+			isa = PBXGroup;
+			children = (
+				5D4A06815CA53FA0BD2301AC /* __pycache__ */,
+			);
+			path = Scripts;
+			sourceTree = "<group>";
+		};
+		52AF24DF54AAF0F3CAC1AA0B /* Auth */ = {
+			isa = PBXGroup;
+			children = (
+				3D06A62D2DDC840DC6A12CC7 /* KeychainService.swift */,
+			);
+			path = Auth;
+			sourceTree = "<group>";
+		};
+		57D1AC09F4CAF62CBBA099F8 /* Homeboy */ = {
+			isa = PBXGroup;
+			children = (
+				9FEB0F1E3E336D290DB4C2DE /* App */,
+				905C0DD32197709B0759C486 /* Core */,
+				C4B4FA7115EB70E0A9AB3293 /* Extensions */,
+				4BDB07D9D753035E631EE571 /* Models */,
+				48A84FF4933780B2CA668D49 /* Resources */,
+				7D4D938EF07D7C67EC4BFAEF /* ViewModels */,
+				7CD7DF7C95F543DB47F1055F /* Views */,
+				E134C3E1AFDFB8B9C3BFA989 /* Assets.xcassets */,
+			);
+			path = Homeboy;
+			sourceTree = "<group>";
+		};
+		5D4A06815CA53FA0BD2301AC /* __pycache__ */ = {
+			isa = PBXGroup;
+			children = (
+				75262FFB3BBC6BC33A8AC4F3 /* bandcamp_scraper.cpython-314.pyc */,
+			);
+			path = __pycache__;
+			sourceTree = "<group>";
+		};
+		63DDAC24832E8D6200975064 = {
+			isa = PBXGroup;
+			children = (
+				57D1AC09F4CAF62CBBA099F8 /* Homeboy */,
+				DC501B7A7AB07D49F8911282 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		7154965DA052C9E6BFBF6023 /* RemoteFileEditor */ = {
+			isa = PBXGroup;
+			children = (
+				D68FA905F9B9100BD1A516EB /* Views */,
+				B6A9C1C6E1C766FEF2D21DE5 /* BackupService.swift */,
+				42681ABDD9AC38676CDB315E /* RemoteFileEditorViewModel.swift */,
+			);
+			path = RemoteFileEditor;
+			sourceTree = "<group>";
+		};
+		7277CD6F1C65F994BF298B92 /* GitOperations */ = {
+			isa = PBXGroup;
+			children = (
+				D7018249446FF48B95ADAA4B /* Views */,
+				3320B46DC4876237EA4C9ACE /* GitOperationsViewModel.swift */,
+			);
+			path = GitOperations;
+			sourceTree = "<group>";
+		};
+		74EB364D0CFB168C58CAF209 /* API */ = {
+			isa = PBXGroup;
+			children = (
+				96EB68229A1B9B1265036A09 /* ControlPlaneClient.swift */,
+				2C3174A2A7BEDDBA90DED9D2 /* ControlPlaneModels.swift */,
+				1C1F6860A60F30A9D01D6E9A /* HomeboyDaemonClient.swift */,
+				4F1B499BE056410BC2BD2A42 /* HomeboyDaemonLocator.swift */,
+			);
+			path = API;
+			sourceTree = "<group>";
+		};
+		75DE9BEA3DBEA7C6F27C030A /* CLI */ = {
+			isa = PBXGroup;
+			children = (
+				40736E67E0624C5F3AA5913C /* CLIBridge.swift */,
+				E32E869268148C1260D05F85 /* CLIExtensionTypes.swift */,
+				811079398986364AA0E0542A /* CLIVersionChecker.swift */,
+				19D0AC4BB8035D3A38DF8F83 /* CommandBrowserCatalog.swift */,
+				D870E69E9C29278BC862CD04 /* HomeboyCLI.swift */,
+				C3B52F387CC902FB445FC922 /* HomeboyCLI+CommandBrowserCommands.swift */,
+				FA9A201C8236CBE6A4033FD4 /* HomeboyCLI+FileCommands.swift */,
+				BE4803F280F083C6A559169F /* HomeboyCLI+MissionControlCommands.swift */,
+				7FC07381EEBE0370CD636213 /* HomeboyCLI+ProjectPinCommands.swift */,
+				BC23AFFAB50FD8AFD042E644 /* HomeboyCLI+QualityCommands.swift */,
+				0DD2E86E7655D2ED45CB0E31 /* HomeboyCLI+RigBenchReleaseCommands.swift */,
+				BFAF5103FCB24063514E519F /* HomeboyCLI+RunCommands.swift */,
+				5E87D23CDA0D3B452F3CB752 /* HomeboyCLI+RunnerCommands.swift */,
+				A087DAB3F4E912476EC93E01 /* HomeboyCLI+WorkspaceCommands.swift */,
+				D8D33E39732C375690D3AC46 /* HomeboyCLIModels.swift */,
+				7C6DEE1380754F77DA68EA8B /* HomeboyCommandRegistry.swift */,
+				86CDDF5BF2C45E9687E5C07B /* ShellCommandLineParser.swift */,
+			);
+			path = CLI;
+			sourceTree = "<group>";
+		};
+		7CD7DF7C95F543DB47F1055F /* Views */ = {
+			isa = PBXGroup;
+			children = (
+				92301854AF9D7FCE0328DB48 /* CommandBrowser */,
+				8007D7D3CCEF3F80C36AA686 /* Components */,
+				48CA5756F2D78ADA9FCD0AFD /* Extensions */,
+				8ED6A8EAFE27B075CDD8C830 /* Lab */,
+				22BC7EA2CD85E94B830D44D8 /* Orchestration */,
+				144F0E432A914DE9F141CEFA /* Rigs */,
+				38FA3F3D4C5F5FD7C14C524A /* RunHistory */,
+				F08C0BC0AC87CDDCAA5955CF /* Settings */,
+				941D61AD6DA0DA2420DB13B8 /* BenchView.swift */,
+				EA62EB2C6FD0532AE4CCD204 /* ProjectSwitcherView.swift */,
+				E7C2AF5C1F794564BF7DC0F4 /* RemoteFileBrowserView.swift */,
+				83B2C9499D9E9A17D32109EF /* SettingsView.swift */,
+				4C3C30739F765981B37603DD /* SidebarView.swift */,
+			);
+			path = Views;
+			sourceTree = "<group>";
+		};
+		7D4D938EF07D7C67EC4BFAEF /* ViewModels */ = {
+			isa = PBXGroup;
+			children = (
+				AE4CFBBE215C9D3D1250C8EF /* CommandBrowserViewModel.swift */,
+				ACBBAD050F5C69E93FA60880 /* ExtensionViewModel.swift */,
+				C9C256A435452BB64539C8CE /* MissionStore.swift */,
+			);
+			path = ViewModels;
+			sourceTree = "<group>";
+		};
+		8007D7D3CCEF3F80C36AA686 /* Components */ = {
+			isa = PBXGroup;
+			children = (
+				E458125E00E4AA130D4F530D /* Table */,
+				BA88D343E94C4C34E1069813 /* CodeTextView.swift */,
+				4ED098FFBF749CD6DD355B1B /* CollapsibleSplitView.swift */,
+				61EC8F9095C4AC67383B9F4A /* ConfigGapsView.swift */,
+				4406A9EEECAF8249580937A7 /* CopyableTextView.swift */,
+				91949A849E1F8F3490BBEC6A /* CreateProjectSheet.swift */,
+				7BFAEBF8AA9E2BEC2A55EF0D /* ErrorView.swift */,
+				AD70F8136E9691D7528CB581 /* FileBrowserSidebarView.swift */,
+				385944CD36C9E1B61CE23EDE /* FindableTextView.swift */,
+				943FB329E82EA8D3985C41BE /* InlineErrorView.swift */,
+				0DC18F8D8A50F464D296BB74 /* InlineWarningView.swift */,
+				66B3D28A100F2CAE93D7DE64 /* PinnableTabBar.swift */,
+				20129FFBFEEBA4948B8DA194 /* WarningView.swift */,
+			);
+			path = Components;
+			sourceTree = "<group>";
+		};
+		8ED6A8EAFE27B075CDD8C830 /* Lab */ = {
+			isa = PBXGroup;
+			children = (
+				2734F8A242983E0642DBD72B /* HomeboyLabView.swift */,
+				53E7EFDB7496ED01FDCCC77B /* HomeboyLabViewModel.swift */,
+			);
+			path = Lab;
+			sourceTree = "<group>";
+		};
+		9035A8A5FC0007090577B120 /* Quality */ = {
+			isa = PBXGroup;
+			children = (
+				F7D0EA84DE389AC831F6A7E1 /* Views */,
+				D5F58D23C61F57585387766D /* QualityModels.swift */,
+				6BBAE3837D9DF6634A72AAB1 /* QualityViewModel.swift */,
+			);
+			path = Quality;
+			sourceTree = "<group>";
+		};
+		905C0DD32197709B0759C486 /* Core */ = {
+			isa = PBXGroup;
+			children = (
+				74EB364D0CFB168C58CAF209 /* API */,
+				52AF24DF54AAF0F3CAC1AA0B /* Auth */,
+				75DE9BEA3DBEA7C6F27C030A /* CLI */,
+				EA2D7DCF99CD5F93D88CF3E1 /* Config */,
+				951F19759C5A27A308A4C3E9 /* Copyable */,
+				12B88C4078F5290C35028EBB /* Extensions */,
+				2DE44D1E578B8119641FCA42 /* SSH */,
+			);
+			path = Core;
+			sourceTree = "<group>";
+		};
+		92301854AF9D7FCE0328DB48 /* CommandBrowser */ = {
+			isa = PBXGroup;
+			children = (
+				BCD4DD433928D5A580EB66C8 /* CommandBrowserView.swift */,
+			);
+			path = CommandBrowser;
+			sourceTree = "<group>";
+		};
+		951F19759C5A27A308A4C3E9 /* Copyable */ = {
+			isa = PBXGroup;
+			children = (
+				B59036A328B5EEE5B0D5DF9C /* AppError.swift */,
+				C489D03946456721B73D70EA /* AppWarning.swift */,
+				4C0B9A725382C46F30D83C02 /* CLIError.swift */,
+				A1FDE17265BB36CD42258798 /* ConsoleOutput.swift */,
+				CC77F3DE919D687C5088735B /* ContentContext.swift */,
+				D5BD1368E35CA013C4E064C8 /* CopyableContent.swift */,
+				B4784FCC0B29C23649013882 /* CopyButton.swift */,
+				6C195A8A1462489E882BC187 /* DisplayableError.swift */,
+				7E6E41FFC96012F3C390C094 /* JSONValue.swift */,
+			);
+			path = Copyable;
+			sourceTree = "<group>";
+		};
+		9FEB0F1E3E336D290DB4C2DE /* App */ = {
+			isa = PBXGroup;
+			children = (
+				C918023551483555FD875D7C /* AppNavigationState.swift */,
+				A690A4DC66BE109010668691 /* ContentView.swift */,
+				BFEA6E42C1D9292B10447CDA /* HomeboyApp.swift */,
+			);
+			path = App;
+			sourceTree = "<group>";
+		};
+		C4B4FA7115EB70E0A9AB3293 /* Extensions */ = {
+			isa = PBXGroup;
+			children = (
+				EEF0E6E7C84FB1EAC125ED89 /* Deployer */,
+				7277CD6F1C65F994BF298B92 /* GitOperations */,
+				9035A8A5FC0007090577B120 /* Quality */,
+				7154965DA052C9E6BFBF6023 /* RemoteFileEditor */,
+			);
+			path = Extensions;
+			sourceTree = "<group>";
+		};
+		D68FA905F9B9100BD1A516EB /* Views */ = {
+			isa = PBXGroup;
+			children = (
+				70AE598B819DE3CDD73692D4 /* RemoteFileEditorView.swift */,
+			);
+			path = Views;
+			sourceTree = "<group>";
+		};
+		D7018249446FF48B95ADAA4B /* Views */ = {
+			isa = PBXGroup;
+			children = (
+				2FC13102738FFBE2F5695F78 /* GitOperationsView.swift */,
+			);
+			path = Views;
+			sourceTree = "<group>";
+		};
+		DC501B7A7AB07D49F8911282 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				833BBA3138BAD0CFB3557D6B /* Homeboy.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		E44E8D50BC9A4739543F484C /* Views */ = {
+			isa = PBXGroup;
+			children = (
+				E103FB783F1B8F1CF84750F4 /* DeployerView.swift */,
+			);
+			path = Views;
+			sourceTree = "<group>";
+		};
+		E458125E00E4AA130D4F530D /* Table */ = {
+			isa = PBXGroup;
+			children = (
+				C503C8896286EA38288A139F /* DataTableColumn.swift */,
+				F915FEEAF97ADD6EAADF6E4A /* DataTableConstants.swift */,
+				A2800F57FE83EEBB76CC1F1A /* NativeDataTable.swift */,
+			);
+			path = Table;
+			sourceTree = "<group>";
+		};
+		EA2D7DCF99CD5F93D88CF3E1 /* Config */ = {
+			isa = PBXGroup;
+			children = (
+				0CD2C75C18D0464C6428E5EE /* AppConfiguration.swift */,
+				F3C840B787B398287BC5EEE6 /* AppPaths.swift */,
+				60913533AA72054F3D79625C /* ArtifactVersionParser.swift */,
+				3E609811240E56A3A71CA778 /* ComponentConfiguration.swift */,
+				D4847DDB6175D9E32C423C8C /* ConfigurationChangeType.swift */,
+				9BAE7C655CF0B3F2D679B188 /* ConfigurationManager.swift */,
+				E2FF4CDA2AE7652A449E74D8 /* ConfigurationObserver.swift */,
+				B6676A7C26F7EE42CD5B9E7A /* ConfigurationObserving.swift */,
+				A705E0F3D07B94FCE1724761 /* DeployableComponent.swift */,
+				C794768AF4898995F64DB92D /* ProjectConfiguration.swift */,
+				3CBD189DF7919CB05353FDC9 /* ServerConfig.swift */,
+				13F8D60E3516F29F554438A0 /* VersionParser.swift */,
+			);
+			path = Config;
+			sourceTree = "<group>";
+		};
+		EEF0E6E7C84FB1EAC125ED89 /* Deployer */ = {
+			isa = PBXGroup;
+			children = (
+				E44E8D50BC9A4739543F484C /* Views */,
+				F2FB01E9289515A3AC24A927 /* DeployerViewModel.swift */,
+			);
+			path = Deployer;
+			sourceTree = "<group>";
+		};
+		F08C0BC0AC87CDDCAA5955CF /* Settings */ = {
+			isa = PBXGroup;
+			children = (
+				830D15DCC64EB9AF17F822E0 /* ComponentsSettingsTab.swift */,
+				FCE83D5EB31A4A89A0764753 /* ExtensionInstallSheet.swift */,
+				64DFC1DFC648B2D106BA5361 /* ExtensionsSettingsTab.swift */,
+				8974EB4ED392FD3B52D70FD3 /* GeneralSettingsTab.swift */,
+				A5D75CB92C4916A5B3A8DE34 /* ServerEditSheet.swift */,
+				DF87669DD8D8EEF387C64926 /* ServersSettingsTab.swift */,
+				9172819247F48893F5F20EA2 /* WordPressSettingsTab.swift */,
+			);
+			path = Settings;
+			sourceTree = "<group>";
+		};
+		F7D0EA84DE389AC831F6A7E1 /* Views */ = {
+			isa = PBXGroup;
+			children = (
+				B709FB776FF5A95CAE18A7D2 /* QualityView.swift */,
+			);
+			path = Views;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		0931E8CEFC625C492220ABAB /* Homeboy */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 7CD6D81219BF69E0BBB35741 /* Build configuration list for PBXNativeTarget "Homeboy" */;
+			buildPhases = (
+				7702F51B24257774212D607D /* Sources */,
+				7B2DA20EBDD906F5F2E9B7AF /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = Homeboy;
+			packageProductDependencies = (
+			);
+			productName = Homeboy;
+			productReference = 833BBA3138BAD0CFB3557D6B /* Homeboy.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		0D5F030D62E5EFD79D241EA7 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1430;
+				TargetAttributes = {
+					0931E8CEFC625C492220ABAB = {
+						ProvisioningStyle = Automatic;
+					};
+				};
+			};
+			buildConfigurationList = F38A3A8832E3C55CBC56EF1E /* Build configuration list for PBXProject "Homeboy" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = 63DDAC24832E8D6200975064;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = DC501B7A7AB07D49F8911282 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				0931E8CEFC625C492220ABAB /* Homeboy */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		7B2DA20EBDD906F5F2E9B7AF /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				58782E3C2B83E467318758D3 /* Assets.xcassets in Resources */,
+				C6F738277B8D48B8F03655CA /* bandcamp_scraper.cpython-314.pyc in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		7702F51B24257774212D607D /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				EDE8694330029B75C53CBF95 /* ActivityView.swift in Sources */,
+				E6403DF4F6747B97ED009C1A /* AppConfiguration.swift in Sources */,
+				3CBF41346F060E438864152C /* AppError.swift in Sources */,
+				A95B5B17AF0093FD1108AF6D /* AppNavigationState.swift in Sources */,
+				61876E7ACDA5C3D7A5D2E40F /* AppPaths.swift in Sources */,
+				27D41F217F00E3A8171BEC63 /* AppWarning.swift in Sources */,
+				86C712A03FB9FC626DC46371 /* ArtifactVersionParser.swift in Sources */,
+				445A81283F88E81B8C1F0710 /* BackupService.swift in Sources */,
+				1A9C5FC30453DD2AFD03062D /* BenchView.swift in Sources */,
+				D067D1266FD0989BC9E07C43 /* CLIBridge.swift in Sources */,
+				1D8C5CFC6CC66D4D2059241A /* CLIError.swift in Sources */,
+				5A7E75D51012C3ED36EA7853 /* CLIExtensionTypes.swift in Sources */,
+				761826050ADDBB5E4B00E1AC /* CLIVersionChecker.swift in Sources */,
+				6EE34EF4328107EC9BDB609E /* CapacityView.swift in Sources */,
+				CC79CDB6AF19F24E74A11202 /* CodeTextView.swift in Sources */,
+				807E4729F90F95A12FAB99B7 /* CollapsibleSplitView.swift in Sources */,
+				B6AC1E19666E9FC9AF76D431 /* CommandBrowserCatalog.swift in Sources */,
+				A387D3BAF65EFBE5A44AA37C /* CommandBrowserEntry.swift in Sources */,
+				A1F7848D131CBFFFEEB239D8 /* CommandBrowserView.swift in Sources */,
+				4118594C23453F57B04D3C16 /* CommandBrowserViewModel.swift in Sources */,
+				9CD0D78AD51869E4BCA3363C /* ComponentConfiguration.swift in Sources */,
+				8D62AD324E3C99747FA53FCB /* ComponentsSettingsTab.swift in Sources */,
+				E450CA4C790C609575070F05 /* ConfigGapsView.swift in Sources */,
+				2BDBF9B46483155A6701C845 /* ConfigurationChangeType.swift in Sources */,
+				5BD322602F64CCA4E7A54FEF /* ConfigurationManager.swift in Sources */,
+				E6130C3BA0E6F318EAB670A3 /* ConfigurationObserver.swift in Sources */,
+				0597F5E10CC3D748D36710F9 /* ConfigurationObserving.swift in Sources */,
+				3D5278E44CF446DC733DFDF7 /* ConsoleOutput.swift in Sources */,
+				29AC5918A42B81DE1D250360 /* ContentContext.swift in Sources */,
+				B27446E0A3706D997A75D1E9 /* ContentView.swift in Sources */,
+				B64B5A0883C3992694AF34A8 /* ControlPlaneClient.swift in Sources */,
+				50C3063245F5FF6D48F45D65 /* ControlPlaneModels.swift in Sources */,
+				1DBC1006D2D49099F3F78854 /* CookComposerModel.swift in Sources */,
+				364E9DAE57B4B08D341D3E83 /* CookComposerView.swift in Sources */,
+				E8669A6388102A44C9D3B640 /* CookComposerViewModel.swift in Sources */,
+				337BB8150B603A86CAECBE7F /* CopyButton.swift in Sources */,
+				1A164D8DD4607926F6964B95 /* CopyableContent.swift in Sources */,
+				E1F7C14F08E1E4D8353F8064 /* CopyableTextView.swift in Sources */,
+				FB914712293D43F2D7D80F80 /* CreateProjectSheet.swift in Sources */,
+				A051F697BD41C8D9A5298333 /* DataTableColumn.swift in Sources */,
+				A34392C1F77DDF4B0B386D8C /* DataTableConstants.swift in Sources */,
+				B9C42108AC64D21BAEEE580A /* DeployableComponent.swift in Sources */,
+				36E2AEA91D720BC0FCE5D660 /* DeployerView.swift in Sources */,
+				023BC7FBF76D2C19E8B8559D /* DeployerViewModel.swift in Sources */,
+				85F4F94606B3D49BEFDC227F /* DeploymentService.swift in Sources */,
+				AB378FCB8518F6BED6EEFB6F /* DisplayableError.swift in Sources */,
+				5CA76C92A6AF0C42784FD35D /* ErrorView.swift in Sources */,
+				59B9942920AA8A82C6687BA1 /* ExtensionActionsBar.swift in Sources */,
+				B1BC5D62A38657148E674B80 /* ExtensionConsoleView.swift in Sources */,
+				D94CC978855E31469979CD82 /* ExtensionContainerView.swift in Sources */,
+				5312A3BDB64264012E062616 /* ExtensionInputsView.swift in Sources */,
+				9E83D8F4A47320D0DC38B248 /* ExtensionInstallSheet.swift in Sources */,
+				9057B57BD09E3D8A025D305D /* ExtensionManager.swift in Sources */,
+				B23886AC41FD2A725383EF45 /* ExtensionManifest.swift in Sources */,
+				CFD2A46F7153AF3F5A5F7BED /* ExtensionResultsView.swift in Sources */,
+				6058DC822E13A3B7C56C64BF /* ExtensionSetupView.swift in Sources */,
+				93B2772BA952451AE39491B3 /* ExtensionViewModel.swift in Sources */,
+				585F2338D58023625EBBA0B5 /* ExtensionsSettingsTab.swift in Sources */,
+				5B3425AA6A8A9C4C9EF5E29F /* FileBrowserSidebarView.swift in Sources */,
+				85A8C46096DE6DFF3BD11E63 /* FindableTextView.swift in Sources */,
+				02AD314100925D82AE384CE8 /* GeneralSettingsTab.swift in Sources */,
+				FDC7A36317A54E1EE4486D4A /* GitOperationsView.swift in Sources */,
+				0D616728E30CB0C012851F18 /* GitOperationsViewModel.swift in Sources */,
+				57C3AE0D20A591DEE69B0FF0 /* HomeboyApp.swift in Sources */,
+				D5421FF656190A21F439C40A /* HomeboyCLI+CommandBrowserCommands.swift in Sources */,
+				5F95A53713A121D0D13A95B8 /* HomeboyCLI+FileCommands.swift in Sources */,
+				C3156DBD6A7BA766221A1776 /* HomeboyCLI+MissionControlCommands.swift in Sources */,
+				B1E8E656BDC1765CCF41A683 /* HomeboyCLI+ProjectPinCommands.swift in Sources */,
+				A40B645FCF64C59E6F1EC4FC /* HomeboyCLI+QualityCommands.swift in Sources */,
+				46238C2E19607D4410D23FA2 /* HomeboyCLI+RigBenchReleaseCommands.swift in Sources */,
+				19F0A3B40B6B6BA59A201C7F /* HomeboyCLI+RunCommands.swift in Sources */,
+				5A062EFBFD4AC1A479B90C02 /* HomeboyCLI+RunnerCommands.swift in Sources */,
+				306DE99757A1BBA6E328A8FF /* HomeboyCLI+WorkspaceCommands.swift in Sources */,
+				278021F9D228BBDA95267231 /* HomeboyCLI.swift in Sources */,
+				CC892914AFEB03C734959003 /* HomeboyCLIModels.swift in Sources */,
+				4AC373868CADD6B52F177BF4 /* HomeboyCommandRegistry.swift in Sources */,
+				A6C1285910873B6C02B4CE79 /* HomeboyDaemonClient.swift in Sources */,
+				543626E78A3C5502E448629E /* HomeboyDaemonLocator.swift in Sources */,
+				2B66E2C66072EA7F119F138A /* HomeboyLabView.swift in Sources */,
+				FA9088059644CB053678418A /* HomeboyLabViewModel.swift in Sources */,
+				E832787BA1F926FB3A085E09 /* InlineErrorView.swift in Sources */,
+				EEA581470DC8B48027F54228 /* InlineWarningView.swift in Sources */,
+				5BDE52F8E2A18B1F50AD060A /* JSONValue.swift in Sources */,
+				5A9B1A9B7984F57035A97D82 /* KeychainService.swift in Sources */,
+				88C7EDB2A9AB24DF64954AB6 /* MissionStore.swift in Sources */,
+				62A9E27245B3DB014810B662 /* MissionsView.swift in Sources */,
+				C727FE57ACE75A3152D4C972 /* NativeDataTable.swift in Sources */,
+				76A91937D9017A5B0D9B0BA5 /* PinnableTabBar.swift in Sources */,
+				023E9AE450BF036FF40C0E76 /* ProjectConfiguration.swift in Sources */,
+				7EE844A0691D39F31A685114 /* ProjectSwitcherView.swift in Sources */,
+				5CEF2659D6426FC7150A96C7 /* QualityModels.swift in Sources */,
+				9EB8E162236E90FFB9585AC9 /* QualityView.swift in Sources */,
+				EC7E0C50096E39206C199118 /* QualityViewModel.swift in Sources */,
+				38D566E59E85DF4E4D14C48F /* RemoteFileBrowser.swift in Sources */,
+				22221233AC86561D48490886 /* RemoteFileBrowserView.swift in Sources */,
+				1AEFFA5D377D403DDA560237 /* RemoteFileEditorView.swift in Sources */,
+				79F089B7341476178AB41022 /* RemoteFileEditorViewModel.swift in Sources */,
+				72D058E4C987B44B3C2FE75F /* RemoteFileEntry.swift in Sources */,
+				3AE96B334740E1FD5BF12CE8 /* RemoteFileModels.swift in Sources */,
+				C24FBE4BE4FE4BA046D565C3 /* RemotePathResolver+WordPress.swift in Sources */,
+				465D0E037B7E2705A578EAF2 /* RemotePathResolver.swift in Sources */,
+				04CC8776681CF107919B5B76 /* RigsView.swift in Sources */,
+				2FA2E2EB6635082599CF1172 /* RigsViewModel.swift in Sources */,
+				EC9244E3C614561638C57AB7 /* RunHistoryView.swift in Sources */,
+				BAEDE5ABE49EBE42C7C703DC /* RunHistoryViewModel.swift in Sources */,
+				583928D73E613923E310D2BD /* RunnersView.swift in Sources */,
+				58C9903BC07607162259D792 /* SSHKeyManager.swift in Sources */,
+				71419F89166E98CC7C4A3A98 /* SSHService.swift in Sources */,
+				8327EB6B86BD82A5A8F0E466 /* ServerConfig.swift in Sources */,
+				0B1C053B8DCA686200739C43 /* ServerEditSheet.swift in Sources */,
+				790A549F1DA4887FA2EF100F /* ServersSettingsTab.swift in Sources */,
+				F34BB35C6C33E774792043ED /* SettingsView.swift in Sources */,
+				166FD1AAF56BFE797F56E1C4 /* ShellCommandLineParser.swift in Sources */,
+				999116DB4DB5B3DF3EA9C171 /* SidebarView.swift in Sources */,
+				8B8811A6AB7570F644C36FC5 /* VersionParser.swift in Sources */,
+				30856C36D38963CB5A540EFC /* WarningView.swift in Sources */,
+				969EDDA4900E1F2620099F30 /* WordPressSSHExtension.swift in Sources */,
+				3188A425BBDAED4249534CE8 /* WordPressSettingsTab.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		341C9F992635EC3F512EE382 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.4;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		BB993384F208D0EC550FC0E4 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 12;
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = Homeboy;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "Copyright © 2026 Extra Chill. All rights reserved.";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 14.4;
+				MARKETING_VERSION = 0.11.3;
+				PRODUCT_BUNDLE_IDENTIFIER = com.extrachill.homeboy;
+				PRODUCT_NAME = Homeboy;
+				SDKROOT = macosx;
+				SWIFT_VERSION = 5.9;
+			};
+			name = Debug;
+		};
+		CD330367391D6BEA826E2652 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 12;
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = Homeboy;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "Copyright © 2026 Extra Chill. All rights reserved.";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 14.4;
+				MARKETING_VERSION = 0.11.3;
+				PRODUCT_BUNDLE_IDENTIFIER = com.extrachill.homeboy;
+				PRODUCT_NAME = Homeboy;
+				SDKROOT = macosx;
+				SWIFT_VERSION = 5.9;
+			};
+			name = Release;
+		};
+		D1D9204C725327EC27161AE0 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.4;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		7CD6D81219BF69E0BBB35741 /* Build configuration list for PBXNativeTarget "Homeboy" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				BB993384F208D0EC550FC0E4 /* Debug */,
+				CD330367391D6BEA826E2652 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		F38A3A8832E3C55CBC56EF1E /* Build configuration list for PBXProject "Homeboy" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				D1D9204C725327EC27161AE0 /* Debug */,
+				341C9F992635EC3F512EE382 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 0D5F030D62E5EFD79D241EA7 /* Project object */;
+}

@@ -1,0 +1,156 @@
+import SwiftUI
+
+/// Protocol for items that can be displayed in a PinnableTabBar
+protocol PinnableTabItem: Identifiable where ID == UUID {
+    var id: UUID { get }
+    var displayName: String { get }
+    var isPinned: Bool { get }
+}
+
+/// A reusable horizontal tab bar with pinnable tabs
+/// Used by Remote File Editor
+struct PinnableTabBar<Item: PinnableTabItem>: View {
+    let items: [Item]
+    let selectedId: UUID?
+    let showIndicator: (Item) -> Bool  // e.g., unsaved changes indicator
+    
+    let onSelect: (UUID) -> Void
+    let onClose: (UUID) -> Void
+    let onPin: (UUID) -> Void
+    let onUnpin: (UUID) -> Void
+    let onBrowse: (() -> Void)?
+    
+    /// Custom label for the browse button (defaults to "Browse...")
+    let browseLabel: String
+    
+    /// Custom icon for the browse button (defaults to "plus")
+    let browseIcon: String
+    
+    init(
+        items: [Item],
+        selectedId: UUID?,
+        showIndicator: @escaping (Item) -> Bool,
+        onSelect: @escaping (UUID) -> Void,
+        onClose: @escaping (UUID) -> Void,
+        onPin: @escaping (UUID) -> Void,
+        onUnpin: @escaping (UUID) -> Void,
+        onBrowse: (() -> Void)? = nil,
+        browseLabel: String = "Browse...",
+        browseIcon: String = "plus"
+    ) {
+        self.items = items
+        self.selectedId = selectedId
+        self.showIndicator = showIndicator
+        self.onSelect = onSelect
+        self.onClose = onClose
+        self.onPin = onPin
+        self.onUnpin = onUnpin
+        self.onBrowse = onBrowse
+        self.browseLabel = browseLabel
+        self.browseIcon = browseIcon
+    }
+    
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 0) {
+                ForEach(items) { item in
+                    tabButton(for: item)
+                        .contextMenu {
+                            tabContextMenu(for: item)
+                        }
+                }
+                
+                // Browse button (only shown if onBrowse is provided)
+                if let onBrowse = onBrowse {
+                    HStack(spacing: 4) {
+                        Image(systemName: browseIcon)
+                            .font(.caption)
+                        Text(browseLabel)
+                            .font(.subheadline)
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .foregroundColor(.secondary)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        onBrowse()
+                    }
+                }
+                
+                Spacer()
+            }
+            .padding(.horizontal)
+            .padding(.vertical, 8)
+        }
+        .background(Color(nsColor: .controlBackgroundColor))
+    }
+    
+    private func tabButton(for item: Item) -> some View {
+        HStack(spacing: 6) {
+            // Pin indicator
+            if item.isPinned {
+                Image(systemName: "pin.fill")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+
+            Text(item.displayName)
+                .font(.subheadline)
+
+            // Custom indicator (e.g., unsaved changes)
+            if showIndicator(item) {
+                Circle()
+                    .fill(Color.orange)
+                    .frame(width: 6, height: 6)
+            }
+
+            // Close button (only for unpinned)
+            if !item.isPinned {
+                Button {
+                    onClose(item.id)
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(
+            RoundedRectangle(cornerRadius: 6)
+                .fill(item.id == selectedId ? Color.accentColor.opacity(0.2) : Color.clear)
+        )
+        .foregroundColor(item.id == selectedId ? .accentColor : .secondary)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            onSelect(item.id)
+        }
+    }
+    
+    @ViewBuilder
+    private func tabContextMenu(for item: Item) -> some View {
+        if item.isPinned {
+            Button {
+                onUnpin(item.id)
+            } label: {
+                Label("Unpin", systemImage: "pin.slash")
+            }
+        } else {
+            Button {
+                onPin(item.id)
+            } label: {
+                Label("Pin", systemImage: "pin")
+            }
+        }
+        
+        Divider()
+        
+        Button(role: .destructive) {
+            onClose(item.id)
+        } label: {
+            Label("Close", systemImage: "xmark")
+        }
+    }
+}

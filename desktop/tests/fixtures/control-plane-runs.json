@@ -1,0 +1,484 @@
+{
+  "data": {
+    "body": {
+      "ok": true,
+      "resource": {
+        "has_more": true,
+        "next_cursor": "eyJzY2hlbWEiOiJob21lYm95L2NvbnRyb2wtcGxhbmUtcnVuLWN1cnNvci92MSIsInN0YXJ0ZWRfYXQiOiIyMDI2LTA5LTI1VDAwOjEzOjQzLjM1MDU2MCswMDowMCIsInJ1bl9pZCI6ImFnZW50LXRhc2stYjg2OTdiM2EtZDE1Ni00MDdlLWEwOTktZTY4N2ZlZTY5YjA5LWF0dGVtcHQtMS0xYjY4YWQ5YSIsIm1pc3Npb25faWQiOm51bGx9",
+        "runs": [
+          {
+            "action_eligibility": {
+              "actions": [
+                {
+                  "action": "cancel",
+                  "availability": "unavailable",
+                  "confirmation": "required",
+                  "idempotent": true,
+                  "reason": "Invalid argument 'run_id': agent-task run 'cook-detached-1b9a02ee-40d4-40df-94b9-9dd8ba2800f7-attempt-1-5361759d' is already terminal with state CandidateRecoverable",
+                  "requires_revalidation": true,
+                  "result_resource_type": "agent_task_run"
+                },
+                {
+                  "action": "resume",
+                  "availability": "unavailable",
+                  "confirmation": "none",
+                  "idempotent": true,
+                  "reason": "terminal runs cannot be resumed",
+                  "requires_revalidation": true,
+                  "result_resource_type": "agent_task_run"
+                },
+                {
+                  "action": "placement_update",
+                  "availability": "unavailable",
+                  "confirmation": "required",
+                  "idempotent": true,
+                  "reason": "placement updates require a queued unmaterialized Cook admission",
+                  "required_inputs": [
+                    "placement"
+                  ],
+                  "requires_revalidation": true,
+                  "result_resource_type": "agent_task_run"
+                },
+                {
+                  "action": "retry",
+                  "availability": "unavailable",
+                  "confirmation": "required",
+                  "idempotent": true,
+                  "reason": "retry requires a failed, cancelled, or partial-failure run",
+                  "requires_revalidation": true,
+                  "result_resource_type": "agent_task_run"
+                },
+                {
+                  "action": "quarantine",
+                  "availability": "unavailable",
+                  "confirmation": "required",
+                  "idempotent": true,
+                  "reason": "quarantine requires an exact queued run",
+                  "required_inputs": [
+                    "reason"
+                  ],
+                  "requires_revalidation": true,
+                  "result_resource_type": "agent_task_run"
+                },
+                {
+                  "action": "rearm",
+                  "availability": "unavailable",
+                  "confirmation": "required",
+                  "idempotent": true,
+                  "reason": "run is not quarantined",
+                  "requires_revalidation": true,
+                  "result_resource_type": "agent_task_run"
+                },
+                {
+                  "action": "promote",
+                  "availability": "indeterminate",
+                  "confirmation": "required",
+                  "idempotent": true,
+                  "reason": "promotion requires a target worktree and candidate preflight",
+                  "required_inputs": [
+                    "to_worktree"
+                  ],
+                  "requires_revalidation": true,
+                  "result_resource_type": "agent_task_promotion"
+                },
+                {
+                  "action": "reconcile",
+                  "availability": "unavailable",
+                  "confirmation": "none",
+                  "idempotent": true,
+                  "reason": "reconciliation is offered only for running records without a live local owner",
+                  "requires_revalidation": true,
+                  "result_resource_type": "agent_task_run"
+                }
+              ],
+              "run": "cook-detached-1b9a02ee-40d4-40df-94b9-9dd8ba2800f7-attempt-1-5361759d",
+              "schema": "homeboy/control-plane-action-eligibility/v1"
+            },
+            "artifacts": [
+              {
+                "id": "artifact-0850cb6d05559eeed31586be9c96f179",
+                "kind": "runtime_log",
+                "uri": "file:///Users/operator/.local/share/homeboy/artifacts/agent-task/executor-artifacts/cook-detached-1b9a02ee-40d4-40df-94b9-9dd8ba2800f7-attempt-1-5361759d/cook-wp-codebox/attempt-2/cook-wp-codebox-opencode-runtime-stdout.log"
+              },
+              {
+                "id": "artifact-75f3a0b3ae1acb099eda764300172733",
+                "kind": "agent-task-progress",
+                "uri": "file:///Users/operator/.local/share/homeboy/artifacts/agent-task/executor-artifacts/cook-detached-1b9a02ee-40d4-40df-94b9-9dd8ba2800f7-attempt-1-5361759d/cook-wp-codebox/attempt-2/cook-wp-codebox-opencode-progress.jsonl"
+              },
+              {
+                "id": "artifact-bee35fb4c59df594595274e04292f502",
+                "kind": "patch",
+                "uri": "homeboy://agent-task/run/cook-detached-1b9a02ee-40d4-40df-94b9-9dd8ba2800f7-attempt-1-5361759d/artifacts"
+              },
+              {
+                "id": "artifact-99f5af4e3e8c085870400d412ce4f9b8",
+                "kind": "opencode-runtime-log",
+                "uri": "file:///Users/operator/.local/share/homeboy/artifacts/agent-task/executor-artifacts/cook-detached-1b9a02ee-40d4-40df-94b9-9dd8ba2800f7-attempt-1-5361759d/cook-wp-codebox/attempt-2/cook-wp-codebox-opencode-runtime-stdout.log"
+              },
+              {
+                "id": "artifact-75f3a0b3ae1acb099eda764300172733",
+                "kind": "agent-task-progress",
+                "uri": "file:///Users/operator/.local/share/homeboy/artifacts/agent-task/executor-artifacts/cook-detached-1b9a02ee-40d4-40df-94b9-9dd8ba2800f7-attempt-1-5361759d/cook-wp-codebox/attempt-2/cook-wp-codebox-opencode-progress.jsonl"
+              },
+              {
+                "id": "artifact-67bf78e5fac3d5a86c8d6fa7198b781d",
+                "kind": "executor-input",
+                "uri": "file:///Users/operator/.local/share/homeboy/artifacts/agent-task/executor-evidence/cook-detached-1b9a02ee-40d4-40df-94b9-9dd8ba2800f7-attempt-1-5361759d/cook-wp-codebox/executor-input.json"
+              },
+              {
+                "id": "artifact-b58709aa77cc49e141918742b9a509dc",
+                "kind": "executor-result",
+                "uri": "file:///Users/operator/.local/share/homeboy/artifacts/agent-task/executor-evidence/cook-detached-1b9a02ee-40d4-40df-94b9-9dd8ba2800f7-attempt-1-5361759d/cook-wp-codebox/executor-result.json"
+              },
+              {
+                "id": "artifact-15e2a23b2333296f7bc8ce345d791d02",
+                "kind": "executor-runtime-evidence",
+                "uri": "file:///Users/operator/.local/share/homeboy/artifacts/agent-task/executor-evidence/cook-detached-1b9a02ee-40d4-40df-94b9-9dd8ba2800f7-attempt-1-5361759d/cook-wp-codebox/executor-runtime-evidence.json"
+              },
+              {
+                "id": "artifact-cbec6d7466028eb9c5dbe83b0a102ec1",
+                "kind": "executor-artifact-root",
+                "uri": "file:///Users/operator/.local/share/homeboy/artifacts/agent-task/executor-artifacts/cook-detached-1b9a02ee-40d4-40df-94b9-9dd8ba2800f7-attempt-1-5361759d/cook-wp-codebox/attempt-2"
+              },
+              {
+                "id": "artifact-601085732e730a19745bb72d208c2491",
+                "kind": "provider-session",
+                "uri": "file:///Users/operator/.local/share/homeboy/artifacts/agent-task/executor-evidence/cook-detached-1b9a02ee-40d4-40df-94b9-9dd8ba2800f7-attempt-1-5361759d/cook-wp-codebox/executor-runtime-evidence.json"
+              },
+              {
+                "id": "artifact-58f8bfd1a50d89387bec29064a83b99a",
+                "kind": "provider-runtime-progress",
+                "uri": "file:///Users/operator/.local/share/homeboy/artifacts/agent-task/executor-artifacts/cook-detached-1b9a02ee-40d4-40df-94b9-9dd8ba2800f7-attempt-1-5361759d/cook-wp-codebox/attempt-2/cook-wp-codebox-opencode-progress.jsonl"
+              },
+              {
+                "id": "artifact-2a68cc708e45720a9eb55801f4814317",
+                "kind": "provider-runtime-stderr",
+                "uri": "file:///Users/operator/.local/share/homeboy/artifacts/agent-task/executor-artifacts/cook-detached-1b9a02ee-40d4-40df-94b9-9dd8ba2800f7-attempt-1-5361759d/cook-wp-codebox/attempt-2/provider-runtime-stderr-2.log"
+              },
+              {
+                "id": "artifact-d8346b44d1473ff10246cd8a4700cb23",
+                "kind": "provider-runtime-stderr",
+                "uri": "file:///Users/operator/.local/share/homeboy/artifacts/agent-task/executor-artifacts/cook-detached-1b9a02ee-40d4-40df-94b9-9dd8ba2800f7-attempt-1-5361759d/cook-wp-codebox/attempt-2/cook-wp-codebox-opencode-runtime-stderr.log"
+              },
+              {
+                "id": "artifact-22d05b1b8c8e260157bcb039949742d3",
+                "kind": "provider-runtime-stdout",
+                "uri": "file:///Users/operator/.local/share/homeboy/artifacts/agent-task/executor-artifacts/cook-detached-1b9a02ee-40d4-40df-94b9-9dd8ba2800f7-attempt-1-5361759d/cook-wp-codebox/attempt-2/provider-runtime-stdout-2.log"
+              },
+              {
+                "id": "artifact-08939d23a6239ea1ac2aa4cac61eb8a2",
+                "kind": "provider-runtime-stdout",
+                "uri": "file:///Users/operator/.local/share/homeboy/artifacts/agent-task/executor-artifacts/cook-detached-1b9a02ee-40d4-40df-94b9-9dd8ba2800f7-attempt-1-5361759d/cook-wp-codebox/attempt-2/cook-wp-codebox-opencode-runtime-stdout.log"
+              }
+            ],
+            "blocker": {
+              "code": "controller_failure",
+              "message": "Dependency step 'promotion.gate_setup' failed for component 'npm'"
+            },
+            "candidate": {
+              "state": "verification_pending"
+            },
+            "created_at": "2026-09-25T02:02:58.502406+00:00",
+            "evidence": [
+              {
+                "id": "evidence-2a3653fea48296515e3c7e8af0c1eb2f",
+                "kind": "executor-input",
+                "uri": "homeboy://agent-task/run/cook-detached-1b9a02ee-40d4-40df-94b9-9dd8ba2800f7-attempt-1-5361759d/plan"
+              },
+              {
+                "id": "evidence-f3c6cbb1206a2bd62fdcd37542876cee",
+                "kind": "executor-normalized-output",
+                "uri": "homeboy://agent-task/run/cook-detached-1b9a02ee-40d4-40df-94b9-9dd8ba2800f7-attempt-1-5361759d/aggregate"
+              },
+              {
+                "id": "evidence-7033e8dcc280afdd1ec9551eae4d6b86",
+                "kind": "executor-outcome",
+                "uri": "homeboy://agent-task/run/cook-detached-1b9a02ee-40d4-40df-94b9-9dd8ba2800f7-attempt-1-5361759d/artifacts"
+              }
+            ],
+            "finished_at": "2026-09-25T02:37:45.804486+00:00",
+            "heartbeat_at": "2026-09-25T02:10:31.040944+00:00",
+            "mission": "cook-detached-1b9a02ee-40d4-40df-94b9-9dd8ba2800f7",
+            "owner": {
+              "id": "local_controller",
+              "kind": "local_controller"
+            },
+            "phase": "terminal",
+            "placement": {
+              "decision_id": "epd-e781c6208bb72c57",
+              "requested": "controller",
+              "selected": "controller"
+            },
+            "provider": {
+              "id": "opencode"
+            },
+            "run": "cook-detached-1b9a02ee-40d4-40df-94b9-9dd8ba2800f7-attempt-1-5361759d",
+            "runtime": {
+              "build_identity": "homeboy 0.390.0+79b345088b264fa4397d6e7c8754fad9611dd57a"
+            },
+            "schema": "homeboy/control-plane-run/v1",
+            "state": "candidate_recoverable",
+            "updated_at": "2026-09-25T02:37:45.804486+00:00"
+          },
+          {
+            "action_eligibility": {
+              "actions": [
+                {
+                  "action": "cancel",
+                  "availability": "unavailable",
+                  "confirmation": "required",
+                  "idempotent": true,
+                  "reason": "Invalid argument 'run_id': agent-task run 'agent-task-79cdf130-cce3-4586-8424-841789aaef42-attempt-1-e0d61c48' is already terminal with state Cancelled",
+                  "requires_revalidation": true,
+                  "result_resource_type": "agent_task_run"
+                },
+                {
+                  "action": "resume",
+                  "availability": "available",
+                  "confirmation": "none",
+                  "idempotent": true,
+                  "reason": "terminal runner evidence may be reprojected idempotently without reopening execution",
+                  "requires_revalidation": true,
+                  "result_resource_type": "agent_task_run"
+                },
+                {
+                  "action": "placement_update",
+                  "availability": "unavailable",
+                  "confirmation": "required",
+                  "idempotent": true,
+                  "reason": "placement updates require a queued unmaterialized Cook admission",
+                  "required_inputs": [
+                    "placement"
+                  ],
+                  "requires_revalidation": true,
+                  "result_resource_type": "agent_task_run"
+                },
+                {
+                  "action": "retry",
+                  "availability": "indeterminate",
+                  "confirmation": "required",
+                  "idempotent": true,
+                  "reason": "durable plan is materializable; retry lineage and runtime admission require store preflight",
+                  "requires_revalidation": true,
+                  "result_resource_type": "agent_task_run"
+                },
+                {
+                  "action": "quarantine",
+                  "availability": "unavailable",
+                  "confirmation": "required",
+                  "idempotent": true,
+                  "reason": "quarantine requires an exact queued run",
+                  "required_inputs": [
+                    "reason"
+                  ],
+                  "requires_revalidation": true,
+                  "result_resource_type": "agent_task_run"
+                },
+                {
+                  "action": "rearm",
+                  "availability": "unavailable",
+                  "confirmation": "required",
+                  "idempotent": true,
+                  "reason": "run is not quarantined",
+                  "requires_revalidation": true,
+                  "result_resource_type": "agent_task_run"
+                },
+                {
+                  "action": "promote",
+                  "availability": "unavailable",
+                  "confirmation": "required",
+                  "idempotent": true,
+                  "reason": "run does not retain a potentially promotable candidate",
+                  "required_inputs": [
+                    "to_worktree"
+                  ],
+                  "requires_revalidation": true,
+                  "result_resource_type": "agent_task_promotion"
+                },
+                {
+                  "action": "reconcile",
+                  "availability": "unavailable",
+                  "confirmation": "none",
+                  "idempotent": true,
+                  "reason": "reconciliation is offered only for running records without a live local owner",
+                  "requires_revalidation": true,
+                  "result_resource_type": "agent_task_run"
+                }
+              ],
+              "run": "agent-task-79cdf130-cce3-4586-8424-841789aaef42-attempt-1-e0d61c48",
+              "schema": "homeboy/control-plane-action-eligibility/v1"
+            },
+            "created_at": "2026-09-25T00:16:30.971222062+00:00",
+            "finished_at": "2026-09-25T00:46:48.625404227+00:00",
+            "heartbeat_at": "2026-09-25T00:16:31.237278359+00:00",
+            "location": {
+              "runner_id": "homeboy-lab"
+            },
+            "mission": "agent-task-79cdf130-cce3-4586-8424-841789aaef42",
+            "owner": {
+              "id": "homeboy-lab",
+              "kind": "runner"
+            },
+            "run": "agent-task-79cdf130-cce3-4586-8424-841789aaef42-attempt-1-e0d61c48",
+            "runtime": {
+              "build_identity": "homeboy 0.389.0+44f61138739beeb299566921871015da1d3c6085"
+            },
+            "schema": "homeboy/control-plane-run/v1",
+            "state": "cancelled",
+            "updated_at": "2026-09-25T00:46:48.625404227+00:00"
+          },
+          {
+            "action_eligibility": {
+              "actions": [
+                {
+                  "action": "cancel",
+                  "availability": "unavailable",
+                  "confirmation": "required",
+                  "idempotent": true,
+                  "reason": "Invalid argument 'run_id': agent-task run 'agent-task-b8697b3a-d156-407e-a099-e687fee69b09-attempt-1-1b68ad9a' is already terminal with state Failed",
+                  "requires_revalidation": true,
+                  "result_resource_type": "agent_task_run"
+                },
+                {
+                  "action": "resume",
+                  "availability": "unavailable",
+                  "confirmation": "none",
+                  "idempotent": true,
+                  "reason": "terminal runs cannot be resumed",
+                  "requires_revalidation": true,
+                  "result_resource_type": "agent_task_run"
+                },
+                {
+                  "action": "placement_update",
+                  "availability": "unavailable",
+                  "confirmation": "required",
+                  "idempotent": true,
+                  "reason": "placement updates require a queued unmaterialized Cook admission",
+                  "required_inputs": [
+                    "placement"
+                  ],
+                  "requires_revalidation": true,
+                  "result_resource_type": "agent_task_run"
+                },
+                {
+                  "action": "retry",
+                  "availability": "unavailable",
+                  "confirmation": "required",
+                  "idempotent": true,
+                  "reason": "durable Cook retry is unavailable: Invalid argument 'run_id': Cook-owned run is not eligible for a durable Cook retry; inspect this exact attempt with: homeboy agent-task status agent-task-b8697b3a-d156-407e-a099-e687fee69b09-attempt-1-1b68ad9a",
+                  "requires_revalidation": true,
+                  "result_resource_type": "agent_task_run"
+                },
+                {
+                  "action": "quarantine",
+                  "availability": "unavailable",
+                  "confirmation": "required",
+                  "idempotent": true,
+                  "reason": "quarantine requires an exact queued run",
+                  "required_inputs": [
+                    "reason"
+                  ],
+                  "requires_revalidation": true,
+                  "result_resource_type": "agent_task_run"
+                },
+                {
+                  "action": "rearm",
+                  "availability": "unavailable",
+                  "confirmation": "required",
+                  "idempotent": true,
+                  "reason": "run is not quarantined",
+                  "requires_revalidation": true,
+                  "result_resource_type": "agent_task_run"
+                },
+                {
+                  "action": "promote",
+                  "availability": "unavailable",
+                  "confirmation": "required",
+                  "idempotent": true,
+                  "reason": "run does not retain a potentially promotable candidate",
+                  "required_inputs": [
+                    "to_worktree"
+                  ],
+                  "requires_revalidation": true,
+                  "result_resource_type": "agent_task_promotion"
+                },
+                {
+                  "action": "reconcile",
+                  "availability": "unavailable",
+                  "confirmation": "none",
+                  "idempotent": true,
+                  "reason": "reconciliation is offered only for running records without a live local owner",
+                  "requires_revalidation": true,
+                  "result_resource_type": "agent_task_run"
+                }
+              ],
+              "run": "agent-task-b8697b3a-d156-407e-a099-e687fee69b09-attempt-1-1b68ad9a",
+              "schema": "homeboy/control-plane-action-eligibility/v1"
+            },
+            "artifacts": [
+              {
+                "id": "artifact-cab8482cff4770e0fe0d3e0dad2ee5ad",
+                "kind": "agent-task-pre-execution-failure",
+                "uri": "homeboy://agent-task/run/agent-task-b8697b3a-d156-407e-a099-e687fee69b09-attempt-1-1b68ad9a/status"
+              }
+            ],
+            "blocker": {
+              "code": "validation.invalid_argument",
+              "message": "Invalid argument 'path': Checkout '/Users/operator/Developer/blocks-engine@fix-issue-2195-blocks-engine' matches multiple registered component configurations: blocks-engine, php-transformer"
+            },
+            "created_at": "2026-09-25T00:13:43.350560+00:00",
+            "evidence": [
+              {
+                "id": "evidence-c3eb605e51a07d9a1f627a4d3f33de6e",
+                "kind": "executor-input",
+                "uri": "homeboy://agent-task/run/agent-task-b8697b3a-d156-407e-a099-e687fee69b09-attempt-1-1b68ad9a/plan"
+              },
+              {
+                "id": "evidence-375f197be06beea95d6cff9987288fcc",
+                "kind": "executor-normalized-output",
+                "uri": "homeboy://agent-task/run/agent-task-b8697b3a-d156-407e-a099-e687fee69b09-attempt-1-1b68ad9a/aggregate"
+              },
+              {
+                "id": "evidence-c9b04486674d52a06e41352d6eb67105",
+                "kind": "executor-outcome",
+                "uri": "homeboy://agent-task/run/agent-task-b8697b3a-d156-407e-a099-e687fee69b09-attempt-1-1b68ad9a/artifacts"
+              }
+            ],
+            "finished_at": "2026-09-25T00:15:07.414253+00:00",
+            "heartbeat_at": "2026-09-25T00:15:06.217835+00:00",
+            "location": {
+              "runner_id": "homeboy-lab"
+            },
+            "mission": "agent-task-b8697b3a-d156-407e-a099-e687fee69b09",
+            "owner": {
+              "id": "homeboy-lab",
+              "kind": "runner"
+            },
+            "phase": "in_flight",
+            "placement": {
+              "decision_id": "epd-056a7fcf7a11874e",
+              "requested": "automatic",
+              "runner_id": "homeboy-lab",
+              "selected": "runner"
+            },
+            "provider": {
+              "id": "opencode"
+            },
+            "run": "agent-task-b8697b3a-d156-407e-a099-e687fee69b09-attempt-1-1b68ad9a",
+            "runtime": {
+              "build_identity": "homeboy 0.389.0+44f61138739beeb299566921871015da1d3c6085"
+            },
+            "schema": "homeboy/control-plane-run/v1",
+            "state": "failed",
+            "updated_at": "2026-09-25T00:15:07.414253+00:00"
+          }
+        ],
+        "schema": "homeboy/control-plane-run-page/v1"
+      },
+      "schema": "homeboy/control-plane-result/v1"
+    },
+    "endpoint": "control_plane.runs.list",
+    "status": 200
+  },
+  "success": true
+}

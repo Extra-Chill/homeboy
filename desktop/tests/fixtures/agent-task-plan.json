@@ -1,0 +1,19 @@
+{
+  "schema": "homeboy/agent-task-plan/v1",
+  "plan_id": "desktop-mission-fixture",
+  "tasks": [
+    {
+      "schema": "homeboy/agent-task-request/v1",
+      "task_id": "desktop-mission",
+      "executor": { "backend": "opencode" },
+      "instructions": "Implement the requested mission.",
+      "source_refs": [{ "kind": "reference", "uri": "https://github.com/Extra-Chill/homeboy-desktop/issues/82" }],
+      "workspace": { "mode": "existing", "root": "/workspace/homeboy-desktop" },
+      "policy": { "write": "patch_only" }
+    }
+  ],
+  "options": {
+    "max_concurrency": 2,
+    "retry": { "max_attempts": 3 }
+  }
+}

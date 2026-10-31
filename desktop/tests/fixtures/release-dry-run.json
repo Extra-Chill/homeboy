@@ -1,0 +1,13 @@
+{
+  "success": true,
+  "data": {
+    "command": "release",
+    "result": {
+      "bump_type": "major",
+      "component_id": "homeboy-desktop",
+      "dry_run": true,
+      "releasable_commits": 12,
+      "skipped_reason": "major-requires-flag"
+    }
+  }
+}

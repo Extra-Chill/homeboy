@@ -1,0 +1,157 @@
+{
+  "schema": "homeboy/command-result/v3",
+  "command": "agent-task",
+  "operation": "capacity",
+  "success": true,
+  "exit_code": 0,
+  "status": "succeeded",
+  "summary": "zai-coding-plan (1 plans): 31% remaining\n  zai-coding-plan  available  31%  resets 2026-09-29T02:00:15.973+00:00\nopencode-go (1 plans): exhausted until 2026-10-08T00:46:00+00:00\n  opencode-go  exhausted  resets 2026-10-08T00:46:00+00:00\nxai (1 plans): 83% remaining\n  xai#0  available  83%  resets 2026-10-01T21:08:53.920+00:00\nopenai (2 plans): exhausted until 2026-09-27T15:26:10+00:00\n  plan-a@example.com  exhausted  resets 2026-09-27T15:26:10+00:00\n  plan-b@example.com  exhausted  resets 2026-09-28T23:29:35+00:00\nanthropic (4 plans): 39% remaining\n  anthropic#0  credential_expired\n  plan-a@example.com  available  12%  resets 2026-09-25T05:39:59.658+00:00\n  plan-c@example.com  exhausted  resets 2026-09-29T15:59:59.837+00:00\n  plan-d@example.com  available  39%  resets 2026-09-27T17:59:59.831+00:00",
+  "data": {
+    "generated_at": "2026-09-25T03:16:25.339771+00:00",
+    "next_reset": "2026-09-27T15:26:10+00:00",
+    "routes": [
+      {
+        "backend": "opencode",
+        "capacity": {
+          "accounts": [
+            {
+              "account": "zai-coding-plan",
+              "remaining": 31,
+              "reset_at": "2026-09-29T02:00:15.973+00:00",
+              "state": "available"
+            }
+          ],
+          "limit": 100,
+          "remaining": 31,
+          "reset_at": "2026-09-29T02:00:15.973+00:00",
+          "scope": "opencode:zai-coding-plan",
+          "state": "known",
+          "unit": "percent"
+        },
+        "models": [
+          "zai-coding-plan/glm-5.3-flash"
+        ],
+        "scope": "opencode:zai-coding-plan",
+        "selector": null
+      },
+      {
+        "backend": "opencode",
+        "capacity": {
+          "accounts": [
+            {
+              "account": "opencode-go",
+              "remaining": 0,
+              "reset_at": "2026-10-08T00:46:00+00:00",
+              "state": "exhausted"
+            }
+          ],
+          "reason": "provider_capacity_exhausted",
+          "reset_at": "2026-10-08T00:46:00+00:00",
+          "scope": "opencode:opencode-go",
+          "state": "exhausted"
+        },
+        "models": [
+          "opencode-go/glm-5.3-flash"
+        ],
+        "scope": "opencode:opencode-go",
+        "selector": null
+      },
+      {
+        "backend": "opencode",
+        "capacity": {
+          "accounts": [
+            {
+              "account": "xai#0",
+              "remaining": 83,
+              "reset_at": "2026-10-01T21:08:53.920+00:00",
+              "state": "available"
+            }
+          ],
+          "limit": 100,
+          "remaining": 83,
+          "reset_at": "2026-10-01T21:08:53.920+00:00",
+          "scope": "opencode:xai",
+          "state": "known",
+          "unit": "percent"
+        },
+        "models": [
+          "xai/grok-4.7"
+        ],
+        "scope": "opencode:xai",
+        "selector": null
+      },
+      {
+        "backend": "opencode",
+        "capacity": {
+          "accounts": [
+            {
+              "account": "plan-a@example.com",
+              "remaining": 0,
+              "reset_at": "2026-09-27T15:26:10+00:00",
+              "state": "exhausted"
+            },
+            {
+              "account": "plan-b@example.com",
+              "remaining": 0,
+              "reset_at": "2026-09-28T23:29:35+00:00",
+              "state": "exhausted"
+            }
+          ],
+          "reason": "provider_capacity_exhausted",
+          "reset_at": "2026-09-27T15:26:10+00:00",
+          "scope": "opencode:openai",
+          "state": "exhausted"
+        },
+        "models": [
+          "openai/gpt-5.6-luna"
+        ],
+        "scope": "opencode:openai",
+        "selector": null
+      },
+      {
+        "backend": "opencode",
+        "capacity": {
+          "accounts": [
+            {
+              "account": "anthropic#0",
+              "state": "credential_expired"
+            },
+            {
+              "account": "plan-a@example.com",
+              "remaining": 12,
+              "reset_at": "2026-09-25T05:39:59.658+00:00",
+              "state": "available"
+            },
+            {
+              "account": "plan-c@example.com",
+              "remaining": 0,
+              "reset_at": "2026-09-29T15:59:59.837+00:00",
+              "state": "exhausted"
+            },
+            {
+              "account": "plan-d@example.com",
+              "remaining": 39,
+              "reset_at": "2026-09-27T17:59:59.831+00:00",
+              "state": "available"
+            }
+          ],
+          "limit": 100,
+          "remaining": 39,
+          "reset_at": "2026-09-27T17:59:59.831+00:00",
+          "scope": "opencode:anthropic",
+          "state": "known",
+          "unit": "percent"
+        },
+        "models": [
+          "anthropic/claude-sonnet-5"
+        ],
+        "scope": "opencode:anthropic",
+        "selector": null
+      }
+    ],
+    "schema": "homeboy/agent-task-capacity/v1"
+  },
+  "presentation": {
+    "stdout": "zai-coding-plan (1 plans): 31% remaining\n  zai-coding-plan  available  31%  resets 2026-09-29T02:00:15.973+00:00\nopencode-go (1 plans): exhausted until 2026-10-08T00:46:00+00:00\n  opencode-go  exhausted  resets 2026-10-08T00:46:00+00:00\nxai (1 plans): 83% remaining\n  xai#0  available  83%  resets 2026-10-01T21:08:53.920+00:00\nopenai (2 plans): exhausted until 2026-09-27T15:26:10+00:00\n  plan-a@example.com  exhausted  resets 2026-09-27T15:26:10+00:00\n  plan-b@example.com  exhausted  resets 2026-09-28T23:29:35+00:00\nanthropic (4 plans): 39% remaining\n  anthropic#0  credential_expired\n  plan-a@example.com  available  12%  resets 2026-09-25T05:39:59.658+00:00\n  plan-c@example.com  exhausted  resets 2026-09-29T15:59:59.837+00:00\n  plan-d@example.com  available  39%  resets 2026-09-27T17:59:59.831+00:00"
+  }
+}

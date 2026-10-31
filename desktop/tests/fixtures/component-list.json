@@ -1,0 +1,38 @@
+{
+  "success": true,
+  "data": {
+    "command": "component.list",
+    "entities": [
+      {
+        "auto_cleanup": false,
+        "changelog_target": "docs/CHANGELOG.md",
+        "extensions": {
+          "swift": {}
+        },
+        "id": "homeboy-desktop",
+        "local_path": "/Users/chubes/Developer/homeboy-desktop",
+        "remote_path": "",
+        "remote_url": "https://github.com/Extra-Chill/homeboy-desktop.git"
+      },
+      {
+        "auto_cleanup": false,
+        "build_artifact": "target/release/homeboy",
+        "changelog_target": "docs/changelog.md",
+        "docs_dir": "docs",
+        "extensions": {
+          "rust": {}
+        },
+        "id": "homeboy",
+        "local_path": "/Users/chubes/Developer/homeboy",
+        "remote_path": "",
+        "remote_url": "https://github.com/Extra-Chill/homeboy.git",
+        "version_targets": [
+          {
+            "file": "Cargo.toml",
+            "pattern": "(?m)^version\\s*=\\s*\"([0-9.]+)\""
+          }
+        ]
+      }
+    ]
+  }
+}

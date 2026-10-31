@@ -1,0 +1,41 @@
+{
+  "success": true,
+  "data": {
+    "command": "extension.list",
+    "extensions": [
+      {
+        "actions": [
+          {
+            "id": "release.package",
+            "label": "Package release artifacts",
+            "type": "command"
+          }
+        ],
+        "compatible": true,
+        "description": "Node.js project type",
+        "id": "nodejs",
+        "linked": true,
+        "name": "Node.js",
+        "path": "/Users/example/.config/homeboy/extensions/nodejs",
+        "ready": true,
+        "runtime": "platform",
+        "source_revision": "0a1e566",
+        "version": "3.0.0"
+      },
+      {
+        "compatible": true,
+        "description": "Swift testing infrastructure",
+        "has_ready_check": true,
+        "has_setup": true,
+        "id": "swift",
+        "linked": true,
+        "name": "Swift",
+        "path": "/Users/example/.config/homeboy/extensions/swift",
+        "ready": true,
+        "runtime": "executable",
+        "source_revision": "5ae07a3",
+        "version": "2.4.1"
+      }
+    ]
+  }
+}

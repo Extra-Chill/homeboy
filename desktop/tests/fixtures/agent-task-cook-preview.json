@@ -1,0 +1,213 @@
+{
+  "schema": "homeboy/command-result/v3",
+  "command": "agent-task",
+  "operation": "cook",
+  "success": true,
+  "exit_code": 0,
+  "status": "succeeded",
+  "summary": "Cook preview\nPlacement: local  (requested: auto — stale_daemon; active_daemon_control_plane_version != job_command_binary_version)\nProvider: opencode\nModel: zai-coding-plan/glm-5.3-flash\nDestination: /Users/operator/Developer/homeboy@fix-issue-15024-homeboy\nGates: 1 public, 0 private\nReplay: homeboy agent-task cook --repo homeboy --task-url https://github.com/Extra-Chill/homeboy/issues/15024 --goal 'Example goal' --prompt 'Example prompt' --verify 'cargo fmt --all -- --check' --draft-pr --component homeboy\n",
+  "data": {
+    "mutates": false,
+    "progress": [
+      {
+        "event": "cook_preview_progress",
+        "phase": "prompt_input"
+      },
+      {
+        "event": "cook_preview_progress",
+        "phase": "input_validation"
+      },
+      {
+        "event": "cook_preview_progress",
+        "phase": "destination_resolution"
+      },
+      {
+        "event": "cook_preview_progress",
+        "phase": "placement_projection"
+      },
+      {
+        "event": "cook_preview_progress",
+        "phase": "gate_contract_validation"
+      },
+      {
+        "event": "cook_preview_progress",
+        "phase": "provider_preflight"
+      },
+      {
+        "event": "cook_preview_progress",
+        "phase": "plan_compilation"
+      }
+    ],
+    "replay_argv": [
+      "homeboy",
+      "agent-task",
+      "cook",
+      "--repo",
+      "homeboy",
+      "--task-url",
+      "https://github.com/Extra-Chill/homeboy/issues/15024",
+      "--goal",
+      "Example goal",
+      "--prompt",
+      "Example prompt",
+      "--verify",
+      "cargo fmt --all -- --check",
+      "--draft-pr",
+      "--component",
+      "homeboy"
+    ],
+    "replay_requires": [
+      "runner placement admission is deferred; replay revalidates connected runner readiness before execution"
+    ],
+    "resolved": {
+      "base": "main",
+      "base_preparation": {
+        "base_sha": null,
+        "declared_base": "main",
+        "provenance": "workspace_unmaterialized",
+        "remote_freshness": "deferred",
+        "schema": "homeboy/cook-base-preparation/v1",
+        "topology": null
+      },
+      "component": "homeboy",
+      "gates": {
+        "private": 0,
+        "public": 1
+      },
+      "head": "fix/issue-15024-homeboy",
+      "notification_resolution": {
+        "classification": "route_less",
+        "schema": "homeboy/notification-route-resolution/v1"
+      },
+      "placement": {
+        "admission": {
+          "blockers": [],
+          "revalidate_before_execution": true,
+          "schema": "homeboy/cook-preview-placement-admission/v1",
+          "state": "admissible"
+        },
+        "detach_after_handoff": true,
+        "fallback_reason": "stale_daemon; active_daemon_control_plane_version != job_command_binary_version",
+        "requested": "auto",
+        "route_executed": false,
+        "runner": null,
+        "selected": "local"
+      },
+      "provider": {
+        "backend": "opencode",
+        "config": {
+          "client_context": {},
+          "component_id": "homeboy",
+          "repo": "homeboy",
+          "task_url": "https://github.com/Extra-Chill/homeboy/issues/15024",
+          "workspace": null,
+          "workspace_required": false,
+          "workspace_root": null,
+          "worktree_provider_lifecycle": {}
+        },
+        "model": "zai-coding-plan/glm-5.3-flash",
+        "runtime_selection": {
+          "executor_backend": "opencode",
+          "model": "zai-coding-plan/glm-5.3-flash"
+        }
+      },
+      "publication": {
+        "ai_tool": "AI-assisted",
+        "draft": true,
+        "finalize": true,
+        "provider_ci": false
+      },
+      "repository": "homeboy",
+      "repository_identity": {
+        "component_cwd": ".",
+        "component_id": "homeboy",
+        "provenance": "--repo:configured-component",
+        "remote_identity": "git://github.com/extra-chill/homeboy",
+        "repository_name": "homeboy",
+        "slug": "homeboy"
+      },
+      "retry_budget": {
+        "effective": {
+          "max_attempts": 3,
+          "max_provider_executions": 5,
+          "max_provider_rotations": 2,
+          "max_same_provider_retries": 2
+        },
+        "operator_intent": {
+          "allow_provider_rotation": false,
+          "max_attempts": 3,
+          "max_provider_executions": null,
+          "max_provider_rotations": null,
+          "max_same_provider_retries": null
+        },
+        "requested": {
+          "max_attempts": 3,
+          "max_provider_executions": 5,
+          "max_provider_rotations": 2,
+          "max_same_provider_retries": 2
+        },
+        "resolved": {
+          "max_attempts": 3,
+          "max_provider_executions": 5,
+          "max_provider_rotations": 2,
+          "max_same_provider_retries": 2
+        },
+        "route": {
+          "effective": {
+            "backend": "opencode",
+            "model": "zai-coding-plan/glm-5.3-flash",
+            "model_selection": null,
+            "selector": null
+          },
+          "fallback": {
+            "configured_rotations": 4,
+            "enabled": true,
+            "mode": "rotatable",
+            "opted_in": false
+          },
+          "requested": {
+            "backend": null,
+            "model": null
+          }
+        },
+        "timeouts": {
+          "provider_timeout_ms": 1200000,
+          "review_form_provider_budget_is_distinct": true,
+          "review_form_provider_budget_scope": "fresh_cook_review",
+          "review_form_timeout_cap_ms": 600000,
+          "review_form_timeout_ms": 300000
+        },
+        "truncated": {
+          "max_provider_rotations": 0
+        }
+      },
+      "workspace": {
+        "action": "planned_create",
+        "base_preparation": {
+          "base_sha": null,
+          "declared_base": "main",
+          "provenance": "workspace_unmaterialized",
+          "remote_freshness": "deferred",
+          "schema": "homeboy/cook-base-preparation/v1",
+          "topology": null
+        },
+        "branch": "fix/issue-15024-homeboy",
+        "handle": "homeboy@fix-issue-15024-homeboy",
+        "intent": {
+          "base": "main",
+          "handle": "homeboy@fix-issue-15024-homeboy",
+          "head": "fix/issue-15024-homeboy",
+          "repo": "homeboy",
+          "task_url": "https://github.com/Extra-Chill/homeboy/issues/15024"
+        },
+        "kind": "native",
+        "path": "/Users/operator/Developer/homeboy@fix-issue-15024-homeboy"
+      },
+      "worktree": "homeboy@fix-issue-15024-homeboy"
+    },
+    "schema": "homeboy/agent-task-cook-preview/v1"
+  },
+  "presentation": {
+    "stdout": "Cook preview\nPlacement: local  (requested: auto — stale_daemon; active_daemon_control_plane_version != job_command_binary_version)\nProvider: opencode\nModel: zai-coding-plan/glm-5.3-flash\nDestination: /Users/operator/Developer/homeboy@fix-issue-15024-homeboy\nGates: 1 public, 0 private\nReplay: homeboy agent-task cook --repo homeboy --task-url https://github.com/Extra-Chill/homeboy/issues/15024 --goal 'Example goal' --prompt 'Example prompt' --verify 'cargo fmt --all -- --check' --draft-pr --component homeboy\n"
+  }
+}
