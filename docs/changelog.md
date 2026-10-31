@@ -4,6 +4,22 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.438.0] - 2026-10-31
+
+### Added
+- resolve extensions from nested extension roots
+
+### Changed
+- Remove homeboy tunnel and its crate (net production Rust: −8,455 lines)
+- Delete readers that reconstruct pre-field persisted records
+- Delete renamed CLI flag and JSON field aliases
+
+### Fixed
+- sparsely clone URL sources for install update and repair
+- configure per-component GitHub Latest ownership
+- keep repository identity for project-attached components
+- diagnose Lab candidate tree mismatches by path
+
 ## [0.437.4] - 2026-10-31
 
 ### Changed
