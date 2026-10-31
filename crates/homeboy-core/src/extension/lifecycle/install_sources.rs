@@ -208,22 +208,26 @@ pub(crate) fn resolve_cloned_extension(
         return Ok(extension_id.to_string());
     }
 
-    // Case 2: Monorepo — target extension exists as a subdirectory.
-    let subdir = temp_dir.join(extension_id);
-    let manifest_in_subdir = subdir.join(format!("{}.json", extension_id));
-
-    if subdir.is_dir() && manifest_in_subdir.exists() {
+    // Preserve the legacy direct-child layout before considering declared roots.
+    let mut roots = vec![temp_dir.to_path_buf()];
+    roots.extend(nested_extension_roots(temp_dir));
+    for source_root in roots {
+        let subdir = source_root.join(extension_id);
+        let manifest_in_subdir = subdir.join(format!("{}.json", extension_id));
+        if !manifest_in_subdir.is_file() {
+            continue;
+        }
         // Validate the manifest is parseable before moving.
         let content = local_files::local().read(&manifest_in_subdir)?;
         let _manifest: ExtensionManifest = from_str(&content)?;
 
         // Cloned installs copy: the clone temp dir is discarded after install,
         // so the shared trees must be materialized as standalone copies.
-        install_shared_assets_from_root(temp_dir, extension_dir, SharedAssetMode::Copy, None)?;
+        install_shared_assets_from_root(&source_root, extension_dir, SharedAssetMode::Copy, None)?;
 
         // Move just the subdirectory to the final extension location.
         rename_dir(&subdir, extension_dir)?;
-        persist_installed_root_manifest(temp_dir, extension_dir)?;
+        persist_installed_root_manifest(&source_root, extension_dir)?;
         return Ok(extension_id.to_string());
     }
 
@@ -495,6 +499,43 @@ fn runtime_package_source_root(source: &Path) -> Option<&Path> {
 /// Returns a sorted list of extension IDs found.
 fn scan_available_extensions(repo_dir: &Path) -> Vec<String> {
     let mut found = Vec::new();
+    let mut roots = vec![repo_dir.to_path_buf()];
+    roots.extend(nested_extension_roots(repo_dir));
+    for root in roots {
+        scan_extensions_in_root(&root, &mut found);
+    }
+    found.sort();
+    found.dedup();
+    found
+}
+
+// Deterministic traversal, excluding hidden directories and directory symlinks:
+// neither Git internals nor paths outside the checkout are extension roots.
+fn nested_extension_roots(repo_dir: &Path) -> Vec<PathBuf> {
+    fn visit(dir: &Path, roots: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            if !entry.file_type().is_ok_and(|kind| kind.is_dir())
+                || entry.file_name().to_string_lossy().starts_with('.')
+            {
+                continue;
+            }
+            let path = entry.path();
+            if path.join(ROOT_MANIFEST).is_file() {
+                roots.push(path.clone());
+            }
+            visit(&path, roots);
+        }
+    }
+    let mut roots = Vec::new();
+    visit(repo_dir, &mut roots);
+    roots.sort();
+    roots
+}
+
+fn scan_extensions_in_root(repo_dir: &Path, found: &mut Vec<String>) {
     if let Ok(entries) = std::fs::read_dir(repo_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
@@ -512,8 +553,6 @@ fn scan_available_extensions(repo_dir: &Path) -> Vec<String> {
             }
         }
     }
-    found.sort();
-    found
 }
 
 /// Move a directory, falling back to recursive copy + delete if rename fails
@@ -591,15 +630,20 @@ pub(super) fn install_from_path(
     let manifest_path = manifest_path_for_extension(&source, &extension_id);
     if !manifest_path.exists() {
         if id_override.is_some() {
-            let monorepo_extension = source.join(&extension_id);
-            let monorepo_manifest = manifest_path_for_extension(&monorepo_extension, &extension_id);
-            if monorepo_manifest.exists() {
-                return install_from_path(
-                    &monorepo_extension.to_string_lossy(),
-                    Some(&extension_id),
-                    Some(&source),
-                    revision,
-                );
+            let mut roots = vec![source.clone()];
+            roots.extend(nested_extension_roots(&source));
+            for root in roots {
+                let monorepo_extension = root.join(&extension_id);
+                let monorepo_manifest =
+                    manifest_path_for_extension(&monorepo_extension, &extension_id);
+                if monorepo_manifest.is_file() {
+                    return install_from_path(
+                        &monorepo_extension.to_string_lossy(),
+                        Some(&extension_id),
+                        Some(&root),
+                        revision,
+                    );
+                }
             }
         }
 

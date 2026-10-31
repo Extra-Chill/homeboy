@@ -1243,17 +1243,34 @@ mod tests {
 
     #[test]
     fn isolated_lab_nodejs_overlay_stages_root_assets_for_project_tests() {
+        check_linked_overlay_root(false);
+    }
+
+    #[test]
+    fn nested_root_linked_lab_materialization() {
+        check_linked_overlay_root(true);
+    }
+
+    fn check_linked_overlay_root(nested: bool) {
         crate::test_support::with_isolated_home(|_home| {
-            let source_root = tempfile::tempdir().expect("extension source root");
-            let nodejs = source_root.path().join("nodejs");
-            let scripts_lib = source_root.path().join("scripts/lib");
+            let repo = tempfile::tempdir().expect("extension repository");
+            let source_root = if nested {
+                let path = repo.path().join("extensions");
+                fs::create_dir_all(&path).unwrap();
+                path
+            } else {
+                repo.path().to_path_buf()
+            };
+            let source_root = source_root.as_path();
+            let nodejs = source_root.join("nodejs");
+            let scripts_lib = source_root.join("scripts/lib");
             fs::create_dir_all(&nodejs).expect("nodejs extension");
             fs::create_dir_all(&scripts_lib).expect("shared scripts library");
-            fs::create_dir_all(source_root.path().join("dependency-adapters"))
+            fs::create_dir_all(source_root.join("dependency-adapters"))
                 .expect("dependency adapters");
-            fs::create_dir_all(source_root.path().join("agent-runtimes")).expect("agent runtimes");
+            fs::create_dir_all(source_root.join("agent-runtimes")).expect("agent runtimes");
             fs::write(
-                source_root.path().join("homeboy-extension-root.json"),
+                source_root.join("homeboy-extension-root.json"),
                 r#"{"shared_assets":["scripts/lib",{"path":"dependency-adapters"},"agent-runtimes"]}"#,
             )
             .expect("root manifest");
