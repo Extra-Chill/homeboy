@@ -872,7 +872,7 @@ fn runner_reconciliation_diagnostics(exit_code: i32, data: &Value) -> Option<Com
 
     let reconciliation = data.get("reconciliation")?;
     let status = reconciliation.get("status")?.as_str()?;
-    if !matches!(status, "blocked" | "partial_progress") {
+    if status != "blocked" {
         return None;
     }
     let blocker = reconciliation.get("remaining_blocker")?.as_str()?;
@@ -3037,18 +3037,18 @@ mod tests {
                 None,
             ),
             (
-                "unresolved generation projection",
+                "runner disconnected",
                 json!({
                     "command": "runner.reconcile",
                     "reconciliation": {
                         "status": "blocked",
-                        "remaining_blocker": "unresolved_generation_projection",
-                        "next_action": "homeboy runner disconnect homeboy-lab && homeboy runner connect homeboy-lab",
-                        "retry_predicate": "reconnect publishes a reachable generation endpoint or the live daemon remains idle with no claimed retained jobs",
+                        "remaining_blocker": "runner_disconnected",
+                        "next_action": "homeboy runner connect homeboy-lab",
+                        "retry_predicate": "the runner reconnects and publishes a current daemon session",
                     },
                 }),
-                "runner.reconcile.unresolved_generation_projection",
-                Some("homeboy runner disconnect homeboy-lab && homeboy runner connect homeboy-lab"),
+                "runner.reconcile.runner_disconnected",
+                Some("homeboy runner connect homeboy-lab"),
             ),
         ] {
             let response = cli_response_for_json_result_for_identity(
@@ -3103,8 +3103,8 @@ mod tests {
                     "command": "runner.reconcile",
                     "reconciliation": {
                         "status": "blocked",
-                        "remaining_blocker": "unresolved_generation_projection",
-                        "next_action": "homeboy runner disconnect homeboy-lab && homeboy runner connect homeboy-lab",
+                        "remaining_blocker": "runner_disconnected",
+                        "next_action": "homeboy runner connect homeboy-lab",
                     },
                 }),
             ),

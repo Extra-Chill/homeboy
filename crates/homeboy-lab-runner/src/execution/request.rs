@@ -375,9 +375,6 @@ fn persist_execution_output(
             exit_code,
         )?;
     }
-    if output.mode == RunnerExecMode::Daemon {
-        crate::reconcile_runner_generation_after_evidence(&output.runner_id)?;
-    }
     Ok(())
 }
 

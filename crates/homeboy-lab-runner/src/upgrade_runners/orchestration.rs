@@ -995,7 +995,7 @@ pub(super) fn managed_immutable_runner_target_revision(
 }
 
 pub(super) fn managed_immutable_admission_ready(status: &crate::RunnerStatusReport) -> bool {
-    status.admission_summary(0).accepting_jobs
+    status.admission_summary().accepting_jobs
 }
 
 pub(super) fn managed_refresh_can_reconcile(

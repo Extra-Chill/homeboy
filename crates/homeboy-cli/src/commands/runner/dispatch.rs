@@ -183,11 +183,7 @@ pub fn run(args: RunnerArgs) -> CmdResult<RunnerCommandOutput> {
                 recorded_endpoint,
             },
         )),
-        RunnerCommand::Status {
-            id,
-            generations,
-            full,
-        } => map_registry(status_mod::status(id.as_deref(), generations, full)),
+        RunnerCommand::Status { id, full } => map_registry(status_mod::status(id.as_deref(), full)),
         RunnerCommand::PeerSessions { id, cursor, apply } => map_registry(Ok((
             RunnerOutput {
                 command: "runner.peer_sessions".to_string(),
@@ -207,11 +203,9 @@ pub fn run(args: RunnerArgs) -> CmdResult<RunnerCommandOutput> {
         RunnerCommand::Reconcile {
             id,
             confirm_workload_processes_absent,
-            release_unverified_evidence,
         } => map_registry(status_mod::reconcile(
             &id,
             confirm_workload_processes_absent,
-            release_unverified_evidence,
         )),
         RunnerCommand::Disconnect { id, local_recovery } => {
             map_registry(registry::disconnect(&id, local_recovery))

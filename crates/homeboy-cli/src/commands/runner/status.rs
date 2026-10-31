@@ -28,11 +28,7 @@ use super::types::{
 
 const DEFAULT_STATUS_SESSION_LIMIT: usize = 20;
 
-pub(super) fn status(
-    id: Option<&str>,
-    include_generations: bool,
-    full: bool,
-) -> CmdResult<RunnerOutput> {
+pub(super) fn status(id: Option<&str>, full: bool) -> CmdResult<RunnerOutput> {
     if let Some(id) = id {
         let runners = runner::list()?;
         if is_controller_local_runner(&runners, id) {
@@ -44,25 +40,9 @@ pub(super) fn status(
         let report = admission_snapshot.status;
         let capabilities =
             global_execution_capabilities(&runners, Some(&report), Some(&lab_readiness))?;
-        let generation_inventory = admission_snapshot.generation_inventory;
-        let retirement_readiness = homeboy::runner::persisted_retirement_verdicts(id)?;
-        // Lead with the compact authoritative admission answer, summarizing the
-        // draining generations by count rather than expanding the full ledger
-        // (#9478/#9522). The full inventory stays available as detail below.
-        // Count the draining generations before optionally dropping the expanded
-        // ledger, so the summary's count is accurate whether or not the caller
-        // asked for the full list.
+        // Lead with the compact authoritative admission answer (#9478/#9522);
+        // `--full` adds the session detail behind it.
         let admission_summary = Some(admission_snapshot.summary);
-        // By default the expanded per-generation ledger is omitted — the summary
-        // already carries the count, and on a long-lived runner the full
-        // inventory runs to thousands of lines that make old ownership look like
-        // current load. `--generations` opts back into the full detail.
-        let generation_count = generation_inventory.len();
-        let generation_inventory = if include_generations || full {
-            generation_inventory
-        } else {
-            Vec::new()
-        };
         if !full {
             let operator_summary =
                 operator_summary_with_admission(&report, admission_summary.as_ref());
@@ -74,15 +54,6 @@ pub(super) fn status(
                         admission_summary,
                         execution_capabilities: Some(capabilities),
                         operator_summary: Some(operator_summary),
-                        truncation: Some(RunnerTruncation {
-                            omitted_generations: generation_count
-                                .saturating_sub(generation_inventory.len()),
-                            omitted_sessions: 0,
-                            evidence_ref: format!("runner:{}:generation-inventory", id),
-                            full_command: format!("homeboy runner status {} --full", shell_arg(id)),
-                        }),
-                        generation_inventory,
-                        retirement_readiness,
                         probe_degradations: readonly_probe::take_degradations(),
                         ..Default::default()
                     },
@@ -109,8 +80,6 @@ pub(super) fn status(
                     connection: Some(RunnerConnectionOutput::Status(Box::new(
                         sanitized_status_for_output(report),
                     ))),
-                    generation_inventory,
-                    retirement_readiness,
                     preferred_lab_runner,
                     selected_lab_runner,
                     managed_followups,
@@ -130,14 +99,6 @@ pub(super) fn status(
     let runners = runner::list()?;
     let sessions = non_local_sessions(&runners, runner::persisted_statuses()?);
     let capabilities = execution_capabilities(&runners, &sessions, Some(&lab_readiness));
-    let mut retirement_readiness = std::collections::BTreeMap::new();
-    for report in &sessions {
-        for (generation, reason) in
-            homeboy::runner::persisted_retirement_verdicts(&report.runner_id)?
-        {
-            retirement_readiness.insert(format!("{}/{}", report.runner_id, generation), reason);
-        }
-    }
     if !full {
         let omitted = sessions.len().saturating_sub(DEFAULT_STATUS_SESSION_LIMIT);
         let sessions = sessions
@@ -150,10 +111,8 @@ pub(super) fn status(
                 command: "runner.status".to_string(),
                 extra: RunnerExtra {
                     operator_summaries: sessions,
-                    retirement_readiness,
                     execution_capabilities: Some(capabilities),
                     truncation: Some(RunnerTruncation {
-                        omitted_generations: 0,
                         omitted_sessions: omitted,
                         evidence_ref: "runner:session-inventory".to_string(),
                         full_command: "homeboy runner status --full".to_string(),
@@ -202,7 +161,6 @@ pub(super) fn status(
                     .collect(),
                 execution_capabilities: Some(capabilities),
                 inspection: Some(inspection),
-                retirement_readiness,
                 preferred_lab_runner,
                 selected_lab_runner,
                 managed_followups,
@@ -362,123 +320,16 @@ pub(super) fn execution_capabilities_with_local_placement(
 pub(super) fn reconcile(
     id: &str,
     confirm_workload_processes_absent: bool,
-    release_unverified_evidence: bool,
 ) -> CmdResult<RunnerOutput> {
-    let policy = runner::GenerationReconcilePolicy {
-        release_unverified_evidence,
-        release_stopped_generation_jobs: confirm_workload_processes_absent,
-    };
-    let (reconcile_outcome, attested_recovery) = if confirm_workload_processes_absent {
-        // The attestation first releases what the controller can prove: job
-        // owners pinning a draining generation whose daemon is proven stopped
-        // (#15779). Only remaining blockers go on to the runner's own
-        // lifecycle plan, and a plan that needs no attestation is not an error
-        // once the controller-side release has run.
-        let controller = runner::reconcile_status_with_outcome_with_policy(id, policy)?;
-        if controller.retirement_blockers.is_empty() {
-            (controller, None)
-        } else {
-            match runner::reconcile_status_with_outcome_with_remote_attestation(id) {
-                Ok(with_attestation) => {
-                    let outcome = if release_unverified_evidence {
-                        runner::reconcile_status_with_outcome_with_policy(id, policy)?
-                    } else {
-                        with_attestation.outcome
-                    };
-                    (outcome, with_attestation.attested)
-                }
-                Err(error)
-                    if error
-                        .message
-                        .contains("does not call for a workload-absence attestation") =>
-                {
-                    (controller, None)
-                }
-                Err(error) => return Err(error),
-            }
-        }
+    let (report, attested_recovery) = if confirm_workload_processes_absent {
+        // The attestation runs only when the runner's lifecycle plan is blocked
+        // by daemon ownership evidence; otherwise this is the plain reconcile.
+        let outcome = runner::reconcile_status_with_remote_attestation(id)?;
+        (outcome.status, outcome.attested)
     } else {
-        (
-            runner::reconcile_status_with_outcome_with_policy(id, policy)?,
-            None,
-        )
+        (runner::reconcile_status(id)?, None)
     };
-    let evidence_blocked = reconcile_outcome.evidence_blocked_generation_ids.clone();
-    let released = reconcile_outcome.released_unverified_evidence.clone();
-    let released_stopped_jobs = reconcile_outcome.released_stopped_generation_jobs.clone();
-    let stopped_job_blocked = reconcile_outcome.stopped_generation_job_owner_ids.clone();
-    let (mut output, mut exit_code) = reconcile_output(
-        id,
-        reconcile_outcome.status,
-        reconcile_outcome.retired_generation_ids,
-    )?;
-    if let Some(reconciliation) = output.extra.reconciliation.as_mut() {
-        reconciliation.retirement_blockers = reconcile_outcome.retirement_blockers;
-        reconciliation.retained_evidence_generation_count =
-            reconcile_outcome.retained_evidence_generation_count;
-        reconciliation.postcondition = "healthy admission, verified retained evidence, and no blocked draining process retirement";
-        if !reconciliation.retirement_blockers.is_empty() {
-            reconciliation.status = if reconciliation.retired_generation_count > 0 {
-                RunnerReconciliationStatus::PartialProgress
-            } else {
-                RunnerReconciliationStatus::Blocked
-            };
-            if reconciliation.remaining_blocker.is_none() {
-                if !stopped_job_blocked.is_empty()
-                    && reconciliation
-                        .retirement_blockers
-                        .keys()
-                        .all(|generation| stopped_job_blocked.contains_key(generation))
-                {
-                    // Every blocker is a proven-stopped generation pinned only
-                    // by job owners its dead daemon can never settle. Name the
-                    // one operator action that releases them (#15779) rather
-                    // than the reconnect/reconcile loop.
-                    reconciliation.remaining_blocker =
-                        Some("stopped_generation_job_owners".to_string());
-                    reconciliation.next_action = Some(format!(
-                        "homeboy runner reconcile {} --confirm-workload-processes-absent",
-                        shell_arg(id)
-                    ));
-                    reconciliation.retry_predicate = Some(
-                        "the operator attests that no workload process from the stopped daemon survives on the runner".to_string(),
-                    );
-                } else if evidence_only_blockers(
-                    &reconciliation.retirement_blockers,
-                    &evidence_blocked,
-                ) {
-                    // Every blocker is an idle generation whose retained
-                    // evidence cannot be verified. Name the one explicit
-                    // operator action instead of dead-ending (#15653).
-                    reconciliation.remaining_blocker =
-                        Some("unverified_retained_evidence".to_string());
-                    reconciliation.next_action = Some(format!(
-                        "homeboy runner reconcile {} --release-unverified-evidence",
-                        shell_arg(id)
-                    ));
-                    reconciliation.retry_predicate = Some(
-                        "the operator releases the unverifiable evidence, or its source inventory becomes verifiable".to_string(),
-                    );
-                } else {
-                    reconciliation.remaining_blocker =
-                        Some("generation_retirement_blocked".to_string());
-                    reconciliation.retry_predicate = Some(
-                        "active work completes or the reported ownership/evidence blocker is resolved"
-                            .to_string(),
-                    );
-                }
-            }
-            exit_code = 1;
-        }
-        reconciliation.released_unverified_evidence = released.clone();
-        reconciliation.released_stopped_generation_jobs = released_stopped_jobs;
-    }
-    if !released.is_empty() {
-        output.extra.operator_hints.push(format!(
-            "retired {} generation(s) despite unverifiable retained evidence; their run and artifact ownership is kept as retired evidence and nothing was deleted",
-            released.len()
-        ));
-    }
+    let (mut output, exit_code) = reconcile_output(id, report)?;
     if let Some(applied) = attested_recovery {
         output.extra.operator_hints.push(format!(
             "applied remote attested dead-lease recovery for lease `{}` in `{}` ({} job(s) terminalized): {}",
@@ -491,26 +342,14 @@ pub(super) fn reconcile(
     Ok((output, exit_code))
 }
 
-/// Whether every retirement blocker is an idle generation blocked only by
-/// retained-evidence verification.
-pub(super) fn evidence_only_blockers(
-    blockers: &std::collections::BTreeMap<String, String>,
-    evidence_blocked: &std::collections::BTreeSet<String>,
-) -> bool {
-    !blockers.is_empty() && blockers.keys().all(|key| evidence_blocked.contains(key))
-}
-
 pub(super) fn reconcile_output(
     id: &str,
     report: homeboy::runner::runners::RunnerStatusReport,
-    retired_generation_ids: Vec<String>,
 ) -> CmdResult<RunnerOutput> {
-    let admission_snapshot = runner::runner_admission_snapshot_for_status(report)?;
+    let admission_snapshot = runner::runner_admission_snapshot_for_status(report);
     let report = admission_snapshot.status;
-    let generation_inventory = admission_snapshot.generation_inventory;
     let admission_summary = admission_snapshot.summary;
-    let reconciliation =
-        reconciliation_outcome(id, retired_generation_ids, &report, &admission_summary);
+    let reconciliation = reconciliation_outcome(id, &report, &admission_summary);
     let exit_code = if reconciliation.status == RunnerReconciliationStatus::Converged {
         0
     } else {
@@ -527,7 +366,6 @@ pub(super) fn reconcile_output(
                 connection: Some(RunnerConnectionOutput::Status(Box::new(
                     sanitized_status_for_output(report.clone()),
                 ))),
-                generation_inventory,
                 operator_hints: runner_status_operator_hints(&report),
                 // Reconcile has already consumed the current evidence. A repeat
                 // is valid only after new evidence, never as its own follow-up.
@@ -545,29 +383,18 @@ pub(super) fn reconcile_output(
 
 pub(crate) fn reconciliation_outcome(
     runner_id: &str,
-    retired_generation_ids: Vec<String>,
     report: &homeboy::runner::runners::RunnerStatusReport,
     admission: &homeboy::runner::runners::RunnerAdmissionSummary,
 ) -> RunnerReconciliationOutcome {
-    let retired_generation_count = retired_generation_ids.len();
-    let unresolved_projection = admission.unresolved_retained_projection_count > 0
-        || !admission.unresolved_generation_ids.is_empty();
-    if admission.accepting_jobs && !unresolved_projection {
+    if admission.accepting_jobs {
         return RunnerReconciliationOutcome {
-            changed_state: reconciliation_changed_state(retired_generation_count),
-            owner: "runner_generations",
-            scope: format!("runner `{runner_id}` and its persisted daemon generations"),
-            postcondition: "the runner accepts jobs with no unresolved generation projection",
+            owner: RECONCILIATION_OWNER,
+            scope: format!("runner `{runner_id}` and its current daemon session"),
+            postcondition: RECONCILIATION_POSTCONDITION,
             status: RunnerReconciliationStatus::Converged,
             remaining_blocker: None,
             next_action: None,
             retry_predicate: None,
-            retired_generation_count,
-            retired_generation_ids,
-            retirement_blockers: Default::default(),
-            retained_evidence_generation_count: 0,
-            released_unverified_evidence: Default::default(),
-            released_stopped_generation_jobs: Default::default(),
         };
     }
 
@@ -576,111 +403,87 @@ pub(crate) fn reconciliation_outcome(
         "homeboy runner reconcile {} --confirm-workload-processes-absent",
         shell_arg(runner_id)
     );
-    let (remaining_blocker, next_action, retry_predicate) = if terminal_daemon_ownership_blocker(
-        report,
-    ) {
-        // The attested reconcile is the one action that can still recover this
-        // state, so the blocked plan names it exactly and never dead-ends
-        // (#15556). Applying it remains the operator's explicit choice.
-        (
-            "daemon_ownership_evidence_unavailable".to_string(),
-            Some(attested_reconcile_command),
-            format!(
-                "ownership evidence required before daemon recovery: {}",
-                report
-                    .daemon_freshness
-                    .as_ref()
-                    .and_then(|freshness| freshness.ownership_evidence.as_deref())
-                    .unwrap_or("no ownership evidence was recorded")
-            ),
-        )
-    } else if unresolved_projection {
-        (
-                "unresolved_generation_projection".to_string(),
-                Some(runner_reconnect_command(runner_id)),
-                "reconnect publishes a reachable generation endpoint or the live daemon remains idle with no claimed retained jobs"
-                    .to_string(),
+    let (remaining_blocker, next_action, retry_predicate) =
+        if terminal_daemon_ownership_blocker(report) {
+            // The attested reconcile is the one action that can still recover this
+            // state, so the blocked plan names it exactly and never dead-ends
+            // (#15556). Applying it remains the operator's explicit choice.
+            (
+                "daemon_ownership_evidence_unavailable".to_string(),
+                Some(attested_reconcile_command),
+                format!(
+                    "ownership evidence required before daemon recovery: {}",
+                    report
+                        .daemon_freshness
+                        .as_ref()
+                        .and_then(|freshness| freshness.ownership_evidence.as_deref())
+                        .unwrap_or("no ownership evidence was recorded")
+                ),
             )
-    } else if !admission.connected {
-        (
-            "runner_disconnected".to_string(),
-            Some(
-                reconciliation_remediation(&reconcile_command, admission, report)
-                    .unwrap_or_else(|| format!("homeboy runner connect {}", shell_arg(runner_id))),
-            ),
-            "the runner reconnects and publishes a current daemon session".to_string(),
-        )
-    } else if !admission.daemon_fresh {
-        (
-            daemon_freshness_blocker(report),
-            Some(
-                reconciliation_remediation(&reconcile_command, admission, report).unwrap_or_else(
-                    || {
-                        format!(
-                            "homeboy runner doctor {} --scope lab-offload",
-                            shell_arg(runner_id)
-                        )
-                    },
+        } else if !admission.connected {
+            (
+                "runner_disconnected".to_string(),
+                Some(
+                    reconciliation_remediation(&reconcile_command, admission, report)
+                        .unwrap_or_else(|| {
+                            format!("homeboy runner connect {}", shell_arg(runner_id))
+                        }),
                 ),
-            ),
-            "daemon_fresh=true after the selected daemon repair completes".to_string(),
-        )
-    } else if !admission.daemon_compatible {
-        (
-            "daemon_compatibility".to_string(),
-            Some(
-                reconciliation_remediation(&reconcile_command, admission, report).unwrap_or_else(
-                    || {
-                        format!(
-                            "homeboy runner doctor {} --scope lab-offload",
-                            shell_arg(runner_id)
-                        )
-                    },
+                "the runner reconnects and publishes a current daemon session".to_string(),
+            )
+        } else if !admission.daemon_fresh {
+            (
+                daemon_freshness_blocker(report),
+                Some(
+                    reconciliation_remediation(&reconcile_command, admission, report)
+                        .unwrap_or_else(|| {
+                            format!(
+                                "homeboy runner doctor {} --scope lab-offload",
+                                shell_arg(runner_id)
+                            )
+                        }),
                 ),
-            ),
-            "daemon_compatible=true after the selected daemon identity is repaired".to_string(),
-        )
-    } else if admission.blocking_generation.is_some() {
-        (
-            "retained_generation_ownership".to_string(),
-            Some(format!(
-                "homeboy runner job list {} --active",
-                shell_arg(runner_id)
-            )),
-            "the retained generation has no authoritative active job owners".to_string(),
-        )
-    } else {
-        (
-            "admission_unavailable".to_string(),
-            Some(format!(
-                "homeboy runner status {} --full",
-                shell_arg(runner_id)
-            )),
-            "an authoritative active-job view is available".to_string(),
-        )
-    };
+                "daemon_fresh=true after the selected daemon repair completes".to_string(),
+            )
+        } else if !admission.daemon_compatible {
+            (
+                "daemon_compatibility".to_string(),
+                Some(
+                    reconciliation_remediation(&reconcile_command, admission, report)
+                        .unwrap_or_else(|| {
+                            format!(
+                                "homeboy runner doctor {} --scope lab-offload",
+                                shell_arg(runner_id)
+                            )
+                        }),
+                ),
+                "daemon_compatible=true after the selected daemon identity is repaired".to_string(),
+            )
+        } else {
+            (
+                "admission_unavailable".to_string(),
+                Some(format!(
+                    "homeboy runner status {} --full",
+                    shell_arg(runner_id)
+                )),
+                "an authoritative active-job view is available".to_string(),
+            )
+        };
 
     RunnerReconciliationOutcome {
-        changed_state: reconciliation_changed_state(retired_generation_count),
-        owner: "runner_generations",
-        scope: format!("runner `{runner_id}` and its persisted daemon generations"),
-        postcondition: "the runner accepts jobs with no unresolved generation projection",
-        status: if retired_generation_count > 0 {
-            RunnerReconciliationStatus::PartialProgress
-        } else {
-            RunnerReconciliationStatus::Blocked
-        },
+        owner: RECONCILIATION_OWNER,
+        scope: format!("runner `{runner_id}` and its current daemon session"),
+        postcondition: RECONCILIATION_POSTCONDITION,
+        status: RunnerReconciliationStatus::Blocked,
         remaining_blocker: Some(remaining_blocker),
         next_action,
         retry_predicate: Some(retry_predicate),
-        retired_generation_count,
-        retired_generation_ids,
-        retirement_blockers: Default::default(),
-        retained_evidence_generation_count: 0,
-        released_unverified_evidence: Default::default(),
-        released_stopped_generation_jobs: Default::default(),
     }
 }
+
+/// State plane that owns direct-runner session reconciliation.
+const RECONCILIATION_OWNER: &str = "runner_session";
+const RECONCILIATION_POSTCONDITION: &str = "the runner's current daemon session accepts jobs";
 
 fn terminal_daemon_ownership_blocker(report: &RunnerStatusReport) -> bool {
     report
@@ -704,19 +507,6 @@ fn terminal_daemon_ownership_diagnostic(report: &RunnerStatusReport) -> Option<S
 
 fn terminal_daemon_ownership_blocks_mutation(report: &RunnerStatusReport) -> bool {
     terminal_daemon_ownership_blocker(report)
-}
-
-fn reconciliation_changed_state(retired_generation_count: usize) -> String {
-    if retired_generation_count == 0 {
-        "unchanged".to_string()
-    } else {
-        format!("retired_generations:{retired_generation_count}")
-    }
-}
-
-fn runner_reconnect_command(runner_id: &str) -> String {
-    let runner = shell_arg(runner_id);
-    format!("homeboy runner disconnect {runner} && homeboy runner connect {runner}")
 }
 
 fn reconciliation_remediation(
@@ -1737,7 +1527,7 @@ fn is_terminal_ownership_mutating_followup(followup: &LabFollowup) -> bool {
 pub(crate) fn selected_admission_summary(
     selected_status: Option<&RunnerStatusReport>,
 ) -> Option<runner::RunnerAdmissionSummary> {
-    selected_status.map(|report| report.admission_summary(0))
+    selected_status.map(|report| report.admission_summary())
 }
 
 /// Recovery targets the controller release; refresh enforces the version guard.
@@ -2092,11 +1882,13 @@ fn runner_status_operator_commands_with_recovery_guidance(
 
     if report.connected {
         commands.push(RunnerOperatorCommand {
-            scope: "generation_reconcile",
+            scope: "session_reconcile",
             runner_id: report.runner_id.clone(),
             job_id: None,
             command: format!("homeboy runner reconcile {}", shell_arg(&report.runner_id)),
-            description: "Persist fresh generation observations and retire only verified drained daemon generations.".to_string(),
+            description:
+                "Reconcile the current daemon session's metadata and settle its terminal jobs."
+                    .to_string(),
         });
     }
 
@@ -2161,7 +1953,7 @@ fn is_terminal_ownership_mutating_command(command: &RunnerOperatorCommand) -> bo
         "unknown_owner_reconcile"
             | "agent_task_retry"
             | "job_cancel"
-            | "generation_reconcile"
+            | "session_reconcile"
             | "daemon_refresh"
             | "daemon_reconcile_split_view"
             | "daemon_reconnect_fresh_idle"

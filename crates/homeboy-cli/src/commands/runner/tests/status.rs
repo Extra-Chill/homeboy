@@ -11,8 +11,8 @@ use homeboy::core::daemon::{
     DaemonFreshnessReport, DaemonRecoveryEvidence, DaemonRepairStep, DaemonStaleReasonCode,
 };
 use homeboy::runner::runners::{
-    self as runner, Runner, RunnerDaemonGenerationStatus, RunnerDaemonLeaseVerdict, RunnerSession,
-    RunnerStatusReport, RunnerTunnelMode,
+    self as runner, Runner, RunnerDaemonLeaseVerdict, RunnerSession, RunnerStatusReport,
+    RunnerTunnelMode,
 };
 use homeboy::runner::{RunnerActiveJobError, RunnerActiveJobSource, RunnerActiveJobState};
 use homeboy_runner_contract::RunnerKind;
@@ -92,27 +92,18 @@ fn admission_fixture() -> homeboy::runner::runners::RunnerAdmissionSummary {
         accepting_jobs: false,
         active_job_count: Some(0),
         live_daemon_job_count: Some(0),
-        retained_durable_job_count: 0,
-        unresolved_retained_projection_count: 0,
-        admission_blocking_job_ids: Vec::new(),
-        unresolved_job_owners: Vec::new(),
-        unresolved_generation_ids: Vec::new(),
         stale_job_count: 0,
         daemon_build_identity: None,
-        blocking_generation: None,
-        draining_generation_count: 0,
         safe_to_rotate: false,
         next_action: None,
     }
 }
 
 #[test]
-fn reconcile_reports_retired_generation_progress_with_remaining_skew_and_ownership() {
+fn reconcile_reports_remaining_daemon_skew() {
     let mut admission = admission_fixture();
     admission.daemon_fresh = false;
     admission.daemon_lease_verdict.fresh = false;
-    admission.blocking_generation = Some("lease-retained".to_string());
-    admission.admission_blocking_job_ids = vec!["job-retained".to_string()];
     admission.next_action =
         Some("homeboy runner refresh-homeboy homeboy-lab --reconnect".to_string());
 
@@ -134,22 +125,14 @@ fn reconcile_reports_retired_generation_progress_with_remaining_skew_and_ownersh
         termination_evidence: None,
         repair_plan: Vec::new(),
     });
-    let outcome = reconciliation_outcome(
-        "homeboy-lab",
-        vec!["lease-retired".to_string()],
-        &report,
-        &admission,
-    );
+    let outcome = reconciliation_outcome("homeboy-lab", &report, &admission);
 
-    assert_eq!(outcome.status, RunnerReconciliationStatus::PartialProgress);
-    assert_eq!(outcome.owner, "runner_generations");
+    assert_eq!(outcome.status, RunnerReconciliationStatus::Blocked);
+    assert_eq!(outcome.owner, "runner_session");
     assert_eq!(
         outcome.postcondition,
-        "the runner accepts jobs with no unresolved generation projection"
+        "the runner's current daemon session accepts jobs"
     );
-    assert_eq!(outcome.retired_generation_count, 1);
-    assert_eq!(outcome.retired_generation_ids, ["lease-retired"]);
-    assert_eq!(outcome.changed_state, "retired_generations:1");
     assert_eq!(
         outcome.remaining_blocker.as_deref(),
         Some("daemon_version_mismatch")
@@ -165,28 +148,24 @@ fn reconcile_reports_retired_generation_progress_with_remaining_skew_and_ownersh
 }
 
 #[test]
-fn reconcile_reports_unchanged_blocked_state_without_self_recommendation() {
+fn reconcile_reports_blocked_state_without_self_recommendation() {
     let mut admission = admission_fixture();
-    admission.unresolved_retained_projection_count = 1;
     admission.next_action = Some("homeboy runner reconcile homeboy-lab".to_string());
 
-    let outcome =
-        reconciliation_outcome("homeboy-lab", Vec::new(), &connected_report(), &admission);
+    let outcome = reconciliation_outcome("homeboy-lab", &connected_report(), &admission);
 
     assert_eq!(outcome.status, RunnerReconciliationStatus::Blocked);
-    assert_eq!(outcome.retired_generation_count, 0);
-    assert_eq!(outcome.changed_state, "unchanged");
     assert_eq!(
         outcome.remaining_blocker.as_deref(),
-        Some("unresolved_generation_projection")
+        Some("admission_unavailable")
     );
     assert_eq!(
         outcome.next_action.as_deref(),
-        Some("homeboy runner disconnect homeboy-lab && homeboy runner connect homeboy-lab")
+        Some("homeboy runner status homeboy-lab --full")
     );
     assert_eq!(
         outcome.retry_predicate.as_deref(),
-        Some("reconnect publishes a reachable generation endpoint or the live daemon remains idle with no claimed retained jobs")
+        Some("an authoritative active-job view is available")
     );
 }
 
@@ -196,81 +175,12 @@ fn reconcile_reports_ready_admission_as_converged() {
     admission.accepting_jobs = true;
     admission.safe_to_rotate = true;
 
-    let outcome =
-        reconciliation_outcome("homeboy-lab", Vec::new(), &connected_report(), &admission);
+    let outcome = reconciliation_outcome("homeboy-lab", &connected_report(), &admission);
 
     assert_eq!(outcome.status, RunnerReconciliationStatus::Converged);
-    assert_eq!(outcome.retired_generation_count, 0);
-    assert_eq!(outcome.changed_state, "unchanged");
     assert_eq!(outcome.remaining_blocker, None);
     assert_eq!(outcome.next_action, None);
     assert_eq!(outcome.retry_predicate, None);
-}
-
-#[test]
-fn reconcile_retained_owner_requires_owner_settlement_before_retry() {
-    let mut admission = admission_fixture();
-    admission.blocking_generation = Some("lease-retained".to_string());
-    admission.admission_blocking_job_ids = vec!["job-retained".to_string()];
-    admission.next_action = Some("homeboy runner reconcile homeboy-lab".to_string());
-
-    let outcome =
-        reconciliation_outcome("homeboy-lab", Vec::new(), &connected_report(), &admission);
-
-    assert_eq!(outcome.status, RunnerReconciliationStatus::Blocked);
-    assert_eq!(outcome.changed_state, "unchanged");
-    assert_eq!(
-        outcome.remaining_blocker.as_deref(),
-        Some("retained_generation_ownership")
-    );
-    assert_eq!(
-        outcome.next_action.as_deref(),
-        Some("homeboy runner job list homeboy-lab --active")
-    );
-    assert_eq!(
-        outcome.retry_predicate.as_deref(),
-        Some("the retained generation has no authoritative active job owners")
-    );
-}
-
-#[test]
-fn reconcile_does_not_converge_when_admission_accepts_with_unresolved_projection() {
-    let mut admission = admission_fixture();
-    admission.accepting_jobs = true;
-    admission.unresolved_retained_projection_count = 1;
-    admission.unresolved_generation_ids = vec!["lease-old".to_string()];
-    admission.next_action = Some("homeboy runner reconcile homeboy-lab".to_string());
-
-    let outcome =
-        reconciliation_outcome("homeboy-lab", Vec::new(), &connected_report(), &admission);
-
-    assert_eq!(outcome.status, RunnerReconciliationStatus::Blocked);
-    assert_eq!(
-        outcome.remaining_blocker.as_deref(),
-        Some("unresolved_generation_projection")
-    );
-    assert_eq!(
-        outcome.next_action.as_deref(),
-        Some("homeboy runner disconnect homeboy-lab && homeboy runner connect homeboy-lab")
-    );
-}
-
-#[test]
-fn reconcile_converges_after_unclaimed_projection_retirement() {
-    let mut admission = admission_fixture();
-    admission.accepting_jobs = true;
-    admission.safe_to_rotate = true;
-
-    let outcome = reconciliation_outcome(
-        "homeboy-lab",
-        vec!["lease-old".to_string()],
-        &connected_report(),
-        &admission,
-    );
-
-    assert_eq!(outcome.status, RunnerReconciliationStatus::Converged);
-    assert_eq!(outcome.retired_generation_ids, ["lease-old"]);
-    assert_eq!(outcome.next_action, None);
 }
 
 #[test]
@@ -278,12 +188,11 @@ fn runner_command_failure_next_action_is_never_the_failed_command() {
     let reconcile = "homeboy runner reconcile homeboy-lab";
     let mut cases = Vec::new();
 
-    let mut unresolved = admission_fixture();
-    unresolved.unresolved_retained_projection_count = 1;
-    unresolved.next_action = Some(reconcile.to_string());
+    let mut unavailable = admission_fixture();
+    unavailable.next_action = Some(reconcile.to_string());
     cases.push((
-        "unresolved_projection",
-        reconciliation_outcome("homeboy-lab", Vec::new(), &connected_report(), &unresolved),
+        "admission_unavailable",
+        reconciliation_outcome("homeboy-lab", &connected_report(), &unavailable),
     ));
 
     let mut disconnected = admission_fixture();
@@ -291,20 +200,15 @@ fn runner_command_failure_next_action_is_never_the_failed_command() {
     disconnected.next_action = Some(reconcile.to_string());
     cases.push((
         "disconnected",
-        reconciliation_outcome(
-            "homeboy-lab",
-            Vec::new(),
-            &disconnected_report(),
-            &disconnected,
-        ),
+        reconciliation_outcome("homeboy-lab", &disconnected_report(), &disconnected),
     ));
 
-    let mut ownership = admission_fixture();
-    ownership.blocking_generation = Some("lease-retained".to_string());
-    ownership.next_action = Some(reconcile.to_string());
+    let mut incompatible = admission_fixture();
+    incompatible.daemon_compatible = false;
+    incompatible.next_action = Some(reconcile.to_string());
     cases.push((
-        "retained_ownership",
-        reconciliation_outcome("homeboy-lab", Vec::new(), &connected_report(), &ownership),
+        "daemon_compatibility",
+        reconciliation_outcome("homeboy-lab", &connected_report(), &incompatible),
     ));
 
     let mut stale = admission_fixture();
@@ -331,7 +235,7 @@ fn runner_command_failure_next_action_is_never_the_failed_command() {
     });
     cases.push((
         "daemon_freshness",
-        reconciliation_outcome("homeboy-lab", Vec::new(), &stale_report, &stale),
+        reconciliation_outcome("homeboy-lab", &stale_report, &stale),
     ));
 
     for (label, outcome) in cases {
@@ -372,7 +276,7 @@ fn reconcile_uses_authoritative_non_version_freshness_blocker() {
     admission.daemon_fresh = false;
     admission.daemon_lease_verdict.fresh = false;
 
-    let outcome = reconciliation_outcome("homeboy-lab", Vec::new(), &report, &admission);
+    let outcome = reconciliation_outcome("homeboy-lab", &report, &admission);
 
     assert_eq!(
         outcome.remaining_blocker.as_deref(),
@@ -406,8 +310,8 @@ fn unavailable_daemon_ownership_is_terminal_across_status_and_reconcile() {
         )],
     });
 
-    let admission = report.admission_summary(0);
-    let outcome = reconciliation_outcome("homeboy lab", Vec::new(), &report, &admission);
+    let admission = report.admission_summary();
+    let outcome = reconciliation_outcome("homeboy lab", &report, &admission);
 
     assert!(!admission.accepting_jobs);
     assert_eq!(admission.next_action, None);
@@ -437,8 +341,8 @@ fn unavailable_daemon_ownership_is_terminal_across_status_and_reconcile() {
         .as_mut()
         .expect("freshness")
         .recovery_evidence = None;
-    let admission = report.admission_summary(0);
-    let outcome = reconciliation_outcome("homeboy lab", Vec::new(), &report, &admission);
+    let admission = report.admission_summary();
+    let outcome = reconciliation_outcome("homeboy lab", &report, &admission);
     assert_eq!(
         outcome.next_action.as_deref(),
         Some("homeboy runner reconcile 'homeboy lab' --confirm-workload-processes-absent")
@@ -450,7 +354,7 @@ fn unavailable_daemon_ownership_is_terminal_across_status_and_reconcile() {
 }
 
 #[test]
-fn terminal_ownership_dominates_unresolved_retained_generation_projections() {
+fn terminal_ownership_dominates_status_followups() {
     let mut report = disconnected_report();
     let mut session = runner_session_fixture();
     session.runner_id = "homeboy lab".to_string();
@@ -473,28 +377,12 @@ fn terminal_ownership_dominates_unresolved_retained_generation_projections() {
         termination_evidence: None,
         repair_plan: Vec::new(),
     });
-    let generations = vec![RunnerDaemonGenerationStatus {
-        generation: "lease-old".to_string(),
-        admission_owner: false,
-        drain_state: homeboy_lab_runner::RollingDrainState::Draining,
-        active_job_count: 2,
-        observed_active_job_count: None,
-        active_job_count_authoritative: false,
-        job_owner_count: 2,
-        run_owner_count: 0,
-        artifact_owner_count: 0,
-        homeboy_build_identity: None,
-        remote_daemon_lease_id: Some("lease-old".to_string()),
-        remote_daemon_address: None,
-        local_url: None,
-    }];
-
-    let admission = report.admission_summary_with_generations(&generations, &[], 1);
+    let admission = report.admission_summary();
     let summary = operator_summary(&report);
     let followups =
         runner_followups_with_admission(Some("homeboy lab"), Some(&report), Some(&admission));
 
-    assert_eq!(admission.unresolved_retained_projection_count, 2);
+    assert!(!admission.accepting_jobs);
     assert_eq!(
         admission.next_action, None,
         "compact status must not reconcile"
@@ -522,7 +410,7 @@ fn reconcile_command_output_reports_exit_state_and_removes_self_loop() {
     session.runner_id = "homeboy-lab".to_string();
     report.session = Some(session);
     report.active_job_state = RunnerActiveJobState::Unavailable;
-    let output = reconcile_output("homeboy-lab", report, Vec::new()).expect("reconcile output");
+    let output = reconcile_output("homeboy-lab", report).expect("reconcile output");
 
     assert_eq!(output.1, 1);
     let (json, exit_code) = map_cmd_result_to_json(Ok(output));
@@ -532,13 +420,12 @@ fn reconcile_command_output_reports_exit_state_and_removes_self_loop() {
     assert_eq!(serialized["exit_code"], 1);
     assert_eq!(serialized["status"], "failed");
     assert_eq!(serialized["data"]["reconciliation"]["status"], "blocked");
-    assert_eq!(
-        serialized["data"]["reconciliation"]["changed_state"],
-        "unchanged"
-    );
+    assert!(serialized["data"]["reconciliation"]
+        .get("changed_state")
+        .is_none());
     assert_eq!(
         serialized["data"]["reconciliation"]["owner"],
-        "runner_generations"
+        "runner_session"
     );
     assert_eq!(
         serialized["data"]["reconciliation"]["remaining_blocker"],
@@ -715,7 +602,7 @@ fn direct_runner_status_commands_include_lifecycle_operations() {
 }
 
 #[test]
-fn direct_runner_status_exposes_the_explicit_generation_reconcile_command() {
+fn direct_runner_status_exposes_the_explicit_session_reconcile_command() {
     let report = RunnerStatusReport {
         runner_id: "homeboy-lab".to_string(),
         connected: true,
@@ -762,7 +649,7 @@ fn direct_runner_status_exposes_the_explicit_generation_reconcile_command() {
     assert!(runner_status_operator_commands(&report)
         .iter()
         .any(|command| {
-            command.scope == "generation_reconcile"
+            command.scope == "session_reconcile"
                 && command.command == "homeboy runner reconcile homeboy-lab"
         }));
 }
@@ -851,7 +738,7 @@ fn disconnected_split_view_status_exposes_bounded_reconciliation_command() {
         .all(|command| command.scope != "daemon_reconcile_split_view"));
     assert!(runner_status_operator_commands(&report)
         .iter()
-        .all(|command| command.scope != "generation_reconcile"));
+        .all(|command| command.scope != "session_reconcile"));
 }
 
 #[test]
@@ -936,7 +823,7 @@ fn admission_followups_replace_generic_restart_for_ambiguous_missing_lease() {
         termination_evidence: None,
         repair_plan: Vec::new(),
     });
-    let admission = report.admission_summary(0);
+    let admission = report.admission_summary();
 
     let followups =
         runner_followups_with_admission(Some("homeboy-lab"), Some(&report), Some(&admission));
@@ -990,24 +877,8 @@ fn terminal_ownership_suppresses_mutating_full_status_guidance_across_projection
             "homeboy runner connect homeboy-lab --reconcile-leaseless-orphans",
         )],
     });
-    let generations = vec![RunnerDaemonGenerationStatus {
-        generation: "lease-retained".to_string(),
-        admission_owner: false,
-        drain_state: homeboy_lab_runner::RollingDrainState::Draining,
-        active_job_count: 2,
-        observed_active_job_count: None,
-        active_job_count_authoritative: false,
-        job_owner_count: 2,
-        run_owner_count: 0,
-        artifact_owner_count: 0,
-        homeboy_build_identity: None,
-        remote_daemon_lease_id: Some("lease-retained".to_string()),
-        remote_daemon_address: None,
-        local_url: None,
-    }];
-
-    let admission = report.admission_summary_with_generations(&generations, &[], 1);
-    let outcome = reconciliation_outcome("homeboy-lab", Vec::new(), &report, &admission);
+    let admission = report.admission_summary();
+    let outcome = reconciliation_outcome("homeboy-lab", &report, &admission);
     let followups =
         runner_followups_with_admission(Some("homeboy-lab"), Some(&report), Some(&admission));
     let commands = runner_status_operator_commands(&report);
@@ -1039,7 +910,7 @@ fn terminal_ownership_suppresses_mutating_full_status_guidance_across_projection
             "unknown_owner_reconcile"
                 | "agent_task_retry"
                 | "job_cancel"
-                | "generation_reconcile"
+                | "session_reconcile"
                 | "daemon_refresh"
                 | "daemon_reconcile_split_view"
                 | "daemon_reconnect_fresh_idle"
@@ -1551,7 +1422,7 @@ fn runner_status_actions_preserve_runner_ids_for_every_admission_state() {
     ];
 
     for (state, report, pinned_ref) in cases {
-        let admission = report.admission_summary(0);
+        let admission = report.admission_summary();
         let operator = operator_summary(&report);
 
         if let Some(compact_action) = admission.next_action.as_deref() {
@@ -1770,7 +1641,7 @@ fn controller_local_status_query_never_probes_a_configured_remote_runner() {
 
         let started = std::time::Instant::now();
         let (output, exit_code) =
-            super::super::status::status(Some("local"), false, false).expect("local status");
+            super::super::status::status(Some("local"), false).expect("local status");
 
         assert_eq!(exit_code, 0);
         assert!(output.extra.execution_capabilities.is_none());
@@ -1778,106 +1649,6 @@ fn controller_local_status_query_never_probes_a_configured_remote_runner() {
             started.elapsed() < std::time::Duration::from_secs(1),
             "local status took {:?}",
             started.elapsed()
-        );
-    });
-}
-
-#[test]
-fn status_reports_persisted_retirement_verdict_without_evidence_calls() {
-    homeboy::test_support::with_isolated_home(|_| {
-        use std::io::{Read, Write};
-        use std::sync::{Arc, Mutex};
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        listener.set_nonblocking(true).unwrap();
-        let address = listener.local_addr().unwrap();
-        let requests = Arc::new(Mutex::new(Vec::new()));
-        let seen = requests.clone();
-        let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let stop = done.clone();
-        let server = std::thread::spawn(move || {
-            while !stop.load(std::sync::atomic::Ordering::SeqCst) {
-                if let Ok((mut stream, _)) = listener.accept() {
-                    stream
-                        .set_read_timeout(Some(std::time::Duration::from_secs(1)))
-                        .unwrap();
-                    let mut bytes = [0; 8192];
-                    let n = stream.read(&mut bytes).unwrap_or(0);
-                    seen.lock()
-                        .unwrap()
-                        .push(String::from_utf8_lossy(&bytes[..n]).to_string());
-                    let body = r#"{"data":{"body":{"artifacts":[],"findings":[]}}}"#;
-                    let _ = write!(
-                        stream,
-                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                        body.len(),
-                        body
-                    );
-                } else {
-                    std::thread::sleep(std::time::Duration::from_millis(1));
-                }
-            }
-        });
-        homeboy::core::server::create(r#"{"id":"lab","host":"127.0.0.1","user":"user"}"#, false)
-            .unwrap();
-        runner::create(
-            r#"{"id":"lab","kind":"ssh","server_id":"lab","workspace_root":"/tmp/lab"}"#,
-            false,
-        )
-        .unwrap();
-        let endpoint = serde_json::json!({
-            "runner_id":"lab", "mode":"direct_ssh", "role":"controller",
-            "local_url":format!("http://{address}"), "local_port":address.port(),
-            "homeboy_version":"test", "connected_at":"2026-10-30T00:00:00Z"
-        });
-        let directory = homeboy::core::paths::runner_sessions_dir()
-            .unwrap()
-            .join("lab");
-        std::fs::create_dir_all(&directory).unwrap();
-        std::fs::write(directory.join("generations.json"), serde_json::to_vec(&serde_json::json!({
-            "runner_id":"lab", "admission_owner":"current",
-            "generations": {
-                "current": {"endpoint":endpoint,"drain_state":"admitting","observed_active_jobs":0},
-                "old": {"endpoint":endpoint,"drain_state":"draining","observed_active_jobs":0}
-            },
-            "job_owners":{}, "run_owners":{"retained-run":"old"}, "artifact_owners":{}, "retired_evidence":{}
-        })).unwrap()).unwrap();
-        let store = homeboy::core::observation::ObservationStore::open_initialized().unwrap();
-        store
-            .import_run(&homeboy::core::observation::RunRecord {
-                id: "retained-run".into(),
-                kind: "runner-exec".into(),
-                status: "pass".into(),
-                metadata_json: serde_json::json!({"runner_id":"lab"}),
-                ..Default::default()
-            })
-            .unwrap();
-        let verdict = serde_json::json!({
-            "checked_at":"2026-10-30T00:00:00Z", "state":"blocked",
-            "kind":"retained_evidence", "run_id":"retained-run", "reason":"previous evidence blocker"
-        });
-        std::fs::write(
-            directory.join("retirement-verdicts.state"),
-            serde_json::to_vec(&serde_json::json!({"old":verdict})).unwrap(),
-        )
-        .unwrap();
-        let result = super::super::status::status(None, false, false);
-        let selected_result = super::super::status::status(Some("lab"), false, false);
-        done.store(true, std::sync::atomic::Ordering::SeqCst);
-        server.join().unwrap();
-        let (output, _) = result.unwrap();
-        let (selected_output, _) = selected_result.unwrap();
-        let requests = requests.lock().unwrap();
-        assert!(
-            !requests.iter().any(|request| request.contains("/runs/")),
-            "status read retained evidence: {requests:?}"
-        );
-        assert_eq!(
-            serde_json::to_value(&output.extra.retirement_readiness["lab/old"]).unwrap(),
-            verdict
-        );
-        assert_eq!(
-            serde_json::to_value(&selected_output.extra.retirement_readiness["old"]).unwrap(),
-            verdict
         );
     });
 }
@@ -2055,37 +1826,4 @@ fn sample_runtime_declaration() -> AgentRuntimeRuntimeDiagnosticDeclaration {
         ],
         extra: BTreeMap::new(),
     }
-}
-
-/// #15653: a blocked reconcile names `--release-unverified-evidence` only when
-/// every blocker is an idle generation blocked by evidence verification.
-#[test]
-fn evidence_only_blockers_are_recognized_exactly() {
-    use std::collections::{BTreeMap, BTreeSet};
-    let evidence: BTreeSet<String> = ["gen-a", "gen-b"].map(String::from).into();
-    let only_evidence: BTreeMap<String, String> = [
-        (
-            "gen-a".to_string(),
-            "retained evidence run-1: source artifact inventory unavailable".to_string(),
-        ),
-        (
-            "gen-b".to_string(),
-            "retained evidence run-2: controller run is missing".to_string(),
-        ),
-    ]
-    .into();
-    assert!(super::super::status::evidence_only_blockers(
-        &only_evidence,
-        &evidence
-    ));
-
-    let mut mixed = only_evidence.clone();
-    mixed.insert("gen-c".to_string(), "1 active jobs".to_string());
-    assert!(!super::super::status::evidence_only_blockers(
-        &mixed, &evidence
-    ));
-    assert!(!super::super::status::evidence_only_blockers(
-        &BTreeMap::new(),
-        &evidence
-    ));
 }

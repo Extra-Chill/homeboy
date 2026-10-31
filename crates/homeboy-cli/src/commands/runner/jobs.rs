@@ -38,10 +38,6 @@ fn render_compact_job_table(payload: &serde_json::Value) -> String {
         .get("live_daemon_job_count")
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(0);
-    let retained = payload
-        .get("retained_durable_projection_count")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(0);
     let mut rows = vec![(
         "JOB ID".to_string(),
         "STATE".to_string(),
@@ -53,7 +49,7 @@ fn render_compact_job_table(payload: &serde_json::Value) -> String {
                 job.get("job_id")?.as_str()?.to_string(),
                 job.get("state")
                     .and_then(serde_json::Value::as_str)
-                    .unwrap_or("retained")
+                    .unwrap_or("-")
                     .to_string(),
                 job.get("command")
                     .and_then(serde_json::Value::as_str)
@@ -72,7 +68,7 @@ fn render_compact_job_table(payload: &serde_json::Value) -> String {
                 .unwrap_or(0)
         })
         .collect::<Vec<_>>();
-    let mut output = format!("Live: {live}  Retained: {retained}\n");
+    let mut output = format!("Live: {live}\n");
     for (index, row) in rows.iter().enumerate() {
         output.push_str(&format!(
             "{:<width0$}  {:<width1$}  {}\n",
@@ -105,7 +101,6 @@ pub(super) fn job(command: RunnerJobCommand) -> CmdResult<RunnerJobCommandOutput
             queued,
             terminal,
             all,
-            generation,
             correlation,
             ..
         } => Ok((
@@ -116,7 +111,6 @@ pub(super) fn job(command: RunnerJobCommand) -> CmdResult<RunnerJobCommandOutput
                     queued,
                     terminal,
                     all,
-                    generation,
                     correlation,
                 },
             )?)),
@@ -146,18 +140,15 @@ struct JobListFilter {
     queued: bool,
     terminal: bool,
     all: bool,
-    generation: Option<String>,
     correlation: Option<String>,
 }
 
 fn job_list(runner_id: &str, filter: JobListFilter) -> homeboy::core::Result<RunnerJobListOutput> {
     let report = runner::status(runner_id)?;
-    let owners = runner::runner_generation_job_owners(runner_id)?;
     let jobs = project_job_list(
         runner_id,
         &report.active_runner_jobs,
         &report.stale_runner_jobs,
-        &owners,
         &filter,
     );
     Ok(RunnerJobListOutput {
@@ -165,7 +156,6 @@ fn job_list(runner_id: &str, filter: JobListFilter) -> homeboy::core::Result<Run
         command: "runner.job.list",
         runner_id: runner_id.to_string(),
         live_daemon_job_count: report.active_runner_jobs.len(),
-        retained_durable_projection_count: owners.iter().map(|owner| owner.job_ids.len()).sum(),
         jobs,
     })
 }
@@ -174,18 +164,8 @@ fn project_job_list(
     runner_id: &str,
     active: &[runner::RunnerJob],
     terminal: &[runner::RunnerJob],
-    owners: &[runner::RunnerGenerationJobOwners],
     filter: &JobListFilter,
 ) -> Vec<RunnerJobListEntry> {
-    let generation_for = |job_id: &str| {
-        owners.iter().find_map(|owner| {
-            owner
-                .job_ids
-                .iter()
-                .any(|id| id == job_id)
-                .then(|| owner.generation.clone())
-        })
-    };
     let mut jobs: Vec<_> = active
         .iter()
         .chain(
@@ -208,7 +188,6 @@ fn project_job_list(
                 command: Some(job.command.clone()),
                 owner: job.claim.claimed_by_runner_id.clone(),
                 correlation: job.durable_run_id.clone(),
-                generation: generation_for(&job.job_id),
                 started_at_ms: job.started_at_ms,
                 logs_command: (!unknown_owner).then(|| {
                     format!(
@@ -221,29 +200,6 @@ fn project_job_list(
             }
         })
         .collect();
-    if filter.all {
-        for owner in owners {
-            for job_id in &owner.job_ids {
-                if jobs.iter().all(|job| job.job_id != *job_id) {
-                    jobs.push(RunnerJobListEntry {
-                        job_id: job_id.clone(),
-                        source: "retained_durable_projection",
-                        daemon_source: None,
-                        state: None,
-                        command: None,
-                        owner: None,
-                        correlation: None,
-                        generation: Some(owner.generation.clone()),
-                        started_at_ms: None,
-                        logs_command: Some(format!(
-                            "homeboy runner job logs {runner_id} {job_id} --follow"
-                        )),
-                        cancel_command: None,
-                    });
-                }
-            }
-        }
-    }
     jobs.retain(|job| job_matches_filter(job, filter));
     jobs.sort_by(|left, right| left.job_id.cmp(&right.job_id));
     jobs
@@ -253,10 +209,6 @@ fn job_matches_filter(job: &RunnerJobListEntry, filter: &JobListFilter) -> bool 
     let state_matches = (!filter.active || job.state == Some(JobStatus::Running))
         && (!filter.queued || job.state == Some(JobStatus::Queued))
         && (!filter.terminal || job.state.is_some_and(JobStatus::is_terminal));
-    let generation_matches = filter
-        .generation
-        .as_ref()
-        .is_none_or(|generation| job.generation.as_deref() == Some(generation));
     let correlation_matches = filter.correlation.as_ref().is_none_or(|correlation| {
         [
             Some(job.job_id.as_str()),
@@ -267,7 +219,7 @@ fn job_matches_filter(job: &RunnerJobListEntry, filter: &JobListFilter) -> bool 
         .flatten()
         .any(|value| value.contains(correlation))
     });
-    state_matches && generation_matches && correlation_matches
+    state_matches && correlation_matches
 }
 
 fn map_daemon_job(result: CmdResult<RunnerJobOutput>) -> CmdResult<RunnerJobCommandOutput> {
@@ -338,7 +290,7 @@ fn job_logs(
         Ok(snapshot) => snapshot,
         Err(_) => {
             reconnects += 1;
-            eprintln!("runner log transport lost; reconnecting to the authoritative job generation ({reconnects}/{MAX_RECONNECTS})");
+            eprintln!("runner log transport lost; reconnecting to the job-owning daemon ({reconnects}/{MAX_RECONNECTS})");
             let session =
                 runner::reconnect_job_log_owner(runner_id).map_err(|reconnect_error| {
                     follow_recovery_error(
@@ -393,7 +345,7 @@ fn job_logs(
             Ok(snapshot) => snapshot,
             Err(_error) if reconnects < MAX_RECONNECTS => {
                 reconnects += 1;
-                eprintln!("runner log transport lost; reconnecting to the authoritative job generation ({reconnects}/{MAX_RECONNECTS})");
+                eprintln!("runner log transport lost; reconnecting to the job-owning daemon ({reconnects}/{MAX_RECONNECTS})");
                 if let Some(session) = recovery_session.take() {
                     runner::close_reconnected_job_log_owner(&session);
                 }
@@ -634,7 +586,7 @@ fn classify_follow_error(
     if message.contains("404") || message.contains("not found") {
         return homeboy::core::Error::validation_invalid_argument(
             "job_id",
-            format!("runner job `{job_id}` evidence is unavailable after authoritative generation recovery: the exact job was not retained by its job-owning daemon generation. No terminal status is inferred and no unrelated runner run was selected. Resume evidence is unavailable after cursor {cursor}"),
+            format!("runner job `{job_id}` evidence is unavailable after authoritative daemon recovery: the exact job was not retained by its job-owning daemon. No terminal status is inferred and no unrelated runner run was selected. Resume evidence is unavailable after cursor {cursor}"),
             Some(job_id.to_string()),
             Some(vec![
                 "Inspect the controller record for the exact durable run before retrying: homeboy runs show <run-id>.".to_string(),
@@ -693,7 +645,7 @@ fn runner_job_terminal(status: JobStatus) -> bool {
 mod tests {
     use super::*;
     use homeboy::core::api_jobs::JobClaimMetadata;
-    use homeboy::runner::runners::{RunnerGenerationJobOwners, RunnerJob, RunnerLifecycleOwner};
+    use homeboy::runner::runners::{RunnerJob, RunnerLifecycleOwner};
     use homeboy::runner::{
         runners::{RunnerSession, RunnerSessionRole, RunnerTunnelMode},
         RunnerTunnelProcessStartIdentity,
@@ -743,25 +695,14 @@ mod tests {
     }
 
     #[test]
-    fn job_list_distinguishes_live_jobs_from_retained_projections_and_filters() {
+    fn job_list_projects_live_jobs_and_filters() {
         let active = vec![runner_job("job-running", JobStatus::Running, "cargo test")];
         let terminal = vec![runner_job(
             "job-finished",
             JobStatus::Succeeded,
             "cargo fmt",
         )];
-        let owners = vec![RunnerGenerationJobOwners {
-            generation: "generation-a".to_string(),
-            job_ids: vec!["job-running".to_string(), "job-retained".to_string()],
-        }];
-
-        let jobs = project_job_list(
-            "lab",
-            &active,
-            &terminal,
-            &owners,
-            &JobListFilter::default(),
-        );
+        let jobs = project_job_list("lab", &active, &terminal, &JobListFilter::default());
 
         assert_eq!(jobs.len(), 1);
         assert_eq!(jobs[0].source, "live_daemon");
@@ -770,28 +711,24 @@ mod tests {
             "lab",
             &active,
             &terminal,
-            &owners,
             &JobListFilter {
                 all: true,
                 ..JobListFilter::default()
             },
         );
-        assert_eq!(all.len(), 3);
-        assert_eq!(all[1].job_id, "job-retained");
-        assert_eq!(all[1].source, "retained_durable_projection");
-        assert_eq!(all[1].state, None);
-        assert_eq!(all[1].generation.as_deref(), Some("generation-a"));
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].job_id, "job-finished");
+        assert_eq!(all[0].state, Some(JobStatus::Succeeded));
         assert_eq!(
-            all[1].logs_command.as_deref(),
-            Some("homeboy runner job logs lab job-retained --follow")
+            all[0].logs_command.as_deref(),
+            Some("homeboy runner job logs lab job-finished --follow")
         );
-        assert_eq!(all[1].cancel_command, None);
+        assert_eq!(all[0].cancel_command, None);
 
         let running = project_job_list(
             "lab",
             &active,
             &terminal,
-            &owners,
             &JobListFilter {
                 active: true,
                 ..JobListFilter::default()
@@ -809,7 +746,6 @@ mod tests {
             "lab",
             &active,
             &terminal,
-            &owners,
             &JobListFilter {
                 all: true,
                 correlation: Some("11770".to_string()),
@@ -821,10 +757,9 @@ mod tests {
     }
 
     #[test]
-    fn compact_job_list_table_reports_both_counts() {
+    fn compact_job_list_table_reports_the_live_count() {
         let table = render_compact_job_table(&serde_json::json!({
             "live_daemon_job_count": 1,
-            "retained_durable_projection_count": 42,
             "jobs": [{
                 "job_id": "job-running",
                 "state": "running",
@@ -832,25 +767,24 @@ mod tests {
             }]
         }));
 
-        assert!(table.starts_with("Live: 1  Retained: 42\n"));
+        assert!(table.starts_with("Live: 1\n"));
         assert!(table.contains("JOB ID"));
         assert!(table.contains("job-running"));
     }
 
     #[test]
-    fn job_list_json_keeps_live_and_retained_counts() {
+    fn job_list_json_keeps_the_live_count() {
         let payload = serde_json::to_value(RunnerJobListOutput {
             variant: "job_list",
             command: "runner.job.list",
             runner_id: "lab".to_string(),
             live_daemon_job_count: 1,
-            retained_durable_projection_count: 42,
             jobs: Vec::new(),
         })
         .expect("serialize job list");
 
         assert_eq!(payload["live_daemon_job_count"], 1);
-        assert_eq!(payload["retained_durable_projection_count"], 42);
+        assert!(payload.get("retained_durable_projection_count").is_none());
     }
 
     #[test]
@@ -860,13 +794,7 @@ mod tests {
             JobStatus::Running,
             "unprojected daemon child",
         );
-        let jobs = project_job_list(
-            "homeboy-lab",
-            &[unknown],
-            &[],
-            &[],
-            &JobListFilter::default(),
-        );
+        let jobs = project_job_list("homeboy-lab", &[unknown], &[], &JobListFilter::default());
 
         assert_eq!(jobs[0].source, "unknown_daemon_owner");
         assert_eq!(jobs[0].logs_command, None);
@@ -1095,7 +1023,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn dropped_transport_reconnects_to_authoritative_generation_without_replaying_events() {
+    fn dropped_transport_reconnects_to_the_job_owning_daemon_without_replaying_events() {
         let (dropped_url, dropped_server) = serve_dropped_daemon_request();
         let dropped = session(dropped_url, None);
         assert!(runner::runner_job_log_snapshot_for_session(&dropped, "job-42").is_err());
@@ -1134,7 +1062,7 @@ mod tests {
 
         for expected_status in [JobStatus::Queued, JobStatus::Running, JobStatus::Succeeded] {
             let snapshot = runner::runner_job_log_snapshot_for_session(&authoritative, "job-42")
-                .expect("authoritative generation snapshot");
+                .expect("authoritative daemon snapshot");
             assert_eq!(snapshot.job.status, expected_status);
             rendered.extend(
                 new_job_events(&snapshot.events, &mut cursor)

@@ -151,7 +151,7 @@ homeboy runner doctor <runner-id> --scope lab-offload --repair
 
 Diagnoses a local or configured SSH runner without mutating it. A connected
 session is read once from controller state and checked through a bounded
-`/health` request; doctor does not reconcile generations, create an exec job,
+`/health` request; doctor does not reconcile the session, create an exec job,
 replace the session, or tear down its tunnel. Use `local`,
 `localhost`, or `self` to inspect this machine without creating a runner record.
 The JSON payload uses `command: "runner.doctor"` and includes `runner_id`,
@@ -657,10 +657,10 @@ homeboy runner service status homeboy-lab
 
 Run the runner daemon as a systemd user unit that the runner owns. `install`
 requires an idle runner. It writes the unit, hands the controller-started
-daemon over to it, stops idle leftover generation daemons, and marks the runner
+daemon over to it, stops idle daemons left by earlier rotation, and marks the runner
 `service_managed`. After that, `connect` only attaches, `disconnect` only
 detaches, and `refresh-homeboy --reconnect` repoints the unit's binary and
-restarts it instead of rotating daemon generations. `status` reports the unit
+restarts it instead of replacing the daemon. `status` reports the unit
 and the daemon lease it holds. See
 [Runner-Owned Service](../architecture/runner-connection.md#runner-owned-service).
 
@@ -682,16 +682,16 @@ its event stream; `--follow` keeps polling until the job reaches a terminal stat
 and prints newly observed events as they arrive. Use this when a controller exits
 after dispatching runner work and you need to inspect the already-started job.
 
-`job list` defaults to a compact table of live daemon jobs. Use `--all` (or
-`--retained`) to include retained durable projections, and `--json` for the
-structured response, including both live and retained counts.
+`job list` defaults to a compact table of live daemon jobs. Use `--all` to
+include observed terminal jobs, and `--json` for the structured response,
+including the live job count.
 
 `cancel` requests cancellation for a queued or running durable runner daemon job
 through the connected runner daemon.
 
 Follow tracks the highest displayed daemon event sequence. A controller tunnel
-loss opens a new ephemeral SSH tunnel to the generation recorded as the job
-owner, and verifies that generation's lease and PID through `/health` before
+loss opens a new ephemeral SSH tunnel to the runner's current session daemon,
+and verifies that daemon's lease and PID through `/health` before
 reading. It never reuses or probes the recorded local tunnel port. Replayed
 events are sorted and emitted only when their sequence exceeds the cursor. The
 final JSON output includes `next_cursor` and `resume_command`; Ctrl-C prints the
@@ -752,30 +752,22 @@ result set.
 homeboy runner reconcile <runner-id>
 ```
 
-Reconciles persisted direct-runner generation state and retires daemon
-generations that have been verified as drained. Successful refresh, reconnect,
-and runner upgrade invoke this same reconciler automatically. A generation
-must relinquish admission and have no live work before its daemon can stop.
-Deleted controller runs count as released evidence; retained runs still require
-verified controller files or directory tree checksums and complete source
-inventories. `--release-unverified-evidence` remains an explicit operator choice
-for genuinely unverifiable evidence, not a default lifecycle policy.
+Reconciles one direct runner's current daemon session: it refreshes the
+session metadata from the observed daemon and settles jobs that reached a
+terminal state. A disconnected runner is reported as-is. Successful refresh,
+reconnect, and runner upgrade observe the same session.
 
-`runner status` includes `retirement_readiness` even without `--generations`.
-It reports the last reconcile-owned verdict, not a fresh retirement proof:
-`checked_at` is the decision timestamp and `state` is `ready` or `blocked`.
-Blocked verdicts include a typed `kind`, a `reason`, and a `run_id` when a
-retained run caused the blocker. Unqualified status prefixes generation keys
-with the runner ID. Generations without a recorded verdict are omitted, not
-assumed ready. Status makes no retained-evidence reads or stop attempts;
-reconcile and retirement retain those safety checks and publish the next verdict.
-Successful retirements are recorded as ready in the latest reconciliation.
+`--confirm-workload-processes-absent` records the operator's attestation that
+no workload process from a dead daemon survives. It runs the remote
+`daemon reconcile-dead-lease-orphans` only when reconcile is blocked by
+missing daemon ownership evidence, bound to that daemon's state directory,
+lease, and active job set, and then reconciles again.
 
-The command succeeds only when its postcondition has converged: the runner is
-accepting jobs and has no unresolved generation projection. A non-converged
-result exits non-zero and reports `changed_state`, the remaining blocker, one
-different executable action, and the concrete predicate that must become true
-before another reconcile can make progress.
+The command succeeds only when its postcondition has converged: the runner's
+current daemon session is accepting jobs. A blocked result exits non-zero and
+reports the remaining blocker, one different executable action, and the
+concrete predicate that must become true before another reconcile can make
+progress.
 
 ### `disconnect`
 
@@ -1230,4 +1222,4 @@ run there at all. Its `timeout_seconds` is `0` and its hint is labelled
 
 `runs list --include-active-runner-jobs` deliberately reads the latency-bounded
 indexed active-job snapshot rather than the full status report: it does not
-reconcile the daemon generation ledger, so a wedged Lab cannot block a listing.
+reconcile the runner session, so a wedged Lab cannot block a listing.

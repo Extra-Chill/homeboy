@@ -3715,52 +3715,6 @@ process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-outcome/v1',task
         )
     }
 
-    fn persist_unresolved_generation_runner(runner_id: &str) {
-        homeboy::runner::runners::create(
-            &format!(r#"{{"id":"{runner_id}","kind":"local"}}"#),
-            false,
-        )
-        .expect("create runner");
-        let dir = homeboy::core::paths::runner_sessions_dir()
-            .expect("runner sessions")
-            .join(runner_id);
-        std::fs::create_dir_all(&dir).expect("runner session dir");
-        let endpoint = |lease: &str| {
-            serde_json::json!({
-                "runner_id": runner_id,
-                "server_id": null,
-                "tunnel_pid": null,
-                "remote_daemon_pid": null,
-                "homeboy_version": "1.0.0",
-                "connected_at": "2026-09-17T00:00:00Z",
-                "remote_daemon_lease_id": lease,
-            })
-        };
-        std::fs::write(
-            dir.join("generations.json"),
-            serde_json::to_vec_pretty(&serde_json::json!({
-                "runner_id": runner_id,
-                "admission_owner": "lease-new",
-                // The retained job is what leaves the draining generation
-                // unresolved: the ledger derives its active count from job
-                // owners (#15685).
-                "job_owners": { "job-retained": "lease-old" },
-                "generations": {
-                    "lease-old": {
-                        "endpoint": endpoint("lease-old"),
-                        "drain_state": "draining"
-                    },
-                    "lease-new": {
-                        "endpoint": endpoint("lease-new"),
-                        "drain_state": "admitting"
-                    }
-                }
-            }))
-            .expect("serialize generations"),
-        )
-        .expect("write generations");
-    }
-
     fn preview_cook_with_captured_runner(runner_id: Option<&str>) -> (Value, i32) {
         let (repository, workspace) = preview_fixture_worktree();
         let _capacity =
@@ -3795,54 +3749,6 @@ process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-outcome/v1',task
             panic!("Cook command");
         };
         preview_cook(*args, None).expect("compile preview")
-    }
-
-    #[test]
-    fn preview_reports_unresolved_generation_blocker_instead_of_an_unqualified_ready_plan() {
-        crate::test_support::with_isolated_home(|_| {
-            let _reset = ResetCapturedPreflight::new();
-            persist_unresolved_generation_runner("homeboy-lab");
-            let (preview, exit_code) = preview_cook_with_captured_runner(Some("homeboy-lab"));
-
-            assert_eq!(exit_code, 0);
-            assert_eq!(
-                preview["resolved"]["placement"]["selected_runner"],
-                "homeboy-lab"
-            );
-            assert_eq!(
-                preview["resolved"]["placement"]["admission"]["state"],
-                "blocked"
-            );
-            assert_eq!(
-                preview["resolved"]["placement"]["admission"]["remaining_blocker"],
-                "unresolved_generation_projection"
-            );
-            assert_eq!(
-                preview["failure"]["message"],
-                "unresolved_generation_projection"
-            );
-            let next_action = preview["resolved"]["placement"]["admission"]["next_action"]
-                .as_str()
-                .expect("recovery action");
-            assert!(
-                next_action.contains("homeboy-lab"),
-                "recovery action must target the resolved runner: {next_action}"
-            );
-
-            let summary = crate::commands::agent_task_summary::render_agent_task_summary(
-                crate::commands::agent_task_summary::AgentTaskSummaryKind::Cook,
-                &preview,
-            )
-            .expect("cook preview summary renders");
-            assert!(
-                summary.contains("Blocked: unresolved_generation_projection"),
-                "preview must not present an unqualified ready plan: {summary}"
-            );
-            assert!(
-                summary.contains("Next:") && summary.contains("homeboy-lab"),
-                "preview must surface the runner-status recovery action: {summary}"
-            );
-        });
     }
 
     #[test]
@@ -4001,7 +3907,6 @@ process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-outcome/v1',task
         use homeboy::core::parsed_command_preflight::*;
         crate::test_support::with_isolated_home(|_| {
             let _reset = ResetCapturedPreflight::new();
-            persist_unresolved_generation_runner("unresolved");
             for (placement, runner, unavailable, rejected, expected) in [
                 ("auto", None, false, false, CookAdmissionDecision::Admitted),
                 ("local", None, false, false, CookAdmissionDecision::Admitted),
@@ -4025,16 +3930,6 @@ process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-outcome/v1',task
                     false,
                     false,
                     CookAdmissionDecision::Admitted,
-                ),
-                (
-                    "lab",
-                    Some("unresolved"),
-                    false,
-                    false,
-                    CookAdmissionDecision::Blocked {
-                        reason: "unresolved_generation_projection".into(),
-                        next_action: Some("homeboy runner disconnect unresolved && homeboy runner connect unresolved".into()),
-                    },
                 ),
                 (
                     "auto",

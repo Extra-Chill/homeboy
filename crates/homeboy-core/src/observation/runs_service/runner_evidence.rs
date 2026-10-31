@@ -98,13 +98,11 @@ pub trait RunnerEvidenceProvider: Send + Sync {
     fn statuses(&self) -> Vec<RunnerConnectionInfo>;
 
     /// A latency-bounded, read-only view of each runner's active jobs — no
-    /// generation reconcile, no per-generation network polling.
+    /// session reconcile.
     ///
-    /// `statuses()` reconciles the full generation ledger, which issues one
-    /// blocking HTTP call per draining generation and can take minutes on a
-    /// long-lived runner. Callers that only need the current/recent active-job
-    /// view use this instead so latency stays bounded
-    /// as generation history grows (#9522). The default falls back to
+    /// `statuses()` observes every runner's full status, which can block on a
+    /// wedged runner. Callers that only need the current active-job view use
+    /// this instead so latency stays bounded (#9522). The default falls back to
     /// `statuses()` for providers that have no cheaper path (tests, no-ops).
     fn statuses_indexed(&self) -> Vec<RunnerConnectionInfo> {
         self.statuses()

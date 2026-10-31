@@ -60,7 +60,6 @@ pub(crate) fn run_plain_text_raw(args: RunnerArgs) -> super::output_runtime::Com
                     queued,
                     terminal,
                     all,
-                    generation,
                     correlation,
                     ..
                 },
@@ -73,7 +72,6 @@ pub(crate) fn run_plain_text_raw(args: RunnerArgs) -> super::output_runtime::Com
                         queued,
                         terminal,
                         all,
-                        generation,
                         correlation,
                         json: false,
                     },

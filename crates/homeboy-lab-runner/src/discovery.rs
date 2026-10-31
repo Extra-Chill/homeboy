@@ -322,9 +322,6 @@ fn readiness(runner: &Runner, snapshot: RunnerAdmissionSnapshot) -> RunnerReadin
     if !snapshot.summary.daemon_fresh {
         reasons.push("daemon_not_fresh".to_string());
     }
-    if !snapshot.summary.admission_blocking_job_ids.is_empty() {
-        reasons.push("retained_job_owners".to_string());
-    }
     if snapshot.summary.stale_job_count > 0 {
         reasons.push("stale_jobs".to_string());
     }

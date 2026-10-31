@@ -1506,11 +1506,11 @@ mod tests {
     fn reconciliation_help_names_each_state_plane_and_mutation_boundary() {
         let runs = scoped_help(&["runs", "reconcile"]);
         assert!(runs.contains("observation records"));
-        assert!(runs.contains("Runner generations and durable agent-task records have"));
+        assert!(runs.contains("Runner sessions and durable agent-task records have"));
 
         let runner = scoped_help(&["runner", "reconcile"]);
-        assert!(runner.contains("persisted daemon generations"));
-        assert!(runner.contains("accepts jobs with no unresolved generation projection"));
+        assert!(runner.contains("current daemon session"));
+        assert!(runner.contains("Success means that runner accepts jobs"));
 
         let agent_task = scoped_help(&["agent-task", "reconcile"]);
         assert!(agent_task.contains("preview by default"));

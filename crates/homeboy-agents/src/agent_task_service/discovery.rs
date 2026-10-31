@@ -959,9 +959,9 @@ pub(crate) fn controller_upgrade_admission_for_records(
                     .starts_with("homeboy runner reconcile ")
                 {
                     (
-                        "runner_generations",
-                        format!("runner `{}` and its persisted daemon generations", record.runner_id().unwrap_or_default()),
-                        "the runner accepts jobs with no unresolved generation projection",
+                        "runner_session",
+                        format!("runner `{}` and its current daemon session", record.runner_id().unwrap_or_default()),
+                        "the runner's current daemon session accepts jobs",
                     )
                 } else {
                     (
@@ -999,11 +999,11 @@ pub(crate) fn controller_upgrade_admission_for_records(
         .into_values()
         .map(|mut group| {
             group.sort_by(|left, right| left.action.cmp(&right.action));
-            // Runner generation ownership is authoritative for a runner-backed
+            // Runner session ownership is authoritative for a runner-backed
             // record; one blocker must route to one owning reconciliation plane.
             group
                 .iter()
-                .find(|blocker| blocker.owner == "runner_generations")
+                .find(|blocker| blocker.owner == "runner_session")
                 .cloned()
                 .unwrap_or_else(|| group.remove(0))
         })
@@ -1093,7 +1093,7 @@ pub(super) fn filter_idle_runner_stale_blockers(
     // alter retained evidence. Only stale runner ownership can be waived, and
     // only after a direct observation proves the daemon has no active jobs.
     admission.blockers.retain(|blocker| {
-        if blocker.owner != "runner_generations" || blocker.liveness != "stale" {
+        if blocker.owner != "runner_session" || blocker.liveness != "stale" {
             return true;
         }
         let Some(runner_id) = blocker
@@ -1113,7 +1113,7 @@ pub(super) fn stale_runner_blocker_has_idle_daemon(
     blocker: &ControllerUpgradeBlocker,
     direct_active_job_count: Option<usize>,
 ) -> bool {
-    blocker.owner == "runner_generations"
+    blocker.owner == "runner_session"
         && blocker.liveness == "stale"
         && direct_active_job_count == Some(0)
 }

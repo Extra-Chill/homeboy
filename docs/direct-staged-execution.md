@@ -63,6 +63,10 @@ cargo test -p homeboy-lab-runner --lib reverse_worker_executes_a_verified_staged
 cargo test -p homeboy-lab-runner --lib retained_staged_workspace_authority_refuses_path_replacement_before_spawn -- --test-threads=1
 ```
 
+The `daemon::generation_store::tests` group recorded above no longer exists: the
+daemon generation store was removed in #16680, and a runner now routes through
+its one current session.
+
 The daemon-execution tests call the production routes and real runner driver to
 execute sealed-file reads, preserve public environment, observe one side effect
 under concurrent replay, retain a nonzero child result, and cancel/reap a child.

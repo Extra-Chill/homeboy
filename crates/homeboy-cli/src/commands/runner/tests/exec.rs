@@ -1486,7 +1486,7 @@ fn runner_exec_promotes_artifact_dir_typed_schema_children() {
 
 #[test]
 fn read_only_artifact_exec_rejects_capture_patch() {
-    // A read-only retrieval must never rewrite a draining generation, so it
+    // A read-only retrieval must never rewrite the runner's daemon, so it
     // cannot capture a mutation patch (Extra-Chill/homeboy#9420).
     let mut input = RunnerExecInput::new(
         "lab-local",

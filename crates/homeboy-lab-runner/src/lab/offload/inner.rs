@@ -3290,7 +3290,7 @@ mod tests {
         assert!(post_rotation.active_jobs.is_empty());
 
         let blocked = require_available_lab_runner("homeboy-lab", &post_rotation, Some(1), "cook")
-            .expect_err("a full runner must not admit over the draining generation");
+            .expect_err("a full runner must not admit over its active job");
         assert_eq!(
             blocked.details["runner_availability"]["reasons"],
             serde_json::json!(["capacity_reached"])

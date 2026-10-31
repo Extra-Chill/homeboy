@@ -565,15 +565,8 @@ fn disconnected_incompatible_daemon_with_unavailable_ownership_is_terminal() {
         accepting_jobs: false,
         active_job_count: Some(0),
         live_daemon_job_count: Some(0),
-        retained_durable_job_count: 0,
-        unresolved_retained_projection_count: 0,
-        admission_blocking_job_ids: Vec::new(),
-        unresolved_job_owners: Vec::new(),
-        unresolved_generation_ids: Vec::new(),
         stale_job_count: 0,
         daemon_build_identity: Some("homeboy 0.349.0+incompatible".to_string()),
-        blocking_generation: None,
-        draining_generation_count: 0,
         safe_to_rotate: false,
         next_action: None,
     };
@@ -835,11 +828,11 @@ mod repair_readiness {
             Some("homeboy 0.329.1+98cc7876dd71".to_string()),
         );
 
-        assert!(!status(Some(stale)).admission_summary(0).accepting_jobs);
+        assert!(!status(Some(stale)).admission_summary().accepting_jobs);
     }
 
     #[test]
     fn repair_success_postcondition_requires_open_admission() {
-        assert!(status(None).admission_summary(0).accepting_jobs);
+        assert!(status(None).admission_summary().accepting_jobs);
     }
 }

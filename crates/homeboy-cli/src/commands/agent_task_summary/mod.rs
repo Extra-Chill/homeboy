@@ -1309,7 +1309,7 @@ mod tests {
                     "admission": {
                         "schema": "homeboy/cook-preview-placement-admission/v1",
                         "state": "blocked",
-                        "remaining_blocker": "unresolved_generation_projection",
+                        "remaining_blocker": "daemon_compatibility",
                         "next_action": "homeboy runner status homeboy-lab --full",
                     },
                 },
@@ -1318,7 +1318,7 @@ mod tests {
                 "gates": { "public": 1, "private": 0 },
             },
             "failure": {
-                "message": "unresolved_generation_projection",
+                "message": "daemon_compatibility",
                 "next_action": "homeboy runner status homeboy-lab --full",
             },
             "replay_argv": ["homeboy", "agent-task", "cook", "--backend", "fixture"],
@@ -1327,7 +1327,7 @@ mod tests {
         let summary = render_agent_task_summary(AgentTaskSummaryKind::Cook, &payload)
             .expect("cook preview summary");
         assert!(
-            summary.contains("Blocked: unresolved_generation_projection"),
+            summary.contains("Blocked: daemon_compatibility"),
             "blocked admission must lead the operator-facing plan: {summary}"
         );
         assert!(

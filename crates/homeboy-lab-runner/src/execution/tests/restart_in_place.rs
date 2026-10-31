@@ -1,7 +1,7 @@
 //! End-to-end acceptance for refresh's in-place daemon restart (#16680).
 //!
 //! A refresh whose active jobs are all re-adoptable restarts the connected
-//! daemon on its own state directory instead of rotating a new generation.
+//! daemon on its own state directory instead of starting a replacement daemon.
 //! These tests drive the real `connection::restart_daemon_in_place` against a
 //! localhost SSH runner. A fake `homeboy` handles the lease lifecycle
 //! (`self identity`, `daemon stop`, `daemon ensure-running`, `daemon status`)
@@ -436,7 +436,7 @@ fn daemon_invocations(log: &Path) -> Vec<(String, String)> {
 }
 
 /// Only the one daemon state directory exists for this runner and controller:
-/// no new generation directory was created next to it.
+/// no second state directory was created next to it.
 fn assert_single_state_dir() {
     let state_dir = PathBuf::from(expected_state_dir());
     let controller_dir = state_dir.parent().expect("controller state root");
@@ -456,18 +456,9 @@ fn assert_single_state_dir() {
     );
 }
 
-/// The ledger is the restarted lease alone, and the re-adopted job routes
-/// through the current session to the restarted daemon's endpoint.
+/// The runner's one current session is the restarted lease, and the
+/// re-adopted job routes through it to the restarted daemon's endpoint.
 fn assert_owner_rebound_to_restarted_lease(fixture: &RestartFixture) {
-    let ledger = crate::generation_store::read(RUNNER)
-        .expect("read ledger")
-        .expect("ledger");
-    assert_eq!(
-        ledger.generations.keys().collect::<Vec<_>>(),
-        vec![NEW_LEASE],
-        "no generation key is created and the stopped lease is not left draining"
-    );
-    assert_eq!(ledger.admission_owner, NEW_LEASE);
     let owner = crate::connection::read_session(RUNNER)
         .expect("route job")
         .expect("current session");
@@ -480,7 +471,7 @@ fn assert_owner_rebound_to_restarted_lease(fixture: &RestartFixture) {
 /// Poll the job the way a foreground observer does once refresh has
 /// restarted its daemon. The poll starts from the stopped lease's endpoint and
 /// carries the identity the job was admitted under. The observer must follow
-/// the ledger to the restarted lease, see the job still running, then see its
+/// the current session to the restarted lease, see the job still running, then see its
 /// real terminal status exactly once. It must not report a lost job, a dead
 /// lease or a replaced daemon.
 fn assert_observer_follows_job_to_terminal(fixture: &RestartFixture) {
@@ -562,7 +553,7 @@ fn direct_refresh_restarts_the_daemon_in_place_and_keeps_its_re_adoptable_job() 
         );
         assert!(
             !invocations[ensure].1.contains("--replacement-operation-id"),
-            "an in-place restart is not a generation replacement: {invocations:?}"
+            "an in-place restart is not a daemon replacement: {invocations:?}"
         );
         assert!(
             invocations.iter().all(|(dir, _)| dir == &state_dir),
