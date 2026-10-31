@@ -407,6 +407,63 @@ pub fn refresh_homeboy_binary(
     refresh_homeboy_binary_inner_in_roots(roots, options)
 }
 
+/// The outcome of installing the controller's own release into a runner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ControllerReleaseInstall {
+    /// The release is selected and the daemon now runs it.
+    Installed {
+        identity: Option<String>,
+    },
+    /// The daemon's active jobs deferred the replacement; selection was
+    /// restored so the current daemon keeps running them.
+    DeferredByActiveJobs(Vec<String>),
+    Failed(String),
+}
+
+/// Install the controller's exact release tag into `runner_id` through the
+/// verified release path and replace its daemon with the `--reconnect`
+/// mechanism. Never a source build, never "latest", never a downgrade, and
+/// never interrupting a job the restarted daemon cannot re-adopt.
+pub(crate) fn install_controller_release(runner_id: &str) -> ControllerReleaseInstall {
+    let refreshed = refresh_homeboy_binary(HomeboyBinaryRefreshOptions {
+        runner_id: runner_id.to_string(),
+        mode: HomeboyBinaryRefreshMode::Materialize,
+        source: None,
+        git_ref: Some(controller_refresh_ref()),
+        target_dir: None,
+        reconnect: true,
+        force: false,
+        allow_downgrade: false,
+        dry_run: false,
+    });
+    let (output, exit_code) = match refreshed {
+        Ok(refreshed) => refreshed,
+        Err(error) => return ControllerReleaseInstall::Failed(error.message),
+    };
+    if let Some(deferred) = output.reconnect_deferred {
+        return ControllerReleaseInstall::DeferredByActiveJobs(deferred.active_job_ids);
+    }
+    if exit_code == 0 && output.daemon_refreshed {
+        return ControllerReleaseInstall::Installed {
+            identity: output
+                .identity
+                .as_ref()
+                .and_then(|identity| identity.get("data").unwrap_or(identity).get("display"))
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        };
+    }
+    let detail = output
+        .failure
+        .and_then(|failure| {
+            failure.verification.or_else(|| {
+                Some(failure.stderr.trim().to_string()).filter(|stderr| !stderr.is_empty())
+            })
+        })
+        .unwrap_or_else(|| format!("runner refresh-homeboy exited {exit_code}"));
+    ControllerReleaseInstall::Failed(detail)
+}
+
 fn refresh_homeboy_binary_inner_in_roots(
     roots: &homeboy_core::paths::PathRoots,
     options: HomeboyBinaryRefreshOptions,

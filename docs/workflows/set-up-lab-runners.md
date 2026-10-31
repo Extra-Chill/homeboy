@@ -117,11 +117,11 @@ Environment values escalate only. Neither variable can relax a runner already co
 
 ## 6. Refresh Runner Homeboy Deliberately
 
-Runner proof depends on the Homeboy binary actually used by the runner:
+Runner proof depends on the Homeboy binary actually used by the runner. `homeboy runner connect` already installs the controller's release when the runner is older (reported as `binary_convergence`); refresh deliberately only for an explicit ref or binary:
 
 ```bash
-homeboy runner refresh-homeboy <runner-id> --ref main --dry-run
-homeboy runner refresh-homeboy <runner-id> --ref main --reconnect
+homeboy runner refresh-homeboy <runner-id> --ref v0.434.30 --dry-run
+homeboy runner refresh-homeboy <runner-id> --ref v0.434.30 --reconnect
 homeboy runner status <runner-id>
 ```
 
