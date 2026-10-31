@@ -1769,6 +1769,45 @@ fn verified_unchanged_attempt_ends_as_no_changes_with_the_provider_message() {
     });
 }
 
+#[test]
+fn provider_setup_execution_failure_never_dispatches_gate_fix() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-provider-setup-failure";
+        let run_id = format!("{cook_id}-attempt-1");
+        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        options.identity.initial_run_id = run_id.clone();
+        persist_initial_recipe(&options).unwrap();
+        agent_task_lifecycle::submit_plan(&options.identity.initial_plan, Some(&run_id)).unwrap();
+        agent_task_lifecycle::record_cook_attempt_in_store(
+            &test_lifecycle_store(),
+            cook_id,
+            1,
+            &run_id,
+        )
+        .unwrap();
+        let mut aggregate = review_form_aggregate(&options.identity.initial_plan);
+        aggregate.outcomes[0].status = crate::agent_task::AgentTaskOutcomeStatus::Failed;
+        aggregate.outcomes[0].failure_classification =
+            Some(crate::agent_task::AgentTaskFailureClassification::ExecutionFailed);
+        aggregate.outcomes[0].summary = Some("Pi runtime command is unavailable".to_string());
+        agent_task_lifecycle::record_run_aggregate(
+            &run_id,
+            &options.identity.initial_plan,
+            &aggregate,
+        )
+        .unwrap();
+        let report = run_cook(CookContext::new(options, Arc::new(UnusedExecutor))).unwrap();
+        assert_eq!(report.value.terminal_phase.as_deref(), Some("pre_provider"));
+        assert_eq!(
+            report.value.terminal_failure_classification.as_deref(),
+            Some("execution_failed")
+        );
+        let reason = report.value.stop_reason.as_deref().unwrap();
+        assert!(reason.contains("provider setup failed"), "{reason}");
+        assert!(!reason.contains("gate-fix"), "{reason}");
+    });
+}
+
 fn run_intentional_no_change_cook(
     evidence_policy: bool,
     verdict: &str,
