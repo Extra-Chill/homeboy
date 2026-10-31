@@ -96,17 +96,11 @@ fn prompt_session_and_model_contract() {
 #[cfg(unix)]
 #[test]
 fn bounded_readiness_classifies_fake_pi() {
-    use std::os::unix::fs::PermissionsExt;
-    let temp = tempfile::tempdir().unwrap();
-    let pi = temp.path().join("pi");
-    std::fs::write(&pi, "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'pi 1.0'; else printf '%s\\n' \"$CATALOG\"; fi\n").unwrap();
-    std::fs::set_permissions(&pi, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let _env_lock = homeboy_core::test_support::env_lock();
-    let path = std::env::join_paths(std::iter::once(temp.path().to_path_buf()).chain(
-        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
-    ))
-    .unwrap();
-    let _path = homeboy_core::test_support::EnvVarGuard::set("PATH", path);
+    let fake = super::test_pi::FakePi::with_probes(
+        "exit 1",
+        "printf 'pi 1.0\\n'",
+        "printf '%s\\n' \"$CATALOG\"",
+    );
     let timeout = std::time::Duration::from_secs(2);
     for (model, catalog, reason) in [
         ("roadie/test", "roadie test", ""),
@@ -115,7 +109,7 @@ fn bounded_readiness_classifies_fake_pi() {
         ("roadie/test", "No models available", "no_models_available"),
     ] {
         let result = readiness(
-            &json!({"model":model}),
+            &json!({"command":fake.command,"model":model}),
             &[("CATALOG".into(), catalog.into())],
             timeout,
             None,
@@ -128,7 +122,7 @@ fn bounded_readiness_classifies_fake_pi() {
             assert_eq!(result.identity["candidates"], json!(["roadie/test"]));
         }
     }
-    let result = readiness(&json!({"command":pi}), &[], std::time::Duration::ZERO, None).unwrap();
+    let result = readiness(&fake.config(), &[], std::time::Duration::ZERO, None).unwrap();
     assert_eq!(result.classification, "transient_failure");
     assert!(result.retryable);
 }

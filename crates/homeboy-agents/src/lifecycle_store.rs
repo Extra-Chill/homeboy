@@ -2047,6 +2047,7 @@ fn read_aggregate_bytes_bounded_in_store(
     Ok(raw)
 }
 
+#[cfg(test)]
 pub(super) fn aggregate_path(run_id: &str) -> Result<PathBuf> {
     Ok(default_store()?.aggregate_path(run_id))
 }
