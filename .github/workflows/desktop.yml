@@ -1,0 +1,65 @@
+name: Desktop
+
+# Builds the macOS app and runs its contract tests. The contract tests compile
+# against the app's own sources (minus the @main App entry point), so a model
+# or command-registry change that breaks a fixture fails here.
+
+on:
+  pull_request:
+    paths:
+      - 'desktop/**'
+      - '.github/workflows/desktop.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'desktop/**'
+      - '.github/workflows/desktop.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Desktop / Build and contract tests
+    runs-on: macos-15
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+
+      - name: Build
+        run: |
+          set -o pipefail
+          xcodebuild build \
+            -project Homeboy.xcodeproj \
+            -scheme Homeboy \
+            -configuration Debug \
+            -destination 'platform=macOS' \
+            -derivedDataPath "$RUNNER_TEMP/desktop-derived-data" \
+            CODE_SIGNING_ALLOWED=NO \
+            | tail -n 200
+
+      - name: Contract tests
+        run: |
+          set -euo pipefail
+          sources="$RUNNER_TEMP/contract-test-sources.txt"
+          find Homeboy -name '*.swift' \
+            ! -path 'Homeboy/App/HomeboyApp.swift' \
+            ! -path 'Homeboy/Resources/*' | sort > "$sources"
+          find tests -maxdepth 1 -name '*.swift' | sort >> "$sources"
+          echo "Compiling $(wc -l < "$sources" | tr -d ' ') sources"
+          xcrun swiftc -parse-as-library -swift-version 5 \
+            -o "$RUNNER_TEMP/contract-tests" $(cat "$sources")
+          "$RUNNER_TEMP/contract-tests" "$PWD/tests"

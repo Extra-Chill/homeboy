@@ -1,4 +1,4 @@
-# Homeboy Extensions reusable workflows
+# Reusable workflows
 
 ## Actions Run Once
 
@@ -16,7 +16,7 @@ parallel events cannot both pass the check before the marker is saved.
 ```yaml
 jobs:
   preflight:
-    uses: Extra-Chill/homeboy-extensions/.github/workflows/actions-run-once.yml@main
+    uses: Extra-Chill/homeboy/.github/workflows/actions-run-once.yml@main
     with:
       mode: check
       idempotency_key: static-validation/${{ github.repository }}/${{ github.event.pull_request.number }}/${{ github.event.pull_request.head.sha }}/${{ matrix.site }}
@@ -31,7 +31,7 @@ jobs:
   mark:
     needs: validate
     if: always() && needs.preflight.outputs.should_run == 'true'
-    uses: Extra-Chill/homeboy-extensions/.github/workflows/actions-run-once.yml@main
+    uses: Extra-Chill/homeboy/.github/workflows/actions-run-once.yml@main
     with:
       mode: mark
       idempotency_key: static-validation/${{ github.repository }}/${{ github.event.pull_request.number }}/${{ github.event.pull_request.head.sha }}/${{ matrix.site }}
@@ -65,7 +65,7 @@ adapter manifests; see the runtime adapter docs for wrapper-specific inputs.
 ```yaml
 jobs:
   run-agent:
-    uses: Extra-Chill/homeboy-extensions/.github/workflows/runtime-agent-full-run.yml@v4
+    uses: Extra-Chill/homeboy/.github/workflows/runtime-agent-full-run.yml@v4
     with:
       runtime: local-shell
       runtime_ref: main
@@ -199,7 +199,7 @@ checkout and passes projection config to the selected runtime.
 ```yaml
 jobs:
   run-external-agent:
-    uses: Extra-Chill/homeboy-extensions/.github/workflows/runtime-agent-full-run.yml@v4
+    uses: Extra-Chill/homeboy/.github/workflows/runtime-agent-full-run.yml@v4
     with:
       runtime: local-shell
       runtime_ref: main
@@ -244,7 +244,7 @@ contract without serializing values:
 ```yaml
 jobs:
   run-agent:
-    uses: Extra-Chill/homeboy-extensions/.github/workflows/runtime-agent-full-run.yml@v4
+    uses: Extra-Chill/homeboy/.github/workflows/runtime-agent-full-run.yml@v4
     with:
       runtime: local-shell
       profile: example-agent

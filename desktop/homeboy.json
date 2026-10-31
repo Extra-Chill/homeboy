@@ -5,5 +5,15 @@
     "swift": {}
   },
   "id": "homeboy-desktop",
-  "remote_path": ""
+  "remote_path": "",
+  "version_targets": [
+    {
+      "file": "project.yml",
+      "pattern": "MARKETING_VERSION: ([0-9.]+)"
+    },
+    {
+      "file": "Homeboy.xcodeproj/project.pbxproj",
+      "pattern": "MARKETING_VERSION = ([0-9.]+);"
+    }
+  ]
 }

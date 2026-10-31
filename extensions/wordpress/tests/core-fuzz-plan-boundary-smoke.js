@@ -32,7 +32,7 @@ assert(wordpressDocs.includes('homeboy fuzz plan my-wordpress-component'), 'Word
 assert(wordpressDocs.includes('wp-codebox/fuzz-suite/v1'), 'WordPress extension docs must preserve the WP Codebox fuzz-suite runtime boundary.');
 
 const workflowAndScriptText = [
-	...readDirectoryFiles('.github/workflows', (entry) => entry.endsWith('.yml') || entry.endsWith('.yaml')),
+	...readDirectoryFiles('../.github/workflows', (entry) => entry.endsWith('.yml') || entry.endsWith('.yaml')),
 	...readDirectoryFiles('.github/scripts/runtime-agent-full-run', (entry) => entry.endsWith('.cjs') || entry.endsWith('.mjs') || entry.endsWith('.js')),
 	readIfExists('wordpress/package.json'),
 ].join('\n');

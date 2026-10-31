@@ -18,7 +18,7 @@ const genericFiles = [
   'runtime-agent-ci/provider-adapters.js',
   'runtime-agent-ci/lib/runtime-agent-ci-plan.js',
   'agent-task-contracts/generic-agent-task-plan.js',
-  '.github/workflows/runtime-agent-full-run.yml',
+  '../.github/workflows/runtime-agent-full-run.yml',
 ];
 
 for (const relativePath of genericFiles) {

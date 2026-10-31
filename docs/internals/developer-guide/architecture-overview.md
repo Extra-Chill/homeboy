@@ -15,7 +15,7 @@ Cargo behavior, WP-CLI flows, package-manager semantics, or framework-specific
 lint rules.
 
 Those semantics belong in extensions. The shared implementation lives in
-[Extra-Chill/homeboy-extensions](https://github.com/Extra-Chill/homeboy-extensions),
+[`extensions/`](../../../extensions) of this repository,
 and private teams can provide the same contracts through custom extension
 manifests, scripts, hooks, docs, and CLI verbs.
 
