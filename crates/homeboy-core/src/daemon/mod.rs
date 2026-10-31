@@ -1455,7 +1455,9 @@ pub(super) fn read_status_for_state_path(path: PathBuf) -> Result<DaemonStatus> 
     // the lease it recorded, live or dead, so another controller's stamped
     // work on a shared Lab host neither protects this daemon nor blocks its
     // replacement, even before this state dir has a lease (#16798).
-    // Unstamped records have no proven owner and stay counted.
+    // Unstamped records have no proven owner and stay counted. A state dir
+    // with no lease cannot own a job another daemon stamped with its lease,
+    // even when that daemon predates scope stamps.
     let job_store = JobStore::open_without_reconciliation(&jobs_path)?
         .with_daemon_scope(daemon_scope_for_state_path(&path));
     let job_store = match validation.state.as_ref() {
@@ -1476,7 +1478,10 @@ pub(super) fn read_status_for_state_path(path: PathBuf) -> Result<DaemonStatus> 
             pid_is_running,
         )
         .into_iter()
-        .filter(|evidence| job_store.executes_lease(evidence.daemon_lease_id.as_deref()))
+        .filter(|evidence| match validation.state {
+            Some(_) => job_store.executes_lease(evidence.daemon_lease_id.as_deref()),
+            None => evidence.daemon_lease_id.is_none(),
+        })
         .collect::<Vec<_>>();
     // Durable terminal evidence proves no workload remains, so those jobs are
     // reported as evidence but do not protect the daemon from replacement.
@@ -6141,6 +6146,20 @@ mod tests {
                 status.active_job_recovery_evidence
             );
             assert_eq!(status.freshness.active_jobs, 0);
+
+            // So is one stamped only with another daemon's lease, as a daemon
+            // that predates scope stamps records it.
+            let unscoped_other = JobStore::open_without_reconciliation(&ledger)
+                .expect("open unscoped store")
+                .with_daemon_lease("lease-pre-scope-daemon".to_string());
+            let leased = unscoped_other.create("runner.exec");
+            unscoped_other.start(leased.id).expect("start leased job");
+            let status = read_status_for_state_path(path.clone()).expect("status");
+            assert!(
+                status.active_job_recovery_evidence.is_empty(),
+                "another lease's job is not this leaseless state dir's work: {:?}",
+                status.active_job_recovery_evidence
+            );
 
             // A job stamped with this state dir's own scope still counts.
             let own = JobStore::open_without_reconciliation(&ledger)
