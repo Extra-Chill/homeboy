@@ -5,8 +5,8 @@ use std::path::PathBuf;
 
 use crate::commands::{
     agent_task, bench, cleanup, component, config, contract, control_plane, daemon, deploy,
-    extension, fuzz, git, harvest, project, refactor, release, review, rig, runner, runs, runtime,
-    self_cmd, server, source, ssh, status, trace, upgrade, workflow, workload, worktree,
+    extension, fuzz, git, harvest, project, refactor, release, review, rig, runner, runs, self_cmd,
+    server, source, ssh, status, trace, upgrade, workflow, workload, worktree,
 };
 
 mod argument_provenance;

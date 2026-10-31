@@ -18,10 +18,9 @@ use homeboy::agents::agent_tasks::gate::VerifyGateOptions;
 use homeboy::agents::agent_tasks::lifecycle as agent_task_lifecycle;
 use homeboy::agents::agent_tasks::promotion::{AgentTaskPromotionReport, AgentTaskPromotionStatus};
 use homeboy::agents::agent_tasks::provider::{
-    evaluate_provider_dispatchability, evaluate_provider_dispatchability_with_config,
-    provider_credential_readiness, resolve_provider_for_backend, AgentTaskExecutorProvider,
-    AgentTaskProviderCatalog, ExtensionProviderAgentTaskExecutor, ProviderResolution,
-    ProviderRuntimeReadinessCache,
+    evaluate_provider_dispatchability_with_config, provider_credential_readiness,
+    resolve_provider_for_backend, AgentTaskExecutorProvider, AgentTaskProviderCatalog,
+    ExtensionProviderAgentTaskExecutor, ProviderResolution, ProviderRuntimeReadinessCache,
 };
 use homeboy::agents::agent_tasks::review_dossier::{
     homeboy_tool_disclosure, resolve_review_profile, validate_issue_reference,
@@ -3177,6 +3176,7 @@ pub(crate) fn read_promotion_source(
 mod tests {
     use super::*;
     use crate::commands::agent_task::fake_pi_test::FakePi;
+    use homeboy::agents::agent_tasks::provider::evaluate_provider_dispatchability;
 
     use crate::commands::agent_task_summary::{render_agent_task_summary, AgentTaskSummaryKind};
     use clap::Parser;
