@@ -72,15 +72,7 @@ fn service_binary_link_for(runner_id: &str, controller_id: &str) -> String {
 /// The daemon state directory, relative to `$HOME`. It is the directory the
 /// read-only `daemon status` probe already inspects for this runner.
 fn service_state_dir(runner_id: &str) -> String {
-    service_state_dir_for(runner_id, &controller_id())
-}
-
-fn service_state_dir_for(runner_id: &str, controller_id: &str) -> String {
-    format!(
-        ".config/homeboy/daemon-generations/{}/controllers/{}/primary",
-        paths::sanitize_path_segment(runner_id),
-        super::controller_scope_segment(controller_id)
-    )
+    super::daemon_state_dir(runner_id, &controller_id())
 }
 
 fn controller_segment() -> String {
@@ -144,11 +136,12 @@ Environment=PATH={path}
 Restart=always
 RestartSec=2s
 TimeoutStopSec=30s
+KillMode=process
 
 [Install]
 WantedBy=default.target
 "#,
-        state_dir = service_state_dir_for(runner_id, controller_id),
+        state_dir = super::daemon_state_dir(runner_id, controller_id),
         token_env = paths::DAEMON_STARTUP_TOKEN_ENV,
         path = SERVICE_PATH_PLACEHOLDER,
         link = service_binary_link_for(runner_id, controller_id),
@@ -481,9 +474,10 @@ pub fn service_status(runner_id: &str) -> Result<RunnerServiceReport> {
     Ok(report_for(runner_id, homeboy, daemon.as_ref(), Vec::new()))
 }
 
-/// Point the service at `binary` and restart it. Callers first prove the
-/// runner is idle (or explicitly force the restart), because restarting the
-/// unit stops the daemon's child processes.
+/// Point the service at `binary` and restart it in place. The unit keeps its
+/// state directory and stops only the daemon process (`KillMode=process`), so
+/// the restarted daemon re-adopts every job with a recorded child identity.
+/// Callers prove every active job is re-adoptable, or explicitly force it.
 ///
 /// The unit file is rewritten (not just the binary link) on every repoint, so
 /// a unit installed before the daemon's startup token was rendered self-heals
@@ -820,6 +814,9 @@ mod tests {
             &format!("Environment=HOMEBOY_DAEMON_STATE_DIR=%h/.config/homeboy/daemon-generations/homeboy-lab/controllers/{}/primary", controller_segment())
         ));
         assert!(unit.contains("Restart=always"));
+        // A restart stops only the daemon; re-adoptable job children lead
+        // their own sessions and must outlive it.
+        assert!(unit.contains("KillMode=process"));
         assert!(unit.contains("WantedBy=default.target"));
         assert_eq!(
             service_unit_name("homeboy-lab"),
@@ -987,7 +984,7 @@ mod tests {
 
         let a_state = home
             .path()
-            .join(service_state_dir_for("homeboy-lab", "controller-a"));
+            .join(daemon_state_dir("homeboy-lab", "controller-a"));
         std::fs::create_dir_all(&a_state).unwrap();
         std::fs::write(a_state.join("state.json"), r#"{"lease_id":"lease-a"}"#).unwrap();
         std::fs::write(a_state.join("termination.json"), r#"{"pid":1}"#).unwrap();
@@ -1063,9 +1060,9 @@ mod tests {
         let b_rendered = std::fs::read_to_string(b_unit_path).unwrap();
         assert!(b_rendered.contains(&format!(
             "HOMEBOY_DAEMON_STATE_DIR=%h/{}",
-            service_state_dir_for("homeboy-lab", "controller-b")
+            daemon_state_dir("homeboy-lab", "controller-b")
         )));
-        assert!(!b_rendered.contains(&service_state_dir_for("homeboy-lab", "controller-a")));
+        assert!(!b_rendered.contains(&daemon_state_dir("homeboy-lab", "controller-a")));
 
         let b_replacement = home.path().join("homeboy-b-refreshed");
         std::fs::write(&b_replacement, "B refreshed binary").unwrap();
@@ -1130,7 +1127,7 @@ mod tests {
             )
         );
         assert_eq!(
-            service_state_dir_for(a.0, a.1),
+            daemon_state_dir(a.0, a.1),
             format!(
                 ".config/homeboy/daemon-generations/runner-a/controllers/{}/primary",
                 super::super::controller_scope_segment(a.1)
@@ -1144,10 +1141,7 @@ mod tests {
             service_binary_link_for(a.0, a.1),
             service_binary_link_for(b.0, b.1)
         );
-        assert_ne!(
-            service_state_dir_for(a.0, a.1),
-            service_state_dir_for(b.0, b.1)
-        );
+        assert_ne!(daemon_state_dir(a.0, a.1), daemon_state_dir(b.0, b.1));
         assert_eq!(
             service_unit_name_for("runner/a", "controller b"),
             format!(
@@ -1177,8 +1171,8 @@ mod tests {
             service_binary_link_for("homeboy-lab", second)
         );
         assert_ne!(
-            service_state_dir_for("homeboy-lab", first),
-            service_state_dir_for("homeboy-lab", second)
+            daemon_state_dir("homeboy-lab", first),
+            daemon_state_dir("homeboy-lab", second)
         );
 
         let long_id = "controller/identity/".repeat(128);

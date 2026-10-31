@@ -334,6 +334,31 @@ pub(crate) struct StoredJob {
     pub(super) daemon_scope: Option<DaemonScope>,
 }
 
+impl StoredJob {
+    /// The recorded PID and kernel start identity a restarted daemon re-adopts
+    /// this job's child by. A platform without a start discriminator records
+    /// none, and such a child cannot be re-adopted.
+    fn recorded_child_start(&self) -> Option<(u32, u64)> {
+        let process = self.local_child.as_ref()?.process.as_ref()?;
+        match process.discriminator {
+            LocalChildStartDiscriminator::LinuxProcStatStarttimeTicks { ticks } => {
+                Some((process.pid, ticks))
+            }
+            LocalChildStartDiscriminator::Unsupported { .. } => None,
+        }
+    }
+
+    /// A daemon restarted in place on the same state directory continues this
+    /// job: a running runner exec job is re-adopted by its recorded child
+    /// identity, and a step job resumes from its checkpoint.
+    pub(super) fn re_adoptable_across_daemon_restart(&self) -> bool {
+        self.controller_job
+            .as_ref()
+            .is_some_and(|controller| controller.job_type == crate::daemon::step_job::STEP_JOB_TYPE)
+            || (self.job.status == JobStatus::Running && self.recorded_child_start().is_some())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct AdmissionLease {
     token: String,
@@ -2470,13 +2495,8 @@ impl JobStore {
                     && stored.job.daemon_lease_id != self.daemon_lease_id
             })
             .filter_map(|stored| {
-                let process = stored.local_child.as_ref()?.process.as_ref()?;
-                match process.discriminator {
-                    LocalChildStartDiscriminator::LinuxProcStatStarttimeTicks { ticks } => {
-                        Some((stored.job.id, process.pid, ticks))
-                    }
-                    LocalChildStartDiscriminator::Unsupported { .. } => None,
-                }
+                let (pid, ticks) = stored.recorded_child_start()?;
+                Some((stored.job.id, pid, ticks))
             })
             .collect()
     }

@@ -15,6 +15,8 @@ mod handoff;
 mod policy;
 mod prepare;
 mod redaction;
+#[cfg(target_os = "linux")]
+mod restart_in_place;
 mod secret_source;
 mod watch;
 

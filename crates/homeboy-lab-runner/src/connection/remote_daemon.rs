@@ -1778,6 +1778,32 @@ mod tests {
     }
 
     #[test]
+    fn in_place_restart_stops_and_starts_on_the_one_state_dir_the_service_unit_uses() {
+        let controller = crate::connection::controller_id();
+        let state_dir = remote_daemon_state_dir("homeboy-lab", &controller);
+        let stop = remote_daemon_command(
+            "homeboy-lab",
+            "/opt/homeboy",
+            "daemon stop --lease-id lease-a",
+        );
+        let start = remote_daemon_ensure_running_command("/opt/homeboy", "homeboy-lab", None);
+
+        assert_eq!(
+            state_dir,
+            format!(
+                "$HOME/{}",
+                crate::connection::daemon_state_dir("homeboy-lab", &controller)
+            ),
+            "the direct path and the service unit derive the dir from one function"
+        );
+        assert!(state_dir.ends_with("/primary"));
+        assert!(!state_dir.contains("generation-"));
+        let pinned = format!("HOMEBOY_DAEMON_STATE_DIR=\"{state_dir}\"");
+        assert!(stop.starts_with(&pinned), "{stop}");
+        assert!(start.starts_with(&pinned), "{start}");
+    }
+
+    #[test]
     fn daemon_store_scope_does_not_alias_distinct_ids_with_equal_sanitized_prefixes() {
         let first = remote_daemon_state_dir("shared-runner", "a/b-controller");
         let second = remote_daemon_state_dir("shared-runner", "a_b-controller");
@@ -2472,9 +2498,10 @@ fn remote_resident_daemon_command(runner_id: &str, homeboy: &str, args: &str) ->
 }
 
 fn remote_daemon_state_dir(runner_id: &str, controller_id: &str) -> String {
-    let runner_segment = homeboy_core::paths::sanitize_path_segment(runner_id);
-    let controller_segment = crate::connection::controller_scope_segment(controller_id);
-    format!("$HOME/.config/homeboy/daemon-generations/{runner_segment}/controllers/{controller_segment}/primary")
+    format!(
+        "$HOME/{}",
+        crate::connection::daemon_state_dir(runner_id, controller_id)
+    )
 }
 
 /// Schema of `homeboy daemon plan` data (#15557 C5).
@@ -2683,6 +2710,43 @@ pub(super) fn remote_daemon_force_stop(
         );
     }
     Ok(())
+}
+
+/// Restart a direct daemon in place: stop the exact previous lease, then run
+/// `ensure-running` with the same `HOMEBOY_DAEMON_STATE_DIR`. The previous
+/// process must be gone before the start, because the restarted daemon takes
+/// the store's exclusive owner lock and re-adopts the jobs it left running.
+pub(super) fn restart_remote_daemon_in_place(
+    client: &SshClient,
+    homeboy: &str,
+    runner_id: &str,
+    previous_lease: &str,
+    configured_identity: &str,
+) -> std::result::Result<RemoteDaemon, String> {
+    remote_daemon_force_stop(client, homeboy, runner_id, previous_lease)?;
+    let stopped = remote_daemon_status(client, homeboy, runner_id)?;
+    if stopped.reachable
+        && stopped
+            .daemon
+            .as_ref()
+            .is_some_and(|daemon| daemon.lease_id.as_deref() == Some(previous_lease))
+    {
+        return Err(format!(
+            "daemon lease `{previous_lease}` still serves after its stop; refusing to start a second owner on its state directory"
+        ));
+    }
+    let restarted = remote_daemon_ensure_running(client, homeboy, runner_id, None).map_err(
+        |error| match error {
+            RemoteDaemonEnsureError::Other(message) => message,
+            RemoteDaemonEnsureError::EnsureRunning(failure) => failure.message,
+        },
+    )?;
+    if restarted.lease_id.as_deref() == Some(previous_lease) {
+        return Err(format!(
+            "ensure-running returned the stopped daemon lease `{previous_lease}` instead of restarting it"
+        ));
+    }
+    verify_remote_daemon_replacement(client, homeboy, runner_id, &restarted, configured_identity)
 }
 
 fn verify_remote_daemon_replacement(

@@ -569,6 +569,38 @@ fn daemon_identity_transition_reports_a_restarted_control_plane() {
 }
 
 #[test]
+fn polling_accepts_the_daemon_restarted_in_place_but_not_an_unrelated_replacement() {
+    let accepted = "homeboy 0.436.8+before-refresh";
+    let restarted = "homeboy 0.436.9+after-refresh";
+    let mut rebound_owner = crate::test_support::direct_ssh_session("lease-b");
+    rebound_owner.homeboy_build_identity = Some(restarted.to_string());
+
+    assert!(super::super::daemon::daemon_identity_is_accepted(
+        accepted, accepted, None
+    ));
+    assert!(
+        super::super::daemon::daemon_identity_is_accepted(
+            restarted,
+            accepted,
+            Some(&rebound_owner)
+        ),
+        "the ledger rebound the job onto the restarted lease, so its new identity is the owner"
+    );
+    assert!(
+        !super::super::daemon::daemon_identity_is_accepted(restarted, accepted, None),
+        "without a ledger owner a changed identity is still refused"
+    );
+    assert!(
+        !super::super::daemon::daemon_identity_is_accepted(
+            "homeboy 9.9.9+unrelated",
+            accepted,
+            Some(&rebound_owner)
+        ),
+        "a daemon matching neither the admission nor the ledger owner is refused"
+    );
+}
+
+#[test]
 fn direct_daemon_preserves_declared_provider_source_through_execution() {
     crate::test_support::with_isolated_home(|_| {
         crate::register_runner_daemon_exec_driver();

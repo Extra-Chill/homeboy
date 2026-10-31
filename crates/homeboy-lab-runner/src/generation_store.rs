@@ -1300,19 +1300,6 @@ pub(crate) fn status_admission_projection(
     ))
 }
 
-/// Report whether a refresh must preserve existing daemon endpoints. Current
-/// daemon activity is queried separately; this covers durable ownership that
-/// remains after a producing job has completed.
-pub(crate) fn requires_generation_preserving_refresh(runner_id: &str) -> Result<bool> {
-    Ok(read(runner_id)?.is_some_and(|generations| {
-        !generations.job_owners.is_empty()
-            || generations
-                .generations
-                .iter()
-                .any(|(id, entry)| has_result_owners_for(&generations, id, &entry.endpoint))
-    }))
-}
-
 fn owner_matches_generation(owner: &str, generation: &str, endpoint: &RunnerSession) -> bool {
     owner == generation || endpoint.remote_daemon_lease_id.as_deref() == Some(owner)
 }
@@ -3021,6 +3008,90 @@ fn retire_result_owner(
     })
 }
 
+/// A daemon restarted in place keeps its state directory, so every job, run
+/// and artifact the stopped lease owned now belongs to the restarted lease:
+/// the new daemon re-adopted them from the same store. Move the stopped
+/// lease's ledger entry onto the restarted lease (and make it the admission
+/// owner) instead of leaving a draining generation behind that observers
+/// would report as dead or replaced.
+pub(crate) fn rebind_restarted_lease(
+    runner_id: &str,
+    previous_lease: &str,
+    restarted: &RunnerSession,
+) -> Result<()> {
+    let restarted_lease = restarted
+        .remote_daemon_lease_id
+        .clone()
+        .filter(|lease_id| !lease_id.is_empty())
+        .ok_or_else(|| Error::internal_unexpected("restarted daemon session has no lease ID"))?;
+    with_registry_lock(runner_id, || {
+        let mut generations = read(runner_id)?
+            .unwrap_or_else(|| RollingGenerations::new(restarted_lease.clone(), restarted.clone()));
+        rebind_restarted_lease_in(
+            &mut generations,
+            previous_lease,
+            &restarted_lease,
+            restarted,
+        );
+        write(runner_id, &generations)
+    })
+}
+
+fn rebind_restarted_lease_in(
+    generations: &mut RollingGenerations<RunnerSession>,
+    previous_lease: &str,
+    restarted_lease: &str,
+    restarted: &RunnerSession,
+) {
+    let previous_keys = generations
+        .generations
+        .iter()
+        .filter(|(generation, entry)| {
+            generation.as_str() != restarted_lease
+                && owner_matches_generation(previous_lease, generation, &entry.endpoint)
+        })
+        .map(|(generation, _)| generation.clone())
+        .collect::<Vec<_>>();
+    for generation in &previous_keys {
+        generations.generations.remove(generation);
+    }
+    let moved = |owner: &String| {
+        owner == previous_lease || previous_keys.iter().any(|generation| generation == owner)
+    };
+    for owners in [
+        &mut generations.job_owners,
+        &mut generations.run_owners,
+        &mut generations.artifact_owners,
+    ] {
+        for owner in owners.values_mut() {
+            if moved(owner) {
+                *owner = restarted_lease.to_string();
+            }
+        }
+    }
+    if moved(&generations.admission_owner) {
+        // The admission owner must name a present generation before
+        // activation can demote it.
+        generations.admission_owner = restarted_lease.to_string();
+    }
+    generations.begin(restarted_lease, restarted.clone());
+    let entry = generations
+        .generations
+        .get_mut(restarted_lease)
+        .expect("restarted generation was inserted or found");
+    entry.endpoint = restarted.clone();
+    entry.observed_active_jobs = None;
+    if generations.admission_owner == restarted_lease {
+        entry.drain_state = crate::RollingDrainState::Admitting;
+    } else {
+        generations.activate_preserving_drained(restarted_lease);
+    }
+}
+
+/// Seed a multi-generation ledger for the retained retirement and routing
+/// tests. Production never creates a second generation: a refresh restarts the
+/// daemon in place and rebinds its lease instead.
+#[cfg(test)]
 pub(crate) fn activate(
     runner_id: &str,
     current: &RunnerSession,
@@ -3067,45 +3138,6 @@ pub(crate) fn activate(
         }
         generations.begin(generation.clone(), candidate);
         generations.activate_preserving_drained(&generation);
-        write(runner_id, &generations)
-    })
-}
-
-/// Remove an unactivated candidate from the durable ledger. This is safe to
-/// call after any candidate validation failure and never changes admission.
-pub(crate) fn rollback_candidate(runner_id: &str, generation: &str) -> Result<()> {
-    with_registry_lock(runner_id, || {
-        let Some(mut generations) = read(runner_id)? else {
-            return Ok(());
-        };
-        if generations.rollback(generation) {
-            write(runner_id, &generations)?;
-        }
-        Ok(())
-    })
-}
-
-/// Undo a candidate that was activated locally but could not be durably
-/// published as the controller session. The previous admission remains intact.
-pub(crate) fn rollback_activation(
-    runner_id: &str,
-    current: &RunnerSession,
-    generation: &str,
-) -> Result<()> {
-    with_registry_lock(runner_id, || {
-        let Some(mut generations) = read(runner_id)? else {
-            return Ok(());
-        };
-        let previous = session_generation(current);
-        if generations.admission_owner == generation {
-            generations.generations.remove(generation);
-            if let Some(entry) = generations.generations.get_mut(&previous) {
-                entry.drain_state = crate::RollingDrainState::Admitting;
-                generations.admission_owner = previous;
-            }
-        } else {
-            generations.rollback(generation);
-        }
         write(runner_id, &generations)
     })
 }
@@ -5110,35 +5142,6 @@ mod tests {
     }
 
     #[test]
-    fn completed_result_ownership_requires_generation_preserving_refresh_until_retired() {
-        crate::test_support::with_isolated_home(|_| {
-            let current = session("lease-a", "daemon-a", Some(101));
-            let mut generations = RollingGenerations::new("lease-a", current.clone());
-            assert!(generations.admit_job_for("lease-a", "job-a"));
-            assert!(generations.record_run("job-a", "run-a"));
-            assert!(generations.record_artifact("job-a", "artifact-a"));
-            assert!(generations.complete_job_preserving_drained("job-a"));
-            write("runner-a", &generations).expect("persist retained result ownership");
-
-            assert!(
-                requires_generation_preserving_refresh("runner-a")
-                    .expect("inspect retained ownership"),
-                "completed result owners keep their producing generation routable"
-            );
-
-            generations.retire_result_owner(RollingResultOwnerRetirement::Run("run-a"));
-            generations.retire_result_owner(RollingResultOwnerRetirement::Artifact("artifact-a"));
-            write("runner-a", &generations).expect("persist retired result ownership");
-
-            assert!(
-                !requires_generation_preserving_refresh("runner-a")
-                    .expect("inspect idle generation"),
-                "an idle generation can use ordinary disconnect and reconnect"
-            );
-        });
-    }
-
-    #[test]
     fn registry_rejects_an_explicit_mismatched_runner_id() {
         crate::test_support::with_isolated_home(|_| {
             let a = session("lease-a", "daemon-a", Some(101));
@@ -5987,7 +5990,7 @@ mod tests {
     }
 
     #[test]
-    fn persisted_generation_rotation_routes_jobs_projects_status_and_retires_once() {
+    fn persisted_generations_route_jobs_project_status_and_retire_once() {
         crate::test_support::with_isolated_home(|_| {
             let a = session("lease-a", "daemon-a", Some(101));
             let b = session("lease-b", "daemon-b", Some(202));
@@ -6119,6 +6122,7 @@ mod tests {
                     stale_reason: None,
                     active_child_count: None,
                     active_cell_count: None,
+                    re_adoptable: false,
                 }],
                 active_runner_jobs: Vec::new(),
                 stale_runner_jobs: Vec::new(),
@@ -6353,28 +6357,59 @@ mod tests {
             );
         });
     }
+    #[test]
+    fn in_place_restart_rebinds_the_stopped_lease_without_leaving_a_generation_behind() {
+        crate::test_support::with_isolated_home(|_| {
+            let a = session("lease-a", "daemon", Some(101));
+            let b = session("lease-b", "daemon", Some(202));
+            record_job("runner-a", &a, "job-a").expect("record job on lease A");
+            let mut generations = read("runner-a").expect("read").expect("ledger");
+            assert!(generations.record_run("job-a", "run-a"));
+            assert!(generations.record_artifact("job-a", "artifact-a"));
+            write("runner-a", &generations).expect("record result owners");
+
+            rebind_restarted_lease("runner-a", "lease-a", &b).expect("rebind restarted lease");
+
+            let generations = read("runner-a").expect("read").expect("ledger");
+            assert_eq!(
+                generations.generations.keys().collect::<Vec<_>>(),
+                vec!["lease-b"],
+                "no draining generation of the stopped lease is left behind"
+            );
+            assert_eq!(generations.admission_owner, "lease-b");
+            assert_eq!(generations.job_owner("job-a"), Some("lease-b"));
+            assert_eq!(
+                generations.endpoint_owner(None, Some("run-a"), Some("artifact-a")),
+                Some("lease-b")
+            );
+            assert_eq!(
+                generations.generations["lease-b"].drain_state,
+                crate::RollingDrainState::Admitting
+            );
+            assert_eq!(
+                job_session("runner-a", "job-a").expect("route job"),
+                Some(b.clone()),
+                "the controller follows the re-adopted job to the restarted lease"
+            );
+            assert_eq!(admission_session("runner-a").expect("admission"), Some(b));
+            let owners = status_job_owners("runner-a").expect("status owners");
+            assert!(owners
+                .iter()
+                .all(|owner| owner.job_ids.is_empty() || owner.generation == "lease-b"));
+        });
+    }
 
     #[test]
-    fn activation_rollback_restores_a_after_post_validation_failure() {
+    fn in_place_restart_rebind_seeds_a_missing_ledger_on_the_restarted_lease() {
         crate::test_support::with_isolated_home(|_| {
-            let a = session("lease-a", "daemon-a", Some(101));
-            let b = session("lease-b", "daemon-b", Some(202));
-            activate(
-                "runner-a",
-                &a,
-                "build-b".to_string(),
-                b,
-                &["job-a".to_string()],
-            )
-            .expect("activate B");
-
-            // This is the same ledger state reached when either durable
-            // activation publication or controller-session publication fails.
-            rollback_activation("runner-a", &a, "build-b").expect("restore A");
-            let restored = read("runner-a").expect("read").expect("ledger");
-            assert_eq!(restored.admission_owner, "lease-a");
-            assert_eq!(restored.job_owner("job-a"), Some("lease-a"));
-            assert!(!restored.generations.contains_key("build-b"));
+            let b = session("lease-b", "daemon", Some(202));
+            rebind_restarted_lease("runner-a", "lease-a", &b).expect("rebind");
+            let generations = read("runner-a").expect("read").expect("ledger");
+            assert_eq!(generations.admission_owner, "lease-b");
+            assert_eq!(
+                generations.generations.keys().collect::<Vec<_>>(),
+                vec!["lease-b"]
+            );
         });
     }
 }

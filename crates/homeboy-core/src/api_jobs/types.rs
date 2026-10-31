@@ -197,6 +197,13 @@ pub struct ActiveRunnerJobSummary {
     pub active_child_count: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_cell_count: Option<u64>,
+    /// The daemon that owns this job can be restarted in place without losing
+    /// it: a restarted daemon on the same state directory re-adopts it. Set
+    /// from typed store facts only — a running runner exec job whose child
+    /// identity was recorded, or a resumable step job. A daemon that does not
+    /// report it is treated as not re-adoptable.
+    #[serde(default)]
+    pub re_adoptable: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

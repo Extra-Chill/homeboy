@@ -9,6 +9,7 @@ pub(super) fn active_runner_job_summary(
     job: &Job,
     envelope: &RunnerExecutionEnvelope,
     now_ms: u64,
+    re_adoptable: bool,
 ) -> ActiveRunnerJobSummary {
     let dispatch = envelope
         .dispatch
@@ -62,10 +63,15 @@ pub(super) fn active_runner_job_summary(
             .as_ref()
             .and_then(|lifecycle| lifecycle.active_cell_count)
             .or_else(|| envelope_metadata_u64(envelope, "active_cell_count")),
+        re_adoptable,
     }
 }
 
-pub(super) fn active_daemon_job_summary(job: &Job, now_ms: u64) -> ActiveRunnerJobSummary {
+pub(super) fn active_daemon_job_summary(
+    job: &Job,
+    now_ms: u64,
+    re_adoptable: bool,
+) -> ActiveRunnerJobSummary {
     let started_at_ms = job.started_at_ms.unwrap_or(job.created_at_ms);
     let projection = job.runner_job_projection.as_ref();
     let lifecycle = projection.and_then(|projection| projection.lifecycle.clone());
@@ -107,6 +113,7 @@ pub(super) fn active_daemon_job_summary(job: &Job, now_ms: u64) -> ActiveRunnerJ
         stale_reason: job.stale_reason.clone(),
         active_child_count: None,
         active_cell_count: None,
+        re_adoptable,
     }
 }
 
@@ -114,6 +121,7 @@ pub(super) fn active_local_runner_job_summary(
     job: &Job,
     local: &LocalRunnerJob,
     now_ms: u64,
+    re_adoptable: bool,
 ) -> ActiveRunnerJobSummary {
     let started_at_ms = job.started_at_ms.unwrap_or(job.created_at_ms);
     let lifecycle = local.lifecycle.clone();
@@ -150,6 +158,7 @@ pub(super) fn active_local_runner_job_summary(
         stale_reason: job.stale_reason.clone(),
         active_child_count: None,
         active_cell_count: None,
+        re_adoptable,
     }
 }
 

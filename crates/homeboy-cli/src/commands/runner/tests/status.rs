@@ -646,6 +646,7 @@ fn direct_runner_status_commands_include_lifecycle_operations() {
             stale_reason: None,
             active_child_count: None,
             active_cell_count: None,
+            re_adoptable: false,
         }],
         active_runner_jobs: vec![homeboy::runner::runners::RunnerJob {
             runner_id: "homeboy-lab".to_string(),
@@ -881,6 +882,7 @@ fn unknown_owner_has_reconcile_guidance_but_no_logs_or_cancel_command() {
         stale_reason: Some("daemon_freshness_count_exceeds_typed_jobs".to_string()),
         active_child_count: None,
         active_cell_count: None,
+        re_adoptable: false,
     };
     let mut second_unknown = unknown.clone();
     second_unknown.job_id = "unknown-daemon-owner-lease-1-2".to_string();

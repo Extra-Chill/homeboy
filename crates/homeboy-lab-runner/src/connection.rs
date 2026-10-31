@@ -49,6 +49,18 @@ pub(super) fn controller_scope_segment(controller_id: &str) -> String {
     format!("{prefix}-{digest}")
 }
 
+/// The one daemon state directory for a (runner, controller) pair, relative to
+/// the runner user's `$HOME`. Direct SSH launches and the service unit both
+/// derive their `HOMEBOY_DAEMON_STATE_DIR` from it, so a restarted daemon
+/// always reopens the job store its predecessor wrote and re-adopts its jobs.
+pub(super) fn daemon_state_dir(runner_id: &str, controller_id: &str) -> String {
+    format!(
+        ".config/homeboy/daemon-generations/{}/controllers/{}/primary",
+        paths::sanitize_path_segment(runner_id),
+        controller_scope_segment(controller_id)
+    )
+}
+
 const REMOTE_LEASELESS_RECOVERY_TIMEOUT: Duration = Duration::from_secs(30);
 const REMOTE_RUNNER_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 // A reader may wait for an in-flight reconnect, but never indefinitely behind a
@@ -58,8 +70,7 @@ const CONTROLLER_PROXY_ENV: &str = "HOMEBOY_CONTROLLER_PROXY";
 mod connection_daemon;
 pub(crate) use connection_daemon::versions_match;
 use connection_daemon::{
-    connect_remote_daemon, daemon_http_freshness, daemon_http_freshness_with_timeout,
-    daemon_http_version,
+    connect_remote_daemon, daemon_http_freshness_with_timeout, daemon_http_version,
 };
 use connection_daemon::{daemon_http_identity, normalize_homeboy_version_owned};
 use connection_daemon::{
@@ -310,179 +321,128 @@ pub fn connect(runner_id: &str) -> Result<(RunnerConnectReport, i32)> {
     )
 }
 
-/// Start command for a rotation candidate generation.
+/// Restart the runner's daemon in place after a binary refresh: the same
+/// state directory under a new lease. The caller has proven every active job
+/// is re-adoptable, so the restarted daemon continues them from its job store.
+/// The controller ledger then moves the stopped lease's jobs, runs and
+/// artifacts onto the restarted lease, so observers follow them through the
+/// new tunnel instead of reporting a lost job, a dead lease or a replaced
+/// daemon.
 ///
-/// The candidate becomes the admission generation once promoted, so it must be
-/// resident like the one `runner connect` starts. Otherwise it idles out under
-/// the automatic 300s window and strands the connected session (#15585,
-/// #15610). Superseded generations still drain under the bounded default.
-fn candidate_daemon_start_command(state_dir: &str, candidate_homeboy: &str) -> String {
-    format!(
-        "HOMEBOY_DAEMON_STATE_DIR=\"{state_dir}\" {}=0 {} daemon ensure-running --addr 127.0.0.1:0",
-        homeboy_core::daemon::DAEMON_IDLE_TIMEOUT_ENV,
-        shell::quote_arg(candidate_homeboy),
-    )
-}
-
-#[cfg(test)]
-#[test]
-fn candidate_daemon_start_command_launches_a_resident_generation() {
-    assert_eq!(
-        candidate_daemon_start_command("$HOME/state/gen1", "/opt/homeboy"),
-        "HOMEBOY_DAEMON_STATE_DIR=\"$HOME/state/gen1\" HOMEBOY_DAEMON_IDLE_TIMEOUT_SECS=0 /opt/homeboy daemon ensure-running --addr 127.0.0.1:0"
-    );
-}
-
-/// Start and validate a second daemon without touching the recorded admission
-/// daemon. Its state directory is generation-scoped while HOME and the normal
-/// runtime configuration remain shared, preserving runner credentials.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn rotate_daemon_generation_in_roots(
+/// A service-managed runner repoints its unit at `service_binary` and restarts
+/// the unit; a direct runner stops the exact previous lease and starts its
+/// configured binary with the same `HOMEBOY_DAEMON_STATE_DIR`.
+pub(crate) fn restart_daemon_in_place(
     runner_id: &str,
-    candidate_homeboy: &str,
-    candidate_version: &str,
-    candidate_identity: &str,
-    candidate_generation: &str,
-    candidate_binary_sha256: Option<&str>,
-    draining_job_ids: &[String],
-) -> Result<()> {
-    let current = read_session_or_live_peer(runner_id)?.ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "runner",
-            "runner has no connected daemon to rotate",
-            Some(runner_id.to_string()),
-            None,
-        )
-    })?;
+    previous: &RunnerSession,
+    service_binary: &str,
+) -> Result<(RunnerConnectReport, i32)> {
+    let previous_lease = previous
+        .remote_daemon_lease_id
+        .clone()
+        .filter(|lease_id| !lease_id.is_empty())
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "runner",
+                "the connected daemon session has no lease to restart in place",
+                Some(runner_id.to_string()),
+                None,
+            )
+        })?;
     let runner = load(runner_id)?;
-    let Some((server_id, server, client)) = resolve_ssh_runner(&runner)? else {
-        return Err(Error::validation_invalid_argument(
-            "runner",
-            "daemon generation rotation requires an SSH runner",
-            Some(runner_id.to_string()),
-            None,
-        ));
-    };
-    let generation = candidate_generation
-        .chars()
-        .filter(|character| character.is_ascii_alphanumeric())
-        .take(48)
-        .collect::<String>();
-    let generation = if generation.is_empty() {
-        "candidate".to_string()
-    } else {
-        generation
-    };
-    let runner_segment = homeboy_core::paths::sanitize_path_segment(runner_id);
-    let controller_segment = controller_scope_segment(&controller_id());
-    let state_dir = format!(
-        "$HOME/.config/homeboy/daemon-generations/{runner_segment}/controllers/{controller_segment}/{generation}"
-    );
-    let command = candidate_daemon_start_command(&state_dir, candidate_homeboy);
-    let output = client.execute_with_timeout(&command, REMOTE_RUNNER_CONNECT_TIMEOUT);
-    if !output.success {
-        return Err(Error::validation_invalid_argument(
-            "reconnect",
-            command_failure_message("candidate daemon startup failed", &output),
-            Some(runner_id.to_string()),
-            None,
-        ));
-    }
-    let envelope = parse_envelope(&output.stdout).map_err(|error| {
-        Error::internal_json(
-            error.to_string(),
-            Some("parse candidate daemon startup".to_string()),
-        )
-    })?;
-    if !envelope.success {
-        return Err(Error::validation_invalid_argument(
-            "reconnect",
-            "candidate daemon startup returned an error envelope",
-            Some(runner_id.to_string()),
-            None,
-        ));
-    }
-    let data = envelope
-        .data
-        .ok_or_else(|| Error::internal_unexpected("candidate daemon startup returned no data"))?;
-    let daemon = RemoteDaemon {
-        address: data
-            .get("address")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string(),
-        pid: data
-            .get("pid")
-            .and_then(Value::as_u64)
-            .and_then(|pid| u32::try_from(pid).ok()),
-        lease_id: data
-            .get("lease_id")
-            .and_then(Value::as_str)
-            .map(str::to_string),
-        version: None,
-        build_identity: Some(candidate_identity.to_string()),
-        inspected_freshness: None,
-    };
+    // Pollers reattach a job through its owning lease's recovery lock. Holding
+    // it across the restart makes them wait for the rebind instead of trying
+    // to reattach the stopped lease and reporting the job lost.
+    super::generation_store::with_generation_recovery_lock(runner_id, &previous_lease, || {
+        let (report, exit_code) = if runner.settings.service_managed {
+            service::repoint_and_restart(runner_id, service_binary)?;
+            terminate_tunnel_if_owned(previous);
+            service::connect_service_runner(runner_id)?
+        } else {
+            restart_direct_daemon_in_place(&runner, previous, &previous_lease)?
+        };
+        if exit_code == 0 {
+            let session = read_session(runner_id)?.ok_or_else(|| {
+                Error::internal_unexpected(
+                    "restarted daemon connected without a controller session",
+                )
+            })?;
+            super::generation_store::rebind_restarted_lease(runner_id, &previous_lease, &session)?;
+        }
+        Ok((report, exit_code))
+    })
+}
+
+/// Stop the exact previous lease, start the configured binary on the same
+/// state directory, and reattach the controller tunnel to it.
+fn restart_direct_daemon_in_place(
+    runner: &Runner,
+    previous: &RunnerSession,
+    previous_lease: &str,
+) -> Result<(RunnerConnectReport, i32)> {
+    let runner_id = runner.id.as_str();
     let session_path = session_path(runner_id)?;
+    let homeboy = remote_runner_homeboy_path(runner, "runner daemon restart")?;
+    let Some((server_id, server, client)) = resolve_ssh_runner(runner)? else {
+        return Ok(failed_connect(
+            runner_id,
+            session_path,
+            RunnerFailureKind::SshFailure,
+            "restarting a runner daemon in place requires an SSH runner".to_string(),
+        ));
+    };
+    let identity = match remote_homeboy_identity(&client, homeboy) {
+        Ok(identity) => identity,
+        Err(message) => {
+            return Ok(failed_connect(
+                runner_id,
+                session_path,
+                RunnerFailureKind::MissingRemoteHomeboy,
+                message,
+            ))
+        }
+    };
+    let Some(configured_identity) = identity.build_identity.clone() else {
+        return Ok(failed_connect(
+            runner_id,
+            session_path,
+            RunnerFailureKind::MissingRemoteHomeboy,
+            "the runner's homeboy did not report a build identity".to_string(),
+        ));
+    };
+    let daemon = match restart_remote_daemon_in_place(
+        &client,
+        homeboy,
+        runner_id,
+        previous_lease,
+        &configured_identity,
+    ) {
+        Ok(daemon) => daemon,
+        Err(message) => {
+            return Ok(failed_connect(
+                runner_id,
+                session_path,
+                RunnerFailureKind::DaemonStartupFailure,
+                message,
+            ))
+        }
+    };
+    terminate_tunnel_if_owned(previous);
+    let expected_version = daemon.version.clone().unwrap_or(identity.version.clone());
     let (local_port, tunnel_pid, tunnel_process_start_identity, local_url, daemon) =
         match connect_remote_daemon(connection_daemon::RemoteDaemonConnectRequest {
             server: &server,
-            homeboy: candidate_homeboy,
-            daemon: daemon.clone(),
-            expected_version: "",
-            expected_identity: candidate_identity,
+            homeboy,
+            daemon,
+            expected_version: &expected_version,
+            expected_identity: &configured_identity,
             runner_id,
             session_path: &session_path,
         }) {
             Ok(connection) => connection,
-            Err(report) => {
-                let (report, _) = *report;
-                // Startup may have created the candidate lease even though tunnel
-                // or identity validation failed. Stop that exact lease and erase a
-                // pre-existing candidate ledger entry before returning to A.
-                if let Some(lease_id) = daemon.lease_id.as_deref() {
-                    let command = format!(
-                        "{} daemon stop --force --lease-id {}",
-                        shell::quote_arg(candidate_homeboy),
-                        shell::quote_arg(lease_id),
-                    );
-                    let _ = client.execute(&command);
-                }
-                let _ = super::generation_store::rollback_candidate(runner_id, &generation);
-                return Err(Error::validation_invalid_argument(
-                    "reconnect",
-                    report
-                        .failure_message
-                        .unwrap_or_else(|| "candidate daemon tunnel validation failed".to_string()),
-                    Some(runner_id.to_string()),
-                    None,
-                ));
-            }
+            Err(report) => return Ok(*report),
         };
-    if let Some(expected_binary_sha256) = candidate_binary_sha256 {
-        let freshness = daemon_http_freshness(runner_id, &local_url, "", candidate_identity);
-        if let Err(error) =
-            verify_candidate_daemon_freshness(runner_id, expected_binary_sha256, freshness)
-        {
-            if let Some(lease_id) = daemon.lease_id.as_deref() {
-                let command = format!(
-                    "{} daemon stop --force --lease-id {}",
-                    shell::quote_arg(candidate_homeboy),
-                    shell::quote_arg(lease_id),
-                );
-                let _ = client.execute(&command);
-            }
-            if let Some(pid) = tunnel_pid {
-                terminate_tunnel_if_owned_parts(pid, tunnel_process_start_identity.as_ref());
-            }
-            // The candidate was never activated. Remove any retained entry for
-            // this generation just as the preceding startup-validation path
-            // does, leaving the current admission owner untouched.
-            let _ = super::generation_store::rollback_candidate(runner_id, &generation);
-            return Err(error);
-        }
-    }
-    let candidate = RunnerSession {
+    let session = RunnerSession {
         runner_id: runner_id.to_string(),
         mode: RunnerTunnelMode::DirectSsh,
         role: RunnerSessionRole::Controller,
@@ -494,100 +454,48 @@ pub(crate) fn rotate_daemon_generation_in_roots(
         local_url: Some(local_url),
         tunnel_pid,
         tunnel_process_start_identity,
-        proxy_forward: current.proxy_forward.clone(),
+        proxy_forward: None,
         remote_daemon_pid: daemon.pid,
         remote_daemon_lease_id: daemon.lease_id,
-        homeboy_version: candidate_version.to_string(),
-        homeboy_build_identity: Some(candidate_identity.to_string()),
+        homeboy_version: expected_version,
+        homeboy_build_identity: Some(configured_identity),
         connected_at: Utc::now().to_rfc3339(),
         worker_identity: None,
         worker_pid: None,
         last_seen_at: None,
         leaseless_recovery_evidence: None,
     };
-    if let Err(error) = super::generation_store::activate(
-        runner_id,
-        &current,
-        generation.clone(),
-        candidate.clone(),
-        draining_job_ids,
-    ) {
-        rollback_rotated_candidate(
-            runner_id,
-            &current,
-            &generation,
-            &candidate,
-            candidate_homeboy,
-            &client,
-        );
-        return Err(error);
-    }
-    if let Err(error) = write_session(&candidate) {
-        rollback_rotated_candidate(
-            runner_id,
-            &current,
-            &generation,
-            &candidate,
-            candidate_homeboy,
-            &client,
-        );
+    if let Err(error) = write_session(&session) {
+        terminate_tunnel_if_owned(&session);
         return Err(error);
     }
     super::runner_probe_gate::invalidate_runner_probes(runner_id);
-    Ok(())
-}
-
-/// Candidate startup is admitted only when the daemon's own freshness report
-/// proves it is serving the exact immutable binary selected by refresh.
-fn verify_candidate_daemon_freshness(
-    runner_id: &str,
-    expected_binary_sha256: &str,
-    freshness: std::result::Result<DaemonFreshnessReport, String>,
-) -> Result<()> {
-    match freshness {
-        Ok(report)
-            if report.fresh && report.binary_hash.as_deref() == Some(expected_binary_sha256) =>
-        {
-            Ok(())
-        }
-        Ok(report) => Err(Error::validation_invalid_argument(
-            "reconnect",
-            format!(
-                "candidate daemon freshness did not match the immutable binary SHA-256 (expected {expected_binary_sha256}, observed {}, fresh={}, stale_reason_code={:?})",
-                report.binary_hash.as_deref().unwrap_or("<missing>"),
-                report.fresh,
-                report.stale_reason_code,
-            ),
-            Some(runner_id.to_string()),
-            None,
-        )),
-        Err(error) => Err(Error::validation_invalid_argument(
-            "reconnect",
-            format!("candidate daemon freshness verification failed: {error}"),
-            Some(runner_id.to_string()),
-            None,
-        )),
-    }
-}
-
-fn rollback_rotated_candidate(
-    runner_id: &str,
-    current: &RunnerSession,
-    generation: &str,
-    candidate: &RunnerSession,
-    candidate_homeboy: &str,
-    client: &SshClient,
-) {
-    if let Some(lease_id) = candidate.remote_daemon_lease_id.as_deref() {
-        let command = format!(
-            "{} daemon stop --force --lease-id {}",
-            shell::quote_arg(candidate_homeboy),
-            shell::quote_arg(lease_id),
-        );
-        let _ = client.execute(&command);
-    }
-    terminate_tunnel_if_owned(candidate);
-    let _ = super::generation_store::rollback_activation(runner_id, current, generation);
+    Ok((
+        RunnerConnectReport {
+            runner_id: runner_id.to_string(),
+            mode: Some(session.mode.clone()),
+            role: Some(session.role.clone()),
+            connected: true,
+            recorded: None,
+            local_url: session.local_url.clone(),
+            broker_url: None,
+            controller_id: None,
+            remote_daemon_address: session.remote_daemon_address.clone(),
+            tunnel_pid: session.tunnel_pid,
+            remote_daemon_pid: session.remote_daemon_pid,
+            connection_warning: None,
+            homeboy_version: Some(session.homeboy_version.clone()),
+            homeboy_build_identity: session.homeboy_build_identity.clone(),
+            session_path: Some(session_path.display().to_string()),
+            leaseless_recovery: None,
+            state_loss_recovery: None,
+            leaseless_recovery_evidence: None,
+            failure_kind: None,
+            failure_message: None,
+            failure_evidence: None,
+        },
+        0,
+    ))
 }
 
 pub fn connect_with_orphan_adoption(
@@ -3321,6 +3229,7 @@ fn orphaned_child_run_job(runner_id: &str, run: RunSummary) -> ActiveRunnerJobSu
         stale_reason: Some("child_run_running_without_active_runner_job".to_string()),
         active_child_count: None,
         active_cell_count: None,
+        re_adoptable: false,
     }
 }
 

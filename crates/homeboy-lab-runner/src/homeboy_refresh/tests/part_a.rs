@@ -17,8 +17,8 @@ use std::cell::RefCell;
 #[test]
 fn routine_reconnect_refuses_to_interrupt_an_admitted_lab_offload() {
     let admission = active_admission("0b77251a-b6a7-42a6-91a3-e49ff5f57c16");
-    let error = protect_active_jobs_before_reconnect("homeboy-lab", &[admission], false)
-        .expect_err("routine reconnect must preserve the active cook");
+    let error = plan_daemon_restart("homeboy-lab", &[admission], false)
+        .expect_err("a job the restarted daemon cannot re-adopt defers the reconnect");
 
     assert_eq!(
         error.details["active_job_ids"],
@@ -34,12 +34,122 @@ fn routine_reconnect_refuses_to_interrupt_an_admitted_lab_offload() {
 #[test]
 fn forced_reconnect_reports_the_jobs_it_will_interrupt() {
     let admission = active_admission("0b77251a-b6a7-42a6-91a3-e49ff5f57c16");
-    let interrupted = protect_active_jobs_before_reconnect("homeboy-lab", &[admission], true)
+    let mut re_adoptable = active_admission("6f1c1f5e-0d8e-4a43-9b1f-0c7d1f0a9b11");
+    re_adoptable.re_adoptable = true;
+    let restart = plan_daemon_restart("homeboy-lab", &[admission, re_adoptable], true)
         .expect("explicit force permits interruption");
 
     assert_eq!(
-        interrupted,
-        vec!["0b77251a-b6a7-42a6-91a3-e49ff5f57c16".to_string()]
+        restart.interrupted_job_ids(),
+        vec![
+            "0b77251a-b6a7-42a6-91a3-e49ff5f57c16".to_string(),
+            "6f1c1f5e-0d8e-4a43-9b1f-0c7d1f0a9b11".to_string(),
+        ],
+        "--force interrupts every active job, re-adoptable or not"
+    );
+}
+
+#[test]
+fn re_adoptable_active_jobs_restart_the_daemon_in_place() {
+    let mut exec_job = active_admission("exec-job");
+    exec_job.re_adoptable = true;
+    let mut step_job = active_admission("step-job");
+    step_job.re_adoptable = true;
+
+    let restart = plan_daemon_restart("homeboy-lab", &[exec_job, step_job], false)
+        .expect("re-adoptable work never defers the reconnect");
+
+    assert_eq!(restart, DaemonRestart::InPlace);
+    assert!(
+        restart.interrupted_job_ids().is_empty(),
+        "an in-place restart interrupts nothing"
+    );
+    assert_eq!(
+        plan_daemon_restart("homeboy-lab", &[], false).expect("idle runner"),
+        DaemonRestart::InPlace,
+        "an idle runner restarts in place too"
+    );
+}
+
+/// #16680: with a connected daemon and one active re-adoptable exec job,
+/// refresh takes the `restart_in_place` route, which restarts the daemon on
+/// its state dir and rebinds the job's owner. It does not take disconnect
+/// plus connect, and for a service-managed runner it never defers and never
+/// interrupts the job. The restart itself is covered end to end in
+/// `execution::tests::restart_in_place`.
+#[test]
+fn re_adoptable_active_job_routes_refresh_through_restart_in_place() {
+    let session = crate::test_support::direct_ssh_session("lease-old");
+    let mut exec_job = active_admission("exec-job");
+    exec_job.re_adoptable = true;
+
+    for service_managed in [false, true] {
+        let restart = plan_daemon_restart("homeboy-lab", std::slice::from_ref(&exec_job), false)
+            .expect("a re-adoptable job never defers the refresh");
+        assert!(
+            restart.interrupted_job_ids().is_empty(),
+            "service_managed={service_managed}: the job is not interrupted"
+        );
+        assert_eq!(
+            refresh_reconnect_route(&restart, Some(&session), service_managed),
+            RefreshReconnectRoute::RestartInPlace(&session),
+            "service_managed={service_managed}: restart in place, not disconnect plus connect"
+        );
+    }
+}
+
+/// The negative case. A job the restarted daemon cannot re-adopt defers the
+/// refresh before any route is taken, so the daemon is neither stopped nor
+/// disconnected. `--force` takes the disconnect route instead and names the
+/// job it interrupts.
+#[test]
+fn non_re_adoptable_job_defers_refresh_and_force_interrupts_it() {
+    let session = crate::test_support::direct_ssh_session("lease-old");
+    let queued = active_admission("queued-job");
+
+    let deferred = plan_daemon_restart("homeboy-lab", std::slice::from_ref(&queued), false)
+        .expect_err("a non-re-adoptable job defers the refresh");
+    assert_eq!(
+        deferred.details["active_job_ids"],
+        serde_json::json!(["queued-job"])
+    );
+
+    for service_managed in [false, true] {
+        let forced = plan_daemon_restart("homeboy-lab", std::slice::from_ref(&queued), true)
+            .expect("--force permits the interruption");
+        assert_eq!(forced.interrupted_job_ids(), vec!["queued-job".to_string()]);
+        assert_eq!(
+            refresh_reconnect_route(&forced, Some(&session), service_managed),
+            RefreshReconnectRoute::Reconnect {
+                restart_service: service_managed,
+                disconnect: Some(&session),
+            },
+            "service_managed={service_managed}: --force disconnects the connected daemon"
+        );
+    }
+    assert_eq!(
+        refresh_reconnect_route(&DaemonRestart::InPlace, None, false),
+        RefreshReconnectRoute::Reconnect {
+            restart_service: false,
+            disconnect: None,
+        },
+        "with no connected daemon there is nothing to restart in place"
+    );
+}
+
+#[test]
+fn one_job_that_cannot_be_re_adopted_defers_the_whole_restart() {
+    let mut exec_job = active_admission("exec-job");
+    exec_job.re_adoptable = true;
+    let queued = active_admission("queued-job");
+
+    let error = plan_daemon_restart("homeboy-lab", &[exec_job, queued], false)
+        .expect_err("a non-re-adoptable job keeps the drain/defer behaviour");
+
+    assert_eq!(
+        error.details["active_job_ids"],
+        serde_json::json!(["queued-job"]),
+        "only the job that blocks the restart is named"
     );
 }
 
@@ -88,6 +198,7 @@ fn active_admission(job_id: &str) -> homeboy_core::api_jobs::ActiveRunnerJobSumm
         stale_reason: None,
         active_child_count: None,
         active_cell_count: None,
+        re_adoptable: false,
     }
 }
 
@@ -153,7 +264,7 @@ fn reconnect_transport_state_matrix_preserves_disconnected_and_rotation_paths() 
     let healthy_connected = refreshed_daemon_status(true, Some("homeboy 0.294.0+newcommit"));
 
     assert!(
-        !reconnect_rotates_existing_transport(&disconnected),
+        !reconnect_restarts_existing_transport(&disconnected),
         "a disconnected runner starts the promoted binary directly"
     );
     assert_eq!(
@@ -162,7 +273,7 @@ fn reconnect_transport_state_matrix_preserves_disconnected_and_rotation_paths() 
         "a disconnected runner cannot report reconnect transport success"
     );
     assert!(
-        reconnect_rotates_existing_transport(&stale_connected),
+        reconnect_restarts_existing_transport(&stale_connected),
         "a stale connected daemon is rotated before reconnect"
     );
     assert_eq!(
@@ -171,7 +282,7 @@ fn reconnect_transport_state_matrix_preserves_disconnected_and_rotation_paths() 
         "a stale but connected transport remains a completed reconnect phase"
     );
     assert!(
-        reconnect_rotates_existing_transport(&healthy_connected),
+        reconnect_restarts_existing_transport(&healthy_connected),
         "a healthy connected daemon retains the established rotation behavior"
     );
     assert_eq!(
@@ -226,7 +337,7 @@ fn connected_refresh_rotates_before_connecting_the_promoted_binary() {
 /// ownership. The post-lease session must drive retirement, and active work
 /// remains owned by the draining generation rather than being interrupted.
 #[test]
-fn materialization_race_rotates_the_newly_connected_daemon_and_preserves_active_work() {
+fn materialization_race_restarts_the_newly_connected_daemon_and_preserves_active_work() {
     let materialization_snapshot = refreshed_daemon_status(false, None);
     let mut post_lease_status = refreshed_daemon_status(true, Some("homeboy 0.294.0+oldcommit"));
     let old_session = post_lease_status
@@ -237,7 +348,7 @@ fn materialization_race_rotates_the_newly_connected_daemon_and_preserves_active_
     old_session.remote_daemon_pid = Some(42);
 
     assert!(
-        !reconnect_rotates_existing_transport(&materialization_snapshot),
+        !reconnect_restarts_existing_transport(&materialization_snapshot),
         "materialization began while the runner was disconnected"
     );
     let post_lease_session = reconnect_session_after_promotion(true, &post_lease_status)
@@ -259,22 +370,13 @@ fn materialization_race_rotates_the_newly_connected_daemon_and_preserves_active_
         ["retire lease-old", "connect promoted binary"]
     );
 
-    let active_job = active_admission("active-job");
-    assert!(
-        should_rotate_daemon_generation(true, false, false),
-        "active work selects generation rotation instead of daemon replacement"
-    );
-    let mut generations = crate::RollingGenerations::new("lease-old", "old daemon");
-    assert!(generations.admit_job_for("lease-old", &active_job.job_id));
+    let mut active_job = active_admission("active-job");
+    active_job.re_adoptable = true;
     assert_eq!(
-        generations.begin("lease-new", "promoted daemon"),
-        crate::RollingStart::Start
-    );
-    assert!(generations.activate_preserving_drained("lease-new"));
-    assert_eq!(
-        generations.job_owner(&active_job.job_id),
-        Some("lease-old"),
-        "the old generation retains active work while the promoted generation admits new work"
+        plan_daemon_restart("lab", std::slice::from_ref(&active_job), false)
+            .expect("re-adoptable work restarts in place"),
+        DaemonRestart::InPlace,
+        "active re-adoptable work restarts the daemon in place instead of interrupting it"
     );
 }
 
@@ -748,17 +850,6 @@ fn parse_identity_reads_final_pretty_json_after_command_output() {
 }
 
 #[test]
-fn rotation_candidate_identity_preserves_materialized_version_and_display() {
-    let identity = parse_identity(
-        r#"{"success":true,"data":{"version":"0.348.6","display":"homeboy 0.348.6+candidate"}}"#,
-    )
-    .expect("identity parses");
-    let candidate = rotation_candidate_identity(&identity).expect("candidate identity");
-
-    assert_eq!(candidate, ("0.348.6", "homeboy 0.348.6+candidate"));
-}
-
-#[test]
 fn disconnected_ssh_refresh_dispatches_the_existing_script_with_bounded_transport() {
     let plan = HomeboyBinaryRefreshPlan {
         runner_id: "lab".to_string(),
@@ -1075,7 +1166,7 @@ fn connected_refresh_keeps_daemon_execution_options() {
 
 #[test]
 fn terminal_refresh_errors_include_the_completed_and_failed_phases() {
-    for phase in ["generation_rotation", "disconnect", "reconnect_transport"] {
+    for phase in ["restart_in_place", "disconnect", "reconnect_transport"] {
         let error = refresh_error_with_phase_summary(
             Error::internal_unexpected("terminal refresh failure"),
             &[

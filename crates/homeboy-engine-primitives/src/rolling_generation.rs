@@ -106,13 +106,6 @@ impl<E> RollingGenerations<E> {
         true
     }
 
-    pub fn rollback(&mut self, generation: &str) -> bool {
-        if self.admission_owner == generation {
-            return false;
-        }
-        self.generations.remove(generation).is_some()
-    }
-
     pub fn admit_job_for(&mut self, generation: &str, job_id: impl Into<String>) -> bool {
         let job_id = job_id.into();
         if self.job_owners.contains_key(&job_id) || !self.generations.contains_key(generation) {
@@ -203,15 +196,5 @@ mod tests {
             generations.generations.contains_key("A"),
             "retained result owners keep the drained generation routable"
         );
-    }
-
-    #[test]
-    fn failed_candidate_rollback_does_not_move_admission() {
-        let mut generations = RollingGenerations::new("A", "endpoint-a");
-        assert!(generations.admit_job_for("A", "job-a"));
-        generations.begin("B", "endpoint-b");
-        assert!(generations.rollback("B"));
-        assert_eq!(generations.admission_owner, "A");
-        assert_eq!(generations.job_owner("job-a"), Some("A"));
     }
 }
