@@ -844,7 +844,7 @@ mod tests {
         assert!(body["hint"]
             .as_str()
             .expect("hint")
-            .contains("artifact-origin inspect"));
+            .contains("are not filenames"));
     }
 
     #[test]
