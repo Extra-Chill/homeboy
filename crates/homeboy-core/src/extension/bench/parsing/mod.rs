@@ -647,11 +647,11 @@ mod tests {
             "iterations": 1,
             "diagnostics": [
                 {
-                    "code": "wordpress.bench.stdout_noise",
+                    "class": "wordpress.bench.stdout_noise",
                     "message": "captured non-JSON stdout",
                     "severity": "warning",
                     "source": "wordpress.bench/stdout",
-                    "details": { "line_count": 3 }
+                    "metadata": { "line_count": 3 }
                 }
             ],
             "scenarios": [
