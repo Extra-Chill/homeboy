@@ -58,7 +58,7 @@ fn cook_help_snapshot_is_task_first_and_full_help_retains_advanced_controls() {
     assert!(full.contains("--selector <PROVIDER_ID>"), "{full}");
     assert!(full.contains("--model <MODEL>"), "{full}");
     assert!(!full.contains("--ai-model"), "{full}");
-    assert!(full.contains("--dispatch-provider-id"), "{full}");
+    assert!(full.contains("--selector"), "{full}");
     for advanced in [
         "--placement",
         "--private-verify",

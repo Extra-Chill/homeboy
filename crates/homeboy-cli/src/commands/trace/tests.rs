@@ -21,14 +21,6 @@ struct TestCli {
 }
 
 #[test]
-fn trace_accepts_allow_local_evidence_alias() {
-    let cli = TestCli::try_parse_from(["trace", "component", "scenario", "--allow-local-evidence"])
-        .expect("trace args parse");
-
-    assert!(cli.trace.allow_local_toolchain);
-}
-
-#[test]
 fn trace_observe_parses_shared_duration_and_probe_arguments() {
     let cli = TestCli::try_parse_from([
         "trace",

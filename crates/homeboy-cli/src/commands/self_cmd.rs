@@ -25,7 +25,6 @@ pub enum SelfCommand {
     /// Report active binary, version, and nearby install/update signals
     Status(SelfStatusArgs),
     /// Report the active binary build identity without external probes
-    #[command(alias = "inspect")]
     Identity(SelfIdentityArgs),
     /// Report one authoritative binary/runtime view across the controller and
     /// every configured runner, including version drift signals and host

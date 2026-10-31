@@ -225,7 +225,7 @@ enum RigCommand {
         #[arg(long)]
         all: bool,
         /// Explicitly refresh an existing matching rig install. Refuses user-owned conflicts.
-        #[arg(long, alias = "force")]
+        #[arg(long)]
         reinstall: bool,
         /// Copy a local package into durable rig registry storage instead of linking it.
         #[arg(long)]

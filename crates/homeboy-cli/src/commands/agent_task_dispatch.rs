@@ -9,7 +9,7 @@ use homeboy::agents::agent_tasks::dispatch_service::{
 /// the execution/retry budget shared by every dispatch entrypoint.
 //
 // Implementation note (not shown in `--help`): this group is flattened into
-// `DispatchArgs` so the `--tasks/--client-context/--attempts/--queue-only`
+// `DispatchArgs` so the `--tasks/--client-context/--max-provider-executions/--queue-only`
 // flags are declared once and stay identical across carriers
 // (#5187).
 #[derive(Args, Debug, Clone)]
@@ -28,7 +28,7 @@ pub struct DispatchCoreArgs {
     /// --max-same-provider-retries for gate and review-form remediation.
     /// A cap that cannot fund configured rotation is rejected. When omitted,
     /// defaults to the total executions required by the configured policy.
-    #[arg(long = "max-provider-executions", alias = "attempts", value_name = "N")]
+    #[arg(long = "max-provider-executions", value_name = "N")]
     pub attempts: Option<u32>,
 
     /// Same-provider retries allowed after the first provider execution. Cook
@@ -127,7 +127,7 @@ pub struct DispatchArgs {
     ///
     ///   --prompt @task.md
     ///   cat task.md | homeboy agent-task cook --prompt - ...
-    #[arg(long, visible_alias = "prompt-file", value_name = "PROMPT")]
+    #[arg(long, value_name = "PROMPT")]
     pub prompt: Option<String>,
     #[arg(skip)]
     pub prompt_is_literal: bool,
@@ -139,7 +139,7 @@ pub struct DispatchArgs {
     /// Existing local repo checkout or worktree path to cook in. For Cook,
     /// omitting --repo infers its configured component when the Git remote maps
     /// unambiguously to one registered component.
-    #[arg(long, visible_alias = "dir", value_name = "PATH")]
+    #[arg(long, value_name = "PATH")]
     pub cwd: Option<String>,
 
     /// Homeboy workspace ID or existing local workspace path to cook in. For

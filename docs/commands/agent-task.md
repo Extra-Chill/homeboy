@@ -150,9 +150,7 @@ homeboy agent-task cook --prompt @task.md --model openai/gpt-5.6-terra \
   --acknowledge-model-override
 ```
 
-`--attempts N` remains accepted as a legacy alias for `--max-provider-executions N`.
-The alias cannot remove configured fallbacks. It cannot be combined with the
-canonical total execution flag. Plan and `agent-task status` output show the
+Plan and `agent-task status` output show the
 resolved defaults before provider execution;
 an exhausted run records which budget stopped further execution.
 
@@ -487,16 +485,16 @@ homeboy agent-task cook \
 ```
 
 For a caller-owned existing checkout, `cook` already accepts its path directly
-with `--cwd` (also `--dir`); it does not re-materialize that checkout. Use
-`--prompt @task.md` (also `--prompt-file @task.md`) to snapshot a prompt file and
+with `--cwd`; it does not re-materialize that checkout. Use
+`--prompt @task.md` to snapshot a prompt file and
 `--model` together with `--acknowledge-model-override` to confirm a pinned route.
 Omit the model override to use configured rotation. The ordinary
 Cook durable run is then inspectable with `agent-task status`, `agent-task status --watch`, and
 `logs`:
 
 ```bash
-homeboy agent-task cook --dir /path/to/existing-worktree \
-  --prompt-file @task.md --model openai/gpt-5.6-terra \
+homeboy agent-task cook --cwd /path/to/existing-worktree \
+  --prompt @task.md --model openai/gpt-5.6-terra \
   --acknowledge-model-override --no-finalize
 ```
 
@@ -817,13 +815,12 @@ safe remediation without exposing the opaque destination. Detached route-less
 submissions emit the same diagnosis before durable handoff, and `agent-task
 status <cook-id>` preserves it with the latest notification delivery outcome.
 
-`--backend` selects the generic executor backend, `--dispatch-provider-id` (also
-accepted as `--selector`) selects a specific provider id for that backend, and
+`--backend` selects the generic executor backend, `--selector`
+selects a specific provider id for that backend, and
 `--model` is only a provider-owned model override. Provider ids come from
 `homeboy agent-task providers`; they are not model names or provider families.
 The same `--model` value records adopted-candidate and manual-finalization AI
-provenance. `finalize-pr` still accepts `--ai-model` as a deprecated alias
-because external publication tooling calls it; `adopt` accepts only `--model`.
+provenance. Both `finalize-pr` and `adopt` accept only `--model`.
 
 ## Gate Command Contracts
 
@@ -860,7 +857,7 @@ homeboy agent-task cook \
   --to-worktree homeboy@fix-issue-3357-agent-task-non-chat-flow \
   --task-url https://github.com/Extra-Chill/homeboy/issues/3357 \
   --concurrency 4 \
-  --attempts 2 \
+  --max-provider-executions 2 \
   --verify "homeboy review test homeboy" \
   --run-id "$run_id" \
   --prompt @task.txt

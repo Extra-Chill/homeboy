@@ -1113,7 +1113,7 @@ mod tests {
                     "regression_threshold_absolute": 0.01
                 },
                 "requests_per_second": {
-                    "direction": "higher",
+                    "direction": "higher_is_better",
                     "regression_threshold_percent": 5.0
                 }
             },

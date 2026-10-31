@@ -2754,7 +2754,7 @@ fn adopt_inherited_failure_acceptance_is_explicit_and_documented() {
 }
 
 #[test]
-fn cook_execution_budget_flags_parse_and_reject_legacy_attempts_mix() {
+fn cook_execution_budget_flags_parse_and_reject_removed_attempts() {
     let cli = Cli::try_parse_from([
         "homeboy",
         "agent-task",
@@ -2795,8 +2795,6 @@ fn cook_execution_budget_flags_parse_and_reject_legacy_attempts_mix() {
         "--prompt",
         "cook",
         "--attempts",
-        "2",
-        "--max-provider-executions",
         "2",
     ])
     .is_err());

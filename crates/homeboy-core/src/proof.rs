@@ -24,11 +24,7 @@ pub struct HomeboyProof {
     pub gates: Vec<HomeboyGateResult>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifacts: Vec<HomeboyProofArtifactRef>,
-    #[serde(
-        default,
-        alias = "required_artifacts",
-        skip_serializing_if = "Vec::is_empty"
-    )]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifact_requirements: Vec<HomeboyProofArtifactRequirement>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub environment: Vec<HomeboyProofEnvironmentVariable>,

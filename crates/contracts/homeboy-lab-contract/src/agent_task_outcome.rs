@@ -49,11 +49,6 @@ pub enum AgentTaskFailureClassification {
     /// generic rate-limit text). Distinct from transient so callers can
     /// respect retry-after hints and the scheduler can rotate when the
     /// pinned model is throttled.
-    #[serde(
-        alias = "provider_quota",
-        alias = "quota_exceeded",
-        alias = "rate_limit"
-    )]
     RateLimited,
     /// The configured provider account rejected the request because its quota,
     /// billing, credentials, or account standing needs operator attention.

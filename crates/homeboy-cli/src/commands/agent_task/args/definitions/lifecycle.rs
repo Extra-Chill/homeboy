@@ -232,36 +232,34 @@ mod tests {
     }
 
     #[test]
-    fn model_parses_canonically_for_manual_finalization_and_ai_model_remains_compatible() {
-        for flag in ["--model", "--ai-model"] {
-            let cli = Cli::try_parse_from([
-                "homeboy",
-                "agent-task",
-                "finalize-pr",
-                "--manual-finalization",
-                "--run-id",
-                "manual-model",
-                "--path",
-                "/tmp/manual-model",
-                "--title",
-                "Manual model",
-                "--commit-message",
-                "record model",
-                flag,
-                "openai/gpt-5.6-sol",
-            ])
-            .expect("manual finalization model parses");
-            let Commands::AgentTask(agent_task) = cli.command else {
-                panic!("expected agent-task command");
-            };
-            let AgentTaskCommand::FinalizePr(args) = agent_task.command else {
-                panic!("expected finalize-pr command");
-            };
-            assert_eq!(
-                args.evidence.ai_model.as_deref(),
-                Some("openai/gpt-5.6-sol")
-            );
-        }
+    fn model_parses_canonically_for_manual_finalization() {
+        let cli = Cli::try_parse_from([
+            "homeboy",
+            "agent-task",
+            "finalize-pr",
+            "--manual-finalization",
+            "--run-id",
+            "manual-model",
+            "--path",
+            "/tmp/manual-model",
+            "--title",
+            "Manual model",
+            "--commit-message",
+            "record model",
+            "--model",
+            "openai/gpt-5.6-sol",
+        ])
+        .expect("manual finalization model parses");
+        let Commands::AgentTask(agent_task) = cli.command else {
+            panic!("expected agent-task command");
+        };
+        let AgentTaskCommand::FinalizePr(args) = agent_task.command else {
+            panic!("expected finalize-pr command");
+        };
+        assert_eq!(
+            args.evidence.ai_model.as_deref(),
+            Some("openai/gpt-5.6-sol")
+        );
     }
 
     #[test]
@@ -549,7 +547,7 @@ pub struct RecoverArgs {
     #[arg(long, value_name = "BACKEND", conflicts_with_all = ["preflight", "timeout_ms", "review_form_timeout_ms"])]
     pub backend: Option<String>,
     /// Provider-specific selector for a rearmed retry of a terminal attempt.
-    #[arg(long, visible_alias = "provider-id", value_name = "SELECTOR", conflicts_with_all = ["preflight", "timeout_ms", "review_form_timeout_ms"])]
+    #[arg(long, value_name = "SELECTOR", conflicts_with_all = ["preflight", "timeout_ms", "review_form_timeout_ms"])]
     pub selector: Option<String>,
     /// Model for a rearmed retry of a terminal attempt. Confirm the pinned
     /// route with --acknowledge-model-override.
@@ -634,7 +632,7 @@ pub struct RetryArgs {
     #[arg(long)]
     pub run: bool,
     /// Permit a new retry after every prior retry in this lineage is terminal.
-    #[arg(long, visible_alias = "allow-duplicate")]
+    #[arg(long)]
     pub force: bool,
     /// Stable caller key for safely replaying this retry reservation.
     #[arg(long, value_name = "KEY")]

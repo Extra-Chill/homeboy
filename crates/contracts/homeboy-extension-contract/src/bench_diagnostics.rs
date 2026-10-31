@@ -11,7 +11,6 @@ fn is_zero_usize(value: &usize) -> bool {
 #[serde(deny_unknown_fields)]
 pub struct BenchDiagnostic {
     /// Workload-defined diagnostic class used for grouping related failures.
-    #[serde(alias = "kind", alias = "code")]
     pub class: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
@@ -19,7 +18,7 @@ pub struct BenchDiagnostic {
     pub severity: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<BenchDiagnosticSource>,
-    #[serde(default, alias = "details", skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub metadata: BTreeMap<String, serde_json::Value>,
 }
 

@@ -47,13 +47,13 @@ pub enum TraceProbeConfig {
     #[serde(rename = "process.snapshot")]
     ProcessSnapshot {
         pattern: String,
-        #[serde(default, alias = "interval", skip_serializing_if = "Option::is_none")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         interval_ms: Option<u64>,
     },
     #[serde(rename = "file.watch")]
     FileWatch {
         path: String,
-        #[serde(default, alias = "interval", skip_serializing_if = "Option::is_none")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         interval_ms: Option<u64>,
     },
     #[serde(rename = "port.snapshot")]
@@ -63,22 +63,20 @@ pub enum TraceProbeConfig {
         #[serde(
             default,
             rename = "port-range",
-            alias = "port_range",
             skip_serializing_if = "Option::is_none"
         )]
         port_range: Option<String>,
-        #[serde(default, alias = "interval", skip_serializing_if = "Option::is_none")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         interval_ms: Option<u64>,
     },
     #[serde(rename = "http.poll")]
     HttpPoll {
         url: String,
-        #[serde(default, alias = "interval", skip_serializing_if = "Option::is_none")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         interval_ms: Option<u64>,
         #[serde(
             default,
             rename = "assert-status",
-            alias = "assert_status",
             skip_serializing_if = "Option::is_none"
         )]
         assert_status: Option<u16>,

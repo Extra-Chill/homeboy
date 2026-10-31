@@ -29,7 +29,6 @@ update signals.
 
 ```sh
 homeboy self identity
-# or: homeboy self inspect
 ```
 
 Returns the active executable path, version, build commit, and source dirty state
