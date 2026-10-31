@@ -165,9 +165,7 @@ impl RunnerFileTransfer {
             workspace_root: runner.workspace_root.clone(),
             channel,
         };
-        // This is deliberately before any mkdir/upload materializes workspace
-        // state. Older daemons return a bounded typed refusal here, rather than
-        // a late 404 in the middle of evidence publication.
+        // Validate the advertised protocol before materializing workspace state.
         transfer.ensure_chunk_upload_protocol()?;
         Ok(transfer)
     }
@@ -192,8 +190,7 @@ impl RunnerFileTransfer {
             endpoint_url,
             "/files/capabilities",
             broker_token.as_deref(),
-        )
-        .map_err(|error| unsupported_chunk_upload_error(&self.runner_id, error.to_string()))?;
+        )?;
         let version = response.get("protocol_version").and_then(Value::as_u64);
         let enabled = response
             .get("capabilities")

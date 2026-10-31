@@ -2157,10 +2157,8 @@ mod tests {
         });
     }
 
-    /// Backward compatibility: a non-git install (monorepo extraction, snapshot
-    /// install, or any runner/controller predating content-addressed parity)
-    /// has no working tree to inspect. Parity falls back to the revision and
-    /// warns that uncommitted local edits cannot be detected.
+    /// Current monorepo extraction and snapshot installs have no git working
+    /// tree. Revision parity warns that local edits cannot be detected.
     #[test]
     fn revision_parity_falls_back_to_revision_for_a_non_git_controller_extension() {
         with_isolated_home(|home| {

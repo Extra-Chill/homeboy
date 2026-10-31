@@ -5,8 +5,6 @@
 //! - Once the runner streams output back, `mirror_agent_task_run_plan_lifecycle`
 //!   replays the run-plan aggregate into the controller's lifecycle store so
 //!   `homeboy agent-task status/logs` keeps working transparently.
-//! - The legacy dispatch-envelope parser is retained only for pre-typed runners
-//!   that cannot surface the handoff through workload events/results.
 
 #[cfg(test)]
 use std::fs;
@@ -14,10 +12,7 @@ use std::fs;
 use crate::agent_task_handoff_event::{
     agent_task_dispatch_handoff_event_from_job_events, agent_task_mirrors_dispatch_handoff,
 };
-use crate::agent_task_lifecycle_event::{
-    agent_task_run_plan_lifecycle_event_from_job_events, is_agent_task_run_plan_envelope,
-    parse_offloaded_run_plan_envelope,
-};
+use crate::agent_task_lifecycle_event::agent_task_run_plan_lifecycle_event_from_job_events;
 use homeboy_agents::agent_task::AgentTaskEvidenceRef;
 use homeboy_agents::agent_task_lifecycle::{
     cook_attempt_run_id, AgentTaskArtifactRef, AgentTaskRunRecord, AgentTaskRunState,
@@ -81,11 +76,8 @@ pub(crate) fn write_private_remapped_agent_task_plan(
 }
 
 pub(super) fn mirror_agent_task_run_plan_lifecycle(
-    args: &[String],
     agent_task: Option<&LabRunnerWorkloadAgentTask>,
     notification_route: Option<&NotificationRoute>,
-    stdout: &str,
-    output_file_content: Option<&str>,
     job_events: Option<&[JobEvent]>,
 ) -> Result<()> {
     if let Some(agent_task) = agent_task {
@@ -96,13 +88,7 @@ pub(super) fn mirror_agent_task_run_plan_lifecycle(
         );
     }
 
-    mirror_legacy_agent_task_run_plan_lifecycle(
-        args,
-        notification_route,
-        stdout,
-        output_file_content,
-        job_events,
-    )
+    Ok(())
 }
 
 fn mirror_typed_agent_task_run_plan_lifecycle(
@@ -133,71 +119,6 @@ fn mirror_typed_agent_task_run_plan_lifecycle(
     )
 }
 
-fn mirror_legacy_agent_task_run_plan_lifecycle(
-    args: &[String],
-    notification_route: Option<&NotificationRoute>,
-    stdout: &str,
-    output_file_content: Option<&str>,
-    job_events: Option<&[JobEvent]>,
-) -> Result<()> {
-    let Some((plan_spec, run_id)) = agent_task_run_plan_recording_args(args) else {
-        return Ok(());
-    };
-    if plan_spec == "-" {
-        return Ok(());
-    }
-    // Legacy runner compatibility: only pre-typed runner workloads reach this
-    // branch, so argv/stdout recovery is intentionally centralized here.
-    let (aggregate, dispatch_identity) =
-        match agent_task_run_plan_lifecycle_event_from_job_events(job_events) {
-            Some(event) => (event.aggregate, Some(event.identity)),
-            None => (
-                legacy_agent_task_run_plan_aggregate(stdout, output_file_content)?,
-                None,
-            ),
-        };
-    mirror_agent_task_run_plan_aggregate(
-        &plan_spec,
-        &run_id,
-        aggregate,
-        notification_route,
-        dispatch_identity.as_ref(),
-    )
-}
-
-fn legacy_agent_task_run_plan_aggregate(
-    stdout: &str,
-    output_file_content: Option<&str>,
-) -> Result<AgentTaskAggregate> {
-    let envelope = parse_offloaded_run_plan_envelope(agent_task_run_plan_lifecycle_output(
-        stdout,
-        output_file_content,
-    ))?;
-    if !is_agent_task_run_plan_envelope(&envelope) {
-        return Err(Error::internal_unexpected(
-            "legacy agent-task run-plan output did not contain an aggregate envelope",
-        ));
-    }
-    let Some(aggregate_value) = envelope.get("data").cloned() else {
-        return Err(Error::internal_unexpected(
-            "legacy agent-task run-plan output aggregate envelope was missing data",
-        ));
-    };
-    serde_json::from_value(aggregate_value).map_err(|error| {
-        Error::internal_json(
-            error.to_string(),
-            Some("parse legacy offloaded agent-task aggregate".to_string()),
-        )
-    })
-}
-
-fn agent_task_run_plan_lifecycle_output<'a>(
-    stdout: &'a str,
-    output_file_content: Option<&'a str>,
-) -> &'a str {
-    output_file_content.unwrap_or(stdout)
-}
-
 /// Resolve the cook/dispatch handoff for an offloaded agent-task run.
 ///
 /// Typed path first: when the workload declared
@@ -207,23 +128,7 @@ fn agent_task_run_plan_lifecycle_output<'a>(
 /// a change to what the offloaded command prints can no longer break
 /// failure-evidence mirroring for a job that ran fine (#7530).
 ///
-/// The stdout/stderr scan is retained as the fallback and is NOT dead code: it
-/// is the only path for a runner that predates the typed event, and the typed
-/// path cannot be proven end to end without a connected Lab runner. Deleting
-/// the fallback is a separate change, gated on that proof.
 pub(super) fn resolve_offloaded_agent_task_handoff(
-    agent_task: Option<&LabRunnerWorkloadAgentTask>,
-    job_events: Option<&[JobEvent]>,
-    stdout: &str,
-    stderr: &str,
-) -> Result<Option<AgentTaskLabHandoff>> {
-    if let Some(handoff) = typed_offloaded_agent_task_handoff(agent_task, job_events)? {
-        return Ok(Some(handoff));
-    }
-    parse_offloaded_agent_task_handoff_from_outputs(stdout, stderr)
-}
-
-fn typed_offloaded_agent_task_handoff(
     agent_task: Option<&LabRunnerWorkloadAgentTask>,
     job_events: Option<&[JobEvent]>,
 ) -> Result<Option<AgentTaskLabHandoff>> {
@@ -237,40 +142,11 @@ fn typed_offloaded_agent_task_handoff(
         return Ok(None);
     };
     // Identity is checked against the workload, not against the document. A
-    // stale or misrouted event is treated as absent so the fallback still runs.
+    // stale or misrouted event is treated as absent.
     if event.run_id != agent_task.run_id {
         return Ok(None);
     }
     agent_task_handoff_value(&event.handoff)
-}
-
-pub(super) fn parse_offloaded_agent_task_handoff_from_outputs(
-    stdout: &str,
-    stderr: &str,
-) -> Result<Option<AgentTaskLabHandoff>> {
-    parse_offloaded_agent_task_handoff(stdout).and_then(|parsed| match parsed {
-        Some(handoff) => Ok(Some(handoff)),
-        None => parse_offloaded_agent_task_handoff(stderr),
-    })
-}
-
-pub(super) fn parse_offloaded_agent_task_handoff(
-    output: &str,
-) -> Result<Option<AgentTaskLabHandoff>> {
-    if let Ok(value) = serde_json::from_str::<Value>(output) {
-        return agent_task_handoff_value(&value);
-    }
-
-    for (index, _) in output.match_indices('{') {
-        let mut stream = serde_json::Deserializer::from_str(&output[index..]).into_iter();
-        if let Some(Ok(value)) = stream.next() {
-            if let Some(handoff) = agent_task_handoff_value(&value)? {
-                return Ok(Some(handoff));
-            }
-        }
-    }
-
-    Ok(None)
 }
 
 /// Re-exported from the owning contract so the wire identifier has one
@@ -806,6 +682,8 @@ fn first_quoted_dependency_path(output: &str, path_contains: &str) -> Option<Str
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent_task_lifecycle_event::parse_offloaded_run_plan_envelope;
+    use homeboy_agents::agent_task_lifecycle::agent_task_handoff_event::agent_task_handoff_document_from_output;
 
     #[test]
     fn legacy_offloaded_run_plan_envelope_parser_tolerates_extension_stdout_chatter() {
@@ -844,10 +722,12 @@ mod tests {
             "{\"success\":false,\"data\":{\"schema\":\"homeboy/agent-task-dispatch/v1\",\"run_id\":\"run-1\",\"state\":\"failed\",\"record\":{},\"aggregate\":{\"status\":\"failed\"}}}\n"
         );
 
-        let parsed = parse_offloaded_agent_task_handoff(stdout)
-            .expect("parse dispatch stdout")
-            .map(|handoff| handoff.envelope)
-            .expect("dispatch envelope found");
+        let parsed = agent_task_handoff_value(
+            &agent_task_handoff_document_from_output(stdout).expect("document"),
+        )
+        .expect("parse dispatch stdout")
+        .map(|handoff| handoff.envelope)
+        .expect("dispatch envelope found");
 
         assert_eq!(parsed["run_id"], "run-1");
         assert_eq!(parsed["aggregate"]["status"], "failed");
@@ -855,7 +735,6 @@ mod tests {
 
     #[test]
     fn offloaded_dispatch_envelope_parser_selects_structured_failure_from_stderr() {
-        let stdout = "remote setup complete\n";
         let stderr = concat!(
             "{\n",
             "  \"success\": false,\n",
@@ -883,10 +762,12 @@ mod tests {
             "}\n"
         );
 
-        let parsed = parse_offloaded_agent_task_handoff_from_outputs(stdout, stderr)
-            .expect("parse dispatch outputs")
-            .map(|handoff| handoff.envelope)
-            .expect("dispatch envelope found");
+        let parsed = agent_task_handoff_value(
+            &agent_task_handoff_document_from_output(stderr).expect("document"),
+        )
+        .expect("parse dispatch outputs")
+        .map(|handoff| handoff.envelope)
+        .expect("dispatch envelope found");
 
         assert_eq!(
             parsed["run_id"],
@@ -926,9 +807,11 @@ mod tests {
             "}]}}}\n"
         );
 
-        let handoff = parse_offloaded_agent_task_handoff(stdout)
-            .expect("parse handoff")
-            .expect("handoff found");
+        let handoff = agent_task_handoff_value(
+            &agent_task_handoff_document_from_output(stdout).expect("document"),
+        )
+        .expect("parse handoff")
+        .expect("handoff found");
 
         assert_eq!(handoff.schema, AGENT_TASK_LAB_HANDOFF_SCHEMA);
         assert_eq!(handoff.run_id.as_deref(), Some("run-1"));
@@ -963,9 +846,11 @@ mod tests {
             "}}\n"
         );
 
-        let handoff = parse_offloaded_agent_task_handoff(stdout)
-            .expect("parse handoff")
-            .expect("handoff found");
+        let handoff = agent_task_handoff_value(
+            &agent_task_handoff_document_from_output(stdout).expect("document"),
+        )
+        .expect("parse handoff")
+        .expect("handoff found");
 
         assert_eq!(handoff.run_id.as_deref(), Some("run-typed"));
         assert_eq!(handoff.artifact_refs[0].kind, "review");
@@ -996,9 +881,11 @@ mod tests {
             "}]}}\n"
         );
 
-        let handoff = parse_offloaded_agent_task_handoff(stdout)
-            .expect("parse handoff")
-            .expect("handoff found");
+        let handoff = agent_task_handoff_value(
+            &agent_task_handoff_document_from_output(stdout).expect("document"),
+        )
+        .expect("parse handoff")
+        .expect("handoff found");
 
         assert_eq!(handoff.artifact_refs.len(), 1);
         let artifact_ref = &handoff.artifact_refs[0];
@@ -1026,7 +913,10 @@ mod tests {
             "}}\n"
         );
 
-        let err = parse_offloaded_agent_task_handoff(stdout).expect_err("invalid manifest");
+        let err = agent_task_handoff_value(
+            &agent_task_handoff_document_from_output(stdout).expect("document"),
+        )
+        .expect_err("invalid manifest");
 
         assert_eq!(err.code.as_str(), "validation.invalid_argument");
         assert!(err.message.contains("artifact path must be relative"));
@@ -1083,43 +973,25 @@ mod tests {
             Some(LabRunnerWorkloadAgentTaskHandoffMirrorPolicy::DispatchHandoff),
         );
         let events = vec![typed_handoff_job_event("run-typed-handoff", "from-event")];
-        let decoy = concat!(
-            "{\"schema\":\"homeboy/agent-task-lab-handoff/v1\",",
-            "\"run_id\":\"from-stdout\"}\n"
-        );
-
-        let handoff = resolve_offloaded_agent_task_handoff(
-            Some(&agent_task),
-            Some(&events),
-            decoy,
-            "not json at all",
-        )
-        .expect("typed handoff resolves")
-        .expect("handoff found");
+        let handoff = resolve_offloaded_agent_task_handoff(Some(&agent_task), Some(&events))
+            .expect("typed handoff resolves")
+            .expect("handoff found");
 
         assert_eq!(handoff.run_id.as_deref(), Some("from-event"));
     }
 
-    /// The stdout fallback is retained, not replaced. Every one of these is a
-    /// shape a connected Lab runner can still produce, and the typed path is
-    /// unproven end to end until one is connected.
     #[test]
-    fn dispatch_handoff_falls_back_to_output_scraping() {
-        let stdout = concat!(
-            "{\"schema\":\"homeboy/agent-task-lab-handoff/v1\",",
-            "\"run_id\":\"from-stdout\"}\n"
-        );
-
+    fn dispatch_handoff_requires_matching_typed_event() {
         let cases: Vec<(
             &str,
             Option<LabRunnerWorkloadAgentTask>,
             Option<Vec<JobEvent>>,
         )> = vec![
-            // No workload contract at all (pre-typed controller path).
+            // No agent-task contract.
             ("no workload", None, None),
-            // Workload emitted before `handoff_mirror_policy` existed.
+            // Workload declares no handoff policy.
             (
-                "pre-typed workload",
+                "no handoff policy",
                 Some(dispatch_agent_task("run-typed-handoff", None)),
                 Some(vec![typed_handoff_job_event(
                     "run-typed-handoff",
@@ -1150,32 +1022,16 @@ mod tests {
         ];
 
         for (label, agent_task, events) in cases {
-            let handoff = resolve_offloaded_agent_task_handoff(
-                agent_task.as_ref(),
-                events.as_deref(),
-                stdout,
-                "",
-            )
-            .unwrap_or_else(|error| panic!("{label}: {error:?}"))
-            .unwrap_or_else(|| panic!("{label}: fallback must still find the handoff"));
+            let handoff =
+                resolve_offloaded_agent_task_handoff(agent_task.as_ref(), events.as_deref())
+                    .unwrap_or_else(|error| panic!("{label}: {error:?}"));
 
-            assert_eq!(handoff.run_id.as_deref(), Some("from-stdout"), "{label}");
+            assert!(handoff.is_none(), "{label}");
         }
     }
 
     #[test]
     fn typed_run_plan_lifecycle_ignores_stdout_without_job_event() {
-        let args = vec![
-            "homeboy".to_string(),
-            "agent-task".to_string(),
-            "run-plan".to_string(),
-            "--plan".to_string(),
-            "@/tmp/plan.json".to_string(),
-            "--record-run-id".to_string(),
-            "run-1".to_string(),
-        ];
-        let stdout = "{\"success\":true,\"data\":{\"command\":\"extension.setup\"}}";
-
         let agent_task = LabRunnerWorkloadAgentTask {
             run_id: "run-typed-no-event".to_string(),
             plan_ref: Some("@/tmp/plan.json".to_string()),
@@ -1188,7 +1044,7 @@ mod tests {
             wait_budget_ms: None,
         };
 
-        mirror_agent_task_run_plan_lifecycle(&args, Some(&agent_task), None, stdout, None, None)
+        mirror_agent_task_run_plan_lifecycle(Some(&agent_task), None, None)
             .expect("typed path does not parse stdout fallback");
     }
 
@@ -1239,15 +1095,8 @@ mod tests {
                 })),
             }];
 
-            mirror_agent_task_run_plan_lifecycle(
-                &[],
-                Some(&agent_task),
-                None,
-                "not json and should not be parsed",
-                None,
-                Some(&events),
-            )
-            .expect("typed mirror uses job event");
+            mirror_agent_task_run_plan_lifecycle(Some(&agent_task), None, Some(&events))
+                .expect("typed mirror uses job event");
         });
     }
 
@@ -1314,15 +1163,8 @@ mod tests {
                 })),
             }];
 
-            mirror_agent_task_run_plan_lifecycle(
-                &[],
-                Some(&agent_task),
-                None,
-                "not parsed",
-                None,
-                Some(&events),
-            )
-            .expect("completed no-op mirror");
+            mirror_agent_task_run_plan_lifecycle(Some(&agent_task), None, Some(&events))
+                .expect("completed no-op mirror");
 
             let record =
                 agent_task_lifecycle::reconcile_status("run-completed-noop").expect("status");
@@ -1460,15 +1302,8 @@ mod tests {
                 })),
             }];
 
-            mirror_agent_task_run_plan_lifecycle(
-                &[],
-                Some(&agent_task),
-                None,
-                "not parsed",
-                None,
-                Some(&events),
-            )
-            .expect("remapped Lab aggregate mirrored");
+            mirror_agent_task_run_plan_lifecycle(Some(&agent_task), None, Some(&events))
+                .expect("remapped Lab aggregate mirrored");
 
             let record =
                 agent_task_lifecycle::reconcile_status("run-remapped-model").expect("status");
@@ -1481,37 +1316,8 @@ mod tests {
     }
 
     #[test]
-    fn legacy_run_plan_lifecycle_branch_uses_argv_and_stdout_only_without_typed_workload() {
-        crate::test_support::with_isolated_home(|_| {
-            let temp = tempfile::tempdir().expect("tempdir");
-            let plan_path = temp.path().join("plan.json");
-            fs::write(
-                &plan_path,
-                r#"{"schema":"homeboy/agent-task-plan/v1","plan_id":"plan-legacy","tasks":[]}"#,
-            )
-            .expect("write plan");
-            let args = vec![
-                "homeboy".to_string(),
-                "agent-task".to_string(),
-                "run-plan".to_string(),
-                "--plan".to_string(),
-                format!("@{}", plan_path.display()),
-                "--record-run-id".to_string(),
-                "run-legacy-workload".to_string(),
-            ];
-            let stdout = concat!(
-                "runner chatter\n",
-                "{\"success\":true,\"data\":{",
-                "\"schema\":\"homeboy/agent-task-aggregate/v1\",",
-                "\"plan_id\":\"plan-legacy\",",
-                "\"status\":\"succeeded\",",
-                "\"totals\":{\"skipped\":0,\"succeeded\":0,\"failed\":0},",
-                "\"outcomes\":[]}}"
-            );
-
-            mirror_agent_task_run_plan_lifecycle(&args, None, None, stdout, None, None)
-                .expect("legacy mirror uses stdout fallback");
-        });
+    fn workload_without_agent_task_mirrors_nothing() {
+        mirror_agent_task_run_plan_lifecycle(None, None, None).expect("no lifecycle to mirror");
     }
 
     #[test]
@@ -1550,25 +1356,6 @@ mod tests {
 
         assert_eq!(event.identity.runner_id, "lab-default");
         assert_eq!(event.aggregate.plan_id, "plan-from-event");
-    }
-
-    #[test]
-    fn run_plan_lifecycle_prefers_downloaded_output_file_content() {
-        let stdout = "{\"success\":true,\"data\":{\"command\":\"agent-task.run-plan\"}}";
-        let downloaded_output = concat!(
-            "{\"success\":true,\"data\":{",
-            "\"schema\":\"homeboy/agent-task-aggregate/v1\",",
-            "\"plan_id\":\"plan-from-file\",",
-            "\"status\":\"succeeded\",",
-            "\"totals\":{\"skipped\":0,\"succeeded\":1,\"failed\":0},",
-            "\"outcomes\":[]}}"
-        );
-
-        let selected = agent_task_run_plan_lifecycle_output(stdout, Some(downloaded_output));
-        let envelope = parse_offloaded_run_plan_envelope(selected).expect("parse selected output");
-
-        assert!(is_agent_task_run_plan_envelope(&envelope));
-        assert_eq!(envelope["data"]["plan_id"], "plan-from-file");
     }
 
     #[test]

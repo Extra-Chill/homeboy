@@ -30,8 +30,7 @@
 //! scan happens once, on the side that knows what it dispatched, gated by the
 //! contract — and that a future runner can emit
 //! [`AgentTaskDispatchHandoffEvent`] directly with no stdout involved and no
-//! controller change. Until every runner does, the controller keeps its stdout
-//! fallback; see `agent_task_bridge::resolve_offloaded_agent_task_handoff`.
+//! controller change.
 
 use homeboy_core::api_jobs::{JobEvent, JobEventKind};
 use homeboy_core::lab_contract::{
@@ -43,7 +42,7 @@ use serde_json::Value;
 /// Schema of the typed handoff document an agent-task cook/dispatch produces.
 pub const AGENT_TASK_LAB_HANDOFF_SCHEMA: &str = "homeboy/agent-task-lab-handoff/v1";
 
-/// Schema of the older dispatch envelope, still emitted by pre-typed binaries.
+/// Schema emitted by the current agent-task dispatch service.
 pub const AGENT_TASK_DISPATCH_ENVELOPE_SCHEMA: &str = "homeboy/agent-task-dispatch/v1";
 
 /// Schema of [`AgentTaskDispatchHandoffEvent`] itself.
@@ -83,8 +82,7 @@ fn agent_task_dispatch_handoff_event_schema() -> String {
 
 /// True when this workload declared that it produces a dispatch handoff.
 ///
-/// A `None` policy means the emitting peer predates the field, which is exactly
-/// the case where the consumer must fall back to output scraping.
+/// An absent policy declares no handoff mirroring.
 pub fn agent_task_mirrors_dispatch_handoff(agent_task: &LabRunnerWorkloadAgentTask) -> bool {
     agent_task.handoff_mirror_policy
         == Some(LabRunnerWorkloadAgentTaskHandoffMirrorPolicy::DispatchHandoff)
@@ -351,10 +349,9 @@ mod tests {
         assert_eq!(event.handoff["schema"], AGENT_TASK_DISPATCH_ENVELOPE_SCHEMA);
     }
 
-    /// A workload whose emitter predates `handoff_mirror_policy` produces no
-    /// typed event, so the consumer's retained stdout fallback is what runs.
+    /// An absent policy does not request a typed handoff event.
     #[test]
-    fn pre_typed_workload_emits_no_event() {
+    fn absent_handoff_policy_emits_no_event() {
         let pre_typed = workload(Some(json!({
             "run_id": "cook-7530",
             "dispatch_kind": "cook",

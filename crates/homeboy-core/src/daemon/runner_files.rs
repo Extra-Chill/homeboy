@@ -26,9 +26,7 @@ const UPLOAD_EXPIRY: Duration = Duration::from_secs(15 * 60);
 
 /// Versioned contract advertised before a controller chooses the chunk protocol.
 ///
-/// The upload endpoint is intentionally not an implicit feature probe: callers
-/// must see this capability before they materialize a workspace.  That keeps an
-/// older controller from failing after it has already created remote state.
+/// Callers validate the advertised capability before materializing a workspace.
 pub(super) const CHUNK_UPLOAD_PROTOCOL_VERSION: u64 = 1;
 
 #[derive(Clone, Hash, Eq, PartialEq)]

@@ -1007,11 +1007,6 @@ pub struct DaemonCandidateReconciliationResult {
     pub candidates: Vec<DaemonProcessCandidate>,
     pub retired_pids: Vec<u32>,
     pub blocked_pids: Vec<u32>,
-    /// Bounded, deterministic review identity required to apply a legacy
-    /// zero-job candidate retirement. It is invalidated by any re-enumerated
-    /// process identity change.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub review_token: Option<String>,
     pub evidence: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub replacement: Option<DaemonStartResult>,

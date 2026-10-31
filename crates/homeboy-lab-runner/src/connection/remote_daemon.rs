@@ -72,41 +72,6 @@ impl Drop for StagingIdentityScope {
     }
 }
 
-/// Read the remote Homeboy version on a lifecycle (write) path.
-///
-/// Retains the retrying, unbounded execution used by `connect`, where a
-/// transient SSH failure should be retried rather than surfaced. Read-only
-/// inspection must use [`bounded_remote_homeboy_version`] instead.
-pub(super) fn remote_homeboy_version(
-    client: &SshClient,
-    homeboy: &str,
-) -> std::result::Result<String, String> {
-    parse_remote_homeboy_version(&client.execute_with_timeout(
-        &remote_homeboy_version_command(homeboy),
-        REMOTE_DAEMON_STATUS_TIMEOUT,
-    ))
-}
-
-fn remote_homeboy_version_command(homeboy: &str) -> String {
-    format!("{} --version", shell::quote_arg(homeboy))
-}
-
-fn parse_remote_homeboy_version(
-    output: &homeboy_core::server::CommandOutput,
-) -> std::result::Result<String, String> {
-    if !output.success {
-        return Err(command_failure_message(
-            "remote Homeboy version check failed",
-            output,
-        ));
-    }
-    let version = output.stdout.trim().to_string();
-    if version.is_empty() {
-        return Err("remote Homeboy version check returned empty output".to_string());
-    }
-    Ok(version)
-}
-
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(super) struct RemoteHomeboyIdentity {
     pub(super) version: String,
@@ -116,9 +81,7 @@ pub(super) struct RemoteHomeboyIdentity {
         Vec<LabCapabilityVersion>,
     )>,
     /// The daemon-recovery capabilities the remote advertised in its typed
-    /// self-identity report. `None` means the remote is an older binary that
-    /// never advertised the field; controllers must fall back to scraping the
-    /// long-option help text for those recovery contracts.
+    /// self-identity report. Missing capabilities do not authorize recovery.
     pub(super) daemon_recovery_capabilities: Option<Vec<LabCapabilityVersion>>,
 }
 
@@ -137,11 +100,10 @@ pub(super) fn remote_homeboy_identity(
             return Ok(identity);
         }
     }
-    let version = remote_homeboy_version(client, homeboy)?;
-    Ok(RemoteHomeboyIdentity {
-        version: normalize_homeboy_version_owned(&version),
-        ..Default::default()
-    })
+    Err(command_failure_message(
+        "remote Homeboy identity probe failed",
+        &output,
+    ))
 }
 
 /// Read the remote Homeboy identity under a hard wall-clock bound (#10418).
@@ -224,37 +186,14 @@ fn probe_remote_homeboy_identity_until(
             return Ok(identity);
         }
     }
-    // A probe that already exhausted its deadline must not be followed by a
-    // second probe against the same wedged endpoint: two bounded probes in
-    // series is a doubled bound, which is what this fix exists to prevent.
-    if degraded {
-        return Err(command_failure_message(
-            "remote Homeboy identity probe did not complete within its read-only bound",
-            &output,
-        ));
-    }
-    let timeout = deadline.saturating_duration_since(std::time::Instant::now());
-    if timeout.is_zero() {
-        return Err(
-            "runner admission observation deadline exhausted before remote Homeboy version"
-                .to_string(),
-        );
-    }
-    let command = remote_homeboy_version_command(homeboy);
-    let started = std::time::Instant::now();
-    let output = client.execute_with_timeout(&command, timeout);
-    crate::readonly_probe::record_probe_outcome(
-        "runner_homeboy_version",
-        runner_id,
-        started,
-        timeout,
+    Err(command_failure_message(
+        if degraded {
+            "remote Homeboy identity probe did not complete within its read-only bound"
+        } else {
+            "remote Homeboy identity probe failed"
+        },
         &output,
-    );
-    let version = parse_remote_homeboy_version(&output)?;
-    Ok(RemoteHomeboyIdentity {
-        version: normalize_homeboy_version_owned(&version),
-        ..Default::default()
-    })
+    ))
 }
 
 fn remote_homeboy_identity_command(homeboy: &str) -> String {
@@ -1842,15 +1781,6 @@ mod tests {
     }
 
     #[test]
-    fn an_older_runner_without_daemon_plan_is_detected() {
-        assert!(remote_subcommand_unsupported(
-            "",
-            "error: unrecognized subcommand 'plan'"
-        ));
-        assert!(!remote_subcommand_unsupported("", "permission denied"));
-    }
-
-    #[test]
     fn the_attested_reconcile_command_targets_the_exact_state_dir() {
         let first = uuid::Uuid::from_u128(1);
         let second = uuid::Uuid::from_u128(2);
@@ -2510,19 +2440,15 @@ pub(crate) const REMOTE_DAEMON_PLAN_SCHEMA: &str = "homeboy/daemon-lifecycle-pla
 ///
 /// The remote daemon observes and plans itself with the same planner
 /// `daemon recover` follows locally, so controller and runner never disagree
-/// on what a generation's state means. `Ok(None)` when the runner's Homeboy
-/// predates `daemon plan`; callers fall back to their own probes.
+/// on what a generation's state means.
 pub(crate) fn remote_daemon_lifecycle_plan(
     client: &SshClient,
     runner_id: &str,
     homeboy: &str,
-) -> std::result::Result<Option<homeboy_core::daemon::lifecycle_plan::Plan>, String> {
+) -> std::result::Result<homeboy_core::daemon::lifecycle_plan::Plan, String> {
     let command = remote_daemon_command(runner_id, homeboy, "daemon plan");
     let output = client.execute_with_timeout(&command, REMOTE_DAEMON_STATUS_TIMEOUT);
     if !output.success {
-        if remote_subcommand_unsupported(&output.stdout, &output.stderr) {
-            return Ok(None);
-        }
         return Err(command_failure_message(
             "remote daemon lifecycle plan failed",
             &output,
@@ -2539,7 +2465,7 @@ pub(crate) fn remote_daemon_lifecycle_plan(
     let data = envelope
         .data
         .ok_or_else(|| "remote daemon lifecycle plan returned no data".to_string())?;
-    parse_remote_lifecycle_plan(&data).map(Some)
+    parse_remote_lifecycle_plan(&data)
 }
 
 /// Parse `daemon plan` data, refusing any other schema.
@@ -2556,13 +2482,6 @@ pub(crate) fn parse_remote_lifecycle_plan(
     }
     serde_json::from_value(data.get("plan").cloned().unwrap_or(Value::Null))
         .map_err(|error| format!("remote daemon lifecycle plan is unreadable: {error}"))
-}
-
-/// Whether a remote Homeboy rejected a subcommand it does not know.
-fn remote_subcommand_unsupported(stdout: &str, stderr: &str) -> bool {
-    [stdout, stderr].iter().any(|text| {
-        text.contains("unrecognized subcommand") || text.contains("unexpected argument 'plan'")
-    })
 }
 
 /// Hard wall clock for one attested dead-lease recovery. The remote command
