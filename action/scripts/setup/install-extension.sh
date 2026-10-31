@@ -63,27 +63,62 @@ install_configured_extensions_at_ref() {
   done < <(jq -r '.extensions // {} | keys[]' "${config_file}" 2>/dev/null || true)
 }
 
-if [ -n "${EXTENSION_INPUT}" ]; then
-  echo "Installing extension override: ${EXTENSION_INPUT} from ${EXTENSION_SOURCE}..."
-  refresh_extension "${EXTENSION_INPUT}"
-  install_extension "${EXTENSION_INPUT}"
-  echo "Extension '${EXTENSION_INPUT}' installed successfully"
-elif [ -n "${EXTENSION_REF}" ]; then
-  echo "Installing configured extensions from ${EXTENSION_SOURCE} at ${EXTENSION_REF}..."
-  install_configured_extensions_at_ref
-  echo "Configured extensions installed successfully"
-else
-  if homeboy extension install-for-component --help >/dev/null 2>&1; then
-    echo "Installing extensions configured by ${COMPONENT_DIR}/homeboy.json from ${EXTENSION_SOURCE}..."
-    refresh_configured_extensions
-    homeboy extension install-for-component --path "${COMPONENT_DIR}" --source "${EXTENSION_SOURCE}"
+# The extensions moved into extensions/ of Extra-Chill/homeboy
+# (Extra-Chill/homeboy#16783). The old repository is frozen but still serves
+# what it always did. Two kinds of caller can only install from it:
+#   - callers pinning `extension-ref` to a homeboy-extensions commit SHA, which
+#     does not exist in the monorepo's rewritten history, and
+#   - callers pinning a Homeboy release that predates nested extension roots.
+# For them, an install from the default monorepo source that fails is retried
+# from the frozen repository, with a warning to move the pin.
+MONOREPO_EXTENSION_SOURCE="https://github.com/Extra-Chill/homeboy"
+LEGACY_EXTENSION_SOURCE="https://github.com/Extra-Chill/homeboy-extensions"
+
+install_requested_extensions() {
+  if [ -n "${EXTENSION_INPUT}" ]; then
+    echo "Installing extension override: ${EXTENSION_INPUT} from ${EXTENSION_SOURCE}..."
+    refresh_extension "${EXTENSION_INPUT}"
+    install_extension "${EXTENSION_INPUT}"
+    echo "Extension '${EXTENSION_INPUT}' installed successfully"
+  elif [ -n "${EXTENSION_REF}" ]; then
+    echo "Installing configured extensions from ${EXTENSION_SOURCE} at ${EXTENSION_REF}..."
+    install_configured_extensions_at_ref
     echo "Configured extensions installed successfully"
   else
-    echo "::warning::Installed Homeboy does not support 'extension install-for-component'; falling back to '${EXTENSION_ID}' only"
-    refresh_extension "${EXTENSION_ID}"
-    install_extension "${EXTENSION_ID}"
-    echo "Extension '${EXTENSION_ID}' installed successfully"
+    if homeboy extension install-for-component --help >/dev/null 2>&1; then
+      echo "Installing extensions configured by ${COMPONENT_DIR}/homeboy.json from ${EXTENSION_SOURCE}..."
+      refresh_configured_extensions
+      homeboy extension install-for-component --path "${COMPONENT_DIR}" --source "${EXTENSION_SOURCE}"
+      echo "Configured extensions installed successfully"
+    else
+      echo "::warning::Installed Homeboy does not support 'extension install-for-component'; falling back to '${EXTENSION_ID}' only"
+      refresh_extension "${EXTENSION_ID}"
+      install_extension "${EXTENSION_ID}"
+      echo "Extension '${EXTENSION_ID}' installed successfully"
+    fi
   fi
+}
+
+is_monorepo_extension_source() {
+  local source="${1%/}"
+  source="${source%.git}"
+  [ "${source}" = "${MONOREPO_EXTENSION_SOURCE}" ]
+}
+
+if is_monorepo_extension_source "${EXTENSION_SOURCE}"; then
+  # errexit is ignored inside an `if` condition, so run the attempt as a plain
+  # subshell with errexit on and read its status afterwards.
+  set +e
+  (set -e; install_requested_extensions)
+  monorepo_install_status=$?
+  set -e
+  if [ "${monorepo_install_status}" -ne 0 ]; then
+    echo "::warning::Installing extensions from ${EXTENSION_SOURCE}${EXTENSION_REF:+ at ${EXTENSION_REF}} failed; retrying from the frozen ${LEGACY_EXTENSION_SOURCE}. Pin extension-ref to a ref in Extra-Chill/homeboy (e.g. wordpress-vX.Y.Z) and a Homeboy release with nested extension roots to drop this fallback (Extra-Chill/homeboy#16783)."
+    EXTENSION_SOURCE="${LEGACY_EXTENSION_SOURCE}"
+    install_requested_extensions
+  fi
+else
+  install_requested_extensions
 fi
 
 # Publish where the toolchain landed.

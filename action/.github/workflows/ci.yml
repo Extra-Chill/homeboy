@@ -32,7 +32,7 @@ on:
       extension-source:
         description: 'Git URL or path to install the extension from.'
         type: string
-        default: 'https://github.com/Extra-Chill/homeboy-extensions'
+        default: 'https://github.com/Extra-Chill/homeboy'
       extension-ref:
         description: 'Optional git revision to install from the extension source.'
         type: string

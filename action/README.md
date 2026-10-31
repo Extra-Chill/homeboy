@@ -572,7 +572,7 @@ Use these outputs to gate downstream jobs:
 | `version` | No | `latest` | Homeboy version to install (e.g. `0.52.0`) |
 | `source` | No | | Path to build homeboy from source (e.g. `.`). Falls back to release binary. |
 | `extension` | No | | Extension ID (e.g. `wordpress`, `rust`, `node`) |
-| `extension-source` | No | `Extra-Chill/homeboy-extensions` | Git URL to install the extension from |
+| `extension-source` | No | `Extra-Chill/homeboy` | Git URL to install the extension from. Extensions live in `extensions/` of the Homeboy repository. If an install from the default fails (an `extension-ref` naming a commit from the frozen `Extra-Chill/homeboy-extensions`, or a Homeboy release without nested extension roots), it is retried from `Extra-Chill/homeboy-extensions` with a warning. |
 | `commands` | No | `review lint,review test` | Comma-separated commands to run |
 | `component` | No | *(repo name)* | Component name (auto-detected from repo) |
 | `args` | No | | Extra arguments passed to each command |

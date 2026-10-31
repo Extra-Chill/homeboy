@@ -28,6 +28,10 @@ if [ "$*" = "extension install-for-component --help" ]; then
   exit "${HOMEBOY_INSTALL_FOR_COMPONENT_HELP_STATUS:-0}"
 fi
 printf '%s\n' "$*" >> "${HOMEBOY_CALL_LOG}"
+# Simulate a source that cannot serve the install (e.g. a ref missing there).
+if [ -n "${HOMEBOY_FAIL_SOURCE:-}" ] && [[ " $* " == *" ${HOMEBOY_FAIL_SOURCE} "* ]]; then
+  exit 1
+fi
 STUB
 chmod +x "${TMP_DIR}/bin/homeboy"
 
@@ -89,5 +93,43 @@ if EXTENSION_INPUT="wordpress,nodejs" bash "${ROOT_DIR}/scripts/setup/install-ex
   exit 1
 fi
 assert_equals "" "$(cat "${HOMEBOY_CALL_LOG}")" "comma-separated input does not invoke homeboy"
+
+MONO="https://github.com/Extra-Chill/homeboy"
+LEGACY="https://github.com/Extra-Chill/homeboy-extensions"
+
+: > "${HOMEBOY_CALL_LOG}"
+EXTENSION_SOURCE="${MONO}" EXTENSION_REF="wordpress-v3.53.12" EXTENSION_INPUT="wordpress" bash "${ROOT_DIR}/scripts/setup/install-extension.sh" >/dev/null
+assert_equals \
+  $'extension uninstall wordpress\nextension install '"${MONO}"$' --id wordpress --ref wordpress-v3.53.12' \
+  "$(cat "${HOMEBOY_CALL_LOG}")" \
+  "monorepo source installs without touching the frozen repository"
+
+: > "${HOMEBOY_CALL_LOG}"
+EXTENSION_SOURCE="${MONO}" EXTENSION_REF="dd63b7be" EXTENSION_INPUT="" HOMEBOY_FAIL_SOURCE="${MONO}" \
+  bash "${ROOT_DIR}/scripts/setup/install-extension.sh" >"${TMP_DIR}/fallback.out" 2>&1
+assert_equals \
+  $'extension uninstall nodejs\nextension install '"${MONO}"$' --id nodejs --ref dd63b7be\nextension uninstall nodejs\nextension install '"${LEGACY}"$' --id nodejs --ref dd63b7be\nextension uninstall wordpress\nextension install '"${LEGACY}"$' --id wordpress --ref dd63b7be' \
+  "$(cat "${HOMEBOY_CALL_LOG}")" \
+  "a failed monorepo install stops at the first failure and retries every extension from the frozen repository"
+assert_equals "1" "$(grep -c '^::warning::.*retrying from the frozen' "${TMP_DIR}/fallback.out")" "fallback emits one warning"
+
+: > "${HOMEBOY_CALL_LOG}"
+EXTENSION_SOURCE="${MONO}.git" EXTENSION_INPUT="" HOMEBOY_FAIL_SOURCE="${MONO}.git" \
+  bash "${ROOT_DIR}/scripts/setup/install-extension.sh" >/dev/null 2>&1
+assert_equals \
+  $'extension uninstall nodejs\nextension uninstall wordpress\nextension install-for-component --path '"${COMPONENT_DIR}"$' --source '"${MONO}"$'.git\nextension uninstall nodejs\nextension uninstall wordpress\nextension install-for-component --path '"${COMPONENT_DIR}"$' --source '"${LEGACY}" \
+  "$(cat "${HOMEBOY_CALL_LOG}")" \
+  "install-for-component falls back too, and a .git suffix still counts as the monorepo"
+
+: > "${HOMEBOY_CALL_LOG}"
+if EXTENSION_SOURCE="/custom" EXTENSION_INPUT="wordpress" HOMEBOY_FAIL_SOURCE="/custom" \
+  bash "${ROOT_DIR}/scripts/setup/install-extension.sh" >/dev/null 2>&1; then
+  echo "FAIL: a failing custom source should fail without a fallback"
+  exit 1
+fi
+assert_equals \
+  $'extension uninstall wordpress\nextension install /custom --id wordpress' \
+  "$(cat "${HOMEBOY_CALL_LOG}")" \
+  "a custom extension-source never falls back"
 
 echo "All install-extension checks passed."
