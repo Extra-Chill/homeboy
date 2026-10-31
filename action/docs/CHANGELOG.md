@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.24.0] - 2026-10-31
+
+### Added
+- install extensions from the Extra-Chill/homeboy monorepo, falling back to the frozen homeboy-extensions (Extra-Chill/homeboy#16783)
+
 ## [2.23.5] - 2026-10-31
 
 ### Fixed
