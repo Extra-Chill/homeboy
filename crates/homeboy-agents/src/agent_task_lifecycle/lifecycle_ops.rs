@@ -1832,19 +1832,8 @@ fn controller_local_placement_decision(
     )
 }
 
-/// Adopt a canonical placement decision for a durable run that has none.
-///
-/// Records written before placement decisions were canonical — and records
-/// written by submission paths that never authored one — carry a null
-/// `execution_placement_decision`. That is not a contradiction to fail closed
-/// on; it is missing evidence, and the routing decision the caller is holding
-/// *is* the authoritative one for the execution about to be verified. Adopting
-/// it (and saying so, under `execution_placement_normalized`) is what lets an
-/// older local run be diagnosed and retried instead of dead-ending (#11600).
-///
-/// Never overwrites a routed decision. A submission stamp is superseded,
-/// because it was authored in the absence of routing precisely so this moment
-/// would have something to supersede.
+/// Replace a current submission stamp with the canonical routing decision.
+/// Never overwrites a routed decision.
 pub fn normalize_missing_execution_placement_decision(
     run_id: &str,
     decision: &homeboy_lab_contract::ExecutionPlacementDecision,
@@ -1868,15 +1857,18 @@ pub fn normalize_missing_execution_placement_decision_in_store(
     let persisted = serde_json::from_value::<homeboy_lab_contract::ExecutionPlacementDecision>(
         record.metadata["execution_placement_decision"].clone(),
     )
-    .ok();
-    let reason = match persisted {
-        Some(persisted) if persisted.decision_id == decision.decision_id => return Ok(false),
-        Some(persisted) if persisted.is_submission_stamp() => {
-            "durable run carried a submission-derived placement decision"
-        }
-        Some(_) => return Ok(false),
-        None => "durable run had no canonical placement decision",
-    };
+    .map_err(|error| {
+        Error::validation_invalid_argument(
+            "execution_placement_decision",
+            error.to_string(),
+            Some(run_id.to_string()),
+            None,
+        )
+    })?;
+    if persisted.decision_id == decision.decision_id || !persisted.is_submission_stamp() {
+        return Ok(false);
+    }
+    let reason = "durable run carried a submission-derived placement decision";
     record.metadata["execution_placement_decision"] =
         serde_json::to_value(decision).map_err(|error| {
             Error::internal_json(
@@ -2301,71 +2293,6 @@ mod execution_placement_tests {
                     .expect("a controller-local decision authorizes a local outcome"),
             )
             .expect("record verified local outcome");
-        });
-    }
-
-    #[test]
-    fn a_null_decision_is_normalized_to_the_routing_decision_that_verified_it() {
-        // Records written before the canonical decision existed carry a null.
-        // That is missing evidence, not a contradiction — adopting the routing
-        // decision in hand (and saying so) is what makes an older local run
-        // recoverable instead of a dead end (#11600).
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let plan = super::super::tests::test_plan();
-            submit_plan_with_runtime_admission_in_store(
-                &AgentTaskLifecycleStore::from_current_environment().unwrap(),
-                &plan,
-                Some("legacy-run"),
-                execution_runner_id(),
-                None,
-                None,
-                |_| Ok(json!({})),
-            )
-            .expect("submit plan");
-            let mut record = store::read_record("legacy-run").expect("read record");
-            record.metadata["execution_placement_decision"] = Value::Null;
-            store::write_record(&record).expect("write legacy record");
-
-            let routed = homeboy_lab_contract::ExecutionPlacementDecision::controller_local(
-                "lab-route-contract",
-                "v1",
-                ExecutionPlacementIdentity {
-                    repository: "homeboy".to_string(),
-                    workspace: "/workspace/homeboy".to_string(),
-                    task: "legacy-task".to_string(),
-                    candidate: None,
-                    base: None,
-                },
-                Placement::Local,
-            );
-
-            assert!(
-                normalize_missing_execution_placement_decision("legacy-run", &routed)
-                    .expect("normalize legacy record"),
-                "a null decision is adopted"
-            );
-            assert!(
-                !normalize_missing_execution_placement_decision("legacy-run", &routed)
-                    .expect("normalize is idempotent"),
-                "an already-canonical decision is never overwritten"
-            );
-
-            let record = store::read_record("legacy-run").expect("read normalized record");
-            assert_eq!(
-                record.metadata["execution_placement_decision"]["decision_id"],
-                json!(routed.decision_id)
-            );
-            assert_eq!(
-                record.metadata["execution_placement_normalized"]["adopted_decision_id"],
-                json!(routed.decision_id)
-            );
-            record_execution_placement_outcome(
-                "legacy-run",
-                routed
-                    .outcome(EffectiveExecutionPlacement::Local, None)
-                    .expect("local outcome"),
-            )
-            .expect("a normalized record accepts its verified local outcome");
         });
     }
 
@@ -7063,11 +6990,7 @@ pub struct AgentTaskCookCandidateSkippedAttempt {
     pub reason: String,
 }
 
-const COOK_CANDIDATE_SELECTION_WINDOW: usize = 64;
-
-/// Select the latest attempt with controller-readable actionable patch bytes.
-/// Ties use run ID so duplicate attempt numbers remain deterministic. When no
-/// attempt has candidate bytes, retain the legacy latest attempt for old runs.
+/// Select the durable candidate, or the latest attempt when none is recorded.
 pub(crate) fn select_cook_candidate(cook_id: &str) -> Result<AgentTaskCookCandidateSelection> {
     let index = cook_index(cook_id)?;
     select_cook_candidate_from_index(cook_id, index, None)
@@ -7108,61 +7031,8 @@ fn select_cook_candidate_from_index(
             });
         }
     }
-    // Legacy indexes predate the durable pointer. Their recovery path reads at
-    // most this fixed tail window and reports incomplete rather than widening.
-    let attempts = index
-        .attempts
-        .iter()
-        .rev()
-        .take(COOK_CANDIDATE_SELECTION_WINDOW)
-        .collect::<Vec<_>>();
     let latest_attempt_run_id = index.latest_run_id.clone();
-    let mut skipped_newer_run_ids = Vec::new();
-    let mut skipped_newer_attempts = Vec::new();
-    for attempt in attempts.iter().take(COOK_CANDIDATE_SELECTION_WINDOW) {
-        if let Some((task_id, artifact_id)) =
-            substantive_candidate_in_store(&attempt.run_id, lifecycle_store)
-        {
-            return Ok(AgentTaskCookCandidateSelection {
-                schema: "homeboy/agent-task-cook-candidate-selection/v1".to_string(),
-                cook_id: index.cook_id,
-                run_id: attempt.run_id.clone(),
-                attempt: attempt.attempt,
-                latest_attempt_run_id,
-                reason: if skipped_newer_run_ids.is_empty() {
-                    "latest_attempt_has_substantive_candidate".to_string()
-                } else {
-                    "latest_substantive_candidate_after_non_substantive_attempts".to_string()
-                },
-                incomplete: false,
-                selected_task_id: Some(task_id),
-                selected_candidate_sha: Some(artifact_id),
-                skipped_newer_attempts,
-                skipped_newer_run_ids,
-            });
-        }
-        skipped_newer_run_ids.push(attempt.run_id.clone());
-        skipped_newer_attempts.push(AgentTaskCookCandidateSkippedAttempt {
-            run_id: attempt.run_id.clone(),
-            reason: "no_verified_canonical_promotable_patch".to_string(),
-        });
-    }
-    if index.attempts.len() > COOK_CANDIDATE_SELECTION_WINDOW {
-        return Ok(AgentTaskCookCandidateSelection {
-            schema: "homeboy/agent-task-cook-candidate-selection/v1".to_string(),
-            cook_id: index.cook_id,
-            run_id: String::new(),
-            attempt: 0,
-            latest_attempt_run_id,
-            reason: "selection_window_exhausted_without_promotable_candidate".to_string(),
-            incomplete: true,
-            selected_task_id: None,
-            selected_candidate_sha: None,
-            skipped_newer_attempts,
-            skipped_newer_run_ids,
-        });
-    }
-    let latest = attempts.first().ok_or_else(|| {
+    let latest = index.attempts.last().ok_or_else(|| {
         Error::validation_invalid_argument(
             "cook_id",
             "durable Cook index has no attempts",
@@ -7176,13 +7046,12 @@ fn select_cook_candidate_from_index(
         run_id: latest.run_id.clone(),
         attempt: latest.attempt,
         latest_attempt_run_id,
-        reason: "no_substantive_candidate_evidence_preserve_latest_attempt_compatibility"
-            .to_string(),
+        reason: "no_substantive_candidate_evidence".to_string(),
         incomplete: false,
         selected_task_id: None,
         selected_candidate_sha: None,
-        skipped_newer_attempts,
-        skipped_newer_run_ids,
+        skipped_newer_attempts: Vec::new(),
+        skipped_newer_run_ids: Vec::new(),
     })
 }
 

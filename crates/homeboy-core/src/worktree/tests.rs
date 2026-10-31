@@ -143,7 +143,9 @@ fn fixture_record(source: &Path, worktree: &Path) -> TaskWorktreeRecord {
         worktree_path: worktree.to_string_lossy().to_string(),
         branch: "task".to_string(),
         base_ref: "HEAD".to_string(),
-        workspace_identity: None,
+        workspace_identity: Some(
+            task_worktree_workspace_identity("fixture", "fixture@task").unwrap(),
+        ),
         task_url: Some("https://example.com/task".to_string()),
         run_id: None,
         cleanup_policy: CleanupPolicy::RemoveWhenSafe,
@@ -471,7 +473,7 @@ fn task_worktree_identity_is_path_independent_and_rejects_conflicts() {
     let second = fixture_record(source.path(), &source.path().join("two"));
     let identity = first
         .effective_workspace_identity()
-        .expect("derive legacy identity");
+        .expect("persisted identity");
 
     assert_eq!(
         identity,

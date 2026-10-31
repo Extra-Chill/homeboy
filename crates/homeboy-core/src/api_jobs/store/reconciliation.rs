@@ -392,9 +392,7 @@ impl JobStore {
         })?;
         if stored.job.status != JobStatus::Queued
             || reservation.process.is_some()
-            || reservation
-                .reservation_expires_at_ms
-                .is_none_or(|expires_at| expires_at > now)
+            || reservation.reservation_expires_at_ms > now
         {
             return Err(Error::validation_invalid_argument(
                 "confirm_untracked_child_dead",

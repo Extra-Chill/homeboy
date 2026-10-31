@@ -435,10 +435,7 @@ pub(crate) fn record_local_outcome(request: &LabOffloadRequest<'_>) -> Result<()
         return Ok(());
     };
     let run_id = target.agent_task_run_id();
-    // A record with no canonical decision predates this contract (or was
-    // written by a submission path that never authored one). The decision this
-    // route is holding is the authoritative one for the execution being
-    // verified, so adopt it rather than dead-ending recovery (#11600).
+    // Replace the current submission stamp with the authoritative routed decision.
     homeboy_agents::agent_task_lifecycle::normalize_missing_execution_placement_decision(
         run_id,
         &request.placement_decision,

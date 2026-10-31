@@ -631,12 +631,6 @@ pub(crate) fn record_detached_lab_run_with_submission_locked_in_store(
     let plan = detached_lab_plan(&run_id, &input);
     let mut record = match lifecycle_store.read_record(&run_id) {
         Ok(record) => record,
-        Err(error)
-            if error.code == ErrorCode::InternalJsonError
-                && lifecycle_store.record_lacks_typed_metadata(&run_id)? =>
-        {
-            submit(lifecycle_store, &plan, &run_id)?
-        }
         Err(error) if error.code == ErrorCode::ValidationInvalidArgument => {
             submit(lifecycle_store, &plan, &run_id)?
         }
@@ -964,12 +958,6 @@ fn record_lab_offload_proxy_in_store(
     }
     let mut record = match lifecycle_store.read_record(&run_id) {
         Ok(record) => record,
-        Err(error)
-            if error.code == ErrorCode::InternalJsonError
-                && lifecycle_store.record_lacks_typed_metadata(&run_id)? =>
-        {
-            submit(lifecycle_store, durable_plan.unwrap_or(&plan), &run_id)?
-        }
         Err(error) if error.code == ErrorCode::ValidationInvalidArgument => {
             submit(lifecycle_store, durable_plan.unwrap_or(&plan), &run_id)?
         }

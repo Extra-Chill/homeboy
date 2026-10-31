@@ -760,14 +760,14 @@ fn create_with_store_unlocked(
     ownership::normalize_created_path(&worktree_path, worktree_owner, true, "git worktree add")?;
     pin_worktree_identity(&worktree_path)?;
 
-    let mut record = TaskWorktreeRecord {
+    let record = TaskWorktreeRecord {
         id,
         component_id: target.component_id,
         source_checkout: source_checkout.to_string_lossy().to_string(),
         worktree_path: worktree_path.to_string_lossy().to_string(),
         branch: options.branch,
         base_ref,
-        workspace_identity: None,
+        workspace_identity: Some(identity),
         task_url: options.task_url,
         run_id: options.run_id.clone(),
         cleanup_policy: options
@@ -784,7 +784,6 @@ fn create_with_store_unlocked(
             .map_or(0, |previous| previous.lifecycle_revision.saturating_add(1)),
         terminal_workspace_authority: None,
     };
-    record.workspace_identity = Some(record.effective_workspace_identity()?);
     let reconciliation = superseded
         .map(|previous| -> Result<WorktreeCreateReconciliation> {
             Ok(WorktreeCreateReconciliation {

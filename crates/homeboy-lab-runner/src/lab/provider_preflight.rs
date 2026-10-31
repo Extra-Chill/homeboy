@@ -488,14 +488,17 @@ fn validate_controller_runtime_identity(
             None,
         ));
     }
-    // Older controller policies did not carry the v2 declaration. They remain
-    // usable only through the exact runner-advertised revision check above.
-    let Some(plan) = serde_json::from_value::<
+    let plan = serde_json::from_value::<
         homeboy_core::agent_runtime_manifest::AgentRuntimeMaterializationPlan,
     >(identity.materialization_plan.clone())
-    .ok() else {
-        return Ok(());
-    };
+    .map_err(|error| {
+        Error::validation_invalid_argument(
+            "resolved-provider-policy",
+            error.to_string(),
+            None,
+            None,
+        )
+    })?;
     if plan.runtime_sources.is_empty() {
         return Ok(());
     }

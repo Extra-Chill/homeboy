@@ -89,9 +89,7 @@ const AUTOMATIC_ARTIFACT_RETENTION_LOCK: FsIndexLockConfig = FsIndexLockConfig {
 // which keeps same-process callers and independent processes single-flight.
 static AUTOMATIC_ARTIFACT_RETENTION_ADMISSION: OnceLock<Mutex<()>> = OnceLock::new();
 
-/// Default artifact class for declarations that predate categorized cleanup.
-/// Both the built-in path and repository-declared paths describe output that a
-/// build regenerates, so they report as build output.
+/// Artifact class emitted by built-in and repository-declared build outputs.
 const LEGACY_ARTIFACT_CATEGORY: &str = "build_output";
 
 /// Liveness of the checkout an artifact belongs to.

@@ -334,7 +334,7 @@ fn run_case(args: WorkloadCaseArgs, mode: CaseMode) -> homeboy::core::Result<Wor
     let rig_files = rig_workload_files(&resolved);
     // Reuse the source run's recorded effective safety class: a workload
     // file that raised it at run time keeps the gate engaged here.
-    let effective_safety = source.recorded_safety_class(resolved.kind.config.safety_class);
+    let effective_safety = source.recorded_safety_class()?;
     let authorization = if args.dry_run {
         None
     } else {

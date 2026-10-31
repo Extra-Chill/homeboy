@@ -31,9 +31,6 @@ pub struct CleanupArgs {
     /// so every one written before intent tagging existed is otherwise retained
     /// forever. The fixed age floor, the running-run veto, and the never-reap
     /// rule for operator pulls all still apply.
-    // `#[serde(default)]` because `CleanupArgs` is the durable job request: a
-    // checkpoint written by a binary that predates this flag must still resume.
-    #[serde(default)]
     #[arg(long)]
     pub include_untagged: bool,
 

@@ -1628,8 +1628,7 @@ fn load_recipe_at(path: PathBuf, cook_id: &str) -> Result<AgentTaskCookRecipe> {
     Ok(recipe)
 }
 
-/// Legacy cook indexes predate this durable scheduler contract. Their status
-/// projection remains read-only and preserves the previous orphan behavior.
+/// Check whether the requested identity has a durable scheduler recipe.
 pub fn recipe_exists(cook_id: &str) -> Result<bool> {
     Ok(default_store()?.recipe_exists(cook_id))
 }
@@ -1696,9 +1695,7 @@ fn load_recipe_for_attempt_from(
 }
 
 /// Prove that a lifecycle record is the exact attempt frozen by a Cook recipe.
-/// Older runner mirrors may omit `metadata.cook_id`; immutable recipe membership
-/// remains authoritative in that case, but an observed Cook identity may never
-/// disagree with it.
+/// Recipe membership also binds newly materialized orphan attempts before their Cook stamp.
 pub fn validate_recipe_attempt_record(
     recipe: &AgentTaskCookRecipe,
     run_id: &str,
@@ -3964,7 +3961,7 @@ mod tests {
             &crate::agent_task_lifecycle::load_controller_plan_in_store(&lifecycle_store, "run")
                 .unwrap(),
         )
-        .expect("immutable recipe membership resolves legacy mirror");
+        .expect("immutable recipe membership resolves unbound attempt");
 
         record.ensure_metadata_object().insert(
             "cook_id".to_string(),
