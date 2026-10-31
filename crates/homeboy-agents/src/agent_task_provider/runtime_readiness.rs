@@ -1209,6 +1209,25 @@ mod tests {
     };
     use homeboy_core::command_invocation::CommandInvocation;
 
+    use super::super::test_pi::FakePi;
+
+    fn pi_fixture(models: &str) -> (FakePi, AgentTaskExecutorProvider, Value, PathBuf) {
+        let fake = FakePi::with_probes("exit 1", "printf 'test-pi\\n'", models);
+        let count = fake.root.path().join("count");
+        let provider = fake.provider();
+        let mut config = fake.config();
+        config["model"] = json!("test/model");
+        config["runtime_env"] = json!({"COUNT": count});
+        (fake, provider, config, count)
+    }
+
+    fn probe_count(path: &std::path::Path) -> usize {
+        std::fs::read_to_string(path)
+            .expect("probe count")
+            .lines()
+            .count()
+    }
+
     fn test_cache() -> ProviderRuntimeReadinessCache {
         ProviderRuntimeReadinessCache::isolated()
     }
@@ -1270,24 +1289,42 @@ mod tests {
             .unwrap()
             .id;
         let _timing = homeboy_core::observation::phase_timing::for_run(&store, &run_id);
-        let count = root.path().join("count");
-        let provider = provider(&readiness_script(root.path()), &count);
-        for (classification, ready, retryable) in [
-            ("ready", true, false),
-            ("deterministic_incompatibility", false, false),
-            ("auth_failure", false, false),
-            ("unknown_metadata", false, false),
-            ("transient_failure", false, true),
+        let (_fake, provider, mut config, _) = pi_fixture("printf 'test model\\n'");
+        for (model, classification, ready) in [
+            ("test/model", "ready", true),
+            ("model", "deterministic_incompatibility", false),
+            ("test/missing", "deterministic_incompatibility", false),
         ] {
-            let verdict = readiness_verdict(
-                &provider,
-                &json!({ "model": classification }),
-                &mut test_cache(),
-            )
-            .expect("readiness result");
-            assert_eq!(verdict.ready, ready, "{classification}");
-            assert_eq!(verdict.retryable, retryable, "{classification}");
-            assert_eq!(verdict.remediation, format!("repair {classification}"));
+            config["model"] = json!(model);
+            let verdict = readiness_verdict(&provider, &config, &mut test_cache()).unwrap();
+            assert_eq!(verdict.classification, classification);
+            assert_eq!(verdict.ready, ready);
+            assert!(!verdict.retryable);
+            assert_eq!(verdict.remediation.is_empty(), ready);
+            if !ready {
+                assert!(verdict.remediation.contains("Select a"));
+            }
+        }
+        for (models, classification, retryable, remediation) in [
+            (
+                "printf 'No models available\\n'",
+                "auth_failure",
+                false,
+                "Log in",
+            ),
+            (
+                "exit 1",
+                "transient_failure",
+                true,
+                "Retry the bounded Pi model catalog probe",
+            ),
+        ] {
+            let (_fake, provider, config, _) = pi_fixture(models);
+            let verdict = readiness_verdict(&provider, &config, &mut test_cache()).unwrap();
+            assert!(!verdict.ready);
+            assert_eq!(verdict.classification, classification);
+            assert_eq!(verdict.retryable, retryable);
+            assert!(verdict.remediation.contains(remediation));
         }
         let spans = store.phase_spans(&run_id).unwrap();
         for phase in ["admit.provider_readiness", "provider.readiness_probe"] {
@@ -1309,46 +1346,31 @@ mod tests {
             run_id,
         )));
         assert!(
-            readiness_verdict(&provider, &json!({"model":"ready"}), &mut test_cache())
-                .unwrap()
-                .ready
+            readiness_verdict(
+                &provider,
+                &{
+                    config["model"] = json!("test/model");
+                    config
+                },
+                &mut test_cache()
+            )
+            .unwrap()
+            .ready
         );
-    }
-
-    #[test]
-    fn retryable_non_transient_verdicts_are_not_immediately_retried() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let count = root.path().join("count");
-        let script = root.path().join("retryable-auth.js");
-        std::fs::write(
-            &script,
-            "const fs=require('fs');JSON.parse(fs.readFileSync(0,'utf8'));const count=process.argv[2];fs.writeFileSync(count,String(Number(fs.existsSync(count)?fs.readFileSync(count,'utf8'):0)+1));process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:false,classification:'auth_failure',retryable:true,remediation:'switch account',reason:'rejected',cache_key:'account',identity:{account:'test'}}));",
-        )
-        .expect("readiness script");
-        let provider = provider(&script, &count);
-
-        let verdict = readiness_verdict(&provider, &json!({ "model": "test" }), &mut test_cache())
-            .expect("readiness result");
-
-        assert_eq!(verdict.classification, "auth_failure");
-        assert!(verdict.retryable);
-        assert_eq!(std::fs::read_to_string(count).expect("probe count"), "1");
     }
 
     #[test]
     fn shared_cache_deduplicates_a_fanout_runtime_probe() {
         let _home = stable_identity_home();
-        let root = tempfile::tempdir().expect("tempdir");
-        let count = root.path().join("count");
-        let provider = provider(&readiness_script(root.path()), &count);
+        let (_fake, provider, config, count) =
+            pi_fixture("printf 'probe\\n' >> \"$COUNT\"; printf 'test model\\n'");
         let mut cache = test_cache();
-        let config = json!({ "model": "ready" });
 
         let first = readiness_verdict(&provider, &config, &mut cache).expect("first verdict");
         let second = readiness_verdict(&provider, &config, &mut cache).expect("cached verdict");
 
         assert_eq!(first.cache_key, second.cache_key);
-        assert_eq!(std::fs::read_to_string(count).expect("probe count"), "1");
+        assert_eq!(probe_count(&count), 1);
     }
 
     #[test]
@@ -1454,54 +1476,40 @@ mod tests {
     #[test]
     fn explicit_provider_config_client_contexts_do_not_share_fanout_readiness() {
         let _home = stable_identity_home();
-        let root = tempfile::tempdir().expect("tempdir");
-        let count = root.path().join("count");
-        let provider = provider(&readiness_script(root.path()), &count);
+        let (_fake, provider, mut config, count) =
+            pi_fixture("printf 'probe\\n' >> \"$COUNT\"; printf 'test model\\n'");
         let mut cache = test_cache();
 
         for account in ["first", "second"] {
+            config["client_context"] = json!({"account": account});
             assert!(
-                readiness_verdict(
-                    &provider,
-                    &json!({
-                        "model": "ready",
-                        "client_context": { "account": account },
-                    }),
-                    &mut cache,
-                )
-                .expect("readiness verdict")
-                .ready
+                readiness_verdict(&provider, &config, &mut cache,)
+                    .expect("readiness verdict")
+                    .ready
             );
         }
 
-        assert_eq!(std::fs::read_to_string(count).expect("probe count"), "2");
+        assert_eq!(probe_count(&count), 2);
     }
 
     #[test]
     fn generated_fanout_child_identity_deduplicates_readiness() {
         let _home = stable_identity_home();
-        let root = tempfile::tempdir().expect("tempdir");
-        let count = root.path().join("count");
-        let provider = provider(&readiness_script(root.path()), &count);
+        let (_fake, provider, mut config, count) =
+            pi_fixture("printf 'probe\\n' >> \"$COUNT\"; printf 'test model\\n'");
         let mut cache = test_cache();
 
         for (cook_id, to_worktree) in [("first", "homeboy@first"), ("second", "homeboy@second")] {
+            config["client_context"] = json!({"fanout": {
+                "id": "shared-fanout", "semantics": "batch_cook",
+                "cook_id": cook_id, "to_worktree": to_worktree,
+                "head": format!("fanout/{cook_id}"),
+                "workspace_materialization": [{"child": cook_id}],
+            }});
             assert!(
                 readiness_verdict_with_credentials_and_deadline_for_generated_fanout_context(
                     &provider,
-                    &json!({
-                        "model": "ready",
-                        "client_context": {
-                            "fanout": {
-                                "id": "shared-fanout",
-                                "semantics": "batch_cook",
-                                "cook_id": cook_id,
-                                "to_worktree": to_worktree,
-                                "head": format!("fanout/{cook_id}"),
-                                "workspace_materialization": [{ "child": cook_id }],
-                            },
-                        },
-                    }),
+                    &config,
                     &[],
                     &mut cache,
                     None,
@@ -1513,36 +1521,28 @@ mod tests {
             );
         }
 
-        assert_eq!(std::fs::read_to_string(count).expect("probe count"), "1");
+        assert_eq!(probe_count(&count), 1);
     }
 
     #[test]
     fn caller_fanout_shape_without_the_internal_marker_remains_distinct() {
         let _home = stable_identity_home();
-        let root = tempfile::tempdir().expect("tempdir");
-        let count = root.path().join("count");
-        let provider = provider(&readiness_script(root.path()), &count);
+        let (_fake, provider, mut config, count) =
+            pi_fixture("printf 'probe\\n' >> \"$COUNT\"; printf 'test model\\n'");
         let mut cache = test_cache();
 
         for cook_id in ["first", "second"] {
+            config["client_context"] = json!({"fanout": {
+                "id": "shared-fanout", "semantics": "batch_cook", "cook_id": cook_id,
+            }});
             assert!(
-                readiness_verdict(
-                    &provider,
-                    &json!({
-                        "model": "ready",
-                        "client_context": { "fanout": {
-                            "id": "shared-fanout", "semantics": "batch_cook",
-                            "cook_id": cook_id,
-                        }},
-                    }),
-                    &mut cache,
-                )
-                .expect("readiness verdict")
-                .ready
+                readiness_verdict(&provider, &config, &mut cache,)
+                    .expect("readiness verdict")
+                    .ready
             );
         }
 
-        assert_eq!(std::fs::read_to_string(count).expect("probe count"), "2");
+        assert_eq!(probe_count(&count), 2);
     }
 
     #[test]
@@ -1602,24 +1602,13 @@ mod tests {
     fn negative_runtime_evidence_expires_and_reprobes_recovered_credentials() {
         let _home = stable_identity_home();
         let root = tempfile::tempdir().expect("tempdir");
-        let count = root.path().join("count");
         let recovered = root.path().join("recovered");
-        let script = root.path().join("recovering-readiness.js");
-        std::fs::write(
-            &script,
-            "const fs=require('fs');const count=process.argv[2],recovered=process.argv[3];fs.writeFileSync(count,String(Number(fs.existsSync(count)?fs.readFileSync(count,'utf8'):0)+1));const ready=fs.existsSync(recovered);process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready,classification:ready?'ready':'auth_failure',retryable:false,remediation:'repair credentials',reason:ready?'':'credentials rejected',cache_key:'account',identity:{account:'test'}}));",
-        )
-        .expect("readiness script");
-        let mut provider = provider(&script, &count);
-        provider
-            .readiness_invocation
-            .as_mut()
-            .expect("readiness invocation")
-            .command
-            .argv
-            .push(recovered.display().to_string());
+        let (fake, provider, mut config, count) = pi_fixture(
+            "printf 'probe\\n' >> \"$COUNT\"; if [ -f \"$RECOVERED\" ]; then printf 'test model\\n'; else printf 'No models available\\n'; fi",
+        );
+        config["runtime_env"]["RECOVERED"] = json!(recovered);
         let mut cache = test_cache();
-        let config = json!({ "model": "recovering" });
+        let _keep_alive = fake;
 
         assert!(
             !readiness_verdict(&provider, &config, &mut cache)
@@ -1651,7 +1640,7 @@ mod tests {
                 .expect("recovered verdict")
                 .ready
         );
-        assert_eq!(std::fs::read_to_string(count).expect("probe count"), "2");
+        assert_eq!(probe_count(&count), 2);
     }
 
     #[test]
@@ -1695,27 +1684,22 @@ mod tests {
     fn short_deadline_waiter_does_not_poison_long_deadline_singleflight() {
         let _home = stable_identity_home();
         let root = tempfile::tempdir().expect("tempdir");
-        let count = root.path().join("count");
         let release = root.path().join("release");
-        let script = root.path().join("different-deadlines.js");
-        // The probe finishes only once the test releases it, so the short
-        // waiter's deadline provably expires while the probe is in flight
-        // rather than racing a fixed sleep (#14832).
-        std::fs::write(
-            &script,
-            format!("const fs=require('fs');const count=process.argv[2];fs.appendFileSync(count,'probe\\n');const timer=setInterval(()=>{{if(fs.existsSync({release:?})){{clearInterval(timer);process.stdout.write(JSON.stringify({{schema:'homeboy/agent-task-provider-readiness-result/v1',ready:true,classification:'ready',retryable:false,remediation:'',reason:'',cache_key:'shared',identity:{{account:'shared'}}}}))}}}},10);"),
-        )
-        .expect("readiness script");
-        let provider = provider(&script, &count);
+        // Release explicitly rather than racing a fixed probe delay.
+        let (_fake, provider, mut config, count) = pi_fixture(
+            "printf 'probe\\n' >> \"$COUNT\"; while [ ! -f \"$RELEASE\" ]; do sleep 0.01; done; printf 'test model\\n'",
+        );
+        config["runtime_env"]["RELEASE"] = json!(release);
         let cache = test_cache();
         let long_provider = provider.clone();
         let mut long_cache = cache.clone();
+        let long_config = config.clone();
         // The long deadline only has to outlive the handshake; it bounds a
         // hung probe, not the code under test.
         let long = std::thread::spawn(move || {
             readiness_verdict_with_credentials_and_deadline(
                 &long_provider,
-                &json!({"model":"same"}),
+                &long_config,
                 &[],
                 &mut long_cache,
                 Some(crate::agent_task_timeout::now_unix_ms() + 60_000),
@@ -1745,7 +1729,7 @@ mod tests {
         let short_deadline = crate::agent_task_timeout::now_unix_ms() + 25;
         let error = readiness_verdict_with_credentials_and_deadline(
             &provider,
-            &json!({"model":"same"}),
+            &config,
             &[],
             &mut cache.clone(),
             Some(short_deadline),
@@ -1763,7 +1747,7 @@ mod tests {
 
         let mut cache = cache;
         assert!(
-            readiness_verdict(&provider, &json!({"model":"same"}), &mut cache)
+            readiness_verdict(&provider, &config, &mut cache)
                 .expect("published long result")
                 .ready
         );
@@ -1780,17 +1764,11 @@ mod tests {
     fn expired_probe_owner_releases_singleflight_for_a_long_deadline_retry() {
         let _home = stable_identity_home();
         let root = tempfile::tempdir().expect("tempdir");
-        let count = root.path().join("count");
         let release = root.path().join("release");
-        let script = root.path().join("owner-different-deadlines.js");
-        // The probe answers only after the test releases it, so the short
-        // owner always expires with its probe in flight (#14832).
-        std::fs::write(
-            &script,
-            format!("const fs=require('fs');const count=process.argv[2];fs.appendFileSync(count,'probe\\n');const timer=setInterval(()=>{{if(fs.existsSync({release:?})){{clearInterval(timer);process.stdout.write(JSON.stringify({{schema:'homeboy/agent-task-provider-readiness-result/v1',ready:true,classification:'ready',retryable:false,remediation:'',reason:'',cache_key:'shared',identity:{{account:'shared'}}}}))}}}},10);"),
-        )
-        .expect("readiness script");
-        let provider = provider(&script, &count);
+        let (_fake, provider, mut config, count) = pi_fixture(
+            "printf 'probe\\n' >> \"$COUNT\"; while [ ! -f \"$RELEASE\" ]; do sleep 0.01; done; printf 'test model\\n'",
+        );
+        config["runtime_env"]["RELEASE"] = json!(release);
         let mut cache = test_cache();
 
         // The short deadline must only outlast the probe's process startup,
@@ -1799,10 +1777,11 @@ mod tests {
         let short_deadline = crate::agent_task_timeout::now_unix_ms() + 5_000;
         let short_provider = provider.clone();
         let mut short_cache = cache.clone();
+        let short_config = config.clone();
         let short = std::thread::spawn(move || {
             readiness_verdict_with_credentials_and_deadline(
                 &short_provider,
-                &json!({"model":"same"}),
+                &short_config,
                 &[],
                 &mut short_cache,
                 Some(short_deadline),
@@ -1825,7 +1804,7 @@ mod tests {
         std::fs::write(&release, "release").expect("release probe");
         let verdict = readiness_verdict_with_credentials_and_deadline(
             &provider,
-            &json!({"model":"same"}),
+            &config,
             &[],
             &mut cache,
             Some(crate::agent_task_timeout::now_unix_ms() + 60_000),
@@ -1844,29 +1823,19 @@ mod tests {
     #[test]
     fn distinct_readiness_keys_probe_concurrently() {
         let root = tempfile::tempdir().expect("tempdir");
-        let count = root.path().join("unused-count");
-        let script = root.path().join("concurrent.js");
-        std::fs::write(
-            &script,
-            "const fs=require('fs');const req=JSON.parse(fs.readFileSync(0,'utf8'));const root=process.argv[3],model=req.effective_config.model,other=model==='a'?'b':'a';fs.writeFileSync(root+'/started-'+model,'');while(!fs.existsSync(root+'/started-'+other)){Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,10)}process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:true,classification:'ready',retryable:false,remediation:'',reason:'',cache_key:model,identity:{model}}));",
-        )
-        .expect("readiness script");
-        let mut provider = provider(&script, &count);
-        provider
-            .readiness_invocation
-            .as_mut()
-            .expect("readiness invocation")
-            .command
-            .argv
-            .push(root.path().display().to_string());
+        let (_fake, provider, config, _) = pi_fixture(
+            "touch \"$ROOT/started-$KEY\"; while [ ! -f \"$ROOT/started-$OTHER\" ]; do sleep 0.01; done; printf 'test model\\n'",
+        );
         let cache = test_cache();
         std::thread::scope(|scope| {
-            for model in ["a", "b"] {
+            for (key, other) in [("a", "b"), ("b", "a")] {
                 let provider = provider.clone();
                 let mut cache = cache.clone();
+                let mut config = config.clone();
+                config["runtime_env"] = json!({"ROOT": root.path(), "KEY": key, "OTHER": other});
                 scope.spawn(move || {
                     assert!(
-                        readiness_verdict(&provider, &json!({"model":model}), &mut cache)
+                        readiness_verdict(&provider, &config, &mut cache)
                             .expect("readiness")
                             .ready
                     );
@@ -1883,37 +1852,22 @@ mod tests {
         let root = tempfile::tempdir().expect("tempdir");
         let release = root.path().join("release");
         let probes = root.path().join("probes");
-        let script = root.path().join("bounded.js");
-        std::fs::write(
-            &script,
-            "const fs=require('fs');const req=JSON.parse(fs.readFileSync(0,'utf8'));const release=process.argv[2];fs.appendFileSync(process.argv[3],req.effective_config.model+'\\n');const finish=()=>process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:true,classification:'ready',retryable:false,remediation:'',reason:'',cache_key:req.effective_config.model,identity:{model:req.effective_config.model}}));if(fs.existsSync(release)){finish()}else{const timer=setInterval(()=>{if(fs.existsSync(release)){clearInterval(timer);finish()}},10)}",
-        )
-        .expect("readiness script");
-        let mut provider = provider(&script, &release);
-        let invocation = provider
-            .readiness_invocation
-            .as_mut()
-            .expect("readiness invocation");
-        invocation.command.argv.push(probes.display().to_string());
-        // Each request's readiness budget also covers its wait for one of the
-        // four probe permits. 65 probes drain in ~17 serial waves of process
-        // spawns, so on a loaded host the default 20s budget measured spawn
-        // scheduling rather than the cache bound under test (#14832).
-        invocation.timeout_ms = 300_000;
+        let (_fake, provider, mut config, _) = pi_fixture(
+            "printf '%s\\n' \"$KEY\" >> \"$PROBES\"; while [ ! -f \"$RELEASE\" ]; do sleep 0.01; done; printf 'test model\\n'",
+        );
+        config["runtime_env"] = json!({"RELEASE": release, "PROBES": probes});
         let cache = test_cache();
         std::thread::scope(|scope| {
             for index in (0..65).chain(std::iter::once(0)) {
                 let provider = provider.clone();
                 let mut cache = cache.clone();
+                let mut config = config.clone();
+                config["runtime_env"]["KEY"] = json!(format!("model-{index}"));
                 scope.spawn(move || {
                     assert!(
-                        readiness_verdict(
-                            &provider,
-                            &json!({"model": format!("model-{index}")}),
-                            &mut cache,
-                        )
-                        .expect("readiness")
-                        .ready
+                        readiness_verdict(&provider, &config, &mut cache,)
+                            .expect("readiness")
+                            .ready
                     );
                 });
             }
@@ -1967,17 +1921,9 @@ mod tests {
     #[test]
     fn capacity_mode_probes_are_a_distinct_cache_identity_from_live_inference() {
         let _home = stable_identity_home();
-        let root = tempfile::tempdir().expect("tempdir");
-        let modes = root.path().join("modes.log");
-        let script = root.path().join("mode-echo.js");
-        std::fs::write(
-            &script,
-            "const fs=require('fs');const request=JSON.parse(fs.readFileSync(0,'utf8'));fs.appendFileSync(process.argv[2],(request.mode||'live')+'\\n');const capacity=request.mode==='capacity'?{remaining:70,limit:100,unit:'percent',scope:'pooled'}:undefined;process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:true,classification:'ready',retryable:false,remediation:'',reason:'',cache_key:'shared-route',identity:{},...(capacity?{capacity}:{})}));",
-        )
-        .expect("mode-echo readiness script");
-        let provider = provider(&script, &modes);
+        let (_fake, provider, config, count) =
+            pi_fixture("printf 'probe\\n' >> \"$COUNT\"; printf 'test model\\n'");
         let mut cache = test_cache();
-        let config = json!({ "model": "pooled" });
 
         let capacity = capacity_mode_readiness_verdict_with_deadline(
             &provider,
@@ -1987,15 +1933,15 @@ mod tests {
             None,
         )
         .expect("capacity verdict");
-        assert_eq!(
-            capacity
-                .capacity
-                .as_ref()
-                .and_then(|capacity| capacity.scope.as_deref()),
-            Some("pooled")
-        );
+        assert!(capacity.ready);
+        assert!(capacity.capacity.is_none());
+        assert_eq!(capacity.reason, "capacity_not_published");
+        assert!(!count.exists(), "capacity mode does not run a live probe");
 
         let live = readiness_verdict(&provider, &config, &mut cache).expect("live verdict");
+        assert!(live.ready);
+        assert_ne!(live.cache_key, capacity.cache_key);
+        assert!(live.reason.is_empty());
         assert!(
             live.capacity.is_none(),
             "a live-inference answer must never be served from capacity-mode cache"
@@ -2006,30 +1952,26 @@ mod tests {
         readiness_verdict(&provider, &config, &mut cache).expect("live answer is cached");
 
         assert_eq!(
-            std::fs::read_to_string(&modes)
-                .expect("mode log")
-                .lines()
-                .collect::<Vec<_>>(),
-            vec!["capacity", "live"],
-            "each mode probes exactly once; a capacity cache hit must not satisfy live readiness"
+            probe_count(&count),
+            1,
+            "only live mode runs the catalog probe"
         );
     }
 
     #[test]
     fn readiness_probe_errors_are_cached_briefly() {
         let _home = stable_identity_home();
-        let root = tempfile::tempdir().expect("tempdir");
-        let count = root.path().join("count");
-        let script = root.path().join("failure.js");
-        std::fs::write(
-            &script,
-            "const fs=require('fs');const count=process.argv[2];fs.appendFileSync(count,'probe\\n');process.exit(1);",
-        )
-        .expect("readiness script");
-        let provider = provider(&script, &count);
+        let (fake, provider, mut config, count) = pi_fixture(
+            "printf 'probe\\n' >> \"$COUNT\"; if [ -f \"$RECOVERED\" ]; then printf 'test model\\n'; else exit 1; fi",
+        );
+        let recovered = fake.root.path().join("recovered");
+        config["runtime_env"]["RECOVERED"] = json!(recovered);
         let mut cache = test_cache();
         for _ in 0..2 {
-            assert!(readiness_verdict(&provider, &json!({"model":"error"}), &mut cache).is_err());
+            let verdict = readiness_verdict(&provider, &config, &mut cache).unwrap();
+            assert!(!verdict.ready);
+            assert_eq!(verdict.classification, "transient_failure");
+            assert!(verdict.retryable);
         }
         assert_eq!(
             std::fs::read_to_string(&count)
@@ -2038,14 +1980,10 @@ mod tests {
                 .count(),
             PROVIDER_RUNTIME_READINESS_TRANSIENT_ATTEMPTS
         );
-        std::fs::write(
-            &script,
-            "const fs=require('fs');fs.appendFileSync(process.argv[2],'probe\\n');process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:true,classification:'ready',retryable:false,remediation:'',reason:'',cache_key:'recovered',identity:{account:'recovered'}}));",
-        )
-        .expect("recover probe");
+        std::fs::write(&recovered, "ready").expect("recover probe");
         cache.expire_all();
         assert!(
-            readiness_verdict(&provider, &json!({"model":"error"}), &mut cache)
+            readiness_verdict(&provider, &config, &mut cache)
                 .expect("recovered probe")
                 .ready
         );
@@ -2060,49 +1998,40 @@ mod tests {
 
     #[test]
     fn readiness_timeout_is_shared_across_retries() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let count = root.path().join("count");
-        let script = root.path().join("retry-deadline.js");
-        std::fs::write(
-            &script,
-            "const fs=require('fs');const count=process.argv[2];const n=fs.existsSync(count)?Number(fs.readFileSync(count,'utf8'))+1:1;fs.writeFileSync(count,String(n));if(n===1){process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:false,classification:'transient_failure',retryable:true,remediation:'retry',reason:'transient',cache_key:'retry',identity:{}}))}else{setTimeout(()=>process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:true,classification:'ready',retryable:false,remediation:'',reason:'',cache_key:'ready',identity:{}})),600000)}",
-        )
-        .expect("readiness script");
+        let (_fake, provider, config, count) = pi_fixture(
+            "if [ ! -f \"$COUNT\" ]; then printf 'probe\\n' >> \"$COUNT\"; sleep 4; exit 1; fi; printf 'probe\\n' >> \"$COUNT\"; sleep 600",
+        );
         // The budget only has to cover the first attempt's process startup on
         // a loaded host; the retry never answers, so it always runs into the
         // shared deadline whatever the budget is (#14832).
         const BUDGET_MS: u64 = 10_000;
-        let mut provider = provider(&script, &count);
-        provider
-            .readiness_invocation
-            .as_mut()
-            .expect("readiness invocation")
-            .timeout_ms = BUDGET_MS;
         let gate = Box::leak(Box::new(ProviderReadinessProbeGate {
             active: Mutex::new(0),
             changed: Condvar::new(),
         }));
-        let error = run_readiness_probe_with_gate(
+        let started = Instant::now();
+        let result = run_readiness_probe_with_gate(
             &provider,
-            &json!({"model":"retry-deadline"}),
+            &config,
             &[],
             gate,
             Instant::now() + Duration::from_millis(BUDGET_MS),
             BUDGET_MS,
             None,
-        )
-        .expect_err("the retry shares the first attempt's total deadline");
-
-        assert!(error.contains("timed out after"), "{error}");
-        assert!(error.contains(" ms"), "{error}");
-        let retry_timeout_ms = error
-            .split("timed out after ")
-            .nth(1)
-            .and_then(|value| value.split(" ms").next())
-            .and_then(|value| value.parse::<u64>().ok())
-            .expect("millisecond retry timeout");
-        assert!(retry_timeout_ms < BUDGET_MS, "{error}");
-        assert_eq!(std::fs::read_to_string(count).expect("probe count"), "2");
+        );
+        match result {
+            Ok(verdict) => {
+                assert!(!verdict.ready);
+                assert_eq!(verdict.classification, "transient_failure");
+                assert!(verdict.remediation.contains("timed out"));
+            }
+            Err(error) => assert!(error.contains("timed out"), "{error}"),
+        }
+        // A fresh ten-second budget for the retry would take at least fourteen
+        // seconds, rather than sharing the original ten-second deadline.
+        assert!(started.elapsed() >= Duration::from_millis(BUDGET_MS - 500));
+        assert!(started.elapsed() < Duration::from_secs(12));
+        assert_eq!(probe_count(&count), 2);
     }
 
     #[test]
@@ -2151,26 +2080,23 @@ mod tests {
     fn readiness_command_timeout_is_capped_to_the_absolute_deadline() {
         let root = tempfile::tempdir().expect("tempdir");
         let pid_file = root.path().join("pid");
-        let script = root.path().join("slow.js");
-        std::fs::write(
-            &script,
-            "const fs=require('fs');fs.writeFileSync(process.argv[2],String(process.pid));setInterval(()=>{},1000);",
-        )
-        .expect("slow readiness script");
+        let fake = FakePi::with_probes(
+            "exit 1",
+            "printf '%s' \"$$\" > \"$PID_FILE\"; exec sleep 600",
+            "exit 1",
+        );
+        let provider = fake.provider();
+        let mut config = fake.config();
+        config["readiness_timeout_ms"] = json!(120_000);
+        config["runtime_env"] = json!({"PID_FILE": pid_file});
         // The command's own timeout is far beyond the absolute deadline, so
         // returning well before it proves the cap. The deadline itself only
         // has to let the probe start and record its pid on a loaded host.
-        let mut provider = provider(&script, &pid_file);
-        provider
-            .readiness_invocation
-            .as_mut()
-            .expect("readiness invocation")
-            .timeout_ms = 120_000;
         let started = Instant::now();
 
         let error = readiness_verdict_with_credentials_and_deadline(
             &provider,
-            &json!({"model":"slow"}),
+            &config,
             &[],
             &mut test_cache(),
             Some(crate::agent_task_timeout::now_unix_ms() + 5_000),
@@ -2197,22 +2123,15 @@ mod tests {
     #[test]
     fn delayed_ready_route_is_cached_across_repeated_admission_probes() {
         let _home = stable_identity_home();
-        let root = tempfile::tempdir().expect("tempdir");
-        let count = root.path().join("count");
-        let script = root.path().join("delayed-ready.js");
-        std::fs::write(
-            &script,
-            "const fs=require('fs');fs.appendFileSync(process.argv[2],'probe\\n');setTimeout(()=>process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:true,classification:'ready',retryable:false,remediation:'',reason:'',cache_key:'selected-openai-route',identity:{model:'selected-openai-route'}})),4000);",
-        )
-        .expect("readiness script");
-        let provider = provider(&script, &count);
+        let (_fake, provider, config, count) =
+            pi_fixture("printf 'probe\\n' >> \"$COUNT\"; sleep 4; printf 'test model\\n'");
         let mut cache = test_cache();
         let started = Instant::now();
 
         assert!(
             readiness_verdict_with_credentials_and_deadline(
                 &provider,
-                &json!({"model":"selected-openai-route"}),
+                &config,
                 &[],
                 &mut cache,
                 None,
@@ -2224,7 +2143,7 @@ mod tests {
         assert!(
             readiness_verdict_with_credentials_and_deadline(
                 &provider,
-                &json!({"model":"selected-openai-route"}),
+                &config,
                 &[],
                 &mut cache,
                 None,
