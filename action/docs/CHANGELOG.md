@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.23.5] - 2026-10-31
+
+### Fixed
+- pass the component input to candidate binary setup
+
 ## [2.23.4] - 2026-10-31
 
 ### Fixed
