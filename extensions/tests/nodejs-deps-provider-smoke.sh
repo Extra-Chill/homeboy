@@ -52,10 +52,11 @@ if (!status.packages.some((pkg) => pkg.name === 'vitest' && pkg.manifest_section
 NODE
 
 command_json="$("$ROOT_DIR/nodejs/scripts/deps/deps-runner.sh" install-command)"
-COMMAND_JSON="$command_json" node <<'NODE'
+COMMAND_JSON="$command_json" RUNNER="$ROOT_DIR/nodejs/scripts/deps/deps-runner.sh" node <<'NODE'
 const plan = JSON.parse(process.env.COMMAND_JSON);
-if (JSON.stringify(plan.command) !== JSON.stringify(['npm', 'ci'])) {
-  throw new Error(`expected npm ci install plan, got ${JSON.stringify(plan.command)}`);
+// Hydration runs the deps runner so post-install hooks (local workspace deps) apply.
+if (JSON.stringify(plan.command) !== JSON.stringify(['bash', process.env.RUNNER, 'install'])) {
+  throw new Error(`expected deps-runner install plan, got ${JSON.stringify(plan.command)}`);
 }
 NODE
 
@@ -74,12 +75,20 @@ cat >"$PROJECT_DIR/npm-shrinkwrap.json" <<'JSON'
 }
 JSON
 command_json="$("$ROOT_DIR/nodejs/scripts/deps/deps-runner.sh" install-command)"
-COMMAND_JSON="$command_json" node <<'NODE'
+COMMAND_JSON="$command_json" RUNNER="$ROOT_DIR/nodejs/scripts/deps/deps-runner.sh" node <<'NODE'
 const plan = JSON.parse(process.env.COMMAND_JSON);
-if (JSON.stringify(plan.command) !== JSON.stringify(['npm', 'ci'])) {
-  throw new Error(`expected npm ci for npm-shrinkwrap.json, got ${JSON.stringify(plan.command)}`);
+// Hydration runs the deps runner so post-install hooks (local workspace deps) apply.
+if (JSON.stringify(plan.command) !== JSON.stringify(['bash', process.env.RUNNER, 'install'])) {
+  throw new Error(`expected deps-runner install plan, got ${JSON.stringify(plan.command)}`);
 }
 NODE
+
+: >"$HOMEBOY_FAKE_NPM_LOG"
+"$ROOT_DIR/nodejs/scripts/deps/deps-runner.sh" install >/dev/null
+if [ "$(cat "$HOMEBOY_FAKE_NPM_LOG")" != "ci" ]; then
+    echo "expected npm-shrinkwrap.json install to run npm ci" >&2
+    exit 1
+fi
 
 rm "$PROJECT_DIR/npm-shrinkwrap.json"
 status_json="$($ROOT_DIR/nodejs/scripts/deps/deps-runner.sh status)"
@@ -91,10 +100,11 @@ if (status.errors.length !== 0) {
 NODE
 
 command_json="$($ROOT_DIR/nodejs/scripts/deps/deps-runner.sh install-command)"
-COMMAND_JSON="$command_json" node <<'NODE'
+COMMAND_JSON="$command_json" RUNNER="$ROOT_DIR/nodejs/scripts/deps/deps-runner.sh" node <<'NODE'
 const plan = JSON.parse(process.env.COMMAND_JSON);
-if (JSON.stringify(plan.command) !== JSON.stringify(['npm', 'install', '--no-audit', '--no-fund'])) {
-  throw new Error(`expected npm install fallback plan, got ${JSON.stringify(plan.command)}`);
+// Hydration runs the deps runner so post-install hooks (local workspace deps) apply.
+if (JSON.stringify(plan.command) !== JSON.stringify(['bash', process.env.RUNNER, 'install'])) {
+  throw new Error(`expected deps-runner install plan, got ${JSON.stringify(plan.command)}`);
 }
 NODE
 
