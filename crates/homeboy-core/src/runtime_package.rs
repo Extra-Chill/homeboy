@@ -167,20 +167,12 @@ fn refresh_locked_in_root(
     })
 }
 
-/// Snapshot root-manifest runtime assets into a new generation. Linked extension
-/// installs call this instead of writing through the stable runtime boundary.
+/// Snapshot root-manifest runtime assets into a new generation, preserving the
+/// active shared-asset revision. Individual extension installs must not publish
+/// shared runtime assets.
 pub fn refresh_shared_assets(source_root: &Path) -> Result<()> {
-    refresh_shared_assets_with_revision(source_root, None)
-}
-
-/// [`refresh_shared_assets`] with explicit source revision evidence supplied by
-/// the extension lifecycle when its durable snapshot no longer has `.git`.
-pub fn refresh_shared_assets_with_revision(
-    source_root: &Path,
-    revision: Option<&str>,
-) -> Result<()> {
     let config_root = paths::homeboy()?;
-    refresh_shared_assets_in_root_with_revision(&config_root, source_root, revision)
+    refresh_shared_assets_in_root(&config_root, source_root)
 }
 
 /// [`refresh_shared_assets`] against an explicitly injected config root.
@@ -188,38 +180,40 @@ pub fn refresh_shared_assets_with_revision(
 /// As with [`refresh_in_root`], the lock and the generation store are taken
 /// under one resolution rather than two.
 pub fn refresh_shared_assets_in_root(config_root: &Path, source_root: &Path) -> Result<()> {
-    refresh_shared_assets_in_root_with_revision(config_root, source_root, None)
-}
-
-fn refresh_shared_assets_in_root_with_revision(
-    config_root: &Path,
-    source_root: &Path,
-    revision: Option<&str>,
-) -> Result<()> {
     config::with_config_lock_at(config_root, || {
-        refresh_shared_assets_locked_in_root(config_root, source_root, revision)
+        refresh_shared_assets_locked_in_root(config_root, source_root)
     })
 }
 
-fn refresh_shared_assets_locked_in_root(
-    config_root: &Path,
-    source_root: &Path,
-    revision: Option<&str>,
-) -> Result<()> {
+fn refresh_shared_assets_locked_in_root(config_root: &Path, source_root: &Path) -> Result<()> {
     let store = config_root.join(GENERATIONS);
     fs::create_dir_all(store.join("staging")).map_err(io("prepare runtime generation store"))?;
     recover(&store)?;
     bootstrap_stable_runtime_boundary(config_root, &store)?;
     let source_root =
         canonical_contained_directory(source_root, source_root, "resolve linked runtime source")?;
+    let source_revision = git::short_head_revision(&source_root);
+    let active_revision =
+        fs::read_to_string(paths::agent_runtimes_in_root(config_root).join("pi/.source-revision"))
+            .ok();
+    if let Some(active) = active_revision.as_deref().map(str::trim) {
+        if source_revision.as_deref() != Some(active) {
+            let mut error = Error::validation_invalid_argument(
+                "source_revision",
+                "shared runtime assets must match the active runtime revision",
+                source_revision.clone(),
+                None,
+            );
+            error.details["reason"] = serde_json::json!("shared_asset_revision_mismatch");
+            error.details["active_revision"] = serde_json::json!(active);
+            return Err(error);
+        }
+    }
     let generation_name = format!("extension-assets-{}", nonce());
     let stage = store.join("staging").join(&generation_name);
     remove_if_exists(&stage, "clean linked runtime generation stage")?;
     seed_generation(&store, &stage)?;
     materialize_all_declared_runtime_assets(&source_root, &stage)?;
-    let source_revision = revision
-        .map(str::to_string)
-        .or_else(|| git::short_head_revision(&source_root));
     write_shared_runtime_revisions(&stage, source_revision.as_deref())?;
     sync_tree(&stage)?;
     write_journal(
@@ -832,6 +826,50 @@ mod tests {
             serde_json::json!({"shared_assets": assets}).to_string(),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn shared_asset_revision_mismatch_preserves_current() {
+        with_isolated_home(|_| {
+            let source = tempfile::tempdir().unwrap();
+            package(source.path(), "pi", "active");
+            for args in [
+                vec!["init", "--quiet"],
+                vec!["add", "."],
+                vec![
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.com",
+                    "commit",
+                    "--quiet",
+                    "-m",
+                    "stale source",
+                ],
+            ] {
+                assert!(std::process::Command::new("git")
+                    .current_dir(source.path())
+                    .args(args)
+                    .status()
+                    .unwrap()
+                    .success());
+            }
+            refresh("pi", &source.path().to_string_lossy(), None).unwrap();
+            let root = paths::homeboy().unwrap();
+            fs::write(
+                root.join("agent-runtimes/pi/.source-revision"),
+                "controller-revision",
+            )
+            .unwrap();
+            let before = fs::read_link(root.join(GENERATIONS).join(CURRENT)).unwrap();
+            manifest(source.path(), &["agent-runtimes"]);
+            let error = refresh_shared_assets(source.path()).unwrap_err();
+            assert_eq!(error.details["reason"], "shared_asset_revision_mismatch");
+            assert_eq!(
+                fs::read_link(root.join(GENERATIONS).join(CURRENT)).unwrap(),
+                before
+            );
+        });
     }
 
     #[test]

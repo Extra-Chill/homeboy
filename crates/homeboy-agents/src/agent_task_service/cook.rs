@@ -7503,12 +7503,21 @@ fn run_cook_spine(
         }
         // Only the adopted attempt itself carries adoption authority past a
         // terminal state; a failed form-only continuation of it does not.
-        if !matches!(
-            record.state(),
-            agent_task_lifecycle::AgentTaskRunState::Succeeded
-                | agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
-        ) && (adopted_continuation.is_none() || record.candidate_adoption.is_none())
-            && !review_form_continuation
+        let provider_setup_failure = record.metadata["provider_executions_consumed"]
+            .as_u64()
+            .unwrap_or(0)
+            == 0
+            && aggregate.outcomes.iter().any(|outcome| {
+                outcome.failure_classification
+                    == Some(crate::agent_task::AgentTaskFailureClassification::ExecutionFailed)
+            });
+        if provider_setup_failure
+            || (!matches!(
+                record.state(),
+                agent_task_lifecycle::AgentTaskRunState::Succeeded
+                    | agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
+            ) && (adopted_continuation.is_none() || record.candidate_adoption.is_none())
+                && !review_form_continuation)
         {
             attempts.push(AgentTaskCookAttemptReport {
                 attempt,
@@ -7588,6 +7597,17 @@ fn run_cook_spine(
                         report.value.terminal_failure_classification = Some(classification);
                     }
                 }
+            }
+            if provider_setup_failure {
+                report.value.terminal_phase = Some("pre_provider".to_string());
+                report.value.terminal_failure_classification = Some("execution_failed".to_string());
+                report.value.stop_reason = Some(format!(
+                    "provider setup failed: {}",
+                    aggregate.outcomes.iter().find(|outcome| {
+                        outcome.failure_classification
+                            == Some(crate::agent_task::AgentTaskFailureClassification::ExecutionFailed)
+                    }).and_then(|outcome| outcome.summary.as_deref()).unwrap_or("execution failed")
+                ));
             }
             apply_resource_guard_stop(
                 &mut report,

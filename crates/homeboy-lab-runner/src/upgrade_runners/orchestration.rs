@@ -934,8 +934,21 @@ fn refresh_managed_immutable_runner(
                 .ok()
                 .flatten()
         });
+    let shared_revision_command = RunnerExecOptions::raw_command(vec![
+        "sh".to_string(),
+        "-c".to_string(),
+        "test ! -f \"${HOMEBOY_CONFIG_ROOT:-$HOME/.config/homeboy}/agent-runtimes/pi/.source-revision\" || head -c 128 \"${HOMEBOY_CONFIG_ROOT:-$HOME/.config/homeboy}/agent-runtimes/pi/.source-revision\"".to_string(),
+    ]).with_env(runner.env.clone());
+    let shared_revision_before = exec(&runner.id, shared_revision_command.clone())
+        .ok()
+        .filter(|(_, code)| *code == 0)
+        .map(|(output, _)| output.stdout.trim().to_string());
     let (extensions_synced, extensions_skipped, extensions_failed) =
         sync_runner_extensions(runner, &homeboy_path, extension_updates, exec);
+    let shared_revision_after = exec(&runner.id, shared_revision_command)
+        .ok()
+        .filter(|(_, code)| *code == 0)
+        .map(|(output, _)| output.stdout.trim().to_string());
     let admission_ready = managed_immutable_admission_ready(&reconciled);
     let stale_daemon = reconciled.stale_daemon.map(runner_daemon_drift_entry);
     let success = new_version.is_some()
@@ -965,7 +978,9 @@ fn refresh_managed_immutable_runner(
         service_binaries: Vec::new(),
         exit_code: i32::from(!success),
         detail: format!(
-            "managed immutable runner refreshed through controller-owned promotion, daemon rotation, and reconciliation; admission ready: {admission_ready}"
+            "managed immutable runner refreshed through controller-owned promotion, daemon rotation, and reconciliation; admission ready: {admission_ready}; shared-asset revision before: {}; after: {}",
+            shared_revision_before.as_deref().filter(|value| !value.is_empty()).unwrap_or("unknown"),
+            shared_revision_after.as_deref().filter(|value| !value.is_empty()).unwrap_or("unknown")
         ),
     }
 }

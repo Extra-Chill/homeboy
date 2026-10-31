@@ -168,12 +168,7 @@ fn replace_from_path(
     }
 
     local_files::ensure_app_dirs()?;
-    install_linked_shared_assets(
-        &source,
-        &extension_dir,
-        source_root.as_deref(),
-        requested_revision,
-    )?;
+    install_linked_shared_assets(&source, &extension_dir, source_root.as_deref())?;
 
     let old_path = installed_source_path(&extension_dir);
     let source_revision = git::short_head_revision(&source).or_else(|| {
@@ -981,7 +976,7 @@ mod tests {
     }
 
     #[test]
-    fn relink_nested_runtime_package_publishes_active_generation() {
+    fn relink_nested_runtime_package_preserves_active_generation() {
         with_isolated_home(|home| {
             let home = home.path();
             let old_source = home.join("old-source");
@@ -1007,9 +1002,9 @@ mod tests {
                 &new_source.join("agent-runtimes/pi").to_string_lossy(),
                 ExtensionLifecycleValidation::declaration_only(),
             )
-            .expect("relink should publish declared runtime assets");
+            .expect("relink should preserve runtime assets");
 
-            assert!(home
+            assert!(!home
                 .join(".config/homeboy/agent-runtimes/sample-runtime/scripts/agent/sample-runtime-agent-task-executor.cjs")
                 .exists());
             assert_eq!(
@@ -1050,7 +1045,7 @@ mod tests {
                 &new_source.join("agent-runtimes/pi").to_string_lossy(),
                 ExtensionLifecycleValidation::declaration_only(),
             )
-            .expect_err("malformed root manifest should reject relink");
+            .expect("extension relink does not publish runtime assets");
 
             assert_eq!(
                 fs::read_link(home.join(".config/homeboy/runtime-generations/current"))
@@ -1059,8 +1054,8 @@ mod tests {
             );
             assert_eq!(
                 fs::read_link(home.join(".config/homeboy/extensions/pi"))
-                    .expect("preserved extension link"),
-                old_source.join("pi")
+                    .expect("replacement extension link"),
+                new_source.join("agent-runtimes/pi")
             );
         });
     }

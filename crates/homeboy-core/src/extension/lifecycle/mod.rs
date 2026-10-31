@@ -1088,7 +1088,7 @@ exec '{}' "$@"
     }
 
     #[test]
-    fn refresh_nested_runtime_package_preserves_root_assets_and_publishes_generation() {
+    fn refresh_nested_runtime_package_preserves_active_generation() {
         with_isolated_home(|home| {
             let home = home.path();
             let old_source = home.join("old-source");
@@ -1100,8 +1100,6 @@ exec '{}' "$@"
             if !run_git(&source, &["init", "--quiet"]) || !commit_all(&source, "runtime source") {
                 return;
             }
-            let source_revision =
-                git_output(&source, &["rev-parse", "--short", "HEAD"]).expect("source revision");
             fs::create_dir_all(&boundary_source).expect("boundary source");
             write_shared_asset_manifest(&boundary_source, &[]);
 
@@ -1129,20 +1127,9 @@ exec '{}' "$@"
             assert!(home
                 .join(".config/homeboy/extension-sources/pi/homeboy-extension-root.json")
                 .is_file());
-            assert!(home
+            assert!(!home
                 .join(".config/homeboy/agent-runtimes/pi/pi.json")
-                .is_file());
-            assert!(
-                fs::read_to_string(home.join(".config/homeboy/agent-runtimes/pi/pi.json"))
-                    .expect("stable runtime manifest")
-                    .contains("2.0.0")
-            );
-            assert_eq!(
-                fs::read_to_string(home.join(".config/homeboy/agent-runtimes/pi/.source-revision"))
-                    .expect("stable runtime revision")
-                    .trim(),
-                source_revision
-            );
+                .exists());
             assert_eq!(
                 fs::read_link(home.join(".config/homeboy/extensions/pi"))
                     .expect("durable extension link"),
@@ -1182,7 +1169,7 @@ exec '{}' "$@"
                 None,
                 ExtensionLifecycleValidation::declaration_only(),
             )
-            .expect_err("malformed root manifest should reject refresh");
+            .expect("extension refresh does not publish runtime assets");
 
             assert_eq!(
                 fs::read_link(home.join(".config/homeboy/runtime-generations/current"))
@@ -1191,8 +1178,8 @@ exec '{}' "$@"
             );
             assert_eq!(
                 fs::read_link(home.join(".config/homeboy/extensions/pi"))
-                    .expect("preserved extension link"),
-                old_source.join("pi")
+                    .expect("refreshed extension link"),
+                home.join(".config/homeboy/extension-sources/pi/agent-runtimes/pi")
             );
         });
     }
@@ -1538,6 +1525,12 @@ exec '{}' "$@"
             write_extension_fixture(&first, "rust");
             write_declared_runtime_shared_assets(&first);
             crate::runtime_package::refresh_shared_assets(&first).unwrap();
+            fs::create_dir_all(config.join("agent-runtimes/pi")).unwrap();
+            fs::write(
+                config.join("agent-runtimes/pi/.source-revision"),
+                "9556700c",
+            )
+            .unwrap();
             let generation_link = config.join("runtime-generations/current");
             let old_link = fs::read_link(&generation_link).unwrap();
             let old_generation = config.join("runtime-generations").join(&old_link);
@@ -1551,6 +1544,12 @@ exec '{}' "$@"
             let second = home.path().join("next-generation-source");
             write_extension_fixture(&second, "rust");
             write_shared_runtime_fixture(&second);
+            fs::create_dir_all(second.join("agent-runtimes/pi")).unwrap();
+            fs::write(
+                second.join("agent-runtimes/pi/.source-revision"),
+                "4244f088",
+            )
+            .unwrap();
             write_shared_asset_manifest(
                 &second,
                 &[
@@ -1568,10 +1567,14 @@ exec '{}' "$@"
             let extension = config.join("extensions/rust");
             fs::create_dir_all(extension.parent().unwrap()).unwrap();
             super::resolve_cloned_extension(&second, "rust", &extension, "fixture-source").unwrap();
-            assert_ne!(
+            assert_eq!(
                 fs::read_link(&generation_link).unwrap(),
                 old_link,
-                "publish a successor, not write through the active generation"
+                "extension installs must not republish shared runtimes"
+            );
+            assert_eq!(
+                fs::read_to_string(config.join("agent-runtimes/pi/.source-revision")).unwrap(),
+                "9556700c"
             );
             let new_generation = generation_link.canonicalize().unwrap();
             for (path, content) in relative.iter().zip(&old_contents) {
@@ -1580,10 +1583,7 @@ exec '{}' "$@"
                     content,
                     "previous immutable generation must remain untouched"
                 );
-                assert_eq!(
-                    fs::read_to_string(new_generation.join(path)).unwrap(),
-                    "second generation\n"
-                );
+                assert_eq!(&fs::read(new_generation.join(path)).unwrap(), content);
             }
             assert_eq!(
                 fs::read_link(config.join("agent-runtimes")).unwrap(),
