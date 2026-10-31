@@ -301,17 +301,10 @@ pub(crate) fn read_session(runner_id: &str) -> Result<Option<RunnerSession>> {
 /// tunnel without allowing historical session directories to turn status into
 /// an unbounded liveness scan. Return its observed state with the selected
 /// session so consumers do not spend the remaining deadline probing it again.
-pub(super) fn read_session_for_status(
-    runner_id: &str,
-) -> Result<(Option<RunnerSession>, RunnerSessionState)> {
-    read_session_for_status_until(
-        runner_id,
-        Instant::now() + crate::readonly_probe::readonly_probe_timeout(),
-    )
-}
-
-/// Resolve the current or a peer session without allowing one runner's status
-/// observation to outlive the caller's absolute operation deadline.
+///
+/// `Connected` is exactly [`super::transport_is_live`]: the recorded tunnel
+/// reaches a daemon whose `/health` proves the session's lease and PID. The
+/// observation never opens a tunnel and never outlives the caller's deadline.
 pub(super) fn read_session_for_status_until(
     runner_id: &str,
     deadline: Instant,
@@ -1179,6 +1172,41 @@ mod tests {
             assert_eq!(report.state, RunnerSessionState::Connected);
             assert_eq!(report.session, Some(session));
             server.join().expect("server");
+        });
+    }
+
+    /// A session file and a running tunnel PID are not liveness: with no
+    /// `/health` answer behind the recorded tunnel, status reports the runner
+    /// disconnected and leaves the recorded session exactly as it found it.
+    #[test]
+    fn a_stale_session_file_without_live_health_reports_disconnected() {
+        crate::test_support::with_isolated_home(|_| {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+            let port = listener.local_addr().expect("address").port();
+            drop(listener);
+            let mut session = session_for_health_endpoint(port, "lease-recorded", 42);
+            session.controller_id = Some(controller_id());
+            // This process is alive, so only `/health` can refute the session.
+            session.tunnel_pid = Some(std::process::id());
+            write_session(&session).expect("write session");
+            assert!(read_session(&session.runner_id)
+                .expect("read session")
+                .is_some());
+
+            let report = persisted_status_until(
+                &session.runner_id,
+                Instant::now() + Duration::from_millis(500),
+            )
+            .expect("persisted status");
+
+            assert!(!report.connected);
+            assert_eq!(report.state, RunnerSessionState::Disconnected);
+            assert!(!transport_is_live(&session, Duration::from_millis(200)));
+            assert_eq!(
+                read_session(&session.runner_id).expect("reread session"),
+                Some(session),
+                "status never reconnects or rewrites the recorded session"
+            );
         });
     }
 

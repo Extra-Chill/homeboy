@@ -2214,25 +2214,13 @@ fn terminate_tunnel_with_identity<Inspect, Terminate>(
 }
 
 /// Resolve a direct-SSH session for work admission. A readiness observation can
-/// become stale when its controller-owned tunnel exits before submission; the
-/// reconnect transaction proves the remote daemon lease before replacing the
-/// local tunnel record.
+/// become stale when its controller-owned tunnel exits before submission.
+/// Admission then re-establishes only the transport to the recorded daemon
+/// through [`ensure_transport`], which proves the lease and PID before it
+/// replaces the local tunnel record and never restarts the daemon; see
+/// [`reach_runner`].
 pub(crate) fn status_for_admission(runner_id: &str) -> Result<RunnerStatusReport> {
-    status_for_admission_with(runner_id, status, |runner_id| {
-        let (report, exit_code) = connect(runner_id)?;
-        if report.connected && exit_code == 0 {
-            return Ok(());
-        }
-
-        Err(Error::validation_invalid_argument(
-            "runner",
-            report
-                .failure_message
-                .unwrap_or_else(|| "runner reconnect did not become ready".to_string()),
-            Some(runner_id.to_string()),
-            None,
-        ))
-    })
+    status_for_admission_with(runner_id, status, reach_runner)
 }
 
 /// Resolve the immutable identity of the executable that will start runner-side
@@ -3372,7 +3360,10 @@ pub fn statuses_indexed() -> Result<Vec<RunnerActiveJobsSnapshot>> {
     for runner in super::list()? {
         // Indexed inspection is read-only: reconnecting here can start SSH work
         // and makes controller discovery depend on the unhealthy runner.
-        let (session, state) = read_session_for_status(&runner.id)?;
+        let (session, state) = read_session_for_status_until(
+            &runner.id,
+            Instant::now() + crate::readonly_probe::readonly_probe_timeout(),
+        )?;
         let connected = state == RunnerSessionState::Connected;
         let (active_jobs, active_job_state, active_job_error) = if connected {
             match session.as_ref() {
@@ -3436,6 +3427,47 @@ mod status_read_purity_tests {
             );
         }
     }
+
+    /// Status, persisted status and the doctor projection only observe the
+    /// recorded session through the shared liveness predicate. None of them
+    /// may open a tunnel or reconnect.
+    #[test]
+    fn status_never_opens_a_tunnel() {
+        let source = include_str!("connection.rs");
+        let section = |from: &str, to: &str| {
+            let start = source.find(from).expect("section start exists");
+            let end = start + source[start..].find(to).expect("section end exists");
+            &source[start..end]
+        };
+        for (name, observation) in [
+            (
+                "status",
+                section("pub fn status(", "pub fn reconcile_status("),
+            ),
+            (
+                "persisted_status",
+                section(
+                    "pub fn persisted_status(",
+                    "fn capture_tunnel_process_start_identity(",
+                ),
+            ),
+        ] {
+            for transport in [
+                "ensure_transport",
+                "reach_runner",
+                "open_transport",
+                "connect_remote_daemon",
+                " connect(",
+                "(connect(",
+                "restart_daemon_in_place",
+            ] {
+                assert!(
+                    !observation.contains(transport),
+                    "{name} must not open a tunnel through `{transport}`"
+                );
+            }
+        }
+    }
 }
 
 pub(crate) mod remote_daemon;
@@ -3459,7 +3491,12 @@ pub(crate) use service::{
 use session_store::*;
 pub(crate) use session_store::{controller_id, read_session};
 pub use session_store::{peer_session_maintenance, PeerSessionMaintenanceReport};
-pub use transport::{close_transport, ensure_transport, TransportFailure, TransportLifetime};
+pub(crate) use transport::reach_runner;
+#[cfg(test)]
+pub(crate) use transport::reach_runner_with;
+pub use transport::{
+    close_transport, ensure_transport, transport_is_live, TransportFailure, TransportLifetime,
+};
 
 #[cfg(test)]
 mod tests;

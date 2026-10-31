@@ -94,12 +94,16 @@ pub(crate) fn run_with_options(
                             )?;
                             report.repairs = action_repairs;
                         }
-                        Err(message) => {
+                        Err(failure) => {
                             report.repairs.push(types::RunnerRepair {
+                                transport_failure: failure
+                                    .transport_failure
+                                    .map(runner::TransportFailure::as_str),
                                 id: "repair.convergence".to_string(),
                                 status: RunnerDoctorStatus::Error,
                                 message: format!(
-                                    "Could not apply typed repair {action_label}: {message}"
+                                    "Could not apply typed repair {action_label}: {}",
+                                    failure.message
                                 ),
                                 commands: Vec::new(),
                             });
@@ -110,6 +114,7 @@ pub(crate) fn run_with_options(
                 repair_policy::RepairStep::Converged => break,
                 repair_policy::RepairStep::Exhausted { attempts } => {
                     report.repairs.push(types::RunnerRepair {
+                        transport_failure: None,
                         id: "repair.convergence".to_string(),
                         status: RunnerDoctorStatus::Error,
                         message: format!(
@@ -121,6 +126,7 @@ pub(crate) fn run_with_options(
                 }
                 repair_policy::RepairStep::Ineffective { action } => {
                     report.repairs.push(types::RunnerRepair {
+                        transport_failure: None,
                         id: "repair.convergence".to_string(),
                         status: RunnerDoctorStatus::Error,
                         message: format!(
@@ -195,6 +201,7 @@ fn reprobe_after_repair(
             report.secret_env_migration = (!migration.is_empty()).then_some(migration);
         }
         Err(error) => repairs.push(types::RunnerRepair {
+            transport_failure: None,
             id: "repair.target_identity".to_string(),
             status: RunnerDoctorStatus::Error,
             message: error.message,

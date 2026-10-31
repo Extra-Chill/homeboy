@@ -44,7 +44,8 @@ pub enum TransportFailure {
 }
 
 impl TransportFailure {
-    fn as_str(self) -> &'static str {
+    /// The stable wire name carried as `details.transport_failure`.
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Ssh => "ssh",
             Self::Unreachable => "unreachable",
@@ -94,6 +95,63 @@ impl TransportFailure {
 /// Reach the runner's one current daemon without ever restarting it.
 pub fn ensure_transport(runner_id: &str, lifetime: TransportLifetime) -> Result<RunnerSession> {
     ensure_transport_with(runner_id, lifetime, &LiveTransport)
+}
+
+/// The one liveness predicate: the session's own tunnel is reachable and the
+/// daemon behind it answers `/health` with the session's lease and PID.
+///
+/// Status, readiness, doctor and [`ensure_transport`] all decide "connected"
+/// through this. A present session file or a running tunnel PID alone is never
+/// connected. It only observes: it never opens a tunnel or writes a session.
+pub fn transport_is_live(session: &RunnerSession, timeout: Duration) -> bool {
+    session_is_live_with_timeout(session, timeout)
+}
+
+/// Re-establish a transport for placement or admission.
+///
+/// A runner with a recorded current session only gets its transport back
+/// through [`ensure_transport`]; whatever that reports, typed, is the answer,
+/// and the full [`connect`] is never tried in its place, so an unreachable or
+/// mismatched daemon is never restarted. Only a runner with no daemon session
+/// at all falls back to the full `connect`, which may discover or start the
+/// runner's one daemon.
+pub(crate) fn reach_runner(runner_id: &str) -> Result<()> {
+    reach_runner_with(
+        runner_id,
+        |runner_id| Ok(read_session(runner_id)?.is_some()),
+        |runner_id| ensure_transport(runner_id, TransportLifetime::Persisted).map(|_| ()),
+        connect_until_connected,
+    )
+}
+
+/// [`reach_runner`] with its three effects injected, so the choice between
+/// re-establishing the transport and the no-session `connect` is testable.
+pub(crate) fn reach_runner_with(
+    runner_id: &str,
+    has_recorded_session: impl FnOnce(&str) -> Result<bool>,
+    ensure: impl FnOnce(&str) -> Result<()>,
+    connect: impl FnOnce(&str) -> Result<()>,
+) -> Result<()> {
+    if has_recorded_session(runner_id)? {
+        ensure(runner_id)
+    } else {
+        connect(runner_id)
+    }
+}
+
+fn connect_until_connected(runner_id: &str) -> Result<()> {
+    let (report, exit_code) = connect(runner_id)?;
+    if report.connected && exit_code == 0 {
+        return Ok(());
+    }
+    Err(Error::validation_invalid_argument(
+        "runner",
+        report
+            .failure_message
+            .unwrap_or_else(|| "runner connect did not report a live session".to_string()),
+        Some(runner_id.to_string()),
+        None,
+    ))
 }
 
 /// Close a transport [`ensure_transport`] returned for

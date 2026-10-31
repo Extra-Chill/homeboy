@@ -315,8 +315,9 @@ pub use connection::{
     disconnect_local_recovery, ensure_transport, peer_session_maintenance, persisted_status,
     persisted_status_until, persisted_statuses, reconcile_status,
     reconcile_status_with_remote_attestation, reconcile_terminal_jobs, remote_lifecycle_plan,
-    runner_artifact_content, status, statuses, statuses_indexed, PeerSessionMaintenanceReport,
-    RunnerReconcileWithAttestationOutcome, TransportFailure, TransportLifetime,
+    runner_artifact_content, status, statuses, statuses_indexed, transport_is_live,
+    PeerSessionMaintenanceReport, RunnerReconcileWithAttestationOutcome, TransportFailure,
+    TransportLifetime,
 };
 pub(crate) use connection::{
     configured_runner_homeboy_build_identity, configured_runner_homeboy_handshake_evidence,
