@@ -4,10 +4,19 @@ use crate::{Error, Result};
 use serde::Serialize;
 use std::{collections::BTreeSet, path::Path, process::Command};
 
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ChangeReason {
+    Changed,
+    Dependent,
+    Shared,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ChangedComponent {
     pub component: String,
     pub path: String,
+    pub reason: ChangeReason,
 }
 
 #[derive(Debug, Serialize)]
@@ -52,11 +61,14 @@ fn matches(pattern: &str, path: &str) -> bool {
 /// Discover manifests in the checkout (tracked or unignored), then compare two
 /// commits. Checkout `head` first: component topology/config comes from disk.
 /// Shared patterns are repository-relative globs and override component scopes.
+/// Direct-only selection skips dependency expansion. Reasons take precedence in
+/// this order: shared, changed, dependent.
 pub fn changed(
     repo: &Path,
     base: &str,
     head: &str,
     shared: &[String],
+    direct_only: bool,
 ) -> Result<ChangedComponents> {
     let root = git(repo, &["rev-parse", "--show-toplevel"])?;
     let root = std::path::PathBuf::from(
@@ -118,6 +130,7 @@ pub fn changed(
         components.push((
             ChangedComponent {
                 component: id,
+                reason: ChangeReason::Changed,
                 path: if dir.as_os_str().is_empty() {
                     ".".into()
                 } else {
@@ -145,6 +158,9 @@ pub fn changed(
     for path in changed_paths {
         if shared.iter().any(|p| matches(p, &path)) {
             selected.extend(0..components.len());
+            for (component, _, _) in &mut components {
+                component.reason = ChangeReason::Shared;
+            }
             break;
         }
         // Ownership is established BEFORE exclusions. An excluded nested path
@@ -166,6 +182,9 @@ pub fn changed(
         }
     }
     loop {
+        if direct_only {
+            break;
+        }
         let mut added = Vec::new();
         for (index, (component, _, deps)) in components.iter().enumerate() {
             if selected.contains(&index) {
@@ -188,6 +207,9 @@ pub fn changed(
         }
         if added.is_empty() {
             break;
+        }
+        for &index in &added {
+            components[index].0.reason = ChangeReason::Dependent;
         }
         selected.extend(added);
     }
@@ -237,19 +259,23 @@ mod tests {
         fs::write(root.join("a/file"), "child").unwrap();
         let head = commit(root);
         assert_eq!(
-            changed(root, &base, &head, &[]).unwrap().include,
+            changed(root, &base, &head, &[], false).unwrap().include,
             vec![ChangedComponent {
                 component: "child".into(),
-                path: "a".into()
+                path: "a".into(),
+                reason: ChangeReason::Changed,
             }]
         );
         fs::remove_file(root.join("homeboy.json")).unwrap();
         let base = commit(root);
         fs::write(root.join("unclaimed"), "no owner").unwrap();
         let head = commit(root);
-        assert!(changed(root, &base, &head, &[]).unwrap().include.is_empty());
+        assert!(changed(root, &base, &head, &[], false)
+            .unwrap()
+            .include
+            .is_empty());
         assert_eq!(
-            changed(root, &base, &head, &["unclaimed".into()])
+            changed(root, &base, &head, &["unclaimed".into()], false)
                 .unwrap()
                 .include
                 .len(),
@@ -295,7 +321,7 @@ mod tests {
             fs::create_dir_all(root.join(file).parent().unwrap()).unwrap();
             fs::write(root.join(file), "change").unwrap();
             let head = commit(root);
-            let output = changed(root, &base, &head, &[]).unwrap();
+            let output = changed(root, &base, &head, &[], false).unwrap();
             assert_eq!(
                 output
                     .include
@@ -305,20 +331,36 @@ mod tests {
                 expected,
                 "{file}"
             );
+            if file == "plugins/a/code.php" {
+                // Default selection includes transitive same-repo dependents,
+                // while deploy selection only includes the direct owner.
+                assert_eq!(
+                    serde_json::to_value(&output.include).unwrap(),
+                    serde_json::json!([
+                        {"component":"a","path":"plugins/a","reason":"changed"},
+                        {"component":"theme","path":"themes/theme","reason":"dependent"},
+                        {"component":"ui","path":"packages/ui","reason":"dependent"}
+                    ])
+                );
+                let direct = changed(root, &base, &head, &[], true).unwrap();
+                assert_eq!(direct.include, output.include[..1]);
+            }
             base = head;
         }
         fs::create_dir_all(root.join(".github/workflows")).unwrap();
         fs::write(root.join(".github/workflows/deploy.yml"), "shared").unwrap();
         let head = commit(root);
-        let output = changed(root, &base, &head, &[".github/**".into()]).unwrap();
+        let output = changed(root, &base, &head, &[".github/**".into()], false).unwrap();
+        let direct = changed(root, &base, &head, &[".github/**".into()], true).unwrap();
+        assert_eq!(direct.include, output.include);
         assert_eq!(
             serde_json::to_value(output).unwrap(),
             serde_json::json!({"include":[
-                {"component":"a","path":"plugins/a"},
-                {"component":"nested","path":"plugins/a/nested"},
-                {"component":"network","path":"."},
-                {"component":"theme","path":"themes/theme"},
-                {"component":"ui","path":"packages/ui"}
+                {"component":"a","path":"plugins/a","reason":"shared"},
+                {"component":"nested","path":"plugins/a/nested","reason":"shared"},
+                {"component":"network","path":".","reason":"shared"},
+                {"component":"theme","path":"themes/theme","reason":"shared"},
+                {"component":"ui","path":"packages/ui","reason":"shared"}
             ]})
         );
         // Renames must select both the old and new owner; deletions retain
@@ -329,7 +371,7 @@ mod tests {
         )
         .unwrap();
         let renamed = commit(root);
-        let output = changed(root, &head, &renamed, &[]).unwrap();
+        let output = changed(root, &head, &renamed, &[], false).unwrap();
         assert_eq!(
             output
                 .include
@@ -341,10 +383,16 @@ mod tests {
         fs::remove_file(root.join("network-moved.php")).unwrap();
         let deleted = commit(root);
         assert_eq!(
-            changed(root, &renamed, &deleted, &[]).unwrap().include[0].component,
+            changed(root, &renamed, &deleted, &[], false)
+                .unwrap()
+                .include[0]
+                .component,
             "network"
         );
-        assert!(changed(root, "missing-ref", &head, &[]).is_err());
-        assert!(changed(root, &head, &head, &[]).unwrap().include.is_empty());
+        assert!(changed(root, "missing-ref", &head, &[], false).is_err());
+        assert!(changed(root, &head, &head, &[], false)
+            .unwrap()
+            .include
+            .is_empty());
     }
 }
