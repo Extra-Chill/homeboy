@@ -421,7 +421,7 @@ fn execute_owned(
     let terminal = crate::execution::observe_daemon_job_until_terminal(
         &request.runner_id,
         job_id,
-        daemon_generation.as_deref(),
+        status.session.as_ref(),
         std::time::Duration::from_secs(request.timeout_seconds.saturating_add(120)),
         &cancelled,
     );
