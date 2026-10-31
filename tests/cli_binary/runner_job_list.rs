@@ -30,15 +30,11 @@ fn runner_job_list_real_binary_renders_filters_json_and_output_file() {
     let default = run_cli(&context, &[]);
     assert_command_success(&default, "default job list");
     let default_table = stdout_text(&default);
-    assert!(
-        default_table.contains("Live: 2  Retained: 1\n"),
-        "{default_table}"
-    );
+    assert!(default_table.contains("Live: 2\n"), "{default_table}");
     eprintln!("successful compact job-list CLI output:\n{default_table}");
     assert!(default_table.contains("job-running"), "{default_table}");
     assert!(default_table.contains("job-queued"), "{default_table}");
     assert!(!default_table.contains("job-terminal"), "{default_table}");
-    assert!(!default_table.contains("job-retained"), "{default_table}");
 
     let active = run_cli(&context, &["--active"]);
     assert_command_success(&active, "active job list");
@@ -52,24 +48,15 @@ fn runner_job_list_real_binary_renders_filters_json_and_output_file() {
     assert_command_success(&terminal, "terminal job list");
     assert_contains_only_ids(&stdout_text(&terminal), &["job-terminal"]);
 
-    let retained = run_cli(&context, &["--retained"]);
-    assert_command_success(&retained, "retained job list");
-    let retained_table = stdout_text(&retained);
-    for id in ["job-running", "job-queued", "job-terminal", "job-retained"] {
-        assert!(
-            retained_table.contains(id),
-            "{id} absent from {retained_table}"
-        );
-    }
-    assert!(retained_table.contains("Live: 2  Retained: 1\n"));
+    let all = run_cli(&context, &["--all"]);
+    assert_command_success(&all, "all job list");
+    let all_table = stdout_text(&all);
+    assert_contains_only_ids(&all_table, &["job-running", "job-queued", "job-terminal"]);
+    assert!(all_table.contains("Live: 2\n"), "{all_table}");
 
-    let generation = run_cli(&context, &["--retained", "--generation", "lease-retained"]);
-    assert_command_success(&generation, "generation-filtered retained job list");
-    assert_contains_only_ids(&stdout_text(&generation), &["job-retained"]);
-
-    let correlation = run_cli(&context, &["--retained", "--correlation", "retained"]);
-    assert_command_success(&correlation, "correlation-filtered retained job list");
-    assert_contains_only_ids(&stdout_text(&correlation), &["job-retained"]);
+    let correlation = run_cli(&context, &["--all", "--correlation", "run-job-terminal"]);
+    assert_command_success(&correlation, "correlation-filtered job list");
+    assert_contains_only_ids(&stdout_text(&correlation), &["job-terminal"]);
 
     let json_output = run_cli(&context, &["--json"]);
     assert_command_success(&json_output, "JSON job list");
@@ -77,10 +64,9 @@ fn runner_job_list_real_binary_renders_filters_json_and_output_file() {
     assert_eq!(json_envelope["success"], true);
     assert_eq!(json_envelope["data"]["command"], "runner.job.list");
     assert_eq!(json_envelope["data"]["live_daemon_job_count"], 2);
-    assert_eq!(
-        json_envelope["data"]["retained_durable_projection_count"],
-        1
-    );
+    assert!(json_envelope["data"]
+        .get("retained_durable_projection_count")
+        .is_none());
     assert_eq!(
         json_envelope["data"]["jobs"]
             .as_array()
@@ -98,14 +84,13 @@ fn runner_job_list_real_binary_renders_filters_json_and_output_file() {
         .output()
         .expect("run job list with output file");
     assert_command_success(&output_file_command, "job list output-file invocation");
-    assert!(String::from_utf8_lossy(&output_file_command.stdout).contains("Live: 2  Retained: 1"));
+    assert!(String::from_utf8_lossy(&output_file_command.stdout).contains("Live: 2"));
     let output_file: Value = serde_json::from_slice(
         &std::fs::read(&output_path).expect("structured output file is written"),
     )
     .expect("output file JSON envelope");
     assert_eq!(output_file["success"], true);
     assert_eq!(output_file["data"]["live_daemon_job_count"], 2);
-    assert_eq!(output_file["data"]["retained_durable_projection_count"], 1);
 }
 
 fn run_cli(context: &HermeticTestContext, extra_args: &[&str]) -> std::process::Output {
@@ -133,7 +118,7 @@ fn stdout_text(output: &std::process::Output) -> String {
 }
 
 fn assert_contains_only_ids(table: &str, expected_ids: &[&str]) {
-    for id in ["job-running", "job-queued", "job-terminal", "job-retained"] {
+    for id in ["job-running", "job-queued", "job-terminal"] {
         assert_eq!(table.contains(id), expected_ids.contains(&id), "{table}");
     }
 }
@@ -310,37 +295,13 @@ fn write_runner_state(
             "start_microseconds":start_microseconds
         }),
     };
-    let current_session = session(url, port, tunnel_pid, identity.clone(), "lease-live");
+    let current_session = session(url, port, tunnel_pid, identity, "lease-live");
     let session_path = context
         .config_dir()
         .join(format!("runner-sessions/{RUNNER_ID}/{CONTROLLER_ID}.json"));
     std::fs::create_dir_all(session_path.parent().expect("session parent"))
         .expect("create session directory");
     std::fs::write(&session_path, current_session.to_string()).expect("write runner session");
-
-    let retained_session = session(url, port, tunnel_pid, identity, "lease-retained");
-    let generations = json!({
-        "runner_id": RUNNER_ID,
-        "admission_owner": "lease-live",
-        "generations": {
-            "lease-live": {
-                "endpoint": current_session,
-                "observed_active_jobs": 2,
-                "drain_state": "admitting"
-            },
-            "lease-retained": {
-                "endpoint": retained_session,
-                "observed_active_jobs": 0,
-                "drain_state": "draining"
-            }
-        },
-        "job_owners": { "job-retained": "lease-retained" }
-    });
-    std::fs::write(
-        session_path.with_file_name("generations.json"),
-        generations.to_string(),
-    )
-    .expect("write retained generation ownership fixture");
 }
 
 fn session(url: &str, port: u16, tunnel_pid: u32, identity: Value, lease_id: &str) -> Value {
