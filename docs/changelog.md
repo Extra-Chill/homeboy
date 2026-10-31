@@ -4,6 +4,16 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.438.2] - 2026-10-31
+
+### Changed
+- update fixtures for deleted CLI aliases and validated public artifact URLs
+- Verify refreshed gate daemons against the admitting build identity, not the lease id
+
+### Fixed
+- package from the release commit so provenance names the tagged commit
+- a leaseless state dir does not own another daemon's leased jobs
+
 ## [0.438.1] - 2026-10-31
 
 ### Changed
