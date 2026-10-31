@@ -458,7 +458,7 @@ fn runtime_set_compatibility(requested: &str, daemon: Option<&str>) -> RuntimeSe
     if canonical_homeboy_identity(requested) == canonical_homeboy_identity(daemon) {
         return RuntimeSetCompatibility::Exact;
     }
-    RuntimeSetCompatibility::WireOrLifecycleIncompatible
+    RuntimeSetCompatibility::ContractCompatible
 }
 
 fn runtime_set_admission(
@@ -486,10 +486,7 @@ fn runtime_set_admission(
     }
     let compatibility = runtime_set_compatibility(requested, daemon);
     let command_matches = configured.is_some_and(|identity| {
-        matches!(
-            runtime_set_compatibility(requested, Some(identity)),
-            RuntimeSetCompatibility::Exact
-        )
+        canonical_homeboy_identity(requested) == canonical_homeboy_identity(identity)
     });
     if command_matches
         && !matches!(

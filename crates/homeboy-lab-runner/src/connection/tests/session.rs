@@ -944,7 +944,7 @@ fn observed_matching_daemon_identity_reconciles_stale_session_metadata() {
 }
 
 #[test]
-fn equal_versions_with_different_build_identities_are_stale_and_name_both_builds() {
+fn different_build_identities_are_evidence_not_runtime_incompatibility() {
     let warning = RunnerStaleDaemonWarning::new(
         "homeboy-lab",
         "0.296.3".to_string(),
@@ -953,7 +953,7 @@ fn equal_versions_with_different_build_identities_are_stale_and_name_both_builds
         Some("homeboy 0.296.3+job-build".to_string()),
     );
 
-    assert!(!daemon_runtime_is_current(
+    assert!(daemon_runtime_is_current(
         "0.296.3",
         "0.296.3",
         "0.296.3",
@@ -1050,7 +1050,7 @@ fn runtime_path_diagnostics_redact_sensitive_values_without_hiding_path_drift() 
 }
 
 #[test]
-fn differing_versions_are_stale_and_name_both_versions() {
+fn differing_versions_do_not_make_runtime_paths_stale() {
     let warning = RunnerStaleDaemonWarning::new(
         "homeboy-lab",
         "0.296.2".to_string(),
@@ -1059,7 +1059,7 @@ fn differing_versions_are_stale_and_name_both_versions() {
         Some("homeboy 0.296.3+new".to_string()),
     );
 
-    assert!(!daemon_runtime_is_current(
+    assert!(daemon_runtime_is_current(
         "0.296.2",
         "0.296.2",
         "0.296.3",
@@ -2139,7 +2139,7 @@ fn sessionless_active_daemon_requires_explicit_adoption_even_with_matching_ident
 }
 
 #[test]
-fn sessionless_active_daemon_prescribes_matching_pinned_controller_on_identity_mismatch() {
+fn sessionless_active_daemon_requires_lease_ownership_not_a_pinned_controller() {
     let mut status = remote_daemon_status_for_test(true, true, 2, "lease-live", 1183765);
     let daemon = status.daemon.as_mut().expect("daemon");
     daemon.version = Some("0.284.0".to_string());
@@ -2154,8 +2154,7 @@ fn sessionless_active_daemon_prescribes_matching_pinned_controller_on_identity_m
     )
     .expect_err("mismatched controller must not replace an active daemon");
 
-    assert!(error.contains("Run a controller pinned to `homeboy 0.284.0+live`"));
-    assert!(error.contains("refusing replacement"));
+    assert!(error.contains("--adopt-live-lease lease-live"));
 }
 
 #[test]

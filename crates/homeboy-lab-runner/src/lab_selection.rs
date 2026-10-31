@@ -2064,7 +2064,7 @@ mod placement_readiness_tests {
     }
 
     #[test]
-    fn stale_is_blocked_with_bounded_recovery() {
+    fn build_drift_does_not_require_recovery() {
         let mut observed = status();
         observed.stale_daemon = Some(RunnerStaleDaemonWarning::new(
             "lab",
@@ -2079,12 +2079,12 @@ mod placement_readiness_tests {
             Some(1),
             super::super::LabRunnerGateDecision::Eligible,
         );
-        assert_eq!(result.state, PlacementReadinessState::Blocked);
-        assert!(!result.recovery_actions.is_empty());
+        assert_eq!(result.state, PlacementReadinessState::Ready);
+        assert!(result.recovery_actions.is_empty());
     }
 
     #[test]
-    fn placement_readiness_rejects_runner_with_compared_mismatch() {
+    fn placement_readiness_accepts_runner_with_build_mismatch() {
         let mut observed = status();
         observed.stale_daemon = Some(RunnerStaleDaemonWarning::new(
             "lab",
@@ -2101,7 +2101,7 @@ mod placement_readiness_tests {
             super::super::LabRunnerGateDecision::Eligible,
         );
 
-        assert_eq!(result.state, PlacementReadinessState::Blocked);
+        assert_eq!(result.state, PlacementReadinessState::Ready);
     }
 
     #[test]
@@ -2122,7 +2122,7 @@ mod placement_readiness_tests {
     }
 
     #[test]
-    fn preflight_rejects_runner_with_compared_mismatch() {
+    fn preflight_accepts_runner_with_build_mismatch() {
         let selection = LabRunnerSelection {
             runner_id: "lab".to_string(),
             source: LabRunnerSelectionSource::Explicit,
@@ -2146,8 +2146,8 @@ mod placement_readiness_tests {
         )
         .expect("preflight");
 
-        assert!(!availability.accepts_jobs);
-        assert_eq!(availability.reasons, ["stale_daemon"]);
+        assert!(availability.accepts_jobs);
+        assert!(availability.reasons.is_empty());
     }
 
     #[test]

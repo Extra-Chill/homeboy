@@ -924,29 +924,26 @@ fn direct_runner_admission_compares_daemon_with_configured_runner_identity() {
 }
 
 #[test]
-fn direct_runner_admission_fails_closed_for_mismatched_or_unverifiable_configured_identity() {
+fn direct_runner_admission_does_not_gate_on_configured_build_identity() {
     let mut status = status_with_runner_version("homeboy-lab", "0.295.0");
     let session = status.session.as_mut().expect("runner session");
     session.mode = RunnerTunnelMode::DirectSsh;
     session.homeboy_build_identity = Some("homeboy 0.295.0+b03d659866d1".to_string());
 
     assert!(
-        lab_runner_homeboy_has_blocking_drift_against_configured_identity(
+        !lab_runner_homeboy_has_blocking_drift_against_configured_identity(
             &status,
             Some("homeboy 0.295.0+different"),
             false,
         )
     );
     assert!(
-        lab_runner_homeboy_has_blocking_drift_against_configured_identity(&status, None, false,)
+        !lab_runner_homeboy_has_blocking_drift_against_configured_identity(&status, None, false,)
     );
 }
 
 #[test]
-fn stale_daemon_build_identity_drift_always_blocks_even_on_compatible_version() {
-    // Runner version matches the controller exactly, but the runner's active
-    // daemon was started by a different build than its job command binary: that
-    // internal inconsistency is always blocking, independent of the version policy.
+fn daemon_build_identity_drift_does_not_block_admission() {
     let mut status =
         status_with_runner_version("homeboy-lab", homeboy_product_identity::product_version());
     status.stale_daemon = Some(RunnerStaleDaemonWarning::new(
@@ -958,7 +955,7 @@ fn stale_daemon_build_identity_drift_always_blocks_even_on_compatible_version() 
     ));
 
     assert!(
-        lab_runner_homeboy_has_blocking_drift_against_configured_identity(&status, None, false)
+        !lab_runner_homeboy_has_blocking_drift_against_configured_identity(&status, None, false)
     );
 }
 

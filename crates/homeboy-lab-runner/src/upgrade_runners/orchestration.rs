@@ -26,13 +26,6 @@ pub fn preflight_configured_runners_for_upgrade(
             .homeboy_path
             .clone()
             .unwrap_or_else(|| "homeboy".to_string());
-        if let Some(detail) = runner_live_jobs_preflight(&runner.id, candidate_version) {
-            let mut entry = runner_upgrade_failure_entry(&runner.id, homeboy_path, None, 1, detail);
-            entry.recovery_commands =
-                vec![format!("homeboy upgrade --upgrade-runner {}", runner.id)];
-            failures.push(entry);
-            continue;
-        }
         if let Some(detail) = runner_manifest_preflight(runner, &homeboy_path, candidate_version) {
             failures.push(runner_upgrade_failure_entry(
                 &runner.id,
@@ -45,52 +38,6 @@ pub fn preflight_configured_runners_for_upgrade(
     }
 
     Ok(failures)
-}
-
-/// Refuse a version change while the runner's daemon still runs jobs (#15995).
-///
-/// A controller on the candidate version can no longer admit results from a
-/// daemon on the old one, and the runner cannot rotate that daemon until its
-/// jobs drain. Upgrading anyway strands every in-flight job: its result is
-/// rejected as stale and the runner refuses rotation until it ends. The daemon's
-/// own live job view is the authority; the check fails open when it cannot be
-/// read, because the manifest preflight then reports the unreachable runner.
-fn runner_live_jobs_preflight(runner_id: &str, candidate_version: &str) -> Option<String> {
-    let summary = runner::runner_admission_snapshot(runner_id).ok()?.summary;
-    live_jobs_preflight_detail(
-        runner_id,
-        summary.daemon_build_identity.as_deref(),
-        summary.live_daemon_job_count,
-        candidate_version,
-    )
-}
-
-fn live_jobs_preflight_detail(
-    runner_id: &str,
-    daemon_build_identity: Option<&str>,
-    live_jobs: Option<usize>,
-    candidate_version: &str,
-) -> Option<String> {
-    let live_jobs = live_jobs.filter(|count| *count > 0)?;
-    let daemon_version = daemon_build_identity.and_then(build_identity_version);
-    if daemon_version == Some(candidate_version.trim_start_matches('v')) {
-        return None;
-    }
-    Some(format!(
-        "runner `{runner_id}` has {live_jobs} live job(s) on daemon `{}`; upgrading to {candidate_version} would strand them. Wait for them to finish (`homeboy runner job list {runner_id}`) or cancel them (`homeboy runner job cancel {runner_id} <job-id>`), then re-run `homeboy upgrade`",
-        daemon_build_identity.unwrap_or("unknown"),
-    ))
-}
-
-/// `homeboy 0.428.0+19c5f4e5` -> `0.428.0`.
-fn build_identity_version(identity: &str) -> Option<&str> {
-    identity
-        .trim()
-        .strip_prefix("homeboy ")?
-        .trim_start_matches('v')
-        .split('+')
-        .next()
-        .filter(|version| !version.is_empty())
 }
 
 /// Query only the runner's manifest summary. This admission does not install,
@@ -288,64 +235,6 @@ fn runner_extension_inventory(
         inventory.readable.push((id.to_string(), requires_homeboy));
     }
     Ok(inventory)
-}
-
-#[cfg(test)]
-mod live_jobs_preflight_tests {
-    use super::*;
-
-    #[test]
-    fn a_version_change_is_refused_while_the_daemon_runs_jobs() {
-        let detail = live_jobs_preflight_detail(
-            "homeboy-lab",
-            Some("homeboy 0.428.0+19c5f4e54f8e"),
-            Some(2),
-            "0.428.2",
-        )
-        .expect("live jobs on an outgoing daemon block the upgrade");
-        assert!(detail.contains("2 live job(s)"), "{detail}");
-        assert!(detail.contains("homeboy 0.428.0+19c5f4e54f8e"), "{detail}");
-        assert!(
-            detail.contains("homeboy runner job list homeboy-lab"),
-            "{detail}"
-        );
-        assert!(
-            detail.contains("homeboy runner job cancel homeboy-lab"),
-            "{detail}"
-        );
-        assert!(
-            !detail.contains("refresh-homeboy"),
-            "the recovery must not be a rotation the live jobs also block: {detail}"
-        );
-    }
-
-    #[test]
-    fn an_unknown_daemon_version_with_live_jobs_is_refused() {
-        assert!(live_jobs_preflight_detail("lab", None, Some(1), "0.428.2").is_some());
-    }
-
-    #[test]
-    fn an_idle_daemon_or_same_version_repair_is_admitted() {
-        let identity = Some("homeboy 0.428.0+19c5f4e5");
-        assert_eq!(
-            live_jobs_preflight_detail("lab", identity, Some(0), "0.428.2"),
-            None
-        );
-        assert_eq!(
-            live_jobs_preflight_detail("lab", identity, None, "0.428.2"),
-            None,
-            "an unobservable job view is reported by the manifest preflight"
-        );
-        assert_eq!(
-            live_jobs_preflight_detail("lab", identity, Some(3), "0.428.0"),
-            None,
-            "the daemon already runs the candidate version"
-        );
-        assert_eq!(
-            live_jobs_preflight_detail("lab", identity, Some(3), "v0.428.0"),
-            None
-        );
-    }
 }
 
 #[cfg(test)]

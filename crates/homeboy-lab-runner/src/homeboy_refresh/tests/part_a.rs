@@ -891,13 +891,24 @@ fn stale_daemon_admission_snapshot(
     pid: Option<u32>,
 ) -> RunnerAdmissionSnapshot {
     let mut status = refreshed_daemon_status(true, Some("homeboy 0.1.0+stale"));
-    status.stale_daemon = Some(RunnerStaleDaemonWarning::new(
-        "lab",
-        "old".to_string(),
-        "current".to_string(),
-        None,
-        Some("current".to_string()),
-    ));
+    status.stale_daemon = Some(
+        RunnerStaleDaemonWarning::new(
+            "lab",
+            "old".to_string(),
+            "current".to_string(),
+            None,
+            Some("current".to_string()),
+        )
+        .with_runtime_paths(
+            "lab",
+            Vec::new(),
+            vec![crate::RunnerChangedRuntimePath {
+                env: "HOMEBOY_PLUGIN_PATH".to_string(),
+                loaded_path: Some("/old".to_string()),
+                configured_path: Some("/new".to_string()),
+            }],
+        ),
+    );
     status.daemon_freshness = Some(DaemonFreshnessReport {
         fresh: false,
         stale_reason_code: Some(DaemonStaleReasonCode::VersionMismatch),

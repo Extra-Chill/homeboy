@@ -630,7 +630,7 @@ fn explicit_refresh_keeps_active_or_uncertain_stale_daemons_protected() {
 }
 
 #[test]
-fn runner_exec_rejects_a_live_daemon_with_an_incompatible_build_identity() {
+fn runner_exec_accepts_a_live_daemon_with_a_different_build_identity() {
     let mut status = stale_direct_daemon_status();
     status.daemon_freshness = Some(homeboy_core::daemon::DaemonFreshnessReport {
         fresh: true,
@@ -638,7 +638,7 @@ fn runner_exec_rejects_a_live_daemon_with_an_incompatible_build_identity() {
         ..authoritative_drained_freshness()
     });
 
-    assert!(refuses_nonfresh_daemon_execution(
+    assert!(!refuses_nonfresh_daemon_execution(
         &RunnerExecOptions::raw_command(vec!["cargo".to_string()]),
         &status,
     ));

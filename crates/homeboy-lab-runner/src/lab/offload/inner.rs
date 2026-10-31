@@ -3249,7 +3249,7 @@ mod tests {
     }
 
     #[test]
-    fn direct_readiness_refuses_a_stable_provenance_mismatch_without_retrying() {
+    fn direct_readiness_accepts_a_stable_build_difference_without_retrying() {
         let status = direct_identity_status(Some("homeboy 0.339.0+configured"), "lease-a");
         let mut collections = 0;
 
@@ -3275,7 +3275,7 @@ mod tests {
         assert_eq!(collections, 1);
         assert_eq!(readiness.attempts, 1);
         assert!(
-            require_available_lab_runner("homeboy-lab", &readiness.status, None, "cook").is_err()
+            require_available_lab_runner("homeboy-lab", &readiness.status, None, "cook").is_ok()
         );
     }
 
@@ -3327,7 +3327,7 @@ mod tests {
     }
 
     #[test]
-    fn direct_ssh_admission_rejects_mismatched_status_identity() {
+    fn direct_ssh_admission_accepts_different_build_identity() {
         let mut status = runner_status(true);
         status.session = Some(admission_session(
             RunnerTunnelMode::DirectSsh,
@@ -3353,7 +3353,7 @@ mod tests {
             configured,
         );
 
-        assert!(require_available_lab_runner("homeboy-lab", &status, None, "cook").is_err());
+        assert!(require_available_lab_runner("homeboy-lab", &status, None, "cook").is_ok());
     }
 
     #[test]
@@ -3658,8 +3658,12 @@ mod tests {
             refresh_command:
                 "homeboy runner refresh-homeboy homeboy-lab --ref v0.289.3 --reconnect".to_string(),
             stale_runtime_paths: Vec::new(),
-            changed_runtime_paths: Vec::new(),
-            message: "daemon is stale".to_string(),
+            changed_runtime_paths: vec![crate::RunnerChangedRuntimePath {
+                env: "HOMEBOY_PLUGIN_PATH".to_string(),
+                loaded_path: Some("/old".to_string()),
+                configured_path: Some("/new".to_string()),
+            }],
+            message: "daemon runtime paths changed".to_string(),
             recovery_commands: Vec::new(),
             recovery_actions: Vec::new(),
         });

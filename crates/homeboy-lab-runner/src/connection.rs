@@ -3348,18 +3348,14 @@ fn reconcile_session_metadata(
 }
 
 fn daemon_runtime_is_current(
-    observed_daemon_version: &str,
-    session_version: &str,
-    command_version: &str,
-    identity_comparison: IdentityComparison,
+    _observed_daemon_version: &str,
+    _session_version: &str,
+    _command_version: &str,
+    _identity_comparison: IdentityComparison,
     stale_runtime_paths: &[RunnerStaleRuntimePath],
     changed_runtime_paths: &[RunnerChangedRuntimePath],
 ) -> bool {
-    versions_match(observed_daemon_version, command_version)
-        && versions_match(session_version, command_version)
-        && identity_comparison == IdentityComparison::Match
-        && stale_runtime_paths.is_empty()
-        && changed_runtime_paths.is_empty()
+    stale_runtime_paths.is_empty() && changed_runtime_paths.is_empty()
 }
 
 fn unverifiable_configured_identity_message(homeboy: &str) -> String {

@@ -1016,15 +1016,17 @@ fn lab_runner_admission_candidate(
 
     let controller = crate::controller_identity::compatibility_controller_identity();
     let controller_warning = status.session.as_ref().and_then(|session| {
-        lab::offload::metadata::lab_runner_homeboy_version_drift(status).then(|| {
-            RunnerStaleDaemonWarning::new(
-                runner_id,
-                session.homeboy_version.clone(),
-                controller.version,
-                session.homeboy_build_identity.clone(),
-                Some(controller.display),
-            )
-        })
+        (exact_version && lab::offload::metadata::lab_runner_homeboy_version_drift(status)).then(
+            || {
+                RunnerStaleDaemonWarning::new(
+                    runner_id,
+                    session.homeboy_version.clone(),
+                    controller.version,
+                    session.homeboy_build_identity.clone(),
+                    Some(controller.display),
+                )
+            },
+        )
     });
     let admission_warning = controller_warning
         .as_ref()
@@ -1869,7 +1871,7 @@ mod tests {
         };
         let snapshot = RunnerAdmissionSnapshot::from_status(status);
 
-        assert!(!snapshot.summary.daemon_compatible);
+        assert!(snapshot.summary.daemon_compatible);
         assert!(snapshot.summary.safe_to_rotate);
         assert_eq!(snapshot.summary, snapshot.status.admission_summary());
     }
@@ -2106,7 +2108,7 @@ mod tests {
     }
 
     #[test]
-    fn placement_rejects_recorded_daemon_identity_drift() {
+    fn placement_accepts_recorded_daemon_identity_drift() {
         let mut status =
             skewed_runner_status(homeboy_product_identity::product_version().to_string());
         status.session.as_mut().unwrap().homeboy_build_identity =
@@ -2115,18 +2117,9 @@ mod tests {
             lab_runner_admission_candidate("homeboy-lab", Some(1), &status, true, false);
         let readiness = lab_runner_readiness_from_candidates(None, vec![candidate]);
 
-        assert_eq!(readiness.state, LabRunnerReadinessState::Stale);
-        assert!(readiness.selected_runner_id.is_none());
-        assert!(readiness.available_runner_ids.is_empty());
-        assert!(readiness.reasons.iter().any(|reason| {
-            reason.contains(
-                "active_daemon_control_plane_build_identity != job_command_binary_build_identity",
-            ) && reason.contains("homeboy 0.435.6+de88dcd")
-                && reason.contains(
-                    &crate::controller_identity::compatibility_controller_identity().display,
-                )
-        }));
-        assert!(!readiness.remediation_commands.is_empty());
+        assert_eq!(readiness.state, LabRunnerReadinessState::ConnectedReady);
+        assert_eq!(readiness.selected_runner_id.as_deref(), Some("homeboy-lab"));
+        assert!(readiness.remediation_commands.is_empty());
     }
 
     #[test]
