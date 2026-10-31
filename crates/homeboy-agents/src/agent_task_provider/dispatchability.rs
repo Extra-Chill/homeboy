@@ -1371,6 +1371,7 @@ pub fn provider_readiness_is_runner_owned() -> bool {
 
 /// Admit a compiled plan for the execution placement this process selected.
 ///
+/// Required-but-unavailable Lab placement fails before provider admission.
 /// Local placement keeps full live admission and route selection. Lab placement
 /// defers live readiness to the runner and applies only the deterministic,
 /// probe-free contract checks here, returning the plan unchanged so the runner
@@ -1380,11 +1381,49 @@ pub fn admit_plan_provider_dispatchability_for_placement(
     catalog: &AgentTaskProviderCatalog,
     cache: &mut ProviderRuntimeReadinessCache,
 ) -> homeboy_core::Result<AgentTaskPlan> {
+    let preflight = homeboy_core::parsed_command_preflight::captured_result();
+    admit_plan_provider_dispatchability_with_placement(
+        plan,
+        catalog,
+        cache,
+        preflight.as_ref().map(|result| &result.placement),
+    )
+}
+
+/// Admit only executable placements before checking any provider. A required
+/// Lab that resolved to Local is a placement failure, not a local workload.
+/// Accept the directive explicitly so callers need not mutate captured state.
+pub fn admit_plan_provider_dispatchability_with_placement(
+    plan: &AgentTaskPlan,
+    catalog: &AgentTaskProviderCatalog,
+    cache: &mut ProviderRuntimeReadinessCache,
+    placement: Option<&homeboy_core::parsed_command_preflight::PlacementDirective>,
+) -> homeboy_core::Result<AgentTaskPlan> {
+    use homeboy_lab_contract::{EffectiveExecutionPlacement, ExecutionPlacementRequirement};
+
+    if let Some(placement) = placement {
+        if placement.required == ExecutionPlacementRequirement::Lab
+            && placement.selected == EffectiveExecutionPlacement::Local
+            && !placement.fallback.local_allowed
+        {
+            let reason = placement
+                .fallback
+                .reason
+                .as_deref()
+                .unwrap_or("no selected ready Lab runner");
+            return Err(homeboy_core::Error::validation_invalid_argument(
+                "placement",
+                format!("required Lab placement is unavailable: {reason}"),
+                Some("lab".to_string()),
+                Some(vec![reason.to_string()]),
+            ));
+        }
+    }
     admit_plan_provider_dispatchability_for_runner_ownership(
         plan,
         catalog,
         cache,
-        provider_readiness_is_runner_owned(),
+        placement.is_some_and(|placement| placement.selected == EffectiveExecutionPlacement::Lab),
     )
 }
 
@@ -1920,6 +1959,59 @@ mod tests {
         AgentTaskPlan::new("lab-admission", vec![task])
     }
 
+    fn placement_directive(
+        required: homeboy_lab_contract::ExecutionPlacementRequirement,
+        selected: homeboy_lab_contract::EffectiveExecutionPlacement,
+    ) -> homeboy_core::parsed_command_preflight::PlacementDirective {
+        use homeboy_lab_contract::*;
+        homeboy_core::parsed_command_preflight::PlacementDirective {
+            requested: if required == ExecutionPlacementRequirement::Lab {
+                Placement::Lab
+            } else {
+                Placement::Local
+            },
+            required,
+            selected,
+            runner: None,
+            fallback: ExecutionPlacementFallback {
+                local_allowed: required != ExecutionPlacementRequirement::Lab,
+                reason: None,
+            },
+            override_authorization: ExecutionPlacementOverrideAuthorization {
+                authorized: false,
+                authority: None,
+            },
+        }
+    }
+
+    #[test]
+    fn required_unavailable_lab_fails_before_provider_probe() {
+        use homeboy_lab_contract::{EffectiveExecutionPlacement, ExecutionPlacementRequirement};
+        let root = tempfile::tempdir().unwrap();
+        let (catalog, count) = controller_with_rejected_live_credentials(root.path());
+        let mut placement = placement_directive(
+            ExecutionPlacementRequirement::Lab,
+            EffectiveExecutionPlacement::Local,
+        );
+        let reason = "stale_daemon; active_daemon_control_plane_version != job_command_binary_version; run homeboy runner refresh-homeboy homeboy-lab --ref 0.438.1 --reconnect";
+        placement.fallback.reason = Some(reason.to_string());
+
+        let error = admit_plan_provider_dispatchability_with_placement(
+            &revocable_plan(),
+            &catalog,
+            &mut ProviderRuntimeReadinessCache::default(),
+            Some(&placement),
+        )
+        .expect_err("required unavailable Lab must fail placement admission");
+
+        assert_eq!(error.details["field"], "placement");
+        assert!(error.message.contains(reason), "{error}");
+        assert!(
+            !count.exists(),
+            "placement failure must precede live probes"
+        );
+    }
+
     #[test]
     fn local_placement_still_rejects_controller_credentials_the_live_probe_refuses() {
         let root = tempfile::tempdir().unwrap();
@@ -1931,11 +2023,15 @@ mod tests {
         let catalog = catalog(fake.provider());
         let plan = AgentTaskPlan::new("local-admission", vec![pi_task(&fake, "test/model")]);
 
-        let error = admit_plan_provider_dispatchability_for_runner_ownership(
+        let placement = placement_directive(
+            homeboy_lab_contract::ExecutionPlacementRequirement::Local,
+            homeboy_lab_contract::EffectiveExecutionPlacement::Local,
+        );
+        let error = admit_plan_provider_dispatchability_with_placement(
             &plan,
             &catalog,
             &mut ProviderRuntimeReadinessCache::default(),
-            false,
+            Some(&placement),
         )
         .expect_err("local placement must keep live admission");
 
@@ -1949,11 +2045,15 @@ mod tests {
         let (catalog, count) = controller_with_rejected_live_credentials(root.path());
         let plan = revocable_plan();
 
-        let admitted = admit_plan_provider_dispatchability_for_runner_ownership(
+        let placement = placement_directive(
+            homeboy_lab_contract::ExecutionPlacementRequirement::Lab,
+            homeboy_lab_contract::EffectiveExecutionPlacement::Lab,
+        );
+        let admitted = admit_plan_provider_dispatchability_with_placement(
             &plan,
             &catalog,
             &mut ProviderRuntimeReadinessCache::default(),
-            true,
+            Some(&placement),
         )
         .expect("Lab placement defers live readiness to the runner");
 
