@@ -660,6 +660,26 @@ runs:
           artifact_suffix="${JOB_VALUE:-homeboy}"
         fi
 
+        # GitHub rejects artifact names over 256 chars (400, non-retryable),
+        # and the suffix embeds the full command list: a monorepo deploy of N
+        # components blows past it and fails the job after every deploy
+        # succeeded. Keep a readable prefix and replace the rest with a hash of
+        # the whole suffix, so distinct invocations (which differ in the
+        # instance id at the END) still get distinct names.
+        bound_suffix() {
+          local value="$1" max="$2" keep digest
+          if [ "${#value}" -le "${max}" ]; then
+            printf '%s' "${value}"
+            return
+          fi
+          digest="$(printf '%s' "${value}" | sha256sum | cut -c1-16)"
+          keep=$((max - ${#digest} - 1))
+          value="$(printf '%s' "${value}" | cut -c1-"${keep}")"
+          printf '%s-%s' "${value%-}" "${digest}"
+        }
+        # Longest prefix is "homeboy-phase-progress-" (23 chars).
+        artifact_suffix="$(bound_suffix "${artifact_suffix}" 200)"
+
         echo "homeboy-ci-results=homeboy-ci-results-${artifact_suffix}" >> "${GITHUB_OUTPUT}"
         echo "homeboy-observations=homeboy-observations-${artifact_suffix}" >> "${GITHUB_OUTPUT}"
         echo "homeboy-phase-progress=homeboy-phase-progress-${artifact_suffix}" >> "${GITHUB_OUTPUT}"
@@ -670,8 +690,7 @@ runs:
         # operations-1.json and the second silently destroyed the first's
         # results. Same disambiguator as the artifact names above, bounded so
         # the stem stays a legal filename.
-        operations_stem_suffix="$(printf '%s' "${artifact_suffix}" | cut -c1-64)"
-        operations_stem_suffix="${operations_stem_suffix%-}"
+        operations_stem_suffix="$(bound_suffix "${artifact_suffix}" 64)"
         echo "operations-stem=operations-${operations_stem_suffix}" >> "${GITHUB_OUTPUT}"
 
     - name: Upload Homeboy CI results

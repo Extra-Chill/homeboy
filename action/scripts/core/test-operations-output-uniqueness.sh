@@ -36,6 +36,10 @@ check_contains() {
   esac
 }
 
+# The real bound_suffix, extracted from action.yml so the test cannot drift.
+eval "$(sed -n '/^        bound_suffix() {$/,/^        }$/p' "${ROOT_DIR}/action.yml" | sed 's/^        //')"
+type bound_suffix >/dev/null 2>&1 || { echo "FAIL: bound_suffix not found in action.yml"; exit 1; }
+
 # Mirror of the stem construction in action.yml's "Resolve artifact names".
 stem() {
   local artifact_suffix="${1}-${2}-${3}-${4}-${5}-${6}"
@@ -43,10 +47,17 @@ stem() {
   artifact_suffix="${artifact_suffix#-}"
   artifact_suffix="${artifact_suffix%-}"
   [ -z "${artifact_suffix}" ] && artifact_suffix="${4:-homeboy}"
-  local operations_stem_suffix
-  operations_stem_suffix="$(printf '%s' "${artifact_suffix}" | cut -c1-64)"
-  operations_stem_suffix="${operations_stem_suffix%-}"
-  printf 'operations-%s' "${operations_stem_suffix}"
+  artifact_suffix="$(bound_suffix "${artifact_suffix}" 200)"
+  printf 'operations-%s' "$(bound_suffix "${artifact_suffix}" 64)"
+}
+
+# Mirror of action.yml's artifact name (the longest prefix).
+artifact_name() {
+  local artifact_suffix="${1}-${2}-${3}-${4}-${5}-${6}"
+  artifact_suffix="$(printf '%s' "${artifact_suffix}" | tr -cs 'A-Za-z0-9._-' '-')"
+  artifact_suffix="${artifact_suffix#-}"
+  artifact_suffix="${artifact_suffix%-}"
+  printf 'homeboy-phase-progress-%s' "$(bound_suffix "${artifact_suffix}" 200)"
 }
 
 # The exact downstream shape: deploy then verify, same job and runner.
@@ -73,6 +84,18 @@ else
   echo "FAIL: stem grew to ${#long_stem} chars"
   fail=1
 fi
+
+# A monorepo deploy of many components: the real 2026-10-31 failure shape.
+many="$(for c in $(seq 1 20); do printf 'deploy extrachill-component-%s --project extrachill-monorepo --ref 6f2b5fbd5c65f8ca78a9f1529dc37c6e63f6486c --confirm-dangerous-no-pull ' "$c"; done)"
+name_a="$(artifact_name extrachill-network '' "${many}" deploy __run Linux)"
+name_b="$(artifact_name extrachill-network '' "${many}" deploy __run_2 Linux)"
+if [ "${#name_a}" -le 256 ]; then pass "many-component artifact name fits GitHub's 256 limit (${#name_a})"; else echo "FAIL: artifact name is ${#name_a} chars"; fail=1; fi
+check_differs "long names still differ by invocation" "${name_a}" "${name_b}"
+long_a="$(stem extrachill-network '' "${many}" deploy __run Linux)"
+long_b="$(stem extrachill-network '' "${many}" deploy __run_2 Linux)"
+check_differs "long operations stems still differ by invocation" "${long_a}" "${long_b}"
+short="$(artifact_name extrachill-network '' 'deploy extrachill-site --outdated' deploy __run Linux)"
+check_contains "short names are left readable and unhashed" "${short}" "deploy-extrachill-site-outdated-deploy-__run-Linux"
 
 # The script must consume the stem rather than hardcoding "operations".
 if grep -q 'OUTPUT_STEM="${OPERATIONS_OUTPUT_STEM:-operations}-${CMD_INDEX}"' \
