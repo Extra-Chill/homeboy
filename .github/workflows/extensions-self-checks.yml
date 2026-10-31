@@ -12,10 +12,15 @@
 # not pin, so a regression merged here reaches every consumer with nothing in
 # front of it. This workflow is the missing gate: it runs each extension's
 # declared `self_checks` on every pull request.
-name: Extension self-checks
+name: Extensions self-checks
 
 on:
   pull_request:
+    paths:
+      - 'extensions/**'
+      # Extension runners source these helpers from core at the same commit.
+      - 'crates/homeboy-core/src/extension/runtime/**'
+      - '.github/workflows/extensions-self-checks.yml'
   workflow_dispatch:
 
 permissions:
@@ -65,14 +70,6 @@ jobs:
       # only exists on a developer's disk, so a smoke passes or fails based on
       # what happens to sit next to the repo. Same pattern as the WP Codebox
       # canary workflow.
-      - name: Checkout Homeboy core
-        uses: actions/checkout@v4
-        with:
-          repository: Extra-Chill/homeboy
-          ref: main
-          path: .ci/homeboy
-          sparse-checkout: crates/homeboy-core/src/extension/runtime
-          sparse-checkout-cone-mode: false
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -91,7 +88,7 @@ jobs:
 
       - name: Install WordPress extension dependencies
         if: matrix.component == 'wordpress'
-        working-directory: wordpress
+        working-directory: extensions/wordpress
         run: |
           set -euo pipefail
           composer install --no-interaction --no-progress --prefer-dist
@@ -105,17 +102,19 @@ jobs:
       # toolchain (homeboy-extensions#2870).
       - name: Install wordpress extension's wp-scripts toolchain
         if: matrix.component == 'wordpress'
-        working-directory: wordpress/toolchains/wp-scripts
+        working-directory: extensions/wordpress/toolchains/wp-scripts
         run: npm install
 
       - name: Run lint self-checks
         env:
           HOMEBOY_SELF_CHECK_SKIP: ${{ matrix.self_check_skip }}
-          HOMEBOY_CORE_DIR: ${{ github.workspace }}/.ci/homeboy
+          HOMEBOY_CORE_DIR: ${{ github.workspace }}
+        working-directory: extensions
         run: bash scripts/ci/run-self-checks.sh "${{ matrix.component }}" lint
 
       - name: Run test self-checks
         env:
           HOMEBOY_SELF_CHECK_SKIP: ${{ matrix.self_check_skip }}
-          HOMEBOY_CORE_DIR: ${{ github.workspace }}/.ci/homeboy
+          HOMEBOY_CORE_DIR: ${{ github.workspace }}
+        working-directory: extensions
         run: bash scripts/ci/run-self-checks.sh "${{ matrix.component }}" test

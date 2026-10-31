@@ -1,8 +1,19 @@
-name: Homeboy
+name: Extensions release
+
+# Releases each extension under extensions/ that has releasable commits since
+# its own `<id>-vX.Y.Z` tag (e.g. wordpress-v3.22.1). Core releases separately
+# through release.yml, whose scope excludes extensions/ and desktop/.
+#
+# Gated until cutover (#16783): the imported per-extension tags must exist in
+# this repository first, or the first run would treat each extension's whole
+# history as unreleased. Enable with:
+#   gh variable set EXTENSIONS_RELEASE_AUTOMATION --body enabled --repo Extra-Chill/homeboy
 
 on:
   push:
     branches: [main]
+    paths:
+      - 'extensions/**'
   workflow_dispatch:
 
 permissions:
@@ -10,12 +21,18 @@ permissions:
   pull-requests: write
   issues: write
 
+concurrency:
+  group: extensions-release
+  cancel-in-progress: false
+
 jobs:
-  homeboy:
+  release:
     name: Release ${{ matrix.component }}
+    if: vars.EXTENSIONS_RELEASE_AUTOMATION == 'enabled'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
+      max-parallel: 1
       matrix:
         component:
           - discord
@@ -40,6 +57,6 @@ jobs:
 
       - uses: Extra-Chill/homeboy-action@v2
         with:
-          component: ${{ matrix.component }}
+          component: extensions/${{ matrix.component }}
           commands: release
           app-token: ${{ steps.app-token.outputs.token || '' }}

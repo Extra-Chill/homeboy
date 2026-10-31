@@ -16,6 +16,10 @@
 # in `crates/homeboy-paths` fails closed if a crate is ever added that these
 # globs would miss.
 members = ["crates/homeboy-*", "crates/contracts/homeboy-*"]
+# Extension test fixtures (extensions/rust/tests/fixtures/*) are standalone
+# Cargo projects. Without this, cargo walks up from them to this workspace and
+# refuses to build ("current package believes it's in a workspace").
+exclude = ["extensions"]
 
 [package]
 name = "homeboy"

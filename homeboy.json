@@ -49,5 +49,13 @@
   ],
   "release": {
     "owner": "ci"
+  },
+  "scopes": {
+    "defaults": {
+      "exclude": [
+        "extensions",
+        "desktop"
+      ]
+    }
   }
 }
