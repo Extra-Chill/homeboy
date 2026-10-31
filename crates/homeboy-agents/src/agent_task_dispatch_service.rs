@@ -1430,26 +1430,28 @@ mod tests {
         .expect("a provider that declares no credential is dispatchable");
     }
 
+    fn configure_fake_pi(fake: &crate::agent_task_provider::test_pi::FakePi) {
+        let mut config = homeboy_core::defaults::load_config();
+        config
+            .settings
+            .extend(fake.config().as_object().unwrap().clone());
+        homeboy_core::defaults::save_config(&config).unwrap();
+    }
+
     #[test]
     fn generic_preflight_admits_a_ready_fallback_when_primary_credentials_are_missing() {
         // Preflight materializes provider refs under the home. The ambient home
         // is whichever one a parallel test isolated last, and it vanishes when
         // that test exits (#14832).
         let _home = homeboy_core::test_support::HomeGuard::new();
-        let required = format!("HOMEBOY_TEST_CREDENTIAL_{}", uuid::Uuid::new_v4());
-        let primary = serde_json::from_value(serde_json::json!({
-            "id": "test.primary",
-            "backend": "test",
-            "secret_env_requirements": [{ "env": [required] }],
-        }))
-        .expect("primary provider");
-        let fallback = serde_json::from_value(serde_json::json!({
-            "id": "test.fallback",
-            "backend": "test",
-        }))
-        .expect("fallback provider");
+        let fake = crate::agent_task_provider::test_pi::FakePi::with_probes(
+            "exit 99",
+            "printf 'test-pi\\n'",
+            "printf 'test fallback\\n'",
+        );
+        configure_fake_pi(&fake);
         let catalog = AgentTaskProviderCatalog {
-            providers: vec![primary, fallback],
+            providers: vec![fake.provider()],
             ..Default::default()
         };
         let request = AgentTaskDispatchRequest {
@@ -1461,8 +1463,8 @@ mod tests {
             repo: None,
             component: None,
             task_url: None,
-            backend: "test".to_string(),
-            selector: Some("test.primary".to_string()),
+            backend: "pi".to_string(),
+            selector: Some("pi.agent-task-executor".to_string()),
             model: None,
             required_capabilities: Vec::new(),
             secret_env: Vec::new(),
@@ -1471,13 +1473,13 @@ mod tests {
             task_id: None,
             core: DispatchCoreInputs {
                 resolved_provider_policy: Some(ResolvedAgentTaskProviderPolicy {
-                    backend: "test".to_string(),
-                    selector: Some("test.primary".to_string()),
-                    model: None,
+                    backend: "pi".to_string(),
+                    selector: Some("pi.agent-task-executor".to_string()),
+                    model: Some("test/model".to_string()),
                     rotation: Some(AgentTaskProviderRotationPolicy {
                         entries: vec![
                             crate::agent_task_scheduler::AgentTaskProviderRotationEntry {
-                                selector: Some("test.fallback".to_string()),
+                                model: Some("test/fallback".to_string()),
                                 ..Default::default()
                             },
                         ],
@@ -1500,13 +1502,13 @@ mod tests {
         // fails admission instead of binding the configured fallback
         // (#15837, #15409, #15018).
         let mut pinned = request;
-        pinned.model = Some("pinned-model".to_string());
+        pinned.model = Some("test/model".to_string());
         pinned.core.acknowledge_model_override = true;
         let error = preflight_dispatch_provider_admission(&pinned, &catalog)
             .expect_err("a pinned model is never substituted by a rotation entry");
         assert!(
-            format!("{} {:?} {}", error.message, error.hints, error.details).contains(&required),
-            "the failure names the pinned route's missing credential: {} {}",
+            format!("{} {:?} {}", error.message, error.hints, error.details).contains("test/model"),
+            "the failure names the unavailable pinned model: {} {}",
             error.message,
             error.details
         );
@@ -1515,23 +1517,16 @@ mod tests {
     #[test]
     fn queued_dispatch_persists_the_admitted_fallback_binding() {
         homeboy_core::test_support::with_isolated_home(|_| {
-            let required = format!("HOMEBOY_TEST_CREDENTIAL_{}", uuid::Uuid::new_v4());
+            let fake = crate::agent_task_provider::test_pi::FakePi::with_probes(
+                "exit 99",
+                "printf 'test-pi\\n'",
+                "printf 'test fallback\\n'",
+            );
             let catalog = AgentTaskProviderCatalog {
-                providers: vec![
-                    serde_json::from_value(serde_json::json!({
-                        "id": "test.primary",
-                        "backend": "test",
-                        "secret_env_requirements": [{ "env": [required] }],
-                    }))
-                    .expect("primary provider"),
-                    serde_json::from_value(serde_json::json!({
-                        "id": "test.fallback",
-                        "backend": "test",
-                    }))
-                    .expect("fallback provider"),
-                ],
+                providers: vec![fake.provider()],
                 ..Default::default()
             };
+            configure_fake_pi(&fake);
             let run_id = format!("queued-fallback-{}", uuid::Uuid::new_v4());
             let request = AgentTaskDispatchRequest {
                 prompt: Some("run".to_string()),
@@ -1542,8 +1537,8 @@ mod tests {
                 repo: None,
                 component: None,
                 task_url: None,
-                backend: "test".to_string(),
-                selector: Some("test.primary".to_string()),
+                backend: "pi".to_string(),
+                selector: Some("pi.agent-task-executor".to_string()),
                 model: None,
                 required_capabilities: Vec::new(),
                 secret_env: Vec::new(),
@@ -1553,13 +1548,13 @@ mod tests {
                 core: DispatchCoreInputs {
                     queue_only: true,
                     resolved_provider_policy: Some(ResolvedAgentTaskProviderPolicy {
-                        backend: "test".to_string(),
-                        selector: Some("test.primary".to_string()),
-                        model: None,
+                        backend: "pi".to_string(),
+                        selector: Some("pi.agent-task-executor".to_string()),
+                        model: Some("test/model".to_string()),
                         rotation: Some(AgentTaskProviderRotationPolicy {
                             entries: vec![
                                 crate::agent_task_scheduler::AgentTaskProviderRotationEntry {
-                                    selector: Some("test.fallback".to_string()),
+                                    model: Some("test/fallback".to_string()),
                                     ..Default::default()
                                 },
                             ],
@@ -1585,10 +1580,7 @@ mod tests {
                     .read_controller_plan(&run_id)
                     .expect("queued controller plan");
 
-            assert_eq!(
-                plan.tasks[0].executor.selector.as_deref(),
-                Some("test.fallback")
-            );
+            assert_eq!(plan.tasks[0].executor.model(), Some("test/fallback"));
             assert_eq!(
                 plan.tasks[0].metadata["provider_readiness_routing"]["next_rotation_index"],
                 1

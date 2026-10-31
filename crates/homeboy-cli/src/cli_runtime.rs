@@ -5349,6 +5349,10 @@ mod tests {
                         &primary,
                         &["worktree", "add", "--quiet", "-b", "task", workspace.to_str().unwrap()],
                     );
+                    let fake = crate::commands::agent_task::fake_pi_test::FakePi::with_probes(
+                        "exit 99", "printf 'test model\\n'",
+                    );
+                    fake.install_catalog_config();
                     let mut config = homeboy::core::defaults::load_config();
                     config.retention.reconstructable_artifact_reserve_bytes = 0;
                     homeboy::core::defaults::save_config(&config).expect("capacity policy");

@@ -22,6 +22,14 @@ impl FakePi {
         }
     }
 
+    pub(crate) fn install_catalog_config(&self) {
+        let mut config = homeboy::core::defaults::load_config();
+        config
+            .settings
+            .extend(self.config().as_object().unwrap().clone());
+        homeboy::core::defaults::save_config(&config).unwrap();
+    }
+
     pub(crate) fn config(&self) -> serde_json::Value {
         serde_json::json!({"command": self.command, "command_args": ["--mode", "json"]})
     }
