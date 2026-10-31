@@ -29,6 +29,32 @@ def discover():
     return rows
 
 
+def last_tag(identity):
+    """The newest <id>-vX.Y.Z tag reachable from HEAD, or None."""
+    found = subprocess.run(
+        ['git', 'tag', '--merged', 'HEAD', '--list', f'{identity}-v*', '--sort=-v:refname'],
+        capture_output=True, text=True)
+    tags = found.stdout.split() if found.returncode == 0 else []
+    return tags[0] if tags else None
+
+
+def unchanged_since_release(row):
+    """True when nothing under the component's path changed since its last tag.
+
+    Running the full action for such a component only to learn
+    no-releasable-commits costs about a minute of setup each, which made a
+    no-op monorepo release run take ~28 minutes. Components with no tag yet,
+    or with any commit since their tag, still go through Homeboy, which keeps
+    the final say on what is releasable.
+    """
+    tag = last_tag(row['component'])
+    if tag is None:
+        return False
+    log = subprocess.check_output(
+        ['git', 'log', '--format=%H', f'{tag}..HEAD', '--', row['path']]).decode()
+    return not log.strip()
+
+
 def generate():
     inputs = json.loads(os.environ['RELEASE_INPUTS'])
     if inputs['components'] != 'all' or inputs.get('component'):
@@ -40,6 +66,12 @@ def generate():
     steps = []
     script = 'python3 .homeboy-action/scripts/release/run-monorepo-releases.py'
     for index, row in enumerate(rows):
+        if unchanged_since_release(row):
+            (directory / f'result-{index}.json').write_text(json.dumps({
+                'failed': False,
+                'result': {'component': row['component'], 'released': False, 'version': '',
+                           'tag': '', 'skipped_reason': 'no-releasable-commits'}}))
+            continue
         step_id = f'component_{index}'
         action_inputs = {key: inputs.get(key, '') for key in (
             'args', 'extension', 'extension-ref', 'php-version', 'node-version',
