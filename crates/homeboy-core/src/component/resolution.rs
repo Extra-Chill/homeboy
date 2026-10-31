@@ -791,6 +791,35 @@ fn overlay_registered_local_checkout(
     Ok(component)
 }
 
+/// A repository-level checkout has nested portable components but no root
+/// component. Use Git's tracked/unignored inventory, just as `component changed`
+/// does, so ignored dependencies and metadata do not establish repository scope.
+pub fn is_repository_level_checkout(checkout: &Path) -> bool {
+    if checkout.join("homeboy.json").exists() {
+        return false;
+    }
+    crate::git::output_optional(
+        checkout,
+        &[
+            "ls-files",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "-z",
+        ],
+    )
+    .is_some_and(|files| {
+        files.split('\0').any(|file| {
+            let path = Path::new(file);
+            path.file_name().is_some_and(|name| name == "homeboy.json")
+                && path
+                    .parent()
+                    .is_some_and(|parent| !parent.as_os_str().is_empty())
+                && checkout.join(path).is_file()
+        })
+    })
+}
+
 fn portable_component_for_checkout(
     config_root: Option<&Path>,
     component_id: &str,
@@ -803,7 +832,9 @@ fn portable_component_for_checkout(
         // machine-local metadata, not checkout-owned configuration: another
         // checkout of the repository cannot be expected to carry it. Keep that
         // behavior for legacy consumers; otherwise a target manifest is required.
-        if !checkout_owns_manifest(Path::new(&registered.local_path))? {
+        if is_repository_level_checkout(checkout_path)
+            || !checkout_owns_manifest(Path::new(&registered.local_path))?
+        {
             let mut component = registered.clone();
             component.local_path = checkout_path.to_string_lossy().to_string();
             resolve_remote_path_at(config_root, &mut component);
@@ -3172,6 +3203,43 @@ mod tests {
                 worktree.canonicalize().expect("canonical worktree")
             );
             assert_eq!(component.remote_path, "wp-content/plugins/fixture");
+        });
+    }
+
+    #[test]
+    fn nested_manifests_admit_repository_level_worktree() {
+        crate::test_support::with_isolated_home(|home| {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let primary = dir.path().join("fixture");
+            let worktree = dir.path().join("fixture@task");
+            fs::create_dir_all(&primary).expect("primary dir");
+            git(&primary, &["init"]);
+            git(&primary, &["config", "user.email", "test@example.com"]);
+            git(&primary, &["config", "user.name", "Test User"]);
+            write_portable(&primary, "fixture");
+            git(&primary, &["add", "."]);
+            git(&primary, &["commit", "-m", "root component"]);
+            add_worktree(&primary, &worktree, "task");
+            git(&worktree, &["rm", "homeboy.json"]);
+            for id in ["a", "b"] {
+                let path = worktree.join("plugins").join(id);
+                fs::create_dir_all(&path).expect("nested directory");
+                write_portable(&path, id);
+            }
+            git(&worktree, &["add", "."]);
+            git(&worktree, &["commit", "-m", "nested components"]);
+            write_standalone_registration(home.path(), "fixture", &primary);
+
+            let component = resolve_effective(Some("fixture"), worktree.to_str(), None)
+                .expect("repository-level worktree resolves without a root manifest");
+            assert_eq!(component.id, "fixture");
+            assert_eq!(
+                Path::new(&component.local_path),
+                worktree.canonicalize().unwrap()
+            );
+            assert!(is_repository_level_checkout(Path::new(
+                &component.local_path
+            )));
         });
     }
 

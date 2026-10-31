@@ -517,7 +517,8 @@ pub(crate) fn run_cook(mut args: AgentTaskCookArgs) -> CmdResult<Value> {
 /// Add the gates a registered component declares for every Cook: its
 /// `default_verify_gates` when the caller supplied none, and its lint gate when
 /// the component declares lint support (#15888). Explicit caller gates never
-/// suppress the lint gate; only `--no-component-lint-gate` does.
+/// suppress the lint gate; repository-level checkouts and
+/// `--no-component-lint-gate` do.
 fn apply_component_verify_gates(
     args: &mut AgentTaskCookArgs,
     retained_gate_contract: bool,
@@ -527,13 +528,23 @@ fn apply_component_verify_gates(
         return Ok(());
     };
     let component_id = &component.id;
+    let repository_level = homeboy::core::component::resolution::is_repository_level_checkout(
+        Path::new(&component.local_path),
+    );
+    if repository_level {
+        eprintln!(
+            "cook: skipping default component lint gate for repository-level task '{}' (nested manifests, no root homeboy.json); explicit verification gates are unchanged",
+            component_id
+        );
+    }
     let gates = component_cook_gates(ComponentCookGateInputs {
         component_id,
         has_explicit_gate: args.gates.has_deterministic_gate(),
         retained_gate_contract,
         lint_gate_opted_out: args.gates.no_component_lint_gate,
         // Resolve extension metadata only when the lint gate can apply.
-        declares_lint: !retained_gate_contract
+        declares_lint: !repository_level
+            && !retained_gate_contract
             && !args.gates.no_component_lint_gate
             && component_declares_lint(component),
         existing: args
@@ -11630,6 +11641,40 @@ mod tests {
             ),
             ["homeboy lint data-machine"]
         );
+    }
+
+    #[test]
+    fn repository_level_cook_skips_component_lint_gate_and_keeps_verify() {
+        let dir = tempfile::tempdir().expect("temp repo");
+        let status = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(dir.path())
+            .status()
+            .expect("git init");
+        assert!(status.success());
+        for id in ["a", "b"] {
+            let nested = dir.path().join("plugins").join(id);
+            std::fs::create_dir_all(&nested).unwrap();
+            std::fs::write(nested.join("homeboy.json"), format!(r#"{{"id":"{id}"}}"#)).unwrap();
+        }
+        let component = serde_json::from_value(serde_json::json!({
+            "id": "repository",
+            "local_path": dir.path().to_string_lossy(),
+            "scripts": {"lint": ["echo lint"]}
+        }))
+        .expect("component");
+        let mut args = parse_cook(&["homeboy", "agent-task", "cook", "--verify", "echo explicit"]);
+        super::apply_component_verify_gates(&mut args, false, Some(&component))
+            .expect("repository gates");
+        assert_eq!(args.gates.verify, ["echo explicit"]);
+
+        // The same registration still gets its inferred lint gate when the
+        // checkout has a root component manifest.
+        std::fs::write(dir.path().join("homeboy.json"), r#"{"id":"repository"}"#).unwrap();
+        super::apply_component_verify_gates(&mut args, false, Some(&component))
+            .expect("component gates");
+        assert_eq!(args.gates.verify.len(), 2);
+        assert!(args.gates.verify[1].contains("review lint repository"));
     }
 
     #[test]
