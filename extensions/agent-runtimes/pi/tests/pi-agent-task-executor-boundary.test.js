@@ -110,15 +110,21 @@ fs.writeFileSync(process.env.FAKE_PI_RECORD, JSON.stringify({
   undeclaredSecret: process.env.UNDECLARED_SECRET || null,
   agentDir: process.env.PI_CODING_AGENT_DIR || null,
 }));
-process.stdout.write(fs.readFileSync(process.env.FAKE_PI_STREAM, 'utf8'));
+const resumed = process.argv.includes('--no-tools') && process.env.FAKE_PI_RESUME_STREAM;
+process.stdout.write(fs.readFileSync(resumed || process.env.FAKE_PI_STREAM, 'utf8'));
 process.stderr.write(process.env.FAKE_PI_STDERR || '');
 process.exit(Number(process.env.FAKE_PI_EXIT || 0));
 `);
 
-	function run({ events, exit = 0, stderr = '', instructions = 'Fix the failing test.', config = {}, request = {} }) {
+	function run({ events, resumeEvents, exit = 0, stderr = '', instructions = 'Fix the failing test.', config = {}, request = {} }) {
 		const streamFile = path.join(root, 'stream.jsonl');
+		const resumeFile = path.join(root, 'resume-stream.jsonl');
 		const recordFile = path.join(root, 'record.json');
 		fs.writeFileSync(streamFile, typeof events === 'string' ? events : stream(events));
+		fs.rmSync(resumeFile, { force: true });
+		if (resumeEvents) {
+			fs.writeFileSync(resumeFile, stream(resumeEvents));
+		}
 		const result = executePiAgentTask({
 			schema: 'homeboy/agent-task-request/v1',
 			task_id: 'pi-task',
@@ -135,6 +141,7 @@ process.exit(Number(process.env.FAKE_PI_EXIT || 0));
 						FAKE_PI_RECORD: recordFile,
 						FAKE_PI_EXIT: String(exit),
 						FAKE_PI_STDERR: stderr,
+						...(resumeEvents ? { FAKE_PI_RESUME_STREAM: resumeFile } : {}),
 					},
 					...config,
 				},
@@ -266,6 +273,23 @@ process.exit(Number(process.env.FAKE_PI_EXIT || 0));
 		assert.match(result.summary, /review_form/);
 		assert.equal(result.diagnostics.some((diagnostic) => diagnostic.class === 'pi.required_outputs_missing'), true);
 		assert.deepEqual(result.outputs ?? {}, {});
+	}
+	// A final answer that omits a required output resumes the same session once,
+	// tool-less, and keeps the outputs that reply supplies.
+	{
+		const reviewForm = { verdict: 'ready', summary: 'Moved the gate.' };
+		const answer = `\`\`\`json\n${JSON.stringify({ outputs: { review_form: reviewForm } })}\n\`\`\``;
+		const { result, record } = run({
+			events: okStream,
+			resumeEvents: [{ type: 'message_end', message: assistant({ content: [{ type: 'text', text: answer }] }) }],
+			request: { output_declarations: [{ name: 'review_form', required: true }] },
+		});
+		assert.equal(result.status, 'succeeded', JSON.stringify(result));
+		assert.deepEqual(result.outputs, { review_form: reviewForm });
+		assert.deepEqual(record.argv.slice(0, 5), ['--mode', 'json', '--session', path.join(artifacts, 'pi-task-pi-session.jsonl'), '--no-tools']);
+		assert.match(record.argv.at(-1), /^Your final answer did not include the required output\(s\): review_form\./);
+		assert.equal(result.diagnostics.some((diagnostic) => diagnostic.class === 'pi.required_outputs_resumed'), true);
+		assert.equal(result.diagnostics.some((diagnostic) => diagnostic.class === 'pi.required_outputs_missing'), false);
 	}
 	// No declarations: the prompt and outcome are unchanged.
 	{

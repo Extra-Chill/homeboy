@@ -34,6 +34,9 @@ const PI_DEFAULT_COMMAND = 'pi';
 // JSON mode: one invocation, a JSONL event stream on stdout, exit when done.
 const PI_DEFAULT_COMMAND_ARGS = ['--mode', 'json'];
 const DEFAULT_TIMEOUT_SECONDS = 1200;
+// One tool-less turn to restate declared outputs the final answer omitted.
+const OUTPUT_RESUME_TIMEOUT_SECONDS = 300;
+const OUTPUT_RESUME_MAX_BUFFER = 10 * 1024 * 1024;
 // Linux limits a single argv string to 128 KiB; longer instructions go through a file.
 const MAX_INLINE_INSTRUCTIONS_BYTES = 100 * 1024;
 // Pi owns its credentials (its auth file under the agent dir, or provider
@@ -419,6 +422,50 @@ function stderrTail(spawnResult) {
 	return String(spawnResult.stderr || '').trim().split('\n').slice(-5).join('\n');
 }
 
+/**
+ * Resume the finished Pi session once to ask for required outputs its final
+ * answer left out. The session that did the work is the one that can describe
+ * it, so this costs one turn instead of a fresh attempt that re-reads the
+ * repository. Tools are off, so the reply cannot change the workspace. Any
+ * failure keeps the original result.
+ */
+function resumeForMissingOutputs(context, structured) {
+	const { request, config, commandSpec, cwd, spawnExtra } = context;
+	const session = sessionArgs(request, config);
+	if (session[0] !== '--session') {
+		return structured;
+	}
+	const missing = structured.missingRequiredOutputs;
+	const model = requestedModel(request, config);
+	const prompt = `Your final answer did not include the required output(s): ${missing.join(', ')}. Describe the work you just finished.${requiredOutputInstructions(request, config)}`;
+	const result = spawnSync(commandSpec.command, [...commandSpec.args, ...session, '--no-tools', ...(model ? ['--model', model] : []), prompt], {
+		cwd,
+		encoding: 'utf8',
+		maxBuffer: OUTPUT_RESUME_MAX_BUFFER,
+		...spawnExtra,
+		timeout: OUTPUT_RESUME_TIMEOUT_SECONDS * 1000,
+	});
+	if (result.error || result.status !== 0) {
+		return structured;
+	}
+	const resumed = structuredOutputsFromTexts([parsePiEventStream(result.stdout).finalText], request, { runtime: 'pi', label: 'Pi' });
+	if (resumed.missingRequiredOutputs.length > 0) {
+		return structured;
+	}
+	return {
+		...resumed,
+		diagnostics: [
+			...resumed.diagnostics,
+			{
+				class: 'pi.required_outputs_resumed',
+				classification: 'provider',
+				message: `Pi's final answer omitted ${missing.join(', ')}; resuming its session supplied them.`,
+				data: { resumed_outputs: missing },
+			},
+		],
+	};
+}
+
 /** Map a completed Pi run (exit 0) onto an outcome from its final assistant message. */
 function successFromStream(context) {
 	const stream = parsePiEventStream(context.spawnResult.stdout);
@@ -459,7 +506,10 @@ function successFromStream(context) {
 			metadata: piMetadata(context, stream, { exit_code: 0 }),
 		};
 	}
-	const structured = structuredOutputsFromTexts([stream.finalText], context.request, { runtime: 'pi', label: 'Pi' });
+	let structured = structuredOutputsFromTexts([stream.finalText], context.request, { runtime: 'pi', label: 'Pi' });
+	if (structured.missingRequiredOutputs?.length > 0) {
+		structured = resumeForMissingOutputs(context, structured);
+	}
 	const missing = structured.missingRequiredOutputs || [];
 	return {
 		status: missing.length > 0 ? 'failed' : 'succeeded',
