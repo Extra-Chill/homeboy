@@ -98,7 +98,7 @@ pub enum AgentTaskCommand {
     Cook(Box<AgentTaskCookArgs>),
     /// Attach candidate-bound review findings to an existing Cook.
     CookFeedback(CookFeedbackArgs),
-    /// Run an `AgentTaskPlan` through extension-declared executor providers.
+    /// Run an `AgentTaskPlan` through the built-in Pi provider.
     RunPlan(RunPlanArgs),
     /// Execute a previously submitted durable run.
     Run(RunArgs),
@@ -223,7 +223,7 @@ pub enum AgentTaskCommand {
     Accept(AcceptArgs),
     /// Convert deterministic gate results into a cook retry or stop decision.
     GateFeedback(GateFeedbackArgs),
-    /// List extension-declared executor providers and optional secret/backend readiness.
+    /// List Pi provider routes and optional secret/model readiness.
     ///
     /// `--backend X` filters the presentation to X so output stays within caller
     /// display limits; pass `--catalog` for the full multi-backend catalog.
