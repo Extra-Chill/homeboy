@@ -5,7 +5,7 @@ use super::*;
 use crate::test_support::with_isolated_home;
 
 fn scope(name: &str) -> DaemonScope {
-    DaemonScope::from_state_dir(Path::new(&format!("/state/controllers/{name}/primary")))
+    DaemonScope::from_state_dir(Path::new(&format!("/state/runner-daemons/runner/{name}")))
 }
 
 fn daemon(path: &Path, name: &str) -> JobStore {

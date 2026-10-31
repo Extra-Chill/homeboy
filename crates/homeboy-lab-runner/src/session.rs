@@ -402,6 +402,9 @@ pub enum RunnerFailureKind {
     RunnerCapabilityMissing,
     DaemonStartupFailure,
     TunnelFailure,
+    /// A daemon in the pre-#16752 legacy state-dir layout still has
+    /// active jobs, so connect refuses to start a second daemon beside it.
+    LegacyDaemonBusy,
 }
 
 /// Bounded evidence retained when a direct runner connect cannot complete.

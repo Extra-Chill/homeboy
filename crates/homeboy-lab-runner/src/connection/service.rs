@@ -43,9 +43,9 @@ pub struct RunnerServiceReport {
     pub daemon_lease_id: Option<String>,
     pub daemon_address: Option<String>,
     pub daemon_build_identity: Option<String>,
-    /// Generation daemons from the controller-managed era that install
-    /// stopped. Each entry is the generation state directory.
-    pub retired_generations: Vec<String>,
+    /// Leases of the idle pre-#16752 legacy-layout daemons that
+    /// install stopped (see `legacy_layout`).
+    pub stopped_legacy_leases: Vec<String>,
 }
 
 pub(crate) fn service_unit_name(runner_id: &str) -> String {
@@ -75,6 +75,7 @@ fn service_state_dir(runner_id: &str) -> String {
     super::daemon_state_dir(runner_id, &controller_id())
 }
 
+#[cfg(test)]
 fn controller_segment() -> String {
     super::controller_scope_segment(&controller_id())
 }
@@ -277,22 +278,18 @@ fn repoint_script_with_env(
     )
 }
 
-/// Stop every idle generation daemon left by controller-managed rotation.
-/// `daemon stop` refuses a daemon with active jobs, so busy generations stay.
-fn retire_generations_script(runner_id: &str, homeboy: &str) -> String {
-    format!(
-        r#"for dir in "$HOME/.config/homeboy/daemon-generations/{segment}/controllers/{controller}"/*/; do
-  dir="${{dir%/}}"
-  [ "$(basename "$dir")" = primary ] && continue
-  if out=$(HOMEBOY_DAEMON_STATE_DIR="$dir" {homeboy} daemon stop 2>/dev/null) \
-    && printf '%s' "$out" | grep -q '"stopped": *true'; then
-    echo "$dir"
-  fi
-done"#,
-        segment = paths::sanitize_path_segment(runner_id),
-        controller = controller_segment(),
-        homeboy = shell::quote_arg(homeboy),
-    )
+/// The one-time legacy-layout step for a service runner, run before the unit
+/// (re)starts its daemon in the new state dir. A unit written by older
+/// Homeboy still points at a legacy dir; rewriting it here moves it.
+fn move_off_legacy_layout(
+    client: &SshClient,
+    homeboy: &str,
+    runner_id: &str,
+) -> Result<Vec<String>> {
+    let stopped = super::legacy_layout::stop_remote_legacy_daemons(client, homeboy, runner_id)
+        .map_err(|error| error.into_error(runner_id))?;
+    super::legacy_layout::forget_stopped_legacy_session(runner_id, &stopped)?;
+    Ok(stopped)
 }
 
 fn run_remote(client: &SshClient, script: &str, what: &str) -> Result<String> {
@@ -378,7 +375,7 @@ fn report_for(
     runner_id: &str,
     binary: &str,
     daemon: Option<&RemoteDaemon>,
-    retired_generations: Vec<String>,
+    stopped_legacy_leases: Vec<String>,
 ) -> RunnerServiceReport {
     RunnerServiceReport {
         runner_id: runner_id.to_string(),
@@ -390,7 +387,7 @@ fn report_for(
         daemon_lease_id: daemon.and_then(|daemon| daemon.lease_id.clone()),
         daemon_address: daemon.map(|daemon| daemon.address.clone()),
         daemon_build_identity: daemon.and_then(|daemon| daemon.build_identity.clone()),
-        retired_generations,
+        stopped_legacy_leases,
     }
 }
 
@@ -417,6 +414,7 @@ pub fn install(runner_id: &str) -> Result<RunnerServiceReport> {
         ));
     }
 
+    let stopped_legacy_leases = move_off_legacy_layout(client, homeboy, runner_id)?;
     run_remote(
         client,
         &install_script_with_env(
@@ -428,14 +426,6 @@ pub fn install(runner_id: &str) -> Result<RunnerServiceReport> {
         ),
         "writing the runner service unit",
     )?;
-    let retired_generations = run_remote(
-        client,
-        &retire_generations_script(runner_id, homeboy),
-        "retiring generation daemons",
-    )?
-    .lines()
-    .map(str::to_string)
-    .collect();
     if let Some(lease_id) = status
         .daemon
         .as_ref()
@@ -459,7 +449,7 @@ pub fn install(runner_id: &str) -> Result<RunnerServiceReport> {
         runner_id,
         homeboy,
         Some(&daemon),
-        retired_generations,
+        stopped_legacy_leases,
     ))
 }
 
@@ -485,6 +475,8 @@ pub fn service_status(runner_id: &str) -> Result<RunnerServiceReport> {
 /// behind (#15087).
 pub(crate) fn repoint_and_restart(runner_id: &str, binary: &str) -> Result<()> {
     let target = service_target(runner_id)?;
+    let homeboy = remote_runner_homeboy_path(&target.runner, "runner service restart")?;
+    move_off_legacy_layout(&target.client, homeboy, runner_id)?;
     let startup_token = uuid::Uuid::new_v4().to_string();
     run_remote(
         &target.client,
@@ -811,7 +803,7 @@ mod tests {
             controller_segment()
         )));
         assert!(unit.contains(
-            &format!("Environment=HOMEBOY_DAEMON_STATE_DIR=%h/.config/homeboy/daemon-generations/homeboy-lab/controllers/{}/primary", controller_segment())
+            &format!("Environment=HOMEBOY_DAEMON_STATE_DIR=%h/.config/homeboy/runner-daemons/homeboy-lab/{}\n", controller_segment())
         ));
         assert!(unit.contains("Restart=always"));
         // A restart stops only the daemon; re-adoptable job children lead
@@ -1129,7 +1121,7 @@ mod tests {
         assert_eq!(
             daemon_state_dir(a.0, a.1),
             format!(
-                ".config/homeboy/daemon-generations/runner-a/controllers/{}/primary",
+                ".config/homeboy/runner-daemons/runner-a/{}",
                 super::super::controller_scope_segment(a.1)
             )
         );
@@ -1189,44 +1181,6 @@ mod tests {
             .take(24)
             .collect::<String>();
         assert!(segment.starts_with(&format!("{readable_prefix}-")));
-    }
-
-    #[test]
-    fn retire_script_reports_only_generations_it_actually_stopped() {
-        let home = tempfile::tempdir().expect("home");
-        let generations = home.path().join(format!(
-            ".config/homeboy/daemon-generations/homeboy-lab/controllers/{}/",
-            controller_segment()
-        ));
-        for name in ["primary", "live", "idle"] {
-            std::fs::create_dir_all(generations.join(name)).unwrap();
-        }
-        let fake = home.path().join("homeboy");
-        std::fs::write(
-            &fake,
-            "#!/bin/sh\ncase \"$HOMEBOY_DAEMON_STATE_DIR\" in\n  */live) echo '{\"data\": {\"stopped\": true}}' ;;\n  *) echo '{\"data\": {\"stopped\": false}}' ;;\nesac\n",
-        )
-        .unwrap();
-        std::process::Command::new("chmod")
-            .arg("+x")
-            .arg(&fake)
-            .status()
-            .unwrap();
-        let output = std::process::Command::new("sh")
-            .arg("-c")
-            .arg(retire_generations_script(
-                "homeboy-lab",
-                &fake.display().to_string(),
-            ))
-            .env("HOME", home.path())
-            .output()
-            .expect("run retire script");
-        assert!(output.status.success());
-        let stopped = String::from_utf8(output.stdout).unwrap();
-        assert_eq!(
-            stopped.trim(),
-            generations.join("live").display().to_string()
-        );
     }
 
     #[test]

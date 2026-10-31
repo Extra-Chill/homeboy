@@ -147,11 +147,9 @@ fn ensure_running_observes_the_isolated_daemon_startup_lease() {
 #[test]
 fn ensure_running_in_second_controller_namespace_ignores_live_first_daemon() {
     let context = HermeticTestContext::new();
-    let runner_root = context
-        .config_dir()
-        .join("daemon-generations/shared-runner/controllers");
-    let first_dir = runner_root.join("controller-a/primary");
-    let second_dir = runner_root.join("controller-b/primary");
+    let runner_root = context.config_dir().join("runner-daemons/shared-runner");
+    let first_dir = runner_root.join("controller-a");
+    let second_dir = runner_root.join("controller-b");
 
     let mut first_ensure = context.command(TestBinary::HomeboyFixture);
     first_ensure

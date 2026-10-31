@@ -50,12 +50,13 @@ pub(super) fn controller_scope_segment(controller_id: &str) -> String {
 }
 
 /// The one daemon state directory for a (runner, controller) pair, relative to
-/// the runner user's `$HOME`. Direct SSH launches and the service unit both
-/// derive their `HOMEBOY_DAEMON_STATE_DIR` from it, so a restarted daemon
-/// always reopens the job store its predecessor wrote and re-adopts its jobs.
+/// the runner user's `$HOME`. Direct SSH launches, remote daemon commands, and
+/// the service unit all derive their `HOMEBOY_DAEMON_STATE_DIR` from it, so a
+/// restarted daemon always reopens the job store its predecessor wrote and
+/// re-adopts its jobs.
 pub(super) fn daemon_state_dir(runner_id: &str, controller_id: &str) -> String {
     format!(
-        ".config/homeboy/daemon-generations/{}/controllers/{}/primary",
+        ".config/homeboy/runner-daemons/{}/{}",
         paths::sanitize_path_segment(runner_id),
         controller_scope_segment(controller_id)
     )
@@ -466,6 +467,9 @@ fn restart_direct_daemon_in_place(
             "the runner's homeboy did not report a build identity".to_string(),
         ));
     };
+    if let Err(report) = legacy_layout::move_direct_runner(&client, homeboy, runner_id) {
+        return Ok(*report);
+    }
     let daemon = match restart_remote_daemon_in_place(
         &client,
         homeboy,
@@ -727,6 +731,11 @@ fn connect_with_orphan_adoption_and_live_lease(
             unverifiable_configured_identity_message(homeboy),
         ));
     };
+    // One-time move off the pre-#16752 layout, before anything starts a
+    // daemon in the new state dir; see `legacy_layout`.
+    if let Err(report) = legacy_layout::move_direct_runner(&client, homeboy, runner_id) {
+        return Ok(*report);
+    }
     // A malformed local record is not ownership evidence. It remains fail
     // closed unless an operator supplies an exact live-lease expectation.
     // The runner's one current session is the reconnect target.
@@ -3526,6 +3535,7 @@ mod status_read_purity_tests {
     }
 }
 
+mod legacy_layout;
 pub(crate) mod remote_daemon;
 mod replacement_journal;
 mod restart_recovery;
