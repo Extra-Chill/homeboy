@@ -1968,78 +1968,79 @@ pub(crate) fn status_until(runner_id: &str, deadline: Instant) -> Result<RunnerS
                     .map(|freshness| freshness.active_jobs)
             })
             .flatten();
-    let (active_jobs, stale_jobs, active_job_state, active_job_error) = if let Some(observation) =
-        direct_observation
-    {
-        match observation {
-            Ok(observation) => (
-                observation.active_jobs,
-                observation.stale_jobs,
-                RunnerActiveJobState::Available,
-                None,
-            ),
-            Err(error) => (
-                Vec::new(),
-                Vec::new(),
-                RunnerActiveJobState::Unavailable,
-                Some(RunnerActiveJobError {
-                    code: if describe_capability_missing(&error) {
-                        PRE_DESCRIBE_CAPABILITY_MISSING.to_string()
-                    } else {
-                        error.code.as_str().to_string()
-                    },
-                    message: error.message,
-                }),
-            ),
-        }
-    } else if connected {
-        match session.as_ref() {
-            Some(session) => match runner_jobs_until(runner_id, session, deadline) {
-                Ok((active_jobs, mut stale_jobs)) => {
-                    // `/jobs` is the daemon's typed ownership snapshot. A
-                    // separate freshness read can straddle a job transition,
-                    // so never turn its stale count into a phantom owner.
-                    if should_infer_child_run_orphans(active_jobs.len(), direct_daemon_active_jobs)
-                    {
-                        stale_jobs.extend(orphaned_child_run_jobs_until(
-                            runner_id,
-                            session,
-                            &active_jobs,
-                            deadline,
-                        ));
-                    }
-                    (
-                        active_jobs,
-                        stale_jobs,
-                        RunnerActiveJobState::Available,
-                        None,
-                    )
-                }
-                Err(err) => (
+    let (active_jobs, stale_jobs, mut active_job_state, mut active_job_error) =
+        if let Some(observation) = direct_observation {
+            match observation {
+                Ok(observation) => (
+                    observation.active_jobs,
+                    observation.stale_jobs,
+                    RunnerActiveJobState::Available,
+                    None,
+                ),
+                Err(error) => (
                     Vec::new(),
                     Vec::new(),
                     RunnerActiveJobState::Unavailable,
                     Some(RunnerActiveJobError {
-                        code: err.code.as_str().to_string(),
-                        message: err.message,
+                        code: if describe_capability_missing(&error) {
+                            PRE_DESCRIBE_CAPABILITY_MISSING.to_string()
+                        } else {
+                            error.code.as_str().to_string()
+                        },
+                        message: error.message,
                     }),
                 ),
-            },
-            None => (
+            }
+        } else if connected {
+            match session.as_ref() {
+                Some(session) => match runner_jobs_until(runner_id, session, deadline) {
+                    Ok((active_jobs, mut stale_jobs)) => {
+                        // `/jobs` is the daemon's typed ownership snapshot. A
+                        // separate freshness read can straddle a job transition,
+                        // so never turn its stale count into a phantom owner.
+                        if should_infer_child_run_orphans(
+                            active_jobs.len(),
+                            direct_daemon_active_jobs,
+                        ) {
+                            stale_jobs.extend(orphaned_child_run_jobs_until(
+                                runner_id,
+                                session,
+                                &active_jobs,
+                                deadline,
+                            ));
+                        }
+                        (
+                            active_jobs,
+                            stale_jobs,
+                            RunnerActiveJobState::Available,
+                            None,
+                        )
+                    }
+                    Err(err) => (
+                        Vec::new(),
+                        Vec::new(),
+                        RunnerActiveJobState::Unavailable,
+                        Some(RunnerActiveJobError {
+                            code: err.code.as_str().to_string(),
+                            message: err.message,
+                        }),
+                    ),
+                },
+                None => (
+                    Vec::new(),
+                    Vec::new(),
+                    RunnerActiveJobState::NotQueried,
+                    None,
+                ),
+            }
+        } else {
+            (
                 Vec::new(),
                 Vec::new(),
                 RunnerActiveJobState::NotQueried,
                 None,
-            ),
-        }
-    } else {
-        (
-            Vec::new(),
-            Vec::new(),
-            RunnerActiveJobState::NotQueried,
-            None,
-        )
-    };
+            )
+        };
     if let (Some(freshness), Some(_direct_daemon_active_jobs)) =
         (daemon_freshness.as_mut(), direct_daemon_active_jobs)
     {
@@ -2055,6 +2056,15 @@ pub(crate) fn status_until(runner_id: &str, deadline: Instant) -> Result<RunnerS
     let stale_runner_job_count = stale_jobs.len();
     let active_runner_jobs = active_jobs.iter().map(Into::into).collect();
     let stale_runner_jobs = stale_jobs.iter().map(Into::into).collect();
+    // A selected daemon's empty /jobs snapshot does not prove migration can
+    // proceed: the same controller may still own work in the legacy layout.
+    // Keep those jobs separate from the selected daemon's typed ownership.
+    if let Some(observation) = legacy_layout::observe_legacy_blockers(&runner, deadline) {
+        if let Some(error) = legacy_layout::blocker_status_error(observation, runner_id) {
+            active_job_state = RunnerActiveJobState::Unavailable;
+            active_job_error = Some(error);
+        }
+    }
     let status = RunnerStatusReport {
         runner_id: runner_id.to_string(),
         connected,

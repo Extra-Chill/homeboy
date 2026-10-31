@@ -1692,6 +1692,12 @@ fn declared_run_followup(declaration: &AgentRuntimeDiagnosticFollowup) -> LabFol
 }
 
 pub(super) fn runner_status_operator_hints(report: &RunnerStatusReport) -> Vec<String> {
+    // Migration can be blocked even without a session in the new layout.
+    if let Some(error) = report.active_job_error.as_ref().filter(|error| {
+        error.code == "legacy_daemon_busy" || error.code == "legacy_daemon_observation_failed"
+    }) {
+        return vec![error.message.clone()];
+    }
     if report.session.is_none() || !report.connected {
         return Vec::new();
     }
@@ -2177,6 +2183,23 @@ mod tests {
         assert_eq!(
             serialized["stale_daemon"]["recovery_commands"],
             serde_json::json!([refresh])
+        );
+    }
+
+    #[test]
+    fn legacy_blockers_are_visible_even_without_a_connected_session() {
+        let mut report = stale_daemon_report();
+        report.connected = false;
+        report.session = None;
+        report.active_job_state = RunnerActiveJobState::Unavailable;
+        report.active_job_error = Some(homeboy_lab_runner::RunnerActiveJobError {
+            code: "legacy_daemon_busy".to_string(),
+            message: "legacy primary blocked by job-1, run-1, child_pid 42".to_string(),
+        });
+        let hints = runner_status_operator_hints(&report);
+        assert_eq!(
+            hints,
+            vec!["legacy primary blocked by job-1, run-1, child_pid 42"]
         );
     }
 

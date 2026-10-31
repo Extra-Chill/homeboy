@@ -86,7 +86,11 @@ pub(crate) fn render_service_unit(runner_id: &str, startup_token: &str) -> Strin
 }
 
 #[cfg(test)]
-fn render_service_unit_for(runner_id: &str, controller_id: &str, startup_token: &str) -> String {
+pub(super) fn render_service_unit_for(
+    runner_id: &str,
+    controller_id: &str,
+    startup_token: &str,
+) -> String {
     render_service_unit_with_env(runner_id, controller_id, startup_token, &[])
 }
 
