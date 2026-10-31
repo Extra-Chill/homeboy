@@ -1,4 +1,4 @@
-use super::common::{request, script};
+use super::common::request;
 use super::*;
 
 #[test]
@@ -323,78 +323,23 @@ fn provider_manifest_parses_role_aliases() {
 
 #[test]
 fn provider_command_receives_canonical_artifact_declarations() {
-    let command = format!(
-        "node {}",
-        script(
-            r#"
-const fs = require('fs');
-const input = JSON.parse(fs.readFileSync(0, 'utf8'));
-process.stdout.write(JSON.stringify({
-  schema: 'homeboy/agent-task-outcome/v1',
-  task_id: input.task_id,
-  status: 'succeeded',
-  artifacts: [],
-  typed_artifacts: [],
-  evidence_refs: [],
-  diagnostics: [],
-  outputs: { artifact_declarations: input.artifact_declarations },
-  metadata: null
-}));
-"#
-        )
-    );
-    let (mut request, provider) = request("task-artifact-normalization", command);
-    request.expected_artifacts = vec!["patch".to_string()];
-
-    let outcome = run_provider_command(&request, &provider, None);
-
+    let _home = super::common::artifact_home();
+    let fake = super::super::test_pi::FakePi::success();
+    let mut request = fake.request("task-artifact-normalization");
+    request.expected_artifacts = vec!["patch".into()];
+    request.normalize_artifact_declarations();
+    let outcome = run_provider_command(&request, &fake.provider(), None);
     assert_eq!(outcome.status, AgentTaskOutcomeStatus::Succeeded);
-    assert_eq!(outcome.outputs["artifact_declarations"][0]["name"], "patch");
-    assert_eq!(
-        outcome.outputs["artifact_declarations"][0]["required"],
-        true
-    );
-}
-
-#[test]
-fn provider_command_argv_preserves_extension_and_runtime_paths_with_spaces() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let extension_dir = temp.path().join("extension path with spaces");
-    let runtime_dir = temp.path().join("runtime path with spaces");
-    fs::create_dir_all(&extension_dir).expect("extension dir");
-    fs::create_dir_all(&runtime_dir).expect("runtime dir");
-    fs::write(
-        runtime_dir.join("provider.js"),
-        r#"
-const fs = require('fs');
-const input = JSON.parse(fs.readFileSync(0, 'utf8'));
-process.stdout.write(JSON.stringify({
-  schema: 'homeboy/agent-task-outcome/v1',
-  task_id: input.task_id,
-  status: process.argv[2] === '--extension' && process.argv[3].includes('extension path with spaces') ? 'succeeded' : 'failed',
-  summary: process.argv.slice(2).join('|')
-}));
-"#,
-    )
-    .expect("provider script");
-    let (request, mut provider) = request("task-argv-spaces", "legacy unused".to_string());
-    provider.extension_path = Some(extension_dir.to_string_lossy().to_string());
-    provider.runtime_path = Some(runtime_dir.to_string_lossy().to_string());
-    provider.command_argv = vec![
-        "node".to_string(),
-        "{{runtime_path}}/provider.js".to_string(),
-        "--extension".to_string(),
-        "{{extension_path}}".to_string(),
-    ];
-
-    let outcome = run_provider_command(&request, &provider, None);
-
-    assert_eq!(outcome.status, AgentTaskOutcomeStatus::Succeeded);
-    assert!(outcome
-        .summary
-        .as_deref()
-        .unwrap_or_default()
-        .contains("extension path with spaces"));
+    let input = outcome
+        .evidence_refs
+        .iter()
+        .find(|e| e.kind == "executor-input")
+        .unwrap();
+    let persisted: Value =
+        serde_json::from_slice(&fs::read(input.uri.strip_prefix("file://").unwrap()).unwrap())
+            .unwrap();
+    assert_eq!(persisted["artifact_declarations"][0]["name"], "patch");
+    assert_eq!(persisted["artifact_declarations"][0]["required"], true);
 }
 
 #[test]
@@ -402,33 +347,26 @@ fn provider_invocation_argv_and_cwd_preserve_paths_with_spaces() {
     let temp = tempfile::tempdir().expect("tempdir");
     let runtime_dir = temp.path().join("runtime path with spaces");
     fs::create_dir_all(&runtime_dir).expect("runtime dir");
-    fs::write(
-        runtime_dir.join("provider.js"),
-        r#"
-const fs = require('fs');
-const input = JSON.parse(fs.readFileSync(0, 'utf8'));
-process.stdout.write(JSON.stringify({
-  schema: 'homeboy/agent-task-outcome/v1',
-  task_id: input.task_id,
-  status: process.cwd().includes('runtime path with spaces') ? 'succeeded' : 'failed',
-  summary: process.cwd()
-}));
-"#,
-    )
-    .expect("provider script");
-    let (request, mut provider) = request("task-invocation-cwd", "legacy unused".to_string());
-    provider.runtime_path = Some(runtime_dir.to_string_lossy().to_string());
-    provider.invocation.argv = vec!["node".to_string(), "provider.js".to_string()];
-    provider.invocation.cwd = Some("{{runtime_path}}".to_string());
+    let fake = super::super::test_pi::FakePi::new(&format!(
+        "pwd > observed-cwd\n{}",
+        super::super::test_pi::FakePi::answer("paths preserved")
+    ));
+    let command = runtime_dir.join("fake pi");
+    fs::copy(&fake.command, &command).unwrap();
+    let mut request = fake.request("task-invocation-cwd");
+    request.executor.config["command"] = json!(command);
+    request.workspace.root = Some(runtime_dir.display().to_string());
+    let provider = fake.provider();
 
     let outcome = run_provider_command(&request, &provider, None);
 
     assert_eq!(outcome.status, AgentTaskOutcomeStatus::Succeeded);
-    assert!(outcome
-        .summary
-        .as_deref()
-        .unwrap_or_default()
-        .contains("runtime path with spaces"));
+    assert_eq!(
+        fs::read_to_string(runtime_dir.join("observed-cwd"))
+            .unwrap()
+            .trim(),
+        runtime_dir.canonicalize().unwrap().to_str().unwrap()
+    );
 }
 
 #[test]

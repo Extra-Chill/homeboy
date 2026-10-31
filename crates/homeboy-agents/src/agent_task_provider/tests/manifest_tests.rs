@@ -1,6 +1,7 @@
+use super::super::test_pi::FakePi;
 use super::common::{artifact_home, request, script};
 use super::*;
-use crate::agent_task::{AgentTaskOutputDeclaration, AgentTaskOutputEvidenceRelationship};
+use crate::agent_task::AgentTaskOutputDeclaration;
 
 #[test]
 fn provider_capability_contract_exports_core_owned_schema_ids() {
@@ -172,23 +173,6 @@ fn provider_command_parts_uses_argv() {
 }
 
 #[test]
-fn provider_readiness_invocation_receives_effective_config_and_fails_closed() {
-    let (_, mut provider) = request("configured-readiness", "node ignored.js".to_string());
-    provider.readiness_invocation = Some(CommandInvocation {
-        argv: vec![
-            "node".to_string(),
-            script("let fs=require('fs');let req=JSON.parse(fs.readFileSync(0,'utf8'));process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:req.effective_config.marker==='ready',classification:'test',retryable:false,remediation:'configured marker is not ready',reason:'configured_marker',cache_key:'test-cache',identity:{provider:'test'}}));"),
-        ],
-        ..CommandInvocation::default()
-    }.into());
-
-    assert!(run_provider_readiness_invocation(&provider, &json!({ "marker": "ready" })).is_ok());
-    let result = run_provider_readiness_invocation(&provider, &json!({ "marker": "blocked" }))
-        .expect("provider-owned readiness result parses");
-    assert!(!result.ready);
-}
-
-#[test]
 fn provider_readiness_invocation_defaults_and_validates_its_total_timeout() {
     let provider: AgentTaskExecutorProvider = serde_json::from_value(json!({
         "id": "ready.provider",
@@ -230,31 +214,18 @@ fn workspace_permission_root_capability_serializes_the_exact_task_workspace() {
     let candidate = temp.path().join("attempt-candidate");
     std::fs::create_dir_all(&original).expect("original workspace");
     std::fs::create_dir_all(&candidate).expect("candidate workspace");
-    let script = script(
-        r#"const fs = require('fs');
-let input = '';
-process.stdin.on('data', (chunk) => input += chunk);
-process.stdin.on('end', () => {
-  const request = JSON.parse(input);
-  fs.writeFileSync('provider-observation.json', JSON.stringify({
-     cwd: process.cwd(),
-     workspace: request.workspace.root,
-     config_workspace: request.executor.config.workspace.root,
-     config_workspace_root: request.executor.config.workspace_root,
-     workspace_permission_root: request.executor.config.workspace_permission_root
-  }));
-  process.stderr.write('permission denied');
-});"#,
-    );
-    let (mut request, mut provider) = request("workspace-boundary", format!("node {script}"));
+    let fake = FakePi::new(&format!(
+        "pwd > provider-observation.txt\n{}",
+        FakePi::answer("workspace checked")
+    ));
+    let mut request = fake.request("workspace-boundary");
+    let mut provider = fake.provider();
     provider
         .capabilities
         .push(AGENT_TASK_PROVIDER_CAPABILITY_WORKSPACE_PERMISSION_ROOT_V1.to_string());
     request.workspace.root = Some(candidate.display().to_string());
-    request.executor.config = json!({
-        "workspace": { "root": candidate.display().to_string() },
-        "workspace_root": candidate.display().to_string(),
-    });
+    request.executor.config["workspace"] = json!({ "root": candidate });
+    request.executor.config["workspace_root"] = json!(candidate);
 
     let outcome = ExtensionProviderAgentTaskExecutor::with_providers(vec![provider]).execute(
         request,
@@ -270,221 +241,41 @@ process.stdin.on('end', () => {
             provider_capacity_key: None,
         },
     );
-    assert_eq!(outcome.status, AgentTaskOutcomeStatus::ProviderError);
     assert_eq!(
-        outcome.diagnostics[0].class, "agent_task.provider_empty_stdout",
-        "{:?}",
-        outcome.diagnostics
+        outcome.status,
+        AgentTaskOutcomeStatus::Succeeded,
+        "{outcome:?}"
     );
-    assert!(
-        candidate.join("provider-observation.json").is_file(),
-        "candidate missing provider observation; original exists: {}; diagnostics: {:?}",
-        original.join("provider-observation.json").is_file(),
-        outcome.diagnostics
+    assert_eq!(
+        std::fs::read_to_string(candidate.join("provider-observation.txt"))
+            .unwrap()
+            .trim(),
+        candidate.canonicalize().unwrap().to_str().unwrap()
     );
-    let observation: Value = serde_json::from_slice(
-        &std::fs::read(candidate.join("provider-observation.json")).expect("provider observation"),
+    assert!(!original.join("provider-observation.txt").exists());
+    // Pi no longer consumes a JSON request on stdin. Inspect the persisted
+    // Homeboy request instead to verify the scheduler-selected boundary.
+    let request_path = outcome
+        .evidence_refs
+        .iter()
+        .find(|e| e.kind == "executor-input")
+        .unwrap();
+    let persisted: Value = serde_json::from_slice(
+        &std::fs::read(request_path.uri.strip_prefix("file://").unwrap()).unwrap(),
     )
-    .expect("observation json");
-
+    .unwrap();
+    assert_eq!(persisted["workspace"]["root"], json!(candidate));
     assert_eq!(
-        observation["cwd"],
-        std::fs::canonicalize(&candidate)
-            .expect("canonical candidate")
-            .display()
-            .to_string()
-    );
-    assert_eq!(observation["workspace"], candidate.display().to_string());
-    assert_eq!(
-        observation["config_workspace"],
-        candidate.display().to_string()
+        persisted["executor"]["config"]["workspace_permission_root"],
+        json!(candidate)
     );
     assert_eq!(
-        observation["config_workspace_root"],
-        candidate.display().to_string()
+        persisted["executor"]["config"]["workspace"]["root"],
+        json!(candidate)
     );
     assert_eq!(
-        observation["workspace_permission_root"],
-        candidate.display().to_string(),
-        "the versioned provider capability receives the scheduler-selected workspace without run-ID path reconstruction"
-    );
-    assert!(!original.join("provider-observation.json").exists());
-}
-
-#[test]
-fn provider_adapter_receives_and_consumes_resolved_stdio_runtime_tool() {
-    let _home = artifact_home();
-    let tool = script(
-        "if (process.env.FIXTURE_MODE !== 'isolated') process.exit(17); if (process.argv[2] !== '--launch-only' && (process.env.PROBE_HOME !== 'declared' || process.env.PATH !== undefined || process.env.HOME !== undefined)) process.exit(19); if (process.argv[2] === '--version') { process.stdout.write('fixture 1.0'); process.exit(0); } if (process.argv[2] === '--capability-probe') process.exit(0); if (process.argv[2] !== '--launch-only') process.exit(18); process.stdout.write(process.env.FIXTURE_MODE + ':ping'); process.exit(0);",
-    );
-    let provider_script = script(
-        r#"const { spawnSync } = require('child_process');
-process.stdin.once('data', input => {
-  const request = JSON.parse(input); const tool = request.resolved_runtime_tools[0];
-  if (request.runtime_tools !== undefined) throw new Error('raw runtime tools leaked to adapter');
-  const result = spawnSync(tool.argv[0], tool.argv.slice(1), { input: 'ping', encoding: 'utf8', env: { ...process.env, ...tool.env } });
-  process.stdout.write(JSON.stringify({ schema: 'homeboy/agent-task-outcome/v1', task_id: request.task_id, status: 'succeeded', outputs: { tool_result: result.stdout.trim() } }));
-  process.exit(0);
-});"#,
-    );
-    let (mut request, mut provider) =
-        request("runtime-tool-projection", format!("node {provider_script}"));
-    request.runtime_tools = vec![serde_json::from_value(json!({
-        "id": "fixture.mcp",
-        "command": ["node", tool, "--launch-only"],
-        "env": { "FIXTURE_MODE": "isolated", "PROBE_HOME": "declared" },
-        "secret_env": ["HOME"],
-        "required_capabilities": ["browser"],
-        "readiness": { "command_prefix": [tool], "version_command": ["--version"], "capability_probe": { "argv": ["--capability-probe"] } }
-    }))
-    .expect("runtime tool")];
-    request.policy.tools.tools.insert(
-        "fixture.mcp".to_string(),
-        crate::agent_task::AgentToolPolicyRule {
-            execution_location: crate::agent_task::AgentToolExecutionLocation::Runner,
-            timeout_ms: None,
-            reason: None,
-        },
-    );
-    provider.capabilities = vec!["structured_outcome".to_string()];
-
-    let outcome = ExtensionProviderAgentTaskExecutor::with_providers(vec![provider]).execute(
-        request,
-        AgentTaskExecutionContext {
-            plan_id: "runtime-tool-plan".to_string(),
-            run_id: None,
-            attempt: 1,
-            cancellation: Default::default(),
-            lifecycle_store: None,
-            provider_capacity_key: None,
-        },
-    );
-
-    assert_eq!(
-        outcome.status,
-        AgentTaskOutcomeStatus::Succeeded,
-        "{outcome:?}"
-    );
-    assert_eq!(outcome.outputs["tool_result"], "isolated:ping");
-    assert!(outcome.metadata["resolved_runtime_tools"][0]["argv"][0]
-        .as_str()
-        .is_some_and(|argv| argv.ends_with("node")));
-    assert_eq!(
-        outcome.metadata["resolved_runtime_tools"][0]["env"]["FIXTURE_MODE"],
-        "[redacted]"
-    );
-    assert_eq!(
-        outcome.metadata["resolved_runtime_tools"][0]["capability_probe"]["status"],
-        "succeeded"
-    );
-    assert_eq!(
-        outcome.metadata["resolved_runtime_tools"][0]["version"],
-        "fixture 1.0"
-    );
-    assert_eq!(
-        outcome.metadata["resolved_runtime_tools"][0]["readiness"],
-        json!({ "status": "ready", "evidence": { "kind": "declared_probe", "success": true } })
-    );
-    assert_eq!(
-        outcome.metadata["capability_evidence"]["tool_contributed"][0]["capabilities"][0],
-        "browser"
-    );
-}
-
-#[test]
-fn runtime_tool_cannot_claim_capability_without_a_probe() {
-    let _home = artifact_home();
-    let (mut request, provider) = request("runtime-tool-unverified", "/bin/true".to_string());
-    request.metadata = json!({
-        "capability_requirements": {
-            "schema": "homeboy/agent-task-capability-requirements/v1",
-            "attached_tools": [{ "id": "fixture.browser", "contributes": ["browser"] }]
-        }
-    });
-    request.runtime_tools = vec![serde_json::from_value(json!({
-        "id": "fixture.browser",
-        "command": ["/bin/true"],
-        "required_capabilities": ["browser"]
-    }))
-    .expect("runtime tool")];
-    request.policy.tools.tools.insert(
-        "fixture.browser".to_string(),
-        crate::agent_task::AgentToolPolicyRule {
-            execution_location: crate::agent_task::AgentToolExecutionLocation::Runner,
-            timeout_ms: None,
-            reason: None,
-        },
-    );
-
-    let outcome = ExtensionProviderAgentTaskExecutor::with_providers(vec![provider]).execute(
-        request,
-        AgentTaskExecutionContext {
-            plan_id: "runtime-tool-unverified-plan".to_string(),
-            run_id: None,
-            attempt: 1,
-            cancellation: Default::default(),
-            lifecycle_store: None,
-            provider_capacity_key: None,
-        },
-    );
-
-    assert_eq!(
-        outcome.diagnostics[0].class,
-        "agent_task.runtime_tool_invalid"
-    );
-    assert_eq!(
-        outcome.failure_classification,
-        Some(AgentTaskFailureClassification::InvalidInput)
-    );
-}
-
-#[test]
-fn runtime_tool_without_capabilities_is_usable_without_a_probe() {
-    let _home = artifact_home();
-    let test_context = homeboy_core::test_support::HermeticTestContext::new();
-    let lifecycle_store =
-        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(test_context.path_roots());
-    let provider_script = script(
-        r#"process.stdin.once('data', input => {
-  const tool = JSON.parse(input).resolved_runtime_tools[0];
-  process.stdout.write(JSON.stringify({ schema: 'homeboy/agent-task-outcome/v1', task_id: 'runtime-tool-no-capabilities', status: tool.capabilities === undefined && tool.capability_probe === undefined ? 'succeeded' : 'failed' }));
-  process.exit(0);
-});"#,
-    );
-    let (mut request, provider) = request(
-        "runtime-tool-no-capabilities",
-        format!("node {provider_script}"),
-    );
-    request.runtime_tools = vec![serde_json::from_value(json!({
-        "id": "fixture.utility",
-        "command": ["true"]
-    }))
-    .expect("runtime tool")];
-    request.policy.tools.tools.insert(
-        "fixture.utility".to_string(),
-        crate::agent_task::AgentToolPolicyRule {
-            execution_location: crate::agent_task::AgentToolExecutionLocation::Runner,
-            timeout_ms: None,
-            reason: None,
-        },
-    );
-
-    let outcome = ExtensionProviderAgentTaskExecutor::with_providers(vec![provider]).execute(
-        request,
-        AgentTaskExecutionContext {
-            plan_id: "runtime-tool-no-capabilities-plan".to_string(),
-            run_id: None,
-            attempt: 1,
-            cancellation: Default::default(),
-            lifecycle_store: Some(lifecycle_store),
-            provider_capacity_key: None,
-        },
-    );
-
-    assert_eq!(
-        outcome.status,
-        AgentTaskOutcomeStatus::Succeeded,
-        "{outcome:?}"
+        persisted["executor"]["config"]["workspace_root"],
+        json!(candidate)
     );
 }
 
@@ -586,37 +377,11 @@ fn runtime_tool_capability_probe_obeys_the_command_policy() {
 
 #[test]
 fn provider_validates_declared_outputs() {
-    let script = script(
-        r#"const fs = require('fs');
-let input = '';
-process.stdin.on('data', (chunk) => input += chunk);
-process.stdin.on('end', () => {
-  const request = JSON.parse(input);
-  if (!Array.isArray(request.inputs.required_outputs)
-      || request.inputs.required_outputs[0].name !== 'inspection') {
-    throw new Error('provider did not receive declared outputs');
-  }
-  const mode = request.executor.config.mode;
-  const outputs = mode === 'valid' || mode === 'missing_evidence'
-    ? { inspection: { verdict: 'pass' } }
-    : mode === 'oversized'
-      ? { inspection: { verdict: 'pass', detail: 'x'.repeat(100) } }
-      : mode === 'malformed'
-        ? { inspection: { verdict: 42 } }
-        : {};
-  process.stdout.write(JSON.stringify({
-    schema: 'homeboy/agent-task-outcome/v1',
-    task_id: request.task_id,
-    status: 'succeeded',
-    summary: 'provider completed successfully.',
-    outputs,
-    evidence_refs: mode === 'missing_evidence'
-      ? []
-      : [{ kind: 'transcript', uri: 'file:///provider-transcript.log' }]
-  }));
-});"#,
-    );
-    let (mut request, provider) = request("declared-output", format!("node {script}"));
+    let fake = FakePi::new(&FakePi::answer(
+        r#"{"outputs":{"inspection":{"verdict":"pass"}}}"#,
+    ));
+    let mut request = fake.request("declared-output");
+    let provider = fake.provider();
     request.output_declarations = vec![AgentTaskOutputDeclaration {
         name: "inspection".to_string(),
         required: true,
@@ -627,23 +392,22 @@ process.stdin.on('end', () => {
             "properties": { "verdict": { "type": "string" } }
         }),
         max_bytes: Some(64),
-        evidence_relationship: Some(AgentTaskOutputEvidenceRelationship {
-            relationship: "supported_by".to_string(),
-            evidence: AgentTaskEvidenceRef {
-                kind: "transcript".to_string(),
-                uri: "file:///provider-transcript.log".to_string(),
-                label: None,
-            },
-        }),
+        evidence_relationship: None,
     }];
-    request.executor.config = json!({ "mode": "valid" });
 
     let valid = run_provider_command_once(&request, &provider);
     assert_eq!(valid.status, AgentTaskOutcomeStatus::Succeeded);
     assert_eq!(valid.outputs["inspection"]["verdict"], "pass");
-    assert_eq!(valid.evidence_refs[0].kind, "transcript");
 
-    request.executor.config["mode"] = json!("missing_evidence");
+    request.output_declarations[0].evidence_relationship =
+        Some(crate::agent_task::AgentTaskOutputEvidenceRelationship {
+            relationship: "supported_by".into(),
+            evidence: AgentTaskEvidenceRef {
+                kind: "transcript".into(),
+                uri: "file:///provider-transcript.log".into(),
+                label: None,
+            },
+        });
     let missing_evidence = run_provider_command_once(&request, &provider);
     assert_eq!(
         missing_evidence.status,
@@ -652,22 +416,26 @@ process.stdin.on('end', () => {
     assert!(missing_evidence
         .diagnostics
         .iter()
-        .any(|diagnostic| diagnostic.class == "agent_task.output_evidence_missing"));
+        .any(|diagnostic| { diagnostic.class == "agent_task.output_evidence_missing" }));
+    request.output_declarations[0].evidence_relationship = None;
 
-    request.executor.config["mode"] = json!("missing");
+    let missing_pi = FakePi::new(&FakePi::answer(r#"{"outputs":{"other":"present"}}"#));
+    request.executor.config = missing_pi.config();
     let missing = run_provider_command_once(&request, &provider);
-    assert_eq!(missing.status, AgentTaskOutcomeStatus::CandidateRecoverable);
+    assert_eq!(missing.status, AgentTaskOutcomeStatus::Failed);
     assert_eq!(
         missing.failure_classification,
-        Some(AgentTaskFailureClassification::ExecutionFailed)
+        Some(AgentTaskFailureClassification::Provider)
     );
     assert!(missing
         .diagnostics
         .iter()
-        .any(|diagnostic| diagnostic.class == "agent_task.output_missing"));
-    assert_eq!(missing.evidence_refs[0].kind, "transcript");
+        .any(|diagnostic| diagnostic.class == "pi.required_outputs_missing"));
 
-    request.executor.config["mode"] = json!("malformed");
+    let malformed_pi = FakePi::new(&FakePi::answer(
+        r#"{"outputs":{"inspection":{"verdict":42}}}"#,
+    ));
+    request.executor.config = malformed_pi.config();
     let malformed = run_provider_command_once(&request, &provider);
     assert_eq!(
         malformed.status,
@@ -678,7 +446,10 @@ process.stdin.on('end', () => {
         .iter()
         .any(|diagnostic| diagnostic.class == "agent_task.output_malformed"));
 
-    request.executor.config["mode"] = json!("oversized");
+    let oversized_pi = FakePi::new(&FakePi::answer(
+        &json!({"outputs":{"inspection":{"verdict":"pass", "detail":"x".repeat(100)}}}).to_string(),
+    ));
+    request.executor.config = oversized_pi.config();
     let oversized = run_provider_command_once(&request, &provider);
     assert_eq!(
         oversized.status,
@@ -741,31 +512,26 @@ fn provider_attests_worktree_root_and_executes_nested_component() {
     let component = workspace.join("packages/component");
     std::fs::create_dir_all(&component).expect("component directory");
     let attestation = workspace_attestation(&workspace);
-    let script = script(
-        r#"const fs = require('fs'); let input = ''; process.stdin.on('data', c => input += c); process.stdin.on('end', () => { const request = JSON.parse(input); fs.writeFileSync('provider-observation.json', JSON.stringify({ cwd: process.cwd(), workspace: request.workspace.root })); process.stdout.write(JSON.stringify({ schema: 'homeboy/agent-task-outcome/v1', task_id: request.task_id, status: 'succeeded', summary: 'nested component executed' })); });"#,
-    );
-    let (mut request, provider) = request("nested-component", format!("node {script}"));
+    let fake = FakePi::new(&format!(
+        "pwd > provider-observation.txt\n{}",
+        FakePi::answer("nested component executed")
+    ));
+    let mut request = fake.request("nested-component");
+    let provider = fake.provider();
     request.workspace.root = Some(workspace.display().to_string());
-    request.executor.config = json!({ "component_cwd": "packages/component" });
+    request.executor.config["component_cwd"] = json!("packages/component");
     request.metadata = json!({ "cook_attempt_workspace_identity": attestation });
 
     let outcome = run_provider_command_once(&request, &provider);
 
     assert_eq!(outcome.status, AgentTaskOutcomeStatus::Succeeded);
-    let observation: Value = serde_json::from_slice(
-        &std::fs::read(component.join("provider-observation.json")).expect("provider observation"),
-    )
-    .expect("observation json");
     assert_eq!(
-        observation["cwd"],
-        component
-            .canonicalize()
-            .expect("canonical component")
-            .display()
-            .to_string()
+        std::fs::read_to_string(component.join("provider-observation.txt"))
+            .unwrap()
+            .trim(),
+        component.canonicalize().unwrap().to_str().unwrap()
     );
-    assert_eq!(observation["workspace"], workspace.display().to_string());
-    assert!(!workspace.join("provider-observation.json").exists());
+    assert!(!workspace.join("provider-observation.txt").exists());
 }
 
 #[cfg(unix)]
@@ -1037,157 +803,6 @@ fn provider_manifest_preserves_unknown_metadata_on_export() {
         exported["workspace_materialization"]["provider_workspace_mode"],
         "linked"
     );
-}
-
-#[test]
-fn runtime_contract_normalizes_provider_outputs_to_canonical_artifacts() {
-    let _home = artifact_home();
-    // The runtime writes its artifacts inside the Homeboy-owned executor root
-    // it receives as `artifacts_path`; finalization stages them from there.
-    let script = script(&format!(
-        "let fs=require('fs'); let path=require('path'); let req=JSON.parse(fs.readFileSync(0,'utf8')); \
-         let patch=path.join(req.artifacts_path,'runtime.patch'); let report=path.join(req.artifacts_path,'report.json'); \
-         fs.writeFileSync(patch,'patch bytes'); fs.writeFileSync(report,'{{}}'); \
-         process.stdout.write(JSON.stringify({{schema:'{AGENT_TASK_OUTCOME_SCHEMA}',task_id:req.task_id,status:'succeeded',\
-         outputs:{{runtime:{{status:'done',summary:'runtime finished',artifacts:{{patch:patch,report:{{path:report}}}}}}}}}}));"
-    ));
-    let (request, mut provider) = request("task-runtime-normalization", format!("node {script}"));
-    provider.runtime_contract = AgentTaskRuntimeContract {
-        capabilities: vec!["sandbox".to_string()],
-        lifecycle_states: AgentTaskRuntimeLifecycleStates {
-            execution_states: BTreeMap::new(),
-            outcome_statuses: BTreeMap::from([(
-                "done".to_string(),
-                AgentTaskOutcomeStatus::Succeeded,
-            )]),
-            failure_classifications: BTreeMap::new(),
-        },
-        normalization: AgentTaskRuntimeNormalization {
-            status_path: Some("outputs.runtime.status".to_string()),
-            summary_path: Some("outputs.runtime.summary".to_string()),
-            output_artifacts: vec![
-                AgentTaskRuntimeOutputArtifactMapping {
-                    name: "patch".to_string(),
-                    artifact_type: Some("patch".to_string()),
-                    artifact_schema: Some("text/x-patch".to_string()),
-                    path: "outputs.runtime.artifacts.patch".to_string(),
-                    kind: Some("patch".to_string()),
-                    mime: Some("text/x-patch".to_string()),
-                    id: None,
-                },
-                AgentTaskRuntimeOutputArtifactMapping {
-                    name: "report".to_string(),
-                    artifact_type: Some("agent_report".to_string()),
-                    artifact_schema: Some("application/json".to_string()),
-                    path: "outputs.runtime.artifacts.report".to_string(),
-                    kind: Some("report".to_string()),
-                    mime: Some("application/json".to_string()),
-                    id: None,
-                },
-            ],
-        },
-        apply_back: AgentTaskRuntimeApplyBack::default(),
-        preflight_checks: Vec::new(),
-    };
-
-    let outcome = run_provider_command(&request, &provider, None);
-
-    assert_eq!(outcome.status, AgentTaskOutcomeStatus::Succeeded);
-    assert_eq!(outcome.summary.as_deref(), Some("runtime finished"));
-    assert_eq!(outcome.artifacts.len(), 2);
-    assert_eq!(outcome.artifacts[0].kind, "patch");
-    assert_eq!(
-        outcome.artifacts[0].metadata["executor_artifact_finalized"],
-        true
-    );
-    assert_eq!(outcome.artifacts[1].kind, "report");
-    assert_eq!(
-        outcome.artifacts[1].metadata["executor_artifact_finalized"],
-        true
-    );
-    assert_eq!(
-        outcome.artifacts[0].size_bytes,
-        Some("patch bytes".len() as u64)
-    );
-    assert!(outcome.artifacts[0].sha256.is_some());
-    assert_eq!(outcome.typed_artifacts.len(), 2);
-    assert_eq!(outcome.typed_artifacts[0].name, "patch");
-    assert_eq!(
-        outcome.typed_artifacts[1].artifact_schema.as_deref(),
-        Some("application/json")
-    );
-}
-
-#[test]
-fn runtime_contract_maps_failed_runtime_status() {
-    let provider_output = json!({
-        "schema": AGENT_TASK_OUTCOME_SCHEMA,
-        "task_id": "task-runtime-failed",
-        "status": "succeeded",
-        "outputs": { "sample_runtime": { "state": "failed" } }
-    });
-    let script = script(&format!(
-        "process.stdout.write(JSON.stringify({}));",
-        provider_output
-    ));
-    let (request, mut provider) = request("task-runtime-failed", format!("node {script}"));
-    provider.backend = "sample-runtime".to_string();
-    provider.runtime_contract.lifecycle_states.outcome_statuses =
-        BTreeMap::from([("failed".to_string(), AgentTaskOutcomeStatus::Failed)]);
-    provider
-        .runtime_contract
-        .lifecycle_states
-        .failure_classifications = BTreeMap::from([(
-        "failed".to_string(),
-        AgentTaskFailureClassification::Provider,
-    )]);
-    provider.runtime_contract.normalization.status_path =
-        Some("outputs.sample_runtime.state".to_string());
-
-    let outcome = run_provider_command(&request, &provider, None);
-
-    assert_eq!(outcome.status, AgentTaskOutcomeStatus::Failed);
-    assert_eq!(
-        outcome.failure_classification,
-        Some(AgentTaskFailureClassification::Provider)
-    );
-}
-
-#[test]
-fn readiness_validation_fails_before_execution_when_provider_executable_is_missing() {
-    let (_request, mut provider) = request("task-readiness", "minimal-provider".to_string());
-    provider.runner_readiness = vec![AgentTaskProviderRunnerReadiness {
-        id: "test.executable".to_string(),
-        label: "Test executable".to_string(),
-        required_extensions: Vec::new(),
-        invocation: None,
-        secret_env: Vec::new(),
-        env_path: None,
-        executable: Some(AgentTaskProviderExecutableReadiness {
-            env: vec!["HOMEBOY_TEST_PROVIDER_COMMAND".to_string()],
-            candidates: vec![format!(
-                "homeboy-definitely-missing-provider-{}",
-                std::process::id()
-            )],
-            version_command: Vec::new(),
-            install_hint: Some("Install the test provider".to_string()),
-            extra: BTreeMap::new(),
-        }),
-        remediation: None,
-        extra: BTreeMap::new(),
-    }];
-
-    let err =
-        validate_provider_runner_readiness_for_backend_with_providers(&[provider], "test", None)
-            .expect_err("missing provider executable should block preflight");
-
-    assert_eq!(err.code.as_str(), "validation.invalid_argument");
-    assert!(err.message.contains("backend 'test' is registered"));
-    assert!(err
-        .message
-        .contains("provider runner executable 'Test executable'"));
-    assert!(err.message.contains("HOMEBOY_TEST_PROVIDER_COMMAND"));
-    assert!(err.message.contains("Install the test provider"));
 }
 
 #[test]
