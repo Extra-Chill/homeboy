@@ -2242,6 +2242,59 @@ exec '{}' "$@"
     }
 
     #[test]
+    fn nested_root_install_and_redirected_update() {
+        with_isolated_home(|home| {
+            let home = home.path();
+            let nested_repo = home.join("nested-repo");
+            let root = nested_repo.join("extensions");
+            fs::create_dir_all(&root).unwrap();
+            write_extension_fixture_with_version(&root, "wordpress", "2.0.0");
+            write_declared_runtime_shared_assets(&root);
+            let nested_remote = prepare_git_repo(&nested_repo).expect("nested git fixture");
+            let nested_url = nested_remote.path().join("extension.git");
+
+            let flat = home.join("flat-repo");
+            fs::create_dir_all(&flat).unwrap();
+            write_extension_fixture(&flat, "wordpress");
+            let manifest_path = flat.join("wordpress/wordpress.json");
+            let mut manifest: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(&manifest_path).unwrap()).unwrap();
+            manifest["source_url"] = serde_json::json!(nested_url.to_string_lossy());
+            fs::write(&manifest_path, serde_json::to_string(&manifest).unwrap()).unwrap();
+            let flat_remote = prepare_git_repo(&flat).expect("flat git fixture");
+            let flat_url = flat_remote.path().join("extension.git");
+            let result = install(&flat_url.to_string_lossy(), Some("wordpress")).unwrap();
+            update("wordpress", false, None).expect("redirect to nested root");
+            assert_eq!(load_extension("wordpress").unwrap().version, "2.0.0");
+            assert!(result.path.join(".homeboy-extension-root.json").is_file());
+            assert!(home
+                .join(".config/homeboy/extensions/dependency-adapters/examples/nodejs.json")
+                .is_file());
+            fs::remove_dir_all(&result.path).unwrap();
+            install(&nested_url.to_string_lossy(), Some("wordpress")).expect("nested URL install");
+            let error = install(&nested_url.to_string_lossy(), Some("missing")).unwrap_err();
+            assert!(error.to_string().contains("wordpress"), "{error}");
+        });
+    }
+
+    #[test]
+    fn nested_root_legacy_layout_wins() {
+        with_isolated_home(|home| {
+            let source = home.path().join("source");
+            fs::create_dir_all(source.join("extensions")).unwrap();
+            write_extension_fixture_with_version(&source, "wordpress", "1.0.0");
+            write_extension_fixture_with_version(&source.join("extensions"), "wordpress", "2.0.0");
+            write_declared_runtime_shared_assets(&source.join("extensions"));
+            let target = home.path().join("installed");
+            super::resolve_cloned_extension(&source, "wordpress", &target, "fixture").unwrap();
+            let manifest: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(target.join("wordpress.json")).unwrap())
+                    .unwrap();
+            assert_eq!(manifest["version"], "1.0.0");
+        });
+    }
+
+    #[test]
     fn extracted_monorepo_update_reclones_from_stored_source_url() {
         with_isolated_home(|home| {
             let home = home.path();
