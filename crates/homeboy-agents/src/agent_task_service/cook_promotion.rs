@@ -6488,7 +6488,8 @@ pub(crate) fn cook_failure_context_with_stores(
         .and_then(|record| super::CookDelivery::from_run_metadata(&record.metadata));
     let finalization_claim = delivery
         .as_ref()
-        .and_then(super::CookDelivery::patch_sha)
+        .and_then(|delivery| delivery.candidate.as_ref()?.candidate.as_ref())
+        .map(|candidate| candidate.tree_sha.as_str())
         .and_then(|sha| {
             lifecycle_store
                 .map(|store| {

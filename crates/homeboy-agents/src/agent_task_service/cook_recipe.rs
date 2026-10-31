@@ -3247,7 +3247,7 @@ fn consume_claimed_with_dispatcher_policy(
     // that owns the next remediation. Candidate mismatch is recorded as stale
     // by the feedback store and cannot leak into another attempt.
     let prepared_feedback = if let Some(candidate) =
-        crate::agent_task_feedback::candidate_identity(&record)
+        crate::agent_task_feedback::candidate_sha(&record)
     {
         let feedback_store = crate::agent_task_feedback::CookFeedbackStore::new(store.data_root());
         let feedback = feedback_store.prepare_for_candidate(&recipe.cook_id, &candidate)?;
@@ -4890,6 +4890,18 @@ mod tests {
         );
     }
 
+    fn record_feedback_candidate(record: &mut agent_task_lifecycle::AgentTaskRunRecord) {
+        let artifacts = super::super::CookDeliveryArtifacts {
+            promotion: Some(
+                serde_json::json!({"status": "applied", "candidate": {"base_sha": "base", "candidate_sha": "candidate-a", "tree_sha": "tree"}}),
+            ),
+            ..Default::default()
+        };
+        let delivery = super::super::CookDelivery::project(&artifacts, None);
+        record.metadata["cook_delivery"] =
+            super::super::CookDelivery::to_record(delivery.as_ref(), &Default::default());
+    }
+
     #[test]
     fn feedback_reaches_one_remediation_prompt_before_durable_acknowledgement() {
         let context = homeboy_core::test_support::HermeticTestContext::new();
@@ -4897,8 +4909,8 @@ mod tests {
         persist_recipe_run(&store, &lifecycle_store);
         lifecycle_store
             .mutate_record("run", |record| {
+                record_feedback_candidate(record);
                 record.metadata["provider_executions_consumed"] = serde_json::json!(1);
-                record.metadata["candidate_identity"] = serde_json::json!("candidate-a");
                 true
             })
             .unwrap();
@@ -4961,8 +4973,8 @@ mod tests {
         persist_recipe_run(&store, &lifecycle_store);
         lifecycle_store
             .mutate_record("run", |record| {
+                record_feedback_candidate(record);
                 record.metadata["provider_executions_consumed"] = serde_json::json!(1);
-                record.metadata["candidate_identity"] = serde_json::json!("candidate-a");
                 true
             })
             .unwrap();

@@ -3326,7 +3326,7 @@ fn review_canonical_candidate(
             AgentTaskPromotionStatus::Applied
                 | AgentTaskPromotionStatus::GateFailed
                 | AgentTaskPromotionStatus::VerificationPending
-        ) && candidate.candidate_sha.is_some()
+        ) && candidate.candidate.is_some()
     });
     let state = if finalized {
         "finalized"
@@ -3356,7 +3356,7 @@ fn review_canonical_candidate(
         "target_applied": target_applied,
         "verified": verified,
         "finalized": finalized,
-        "fingerprint": candidate.and_then(|candidate| candidate.fingerprint.as_deref()),
+        "candidate": candidate.and_then(|candidate| candidate.candidate.as_ref()),
     })
 }
 

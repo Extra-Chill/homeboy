@@ -32,6 +32,7 @@ use super::cook_baseline::compare_gate_failures_to_verified_base;
 use super::cook_promotion::*;
 use super::cook_recipe::CookRecipeStore;
 use super::AgentTaskRunResult;
+use crate::agent_task::AgentTaskCandidate;
 use crate::agent_task_gate::failure_excerpt::gate_failure_excerpt_from_value;
 use crate::agent_task_gate::AgentTaskGateStatus;
 use crate::agent_task_lifecycle::{
@@ -242,16 +243,7 @@ pub struct CookDeliveryCandidate {
     /// The latest promotion's status.
     pub promotion: AgentTaskPromotionStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fingerprint: Option<String>,
-    /// The reviewed candidate's identity: its recorded `candidate_ref`, else
-    /// its commit, else its fingerprint. Committed and artifact-backed
-    /// candidates spell it differently.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub identity: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub candidate_sha: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub patch_sha: Option<String>,
+    pub candidate: Option<AgentTaskCandidate>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verified_base: Option<String>,
     /// The post-apply checkpoint proves this exact candidate reached its
@@ -528,21 +520,6 @@ impl CookDelivery {
             .as_ref()
             .and_then(|publication| publication.pr_url.as_deref())
     }
-
-    /// The candidate's patch sha, falling back to its first post-apply
-    /// checkpoint.
-    pub fn patch_sha(&self) -> Option<&str> {
-        self.candidate
-            .as_ref()
-            .and_then(|candidate| candidate.patch_sha.as_deref())
-    }
-
-    /// The reviewed candidate's identity (see [`CookDeliveryCandidate::identity`]).
-    pub fn candidate_identity(&self) -> Option<&str> {
-        self.candidate
-            .as_ref()
-            .and_then(|candidate| candidate.identity.as_deref())
-    }
 }
 
 fn non_null(value: Option<&Value>) -> Option<&Value> {
@@ -576,7 +553,9 @@ fn read_candidate(
         string_at(promotion, pointer)
             .or_else(|| checkpoint.and_then(|checkpoint| string_at(checkpoint, pointer)))
     };
-    let candidate_sha = string_at(promotion, "/candidate/candidate_sha");
+    let candidate: Option<AgentTaskCandidate> = promotion
+        .get("candidate")
+        .and_then(|candidate| serde_json::from_value(candidate.clone()).ok());
     let candidate_recorded = promotion
         .pointer("/provenance/candidate")
         .is_some_and(|candidate| !candidate.is_null());
@@ -589,34 +568,16 @@ fn read_candidate(
         .pointer("/provenance/post_apply")
         .and_then(Value::as_bool)
         == Some(true)
-        && string_at(promotion, "/candidate/candidate_sha").is_some()
+        && candidate.is_some()
         && destination_worktree(promotion).is_some()
         && candidate_recorded;
     CookDeliveryCandidate {
         task_id: string_at(promotion, "/task_id"),
         promotion: status,
-        fingerprint: identity("/provenance/candidate/fingerprint/sha256"),
-        identity: candidate_identity(promotion),
-        candidate_sha,
-        patch_sha: identity("/candidate/tree_sha"),
+        candidate,
         verified_base: identity("/verified_base/sha"),
         target_applied,
     }
-}
-
-/// The first recorded spelling of the candidate's identity. An empty first
-/// spelling records no identity rather than deferring to a later one.
-fn candidate_identity(promotion: &Value) -> Option<String> {
-    [
-        "/provenance/candidate_ref",
-        "/provenance/candidate/commit",
-        "/provenance/candidate/fingerprint/sha256",
-        "/provenance/candidate/sha256",
-    ]
-    .into_iter()
-    .find_map(|pointer| promotion.pointer(pointer).and_then(Value::as_str))
-    .filter(|identity| !identity.is_empty())
-    .map(str::to_string)
 }
 
 fn destination_worktree(promotion: &Value) -> Option<String> {
