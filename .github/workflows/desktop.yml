@@ -1,8 +1,8 @@
 name: Desktop
 
-# Builds the macOS app and runs its contract tests. The contract tests compile
-# against the app's own sources (minus the @main App entry point), so a model
-# or command-registry change that breaks a fixture fails here.
+# Builds the macOS app and runs its contract tests (tests/ContractTests.swift
+# compiles the test runner with the app models it covers), so a model or
+# command-registry change that breaks a fixture fails here.
 
 on:
   pull_request:
@@ -52,14 +52,4 @@ jobs:
             | tail -n 200
 
       - name: Contract tests
-        run: |
-          set -euo pipefail
-          sources="$RUNNER_TEMP/contract-test-sources.txt"
-          find Homeboy -name '*.swift' \
-            ! -path 'Homeboy/App/HomeboyApp.swift' \
-            ! -path 'Homeboy/Resources/*' | sort > "$sources"
-          find tests -maxdepth 1 -name '*.swift' | sort >> "$sources"
-          echo "Compiling $(wc -l < "$sources" | tr -d ' ') sources"
-          xcrun swiftc -parse-as-library -swift-version 5 \
-            -o "$RUNNER_TEMP/contract-tests" $(cat "$sources")
-          "$RUNNER_TEMP/contract-tests" "$PWD/tests"
+        run: swift tests/ContractTests.swift "$PWD/tests"
