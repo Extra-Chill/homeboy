@@ -21,7 +21,7 @@ pub(crate) fn feedback(args: CookFeedbackArgs) -> CmdResult<Value> {
     }
     let selected_identity = homeboy::agents::agent_task_lifecycle::exact_record(&selection.run_id)
         .ok()
-        .and_then(|record| homeboy::agents::agent_task_feedback::candidate_identity(&record));
+        .and_then(|record| homeboy::agents::agent_task_feedback::candidate_sha(&record));
     let candidate = match args.candidate {
         Some(candidate) => candidate,
         None => selected_identity.clone().ok_or_else(|| {

@@ -7545,8 +7545,7 @@ pub(crate) fn attempt_preserves_candidate_or_gate(
             | Status::NoChangesGateFailed
             | Status::VerificationPending
             | Status::Applied
-    ) || candidate.fingerprint.is_some()
-        || candidate.candidate_sha.is_some()
+    ) || candidate.candidate.is_some()
 }
 
 fn acceptance_candidate(

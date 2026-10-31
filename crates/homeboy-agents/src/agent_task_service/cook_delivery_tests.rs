@@ -237,8 +237,7 @@ fn published_delivery_reads_candidate_destination_gates_and_publication() {
     .expect("delivery");
     let candidate = delivery.candidate.expect("candidate");
     assert_eq!(candidate.promotion, AgentTaskPromotionStatus::Applied);
-    assert_eq!(candidate.fingerprint.as_deref(), Some("fingerprint-sha"));
-    assert_eq!(candidate.patch_sha.as_deref(), Some("patchsha"));
+    assert_eq!(candidate.candidate.as_ref().unwrap().tree_sha, "patchsha");
     assert_eq!(candidate.verified_base.as_deref(), Some("base-sha"));
     assert!(candidate.target_applied);
     let destination = delivery.destination.expect("destination");
@@ -335,65 +334,26 @@ fn read_model_accessors_answer_from_the_record() {
         assert_eq!(delivery.has_publication_receipt(), receipt, "{name}");
         assert_eq!(delivery.published(), published, "{name}");
         assert_eq!(delivery.pr_url(), pr_url, "{name}");
-        assert_eq!(delivery.patch_sha(), Some("patchsha"), "{name}");
         assert_eq!(
-            delivery.candidate_identity(),
-            Some("fingerprint-sha"),
+            delivery.candidate.unwrap().candidate.unwrap().tree_sha,
+            "patchsha",
             "{name}"
         );
     }
 }
 
 #[test]
-fn the_source_checkpoint_keeps_the_candidate_identity_a_later_report_omits() {
+fn a_report_without_a_typed_candidate_has_no_candidate() {
     let mut latest = promotion("applied", passed_gate());
-    latest["provenance"]["candidate"] = Value::Null;
-    let recovered = CookDelivery::from_run_metadata(&delivery_metadata(json!({
+    latest["candidate"] = Value::Null;
+    let delivery = CookDelivery::from_run_metadata(&delivery_metadata(json!({
         "promotion": latest,
         "source_checkpoint": promotion("verification_pending", json!([])),
     })))
     .expect("delivery");
-    assert_eq!(
-        recovered
-            .candidate
-            .and_then(|candidate| candidate.fingerprint)
-            .as_deref(),
-        Some("fingerprint-sha")
-    );
-}
-
-#[test]
-fn candidate_identity_reads_its_first_recorded_spelling() {
-    let identity = |provenance: Value| {
-        let mut latest = promotion("applied", passed_gate());
-        latest["provenance"] = provenance;
-        CookDelivery::from_run_metadata(&delivery_metadata(json!({ "promotion": latest })))
-            .and_then(|delivery| delivery.candidate_identity().map(str::to_string))
-    };
-    assert_eq!(
-        identity(json!({
-            "candidate_ref": "refs/cook/1",
-            "candidate": { "commit": "commit-1", "fingerprint": { "sha256": "fp" } }
-        }))
-        .as_deref(),
-        Some("refs/cook/1")
-    );
-    assert_eq!(
-        identity(
-            json!({ "candidate": { "commit": "commit-1", "fingerprint": { "sha256": "fp" } } })
-        )
-        .as_deref(),
-        Some("commit-1")
-    );
-    assert_eq!(
-        identity(json!({ "candidate": { "sha256": "artifact-sha" } })).as_deref(),
-        Some("artifact-sha")
-    );
-    // An empty first spelling records no identity rather than a later one.
-    assert_eq!(
-        identity(json!({ "candidate_ref": "", "candidate": { "commit": "commit-1" } })),
-        None
-    );
+    let candidate = delivery.candidate.unwrap();
+    assert!(candidate.candidate.is_none());
+    assert!(!candidate.target_applied);
 }
 
 #[test]

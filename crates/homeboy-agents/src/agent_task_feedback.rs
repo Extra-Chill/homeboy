@@ -25,7 +25,7 @@ pub enum FeedbackState {
 pub struct CookFeedback {
     pub idempotency_key: String,
     pub cook_id: String,
-    pub candidate_identity: String,
+    pub candidate_sha: String,
     pub author: String,
     pub source: String,
     pub text: String,
@@ -125,7 +125,7 @@ impl CookFeedbackStore {
     pub fn submit(
         &self,
         cook_id: &str,
-        candidate_identity: &str,
+        candidate_sha: &str,
         author: &str,
         source: &str,
         text: &str,
@@ -133,7 +133,7 @@ impl CookFeedbackStore {
     ) -> Result<(CookFeedback, bool)> {
         for (field, value) in [
             ("cook_id", cook_id),
-            ("candidate_identity", candidate_identity),
+            ("candidate_sha", candidate_sha),
             ("author", author),
             ("source", source),
             ("text", text),
@@ -151,7 +151,7 @@ impl CookFeedbackStore {
         self.with_lock(cook_id, || {
             self.submit_locked(
                 cook_id,
-                candidate_identity,
+                candidate_sha,
                 author,
                 source,
                 text,
@@ -163,7 +163,7 @@ impl CookFeedbackStore {
     fn submit_locked(
         &self,
         cook_id: &str,
-        candidate_identity: &str,
+        candidate_sha: &str,
         author: &str,
         source: &str,
         text: &str,
@@ -175,7 +175,7 @@ impl CookFeedbackStore {
             .iter()
             .find(|item| item.idempotency_key == idempotency_key)
         {
-            if existing.candidate_identity != candidate_identity
+            if existing.candidate_sha != candidate_sha
                 || existing.text != text
                 || existing.author != author
                 || existing.source != source
@@ -192,7 +192,7 @@ impl CookFeedbackStore {
         let feedback = CookFeedback {
             idempotency_key: idempotency_key.to_string(),
             cook_id: cook_id.to_string(),
-            candidate_identity: candidate_identity.to_string(),
+            candidate_sha: candidate_sha.to_string(),
             author: author.to_string(),
             source: source.to_string(),
             text: text.to_string(),
@@ -216,9 +216,9 @@ impl CookFeedbackStore {
     pub fn consume_for_candidate(
         &self,
         cook_id: &str,
-        candidate_identity: &str,
+        candidate_sha: &str,
     ) -> Result<Vec<CookFeedback>> {
-        let pending = self.prepare_for_candidate(cook_id, candidate_identity)?;
+        let pending = self.prepare_for_candidate(cook_id, candidate_sha)?;
         self.acknowledge(cook_id, &pending)
     }
 
@@ -228,17 +228,17 @@ impl CookFeedbackStore {
     pub fn prepare_for_candidate(
         &self,
         cook_id: &str,
-        candidate_identity: &str,
+        candidate_sha: &str,
     ) -> Result<Vec<CookFeedback>> {
         self.with_lock(cook_id, || {
-            self.prepare_for_candidate_locked(cook_id, candidate_identity)
+            self.prepare_for_candidate_locked(cook_id, candidate_sha)
         })
     }
 
     fn prepare_for_candidate_locked(
         &self,
         cook_id: &str,
-        candidate_identity: &str,
+        candidate_sha: &str,
     ) -> Result<Vec<CookFeedback>> {
         let mut document = self.load(cook_id)?;
         let mut consumed = Vec::new();
@@ -246,11 +246,11 @@ impl CookFeedbackStore {
             if feedback.state != FeedbackState::Pending {
                 continue;
             }
-            if feedback.candidate_identity != candidate_identity {
+            if feedback.candidate_sha != candidate_sha {
                 feedback.state = FeedbackState::Stale;
                 feedback.stale_reason = Some(format!(
-                    "candidate identity changed before remediation: expected `{}`, got `{candidate_identity}`",
-                    feedback.candidate_identity
+                    "candidate changed before remediation: expected `{}`, got `{candidate_sha}`",
+                    feedback.candidate_sha
                 ));
                 continue;
             }
@@ -433,20 +433,12 @@ mod tests {
     }
 }
 
-/// Resolve the reviewed candidate identity from the Cook delivery read model.
-/// A run without a delivered candidate falls back to its recorded
-/// `candidate_identity`.
-pub fn candidate_identity(record: &AgentTaskRunRecord) -> Option<String> {
+/// Resolve the reviewed commit from the Cook delivery's typed candidate.
+pub fn candidate_sha(record: &AgentTaskRunRecord) -> Option<String> {
     crate::agent_task_service::CookDelivery::from_run_metadata(&record.metadata)
-        .and_then(|delivery| delivery.candidate_identity().map(str::to_string))
-        .or_else(|| {
-            record
-                .metadata
-                .get("candidate_identity")
-                .and_then(Value::as_str)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string)
-        })
+        .and_then(|delivery| delivery.candidate)
+        .and_then(|delivery| delivery.candidate)
+        .map(|candidate| candidate.candidate_sha)
 }
 
 pub fn append_to_plan(
@@ -457,9 +449,9 @@ pub fn append_to_plan(
     if feedback.is_empty() {
         return Ok(());
     }
-    let candidate = candidate_identity(record).ok_or_else(|| {
+    let candidate = candidate_sha(record).ok_or_else(|| {
         Error::validation_invalid_argument(
-            "cook_feedback.candidate_identity",
+            "cook_feedback.candidate_sha",
             "cannot consume feedback because the durable Cook has no candidate identity",
             Some(record.run_id.clone()),
             None,

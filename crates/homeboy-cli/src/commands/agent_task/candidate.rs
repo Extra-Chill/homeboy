@@ -680,7 +680,7 @@ fn has_retained_candidate(payload: &Value) -> bool {
             AgentTaskPromotionStatus::VerificationPending
                 | AgentTaskPromotionStatus::Applied
                 | AgentTaskPromotionStatus::GateFailed
-        ) && candidate.candidate_sha.is_some()
+        ) && candidate.candidate.is_some()
     }) || payload
         .get("attempts")
         .and_then(Value::as_array)
