@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.53.13] - 2026-10-31
+
+### Changed
+- root the reusable workflows, pin CI to the monorepo, add desktop CI and releases
+
 ## [3.53.12] - 2026-10-31
 
 ### Fixed
