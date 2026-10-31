@@ -1937,7 +1937,10 @@ pub(super) fn refreshed_daemon_endpoint(
     runner_id: &str,
     expected_identity: Option<&str>,
 ) -> Result<Option<String>> {
-    let session = super::super::connection::reconnect_job_owner_for_polling(runner_id)?;
+    let session = super::super::connection::ensure_transport(
+        runner_id,
+        super::super::connection::TransportLifetime::Persisted,
+    )?;
     if session.mode != crate::RunnerTunnelMode::DirectSsh {
         return Ok(None);
     }

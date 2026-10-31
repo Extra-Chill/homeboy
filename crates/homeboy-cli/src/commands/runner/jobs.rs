@@ -232,9 +232,10 @@ fn job_cancel(runner_id: &str, job_id: &str) -> CmdResult<RunnerJobOutput> {
     let (job, events) = match runner::runner_job_cancel(runner_id, job_id, CAUSE) {
         Ok(result) => result,
         Err(_) => {
-            let session = runner::reconnect_job_log_owner(runner_id)?;
+            let session =
+                runner::ensure_transport(runner_id, runner::TransportLifetime::Temporary)?;
             let result = runner::runner_job_cancel_for_session(&session, job_id, CAUSE);
-            runner::close_reconnected_job_log_owner(&session);
+            runner::close_transport(&session);
             result?
         }
     };
@@ -283,41 +284,18 @@ fn job_logs(
     let poll_interval = Duration::from_millis(poll_ms.max(100));
     let requested_cursor = cursor.unwrap_or(0);
     let mut emitted_sequence = requested_cursor;
-    const MAX_RECONNECTS: u8 = 3;
     let mut reconnects = 0;
     let mut recovery_session = None;
     let mut snapshot = match runner_job_log_snapshot(runner_id, job_id) {
         Ok(snapshot) => snapshot,
-        Err(_) => {
-            reconnects += 1;
-            eprintln!("runner log transport lost; reconnecting to the job-owning daemon ({reconnects}/{MAX_RECONNECTS})");
-            let session =
-                runner::reconnect_job_log_owner(runner_id).map_err(|reconnect_error| {
-                    follow_recovery_error(
-                        runner_id,
-                        job_id,
-                        emitted_sequence,
-                        poll_ms,
-                        reconnect_error,
-                    )
-                })?;
-            match runner::runner_job_log_snapshot_for_session(&session, job_id) {
-                Ok(snapshot) => {
-                    recovery_session = Some(session);
-                    snapshot
-                }
-                Err(recovery_error) => {
-                    runner::close_reconnected_job_log_owner(&session);
-                    return Err(classify_follow_error(
-                        runner_id,
-                        job_id,
-                        emitted_sequence,
-                        poll_ms,
-                        recovery_error,
-                    ));
-                }
-            }
-        }
+        Err(_) => recover_job_log_snapshot(
+            runner_id,
+            job_id,
+            emitted_sequence,
+            poll_ms,
+            &mut reconnects,
+            &mut recovery_session,
+        )?,
     };
 
     let stream_human_events = follow && !json && !compact && tail_kb.is_none();
@@ -343,42 +321,17 @@ fn job_logs(
         };
         snapshot = match snapshot_result {
             Ok(snapshot) => snapshot,
-            Err(_error) if reconnects < MAX_RECONNECTS => {
-                reconnects += 1;
-                eprintln!("runner log transport lost; reconnecting to the job-owning daemon ({reconnects}/{MAX_RECONNECTS})");
-                if let Some(session) = recovery_session.take() {
-                    runner::close_reconnected_job_log_owner(&session);
-                }
-                let session =
-                    runner::reconnect_job_log_owner(runner_id).map_err(|reconnect_error| {
-                        follow_recovery_error(
-                            runner_id,
-                            job_id,
-                            emitted_sequence,
-                            poll_ms,
-                            reconnect_error,
-                        )
-                    })?;
-                match runner::runner_job_log_snapshot_for_session(&session, job_id) {
-                    Ok(snapshot) => {
-                        recovery_session = Some(session);
-                        snapshot
-                    }
-                    Err(recovery_error) => {
-                        runner::close_reconnected_job_log_owner(&session);
-                        return Err(classify_follow_error(
-                            runner_id,
-                            job_id,
-                            emitted_sequence,
-                            poll_ms,
-                            recovery_error,
-                        ));
-                    }
-                }
-            }
+            Err(_error) if reconnects < MAX_RECONNECTS => recover_job_log_snapshot(
+                runner_id,
+                job_id,
+                emitted_sequence,
+                poll_ms,
+                &mut reconnects,
+                &mut recovery_session,
+            )?,
             Err(error) => {
                 if let Some(session) = recovery_session.take() {
-                    runner::close_reconnected_job_log_owner(&session);
+                    runner::close_transport(&session);
                 }
                 return Err(follow_recovery_error(
                     runner_id,
@@ -421,7 +374,7 @@ fn job_logs(
         );
     }
     if let Some(session) = recovery_session.take() {
-        runner::close_reconnected_job_log_owner(&session);
+        runner::close_transport(&session);
     }
 
     Ok((
@@ -446,6 +399,47 @@ fn job_logs(
         },
         0,
     ))
+}
+
+const MAX_RECONNECTS: u8 = 3;
+
+/// Replace a dropped log transport with a fresh temporary transport to the
+/// job-owning daemon and read the snapshot through it. The prior temporary
+/// transport is closed first; a transport whose read fails is closed before
+/// the classified error is returned.
+fn recover_job_log_snapshot(
+    runner_id: &str,
+    job_id: &str,
+    emitted_sequence: u64,
+    poll_ms: u64,
+    reconnects: &mut u8,
+    recovery_session: &mut Option<runner::RunnerSession>,
+) -> homeboy::core::Result<homeboy::runner::RunnerJobLogSnapshot> {
+    *reconnects += 1;
+    eprintln!("runner log transport lost; reconnecting to the job-owning daemon ({reconnects}/{MAX_RECONNECTS})");
+    if let Some(session) = recovery_session.take() {
+        runner::close_transport(&session);
+    }
+    let session = runner::ensure_transport(runner_id, runner::TransportLifetime::Temporary)
+        .map_err(|error| {
+            follow_recovery_error(runner_id, job_id, emitted_sequence, poll_ms, error)
+        })?;
+    match runner::runner_job_log_snapshot_for_session(&session, job_id) {
+        Ok(snapshot) => {
+            *recovery_session = Some(session);
+            Ok(snapshot)
+        }
+        Err(error) => {
+            runner::close_transport(&session);
+            Err(classify_follow_error(
+                runner_id,
+                job_id,
+                emitted_sequence,
+                poll_ms,
+                error,
+            ))
+        }
+    }
 }
 
 fn reject_unknown_daemon_owner(job_id: &str) -> homeboy::core::Result<()> {
@@ -1074,7 +1068,7 @@ mod tests {
         assert_eq!(rendered, vec![1, 2, 3]);
         assert_eq!(cursor, 3);
         assert!(runner_job_terminal(JobStatus::Succeeded));
-        runner::close_reconnected_job_log_owner(&authoritative);
+        runner::close_transport(&authoritative);
         assert!(!tunnel.wait().expect("recovery tunnel exits").success());
         authoritative_server
             .join()

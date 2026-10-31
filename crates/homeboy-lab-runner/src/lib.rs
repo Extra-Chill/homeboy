@@ -310,13 +310,13 @@ pub use command_path::preflight_remote_argv_path_translation;
 pub(crate) use command_path::set_homeboy_command_selection;
 pub(crate) use connection::daemon_endpoint_identity;
 pub use connection::{
-    close_reconnected_job_log_owner, connect, connect_with_live_lease_adoption,
-    connect_with_orphan_adoption, connect_with_unleased_candidate_reconciliation,
-    diagnostic_status, disconnect, disconnect_local_recovery, peer_session_maintenance,
-    persisted_status, persisted_status_until, persisted_statuses, reconcile_status,
-    reconcile_status_with_remote_attestation, reconcile_terminal_jobs, reconnect_job_log_owner,
-    remote_lifecycle_plan, runner_artifact_content, status, statuses, statuses_indexed,
-    PeerSessionMaintenanceReport, RunnerReconcileWithAttestationOutcome,
+    close_transport, connect, connect_with_live_lease_adoption, connect_with_orphan_adoption,
+    connect_with_unleased_candidate_reconciliation, diagnostic_status, disconnect,
+    disconnect_local_recovery, ensure_transport, peer_session_maintenance, persisted_status,
+    persisted_status_until, persisted_statuses, reconcile_status,
+    reconcile_status_with_remote_attestation, reconcile_terminal_jobs, remote_lifecycle_plan,
+    runner_artifact_content, status, statuses, statuses_indexed, PeerSessionMaintenanceReport,
+    RunnerReconcileWithAttestationOutcome, TransportFailure, TransportLifetime,
 };
 pub(crate) use connection::{
     configured_runner_homeboy_build_identity, configured_runner_homeboy_handshake_evidence,
