@@ -555,6 +555,7 @@ mod tests {
             homeboy_core::extension::catalog::save_manifest(&publish)
                 .expect("save publish extension");
             let github = GithubConfig {
+                release_latest: None,
                 hosts: HashMap::from([(
                     "github.enterprise.test".to_string(),
                     GithubHostConfig {

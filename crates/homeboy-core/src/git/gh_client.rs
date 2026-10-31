@@ -536,7 +536,10 @@ mod tests {
                 env: HashMap::new(),
             },
         );
-        let config = GithubConfig { hosts };
+        let config = GithubConfig {
+            hosts,
+            ..GithubConfig::default()
+        };
 
         let env = github_cli_env("github.example.com", &config);
 
@@ -608,7 +611,10 @@ mod tests {
                 env: HashMap::new(),
             },
         );
-        let config = GithubConfig { hosts };
+        let config = GithubConfig {
+            hosts,
+            ..GithubConfig::default()
+        };
         let inherited = HashMap::from([
             (
                 "HTTPS_PROXY".to_string(),
@@ -651,7 +657,10 @@ mod tests {
                 env: HashMap::new(),
             },
         );
-        let config = GithubConfig { hosts };
+        let config = GithubConfig {
+            hosts,
+            ..GithubConfig::default()
+        };
 
         let env = github_cli_env("github.enterprise.test", &config);
 
@@ -706,6 +715,7 @@ mod tests {
             },
         );
         let config = GithubConfig {
+            release_latest: None,
             hosts: component_hosts,
         };
 

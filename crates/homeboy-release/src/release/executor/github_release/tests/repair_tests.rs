@@ -9,6 +9,48 @@ use super::super::{gh_auth_failure_message, github_cli_env, github_release_repai
 use super::test_repo;
 
 #[test]
+fn latest_marker_publication_and_repair_arguments_match() {
+    use super::super::repair::publish_release_args;
+
+    for tag in ["data-machine-events-v0.79.0", "v0.79.0"] {
+        for (setting, expected) in [
+            (Some(true), Some("--latest")),
+            (Some(false), Some("--latest=false")),
+            (None, None),
+        ] {
+            let config: GithubConfig = serde_json::from_value(serde_json::json!({
+                "release_latest": setting
+            }))
+            .unwrap();
+            assert_eq!(config.release_latest, setting);
+            let github = test_repo();
+            let repo = format!("{}/{}", github.owner, github.repo);
+            let mut expected_args = vec!["release", "edit", tag, "--draft=false"];
+            expected_args.extend(expected);
+            expected_args.extend(["-R", &repo]);
+            assert_eq!(publish_release_args(tag, &repo, &config), expected_args);
+            let repair = github_release_repair_commands(tag, &github, &config, &[], None, None);
+            assert_eq!(
+                repair.publish_command,
+                format!("gh {}", expected_args.join(" "))
+            );
+            // The direct-create recovery path must preserve the same marker policy.
+            assert_eq!(
+                repair.create_command.contains("--latest"),
+                expected.is_some()
+            );
+            if let Some(flag) = expected {
+                assert!(repair.create_command.contains(flag));
+            }
+        }
+    }
+
+    let unset: GithubConfig = serde_json::from_str("{}").unwrap();
+    assert_eq!(unset.release_latest, None);
+    assert_eq!(serde_json::to_value(unset).unwrap(), serde_json::json!({}));
+}
+
+#[test]
 fn repair_commands_reuse_persisted_exact_body_when_available() {
     // With the persisted exact body, recovery must `--notes-file` THAT file
     // and must NOT regenerate notes (which could diverge) — issue #3508.
@@ -78,6 +120,7 @@ fn github_cli_env_sets_enterprise_host_and_proxy() {
         repo: "repo".to_string(),
     };
     let config = GithubConfig {
+        release_latest: None,
         hosts: HashMap::from([(
             "github.enterprise.test".to_string(),
             GithubHostConfig {
@@ -109,6 +152,7 @@ fn repair_commands_include_configured_enterprise_proxy() {
         repo: "repo".to_string(),
     };
     let config = GithubConfig {
+        release_latest: None,
         hosts: HashMap::from([(
             "github.enterprise.test".to_string(),
             GithubHostConfig {
@@ -149,6 +193,7 @@ fn repair_commands_include_configured_enterprise_proxy_env() {
         repo: "repo".to_string(),
     };
     let config = GithubConfig {
+        release_latest: None,
         hosts: HashMap::from([(
             "github.enterprise.test".to_string(),
             GithubHostConfig {
@@ -199,6 +244,7 @@ fn enterprise_auth_failure_mentions_proxy_keyring_context() {
         repo: "repo".to_string(),
     };
     let config = GithubConfig {
+        release_latest: None,
         hosts: HashMap::from([(
             "github.enterprise.test".to_string(),
             GithubHostConfig {
@@ -224,6 +270,7 @@ fn github_cli_env_allows_explicit_host_env_override() {
         repo: "repo".to_string(),
     };
     let config = GithubConfig {
+        release_latest: None,
         hosts: HashMap::from([(
             "github.enterprise.test".to_string(),
             GithubHostConfig {

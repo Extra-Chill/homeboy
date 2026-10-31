@@ -18,7 +18,10 @@ use super::notes::{
     build_github_release_body, github_changelog_url, github_release_notes_start_tag,
     persist_release_body,
 };
-use super::repair::{gh_auth_failure_message, github_release_repair_commands, log_repair_commands};
+use super::repair::{
+    gh_auth_failure_message, github_release_repair_commands, log_repair_commands,
+    publish_release_args,
+};
 use super::results::{
     create_failed_result, not_created_result, published_existing_draft_result,
     published_release_url, skipped_result, unfinished_release_result, upload_failed_result,
@@ -346,7 +349,7 @@ pub(crate) fn run_github_release(
                 gh_command(
                     &github,
                     &component.github,
-                    &["release", "edit", &tag, "--draft=false", "-R", &repo_flag],
+                    &publish_release_args(&tag, &repo_flag, &component.github),
                 ),
                 github_release_upload_timeout(),
             );
@@ -467,7 +470,7 @@ pub(crate) fn run_github_release(
                     repo_flag,
                     metadata.assets.len()
                 );
-                let publish_args = ["release", "edit", &tag, "--draft=false", "-R", &repo_flag];
+                let publish_args = publish_release_args(&tag, &repo_flag, &component.github);
                 let publish_output = run_gh_command(
                     gh_command(&github, &component.github, &publish_args),
                     github_release_upload_timeout(),
@@ -609,7 +612,7 @@ pub(crate) fn run_github_release(
             ));
         }
         if metadata.is_draft {
-            let publish_args = ["release", "edit", &tag, "--draft=false", "-R", &repo_flag];
+            let publish_args = publish_release_args(&tag, &repo_flag, &component.github);
             let publish_output = run_gh_command(
                 gh_command(&github, &component.github, &publish_args),
                 github_release_upload_timeout(),
@@ -791,7 +794,7 @@ pub(crate) fn run_github_release(
             },
         ));
     }
-    let publish_args = ["release", "edit", &tag, "--draft=false", "-R", &repo_flag];
+    let publish_args = publish_release_args(&tag, &repo_flag, &component.github);
     let publish_output = run_gh_command(
         gh_command(&github, &component.github, &publish_args),
         github_release_upload_timeout(),

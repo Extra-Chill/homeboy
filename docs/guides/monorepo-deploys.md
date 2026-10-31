@@ -111,6 +111,21 @@ GitHub can replace pending runs. Repositories requiring every intermediate commi
 to deploy should use a deployment queue. The diff must start at the last deployed
 commit if workflows may be skipped; `event.before` describes only that push.
 
+## GitHub Latest release ownership
+
+GitHub has one **Latest** release per repository, even when components use
+separate tags such as `data-machine-events-v0.79.0`. Set
+`"github": { "release_latest": true }` in the owning component's config to
+publish with `--latest`, preserving URLs such as
+`releases/latest/download/data-machine.zip`. Set
+`"github": { "release_latest": false }` on each non-owning extension to publish
+with `--latest=false` and avoid taking that marker.
+
+Publication uses the releasing component's config, not sibling discovery, so
+non-owners must explicitly opt out. Leaving the setting unset preserves today's
+GitHub arguments and default Latest behavior. Repair commands follow the same
+policy.
+
 ## Output contracts
 
 - `--format matrix`: compact raw JSON `{"include":[{"component":"id","path":"dir"}]}`,

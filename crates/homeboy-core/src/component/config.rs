@@ -279,6 +279,9 @@ pub struct PackageArtifact {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct GithubConfig {
+    /// Control the repository's GitHub Latest marker; unset preserves GitHub defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_latest: Option<bool>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub hosts: HashMap<String, GithubHostConfig>,
 }
