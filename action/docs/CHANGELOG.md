@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.23.3] - 2026-10-31
+
+### Changed
+- skip monorepo components unchanged since their last tag
+
 ## [2.23.2] - 2026-10-30
 
 ### Fixed
