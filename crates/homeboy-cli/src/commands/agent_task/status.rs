@@ -6313,7 +6313,7 @@ fn cook_continuation_action(record: &AgentTaskRunRecord) -> homeboy::core::Resul
 fn cook_continuation_command(run_id: &str) -> CommandNextAction {
     CommandNextAction::new(
         "recover the authenticated Cook",
-        agent_task_service_direct::cook_recover_command(None, run_id, None),
+        agent_task_service_direct::cook_recover_command(None, run_id),
     )
     .with_kind(CommandNextActionKind::Repair)
 }

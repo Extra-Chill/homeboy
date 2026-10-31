@@ -55,7 +55,7 @@ pub struct AgentTaskPromotionReport {
     pub source: AgentTaskPromotionSource,
     pub to_worktree: String,
     pub target: AgentTaskPromotionTarget,
-    pub patch_artifact: AgentTaskPromotionArtifactRef,
+    pub candidate: Option<crate::agent_task::AgentTaskCandidate>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub changed_files: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -317,15 +317,6 @@ pub struct AgentTaskPromotionTarget {
     pub head: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dirty: Option<bool>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct AgentTaskPromotionArtifactRef {
-    pub id: String,
-    pub kind: String,
-    pub path: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

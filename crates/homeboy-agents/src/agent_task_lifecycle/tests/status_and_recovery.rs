@@ -2155,7 +2155,7 @@ fn corrected_promotion_replaces_gate_failed_latest_proof() {
         "source": { "kind": "aggregate", "task_id": "task-a", "run_id": run_id },
         "to_worktree": "homeboy@fix-8307",
         "target": { "worktree": "homeboy@fix-8307", "path": "/repo" },
-        "patch_artifact": { "id": "first.patch", "kind": "patch", "path": "first.patch" },
+        "candidate": { "base_sha": "base", "candidate_sha": "first.patch", "tree_sha": "tree" },
         "changed_files": ["src/lib.rs"],
         "gate_results": [{ "id": "test", "name": "cargo test", "kind": "command", "status": "failed" }],
         "provenance": { "candidate": { "kind": "git", "fingerprint": { "schema": "homeboy/agent-task-candidate-fingerprint/v1", "target_path": "/repo", "head": "base", "base": "base", "changed_files": ["src/lib.rs"], "sha256": "first" } } },
@@ -2167,7 +2167,7 @@ fn corrected_promotion_replaces_gate_failed_latest_proof() {
         "source": { "kind": "aggregate", "task_id": "task-a", "run_id": run_id },
         "to_worktree": "homeboy@fix-8307",
         "target": { "worktree": "homeboy@fix-8307", "path": "/repo" },
-        "patch_artifact": { "id": "corrected.patch", "kind": "patch", "path": "corrected.patch" },
+        "candidate": { "base_sha": "base", "candidate_sha": "corrected.patch", "tree_sha": "corrected-tree" },
         "changed_files": ["src/lib.rs"],
         "gate_results": [{ "id": "test", "name": "cargo test", "kind": "command", "status": "passed" }],
         "provenance": { "candidate": { "kind": "git", "fingerprint": { "schema": "homeboy/agent-task-candidate-fingerprint/v1", "target_path": "/repo", "head": "base", "base": "base", "changed_files": ["src/lib.rs"], "sha256": "corrected" } } },
@@ -2194,7 +2194,10 @@ fn corrected_promotion_replaces_gate_failed_latest_proof() {
         latest.status,
         crate::agent_task_promotion::AgentTaskPromotionStatus::Applied
     );
-    assert_eq!(latest.patch_artifact.id, "corrected.patch");
+    assert_eq!(
+        latest.candidate.as_ref().unwrap().candidate_sha,
+        "corrected.patch"
+    );
     assert_eq!(
         updated.metadata["cook_delivery"]["artifacts"]["promotions"]
             .as_array()

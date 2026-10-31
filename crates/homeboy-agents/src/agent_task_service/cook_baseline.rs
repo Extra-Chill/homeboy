@@ -1038,7 +1038,7 @@ mod tests {
                         "source": {"kind": "aggregate", "task_id": "task"},
                         "to_worktree": "fixture",
                         "target": {"worktree": "fixture", "path": temp.path()},
-                        "patch_artifact": {"id": "patch", "kind": "patch", "path": "patch"},
+                        "candidate": {"base_sha": "base", "candidate_sha": "patch", "tree_sha": "tree"},
                         "deterministic_gates": [],
                         "operator_notification": {"status": "blocked", "message": "red"}
                     }))
@@ -1352,7 +1352,7 @@ mod tests {
                     "source": {"kind": "aggregate", "task_id": "task"},
                     "to_worktree": "fixture",
                     "target": {"worktree": "fixture", "path": temp.path()},
-                    "patch_artifact": {"id": "patch", "kind": "patch", "path": "patch"},
+                    "candidate": {"base_sha": "base", "candidate_sha": "patch", "tree_sha": "tree"},
                     "deterministic_gates": [],
                     "operator_notification": {"status": "blocked", "message": "red"}
                 }))
@@ -1443,7 +1443,7 @@ mod tests {
                     "source": {"kind": "aggregate", "task_id": "task"},
                     "to_worktree": "fixture",
                     "target": {"worktree": "fixture", "path": temp.path()},
-                    "patch_artifact": {"id": "patch", "kind": "patch", "path": "patch"},
+                    "candidate": {"base_sha": "base", "candidate_sha": "patch", "tree_sha": "tree"},
                     "deterministic_gates": [],
                     "operator_notification": {"status": "blocked", "message": "red"}
                 }))

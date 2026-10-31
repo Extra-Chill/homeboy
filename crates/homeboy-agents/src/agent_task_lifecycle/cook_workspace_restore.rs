@@ -97,12 +97,12 @@ pub(super) fn restore_follow_up_cook_candidate_workspace_in_root(
             )
         })?;
     let source_sha256 = provenance
-        .get("source_patch_artifact_sha256")
+        .get("source_candidate_tree_sha")
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
         .ok_or_else(|| {
             Error::validation_invalid_argument(
-                "cook_loop.artifact_provenance.source_patch_artifact_sha256",
+                "cook_loop.artifact_provenance.source_candidate_tree_sha",
                 "Cook retry candidate has no patch identity evidence",
                 None,
                 None,
@@ -118,7 +118,11 @@ pub(super) fn restore_follow_up_cook_candidate_workspace_in_root(
             )
         })?;
     if promotion.source.task_id != source_task_id
-        || promotion.patch_artifact.sha256.as_deref() != Some(source_sha256)
+        || promotion
+            .candidate
+            .as_ref()
+            .map(|candidate| candidate.tree_sha.as_str())
+            != Some(source_sha256)
     {
         return Err(Error::validation_invalid_argument(
             "cook_loop.artifact_provenance",

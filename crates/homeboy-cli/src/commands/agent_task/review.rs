@@ -279,21 +279,11 @@ fn compact_apply_candidate(value: &Value) -> Option<Value> {
 }
 
 fn compact_selected_candidate(promotion: &Value) -> Value {
-    let artifact = promotion
-        .get("patch_artifact")
-        .or_else(|| promotion.get("patch"))
-        .map(|artifact| compact_fields(artifact, &["id", "kind", "path", "sha256"]));
-    let size_bytes = artifact
-        .as_ref()
-        .and_then(|artifact| artifact.get("path"))
-        .and_then(Value::as_str)
-        .and_then(|path| std::fs::metadata(path).ok())
-        .map(|metadata| metadata.len());
+    let candidate = promotion.get("candidate");
     serde_json::json!({
         "status": promotion.get("status"),
         "task_id": promotion.pointer("/source/task_id").or_else(|| promotion.get("task_id")),
-        "artifact": artifact,
-        "size_bytes": size_bytes,
+        "candidate": candidate,
         "changed_files": promotion.get("changed_files"),
     })
 }
@@ -321,13 +311,6 @@ pub(crate) fn promote_artifact(mut args: PromoteArgs) -> CmdResult<Value> {
         source_reference
             .as_ref()
             .and_then(|reference| reference.task_id.clone()),
-    )?;
-    let requested_artifact_id = resolve_promotion_selector(
-        "artifact_id",
-        args.artifact_id,
-        source_reference
-            .as_ref()
-            .map(|reference| reference.artifact_id.clone()),
     )?;
     let (raw, source_path) = read_promotion_source(source_spec)?;
     let source_run_id = match source_path.as_deref() {
@@ -358,7 +341,7 @@ pub(crate) fn promote_artifact(mut args: PromoteArgs) -> CmdResult<Value> {
         source_run_id.as_deref(),
         &args.source,
         task_id.as_deref(),
-        requested_artifact_id.as_deref(),
+        None,
     )?;
     let artifact_id = None;
     let promotion_request = agent_task_service::AgentTaskPromotionRequest {
@@ -451,7 +434,7 @@ pub(crate) fn resolve_promotion_gates(
     source_run_id: Option<&str>,
     source: &str,
     task_id: Option<&str>,
-    artifact_id: Option<&str>,
+    _artifact_id: Option<&str>,
 ) -> homeboy::core::Result<VerifyGateOptions> {
     if !from_cook_recipe && !from_resume_contract {
         gates.snapshot_file_inputs()?;
@@ -485,10 +468,10 @@ pub(crate) fn resolve_promotion_gates(
         )
     })?;
     if from_resume_contract {
-        let (task_id, artifact_id) = task_id.zip(artifact_id).ok_or_else(|| {
+        let task_id = task_id.ok_or_else(|| {
             homeboy::core::Error::validation_invalid_argument(
                 "gates-from-resume-contract",
-                "requires exact --task-id and --artifact-id selectors",
+                "requires an exact --task-id selector",
                 Some(run_id.to_string()),
                 None,
             )
@@ -507,11 +490,7 @@ pub(crate) fn resolve_promotion_gates(
         })?;
         let matches_task =
             promotion.pointer("/source/task_id").and_then(Value::as_str) == Some(task_id);
-        let matches_artifact = promotion
-            .pointer("/patch_artifact/id")
-            .and_then(Value::as_str)
-            == Some(artifact_id);
-        if !matches_task || !matches_artifact {
+        if !matches_task || promotion.get("candidate").is_none_or(Value::is_null) {
             return Err(homeboy::core::Error::validation_invalid_argument(
                 "gates-from-resume-contract",
                 "durable promotion resume contract does not match the selected candidate",
@@ -567,7 +546,6 @@ pub(crate) fn resolve_promotion_gates(
 struct PromotionRunArtifactReference {
     run_id: String,
     task_id: Option<String>,
-    artifact_id: String,
 }
 
 /// Parse the immutable artifact selector emitted in durable agent-task output.
@@ -599,7 +577,6 @@ fn parse_promotion_run_artifact_reference(
             )
         })?;
     let mut task_id = None;
-    let mut artifact_id = None;
     for part in fragment.split('&') {
         let Some((key, value)) = part.split_once('=') else {
             continue;
@@ -625,32 +602,10 @@ fn parse_promotion_run_artifact_reference(
                     ));
                 }
             }
-            "artifact" => {
-                if artifact_id.replace(value).is_some() {
-                    return Err(homeboy::core::Error::validation_invalid_argument(
-                        "source",
-                        "agent-task promotion URI repeats its artifact selector",
-                        Some(source.to_string()),
-                        None,
-                    ));
-                }
-            }
             _ => {}
         }
     }
-    let artifact_id = artifact_id.ok_or_else(|| {
-        homeboy::core::Error::validation_invalid_argument(
-            "source",
-            "agent-task promotion URI must include an artifact selector",
-            Some(source.to_string()),
-            None,
-        )
-    })?;
-    Ok(Some(PromotionRunArtifactReference {
-        run_id,
-        task_id,
-        artifact_id,
-    }))
+    Ok(Some(PromotionRunArtifactReference { run_id, task_id }))
 }
 
 fn resolve_promotion_selector(
@@ -3228,8 +3183,8 @@ mod tests {
     use crate::commands::agent_task_summary::{render_agent_task_summary, AgentTaskSummaryKind};
     use clap::Parser;
     use homeboy::agents::agent_tasks::promotion::{
-        AgentTaskPromotionArtifactRef, AgentTaskPromotionCommandReport,
-        AgentTaskPromotionNotification, AgentTaskPromotionSource, AgentTaskPromotionTarget,
+        AgentTaskPromotionCommandReport, AgentTaskPromotionNotification, AgentTaskPromotionSource,
+        AgentTaskPromotionTarget,
     };
     use std::process::Command;
 
@@ -3249,7 +3204,7 @@ mod tests {
     }
 
     #[test]
-    fn immutable_promotion_uri_selects_its_controller_run_and_artifact() {
+    fn immutable_promotion_uri_selects_its_controller_run_and_task() {
         assert_eq!(
             parse_promotion_run_artifact_reference(
                 "homeboy://agent-task/run/runner%2Fowned/artifacts#task=cook%20task&artifact=patch%2F1"
@@ -3258,7 +3213,6 @@ mod tests {
             Some(PromotionRunArtifactReference {
                 run_id: "runner/owned".to_string(),
                 task_id: Some("cook task".to_string()),
-                artifact_id: "patch/1".to_string(),
             })
         );
     }
@@ -3266,9 +3220,9 @@ mod tests {
     #[test]
     fn immutable_promotion_uri_rejects_conflicting_cli_selector_before_materialization() {
         let error = resolve_promotion_selector(
-            "artifact_id",
-            Some("different-patch".to_string()),
-            Some("patch".to_string()),
+            "task_id",
+            Some("different-task".to_string()),
+            Some("task".to_string()),
         )
         .expect_err("conflicting immutable selector must fail");
         assert!(error
@@ -3383,11 +3337,7 @@ mod tests {
                             "promotion": {
                                 "status": "applied",
                                 "source": { "task_id": "task-1" },
-                                "patch_artifact": {
-                                    "id": "candidate",
-                                    "kind": "patch",
-                                    "path": patch.path(),
-                                },
+                                "candidate": { "base_sha": "base", "candidate_sha": "candidate", "tree_sha": "tree" },
                                 "changed_files": ["a.rs", "b.rs", "c.rs"],
                                 "provenance": { "post_apply": true, "candidate": { "head": "candidate-head" } },
                                 "deterministic_gates": [{
@@ -3407,8 +3357,10 @@ mod tests {
             false,
         );
 
-        assert_eq!(value["selected_candidate"]["artifact"]["id"], "candidate");
-        assert_eq!(value["selected_candidate"]["size_bytes"], 7_635);
+        assert_eq!(
+            value["selected_candidate"]["candidate"]["candidate_sha"],
+            "candidate"
+        );
         assert_eq!(
             value["selected_candidate"]["changed_files"]
                 .as_array()
@@ -4814,12 +4766,11 @@ mod tests {
                 head: Some("abc123".to_string()),
                 dirty: Some(true),
             },
-            patch_artifact: AgentTaskPromotionArtifactRef {
-                id: "patch-1".to_string(),
-                kind: "patch".to_string(),
-                path: "/tmp/changes.patch".to_string(),
-                sha256: None,
-            },
+            candidate: Some(homeboy::agents::agent_task::AgentTaskCandidate {
+                base_sha: "base".to_string(),
+                candidate_sha: "patch-1".to_string(),
+                tree_sha: "tree".to_string(),
+            }),
             changed_files: vec!["src/lib.rs".to_string()],
             command_evidence: Vec::<AgentTaskPromotionCommandReport>::new(),
             deterministic_gates: Vec::new(),

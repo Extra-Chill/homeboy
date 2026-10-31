@@ -7911,7 +7911,7 @@ pub(crate) fn attempt_preserves_candidate_or_gate(
             | Status::VerificationPending
             | Status::Applied
     ) || candidate.fingerprint.is_some()
-        || candidate.patch_artifact.is_some()
+        || candidate.candidate_sha.is_some()
 }
 
 fn acceptance_candidate(

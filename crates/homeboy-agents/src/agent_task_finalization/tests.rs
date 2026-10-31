@@ -1708,7 +1708,7 @@ fn manual_finalization_inherits_only_exact_green_candidate_bound_promotion_gates
         "source": { "kind": "aggregate", "task_id": "task", "run_id": "cook-3678" },
         "to_worktree": "worktree",
         "target": { "worktree": "worktree", "path": "/repo" },
-        "patch_artifact": { "id": "patch", "kind": "patch", "path": "patch" },
+        "candidate": { "base_sha": "base", "candidate_sha": "patch", "tree_sha": "tree" },
         "changed_files": ["src/lib.rs"],
         "deterministic_gates": [
             { "id": "test", "status": "succeeded", "command": ["sh", "-c", "cargo test"], "exit_code": 0, "candidate_checkout": candidate },
@@ -3697,7 +3697,7 @@ fn successful_gate_proof() -> AgentTaskPrDurableGateProof {
         promotion: serde_json::from_value(json!({
             "status": "applied", "source": { "kind": "aggregate", "task_id": "task", "run_id": "cook-3678" },
             "to_worktree": "worktree", "target": { "worktree": "worktree", "path": "/repo" },
-            "patch_artifact": { "id": "patch", "kind": "patch", "path": "patch" },
+            "candidate": { "base_sha": "base", "candidate_sha": "patch", "tree_sha": "tree" },
             "operator_notification": { "status": "completed", "message": "complete" },
             "provenance": {
                 "candidate": {

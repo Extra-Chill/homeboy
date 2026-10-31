@@ -1129,14 +1129,9 @@ mod tests {
         use homeboy_agents::agent_task_service::{cook_recover_command, cook_recovery_command};
 
         for command in [
-            cook_recover_command(None, "cook-1", None),
-            cook_recover_command(None, "cook-1-attempt-2", None),
-            cook_recover_command(None, "cook-1-attempt-2", Some("selected patch")),
-            cook_recover_command(
-                Some("/tmp/controller runtimes/homeboy"),
-                "cook-1-attempt-2",
-                None,
-            ),
+            cook_recover_command(None, "cook-1"),
+            cook_recover_command(None, "cook-1-attempt-2"),
+            cook_recover_command(Some("/tmp/controller runtimes/homeboy"), "cook-1-attempt-2"),
             cook_recovery_command(
                 "cook-1-attempt-2",
                 &["recover", "cook-1-attempt-2", "--timeout-ms", "2400000"],

@@ -1860,7 +1860,6 @@ fn assert_cook_rearm_queue_ownership(block_capacity: bool) {
             CookContinueArgs {
                 cook_or_attempt_id: source_run_id.to_string(),
                 rearm: false,
-                artifact_id: None,
                 timeout_ms: None,
                 review_form_timeout_ms: None,
                 backend: None,
@@ -1879,7 +1878,6 @@ fn assert_cook_rearm_queue_ownership(block_capacity: bool) {
             CookContinueArgs {
                 cook_or_attempt_id: source_run_id.to_string(),
                 rearm: true,
-                artifact_id: None,
                 timeout_ms: None,
                 review_form_timeout_ms: None,
                 backend: None,
@@ -2349,7 +2347,6 @@ fn status_and_continuation_materialize_recipe_only_attempt_without_provider_work
             CookContinueArgs {
                 cook_or_attempt_id: cook_id.to_string(),
                 rearm: false,
-                artifact_id: None,
                 timeout_ms: None,
                 review_form_timeout_ms: None,
                 backend: None,
@@ -2585,7 +2582,6 @@ fn continuation_preflight_rejects_legacy_patch_only_terminal_candidate() {
         let (report, exit_code) = super::super::run::preflight_continue_cook(CookContinueArgs {
             cook_or_attempt_id: cook_id.to_string(),
             rearm: false,
-            artifact_id: Some("retained-patch".to_string()),
             timeout_ms: None,
             review_form_timeout_ms: None,
             backend: None,
@@ -2600,7 +2596,6 @@ fn continuation_preflight_rejects_legacy_patch_only_terminal_candidate() {
         assert_eq!(report["admitted"], false);
         assert_eq!(report["run_id"], run_id);
         assert_eq!(report["selected_attempt"]["run_id"], run_id);
-        assert_eq!(report["selected_artifact"]["artifact_id"], "retained-patch");
         assert_eq!(
             report["continuation_command"],
             format!("homeboy --placement local agent-task recover {run_id}")
@@ -2672,7 +2667,6 @@ fn continuation_preflight_rejects_legacy_patch_only_terminal_candidate() {
             super::super::run::preflight_continue_cook(CookContinueArgs {
                 cook_or_attempt_id: cook_id.to_string(),
                 rearm: false,
-                artifact_id: Some("retained-patch".to_string()),
                 timeout_ms: None,
                 review_form_timeout_ms: None,
                 backend: None,
@@ -2801,7 +2795,6 @@ fn continuation_preflight_bypasses_model_provenance_for_retryable_pre_execution_
         let (report, exit_code) = super::super::run::preflight_continue_cook(CookContinueArgs {
             cook_or_attempt_id: cook_id.to_string(),
             rearm: false,
-            artifact_id: None,
             timeout_ms: None,
             review_form_timeout_ms: None,
             backend: None,
@@ -3118,7 +3111,6 @@ fn diagnose_prioritizes_the_current_gate_denial_after_a_repaired_controller_fail
             json!({
                 "schema": "homeboy/agent-task-promotion-report/v1",
                 "status": "applied",
-                "patch_artifact": { "sha256": "candidate" }
             }),
         )
         .expect("persist applied candidate");
@@ -3127,7 +3119,6 @@ fn diagnose_prioritizes_the_current_gate_denial_after_a_repaired_controller_fail
             json!({
                 "schema": "homeboy/agent-task-promotion-report/v1",
                 "status": "gate_failed",
-                "patch_artifact": { "sha256": "candidate" },
                 "deterministic_gates": [{
                     "name": "cargo test -p homeboy-cli",
                     "status": "failed",
@@ -3298,7 +3289,6 @@ fn diagnose_names_the_gate_not_the_successful_provider_stream_noise() {
             json!({
                 "schema": "homeboy/agent-task-promotion-report/v1",
                 "status": "gate_failed",
-                "patch_artifact": { "sha256": "candidate" },
                 "deterministic_gates": [{
                     "name": "cargo test -p homeboy-cli",
                     "status": "failed",
@@ -3341,7 +3331,6 @@ fn logs_carry_gate_lifecycle_events_for_a_run_that_reached_the_gate_phase() {
             json!({
                 "schema": "homeboy/agent-task-promotion-report/v1",
                 "status": "gate_failed",
-                "patch_artifact": { "sha256": "candidate" },
                 "deterministic_gates": [{
                     "id": "gate-cargo-test",
                     "status": "failed",
@@ -3412,7 +3401,6 @@ fn diagnose_names_the_real_gate_command_and_failure_summary_from_a_production_sh
             json!({
                 "schema": "homeboy/agent-task-promotion-report/v1",
                 "status": "gate_failed",
-                "patch_artifact": { "sha256": "candidate" },
                 // The real `AgentTaskGateReport` shape has no `name`/`message`
                 // fields: naming and the human summary live under `id` and
                 // `failure_evidence`. A gate report with only these fields
@@ -4432,7 +4420,6 @@ fn diagnose_routes_timed_out_review_form_continuation_away_from_generic_retry() 
             "source": { "kind": "aggregate", "task_id": "task-a", "run_id": source_run_id },
             "to_worktree": "fixture@review-form",
             "target": { "worktree": "fixture@review-form", "path": "/tmp/review-form-candidate" },
-            "patch_artifact": { "id": "patch", "kind": "patch", "path": "patch" },
             "changed_files": ["src/lib.rs"],
             "deterministic_gates": [],
             "gate_results": [],

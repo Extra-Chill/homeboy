@@ -1723,12 +1723,7 @@ mod reuse_tests {
             "source": {"kind": "aggregate", "task_id": "task-a", "run_id": run_id},
             "to_worktree": "fixture@adoption-reuse",
             "target": {"worktree": "fixture@adoption-reuse", "path": worktree},
-            "patch_artifact": {
-                "id": "patch",
-                "kind": "patch",
-                "path": "patch",
-                "sha256": "fixture-patch-sha"
-            },
+            "candidate": {"base_sha": candidate_sha, "candidate_sha": candidate_sha, "tree_sha": candidate_sha},
             "operator_notification": {"status": "completed", "message": "complete"},
             "provenance": {
                 "candidate_commit": {"base_sha": candidate_sha, "candidate_sha": candidate_sha, "tree_sha": candidate_sha},

@@ -219,10 +219,10 @@ pub mod lifecycle {
 /// Promotion reports and entry point.
 pub mod promotion {
     pub use super::super::agent_task_promotion::{
-        promote, AgentTaskPromotionArtifactRef, AgentTaskPromotionCommandReport,
-        AgentTaskPromotionNotification, AgentTaskPromotionReport, AgentTaskPromotionRequest,
-        AgentTaskPromotionSource, AgentTaskPromotionStatus, AgentTaskPromotionTarget,
-        AgentTaskPromotionVerifiedBase, PromotionProgressCallback,
+        promote, AgentTaskPromotionCommandReport, AgentTaskPromotionNotification,
+        AgentTaskPromotionReport, AgentTaskPromotionRequest, AgentTaskPromotionSource,
+        AgentTaskPromotionStatus, AgentTaskPromotionTarget, AgentTaskPromotionVerifiedBase,
+        PromotionProgressCallback,
     };
 }
 
@@ -309,8 +309,7 @@ pub mod secrets {
 pub mod service {
     pub use super::super::agent_task_service::{
         adopt_cook_candidate_with_options_dispatcher_and_executor_for_attempt,
-        attempt_primary_failure_diagnostic, authorize_cook_continue_route,
-        authorize_cook_continue_route_with_artifact, claim_continuation_for,
+        attempt_primary_failure_diagnostic, authorize_cook_continue_route, claim_continuation_for,
         claim_continuation_for_recovery_and_clear_failure_in_store,
         compile_cook_attempt_static_with_catalog_and_readiness_cache,
         compile_cook_attempt_with_catalog_and_readiness_cache,

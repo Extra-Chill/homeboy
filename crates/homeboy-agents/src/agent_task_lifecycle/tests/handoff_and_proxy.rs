@@ -902,7 +902,7 @@ fn retry_rebuilds_follow_up_candidate_from_durable_promotion() {
                 "artifact_provenance": {
                     "source_run_id": source_run,
                     "source_task_id": "task-a",
-                    "source_patch_artifact_sha256": candidate.tree_sha,
+                    "source_candidate_tree_sha": candidate.tree_sha,
                 }
             }
         });
@@ -916,12 +916,7 @@ fn retry_rebuilds_follow_up_candidate_from_durable_promotion() {
                 "source": {"kind": "aggregate", "task_id": "task-a", "run_id": source_run},
                 "to_worktree": "homeboy@test",
                 "target": {"worktree": "homeboy@test", "path": repo, "head": head},
-                "patch_artifact": {
-                    "id": candidate.candidate_sha,
-                    "kind": "candidate_commit",
-                    "path": "",
-                    "sha256": candidate.tree_sha,
-                },
+                "candidate": candidate,
                 "provenance": {
                     "worktree_path": repo,
                     "candidate_commit": candidate,

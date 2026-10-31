@@ -104,7 +104,7 @@ pub(crate) fn plan_lineage(plan: &AgentTaskPlan) -> Option<CookAttemptLineage> {
         } else {
             CookLineageKind::GateFix
         },
-        source_patch_sha256: provenance["source_patch_artifact_sha256"]
+        source_patch_sha256: provenance["source_candidate_tree_sha"]
             .as_str()
             .map(str::to_string),
     })
@@ -149,7 +149,7 @@ mod tests {
             "review_form_required": false,
             "artifact_provenance": {
                 "source_run_id": source,
-                "source_patch_artifact_sha256": sha,
+                "source_candidate_tree_sha": sha,
             },
         }))
     }

@@ -67,7 +67,6 @@ use homeboy_lab_contract::lab::transport_failure::{
     preacceptance_transport_error, LabJobAcceptanceDisposition, LabTransportAttemptReceipt,
     LabTransportErrorKind, LabTransportOperation,
 };
-use sha2::Digest;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Barrier, Condvar, LazyLock, Mutex};
@@ -4003,7 +4002,7 @@ fn moved_base_catch_up_rebases_real_owned_candidate_and_refuses_divergence() {
                 "source": {"kind": "aggregate", "task_id": "provider", "run_id": run_id},
                 "to_worktree": options.workspace.to_worktree,
                 "target": {"worktree": options.workspace.to_worktree, "path": destination},
-                "patch_artifact": {"id": "candidate", "kind": "patch", "path": patch},
+                "candidate": {"base_sha": "base", "candidate_sha": "candidate", "tree_sha": "tree"},
                 "changed_files": ["src/lib.rs"],
                 "deterministic_gates": [{"id": "gate", "visibility": "visible", "reveal_policy": "full_evidence", "status": "succeeded", "command": ["sh", "-c", "true"], "exit_code": 0}],
                 "gate_results": [{"id": "gate", "name": "true", "kind": "command", "status": "passed"}],
@@ -4171,7 +4170,7 @@ fn moved_base_catch_up_leaves_a_follow_up_cook_pr_branch_to_finalization() {
             "source": {"kind": "aggregate", "task_id": "provider", "run_id": run_id},
             "to_worktree": destination,
             "target": {"worktree": destination, "path": destination},
-            "patch_artifact": {"id": "candidate", "kind": "patch", "path": temp.path().join("candidate.patch")},
+            "candidate": {"base_sha": "base", "candidate_sha": "candidate", "tree_sha": "tree"},
             "changed_files": ["lib.rs"],
             "deterministic_gates": [],
             "gate_results": [],
@@ -4248,14 +4247,15 @@ fn moved_base_catch_up_preserves_history_below_the_verified_pr_head() {
             "source": {"kind": "aggregate", "task_id": "provider", "run_id": run_id},
             "to_worktree": path,
             "target": {"worktree": path, "path": path},
-            "patch_artifact": {"id": "candidate", "kind": "patch", "path": repo.path().join("candidate.patch")},
+            "candidate": {"base_sha": "base", "candidate_sha": "candidate", "tree_sha": "tree"},
             "changed_files": ["file.txt"],
             "deterministic_gates": [],
             "gate_results": [],
             "verified_base": {"base": "main", "sha": prior_base},
             "provenance": {"worktree_path": path, "candidate": candidate},
             "operator_notification": {"status": "completed", "message": "green"}
-        })).unwrap();
+        }))
+        .unwrap();
         let catch_up = catch_up_cook_candidate_to_base_in_store(
             &test_lifecycle_store(),
             &options,
@@ -16615,7 +16615,7 @@ fn cook_report_emits_selected_candidate_provenance_without_redefining_latest_run
                 &mut record.metadata,
                 "/promotion",
                 serde_json::json!({
-                    "patch_artifact": { "sha256": "candidate-sha" },
+                    "candidate": { "base_sha": "base", "candidate_sha": "candidate", "tree_sha": "candidate-sha" },
                     "to_worktree": "fixture@destination",
                     "provenance": { "candidate": "candidate-fingerprint" }
                 }),
@@ -16739,7 +16739,7 @@ fn resume_promoted_patch_guidance_keeps_the_exhausted_zero_byte_attempt_as_lates
                 "provider_execution": 1,
             });
             crate::agent_task_service::set_cook_delivery_artifact_for_test(&mut record.metadata, "/promotion", serde_json::json!({
-                "patch_artifact": { "sha256": homeboy_engine_primitives::content_hash::sha256_hex(patch.as_bytes()) },
+                "candidate": { "base_sha": "base", "candidate_sha": "candidate", "tree_sha": homeboy_engine_primitives::content_hash::sha256_hex(patch.as_bytes()) },
                 "to_worktree": "fixture@destination",
                 "command_evidence": [{
                     "command": ["git", "apply", "--reverse", "--check", "-"],
@@ -17642,7 +17642,7 @@ pub(crate) fn promotion(run_id: &str) -> AgentTaskPromotionReport {
             "source": {"kind": "aggregate", "task_id": "task", "run_id": run_id},
             "to_worktree": "homeboy@8058",
             "target": {"worktree": "homeboy@8058", "path": worktree_path},
-            "patch_artifact": {"id": "patch", "kind": "patch", "path": "patch", "sha256": "fixture-patch-sha"},
+            "candidate": {"base_sha": "base", "candidate_sha": "patch", "tree_sha": "fixture-patch-sha"},
             "changed_files": ["src/lib.rs"],
             "deterministic_gates": [{"id": "gate", "visibility": "visible", "reveal_policy": "full_evidence", "status": "succeeded", "command": ["sh", "-c", "cargo test --locked agent_task_promotion --lib"], "exit_code": 0, "candidate_checkout": {"schema": "homeboy/agent-task-gate-candidate-checkout/v1", "commit": "candidate", "tree": "candidate-tree", "candidate_sha256": "candidate-sha"}}],
             "gate_results": [{"id": "gate", "name": "cargo test --locked agent_task_promotion --lib", "kind": "command", "status": "passed"}],
@@ -18105,11 +18105,7 @@ fn verified_empty_attempt_dispatches_the_next_rotation_route() {
             .expect("fixture HEAD")
             .trim()
             .to_string();
-        let patch_path = temp.path().join("empty.patch");
-        std::fs::write(&patch_path, "").expect("empty patch");
-        let patch_sha256 = homeboy_engine_primitives::content_hash::sha256_hex(&[]);
         let provenance_worktree = repo.display().to_string();
-        let patch_display = patch_path.display().to_string();
         let finalizations = Arc::new(AtomicUsize::new(0));
         let finalize_count = Arc::clone(&finalizations);
         let side_effects = CookSideEffects::for_test(
@@ -18121,12 +18117,7 @@ fn verified_empty_attempt_dispatches_the_next_rotation_route() {
                         "source": {"kind": "aggregate", "task_id": "provider", "run_id": run_id},
                         "to_worktree": "fixture@target",
                         "target": {"worktree": "fixture@target", "head": target_head},
-                        "patch_artifact": {
-                            "id": "patch",
-                            "kind": "patch",
-                            "path": patch_display,
-                            "sha256": patch_sha256
-                        },
+                        "candidate": null,
                         "changed_files": [],
                         "deterministic_gates": [],
                         "gate_results": [],
@@ -18154,7 +18145,7 @@ fn verified_empty_attempt_dispatches_the_next_rotation_route() {
         let report = result.expect("run_cook report");
         assert_eq!(
             report.value.status, "in_flight",
-            "the detached follow-up is accepted"
+            "the detached follow-up is accepted: {report:?}"
         );
 
         assert_eq!(
@@ -18237,7 +18228,7 @@ fn cook_remediation_preserves_provider_identity_and_no_gate_requirements() {
 #[test]
 fn canonical_completion_accepts_green_and_recipe_authorized_inherited_gate_evidence() {
     let mut green = promotion("canonical-green");
-    green.patch_artifact.sha256 = Some("canonical-sha".to_string());
+    green.candidate.as_mut().unwrap().tree_sha = "canonical-sha".to_string();
     assert!(canonical_finalization_eligible(&green, false, true));
 
     let mut inherited = green.clone();
@@ -18663,12 +18654,7 @@ fn record_tracked_promotion_continuation_in_stores(
         "branch": "cook-candidate",
         "head": fingerprint.head
     });
-    checkpoint["patch_artifact"] = serde_json::json!({
-        "id": "patch",
-        "kind": "patch",
-        "path": patch_path,
-        "sha256": format!("{:x}", sha2::Sha256::digest(patch.as_bytes())),
-    });
+    checkpoint["candidate"] = immutable.clone();
     checkpoint["changed_files"] = serde_json::json!(fingerprint.changed_files);
     checkpoint["provenance"] = serde_json::json!({
         "post_apply": true,
@@ -18797,12 +18783,12 @@ fn terminal_persisted_promotion_loads_without_source_aggregate() {
         )
         .expect("terminal persisted promotion is authoritative");
         assert_eq!(preflight["behavior"], "load_persisted");
-        assert_eq!(preflight["artifact_id"], "patch");
+        assert_eq!(preflight["candidate"]["candidate_sha"], "patch");
         let loaded = promote_or_load_attempt_in_store(&lifecycle_store, &options, run_id)
             .expect("execution loads terminal persisted promotion");
         assert_eq!(loaded.status, AgentTaskPromotionStatus::Applied);
         assert_eq!(loaded.source.run_id.as_deref(), Some(run_id));
-        assert_eq!(loaded.patch_artifact.id, expected.patch_artifact.id);
+        assert_eq!(loaded.candidate, expected.candidate);
 
         // An infrastructure result is not a terminal verdict to replay. With
         // missing source evidence both preflight and execution must refuse,
@@ -19285,7 +19271,6 @@ fn verify_replacement_gates_recovers_pending_verification_and_replays_completed_
         failed["source"]["task_id"] =
             serde_json::json!(options.identity.initial_plan.tasks[0].task_id.clone());
         failed["status"] = serde_json::json!("verification_pending");
-        failed["patch_artifact"]["id"] = serde_json::json!("committed-changes");
         failed["verified_base"]["sha"] =
             serde_json::json!(
                 git_output(&source, &["rev-parse", "HEAD"]).expect("resolve fixture base")
@@ -19417,7 +19402,10 @@ fn verify_replacement_gates_recovers_pending_verification_and_replays_completed_
             serde_json::from_value(result).expect("typed replacement proof");
 
         assert_eq!(replacement.status, AgentTaskPromotionStatus::GateFailed);
-        assert_eq!(replacement.patch_artifact.id, candidate_sha);
+        assert_eq!(
+            replacement.candidate.as_ref().unwrap().candidate_sha,
+            candidate_sha
+        );
         assert!(replacement.deterministic_gates.iter().all(|gate| gate
             .candidate_checkout
             .as_ref()
@@ -20173,7 +20161,7 @@ fn baseline_comparison_finalization_fixture(accept_inherited: bool) {
             "source": {"kind": "aggregate", "task_id": "provider", "run_id": run_id},
             "to_worktree": root,
             "target": {"worktree": root, "path": root},
-            "patch_artifact": {"id": "provider-patch", "kind": "patch", "path": "provider.patch"},
+            "candidate": {"base_sha": "base", "candidate_sha": "provider-patch", "tree_sha": "tree"},
             "changed_files": ["candidate"],
             "deterministic_gates": [gate],
             "verified_base": {"base": "main", "sha": base},
@@ -20377,7 +20365,7 @@ fn restarted_cook_alias_and_exact_id_reuse_the_same_persisted_promotion() {
             .expect("idempotent exact recovery");
         assert_eq!(exact.source.run_id.as_deref(), Some(run_id));
         assert_eq!(alias.source.run_id, exact.source.run_id);
-        assert_eq!(alias.patch_artifact.id, exact.patch_artifact.id);
+        assert_eq!(alias.candidate, exact.candidate);
         assert_eq!(replayed_exact.source.run_id, exact.source.run_id);
     });
 }
@@ -20487,7 +20475,7 @@ fn promotion_operation_claim_completes_once_and_replays_persisted_result() {
             promote_with_operation_claim_in_store(&test_lifecycle_store(), &options, run_id)
                 .unwrap();
         assert_eq!(replayed.source.run_id, first.source.run_id);
-        assert_eq!(replayed.patch_artifact.id, first.patch_artifact.id);
+        assert_eq!(replayed.candidate, first.candidate);
         assert_eq!(gate_feedback_current_diff(&replayed), large_diff);
         assert_eq!(gate_feedback_current_diff(&first), large_diff);
         let review = crate::orchestration::review_from_current_environment(
@@ -20553,7 +20541,7 @@ fn promotion_claim_and_replay_isolate_identical_ids_across_lifecycle_stores() {
             &store.run_dir(run_id).join("candidate-repo"),
         );
         let mut rooted_promotion = promotion(run_id);
-        rooted_promotion.patch_artifact.id = artifact_id.to_string();
+        rooted_promotion.candidate.as_mut().unwrap().candidate_sha = artifact_id.to_string();
         store
             .record_promotion(run_id, serde_json::to_value(rooted_promotion).unwrap())
             .unwrap();
@@ -20563,8 +20551,8 @@ fn promotion_claim_and_replay_isolate_identical_ids_across_lifecycle_stores() {
         });
         let first = side_effects.promote(store, &options, run_id).unwrap();
         let replayed = side_effects.promote(store, &options, run_id).unwrap();
-        assert_eq!(first.patch_artifact.id, artifact_id);
-        assert_eq!(replayed.patch_artifact.id, first.patch_artifact.id);
+        assert_eq!(first.candidate.as_ref().unwrap().candidate_sha, artifact_id);
+        assert_eq!(replayed.candidate, first.candidate);
         assert_eq!(
             store
                 .operation_claim(run_id, &operation_key)
@@ -20711,7 +20699,7 @@ fn persisted_follow_up_intent_recovers_before_submission_without_allocating_a_tw
             "schema":"homeboy/agent-task-promotion-report/v1", "status":"gate_failed",
             "source":{"kind":"aggregate","task_id":options.identity.initial_plan.tasks[0].task_id,"run_id":source},
             "to_worktree":"fixture@target", "target":{"worktree":"fixture@target","head":head},
-            "patch_artifact":{"id":"candidate","kind":"patch","path":artifact.path(),"sha256":digest},
+            "candidate":{"base_sha":"base","candidate_sha":"candidate","tree_sha":digest},
             "changed_files":["tracked"],"command_evidence":[],"deterministic_gates":[],"gate_results":[],
             "provenance":{"worktree_path":workspace.path(), "candidate_commit": crate::agent_task_promotion::tests::candidate_snapshot::snapshot(workspace.path(), &head, &source)},"operator_notification":{"status":"blocked","message":"red"}
         })).unwrap();
@@ -20722,7 +20710,7 @@ fn persisted_follow_up_intent_recovers_before_submission_without_allocating_a_tw
         request.expected_artifacts.clear();
         request.artifact_declarations.clear();
         request.inputs = serde_json::json!({"cook_loop":{"review_form_required":false,"artifact_provenance":{
-            "source_run_id":source,"source_task_id":promotion.source.task_id,"source_patch_artifact_sha256":digest
+            "source_run_id":source,"source_task_id":promotion.source.task_id,"source_candidate_tree_sha":digest
         }}});
         let plan = AgentTaskPlan::new("frozen-follow-up", vec![request.clone()]);
         let run_id = agent_task_lifecycle::cook_attempt_run_id("intent-crash", 2);
@@ -21410,7 +21398,7 @@ fn finalization_dossier_and_backend_hydration_use_explicit_lifecycle_store() {
             )
             .unwrap();
         let mut rooted_promotion = promotion_with_existing_path(run_id, target.path());
-        rooted_promotion.patch_artifact.id = artifact_id.to_string();
+        rooted_promotion.candidate.as_mut().unwrap().candidate_sha = artifact_id.to_string();
         lifecycle_store
             .record_promotion(run_id, serde_json::to_value(rooted_promotion).unwrap())
             .unwrap();
@@ -21451,8 +21439,24 @@ fn finalization_dossier_and_backend_hydration_use_explicit_lifecycle_store() {
     let right_proof = backend
         .hydrate_gate_proof_in_store(&right_lifecycle_store, run_id)
         .unwrap();
-    assert_eq!(left_proof.promotion.patch_artifact.id, "left-patch");
-    assert_eq!(right_proof.promotion.patch_artifact.id, "right-patch");
+    assert_eq!(
+        left_proof
+            .promotion
+            .candidate
+            .as_ref()
+            .unwrap()
+            .candidate_sha,
+        "left-patch"
+    );
+    assert_eq!(
+        right_proof
+            .promotion
+            .candidate
+            .as_ref()
+            .unwrap()
+            .candidate_sha,
+        "right-patch"
+    );
 
     for (recipe_store, lifecycle_store, options) in [
         (&left_recipe_store, &left_lifecycle_store, &left_options),
@@ -22579,7 +22583,7 @@ fn substantive_retry_discloses_each_authenticated_contribution() {
         second_plan.tasks[0].inputs["cook_loop"]["artifact_provenance"] = serde_json::json!({
             "source_run_id": first_run_id,
             "source_task_id": first_plan.tasks[0].task_id,
-            "source_patch_artifact_sha256": patch_sha,
+            "source_candidate_tree_sha": patch_sha,
         });
         super::super::record_recipe_attempt(cook_id, 2, second_run_id, &second_plan)
             .expect("persist bound substantive retry");
@@ -22606,7 +22610,7 @@ fn substantive_retry_discloses_each_authenticated_contribution() {
 
         let mut first_promotion = promotion(first_run_id);
         first_promotion.source.task_id = first_plan.tasks[0].task_id.clone();
-        first_promotion.patch_artifact.sha256 = Some(patch_sha.to_string());
+        first_promotion.candidate.as_mut().unwrap().tree_sha = patch_sha.to_string();
         agent_task_lifecycle::record_promotion(
             first_run_id,
             serde_json::to_value(first_promotion).unwrap(),
@@ -22667,7 +22671,7 @@ fn green_retry_after_verified_no_change_attempt_finalizes_its_contribution_chain
         unchanged_plan.tasks[0].inputs["cook_loop"]["artifact_provenance"] = serde_json::json!({
             "source_run_id": first_run_id,
             "source_task_id": task_id,
-            "source_patch_artifact_sha256": first_sha,
+            "source_candidate_tree_sha": first_sha,
         });
         let mut green_plan = first_plan.clone();
         green_plan.tasks[0].executor.backend = "third-provider".to_string();
@@ -22675,7 +22679,7 @@ fn green_retry_after_verified_no_change_attempt_finalizes_its_contribution_chain
         green_plan.tasks[0].inputs["cook_loop"]["artifact_provenance"] = serde_json::json!({
             "source_run_id": unchanged_run_id,
             "source_task_id": task_id,
-            "source_patch_artifact_sha256": unchanged_sha,
+            "source_candidate_tree_sha": unchanged_sha,
         });
         for (attempt, run_id, plan) in [
             (1, first_run_id, &first_plan),
@@ -22702,7 +22706,7 @@ fn green_retry_after_verified_no_change_attempt_finalizes_its_contribution_chain
         let mut first_promotion = promotion(first_run_id);
         first_promotion.status = AgentTaskPromotionStatus::GateFailed;
         first_promotion.source.task_id = task_id.clone();
-        first_promotion.patch_artifact.sha256 = Some(first_sha.to_string());
+        first_promotion.candidate.as_mut().unwrap().tree_sha = first_sha.to_string();
         agent_task_lifecycle::record_promotion(
             first_run_id,
             serde_json::to_value(first_promotion).unwrap(),
@@ -22711,7 +22715,7 @@ fn green_retry_after_verified_no_change_attempt_finalizes_its_contribution_chain
         let mut unchanged_promotion = promotion(unchanged_run_id);
         unchanged_promotion.status = AgentTaskPromotionStatus::NoChanges;
         unchanged_promotion.source.task_id = task_id.clone();
-        unchanged_promotion.patch_artifact.sha256 = Some(unchanged_sha.to_string());
+        unchanged_promotion.candidate.as_mut().unwrap().tree_sha = unchanged_sha.to_string();
         unchanged_promotion.changed_files.clear();
         unchanged_promotion.deterministic_gates.clear();
         unchanged_promotion.gate_results.clear();
@@ -22753,7 +22757,7 @@ fn green_retry_after_verified_no_change_attempt_finalizes_its_contribution_chain
         // Passing through a no-change link stays bound to its persisted
         // promotion: a digest that does not match still fails closed.
         let mut drifted = unchanged_promotion.clone();
-        drifted.patch_artifact.sha256 = Some(first_sha.to_string());
+        drifted.candidate.as_mut().unwrap().tree_sha = first_sha.to_string();
         record_unchanged_promotion(&drifted);
         assert_binding_fails_closed("a drifted no-change binding fails closed");
         record_unchanged_promotion(&unchanged_promotion);
@@ -24522,7 +24526,7 @@ fn follow_up_baseline_is_clean_and_preserves_binary_mode_and_untracked_candidate
             "schema":"homeboy/agent-task-promotion-report/v1", "status":"gate_failed",
             "source":{"kind":"aggregate","task_id":"candidate-task","run_id":"first-run"},
             "to_worktree":"fixture@target", "target":{"worktree":"fixture@target", "head":target_head},
-            "patch_artifact":{"id":"candidate","kind":"patch","path":patch_path}, "changed_files":["candidate.bin", "candidate.sh"],
+            "candidate":{"base_sha":"base","candidate_sha":"candidate","tree_sha":"tree"}, "changed_files":["candidate.bin", "candidate.sh"],
             "command_evidence":[], "deterministic_gates":[], "gate_results":[],
             "provenance":{"worktree_path":root, "candidate_commit": crate::agent_task_promotion::tests::candidate_snapshot::snapshot(root, &target_head, "first-run")}, "operator_notification":{"status":"blocked","message":"red"}
         })).unwrap();
@@ -24597,7 +24601,7 @@ fn follow_up_baseline_accepts_unchanged_commit_and_rejects_patch_only_records() 
         "schema":"homeboy/agent-task-promotion-report/v1", "status":"gate_failed",
         "source":{"kind":"aggregate","task_id":"candidate-task","run_id":"first-run"},
         "to_worktree":"fixture@target", "target":{"worktree":"fixture@target", "head":target_head},
-        "patch_artifact":{"id":"candidate","kind":"patch","path":"","sha256":sha256},
+        "candidate":{"base_sha":"base","candidate_sha":"candidate","tree_sha":sha256},
         "changed_files":[], "command_evidence":[], "deterministic_gates":[], "gate_results":[],
         "provenance":{"worktree_path":root, "candidate_commit": (sha256 == empty_sha256).then(|| crate::agent_task_promotion::tests::candidate_snapshot::snapshot(&root, &target_head, "first-run"))}, "operator_notification":{"status":"blocked","message":"red"}
     })).unwrap()
@@ -24696,7 +24700,7 @@ fn follow_up_baseline_combines_adopted_candidate_with_overlapping_provider_delta
         "schema":"homeboy/agent-task-promotion-report/v1", "status":"applied",
         "source":{"kind":"aggregate","task_id":"candidate-task","run_id":"first-run"},
         "to_worktree":"fixture@target", "target":{"worktree":"fixture@target", "head":target_head},
-        "patch_artifact":{"id":"provider-delta","kind":"patch","path":patch_path},
+        "candidate":{"base_sha":"base","candidate_sha":"provider-delta","tree_sha":"tree"},
         "changed_files":["candidate.txt"], "command_evidence":[], "deterministic_gates":[], "gate_results":[],
         "provenance":{"worktree_path":root, "candidate_commit": crate::agent_task_promotion::tests::candidate_snapshot::snapshot(root, &target_head, "first-run"), "gate_feedback_baseline":{"current_diff":complete_candidate}},
         "operator_notification":{"status":"completed","message":"applied"}
@@ -24766,7 +24770,7 @@ fn follow_up_baseline_refuses_when_promotion_target_head_has_advanced() {
             "schema":"homeboy/agent-task-promotion-report/v1", "status":"gate_failed",
             "source":{"kind":"aggregate","task_id":"candidate-task","run_id":"first-run"},
             "to_worktree":"fixture@target", "target":{"worktree":"fixture@target", "head":head_a},
-            "patch_artifact":{"id":"candidate","kind":"patch","path":patch_path},
+            "candidate":{"base_sha":"base","candidate_sha":"candidate","tree_sha":"tree"},
             "provenance":{"worktree_path":root}, "operator_notification":{"status":"blocked","message":"red"}
         }))
         .unwrap();
@@ -25552,7 +25556,7 @@ fn re_materialize_follow_up_baseline_recovers_after_worktree_deletion() {
         "schema":"homeboy/agent-task-promotion-report/v1", "status":"gate_failed",
         "source":{"kind":"aggregate","task_id":"candidate-task","run_id":"first-run"},
         "to_worktree":"fixture@target", "target":{"worktree":"fixture@target", "head":target_head},
-        "patch_artifact":{"id":"candidate","kind":"patch","path":patch_path},
+        "candidate":{"base_sha":"base","candidate_sha":"candidate","tree_sha":"tree"},
         "provenance":{"worktree_path":root, "candidate_commit": crate::agent_task_promotion::tests::candidate_snapshot::snapshot(root, &target_head, "first-run")}, "operator_notification":{"status":"blocked","message":"red"}
     }))
     .unwrap();

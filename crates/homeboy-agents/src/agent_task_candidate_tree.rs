@@ -132,11 +132,9 @@ mod tests {
     #[test]
     fn patch_carried_baselines_are_non_recoverable() {
         let (temp, _) = candidate_repo();
-        let error = validate_gate_feedback_candidate_baseline(
-            temp.path(),
-            &json!({"patch_artifact":{"path":"missing.patch"}}),
-        )
-        .unwrap_err();
+        let error =
+            validate_gate_feedback_candidate_baseline(temp.path(), &json!({"candidate":null}))
+                .unwrap_err();
         assert!(error.message.contains("non-recoverable"));
     }
 }

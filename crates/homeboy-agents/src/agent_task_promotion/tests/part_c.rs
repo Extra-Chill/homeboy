@@ -77,7 +77,7 @@ fn bridge_reconciliation_marks_missing_or_mismatched_finalized_bytes_pending() {
 }
 
 #[test]
-fn promote_recoverable_candidate_harvests_committed_changes_behind_an_empty_patch_artifact() {
+fn promote_recoverable_candidate_harvests_committed_changes_behind_empty_evidence() {
     let _home = gate_home();
     let (temp, repo, base, candidate) = adopted_commit_repo();
     let empty_patch_path = temp.path().join("empty-candidate.patch");
@@ -130,7 +130,7 @@ fn promote_recoverable_candidate_harvests_committed_changes_behind_an_empty_patc
     .expect("empty provider patch falls back to the committed candidate");
 
     assert_eq!(report.status, AgentTaskPromotionStatus::Applied);
-    assert_eq!(report.patch_artifact.id, candidate);
+    assert_eq!(report.candidate.as_ref().unwrap().candidate_sha, candidate);
     assert_eq!(report.provenance["candidate_commit"]["base_sha"], base);
 }
 
@@ -253,7 +253,7 @@ fn empty_patch_promotes_a_candidate_already_committed_on_the_destination() {
         .expect("a candidate committed on the destination is promoted");
 
         assert_eq!(report.status, AgentTaskPromotionStatus::Applied);
-        assert_eq!(report.patch_artifact.id, candidate);
+        assert_eq!(report.candidate.as_ref().unwrap().candidate_sha, candidate);
         assert_eq!(report.changed_files, vec!["lib.rs"]);
         assert_eq!(git_head(&repo, "HEAD"), base);
         assert_eq!(

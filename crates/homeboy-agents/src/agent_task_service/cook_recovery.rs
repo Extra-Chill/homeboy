@@ -712,7 +712,7 @@ pub fn recover_cook(
                     object.insert(
                     "handoff".to_string(),
                     serde_json::json!({
-                        "next_command": super::cook_recover_command(None, run_id, None),
+                        "next_command": super::cook_recover_command(None, run_id),
                         "status_command": super::cook_recovery_command(run_id, &["status", run_id]),
                     }),
                 );
