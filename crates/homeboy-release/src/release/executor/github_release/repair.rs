@@ -6,6 +6,24 @@ use homeboy_core::git::release_download::GitHubRepo;
 
 use super::gh_cli::{gh_env_hint, gh_env_prefix, github_cli_env, safe_filename};
 
+fn release_latest_arg(config: &GithubConfig) -> Option<&'static str> {
+    config
+        .release_latest
+        .map(|latest| if latest { "--latest" } else { "--latest=false" })
+}
+
+/// Shared by every draft-publication path and its printed recovery command.
+pub(super) fn publish_release_args<'a>(
+    tag: &'a str,
+    repo: &'a str,
+    config: &GithubConfig,
+) -> Vec<&'a str> {
+    let mut args = vec!["release", "edit", tag, "--draft=false"];
+    args.extend(release_latest_arg(config));
+    args.extend(["-R", repo]);
+    args
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct GitHubReleaseRepairCommands {
     pub(crate) notes_file: String,
@@ -37,6 +55,7 @@ pub(crate) fn github_release_repair_commands(
         previous_tag,
         persisted_notes_path,
         github_cli_env(github, config),
+        config,
     )
 }
 
@@ -65,7 +84,15 @@ pub(crate) fn github_release_repair_commands_with_proxy(
                 Vec::new()
             }
         });
-    github_release_repair_commands_with_env(tag, github, artifact_paths, previous_tag, None, env)
+    github_release_repair_commands_with_env(
+        tag,
+        github,
+        artifact_paths,
+        previous_tag,
+        None,
+        env,
+        &GithubConfig::default(),
+    )
 }
 
 fn github_release_repair_commands_with_env(
@@ -75,6 +102,7 @@ fn github_release_repair_commands_with_env(
     previous_tag: Option<&str>,
     persisted_notes_path: Option<&str>,
     env: Vec<(String, String)>,
+    config: &GithubConfig,
 ) -> GitHubReleaseRepairCommands {
     let env_prefix = gh_env_prefix(&env);
     let repo_flag = format!("{}/{}", github.owner, github.repo);
@@ -129,6 +157,9 @@ fn github_release_repair_commands_with_env(
     for path in artifact_paths {
         create.push(quote_arg(path));
     }
+    if let Some(latest) = release_latest_arg(config) {
+        create.push(latest.to_string());
+    }
     create.push("-R".to_string());
     create.push(quote_arg(&repo_flag));
 
@@ -147,10 +178,13 @@ fn github_release_repair_commands_with_env(
         quote_arg(&repo_flag),
     ]);
     let publish_command = format!(
-        "{}gh release edit {} --draft=false -R {}",
+        "{}gh {}",
         env_prefix,
-        quote_arg(tag),
-        quote_arg(&repo_flag)
+        publish_release_args(tag, &repo_flag, config)
+            .iter()
+            .map(|arg| quote_arg(arg))
+            .collect::<Vec<_>>()
+            .join(" ")
     );
 
     let view_command = format!(

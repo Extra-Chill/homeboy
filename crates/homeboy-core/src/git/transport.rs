@@ -370,6 +370,7 @@ mod tests {
             );
             git(root, &["config", "remote.other.promisor", "true"]);
             let config = GithubConfig {
+                release_latest: None,
                 hosts: HashMap::from([
                     (
                         "a.example.test".to_string(),
@@ -519,6 +520,7 @@ mod tests {
             })
             .unwrap();
             let component = GithubConfig {
+                release_latest: None,
                 hosts: HashMap::from([(
                     host.clone(),
                     GithubHostConfig {

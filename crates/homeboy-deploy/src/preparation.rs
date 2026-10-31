@@ -773,7 +773,10 @@ mod tests {
                 },
             );
         }
-        component.github = GithubConfig { hosts };
+        component.github = GithubConfig {
+            hosts,
+            ..GithubConfig::default()
+        };
         component
     }
 

@@ -1844,6 +1844,7 @@ mod tests {
             repo: "theme".to_string(),
         };
         let config = GithubConfig {
+            release_latest: None,
             hosts: HashMap::from([(
                 "github.enterprise.test".to_string(),
                 GithubHostConfig {
@@ -1902,6 +1903,7 @@ mod tests {
             repo: "theme".to_string(),
         };
         let config = GithubConfig {
+            release_latest: None,
             hosts: HashMap::from([(
                 "github.enterprise.test".to_string(),
                 GithubHostConfig {
