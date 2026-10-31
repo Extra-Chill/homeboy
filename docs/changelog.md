@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.437.4] - 2026-10-31
+
+### Changed
+- Delete fallbacks for runners and daemons older than the controller
+- Simplify the review form and the PR AI signature
+- one runner-daemons state dir per runner and controller
+- Delete homeboy file (net production line change: -2,281)
+- Make Pi a built-in provider; delete extension executor discovery and non-Pi execution paths
+
 ## [0.437.3] - 2026-10-31
 
 ### Changed
