@@ -1,5 +1,7 @@
 //! Pi's native CLI contract. Process supervision remains in command_runner.
 use std::path::Path;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
@@ -9,6 +11,8 @@ use crate::agent_task::{
 };
 
 const OUTPUT_INSTRUCTIONS: &str = include_str!("pi-outputs.prompt.md");
+/// Bound for the one tool-less turn that restates omitted outputs.
+const RESUME_TIMEOUT: Duration = Duration::from_secs(300);
 
 pub(super) fn command(config: &Value) -> Result<(String, Vec<String>), String> {
     let program = config
@@ -141,19 +145,10 @@ pub(super) fn args(
         .as_str()
         .unwrap_or_default()
         .to_string();
-    let declared = declarations(request);
-    if !declared.is_empty() {
-        let suffix = config["output_instructions_template"]
-            .as_str()
-            .unwrap_or(OUTPUT_INSTRUCTIONS)
-            .replace(
-                "{{declarations}}",
-                &serde_json::to_string(&declared).unwrap(),
-            );
-        if !suffix.trim().is_empty() {
-            prompt.push_str("\n\n");
-            prompt.push_str(suffix.trim());
-        }
+    let suffix = output_instructions(request);
+    if !suffix.is_empty() {
+        prompt.push_str("\n\n");
+        prompt.push_str(&suffix);
     }
     if prompt.len() > 100 * 1024 {
         let dir = if artifacts.as_os_str().is_empty() {
@@ -168,6 +163,112 @@ pub(super) fn args(
     }
     args.push(prompt);
     Ok(args)
+}
+
+/// The prompt suffix asking for the request's declared outputs, if any.
+fn output_instructions(request: &Value) -> String {
+    let declared = declarations(request);
+    if declared.is_empty() {
+        return String::new();
+    }
+    request["executor"]["config"]["output_instructions_template"]
+        .as_str()
+        .unwrap_or(OUTPUT_INSTRUCTIONS)
+        .replace(
+            "{{declarations}}",
+            &serde_json::to_string(&declared).unwrap(),
+        )
+        .trim()
+        .to_string()
+}
+
+/// Resume a finished session once, with tools off, when its final answer
+/// omitted required declared outputs. The session that did the work can
+/// describe it in one turn; a fresh form-only attempt has to re-read the
+/// repository and often fails (#16821). `args` are the first run's arguments,
+/// ending with its prompt. Any failure leaves `result` unchanged.
+pub(super) fn resume_for_missing_outputs(
+    result: &mut AgentTaskOutcome,
+    request: &Value,
+    args: &[String],
+    artifacts: &Path,
+    command: Option<Command>,
+) {
+    let Some(index) = result
+        .diagnostics
+        .iter()
+        .position(|d| d.class == "pi.required_outputs_missing")
+    else {
+        return;
+    };
+    let (Some(mut command), true) = (command, args.iter().any(|a| a == "--session")) else {
+        return;
+    };
+    let missing = result.diagnostics[index].data["missing_outputs"].clone();
+    let names = missing
+        .as_array()
+        .map(|names| {
+            names
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .unwrap_or_default();
+    let mut resume_args = args[..args.len() - 1].to_vec();
+    resume_args.push("--no-tools".into());
+    resume_args.push(format!(
+        "Your final answer did not include the required output(s): {names}. Describe the work you just finished.\n\n{}",
+        output_instructions(request)
+    ));
+    let task = safe_segment(request["task_id"].as_str().unwrap_or_default());
+    let stdout_path = artifacts.join(format!("{task}-pi-resume.jsonl"));
+    let Ok(stdout) = std::fs::File::create(&stdout_path) else {
+        return;
+    };
+    let Ok(mut child) = command
+        .args(&resume_args)
+        .stdin(Stdio::null())
+        .stdout(stdout)
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return;
+    };
+    let deadline = Instant::now() + RESUME_TIMEOUT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(200)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return;
+            }
+        }
+    };
+    let stream = std::fs::read_to_string(&stdout_path).unwrap_or_default();
+    let resumed = outcome(request, &stream, "", status.code(), "", None);
+    if resumed.status != AgentTaskOutcomeStatus::Succeeded {
+        return;
+    }
+    if let (Some(outputs), Value::Object(resumed)) =
+        (result.outputs.as_object_mut(), resumed.outputs.clone())
+    {
+        outputs.extend(resumed);
+    } else {
+        result.outputs = resumed.outputs;
+    }
+    result.status = AgentTaskOutcomeStatus::Succeeded;
+    result.failure_classification = None;
+    result.summary = Some(format!(
+        "Pi completed the task; resuming its session supplied the omitted output(s): {names}."
+    ));
+    result.diagnostics[index] = AgentTaskDiagnostic {
+        class: "pi.required_outputs_resumed".into(),
+        message: format!("Pi's final answer omitted {names}; resuming its session supplied them."),
+        data: json!({"class": "pi.required_outputs_resumed", "resumed_outputs": missing}),
+    };
 }
 
 fn structured_answer(text: &str) -> Option<Value> {
