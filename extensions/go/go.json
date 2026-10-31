@@ -2,6 +2,7 @@
   "name": "Go",
   "id": "go",
   "version": "1.8.4",
+  "source_url": "https://github.com/Extra-Chill/homeboy",
   "icon": "g.circle.fill",
   "description": "Go CLI integration for services, bridges, and binaries",
   "author": "Extra Chill",
