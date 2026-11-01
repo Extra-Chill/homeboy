@@ -74,8 +74,8 @@ pub fn shell_join_args(args: &[String]) -> String {
 }
 
 fn client_connection_args(
-    _user: &str,
-    _host: &str,
+    user: &str,
+    host: &str,
     port: u16,
     identity_file: Option<&str>,
     session: Option<&ManagedSshSession>,
@@ -125,6 +125,18 @@ fn client_connection_args(
         // the SSH executable path rather than the control socket.
         push_option(&mut args, format!("ControlPath={}", session.control_path));
         push_option(&mut args, "ControlMaster=no");
+    } else if let Some(control_path) = (!options.interactive)
+        .then(|| super::ssh_mux::control_path(user, host, port, identity_file))
+        .flatten()
+    {
+        // Inside a deploy's mux scope every ssh/scp/rsync call to this target
+        // shares one homeboy-owned master (#16806).
+        push_option(&mut args, "ControlMaster=auto");
+        push_option(&mut args, format!("ControlPath={}", control_path.display()));
+        push_option(
+            &mut args,
+            format!("ControlPersist={}", super::ssh_mux::CONTROL_PERSIST),
+        );
     }
 
     if options.batch_mode && !options.interactive {
