@@ -1,0 +1,28 @@
+# Caller for consumers that publish to npm with trusted publishing (OIDC).
+#
+# This is the ONLY reason to grant id-token: write. It is deliberately not in
+# the minimal consumer, and not requested by release.yml itself, because a
+# reusable workflow cannot hold more permissions than its caller grants — so
+# anything release.yml lists is forced on every caller, including the many that
+# will never publish an npm package (#494).
+#
+# `dry-run: true` so a manual dispatch of this fixture can never publish.
+name: Homeboy release consumer with npm trusted publishing
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  # Required by npm trusted publishing only. Omit it if you do not publish to
+  # npm; release.yml does not require it.
+  id-token: write
+
+jobs:
+  release:
+    uses: Extra-Chill/homeboy-action/.github/workflows/release.yml@v2
+    with:
+      dry-run: true
+    secrets: inherit

@@ -1,0 +1,1525 @@
+# Reusable Homeboy CI workflow.
+#
+# Consumers should call this workflow instead of hand-rolling quality-check DAGs.
+# It preserves a hard build gate when requested, then exposes each Homeboy
+# quality command as its own GitHub check so failures stay easy to scan.
+
+name: Homeboy CI
+
+on:
+  workflow_call:
+    inputs:
+      commands:
+        description: 'Homeboy quality commands to run.'
+        type: string
+        default: 'review lint,review test'
+      component:
+        description: 'Component name override.'
+        type: string
+        default: ''
+      components:
+        description: 'Monorepo CI mode: changed or all. Empty preserves single-component CI.'
+        type: string
+        default: ''
+      shared-paths:
+        description: 'Newline-separated repository-relative globs that select all components in changed mode.'
+        type: string
+        default: ''
+      extension:
+        description: 'Single extension ID override.'
+        type: string
+        default: ''
+      extension-source:
+        description: 'Git URL or path to install the extension from.'
+        type: string
+        default: 'https://github.com/Extra-Chill/homeboy'
+      extension-ref:
+        description: 'Optional git revision to install from the extension source.'
+        type: string
+        default: ''
+      args:
+        description: 'Additional arguments passed to each Homeboy command.'
+        type: string
+        default: ''
+      scope:
+        description: 'Execution scope: auto, changed, or full.'
+        type: string
+        default: 'auto'
+      rig:
+        description: 'Bench rig pair/list passed to homeboy bench.'
+        type: string
+        default: ''
+      scenario:
+        description: 'Bench scenario ID passed to homeboy bench.'
+        type: string
+        default: ''
+      runs:
+        description: 'Bench run count passed to homeboy bench.'
+        type: string
+        default: ''
+      iterations:
+        description: 'Bench iteration count passed to homeboy bench.'
+        type: string
+        default: ''
+      regression-threshold:
+        description: 'Bench regression threshold passed to homeboy bench.'
+        type: string
+        default: ''
+      version:
+        description: 'Homeboy release version to install when no source or binary path is provided.'
+        type: string
+        default: 'latest'
+      source:
+        description: 'Path to build Homeboy from source inside the quality job.'
+        type: string
+        default: ''
+      binary-path:
+        description: 'Path to an existing Homeboy binary inside the caller checkout.'
+        type: string
+        default: ''
+      build-command:
+        description: 'Optional command that builds a Homeboy binary before quality checks.'
+        type: string
+        default: ''
+      build-artifact-path:
+        description: 'Path created by build-command and uploaded for the quality job.'
+        type: string
+        default: 'target/release/homeboy'
+      build-artifact-file:
+        description: 'Downloaded binary filename used by the quality job.'
+        type: string
+        default: 'homeboy'
+      rust-toolchain:
+        description: 'Rust toolchain for optional build and action source builds.'
+        type: string
+        default: 'stable'
+      source-build-profile:
+        description: 'Cargo profile for action source builds: release or dev.'
+        type: string
+        default: 'release'
+      setup-timeout-seconds:
+        description: 'Maximum wall-clock time for each Homeboy Action setup subprocess.'
+        type: string
+        default: '900'
+      auto-setup:
+        description: 'Whether Homeboy Action should install detected runtime dependencies.'
+        type: string
+        default: 'true'
+      php-version:
+        description: 'PHP version override.'
+        type: string
+        default: ''
+      node-version:
+        description: 'Node.js version override.'
+        type: string
+        default: ''
+      differential-gating:
+        description: 'Enable PR differential gating for lint/test.'
+        type: string
+        default: 'false'
+      baseline-commands:
+        description: 'Commands to rerun at the PR base when differential-gating is true. Use auto, a comma-separated subset, or none.'
+        type: string
+        default: 'auto'
+      retry-introduced-test-failures:
+        description: 'Before blaming the PR for a candidate-only test failure, retry it in isolation on the candidate to rule out flakiness. Requires differential-gating. Currently supported for the cargo-nextest and cargo test runners only; other runners are announced as unsupported and blame the PR as before. Extra-Chill/homeboy#14984.'
+        type: string
+        default: 'true'
+      retry-introduced-test-attempts:
+        description: 'Retry attempts per candidate-only test identity when retry-introduced-test-failures is true.'
+        type: string
+        default: '2'
+      observation-window:
+        description: 'Duration window for best-effort observation export.'
+        type: string
+        default: '24h'
+      execution-timeout-seconds:
+        description: 'Maximum wall-clock time for each Homeboy command phase.'
+        type: string
+        default: '1800'
+      config-dir:
+        description: 'Repo-relative Homeboy config root (projects/, servers/, components/, fleets/) exported as HOMEBOY_CONFIG_ROOT so operations commands can resolve checked-in targets.'
+        type: string
+        default: ''
+      test-timeout-seconds:
+        description: 'Maximum wall-clock time for the Homeboy test child. Must leave cleanup margin below the command phase timeout.'
+        type: string
+        default: '1500'
+      nextest-profile:
+        description: 'Nextest profile for unsharded candidate, baseline, and retry Test runs (exported as NEXTEST_PROFILE). Empty keeps nextest''s default profile. Shard jobs keep their own ci profile.'
+        type: string
+        default: ''
+      test-shards:
+        description: 'Optional number of deterministic Test shards. Values above one require the Homeboy test inventory contract.'
+        type: string
+        default: '1'
+      max-changed-test-files:
+        description: 'Optional cap on the number of changed-scope test files Homeboy may select for a Test phase. Positive integers enable the guard; empty disables it and leaves behaviour unchanged.'
+        type: string
+        default: ''
+      allow-oversized-test-scope:
+        description: 'Explicitly allow a duration-backed sharded Test plan whose estimated process duration exceeds test-timeout-seconds.'
+        type: string
+        default: 'false'
+      cleanup-timeout-seconds:
+        description: 'Maximum wall-clock time to terminate command descendants.'
+        type: string
+        default: '15'
+      pr-comment:
+        description: 'Post the default Homeboy PR comment.'
+        type: string
+        default: 'true'
+      comment-key:
+        description: 'Shared PR comment key.'
+        type: string
+        default: ''
+      comment-section-key:
+        description: 'Section key within the shared PR comment.'
+        type: string
+        default: ''
+      comment-section-title:
+        description: 'Section title within the shared PR comment.'
+        type: string
+        default: ''
+      pr-policy:
+        description: 'Path to a repo-local PR policy file.'
+        type: string
+        default: ''
+      pr-open-policy:
+        description: 'Path to a repo-local PR open/update policy file.'
+        type: string
+        default: ''
+      pr-policy-merge:
+        description: 'Merge the PR when pr-policy marks it safe.'
+        type: string
+        default: 'false'
+      pr-policy-merge-method:
+        description: 'Merge method for pr-policy-merge.'
+        type: string
+        default: 'squash'
+      action-ref:
+        description: 'homeboy-action ref used by this workflow.'
+        type: string
+        default: 'v2'
+      contract-probe:
+        description: 'Run only the bounded consumer-contract probe.'
+        type: boolean
+        default: false
+    secrets:
+      HOMEBOY_APP_ID:
+        required: false
+      HOMEBOY_APP_PRIVATE_KEY:
+        required: false
+
+# A called workflow cannot request a permission the CALLER has not granted —
+# GitHub fails the whole run at startup, before any job, with no usable error
+# in the API. Adding a scope here is therefore a breaking change for every
+# consumer that does not already grant it, and it presents to them as
+# "no checks reported" rather than as a failure.
+#
+# `actions: read` was added in #313 and silently disabled CI in every consumer
+# repo from v2.10.0 onward. It was not needed: the only actions-scoped step is
+# `actions/download-artifact` reading artifacts from its OWN run, which the
+# default token can already do. See #327.
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  detect-components:
+    name: Detect components
+    needs: plan
+    if: ${{ !inputs.contract-probe && inputs.components != '' }}
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.detect.outputs.matrix }}
+      enabled: ${{ steps.detect.outputs.enabled }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+      - uses: actions/checkout@v6
+        with:
+          repository: Extra-Chill/homeboy-action
+          ref: ${{ needs.plan.outputs.action-sha }}
+          path: .homeboy-action
+      - name: Hide detector checkout from component discovery
+        id: prepare-detection
+        run: bash .homeboy-action/scripts/core/prepare-test-shard-workspace.sh prepare .homeboy-action
+      # Detection is registry-free and does not require a root homeboy.json.
+      # Pin the detector independently of the consumer's candidate binary.
+      - name: Install component detector (Homeboy >= 0.436.4)
+        env:
+          HOMEBOY_VERSION: '0.436.4'
+          HOMEBOY_ACTION_SETUP_TIMEOUT_SECONDS: ${{ inputs.setup-timeout-seconds }}
+        run: bash .homeboy-action/scripts/core/run-setup-with-timeout.sh 'install component detector' -- bash .homeboy-action/scripts/setup/install-homeboy-release.sh
+      - name: Detect component matrix
+        id: detect
+        env:
+          COMPONENTS: ${{ inputs.components }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          SHARED_PATHS: ${{ inputs.shared-paths }}
+        run: python3 .homeboy-action/scripts/core/plan-components.py
+      - name: Restore consumer Git exclusions
+        if: always() && steps.prepare-detection.outcome == 'success'
+        run: bash .homeboy-action/scripts/core/prepare-test-shard-workspace.sh cleanup
+
+  component-ci:
+    name: Component ${{ matrix.component }}
+    needs: [plan, detect-components]
+    if: ${{ !inputs.contract-probe && !cancelled() && needs.detect-components.result == 'success' && needs.detect-components.outputs.enabled == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.detect-components.outputs.matrix) }}
+    env:
+      NEXTEST_PROFILE: ${{ inputs.nextest-profile || 'default' }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+      - uses: actions/checkout@v6
+        with:
+          repository: Extra-Chill/homeboy-action
+          ref: ${{ needs.plan.outputs.action-sha }}
+          path: .homeboy-action
+      - name: Hide action checkout during component CI
+        id: prepare-component
+        run: bash .homeboy-action/scripts/core/prepare-test-shard-workspace.sh prepare .homeboy-action
+      - name: Install build toolchain
+        if: inputs.build-command != '' && inputs.rust-toolchain != ''
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ inputs.rust-toolchain }}
+      - name: Build candidate binary
+        if: inputs.build-command != ''
+        run: ${{ inputs.build-command }}
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        continue-on-error: true
+        with:
+          client-id: ${{ secrets.HOMEBOY_APP_ID }}
+          private-key: ${{ secrets.HOMEBOY_APP_PRIVATE_KEY }}
+      - name: Run component CI (candidate and differential baseline)
+        uses: ./.homeboy-action
+        env:
+          HOMEBOY_MAX_CHANGED_TEST_FILES: ${{ inputs.max-changed-test-files }}
+        with:
+          # The input selects a directory; read-portable-config resolves its ID.
+          component: ${{ matrix.path }}
+          commands: ${{ inputs.commands }}
+          version: ${{ inputs.version }}
+          source: ${{ inputs.source }}
+          binary-path: ${{ inputs.build-command != '' && inputs.build-artifact-path || inputs.binary-path }}
+          rust-toolchain: ${{ inputs.rust-toolchain }}
+          source-build-profile: ${{ inputs.source-build-profile }}
+          extension: ${{ inputs.extension }}
+          extension-source: ${{ inputs.extension-source }}
+          extension-ref: ${{ inputs.extension-ref }}
+          args: ${{ inputs.args }}
+          scope: ${{ inputs.scope }}
+          rig: ${{ inputs.rig }}
+          scenario: ${{ inputs.scenario }}
+          runs: ${{ inputs.runs }}
+          iterations: ${{ inputs.iterations }}
+          regression-threshold: ${{ inputs.regression-threshold }}
+          auto-setup: ${{ inputs.auto-setup }}
+          php-version: ${{ inputs.php-version }}
+          node-version: ${{ inputs.node-version }}
+          differential-gating: ${{ inputs.differential-gating }}
+          baseline-commands: ${{ inputs.baseline-commands }}
+          retry-introduced-test-failures: ${{ inputs.retry-introduced-test-failures }}
+          retry-introduced-test-attempts: ${{ inputs.retry-introduced-test-attempts }}
+          observation-window: ${{ inputs.observation-window }}
+          setup-timeout-seconds: ${{ inputs.setup-timeout-seconds }}
+          execution-timeout-seconds: ${{ inputs.execution-timeout-seconds }}
+          test-timeout-seconds: ${{ inputs.test-timeout-seconds }}
+          cleanup-timeout-seconds: ${{ inputs.cleanup-timeout-seconds }}
+          config-dir: ${{ inputs.config-dir }}
+          app-token: ${{ steps.app-token.outputs.token || github.token }}
+          pr-comment: ${{ inputs.pr-comment }}
+          comment-key: ${{ inputs.comment-key }}
+          comment-section-key: ${{ inputs.comment-section-key || matrix.component }}
+          comment-section-title: ${{ inputs.comment-section-title || matrix.component }}
+          # No individual component may merge a PR before the other jobs finish.
+          pr-policy-merge: 'false'
+      - name: Restore consumer Git exclusions
+        if: always() && steps.prepare-component.outcome == 'success'
+        run: bash .homeboy-action/scripts/core/prepare-test-shard-workspace.sh cleanup
+
+  components-result:
+    name: Components
+    needs: [plan, detect-components, component-ci]
+    if: ${{ always() && !inputs.contract-probe && inputs.components != '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require detection and every selected component to pass
+        env:
+          PLAN_RESULT: ${{ needs.plan.result }}
+          DETECT_RESULT: ${{ needs.detect-components.result }}
+          ENABLED: ${{ needs.detect-components.outputs.enabled }}
+          COMPONENT_RESULT: ${{ needs.component-ci.result }}
+        run: |
+          test "${PLAN_RESULT}" = success
+          test "${DETECT_RESULT}" = success
+          if [ "${ENABLED}" = true ]; then
+            test "${COMPONENT_RESULT}" = success
+          else
+            test "${ENABLED}" = false && test "${COMPONENT_RESULT}" = skipped
+          fi
+
+  contract-probe:
+    name: Consumer contract
+    if: inputs.contract-probe
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo 'Reusable workflow caller contract accepted.'
+
+  binary:
+    name: Prepare candidate Homeboy binary
+    # needs plan solely for needs.plan.outputs.action-sha; plan is pure bash.
+    needs: plan
+    if: ${{ !inputs.contract-probe && inputs.components == '' }}
+    runs-on: ubuntu-latest
+    # Caps third-party setup actions such as cache restore, which cannot be
+    # enclosed by the action's subprocess supervisor.
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        if: inputs.build-command != '' && inputs.rust-toolchain != ''
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ inputs.rust-toolchain }}
+
+      - name: Check out Homeboy Action
+        uses: actions/checkout@v6
+        with:
+          repository: Extra-Chill/homeboy-action
+          ref: ${{ needs.plan.outputs.action-sha }}
+          path: .homeboy-action
+
+      # Custom build commands own their cache here. Source builds are restored
+      # exactly once by the composite action's canonical source cache resolver.
+      - name: Resolve candidate Cargo cache
+        id: cargo-cache
+        if: inputs.build-command != '' && hashFiles('Cargo.lock') != ''
+        env:
+          SOURCE_PATH: .
+          SOURCE_TARGET_DIR: target
+          SOURCE_BUILD_PROFILE: ${{ inputs.source-build-profile }}
+          SOURCE_BUILD_COMMAND: ${{ inputs.build-command }}
+        run: bash .homeboy-action/scripts/setup/resolve-source-cargo-cache.sh
+
+      - name: Cache cargo
+        id: restore-cargo
+        if: steps.cargo-cache.outputs.key != ''
+        uses: actions/cache/restore@v5
+        with:
+          path: ${{ steps.cargo-cache.outputs.paths }}
+          key: ${{ steps.cargo-cache.outputs.key }}
+          restore-keys: ${{ steps.cargo-cache.outputs.restore-keys }}
+
+      - name: Build candidate Homeboy binary
+        if: inputs.build-command != ''
+        run: ${{ inputs.build-command }}
+
+      # Skip the redundant save after an exact hit. PR saves are kept: a
+      # PR's later pushes restore its own merge-ref cache (Extra-Chill/homeboy-action#545).
+      - name: Save cargo
+        if: steps.cargo-cache.outputs.key != '' && steps.restore-cargo.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: ${{ steps.cargo-cache.outputs.paths }}
+          key: ${{ steps.cargo-cache.outputs.key }}
+
+      - name: Reserve action checkout during candidate binary setup
+        id: prepare-binary-workspace
+        run: bash .homeboy-action/scripts/core/prepare-test-shard-workspace.sh prepare .homeboy-action
+
+      - name: Binary setup
+        id: binary-setup
+        uses: ./.homeboy-action
+        with:
+          commands: __prepare__
+          prepare-only: 'true'
+          # The setup reads homeboy.json; a component in a subdirectory
+          # (single-component CI inside a monorepo) has none at the root.
+          component: ${{ inputs.component }}
+          version: ${{ inputs.version }}
+          source: ${{ inputs.source }}
+          binary-path: ${{ inputs.build-command != '' && inputs.build-artifact-path || inputs.binary-path }}
+          rust-toolchain: ${{ inputs.rust-toolchain }}
+          source-build-profile: ${{ inputs.source-build-profile }}
+          setup-timeout-seconds: ${{ inputs.setup-timeout-seconds }}
+          auto-setup: 'false'
+
+      - name: Restore consumer Git exclusions
+        if: always() && steps.prepare-binary-workspace.outcome == 'success'
+        run: bash .homeboy-action/scripts/core/prepare-test-shard-workspace.sh cleanup
+
+      - name: Upload candidate Homeboy binary
+        uses: actions/upload-artifact@v7
+        with:
+          name: homeboy-candidate-binary-${{ github.run_attempt }}
+          path: /usr/local/bin/homeboy
+          retention-days: 1
+
+  plan:
+    name: Plan
+    if: '!inputs.contract-probe'
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      non-test-commands-enabled: ${{ steps.plan.outputs.non-test-commands-enabled }}
+      test-shards-enabled: ${{ steps.plan.outputs.test-shards-enabled }}
+      test-command: ${{ steps.plan.outputs.test-command }}
+      action-sha: ${{ steps.action-sha.outputs.sha }}
+      base-sha: ${{ steps.base-sha.outputs.sha }}
+    steps:
+      # Resolve the action ref to one immutable revision for every phase and shard.
+      - name: Resolve action revision
+        id: action-sha
+        shell: bash
+        env:
+          ACTION_REF: ${{ inputs.action-ref }}
+          ACTION_REPO: Extra-Chill/homeboy-action
+        run: |
+          set -euo pipefail
+          if [[ "${ACTION_REF}" =~ ^[0-9a-f]{40}$ ]]; then
+            sha="${ACTION_REF}"
+          else
+            refs="$(git ls-remote "https://github.com/${ACTION_REPO}" \
+              "refs/tags/${ACTION_REF}^{}" "refs/tags/${ACTION_REF}" "refs/heads/${ACTION_REF}")"
+            sha="$(printf '%s\n' "${refs}" | awk '$2 ~ /\^\{\}$/ {print $1; exit}')"
+            [ -n "${sha:-}" ] || sha="$(printf '%s\n' "${refs}" | awk 'NR==1{print $1}')"
+          fi
+          if [ -z "${sha:-}" ]; then
+            echo "::error::Could not resolve action-ref '${ACTION_REF}' in ${ACTION_REPO} to a commit."
+            exit 1
+          fi
+          echo "Resolved ${ACTION_REF} -> ${sha}"
+          echo "sha=${sha}" >> "${GITHUB_OUTPUT}"
+
+      - name: Check out resolved Homeboy Action
+        uses: actions/checkout@v6
+        with:
+          repository: Extra-Chill/homeboy-action
+          ref: ${{ steps.action-sha.outputs.sha }}
+          path: .homeboy-action
+
+      - name: Resolve live base revision
+        id: base-sha
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          REPOSITORY: ${{ github.repository }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          CURRENT_SHA: ${{ github.sha }}
+        run: bash .homeboy-action/scripts/core/resolve-live-base-sha.sh
+
+      - name: Plan quality checks
+        id: plan
+        shell: bash
+        env:
+          COMMANDS: ${{ inputs.components == '' && inputs.commands || '' }}
+          BASELINE_COMMANDS: ${{ inputs.baseline-commands }}
+          TEST_SHARDS: ${{ inputs.components == '' && inputs.test-shards || '1' }}
+        run: |
+          declare -A selected_commands=()
+          unknown_commands=()
+
+          IFS=',' read -ra raw_commands <<< "${COMMANDS}"
+          for raw_command in "${raw_commands[@]}"; do
+            command="$(echo "${raw_command}" | xargs)"
+            [ -n "${command}" ] || continue
+            base="${command%% *}"
+            if [ "${base}" = "review" ]; then
+              rest="$(printf '%s' "${command#review}" | xargs)"
+              review_base="${rest%% *}"
+              case "${review_base}" in
+                lint|test)
+                  base="${review_base}"
+                  ;;
+              esac
+            fi
+            case "${base}" in
+              lint|test|bench)
+                if [ -z "${selected_commands[${base}]:-}" ]; then
+                  selected_commands[${base}]="${command}"
+                fi
+                ;;
+              *)
+                unknown_commands+=("${command}")
+                ;;
+            esac
+          done
+
+          rows=()
+          add_row() {
+            artifact_key="$(printf '%s' "$1" | sha256sum | cut -c1-16)"
+            rows+=("$(jq -cn \
+              --arg command "$1" \
+              --arg title "$2" \
+              --arg section_key "$3" \
+              --arg section_title "$4" \
+              --arg baseline "$5" \
+              --arg artifact_key "${artifact_key}" \
+              '{command:$command,title:$title,section_key:$section_key,section_title:$section_title,baseline:$baseline,artifact_key:$artifact_key}')")
+          }
+
+          baseline_for() {
+             local command="$1" requested
+             case "${BASELINE_COMMANDS}" in
+               none) printf '%s\n' false; return ;;
+               auto)
+                 case "${command}" in review\ lint|review\ test|lint|test) printf '%s\n' true ;; *) printf '%s\n' false ;; esac
+                 return ;;
+             esac
+             IFS=',' read -ra requested <<< "${BASELINE_COMMANDS}"
+             for requested in "${requested[@]}"; do
+               [ "$(printf '%s' "${requested}" | xargs)" = "${command}" ] && { printf '%s\n' true; return; }
+             done
+             printf '%s\n' false
+          }
+
+          title_for() {
+            case "$1" in
+              lint) printf '%s\n' 'Lint' ;;
+              test) printf '%s\n' 'Test' ;;
+              bench) printf '%s\n' 'Bench' ;;
+              *) printf '%s\n' "${1:-Homeboy}" ;;
+            esac
+          }
+
+          section_key_for() {
+            printf '%s\n' "$1" \
+              | tr '[:upper:]' '[:lower:]' \
+              | sed -E 's/[^A-Za-z0-9._-]+/-/g; s/-+/-/g; s/^[-._]+//; s/[-._]+$//'
+          }
+
+          for base in lint test bench; do
+            if [ -n "${selected_commands[${base}]:-}" ]; then
+              title="$(title_for "${base}")"
+              command="${selected_commands[${base}]}"
+              add_row "${command}" "${title}" "${base}" "${title}" "$(baseline_for "${command}")"
+            fi
+          done
+
+          for command in "${unknown_commands[@]}"; do
+            base="${command%% *}"
+            title="$(title_for "${base:-homeboy}")"
+            section_key="$(section_key_for "${command}")"
+            add_row "${command}" "${title}" "${section_key:-homeboy}" "${title}" false
+          done
+
+          matrix="$(printf '%s\n' "${rows[@]}" | jq -sc '{include:.}')"
+          test_shards_enabled=false
+          test_command=''
+          if [ "${TEST_SHARDS}" != '1' ] && [ -n "${TEST_SHARDS}" ]; then
+            if ! [[ "${TEST_SHARDS}" =~ ^[2-9][0-9]*$|^[1-9][0-9]+$ ]]; then
+              echo '::error::test-shards must be a positive integer.'
+              exit 1
+            fi
+            # The inventory is materialized by the candidate binary in the step below.
+            test_row="$(printf '%s' "${matrix}" | jq -c '.include[] | select(.section_key == "test")')"
+            if [ -n "${test_row}" ]; then
+              test_command="$(jq -r .command <<< "${test_row}")"
+              test_shards_enabled=true
+              matrix="$(printf '%s' "${matrix}" | jq -c '{include:[.include[] | select(.section_key != "test")]}')"
+            fi
+          fi
+
+          non_test_commands_enabled="$(printf '%s' "${matrix}" | jq -r '.include | length > 0')"
+          {
+            echo "matrix=${matrix}"
+            echo "non-test-commands-enabled=${non_test_commands_enabled}"
+            echo "test-shards-enabled=${test_shards_enabled}"
+            echo "test-command=${test_command}"
+          } >> "${GITHUB_OUTPUT}"
+
+  candidate:
+    name: Candidate ${{ matrix.title }}
+    needs: [binary, plan]
+    if: ${{ !inputs.contract-probe && !cancelled() && needs.binary.result == 'success' && needs.plan.outputs.non-test-commands-enabled == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
+    env:
+      # Callers select e.g. a PR profile with a default-filter; unset means
+      # nextest's built-in default profile. Shard steps still pin ci.
+      NEXTEST_PROFILE: ${{ inputs.nextest-profile || 'default' }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+
+      - name: Check out Homeboy Action
+        uses: actions/checkout@v6
+        with:
+          repository: Extra-Chill/homeboy-action
+          ref: ${{ needs.plan.outputs.action-sha }}
+          path: .homeboy-action
+
+      - name: Download candidate Homeboy binary
+        id: candidate-binary
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HOMEBOY_ACTION_SETUP_TIMEOUT_SECONDS: ${{ inputs.setup-timeout-seconds }}
+        run: bash .homeboy-action/scripts/core/run-setup-with-timeout.sh 'download candidate Homeboy binary' -- bash .homeboy-action/scripts/core/download-candidate-binary.sh
+
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        continue-on-error: true
+        with:
+          client-id: ${{ secrets.HOMEBOY_APP_ID }}
+          private-key: ${{ secrets.HOMEBOY_APP_PRIVATE_KEY }}
+
+      - name: Run candidate ${{ matrix.title }}
+        id: phase
+        continue-on-error: true
+        env:
+          HOMEBOY_MAX_CHANGED_TEST_FILES: ${{ inputs.max-changed-test-files }}
+        uses: ./.homeboy-action
+        with:
+          config-dir: ${{ inputs.config-dir }}
+          version: ${{ inputs.version }}
+          source: ${{ inputs.source }}
+          setup-timeout-seconds: ${{ inputs.setup-timeout-seconds }}
+          binary-path: ${{ steps.candidate-binary.outputs.binary-path }}
+          rust-toolchain: ${{ inputs.rust-toolchain }}
+          extension: ${{ inputs.extension }}
+          extension-source: ${{ inputs.extension-source }}
+          extension-ref: ${{ inputs.extension-ref }}
+          commands: ${{ matrix.command }}
+          component: ${{ inputs.component }}
+          args: ${{ inputs.args }}
+          scope: ${{ inputs.scope }}
+          rig: ${{ inputs.rig }}
+          scenario: ${{ inputs.scenario }}
+          runs: ${{ inputs.runs }}
+          iterations: ${{ inputs.iterations }}
+          regression-threshold: ${{ inputs.regression-threshold }}
+          auto-setup: ${{ inputs.auto-setup }}
+          php-version: ${{ inputs.php-version }}
+          node-version: ${{ inputs.node-version }}
+          # Preserve differential scope semantics (full test, changed
+          # lint) while deferring the baseline to its independent job.
+          differential-gating: ${{ inputs.differential-gating }}
+          baseline-commands: none
+          observation-window: ${{ inputs.observation-window }}
+          execution-timeout-seconds: ${{ inputs.execution-timeout-seconds }}
+          test-timeout-seconds: ${{ inputs.test-timeout-seconds }}
+          cleanup-timeout-seconds: ${{ inputs.cleanup-timeout-seconds }}
+          app-token: ${{ steps.app-token.outputs.token || github.token }}
+          comment-key: ${{ inputs.comment-key }}
+          comment-section-key: ${{ inputs.comment-section-key || matrix.section_key }}
+          comment-section-title: ${{ inputs.comment-section-title || matrix.section_title }}
+          pr-comment: 'false'
+          pr-policy: ''
+          pr-open-policy: ''
+          pr-policy-merge: 'false'
+
+      - name: Write candidate phase provenance
+        id: provenance
+        if: always()
+        shell: bash
+        env:
+          PHASE: candidate
+          PHASE_ARTIFACT_NAME: homeboy-differential-candidate-${{ matrix.artifact_key }}-${{ github.run_attempt }}
+          PHASE_OUTPUT_DIR: differential-phase/candidate
+          REPOSITORY: ${{ github.repository }}
+          CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          BASE_SHA: ${{ needs.plan.outputs.base-sha }}
+          CHECKOUT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          COMMAND: ${{ matrix.command }}
+          COMPONENT: ${{ steps.phase.outputs.component }}
+          CLI_REVISION: ${{ steps.candidate-binary.outputs.cli-revision }}
+          RESULTS: ${{ steps.phase.outputs.results }}
+          EXECUTION_STATE: ${{ steps.phase.outputs.pr-state-reason == 'pr_closed' && 'pr_closed' || steps.phase.outputs.pr-state-reason == 'pr_merged' && 'pr_merged' || 'completed' }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          BINARY_SHA256: ${{ steps.candidate-binary.outputs.binary-sha256 }}
+        run: |
+          ACTION_REVISION="$(git -C .homeboy-action rev-parse HEAD)"
+          export ACTION_REVISION
+          bash .homeboy-action/scripts/core/write-differential-phase-manifest.sh
+          jq --arg scope '${{ steps.phase.outputs.scope-effective }}' '. + {scope:$scope}' differential-phase/candidate/manifest.json > differential-phase/candidate/manifest.tmp
+          mv differential-phase/candidate/manifest.tmp differential-phase/candidate/manifest.json
+          cp -R "${RUNNER_TEMP}/homeboy-ci-results" differential-phase/candidate/homeboy-ci-results 2>/dev/null || mkdir -p differential-phase/candidate/homeboy-ci-results
+          cp -R homeboy-observations differential-phase/candidate/homeboy-observations 2>/dev/null || mkdir -p differential-phase/candidate/homeboy-observations
+
+      - name: Upload candidate phase evidence
+        if: always() && steps.provenance.outcome == 'success'
+        uses: actions/upload-artifact@v7
+        with:
+          name: homeboy-differential-candidate-${{ matrix.artifact_key }}-${{ github.run_attempt }}
+          path: differential-phase
+          if-no-files-found: warn
+
+      # The action deliberately continues through publication so reconciliation
+      # receives terminal evidence. Under differential gating the final command
+      # job owns pass/fail; a known baseline failure must not leave a second raw
+      # candidate check red after reconciliation passes.
+      - name: Fail candidate phase when terminal evidence is not pass
+        if: always() && inputs.differential-gating != 'true' && steps.phase.outcome == 'failure'
+        run: exit 1
+
+  baseline:
+    name: Baseline ${{ matrix.title }}
+    needs: [binary, plan, candidate]
+    if: ${{ !inputs.contract-probe && !cancelled() && needs.binary.result == 'success' && needs.plan.outputs.non-test-commands-enabled == 'true' && github.event_name == 'pull_request' && inputs.differential-gating == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
+    env:
+      # Callers select e.g. a PR profile with a default-filter; unset means
+      # nextest's built-in default profile. Shard steps still pin ci.
+      NEXTEST_PROFILE: ${{ inputs.nextest-profile || 'default' }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.plan.outputs.base-sha }}
+          fetch-depth: 0
+
+      - uses: actions/checkout@v6
+        with:
+          repository: Extra-Chill/homeboy-action
+          ref: ${{ needs.plan.outputs.action-sha }}
+          path: .homeboy-action
+      - name: Download candidate phase evidence
+        uses: actions/download-artifact@v7
+        with:
+          name: homeboy-differential-candidate-${{ matrix.artifact_key }}-${{ github.run_attempt }}
+          path: candidate-phase
+      - name: Select baseline execution
+        id: baseline-policy
+        env:
+          BASELINE_SELECTED: ${{ matrix.baseline }}
+          CANDIDATE_MANIFEST: candidate-phase/candidate/manifest.json
+          COMMAND: ${{ matrix.command }}
+        run: |
+          run=false
+          if [ "${BASELINE_SELECTED}" = true ]; then
+            status="$(jq -r --arg command "${COMMAND}" '.results[$command] // "unknown"' "${CANDIDATE_MANIFEST}" 2>/dev/null || printf unknown)"
+            [ "${status}" = pass ] || run=true
+          fi
+          echo "run=${run}" >> "${GITHUB_OUTPUT}"
+          echo "Candidate status for ${COMMAND}: ${status:-not selected}; run baseline: ${run}"
+      - name: Download candidate Homeboy binary
+        id: candidate-binary
+        if: steps.baseline-policy.outputs.run == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HOMEBOY_ACTION_SETUP_TIMEOUT_SECONDS: ${{ inputs.setup-timeout-seconds }}
+        run: bash .homeboy-action/scripts/core/run-setup-with-timeout.sh 'download candidate Homeboy binary' -- bash .homeboy-action/scripts/core/download-candidate-binary.sh
+      - name: Plan baseline Test selection
+        id: baseline-selection-policy
+        if: steps.baseline-policy.outputs.run == 'true'
+        env:
+          CANDIDATE_MANIFEST: candidate-phase/candidate/manifest.json
+          COMMAND: ${{ matrix.command }}
+        run: python3 .homeboy-action/scripts/core/select-baseline-tests.py plan
+      - name: Enumerate base Test inventory without running tests
+        if: steps.baseline-selection-policy.outputs.runner != ''
+        env:
+          HOMEBOY_TEST_INVENTORY_ONLY: '1'
+          HOMEBOY_TEST_INVENTORY_FILE: ${{ github.workspace }}/homeboy-test-inventory.json
+          HOMEBOY_RUST_TEST_RUNNER: ${{ steps.baseline-selection-policy.outputs.runner }}
+          HOMEBOY_RUST_NEXTEST_FALLBACK: '0'
+        uses: ./.homeboy-action
+        with:
+          config-dir: ${{ inputs.config-dir }}
+          binary-path: ${{ steps.candidate-binary.outputs.binary-path }}
+          setup-timeout-seconds: ${{ inputs.setup-timeout-seconds }}
+          extension: ${{ inputs.extension }}
+          extension-source: ${{ inputs.extension-source }}
+          extension-ref: ${{ inputs.extension-ref }}
+          commands: ${{ matrix.command }}
+          component: ${{ inputs.component }}
+          args: ${{ inputs.args }}
+          scope: 'full'
+          auto-setup: ${{ inputs.auto-setup }}
+          rust-toolchain: ${{ inputs.rust-toolchain }}
+          execution-timeout-seconds: ${{ inputs.execution-timeout-seconds }}
+          test-timeout-seconds: ${{ inputs.test-timeout-seconds }}
+          cleanup-timeout-seconds: ${{ inputs.cleanup-timeout-seconds }}
+          pr-comment: 'false'
+      - name: Materialize base-bound candidate Test selection
+        id: baseline-selection
+        if: steps.baseline-selection-policy.outputs.runner != ''
+        env:
+          CANDIDATE_MANIFEST: candidate-phase/candidate/manifest.json
+          COMMAND: ${{ matrix.command }}
+          BASELINE_INVENTORY_FILE: ${{ github.workspace }}/homeboy-test-inventory.json
+          BASELINE_SELECTION_FILE: ${{ github.workspace }}/homeboy-baseline-selection.json
+        run: python3 .homeboy-action/scripts/core/select-baseline-tests.py materialize
+      - name: Run baseline ${{ matrix.title }}
+        id: phase
+        if: steps.baseline-policy.outputs.run == 'true'
+        continue-on-error: true
+        env:
+          HOMEBOY_TEST_SHARD_MANIFEST: ${{ steps.baseline-selection.outputs.selection-file }}
+          HOMEBOY_RUST_TEST_RUNNER: ${{ steps.baseline-selection-policy.outputs.runner }}
+          HOMEBOY_RUST_NEXTEST_FALLBACK: '0'
+          HOMEBOY_MAX_CHANGED_TEST_FILES: ${{ inputs.max-changed-test-files }}
+        uses: ./.homeboy-action
+        with:
+          config-dir: ${{ inputs.config-dir }}
+          version: ${{ inputs.version }}
+          binary-path: ${{ steps.candidate-binary.outputs.binary-path }}
+          setup-timeout-seconds: ${{ inputs.setup-timeout-seconds }}
+          rust-toolchain: ${{ inputs.rust-toolchain }}
+          extension: ${{ inputs.extension }}
+          extension-source: ${{ inputs.extension-source }}
+          extension-ref: ${{ inputs.extension-ref }}
+          commands: ${{ matrix.command }}
+          component: ${{ inputs.component }}
+          args: ${{ inputs.args }}
+          # Scoped Rust tests replay the candidate identities through a
+          # base-bound manifest; do not derive changed scope from base itself.
+          scope: full
+          auto-setup: ${{ inputs.auto-setup }}
+          php-version: ${{ inputs.php-version }}
+          node-version: ${{ inputs.node-version }}
+          differential-gating: 'true'
+          baseline-commands: none
+          execution-timeout-seconds: ${{ inputs.execution-timeout-seconds }}
+          test-timeout-seconds: ${{ inputs.test-timeout-seconds }}
+          cleanup-timeout-seconds: ${{ inputs.cleanup-timeout-seconds }}
+          pr-comment: 'false'
+      - name: Write baseline phase provenance
+        id: provenance
+        if: always() && steps.baseline-policy.outputs.run == 'true'
+        shell: bash
+        env:
+          PHASE: baseline
+          PHASE_ARTIFACT_NAME: homeboy-differential-baseline-${{ matrix.artifact_key }}-${{ github.run_attempt }}
+          PHASE_OUTPUT_DIR: differential-phase/baseline
+          REPOSITORY: ${{ github.repository }}
+          CANDIDATE_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_SHA: ${{ needs.plan.outputs.base-sha }}
+          CHECKOUT_SHA: ${{ needs.plan.outputs.base-sha }}
+          COMMAND: ${{ matrix.command }}
+          COMPONENT: ${{ steps.phase.outputs.component }}
+          CLI_REVISION: ${{ steps.candidate-binary.outputs.cli-revision }}
+          RESULTS: ${{ steps.phase.outputs.results }}
+          EXECUTION_STATE: ${{ steps.phase.outputs.pr-state-reason == 'pr_closed' && 'pr_closed' || steps.phase.outputs.pr-state-reason == 'pr_merged' && 'pr_merged' || 'completed' }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          BINARY_SHA256: ${{ steps.candidate-binary.outputs.binary-sha256 }}
+        run: |
+          ACTION_REVISION="$(git -C .homeboy-action rev-parse HEAD)"
+          export ACTION_REVISION
+          bash .homeboy-action/scripts/core/write-differential-phase-manifest.sh
+          cp -R "${RUNNER_TEMP}/homeboy-ci-results" differential-phase/baseline/homeboy-ci-results 2>/dev/null || mkdir -p differential-phase/baseline/homeboy-ci-results
+      - name: Upload baseline phase evidence
+        if: always() && steps.baseline-policy.outputs.run == 'true' && steps.provenance.outcome == 'success'
+        uses: actions/upload-artifact@v7
+        with:
+          name: homeboy-differential-baseline-${{ matrix.artifact_key }}-${{ github.run_attempt }}
+          path: differential-phase
+          if-no-files-found: warn
+
+  candidate-test-plan:
+    name: Plan candidate Test shards
+    needs: [binary, plan]
+    if: ${{ !inputs.contract-probe && !cancelled() && needs.binary.result == 'success' && needs.plan.outputs.test-shards-enabled == 'true' }}
+    runs-on: ubuntu-latest
+    outputs:
+      test-matrix: ${{ steps.plan.outputs.matrix }}
+      budget-verdict: ${{ steps.plan.outputs.budget-verdict }}
+      budget-max-estimate-ms: ${{ steps.plan.outputs.budget-max-estimate-ms }}
+      budget-seconds: ${{ steps.plan.outputs.budget-seconds }}
+      budget-override: ${{ steps.plan.outputs.budget-override }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Reserve action checkout path
+        run: |
+          if git ls-files --error-unmatch -- .homeboy-action >/dev/null 2>&1 || [ -e .homeboy-action ] || [ -L .homeboy-action ]; then
+            echo '::error::Refusing to overwrite consumer path reserved for the Homeboy Action checkout: .homeboy-action'
+            exit 1
+          fi
+      - uses: actions/checkout@v6
+        with:
+          repository: Extra-Chill/homeboy-action
+          ref: ${{ needs.plan.outputs.action-sha }}
+          path: .homeboy-action
+      - name: Reserve action-owned candidate Test shard paths
+        id: prepare-workspace
+        run: bash .homeboy-action/scripts/core/prepare-test-shard-workspace.sh
+      - id: candidate-binary
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HOMEBOY_ACTION_SETUP_TIMEOUT_SECONDS: ${{ inputs.setup-timeout-seconds }}
+        run: bash .homeboy-action/scripts/core/run-setup-with-timeout.sh 'download candidate Homeboy binary' -- bash .homeboy-action/scripts/core/download-candidate-binary.sh
+      - name: Install cargo-nextest for Rust shard planning
+        if: inputs.auto-setup == 'true' && hashFiles('Cargo.toml') != ''
+        uses: taiki-e/install-action@nextest
+      # Compile the test binaries ONCE, here, in the job that had to compile them
+      # anyway to enumerate tests.
+      #
+      # `nextest run -E <filter>` filters what EXECUTES, not what COMPILES, so
+      # with `--workspace` every shard rebuilt the entire workspace to run its own
+      # slice. Measured on Extra-Chill/homeboy shard-1: 7.8 minutes of compilation
+      # for a 4.046s run of 30 tests, repeated in all four shards plus here — five
+      # identical debug compiles per run.
+      #
+      # Not `continue-on-error`: a compile failure here is a real, terminal
+      # candidate failure, and the inventory step below cannot succeed without it.
+      - name: Build the candidate Test archive
+        id: test-archive
+        if: inputs.auto-setup == 'true' && hashFiles('Cargo.toml') != ''
+        env:
+          NEXTEST_PROFILE: ci
+        run: |
+          archive="${{ github.workspace }}/homeboy-test-archive.tar.zst"
+          cargo nextest archive --workspace --archive-file "${archive}"
+          echo "path=${archive}" >> "$GITHUB_OUTPUT"
+          # Surfaced because it is the variable that decides whether shipping the
+          # archive is cheaper than recompiling it: if transfer approaches the
+          # per-shard compile it replaces, this stops paying.
+          bytes="$(stat -c %s "${archive}")"
+          printf '## Candidate Test archive\n\n| Field | Value |\n| --- | --- |\n| Size | %s |\n| Shards served | %s |\n' \
+            "$(numfmt --to=iec --suffix=B "${bytes}")" "${{ inputs.test-shards }}" >> "${GITHUB_STEP_SUMMARY}"
+      - name: Upload the candidate Test archive
+        if: steps.test-archive.outcome == 'success'
+        uses: actions/upload-artifact@v7
+        with:
+          name: homeboy-test-archive-${{ github.run_attempt }}
+          path: ${{ steps.test-archive.outputs.path }}
+          retention-days: 1
+          if-no-files-found: error
+      - name: Configure candidate Test shards
+        id: inventory
+        continue-on-error: true
+        env:
+          HOMEBOY_TEST_INVENTORY_ONLY: '1'
+          HOMEBOY_TEST_INVENTORY_FILE: ${{ github.workspace }}/homeboy-test-inventory.json
+          HOMEBOY_RUST_TEST_RUNNER: nextest
+          HOMEBOY_RUST_NEXTEST_FALLBACK: '0'
+          HOMEBOY_RUST_NEXTEST_ARCHIVE: ${{ steps.test-archive.outputs.path }}
+          NEXTEST_PROFILE: ci
+        uses: ./.homeboy-action
+        with:
+          config-dir: ${{ inputs.config-dir }}
+          binary-path: ${{ steps.candidate-binary.outputs.binary-path }}
+          setup-timeout-seconds: ${{ inputs.setup-timeout-seconds }}
+          extension: ${{ inputs.extension }}
+          extension-source: ${{ inputs.extension-source }}
+          extension-ref: ${{ inputs.extension-ref }}
+          commands: ${{ needs.plan.outputs.test-command }}
+          component: ${{ inputs.component }}
+          args: ${{ inputs.args }}
+          scope: ${{ inputs.scope }}
+          auto-setup: ${{ inputs.auto-setup }}
+          php-version: ${{ inputs.php-version }}
+          node-version: ${{ inputs.node-version }}
+          execution-timeout-seconds: ${{ inputs.execution-timeout-seconds }}
+          test-timeout-seconds: ${{ inputs.test-timeout-seconds }}
+          cleanup-timeout-seconds: ${{ inputs.cleanup-timeout-seconds }}
+          pr-comment: 'false'
+      - name: Plan candidate Test shards
+        id: plan
+        if: always() && steps.inventory.outcome == 'success'
+        continue-on-error: true
+        env:
+          TEST_INVENTORY_FILE: ${{ github.workspace }}/homeboy-test-inventory.json
+          TEST_SHARD_PLAN_FILE: ${{ github.workspace }}/homeboy-test-shard-plan.json
+          TEST_SCOPE_BUDGET_FILE: ${{ github.workspace }}/homeboy-test-budget.json
+          TEST_SHARD_COUNT: ${{ inputs.test-shards }}
+          TEST_COMMAND: ${{ needs.plan.outputs.test-command }}
+          TEST_SCOPE_SHARDS: ${{ inputs.test-shards }}
+          TEST_SCOPE_BUDGET_SECONDS: ${{ inputs.test-timeout-seconds }}
+          TEST_SCOPE_ALLOW_OVERRIDE: ${{ inputs.allow-oversized-test-scope }}
+        run: |
+          bash .homeboy-action/scripts/core/preflight-test-scope-budget.sh
+          TEST_SHARD_COUNT="$(awk -F= '$1 == "shard-count" {print $2}' "${GITHUB_OUTPUT}")"
+          export TEST_SHARD_COUNT
+          bash .homeboy-action/scripts/core/shard-tests.sh plan
+          TEST_SHARD_PLAN_FILE="${TEST_SHARD_PLAN_FILE}" bash .homeboy-action/scripts/core/preflight-test-scope-budget.sh verify
+          bash .homeboy-action/scripts/core/shard-tests.sh attach-budget
+          echo "matrix=$(jq -cn --arg command "${TEST_COMMAND}" --slurpfile plan homeboy-test-shard-plan.json '{include:[$plan[0].shards[] | {command:$command,shard_id:.id}]}')" >> "${GITHUB_OUTPUT}"
+      - name: Write candidate Test inventory failure provenance
+        if: always() && (steps.inventory.outcome != 'success' || steps.plan.outcome != 'success')
+        env:
+          REPOSITORY: ${{ github.repository }}
+          CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          COMMAND: ${{ needs.plan.outputs.test-command }}
+          INVENTORY_OUTCOME: ${{ steps.inventory.outcome }}
+          PLANNER_OUTCOME: ${{ steps.plan.outcome }}
+          RESULTS: ${{ steps.inventory.outputs.results }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          mkdir -p homeboy-test-inventory-failure
+          inventory_payload="${RESULTS-}"
+          [ -n "${inventory_payload}" ] || inventory_payload='{}'
+            jq -cn --arg schema 'homeboy/test-inventory-provenance/v1' --arg phase candidate --arg repository "${REPOSITORY}" --arg candidate_sha "${CANDIDATE_SHA}" --arg command "${COMMAND}" --arg inventory_outcome "${INVENTORY_OUTCOME}" --arg planner_outcome "${PLANNER_OUTCOME}" --argjson run_attempt "${RUN_ATTEMPT}" --argjson results "${inventory_payload}" \
+              '{schema:$schema,phase:$phase,repository:$repository,candidate_sha:$candidate_sha,command:$command,inventory_outcome:$inventory_outcome,planner_outcome:$planner_outcome,run_attempt:$run_attempt,results:$results}' > homeboy-test-inventory-failure/provenance.json
+            if [ -f homeboy-test-budget.json ]; then
+              cp homeboy-test-budget.json homeboy-test-inventory-failure/budget.json
+            fi
+            cp -R "${RUNNER_TEMP}/homeboy-ci-results" homeboy-test-inventory-failure/homeboy-ci-results 2>/dev/null || true
+      - name: Upload candidate Test inventory failure provenance
+        if: always() && (steps.inventory.outcome != 'success' || steps.plan.outcome != 'success')
+        uses: actions/upload-artifact@v7
+        with:
+          name: homeboy-test-inventory-failure-${{ github.run_attempt }}
+          path: homeboy-test-inventory-failure
+          if-no-files-found: error
+      - name: Upload candidate Test shard plan
+        if: always() && steps.plan.outcome == 'success'
+        uses: actions/upload-artifact@v7
+        with:
+          name: homeboy-test-shard-plan-${{ github.run_attempt }}
+          path: |
+            homeboy-test-inventory.json
+            homeboy-test-shard-plan.json
+            homeboy-test-budget.json
+          if-no-files-found: error
+      - name: Fail candidate Test inventory generation
+        if: always() && (steps.inventory.outcome != 'success' || steps.plan.outcome != 'success')
+        run: |
+          echo '::error::Candidate Test inventory generation failed; shard execution was not started. Inspect the inventory provenance artifact and this job for the underlying command failure.'
+          exit 1
+      - name: Restore consumer Git exclusions
+        if: always() && steps.prepare-workspace.outcome == 'success'
+        run: bash .homeboy-action/scripts/core/prepare-test-shard-workspace.sh cleanup
+
+  candidate-test-shards:
+    name: Candidate Test shard ${{ matrix.shard_id }}
+    needs: [binary, plan, candidate-test-plan]
+    if: ${{ !inputs.contract-probe && !cancelled() && needs.binary.result == 'success' && needs.plan.outputs.test-shards-enabled == 'true' && needs.candidate-test-plan.result == 'success' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.candidate-test-plan.outputs.test-matrix) }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Reserve action checkout path
+        run: |
+          if git ls-files --error-unmatch -- .homeboy-action >/dev/null 2>&1 || [ -e .homeboy-action ] || [ -L .homeboy-action ]; then
+            echo '::error::Refusing to overwrite consumer path reserved for the Homeboy Action checkout: .homeboy-action'
+            exit 1
+          fi
+      - uses: actions/checkout@v6
+        with:
+          repository: Extra-Chill/homeboy-action
+          ref: ${{ needs.plan.outputs.action-sha }}
+          path: .homeboy-action
+      - name: Reserve action-owned candidate Test shard paths
+        id: prepare-workspace
+        run: bash .homeboy-action/scripts/core/prepare-test-shard-workspace.sh
+      - id: candidate-binary
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HOMEBOY_ACTION_SETUP_TIMEOUT_SECONDS: ${{ inputs.setup-timeout-seconds }}
+        run: bash .homeboy-action/scripts/core/run-setup-with-timeout.sh 'download candidate Homeboy binary' -- bash .homeboy-action/scripts/core/download-candidate-binary.sh
+      - name: Install cargo-nextest for Rust shard replay
+        if: inputs.auto-setup == 'true' && hashFiles('Cargo.toml') != ''
+        uses: taiki-e/install-action@nextest
+      - name: Resolve the candidate Test archive
+        id: test-archive-artifact
+        if: inputs.auto-setup == 'true' && hashFiles('Cargo.toml') != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash .homeboy-action/scripts/core/resolve-run-artifact.sh homeboy-test-archive
+      # Prebuilt by Plan candidate Test shards. Absent (non-Rust callers), the
+      # extension falls back to compiling the workspace exactly as before.
+      - name: Download the candidate Test archive
+        id: test-archive
+        if: inputs.auto-setup == 'true' && hashFiles('Cargo.toml') != ''
+        uses: actions/download-artifact@v7
+        with:
+          name: ${{ steps.test-archive-artifact.outputs.artifact-name }}
+          path: ${{ github.workspace }}/homeboy-test-archive
+      - name: Resolve the candidate Test shard plan
+        id: test-plan-artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash .homeboy-action/scripts/core/resolve-run-artifact.sh homeboy-test-shard-plan
+      - uses: actions/download-artifact@v7
+        with:
+          name: ${{ steps.test-plan-artifact.outputs.artifact-name }}
+      - name: Materialize assigned Test shard
+        run: jq --arg id '${{ matrix.shard_id }}' '.shards[] | select(.id == $id)' homeboy-test-shard-plan.json > homeboy-test-shard.json
+      - name: Run candidate Test shard ${{ matrix.shard_id }}
+        id: phase
+        continue-on-error: true
+        env:
+          HOMEBOY_TEST_SHARD_MANIFEST: ${{ github.workspace }}/homeboy-test-shard.json
+          HOMEBOY_RUST_TEST_RUNNER: nextest
+          HOMEBOY_RUST_NEXTEST_FALLBACK: '0'
+          HOMEBOY_RUST_NEXTEST_ARCHIVE: ${{ steps.test-archive.outcome == 'success' && format('{0}/homeboy-test-archive/homeboy-test-archive.tar.zst', github.workspace) || '' }}
+          NEXTEST_PROFILE: ci
+        uses: ./.homeboy-action
+        with:
+          config-dir: ${{ inputs.config-dir }}
+          binary-path: ${{ steps.candidate-binary.outputs.binary-path }}
+          setup-timeout-seconds: ${{ inputs.setup-timeout-seconds }}
+          extension: ${{ inputs.extension }}
+          extension-source: ${{ inputs.extension-source }}
+          extension-ref: ${{ inputs.extension-ref }}
+          commands: ${{ matrix.command }}
+          component: ${{ inputs.component }}
+          args: ${{ inputs.args }}
+          # The immutable manifest is the shard selector; changed-scope routing
+          # must not further filter its assigned test membership.
+          scope: full
+          auto-setup: ${{ inputs.auto-setup }}
+          php-version: ${{ inputs.php-version }}
+          node-version: ${{ inputs.node-version }}
+          differential-gating: ${{ inputs.differential-gating }}
+          baseline-commands: none
+          execution-timeout-seconds: ${{ inputs.execution-timeout-seconds }}
+          test-timeout-seconds: ${{ inputs.test-timeout-seconds }}
+          cleanup-timeout-seconds: ${{ inputs.cleanup-timeout-seconds }}
+          pr-comment: 'false'
+      - name: Write candidate Test shard provenance
+        if: always()
+        env:
+          RESULTS: ${{ steps.phase.outputs.results }}
+          SHARD_ID: ${{ matrix.shard_id }}
+          COMMAND: ${{ matrix.command }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          mkdir -p differential-phase/candidate
+          results="${RESULTS:-}"; [ -n "${results}" ] || results='{}'
+          jq -cn --arg phase candidate --arg shard_id "${SHARD_ID}" --arg command "${COMMAND}" --arg inventory_digest "$(jq -r .inventory_digest homeboy-test-shard-plan.json)" --arg plan_digest "$(jq -r .plan_digest homeboy-test-shard-plan.json)" --argjson budget "$(jq -c .budget homeboy-test-shard-plan.json)" --argjson run_attempt "${RUN_ATTEMPT}" --argjson results "${results}" '{phase:$phase,shard_id:$shard_id,command:$command,inventory_digest:$inventory_digest,plan_digest:$plan_digest,budget:$budget,run_attempt:$run_attempt,results:$results}' > differential-phase/candidate/manifest.json
+          cp -R "${RUNNER_TEMP}/homeboy-ci-results" differential-phase/candidate/homeboy-ci-results 2>/dev/null || mkdir -p differential-phase/candidate/homeboy-ci-results
+      - if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: homeboy-test-shard-candidate-${{ matrix.shard_id }}-${{ github.run_attempt }}
+          path: differential-phase
+
+      # Artifacts are published before this step. Aggregation always runs after
+      # shard failures, while a green producing check now proves its uploaded
+      # terminal result is present, coherent, and passing.
+      - name: Validate candidate Test shard terminal provenance
+        if: always()
+        env:
+          TEST_SHARD_TERMINAL_ROOT: differential-phase/candidate
+          TEST_SHARD_PLAN_FILE: homeboy-test-shard-plan.json
+          TEST_SHARD_PHASE: candidate
+          TEST_SHARD_COMMAND: ${{ matrix.command }}
+          TEST_SHARD_ID: ${{ matrix.shard_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: bash .homeboy-action/scripts/core/shard-tests.sh validate-terminal
+      - name: Restore consumer Git exclusions
+        if: always() && steps.prepare-workspace.outcome == 'success'
+        run: bash .homeboy-action/scripts/core/prepare-test-shard-workspace.sh cleanup
+
+  candidate-test-result:
+    name: Aggregate candidate Test shards
+    needs: [candidate-test-shards, candidate-test-plan, plan]
+    if: ${{ !inputs.contract-probe && !cancelled() && needs.candidate-test-plan.result == 'success' && needs.plan.outputs.test-shards-enabled == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          repository: Extra-Chill/homeboy-action
+          ref: ${{ needs.plan.outputs.action-sha }}
+          path: .homeboy-action
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: homeboy-test-shard-candidate-*
+          path: test-shard-artifacts
+      - name: Resolve the candidate Test shard plan
+        id: test-plan-artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash .homeboy-action/scripts/core/resolve-run-artifact.sh homeboy-test-shard-plan
+      - uses: actions/download-artifact@v7
+        with:
+          name: ${{ steps.test-plan-artifact.outputs.artifact-name }}
+      - name: Aggregate complete candidate Test shard evidence
+        env:
+          TEST_SHARD_ARTIFACT_ROOT: test-shard-artifacts
+          TEST_SHARD_PLAN_FILE: homeboy-test-shard-plan.json
+          TEST_INVENTORY_FILE: homeboy-test-inventory.json
+          TEST_SHARD_PHASE: candidate
+          TEST_SHARD_COMMAND: ${{ needs.plan.outputs.test-command }}
+          TEST_SHARD_OUTPUT_DIR: candidate-test-results/homeboy-ci-results
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: bash .homeboy-action/scripts/core/shard-tests.sh aggregate
+      # Retained for its validation, not its selection: this asserts the
+      # aggregated candidate result is a well-formed v3 command result with a
+      # valid status before anything enforces a verdict from it. The sharded path
+      # has no baseline phase, so its baseline-command output is unconsumed.
+      - name: Validate canonical candidate Test result
+        id: select
+        env:
+          TEST_SHARD_COMMAND: ${{ needs.plan.outputs.test-command }}
+          TEST_SHARD_RESULTS_FILE: candidate-test-results/homeboy-ci-results/results.json
+          TEST_SHARD_EVENT: ${{ github.event_name }}
+          TEST_SHARD_DIFFERENTIAL_GATING: ${{ inputs.differential-gating }}
+          TEST_SHARD_BASELINE_COMMANDS: ${{ inputs.baseline-commands }}
+        run: |
+          source .homeboy-action/scripts/core/lib.sh
+          TEST_SHARD_RESULT_FILE="candidate-test-results/homeboy-ci-results/$(command_result_filename "${TEST_SHARD_COMMAND}")" bash .homeboy-action/scripts/core/select-test-baseline.sh
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: homeboy-candidate-test-results-${{ github.run_attempt }}
+          path: candidate-test-results
+          if-no-files-found: error
+
+  reconcile-test-shards:
+    name: Test
+    needs: [candidate-test-result, candidate-test-plan, plan]
+    # Reconcile terminal upstream results for active runs. Cancellation must stop
+    # admission here so stale runs do not outlive the caller's concurrency group.
+    if: ${{ !inputs.contract-probe && !cancelled() && needs.plan.outputs.test-shards-enabled == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          repository: Extra-Chill/homeboy-action
+          ref: ${{ needs.plan.outputs.action-sha }}
+          path: .homeboy-action
+      - name: Check final PR state
+        id: final-pr-state
+        if: always() && github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: bash .homeboy-action/scripts/core/check-pr-state.sh
+      - name: Download candidate Test inventory failure provenance
+        if: needs.candidate-test-plan.result != 'success'
+        uses: actions/download-artifact@v7
+        with:
+          name: homeboy-test-inventory-failure-${{ github.run_attempt }}
+          path: test-inventory-failure
+      - name: Report candidate Test inventory generation failure
+        if: needs.candidate-test-plan.result != 'success'
+        run: |
+          provenance=test-inventory-failure/provenance.json
+          command="$(jq -r .command "${provenance}")"
+          results="$(jq -c .results "${provenance}")"
+          echo "::error::Test inventory generation failed for '${command}' (inventory=${{ needs.candidate-test-plan.result }}; results=${results}). Inspect Plan candidate Test shards for the underlying command failure."
+          find test-inventory-failure/homeboy-ci-results -type f -maxdepth 1 -print -exec cat {} \; 2>/dev/null || true
+          exit 1
+      # A rerun can execute this verdict without rerunning successful shards or
+      # their aggregate. Resolve the newest complete aggregate it can consume.
+      - name: Resolve candidate Test result
+        id: candidate-test-result-artifact
+        if: needs.candidate-test-result.result == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash .homeboy-action/scripts/core/resolve-run-artifact.sh homeboy-candidate-test-results
+      - uses: actions/download-artifact@v7
+        if: needs.candidate-test-result.result == 'success'
+        with:
+          name: ${{ steps.candidate-test-result-artifact.outputs.artifact-name }}
+          path: candidate-test-results
+      - name: Report candidate Test aggregation failure
+        if: needs.candidate-test-plan.result == 'success' && needs.candidate-test-result.result != 'success'
+        run: |
+          echo '::error::Candidate Test shard evidence could not be aggregated into a canonical result.'
+          exit 1
+      # The single enforcement path for the sharded Test verdict.
+      #
+      # Deliberately NOT conditioned on a baseline. The sharded Test path has no
+      # baseline phase, so a baseline-shaped condition here is a branch that can
+      # never fire — and the previous `baseline-command == ''` guard meant a
+      # non-empty baseline-command would have left this job green with NO
+      # enforcement step running at all. Every reachable outcome above either
+      # exits non-zero or falls through to exactly this step.
+      - name: Enforce sharded Test result
+        if: needs.candidate-test-result.result == 'success'
+        env:
+          COMMAND: ${{ needs.plan.outputs.test-command }}
+        run: RESULTS="$(cat candidate-test-results/homeboy-ci-results/results.json)" COMMANDS="${COMMAND}" OPERATIONS_RESULTS='' PR_ACTIVE='' bash .homeboy-action/scripts/core/enforce-final-status.sh
+
+  reconcile:
+    # This is the sole verdict and retains the established required-check name.
+    name: ${{ matrix.title }}
+    needs: [candidate, baseline, plan]
+    if: ${{ !inputs.contract-probe && !cancelled() && needs.plan.outputs.non-test-commands-enabled == 'true' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
+    env:
+      # Callers select e.g. a PR profile with a default-filter; unset means
+      # nextest's built-in default profile. Shard steps still pin ci.
+      NEXTEST_PROFILE: ${{ inputs.nextest-profile || 'default' }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          repository: Extra-Chill/homeboy-action
+          ref: ${{ needs.plan.outputs.action-sha }}
+          path: .homeboy-action
+      - name: Check final PR state
+        id: final-pr-state
+        if: always() && github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: bash .homeboy-action/scripts/core/check-pr-state.sh
+      - id: action-revision
+        run: echo "value=$(git -C .homeboy-action rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - uses: actions/download-artifact@v7
+        continue-on-error: true
+        with:
+          pattern: homeboy-differential-*-${{ matrix.artifact_key }}-*
+          path: differential-artifacts
+
+      # Before the gate blames the PR for a candidate-only test failure, give
+      # it a real chance to prove that failure is flaky. This checkout+
+      # toolchain cost is paid only for the Test row of a differential-gated
+      # PR, and reconcile-differential-phases.sh still only spends it on an
+      # actual retry once it has confirmed there is something candidate-only
+      # to retry. See Extra-Chill/homeboy#14984.
+      - name: Checkout candidate for introduced-test retry
+        id: retry-checkout
+        if: github.event_name == 'pull_request' && inputs.differential-gating == 'true' && matrix.baseline == 'true' && matrix.section_key == 'test' && inputs.retry-introduced-test-failures == 'true'
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          # Check out into a dedicated subdirectory. Checking out into the
+          # job's root workspace (even with clean: false) replaced it and
+          # deleted the nested `.homeboy-action` checkout, so Reconcile failed
+          # with exit 127 on every differential PR (Extra-Chill/homeboy#14984).
+          path: .homeboy-retry-workspace
+
+      - name: Install Rust toolchain for introduced-test retry
+        if: steps.retry-checkout.outcome == 'success'
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ inputs.rust-toolchain }}
+
+      # Installed unconditionally on a rust-toolchain candidate checkout, not
+      # gated on the runner Homeboy actually used: retry-introduced-test-
+      # failures.sh checks for `cargo-nextest` on PATH itself before relying
+      # on it and falls back to plain `cargo test` (or an announced-
+      # unsupported no-op) when it is absent or unneeded.
+      - name: Install cargo-nextest for introduced-test retry
+        if: steps.retry-checkout.outcome == 'success'
+        uses: taiki-e/install-action@nextest
+
+      - name: Reconcile provenance-bound phase evidence
+        id: reconcile
+        shell: bash
+        env:
+          PHASE_ARTIFACT_ROOT: differential-artifacts
+          REPOSITORY: ${{ github.repository }}
+          CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          BASE_SHA: ${{ needs.plan.outputs.base-sha }}
+          COMMAND: ${{ matrix.command }}
+          ARTIFACT_KEY: ${{ matrix.artifact_key }}
+          ACTION_REVISION: ${{ steps.action-revision.outputs.value }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          REQUIRE_BASELINE: ${{ github.event_name == 'pull_request' && inputs.differential-gating == 'true' && matrix.baseline == 'true' && 'candidate-failure' || 'false' }}
+          PR_ACTIVE: ${{ steps.final-pr-state.outputs.active }}
+          PR_STATE: ${{ steps.final-pr-state.outputs.state }}
+          RETRY_WORKSPACE: ${{ steps.retry-checkout.outcome == 'success' && format('{0}/.homeboy-retry-workspace', github.workspace) || '' }}
+          RETRY_MAX_ATTEMPTS: ${{ inputs.retry-introduced-test-attempts }}
+        run: bash .homeboy-action/scripts/core/reconcile-differential-phases.sh
+
+      - name: Upload exact-test retry evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: homeboy-test-retry-${{ matrix.artifact_key }}-${{ github.run_attempt }}
+          path: |
+            differential-artifacts/**/*.test-retry.json
+            differential-artifacts/**/*.test-retry/**
+          if-no-files-found: ignore
+
+      - name: Generate GitHub App token
+        id: app-token
+        if: steps.final-pr-state.outputs.active != 'false' && always() && inputs.pr-comment != 'false'
+        uses: actions/create-github-app-token@v3
+        continue-on-error: true
+        with:
+          client-id: ${{ secrets.HOMEBOY_APP_ID }}
+          private-key: ${{ secrets.HOMEBOY_APP_PRIVATE_KEY }}
+
+      - name: Post reconciled PR comment
+        if: steps.final-pr-state.outputs.active != 'false' && always() && github.event_name == 'pull_request' && inputs.pr-comment != 'false'
+        shell: bash
+        env:
+          GITHUB_ACTION_PATH: ${{ github.workspace }}/.homeboy-action
+          HOMEBOY_OUTPUT_DIR: ${{ steps.reconcile.outputs.output-dir }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          COMMANDS: ${{ matrix.command }}
+          COMPONENT_NAME: ${{ steps.reconcile.outputs.component }}
+          RESULTS: ${{ steps.reconcile.outputs.results }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          COMMENT_KEY_INPUT: ${{ inputs.comment-key }}
+          COMMENT_SECTION_KEY_INPUT: ${{ inputs.comment-section-key || matrix.section_key }}
+          COMMENT_SECTION_TITLE_INPUT: ${{ inputs.comment-section-title || matrix.section_title }}
+          HOMEBOY_CI_RESULTS_ARTIFACT: homeboy-differential-candidate-${{ matrix.artifact_key }}-${{ github.run_attempt }}
+          HOMEBOY_OBSERVATIONS_ARTIFACT: homeboy-differential-candidate-${{ matrix.artifact_key }}-${{ github.run_attempt }}
+          GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          GITHUB_PR_URL: ${{ github.event.pull_request.html_url }}
+          HOMEBOY_TEST_TIMEOUT_SECONDS: ${{ inputs.test-timeout-seconds }}
+          HOMEBOY_ACTION_EXECUTION_TIMEOUT_SECONDS: ${{ inputs.execution-timeout-seconds }}
+        run: bash .homeboy-action/scripts/pr/post-pr-comment.sh
+
+  policy:
+    name: PR Policy
+    needs: [reconcile, reconcile-test-shards, plan]
+    if: ${{ !inputs.contract-probe && inputs.components == '' && !cancelled() && github.event_name == 'pull_request' && inputs.pr-policy != '' && needs.reconcile.result == 'success' && (needs.plan.outputs.test-shards-enabled != 'true' || needs.reconcile-test-shards.result == 'success') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: actions/checkout@v6
+        with:
+          repository: Extra-Chill/homeboy-action
+          ref: ${{ needs.plan.outputs.action-sha }}
+          path: .homeboy-action
+      - name: Download candidate Homeboy binary
+        id: candidate-binary
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HOMEBOY_ACTION_SETUP_TIMEOUT_SECONDS: ${{ inputs.setup-timeout-seconds }}
+        run: bash .homeboy-action/scripts/core/run-setup-with-timeout.sh 'download candidate Homeboy binary' -- bash .homeboy-action/scripts/core/download-candidate-binary.sh
+      - name: Install candidate Homeboy binary
+        run: sudo cp "${{ steps.candidate-binary.outputs.binary-path }}" /usr/local/bin/homeboy
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        continue-on-error: true
+        with:
+          client-id: ${{ secrets.HOMEBOY_APP_ID }}
+          private-key: ${{ secrets.HOMEBOY_APP_PRIVATE_KEY }}
+      - name: Evaluate PR policy after reconciled quality gates
+        shell: bash
+        env:
+          GITHUB_ACTION_PATH: ${{ github.workspace }}/.homeboy-action
+          GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+          POLICY_PATH: ${{ inputs.pr-policy }}
+          POLICY_MERGE: ${{ inputs.pr-policy-merge }}
+          POLICY_MERGE_METHOD: ${{ inputs.pr-policy-merge-method }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          REPOSITORY: ${{ github.repository }}
+          COMPONENT_NAME: ${{ inputs.component }}
+        run: bash .homeboy-action/scripts/pr/policy-gate.sh

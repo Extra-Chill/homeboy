@@ -1,0 +1,144 @@
+# Shares the consumer release caller's `release` lock; nested release.yml
+# has no lock of its own, so delegation cannot deadlock/cancel its parent.
+name: Homeboy Dependency Refresh
+on:
+  workflow_call:
+    inputs:
+      action-ref:
+        type: string
+        default: 'v2'
+      publisher-known-hosts:
+        type: string
+        default: ''
+    secrets:
+      HOMEBOY_APP_ID:
+        required: false
+      HOMEBOY_APP_PRIVATE_KEY:
+        required: false
+      PUBLISH_SSH_KEY:
+        required: false
+      NPM_TOKEN:
+        required: false
+      DISPATCH_TOKEN:
+        required: false
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+concurrency:
+  group: release
+  cancel-in-progress: false
+jobs:
+  refresh:
+    if: ${{ github.event_name != 'push' || !startsWith(github.event.head_commit.message, 'release:') }}
+    runs-on: ubuntu-latest
+    outputs:
+      route: ${{ steps.classify.outputs.route }}
+      action-sha: ${{ steps.action-sha.outputs.sha }}
+    steps:
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        continue-on-error: true
+        with:
+          client-id: ${{ secrets.HOMEBOY_APP_ID }}
+          private-key: ${{ secrets.HOMEBOY_APP_PRIVATE_KEY }}
+
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+          persist-credentials: false
+          token: ${{ steps.app-token.outputs.token || github.token }}
+
+      - name: Resolve action revision
+        id: action-sha
+        shell: bash
+        env:
+          ACTION_REF: ${{ inputs.action-ref }}
+          ACTION_REPO: Extra-Chill/homeboy-action
+        run: |
+          set -euo pipefail
+          if [[ "${ACTION_REF}" =~ ^[0-9a-f]{40}$ ]]; then
+            sha="${ACTION_REF}"
+          else
+            refs="$(git ls-remote "https://github.com/${ACTION_REPO}" \
+              "refs/tags/${ACTION_REF}^{}" "refs/tags/${ACTION_REF}" "refs/heads/${ACTION_REF}")"
+            sha="$(printf '%s\n' "${refs}" | awk '$2 ~ /\^\{\}$/ {print $1; exit}')"
+            [ -n "${sha:-}" ] || sha="$(printf '%s\n' "${refs}" | awk 'NR==1{print $1}')"
+          fi
+          if [ -z "${sha:-}" ]; then
+            echo "::error::Could not resolve action-ref '${ACTION_REF}' in ${ACTION_REPO} to a commit."
+            exit 1
+          fi
+          echo "Resolved ${ACTION_REF} -> ${sha}"
+          echo "sha=${sha}" >> "${GITHUB_OUTPUT}"
+
+      - name: Check out resolved action revision
+        uses: actions/checkout@v6
+        with:
+          repository: Extra-Chill/homeboy-action
+          ref: ${{ steps.action-sha.outputs.sha }}
+          path: .homeboy-action
+
+      - name: Exclude nested action checkout from the working tree
+        run: echo '.homeboy-action/' >> .git/info/exclude
+
+      - name: Prepare Homeboy and consumer environment
+        uses: ./.homeboy-action
+        with:
+          # An explicit empty command list performs normal extension/runtime
+          # setup without inferring `release` from the schedule event.
+          commands: ','
+          app-token: ${{ steps.app-token.outputs.token || '' }}
+
+      - name: Preview dependency refresh
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+        run: homeboy deps stack refresh --dry-run > "$RUNNER_TEMP/deps-refresh.json"
+
+      - name: Classify and render dependency refresh
+        id: classify
+        run: python3 .homeboy-action/scripts/deps/classify-refresh.py "$RUNNER_TEMP/deps-refresh.json" homeboy.json "$RUNNER_TEMP/deps-refresh.md" >> "$GITHUB_OUTPUT"
+
+      - name: Apply reviewable dependency refresh
+        if: steps.classify.outputs.route == 'pr'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+        run: |
+          set -euo pipefail
+          homeboy deps stack refresh > "$RUNNER_TEMP/deps-refresh-applied.json"
+          python3 .homeboy-action/scripts/deps/classify-refresh.py "$RUNNER_TEMP/deps-refresh-applied.json" homeboy.json "$RUNNER_TEMP/deps-refresh.md"
+
+      - name: Run consumer gates
+        id: gates
+        if: steps.classify.outputs.route == 'pr'
+        continue-on-error: true
+        uses: ./.homeboy-action
+        with:
+          commands: review lint,review test
+          scope: full
+          app-token: ${{ steps.app-token.outputs.token || '' }}
+
+      - name: Open or update dependency PR
+        if: steps.classify.outputs.route == 'pr'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+          BASE_BRANCH: ${{ github.event.repository.default_branch }}
+          GATE_OUTCOME: ${{ steps.gates.outcome }}
+        run: bash .homeboy-action/scripts/deps/upsert-pr.sh
+
+      - name: Require passing gates
+        if: steps.classify.outputs.route == 'pr' && steps.gates.outcome != 'success'
+        run: exit 1
+
+  release:
+    needs: refresh
+    if: needs.refresh.outputs.route == 'release'
+    # A local `./` path in a called workflow resolves in the caller's repo
+    # ("workflow was not found"), so name this repo explicitly.
+    uses: Extra-Chill/homeboy-action/.github/workflows/release.yml@v2
+    with:
+      action-ref: ${{ needs.refresh.outputs.action-sha }}
+      publisher-known-hosts: ${{ inputs.publisher-known-hosts }}
+    secrets: inherit
