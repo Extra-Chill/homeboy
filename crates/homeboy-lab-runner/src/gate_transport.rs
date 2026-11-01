@@ -73,6 +73,14 @@ impl LabGateTransport for NativeLabGateTransport {
 const LAB_GATE_PUBLIC_MESSAGE: &str =
     "Lab gate transport did not produce verified passing evidence";
 
+/// How long past the gate's own `timeout_seconds` the controller waits for the
+/// runner job's terminal receipt. The runner bounds dependency setup and the
+/// gate command by one deadline of `timeout_seconds` (#16938), so this margin
+/// only has to cover job startup, workspace verification and receipt transfer.
+/// A gate that runs out of time therefore writes its own TimedOut report well
+/// before the controller would cancel the job.
+const LAB_GATE_RECEIPT_MARGIN: std::time::Duration = std::time::Duration::from_secs(120);
+
 /// Whether a transport failure is a controller-side configuration error that
 /// was rejected before any runner job existed (for example a missing runner
 /// `secret_env` ref). It carries no gate output, so its message is safe to
@@ -422,7 +430,8 @@ fn execute_owned(
     let terminal = crate::execution::observe_daemon_job_until_terminal(
         &request.runner_id,
         job_id,
-        std::time::Duration::from_secs(request.timeout_seconds.saturating_add(120)),
+        std::time::Duration::from_secs(request.timeout_seconds)
+            .saturating_add(LAB_GATE_RECEIPT_MARGIN),
         &cancelled,
     );
     let terminal = match terminal {

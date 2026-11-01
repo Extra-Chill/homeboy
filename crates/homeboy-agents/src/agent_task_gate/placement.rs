@@ -353,10 +353,14 @@ pub(super) fn dispatch(
         .iter()
         .find(|outcome| outcome.status == homeboy_core::deps::DependencyHydrationStatus::Failed)
     {
-        return Err(crate::agent_task_promotion::gate_setup_outcome_failure(
-            "lab_gate_setup",
-            failed,
-        ));
+        let mut error =
+            crate::agent_task_promotion::gate_setup_outcome_failure("lab_gate_setup", failed);
+        // The runner names the spent Lab gate limit and the elapsed setup
+        // time in the timed-out outcome's reason (#16938).
+        if failed.termination == homeboy_core::deps::DependencyHydrationTermination::TimedOut {
+            error.message = format!("{}; {}", error.message, failed.reason);
+        }
+        return Err(error);
     }
     let mut report = receipt.report;
     // The step is an in-memory compatibility view and is not on the wire.
@@ -712,9 +716,13 @@ fn execute_with_context_and_resources(
             "Lab gates require private HOME and XDG directories",
         ));
     }
+    // One deadline per Lab gate (#16938): dependency setup gets at most the
+    // whole budget and the gate command only what setup left, so one
+    // gate-execute ends within the controller's single wait for its receipt.
+    let budget = LabGateBudget::start(&request);
     let supervision = GateSupervision {
-        timeout: Duration::from_secs(request.timeout_seconds.max(1)),
-        no_progress_timeout: Duration::from_secs(request.no_progress_timeout_seconds.max(1)),
+        timeout: budget.limit,
+        no_progress_timeout: budget.no_progress_limit,
         heartbeat_interval: Duration::from_secs(5),
         on_spawn: Arc::new(|_, _| Ok(())),
         on_heartbeat: Arc::new(|_| Ok(())),
@@ -730,8 +738,17 @@ fn execute_with_context_and_resources(
     let setup = if request.preflight_only || !environment.hydrate_dependencies {
         Vec::new()
     } else {
-        match hydrate_lab_gate_workspace(cwd, &environment, &supervision, &request) {
-            Ok(setup) => setup,
+        match hydrate_lab_gate_workspace(
+            cwd,
+            &environment,
+            &supervision,
+            budget.remaining(),
+            &request,
+        ) {
+            Ok(mut setup) => {
+                budget.name_spent_setup(&mut setup);
+                setup
+            }
             Err(error) => {
                 run_dir.finish(false);
                 return failed_lab_gate_setup_receipt(&request, context, Vec::new(), Some(error));
@@ -762,6 +779,7 @@ fn execute_with_context_and_resources(
             receipt
         });
     }
+    let setup_elapsed = budget.elapsed();
     let result = if request.preflight_only {
         preflight_gate_toolchains_local(
             cwd,
@@ -781,7 +799,12 @@ fn execute_with_context_and_resources(
                 "readiness-only",
             )
         })
+    } else if budget.remaining() < LAB_GATE_MIN_COMMAND_BUDGET {
+        // Setup finished but left no usable time: the gate timed out without
+        // running rather than starting under a meaningless limit.
+        Ok(budget.exhausted_before_command_report(&request))
     } else {
+        let started = Instant::now();
         run_gate_argv_local(
             cwd,
             request.index,
@@ -791,14 +814,19 @@ fn execute_with_context_and_resources(
             request.reveal_policy,
             GateExecution {
                 runtime_tmpdir: Some(&invocation.context().tmp_dir),
-                timeout: Some(supervision.timeout),
+                timeout: Some(budget.remaining()),
                 supervision: Some(&supervision),
                 baseline_timeout_diagnostic: false,
+                deadline: Some(budget.deadline),
             },
             &environment,
             &request.package_artifacts,
             request.declared_plan.as_ref(),
         )
+        .map(|mut report| {
+            budget.name_limit(&mut report, started.elapsed(), setup_elapsed);
+            report
+        })
     };
     run_dir.finish(
         matches!(&result, Ok(report) if report.status == AgentTaskGateStatus::Succeeded
@@ -845,6 +873,141 @@ fn execute_with_context_and_resources(
     })
 }
 
+/// Smallest remainder worth starting the gate command with. Less than this
+/// after dependency setup is reported as a timed-out gate that never ran.
+const LAB_GATE_MIN_COMMAND_BUDGET: Duration = Duration::from_secs(1);
+
+/// The single wall-clock budget of one runner-side Lab gate: dependency setup
+/// and the gate command both draw from `request.timeout_seconds`.
+struct LabGateBudget {
+    started: Instant,
+    deadline: Instant,
+    limit: Duration,
+    no_progress_limit: Duration,
+}
+
+impl LabGateBudget {
+    fn start(request: &LabGateRequest) -> Self {
+        let started = Instant::now();
+        let limit = Duration::from_secs(request.timeout_seconds.max(1));
+        Self {
+            started,
+            deadline: started + limit,
+            limit,
+            no_progress_limit: Duration::from_secs(request.no_progress_timeout_seconds.max(1)),
+        }
+    }
+
+    fn elapsed(&self) -> Duration {
+        self.started.elapsed()
+    }
+
+    fn remaining(&self) -> Duration {
+        self.deadline.saturating_duration_since(Instant::now())
+    }
+
+    /// A setup step that hit the deadline spent the gate's limit: say so, with
+    /// the elapsed time and the limit, in the outcome the controller reports.
+    fn name_spent_setup(&self, setup: &mut [AgentTaskGateSetupEvidence]) {
+        for outcome in setup.iter_mut().filter(|outcome| {
+            outcome.status == homeboy_core::deps::DependencyHydrationStatus::Failed
+                && outcome.termination
+                    == homeboy_core::deps::DependencyHydrationTermination::TimedOut
+        }) {
+            outcome.reason = format!(
+                "the Lab gate time limit of {}s was spent in dependency setup ({}s elapsed)",
+                self.limit.as_secs(),
+                self.elapsed().as_secs(),
+            );
+        }
+    }
+
+    /// One line naming the effective Lab limits on a supervisor-stopped gate.
+    fn limit_note(
+        &self,
+        termination: AgentTaskGateTermination,
+        gate_elapsed: Duration,
+        setup_elapsed: Duration,
+    ) -> Option<String> {
+        let limit = self.limit.as_secs();
+        let setup = setup_elapsed.as_secs();
+        let elapsed = gate_elapsed.as_secs();
+        match termination {
+            AgentTaskGateTermination::TimedOut => Some(format!(
+                "gate timed out after {elapsed}s (Lab gate limit {limit}s, {setup}s of it spent in dependency setup)"
+            )),
+            AgentTaskGateTermination::NoProgress => Some(format!(
+                "gate stopped after {elapsed}s without progress (no-progress limit {}s, Lab gate limit {limit}s)",
+                self.no_progress_limit.as_secs()
+            )),
+            _ => None,
+        }
+    }
+
+    fn name_limit(
+        &self,
+        report: &mut AgentTaskGateReport,
+        gate_elapsed: Duration,
+        setup_elapsed: Duration,
+    ) {
+        let Some(note) = self.limit_note(report.termination, gate_elapsed, setup_elapsed) else {
+            return;
+        };
+        report.stderr = if report.stderr.is_empty() {
+            note.clone()
+        } else {
+            format!("{}\n{note}", report.stderr)
+        };
+        if let Some(evidence) = report.failure_evidence.as_mut() {
+            evidence.summary = format!("{}; {note}", evidence.summary);
+        }
+    }
+
+    /// Setup left less than [`LAB_GATE_MIN_COMMAND_BUDGET`]: a timed-out gate
+    /// whose command never started (elapsed 0).
+    fn exhausted_before_command_report(&self, request: &LabGateRequest) -> AgentTaskGateReport {
+        let note = self
+            .limit_note(
+                AgentTaskGateTermination::TimedOut,
+                Duration::ZERO,
+                self.elapsed(),
+            )
+            .expect("timed-out note");
+        let stderr = format!("dependency setup left no time to run the gate; {note}");
+        let exit_code = 124;
+        let failure_evidence = gate_budget_failure_evidence(
+            &request.label,
+            exit_code,
+            "",
+            &stderr,
+            AgentTaskGateTermination::TimedOut,
+            false,
+            Some(self.remaining()),
+        )
+        .map(|mut evidence| {
+            evidence.summary = format!("{}; {note}", evidence.summary);
+            evidence
+        });
+        let mut report = AgentTaskGateReport::new(
+            format!("gate-{}", request.index),
+            request.argv.clone(),
+            exit_code,
+            "",
+            stderr,
+            failure_evidence,
+            request.visibility,
+            request.reveal_policy,
+            AgentTaskGateEnvironment::default(),
+        );
+        report.termination = AgentTaskGateTermination::TimedOut;
+        report.test_execution_outcome = request
+            .declared_plan
+            .as_ref()
+            .map(|_| homeboy_engine_primitives::test_execution::TestExecutionOutcome::TimedOut);
+        report
+    }
+}
+
 /// Hydrate the provider-declared dependency roots of the materialized Lab gate
 /// workspace, under the runner-resolved gate environment. This is the same
 /// primitive the local promotion path uses; the Lab runner merely executes it
@@ -853,11 +1016,12 @@ fn hydrate_lab_gate_workspace(
     cwd: &Path,
     environment: &AgentTaskGateEnvironmentPolicy,
     supervision: &GateSupervision,
+    timeout: Duration,
     request: &LabGateRequest,
 ) -> Result<Vec<AgentTaskGateSetupEvidence>> {
     let hydration = GateHydrationEnvironment::prepare(environment)?;
     let policy = homeboy_core::deps::DependencyHydrationPolicy {
-        timeout: supervision.timeout,
+        timeout,
         no_progress_timeout: supervision.no_progress_timeout,
         heartbeat_interval: supervision.heartbeat_interval,
         is_cancelled: Arc::new(|| false),
@@ -1499,10 +1663,14 @@ mod tests {
     /// command only passes when that marker is already there, so a green gate
     /// proves setup ran in the gate cwd before the argv.
     fn repository_with_dependency_manifest(root: &Path) {
+        repository_with_dependency_install(root, "printf hydrated >> hydration-count");
+    }
+
+    fn repository_with_dependency_install(root: &Path, install: &str) {
         repository(root);
         fs::write(
             root.join("homeboy.json"),
-            r#"{"id":"fixture-deps","deps":{"provider":"fixture","commands":{"install":{"argv":["sh","-c","printf hydrated >> hydration-count"]}}}}"#,
+            serde_json::json!({"id":"fixture-deps","deps":{"provider":"fixture","commands":{"install":{"argv":["sh","-c",install]}}}}).to_string(),
         )
         .unwrap();
         // Dependency outputs are ignored content, exactly like a real
@@ -1581,6 +1749,178 @@ mod tests {
             assert!(receipt.setup.is_empty());
             assert!(receipt.report.setup.is_empty());
         });
+    }
+
+    /// #16938: setup and the gate command share one deadline. Slow setup
+    /// leaves the gate only the remainder, and the gate that runs out of it
+    /// comes back as a TimedOut report with its tails and the Lab limit,
+    /// within about one budget rather than two.
+    #[test]
+    fn lab_gate_command_gets_only_the_budget_dependency_setup_left() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let temp = tempfile::tempdir().unwrap();
+            repository_with_dependency_install(
+                temp.path(),
+                "sleep 1.5; printf hydrated >> hydration-count",
+            );
+            let mut request = request(temp.path());
+            request.timeout_seconds = 3;
+            request.argv = vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                "printf started; printf 'gate log' >&2; exec sleep 10".to_string(),
+            ];
+
+            let started = Instant::now();
+            let receipt = execute_with_context(request, temp.path(), &lab_context()).unwrap();
+            let elapsed = started.elapsed();
+
+            assert!(
+                elapsed < Duration::from_millis(4500),
+                "one gate-execute stays within one budget, took {elapsed:?}"
+            );
+            assert_eq!(
+                receipt.setup[0].status,
+                homeboy_core::deps::DependencyHydrationStatus::Succeeded
+            );
+            let report = &receipt.report;
+            assert_eq!(report.status, AgentTaskGateStatus::Failed);
+            assert_eq!(report.termination, AgentTaskGateTermination::TimedOut);
+            assert_eq!(report.stdout, "started");
+            assert!(report.stderr.contains("gate log"), "{}", report.stderr);
+            assert!(
+                report.stderr.contains("(Lab gate limit 3s, ")
+                    && report.stderr.contains("s of it spent in dependency setup)"),
+                "{}",
+                report.stderr
+            );
+            let evidence = report.failure_evidence.as_ref().unwrap();
+            assert_eq!(
+                evidence.classification,
+                AgentTaskGateFailureClassification::ExecutionBudget
+            );
+            assert!(
+                evidence.summary.contains("Lab gate limit 3s"),
+                "{}",
+                evidence.summary
+            );
+            assert_eq!(evidence.stdout_tail, "started");
+        });
+    }
+
+    /// #16938: setup that spends the whole budget is the typed setup failure
+    /// (never a gate run), and it names the elapsed time and the limit.
+    #[test]
+    fn dependency_setup_exceeding_the_lab_gate_limit_is_a_typed_setup_failure() {
+        struct RunnerTransport {
+            previous: Arc<dyn LabGateTransport>,
+        }
+        impl LabGateTransport for RunnerTransport {
+            fn declared_runner(&self, command: &str) -> Result<Option<String>> {
+                self.previous.declared_runner(command)
+            }
+            fn execute(
+                &self,
+                cwd: &Path,
+                request: &LabGateRequest,
+                supervision: Option<&GateSupervision>,
+            ) -> Result<LabGateReceipt> {
+                if request.runner_id != "slow-setup-runner" {
+                    return self.previous.execute(cwd, request, supervision);
+                }
+                execute_with_context(request.clone(), cwd, &runner_context("slow-setup-runner"))
+            }
+        }
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let previous = active_transport();
+            register_lab_gate_transport(Arc::new(RunnerTransport { previous }));
+            let temp = tempfile::tempdir().unwrap();
+            repository_with_dependency_install(temp.path(), "exec sleep 10");
+            let marker = temp.path().join("gate-ran");
+            let mut request = request(temp.path());
+            request.runner_id = "slow-setup-runner".to_string();
+            request.timeout_seconds = 1;
+            request.argv = vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                format!("touch '{}'", marker.display()),
+            ];
+
+            let started = Instant::now();
+            let receipt = execute_with_context(
+                request.clone(),
+                temp.path(),
+                &runner_context("slow-setup-runner"),
+            )
+            .unwrap();
+            assert!(started.elapsed() < Duration::from_secs(5));
+            assert!(!marker.exists(), "a spent budget never runs the gate");
+            let outcome = &receipt.setup[0];
+            assert_eq!(
+                outcome.termination,
+                homeboy_core::deps::DependencyHydrationTermination::TimedOut
+            );
+            assert!(
+                outcome
+                    .reason
+                    .starts_with("the Lab gate time limit of 1s was spent in dependency setup ("),
+                "{}",
+                outcome.reason
+            );
+            assert_eq!(receipt.report.status, AgentTaskGateStatus::Unavailable);
+            let diagnostic = &receipt.report.lab_receipt.as_ref().unwrap()["diagnostic"];
+            assert!(diagnostic["message"]
+                .as_str()
+                .unwrap()
+                .contains("Lab gate time limit of 1s"));
+
+            let error = dispatch(temp.path(), &request, None)
+                .expect_err("a spent setup budget is a gate-setup error, not a gate report");
+            assert_eq!(error.code, homeboy_core::ErrorCode::DependencyStepFailed);
+            assert_eq!(error.details["step_id"], "promotion.gate_setup");
+            assert_eq!(
+                error.details["cause"]["retry_action"],
+                "retry_dependency_hydration"
+            );
+            assert!(
+                error
+                    .message
+                    .contains("the Lab gate time limit of 1s was spent in dependency setup"),
+                "{}",
+                error.message
+            );
+        });
+    }
+
+    /// #16938: setup that leaves less than the minimum command budget yields a
+    /// TimedOut gate report whose command never started.
+    #[test]
+    fn exhausted_budget_before_the_command_is_a_timed_out_gate_report() {
+        let temp = tempfile::tempdir().unwrap();
+        let request = request(temp.path());
+        let budget = LabGateBudget {
+            started: Instant::now() - Duration::from_secs(30),
+            deadline: Instant::now(),
+            limit: Duration::from_secs(30),
+            no_progress_limit: Duration::from_secs(30),
+        };
+
+        let report = budget.exhausted_before_command_report(&request);
+
+        assert_eq!(report.status, AgentTaskGateStatus::Failed);
+        assert_eq!(report.termination, AgentTaskGateTermination::TimedOut);
+        assert_eq!(report.exit_code, 124);
+        assert!(
+            report.stderr.contains(
+                "gate timed out after 0s (Lab gate limit 30s, 30s of it spent in dependency setup)"
+            ),
+            "{}",
+            report.stderr
+        );
+        assert_eq!(
+            report.failure_evidence.unwrap().classification,
+            AgentTaskGateFailureClassification::ExecutionBudget
+        );
     }
 
     /// #16262: a failed runner-side dependency setup is gate setup, not

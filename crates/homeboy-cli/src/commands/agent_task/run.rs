@@ -1135,6 +1135,11 @@ fn cook_preview_resolved_request(args: &AgentTaskCookArgs, placement: Value) -> 
         "gates": {
             "public": args.gates.verify.len(),
             "private": args.gates.private_verify.len(),
+            // The effective per-gate limits a Lab runner enforces (#15792).
+            // On Lab, dependency setup and the gate command share this one
+            // time limit (#16938).
+            "timeout_seconds": args.gates.gate_timeout_seconds.max(1),
+            "no_progress_timeout_seconds": args.gates.gate_no_progress_timeout_seconds.max(1),
         },
         "publication": {
             "finalize": !args.no_finalize,
