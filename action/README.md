@@ -1,5 +1,7 @@
 # Homeboy Action
 
+> **Developed in [Extra-Chill/homeboy](https://github.com/Extra-Chill/homeboy/tree/main/action).** This repository is the published copy: each release lands here as one commit tagged `vX.Y.Z`, and `v2` moves to it once the consumer contract passes. Open issues and pull requests against `Extra-Chill/homeboy`.
+
 GitHub Action for running [Homeboy](https://github.com/Extra-Chill/homeboy) review, bench, and release commands in CI.
 
 Works with **any Homeboy extension** — WordPress, Rust, Node, or your own custom extension.

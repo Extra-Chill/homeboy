@@ -7,6 +7,7 @@ Homeboy, its extensions, and the desktop app live in this one repository (#16783
 | `crates/`, root `Cargo.toml` | The Homeboy CLI and its internal crates | `release.yml`, tagged `vX.Y.Z` | `ci.yml` (skips extension- and desktop-only changes) |
 | `extensions/` | The extensions (`wordpress`, `rust`, `nodejs`, …), formerly `Extra-Chill/homeboy-extensions` | `extensions-release.yml`, tagged `<extension-id>-vX.Y.Z` | `extensions-self-checks.yml`, `extensions-wp-codebox-test-runtime-canary.yml` |
 | `desktop/` | The macOS app, formerly `Extra-Chill/homeboy-desktop` | `extensions-release.yml`, tagged `homeboy-desktop-vX.Y.Z` (tag and changelog; no signed DMG yet) | `desktop.yml` (macOS build and contract tests) |
+| `action/` | The GitHub Action, formerly developed in `Extra-Chill/homeboy-action` | `action-release.yml`, tagged `homeboy-action-vX.Y.Z`, then published to `Extra-Chill/homeboy-action` as `vX.Y.Z` | `action-ci.yml` |
 
 Both imports kept their full history, so `git log -- extensions/wordpress` and
 `git blame` work across the move. Tags that collided with core's `vX.Y.Z` were
@@ -37,3 +38,19 @@ Call them as `Extra-Chill/homeboy/.github/workflows/<name>@<ref>`; see
 [reusable-workflows.md](reusable-workflows.md). Pins to the old
 `Extra-Chill/homeboy-extensions/.github/workflows/...` paths keep resolving from
 the frozen repository.
+
+## The action
+
+`action/` is developed here and **published** to `Extra-Chill/homeboy-action`,
+because callers resolve `uses: Extra-Chill/homeboy-action@v2`. Its imported
+history has rewritten SHAs, so the published repository does not mirror this
+history. Instead, `scripts/publish-action-mirror.sh` appends one commit per
+release whose tree is exactly `action/` at `homeboy-action-vX.Y.Z`, and tags
+it `vX.Y.Z`. Nothing is force-pushed, so every older tag and pinned SHA in the
+published repository keeps working.
+
+`action-release.yml` runs the self-tests, releases, publishes, creates the
+GitHub release there, waits for that repository's consumer contract on the new
+tag, and only then moves `v2`. Re-publish an existing version with
+`gh workflow run action-release.yml -f publish_version=X.Y.Z`. The published
+repository is frozen except for the `homeboy-ci` app.

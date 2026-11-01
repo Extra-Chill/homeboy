@@ -10,9 +10,7 @@
       "pattern": "(?m)^([0-9]+\\.[0-9]+\\.[0-9]+)$"
     }
   ],
-  "hooks": {
-    "post:release": [
-      "bash scripts/release/update-major-tag.sh"
-    ]
+  "github": {
+    "release_latest": false
   }
 }

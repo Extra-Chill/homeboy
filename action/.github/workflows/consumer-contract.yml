@@ -1,12 +1,18 @@
 # GitHub-executed consumer contract for the reusable CI workflow. This calls the
 # revision under test, not the already-published v2 tag, so release validates
 # the promotion candidate before it moves v2.
+#
+# This repository is published from Extra-Chill/homeboy (action/). Edit there.
 name: Reusable Workflow Consumer Contract
 
 on:
   pull_request:
   workflow_dispatch:
   workflow_call:
+  # Extra-Chill/homeboy publishes each release here as a `vX.Y.Z` tag and moves
+  # the floating major tag only after this run passes on that tag.
+  push:
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
 
 permissions:
   contents: write

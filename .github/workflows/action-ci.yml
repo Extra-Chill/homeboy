@@ -1,0 +1,67 @@
+name: Action CI
+
+# Self-tests for the GitHub Action in action/, published to
+# Extra-Chill/homeboy-action. action-release.yml calls this before releasing.
+
+on:
+  pull_request:
+    paths:
+      - 'action/**'
+      - 'scripts/publish-action-mirror.sh'
+      - '.github/workflows/action-ci.yml'
+      - '.github/workflows/action-release.yml'
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: action-ci-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  shell-tests:
+    name: Action / Shell tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: action
+    steps:
+      # Full history: the scope tests resolve real revisions (`HEAD~1`).
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Install nextest for native retry contract tests
+        uses: taiki-e/install-action@nextest
+
+      - name: Run action shell tests
+        run: bash scripts/run-tests.sh
+
+  # The portable containment backend the action uses off Linux can only be
+  # proven on macOS (see action/.github/workflows/self-test.yml).
+  portable-containment:
+    name: Action / Portable containment (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: action
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Run portable containment tests
+        run: bash scripts/core/test-portable-containment.sh
+
+  publish-script:
+    name: Action / Publish script
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Publish to a local mirror
+        run: bash scripts/test-publish-action-mirror.sh

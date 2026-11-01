@@ -1,0 +1,172 @@
+name: Action release
+
+# Releases the GitHub Action in action/ and publishes it to
+# Extra-Chill/homeboy-action, where callers resolve `Extra-Chill/homeboy-action@v2`.
+#
+#   1. action-ci.yml self-tests the candidate.
+#   2. `homeboy release` tags `homeboy-action-vX.Y.Z` here (never GitHub latest).
+#   3. scripts/publish-action-mirror.sh appends one commit whose tree is
+#      action/ to homeboy-action main and tags it `vX.Y.Z`. Nothing is
+#      force-pushed, so every existing tag and pinned SHA stays valid.
+#   4. The `vX.Y.Z` tag push runs homeboy-action's consumer contract; the
+#      floating major tag (`v2`) moves only after it passes.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'action/**'
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: 'Explicit bump: major, minor, patch or X.Y.Z. Empty auto-detects.'
+        type: string
+        default: ''
+      publish_version:
+        description: 'Skip releasing and (re)publish this existing version, e.g. 2.26.0.'
+        type: string
+        default: ''
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  tests:
+    name: Self-tests
+    if: vars.ACTION_RELEASE_AUTOMATION == 'enabled' && !inputs.publish_version
+    uses: ./.github/workflows/action-ci.yml
+
+  release:
+    name: Release
+    needs: tests
+    runs-on: ubuntu-latest
+    # Shares the serial lane with extension and desktop releases: each pushes a
+    # release commit to main.
+    concurrency:
+      group: extensions-release
+      cancel-in-progress: false
+    outputs:
+      released: ${{ steps.release.outputs.released }}
+      version: ${{ steps.release.outputs.release-version }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Generate app token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        continue-on-error: true
+        with:
+          app-id: ${{ secrets.HOMEBOY_APP_ID }}
+          private-key: ${{ secrets.HOMEBOY_APP_PRIVATE_KEY }}
+
+      - uses: Extra-Chill/homeboy-action@v2
+        id: release
+        with:
+          component: action
+          commands: release
+          args: ${{ inputs.bump && format('--bump {0} --force-lower-bump', inputs.bump) || '' }}
+          app-token: ${{ steps.app-token.outputs.token || '' }}
+
+  publish:
+    name: Publish to homeboy-action
+    needs: release
+    if: >-
+      always() && vars.ACTION_RELEASE_AUTOMATION == 'enabled' &&
+      (inputs.publish_version || (needs.release.result == 'success' && needs.release.outputs.released == 'true'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    concurrency:
+      group: action-publish
+      cancel-in-progress: false
+    env:
+      VERSION: ${{ inputs.publish_version || needs.release.outputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Generate homeboy-action token
+        id: mirror-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.HOMEBOY_APP_ID }}
+          private-key: ${{ secrets.HOMEBOY_APP_PRIVATE_KEY }}
+          owner: Extra-Chill
+          repositories: homeboy-action
+
+      - name: Append the release to homeboy-action
+        id: publish
+        env:
+          TOKEN: ${{ steps.mirror-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          git fetch --quiet --tags origin
+          export MIRROR_URL="https://x-access-token:${TOKEN}@github.com/Extra-Chill/homeboy-action.git"
+          bash scripts/publish-action-mirror.sh "${VERSION}"
+
+      - name: Create the homeboy-action GitHub release
+        env:
+          GH_TOKEN: ${{ steps.mirror-token.outputs.token }}
+          SOURCE_GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.publish.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if gh release view "${TAG}" -R Extra-Chill/homeboy-action >/dev/null 2>&1; then
+            echo "${TAG} already has a GitHub release."
+            exit 0
+          fi
+          GH_TOKEN="${SOURCE_GH_TOKEN}" gh release view "homeboy-action-${TAG}" -R "${GITHUB_REPOSITORY}" \
+            --json body --jq .body > "${RUNNER_TEMP}/notes.md" || : > "${RUNNER_TEMP}/notes.md"
+          printf '\n\nPublished from %s/releases/tag/homeboy-action-%s.\n' \
+            "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" "${TAG}" >> "${RUNNER_TEMP}/notes.md"
+          gh release create "${TAG}" -R Extra-Chill/homeboy-action --verify-tag \
+            --title "${TAG}" --notes-file "${RUNNER_TEMP}/notes.md" --latest
+
+      - name: Wait for the consumer contract on the published tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMMIT: ${{ steps.publish.outputs.commit }}
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 120); do
+            run="$(gh run list -R Extra-Chill/homeboy-action --workflow consumer-contract.yml \
+              --commit "${COMMIT}" --event push --limit 1 \
+              --json databaseId,status,conclusion,url --jq '.[0] // empty')"
+            if [ -n "${run}" ]; then
+              status="$(jq -r .status <<<"${run}")"
+              conclusion="$(jq -r .conclusion <<<"${run}")"
+              url="$(jq -r .url <<<"${run}")"
+              if [ "${status}" = "completed" ]; then
+                if [ "${conclusion}" = "success" ]; then
+                  echo "Consumer contract passed: ${url}"
+                  exit 0
+                fi
+                echo "::error::Consumer contract ${conclusion} on ${COMMIT}: ${url}. The major tag was not moved; fix forward and release again."
+                exit 1
+              fi
+            fi
+            sleep 30
+          done
+          echo "::error::Consumer contract did not finish within 60 minutes for ${COMMIT}."
+          exit 1
+
+      - name: Move the floating major tag
+        env:
+          GH_TOKEN: ${{ steps.mirror-token.outputs.token }}
+          COMMIT: ${{ steps.publish.outputs.commit }}
+        run: |
+          set -euo pipefail
+          major="v${VERSION%%.*}"
+          if gh api "repos/Extra-Chill/homeboy-action/git/ref/tags/${major}" >/dev/null 2>&1; then
+            gh api "repos/Extra-Chill/homeboy-action/git/refs/tags/${major}" --method PATCH \
+              -f sha="${COMMIT}" -F force=true >/dev/null
+          else
+            gh api repos/Extra-Chill/homeboy-action/git/refs --method POST \
+              -f ref="refs/tags/${major}" -f sha="${COMMIT}" >/dev/null
+          fi
+          echo "::notice::${major} now points at ${COMMIT} (v${VERSION})."
