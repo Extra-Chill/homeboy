@@ -593,9 +593,15 @@ pub(crate) fn hydrate_gate_dependency_roots_for_component(
             .display()
             .to_string();
         let relative = if relative.is_empty() { "." } else { &relative };
-        let selections =
-            homeboy_core::deps::dependency_selection_roots(&candidate, candidate == checkout)?;
-        if candidate != checkout && selections.is_empty() {
+        let selections = homeboy_core::deps::dependency_selection_roots(&candidate, true)?;
+        // An installed adapter's default fallback declares the walk's own root
+        // only. A descendant that only a default selects (a fixture's bare
+        // package.json, a workspace member) is not a dependency root (#16670);
+        // descendants no adapter selects still reach their other providers.
+        if candidate != checkout
+            && !selections.is_empty()
+            && homeboy_core::deps::dependency_selection_roots(&candidate, false)?.is_empty()
+        {
             continue;
         }
         if !selections.is_empty()
