@@ -4,3 +4,4 @@
 rust/dist-manifest.json
 wordpress/vendor/
 rust/tests/fixtures/*/target/
+**/node_modules/
