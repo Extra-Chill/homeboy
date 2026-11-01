@@ -35,10 +35,6 @@ pub struct CookOptionValues {
     /// Confirm a model override that pins the run instead of configured rotation.
     #[arg(long = "acknowledge-model-override", requires = "model")]
     pub acknowledge_model_override: bool,
-    /// Named installed provider profile supplying backend, selector, model and
-    /// provider-config defaults. Explicit flags win over profile defaults.
-    #[arg(long = "provider-profile", value_name = "PROFILE")]
-    pub provider_profile: Option<String>,
     /// Secret environment variable name to hydrate for the provider. Repeatable.
     #[arg(long = "secret-env", value_name = "ENV")]
     pub secret_env: Vec<String>,
@@ -782,7 +778,7 @@ mod tests {
         }
         let options = [
             ("backend", "fixture"), ("selector", "provider"), ("model", "model"),
-            ("provider-profile", "profile"), ("secret-env", "TOKEN"),
+            ("secret-env", "TOKEN"),
             ("provider-config", r#"{ "exact": true }"#),
             ("provider-evidence", r#"{"id":"evidence","source":"/evidence"}"#),
             ("ai-tool", "Test tool"), ("max-attempts", "7"),

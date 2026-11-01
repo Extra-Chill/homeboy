@@ -567,10 +567,7 @@ Every child needs a deterministic gate from `--verify`, `--verify-file`,
 Cook and cook-batch share the same provider, model, evidence, attempt and gate
 options. Batch forwards explicitly supplied options unchanged to each child;
 relative verification-file paths are anchored at the operator's working directory.
-`--provider-profile NAME` is also available on a single `agent-task cook`:
-Cook resolves the installed profile's backend, selector, model and provider-config
-defaults, with explicit flags taking precedence. Batch only forwards the profile
-name; each child resolves it. `--max-attempts` defaults to 3 for both commands.
+`--max-attempts` defaults to 3 for both commands.
 
 ```bash
 homeboy --placement lab agent-task fanout cook-batch \
