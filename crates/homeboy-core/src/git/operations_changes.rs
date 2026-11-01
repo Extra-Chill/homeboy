@@ -160,7 +160,9 @@ pub fn detect_baseline_with_version_and_tag_prefix_from_fetched_tags(
         if let (Some(current), Some(tag_ver)) = (current_version, &tag_version) {
             if current != tag_ver {
                 // Tag is stale - try to find the release commit for current version
-                if let Some(hash) = find_version_release_commit(path, current)? {
+                if let Some(hash) =
+                    find_version_release_commit_with_prefix(path, current, tag_prefix)?
+                {
                     return Ok(BaselineInfo {
                         latest_tag: Some(tag.clone()),
                         source: Some(BaselineSource::VersionCommit),
@@ -173,7 +175,7 @@ pub fn detect_baseline_with_version_and_tag_prefix_from_fetched_tags(
                 }
 
                 // No matching release commit - fall back to generic version commit
-                if let Some(hash) = find_version_commit(path)? {
+                if let Some(hash) = find_version_commit_with_prefix(path, tag_prefix)? {
                     return Ok(version_commit_baseline(
                         Some(tag.clone()),
                         hash,
@@ -208,7 +210,7 @@ pub fn detect_baseline_with_version_and_tag_prefix_from_fetched_tags(
 
     // Priority 2: No tags - try version commit for current version first
     if let Some(current) = current_version {
-        if let Some(hash) = find_version_release_commit(path, current)? {
+        if let Some(hash) = find_version_release_commit_with_prefix(path, current, tag_prefix)? {
             return Ok(BaselineInfo {
                 latest_tag: None,
                 source: Some(BaselineSource::VersionCommit),
@@ -221,7 +223,7 @@ pub fn detect_baseline_with_version_and_tag_prefix_from_fetched_tags(
     }
 
     // Priority 3: Generic version commit
-    if let Some(hash) = find_version_commit(path)? {
+    if let Some(hash) = find_version_commit_with_prefix(path, tag_prefix)? {
         return Ok(version_commit_baseline(
             None,
             hash,

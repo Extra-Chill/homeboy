@@ -319,12 +319,9 @@ pub(crate) fn run_git_commit(
     }
 
     stage_workspace_npm_lockfile(component)?;
-    let should_amend = should_amend_release_commit(&component.local_path)?;
-    let message = state
-        .version
-        .as_ref()
-        .map(|v| format!("release: v{}", v))
-        .unwrap_or_else(|| "release: unknown".to_string());
+    let scope = super::scope::ReleaseScope::resolve(component, component_id)?;
+    let should_amend = should_amend_release_commit(&component.local_path, scope.tag_prefix())?;
+    let message = release_commit_message(state, scope.tag_prefix());
 
     let options = homeboy_core::git::CommitOptions {
         staged_only: false,
@@ -572,7 +569,36 @@ fn load_release_notes(component: &Component) -> Result<String> {
     )
 }
 
-fn should_amend_release_commit(local_path: &str) -> Result<bool> {
+fn release_commit_message(state: &ReleaseState, prefix: Option<&str>) -> String {
+    let subject = homeboy_core::git::release_commit_subject(
+        state.version.as_deref().unwrap_or("unknown"),
+        prefix,
+    );
+    let Some(notes) = state
+        .notes
+        .as_deref()
+        .filter(|notes| !notes.trim().is_empty())
+    else {
+        return subject;
+    };
+    // The same finalized changelog notes used by the GitHub release. Bound
+    // both line count and line length, including unusually long single entries.
+    let lines: Vec<_> = notes.lines().collect();
+    let body = lines
+        .iter()
+        .take(100)
+        .map(|line| line.chars().take(500).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let omitted = lines.len().saturating_sub(100);
+    if omitted > 0 {
+        format!("{subject}\n\n{body}\n\n... {omitted} more lines omitted")
+    } else {
+        format!("{subject}\n\n{body}")
+    }
+}
+
+fn should_amend_release_commit(local_path: &str, prefix: Option<&str>) -> Result<bool> {
     let log_output =
         homeboy_core::git::execute_git_for_release(local_path, &["log", "-1", "--format=%s"])
             .map_err(|e| Error::internal_io(e.to_string(), Some("git log".to_string())))?;
@@ -583,7 +609,7 @@ fn should_amend_release_commit(local_path: &str) -> Result<bool> {
         .trim()
         .to_string();
 
-    if !last_message.starts_with("release: v") {
+    if !homeboy_core::git::matches_release_subject(&last_message, None, prefix) {
         return Ok(false);
     }
 
@@ -609,6 +635,49 @@ fn should_amend_release_commit(local_path: &str) -> Result<bool> {
 /// forward so the default payload is unchanged.
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn amend_detection_accepts_legacy_and_owned_scopes_only() {
+        use homeboy_test_support::git::{commit_file, repo, run};
+        let repo = repo();
+        let path = repo.path().to_str().unwrap();
+        commit_file(repo.path(), "file", "initial", "initial");
+        run(repo.path(), &["remote", "add", "origin", path]);
+        run(
+            repo.path(),
+            &["update-ref", "refs/remotes/origin/main", "HEAD"],
+        );
+        run(repo.path(), &["branch", "--set-upstream-to=origin/main"]);
+        for (index, subject, expected) in [
+            (1, "release: v1.0.0", true),
+            (2, "release(events): v1.0.0", true),
+            (3, "release(other): v1.0.0", false),
+        ] {
+            commit_file(repo.path(), "file", &index.to_string(), subject);
+            assert_eq!(
+                super::should_amend_release_commit(path, Some("events")).unwrap(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn release_message_includes_scoped_subject_and_finalized_notes() {
+        let mut state = super::ReleaseState {
+            version: Some("1.2.3".into()),
+            notes: Some("### Fixed\n- Fix event dates".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            super::release_commit_message(&state, Some("events")),
+            "release(events): v1.2.3\n\n### Fixed\n- Fix event dates"
+        );
+        assert!(super::release_commit_message(&state, None).starts_with("release: v1.2.3\n\n"));
+        state.notes = Some((0..110).map(|_| "entry").collect::<Vec<_>>().join("\n"));
+        let message = super::release_commit_message(&state, Some("events"));
+        assert!(message.ends_with("10 more lines omitted"));
+        assert_eq!(message.matches("entry").count(), 100);
+    }
+
     /// The isolated home each test below installs, named as roots.
     ///
     /// These tests are their own boundary: `with_isolated_home` establishes the

@@ -262,7 +262,7 @@ static VERSION_NUMBER_RE: LazyLock<Regex> =
 /// Matches release-prefixed subjects: "release: v0.2.3", "release v0.2.3",
 /// "chore(release): v0.2.3"
 static RELEASE_PREFIX_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^(?:chore\([^)]*\):\s*v?\d+\.\d+(?:\.\d+)?|release:?\s*v?\d+\.\d+(?:\.\d+)?)")
+    Regex::new(r"^(?:chore\([^)]*\):\s*v?\d+\.\d+(?:\.\d+)?|release(?:\([^)]*\))?:?\s*v?\d+\.\d+(?:\.\d+)?)")
         .expect("Invalid regex")
 });
 
@@ -559,20 +559,63 @@ fn is_exact_semver_core(version: &str) -> bool {
         .all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()))
 }
 
+/// Format the subject consistently with the release tag namespace.
+pub fn release_commit_subject(version: &str, prefix: Option<&str>) -> String {
+    match prefix {
+        Some(prefix) => format!("release({prefix}): v{version}"),
+        None => format!("release: v{version}"),
+    }
+}
+
+/// Legacy unscoped subjects remain valid in every namespace. Scoped subjects
+/// are only valid for their owner (and never for an unprefixed component).
+fn release_scope_matches(subject: &str, prefix: Option<&str>) -> bool {
+    match subject
+        .get(..8)
+        .filter(|head| head.eq_ignore_ascii_case("release("))
+        .and_then(|_| subject.get(8..))
+    {
+        Some(rest) => rest
+            .split_once("):")
+            .is_some_and(|(scope, _)| Some(scope) == prefix),
+        None => true,
+    }
+}
+
+/// Recognize a release subject, optionally requiring an exact version.
+pub fn matches_release_subject(subject: &str, version: Option<&str>, prefix: Option<&str>) -> bool {
+    if !release_scope_matches(subject, prefix) {
+        return false;
+    }
+    let tail = subject.strip_prefix("release:").or_else(|| {
+        subject
+            .strip_prefix("release(")
+            .and_then(|s| s.split_once("):").map(|(_, tail)| tail))
+    });
+    let Some(value) = tail.and_then(|s| s.trim().strip_prefix('v')) else {
+        return false;
+    };
+    !value.is_empty() && version.is_none_or(|expected| value == expected)
+}
+
 /// Find the most recent commit containing a version number in its message.
 /// Matches strict patterns: v1.0.0, bump to X, release X, version X
 /// Returns the commit hash if found, None otherwise.
 pub fn find_version_commit(path: &str) -> Result<Option<String>> {
+    find_version_commit_with_prefix(path, None)
+}
+
+pub fn find_version_commit_with_prefix(path: &str, prefix: Option<&str>) -> Result<Option<String>> {
     let stdout = command::run_in(path, "git", &["log", "-200", "--format=%h|%s"], "git log")?;
 
     let version_pattern = Regex::new(
-        r"(?i)(?:^v|^version\s+(?:bump\s+(?:to\s+)?)?v?|^bump\s+(?:version\s+)?(?:to\s+)?v?|^(?:chore\([^)]*\):\s*)?release:?\s*v?)(\d+\.\d+(?:\.\d+)?)",
+        r"(?i)(?:^v|^version\s+(?:bump\s+(?:to\s+)?)?v?|^bump\s+(?:version\s+)?(?:to\s+)?v?|^(?:chore\([^)]*\):\s*)?release(?:\([^)]*\))?:?\s*v?)(\d+\.\d+(?:\.\d+)?)",
     )
     .expect("Invalid regex pattern");
 
     for line in stdout.lines() {
         if let Some((hash, subject)) = line.split_once('|') {
-            if version_pattern.is_match(subject) {
+            if release_scope_matches(subject, prefix) && version_pattern.is_match(subject) {
                 return Ok(Some(hash.to_string()));
             }
         }
@@ -585,6 +628,14 @@ pub fn find_version_commit(path: &str) -> Result<Option<String>> {
 /// Uses strict patterns to avoid false positives - only matches commits that
 /// clearly mark a release (e.g., "release: v0.2.0"), not mentions of releases.
 pub fn find_version_release_commit(path: &str, version: &str) -> Result<Option<String>> {
+    find_version_release_commit_with_prefix(path, version, None)
+}
+
+pub fn find_version_release_commit_with_prefix(
+    path: &str,
+    version: &str,
+    prefix: Option<&str>,
+) -> Result<Option<String>> {
     let Some(stdout) = command::run_in_optional(path, "git", &["log", "-200", "--format=%h|%s"])
     else {
         return Ok(None);
@@ -593,7 +644,7 @@ pub fn find_version_release_commit(path: &str, version: &str) -> Result<Option<S
     let escaped_version = regex::escape(version);
     let patterns = [
         format!(
-            r"(?i)^(?:chore\([^)]*\):\s*)?release:?\s*v?{}(?:\s|$)",
+            r"(?i)^(?:chore\([^)]*\):\s*)?release(?:\([^)]*\))?:?\s*v?{}(?:\s|$)",
             escaped_version
         ),
         format!(r"(?i)^v?{}\s*$", escaped_version),
@@ -610,6 +661,9 @@ pub fn find_version_release_commit(path: &str, version: &str) -> Result<Option<S
 
     for line in stdout.lines() {
         if let Some((hash, subject)) = line.split_once('|') {
+            if !release_scope_matches(subject, prefix) {
+                continue;
+            }
             for pattern in &patterns {
                 if Regex::new(pattern)
                     .map(|re| re.is_match(subject))
@@ -1314,6 +1368,67 @@ mod tests {
         assert_eq!(
             parse_conventional_commit("Merge origin/main into feature-branch"),
             CommitCategory::Merge
+        );
+    }
+
+    #[test]
+    fn version_readers_ignore_sibling_releases() {
+        use homeboy_test_support::git::{commit_file, repo};
+        let repo = repo();
+        let path = repo.path().to_str().unwrap();
+        commit_file(repo.path(), "VERSION", "1", "release: v1.0.0");
+        let legacy = find_version_release_commit_with_prefix(path, "1.0.0", Some("events"))
+            .unwrap()
+            .unwrap();
+        commit_file(repo.path(), "VERSION", "2", "release(events): v1.0.0");
+        let owned = find_version_release_commit_with_prefix(path, "1.0.0", Some("events"))
+            .unwrap()
+            .unwrap();
+        assert_ne!(owned, legacy);
+        commit_file(repo.path(), "VERSION", "3", "release(other): v1.0.0");
+        assert_eq!(
+            find_version_commit_with_prefix(path, Some("events")).unwrap(),
+            Some(owned.clone())
+        );
+        assert_eq!(
+            find_version_release_commit_with_prefix(path, "1.0.0", Some("events")).unwrap(),
+            Some(owned)
+        );
+        assert_eq!(find_version_commit(path).unwrap(), Some(legacy));
+    }
+
+    #[test]
+    fn scoped_release_subjects_are_owned_and_backward_compatible() {
+        assert_eq!(
+            release_commit_subject("1.2.3", Some("events")),
+            "release(events): v1.2.3"
+        );
+        assert_eq!(release_commit_subject("1.2.3", None), "release: v1.2.3");
+        for prefix in [None, Some("events")] {
+            assert!(matches_release_subject(
+                "release: v1.2.3",
+                Some("1.2.3"),
+                prefix
+            ));
+            assert!(!matches_release_subject(
+                "release(other): v1.2.3",
+                Some("1.2.3"),
+                prefix
+            ));
+        }
+        assert!(matches_release_subject(
+            "release(events): v1.2.3",
+            Some("1.2.3"),
+            Some("events")
+        ));
+        assert!(!matches_release_subject(
+            "release(events): v1.2.4",
+            Some("1.2.3"),
+            Some("events")
+        ));
+        assert_eq!(
+            parse_conventional_commit("release(events): v1.2.3"),
+            CommitCategory::Release
         );
     }
 

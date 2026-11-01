@@ -544,7 +544,7 @@ pub(super) fn run_recover(
 
     if uncommitted.has_changes {
         homeboy_core::log_status!("recover", "Committing uncommitted changes...");
-        let msg = format!("release: v{}", current_version);
+        let msg = git::release_commit_subject(current_version, release_scope.tag_prefix());
         let commit_result = git::commit(
             Some(&input.component_id),
             Some(msg.as_str()),
@@ -762,7 +762,10 @@ where
         }
         let commit = git::commit(
             Some(&input.component_id),
-            Some(&format!("release: v{}", version)),
+            Some(&git::release_commit_subject(
+                version,
+                release_scope.tag_prefix(),
+            )),
             git::CommitOptions {
                 staged_only: false,
                 files: None,
@@ -927,10 +930,10 @@ fn require_interrupted_release_lineage(
 ) -> Result<()> {
     let subject = git::execute_git_for_release(path, &["log", "-1", "--format=%s", tag_commit])?;
     let subject = String::from_utf8_lossy(&subject.stdout).trim().to_string();
-    let expected_subject = format!("release: v{version}");
+    let prefix = tag_name.strip_suffix(&format!("-v{version}"));
     let parent = git::execute_git_for_release(path, &["rev-parse", &format!("{tag_commit}^")])?;
     let parent = String::from_utf8_lossy(&parent.stdout).trim().to_string();
-    let shares_branch_lineage = subject == expected_subject
+    let shares_branch_lineage = git::matches_release_subject(&subject, Some(version), prefix)
         && !parent.is_empty()
         && git::is_ancestor(path, &parent, head_commit)?;
     if shares_branch_lineage {
@@ -1295,7 +1298,8 @@ pub(super) fn diagnose_orphan_tag(local_path: &str, tag: &str) -> Option<String>
         .trim()
         .to_string();
 
-    if subject.starts_with("release: v") || subject.starts_with("release:v") {
+    let prefix = tag.rsplit_once("-v").map(|(prefix, _)| prefix);
+    if git::matches_release_subject(&subject, None, prefix) {
         return None;
     }
 

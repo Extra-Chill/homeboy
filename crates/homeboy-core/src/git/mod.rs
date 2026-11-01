@@ -33,7 +33,6 @@ pub use changes::{
     get_files_changed_since, get_range_diff, get_uncommitted_changes, resolve_merge_base,
     UncommittedChanges,
 };
-pub use commits::extract_version_from_tag;
 pub use commits::{
     categorize_commits, find_version_commit, find_version_release_commit, get_commits_in_range,
     get_commits_since_tag, get_commits_since_tag_for_path, get_commits_since_tag_for_paths,
@@ -43,6 +42,10 @@ pub use commits::{
     get_previous_tag_before_any_with_prefix, get_previous_tag_before_with_prefix,
     recommended_bump_from_commits, strip_conventional_prefix, CommitCategory, CommitCounts,
     CommitInfo, MonorepoContext, RemoteReleaseCoordinate, SemverBump,
+};
+pub use commits::{
+    extract_version_from_tag, find_version_commit_with_prefix,
+    find_version_release_commit_with_prefix, matches_release_subject, release_commit_subject,
 };
 pub use gh_client::{github_cli_env, GhClient};
 pub use github::push_markdown_body_file_arg;
