@@ -34,10 +34,6 @@ impl PathMaterializationPlanner {
         )?;
         extra_workspaces.extend(provider_config_extra_workspaces(&args, source_path)?);
         extra_workspaces.extend(agent_task_plan_extra_workspaces(&args, source_path)?);
-        extra_workspaces.extend(agent_task_provider_runtime_component_extra_workspaces(
-            &args,
-            source_path,
-        )?);
         extra_workspaces.extend(workspace_ref_extra_workspaces(
             &workspace_ref_resolutions,
             source_path,

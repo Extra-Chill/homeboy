@@ -109,8 +109,6 @@ pub struct AgentTaskExecutorProvider {
     /// statically-ready provider cannot currently dispatch work.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub immediate_failure_patterns: Vec<AgentTaskProviderImmediateFailurePattern>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub lab_runtime_components: Vec<String>,
     #[serde(
         default,
         skip_serializing_if = "AgentTaskProviderTimeoutArtifactDiscovery::is_empty"

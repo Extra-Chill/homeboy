@@ -183,21 +183,3 @@ pub(super) fn required_extension_ids_for_plan_with_providers(
     }
     extension_ids.into_iter().collect()
 }
-
-pub(super) fn lab_runtime_component_ids_for_plan_with_providers(
-    plan: &AgentTaskPlan,
-    providers: &[AgentTaskExecutorProvider],
-) -> Vec<String> {
-    let mut component_ids = BTreeSet::new();
-    for request in &plan.tasks {
-        if let Some(provider) = select_provider(providers, request) {
-            for component_id in &provider.lab_runtime_components {
-                let component_id = component_id.trim();
-                if !component_id.is_empty() {
-                    component_ids.insert(component_id.to_string());
-                }
-            }
-        }
-    }
-    component_ids.into_iter().collect()
-}
