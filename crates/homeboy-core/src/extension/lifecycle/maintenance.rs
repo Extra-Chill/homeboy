@@ -7,8 +7,15 @@ use homeboy_extension_contract::update_output::{
     SourceMetadataRepairEntry, UpdateAllResult, UpdateEntry, UpdateSkippedEntry,
 };
 
-/// Update all installed extensions through the same path used by single-extension updates.
-pub fn update_all(force: bool) -> UpdateAllResult {
+/// Update installed extensions, refreshing linked sources once per Git root.
+///
+/// `progress` runs before each extension's result is processed (a linked group
+/// may do its shared work on the first member). Callback errors abort the sweep;
+/// extension update errors remain best-effort skips.
+pub fn update_all(
+    force: bool,
+    mut progress: impl FnMut(&str, usize, usize) -> Result<()>,
+) -> Result<UpdateAllResult> {
     let extension_ids = available_extension_ids();
     let mut updated = Vec::new();
     let mut skipped = Vec::new();
@@ -42,7 +49,8 @@ pub fn update_all(force: bool) -> UpdateAllResult {
         super::resolve_update_revisions(&extension_ids)
     };
 
-    for id in &extension_ids {
+    for (index, id) in extension_ids.iter().enumerate() {
+        progress(id, index + 1, extension_ids.len())?;
         let old_version = load_extension(id).ok().map(|m| m.version.clone());
         let old_source_revision = homeboy_core::extension::lifecycle::read_source_revision(id);
 
@@ -78,7 +86,15 @@ pub fn update_all(force: bool) -> UpdateAllResult {
                     });
                 }
 
+                let source_url = if let Some(root) = result.git_root.as_ref() {
+                    homeboy_core::git::remote_origin_url(root)
+                } else if super::is_git_url(&result.url) {
+                    Some(result.url.clone())
+                } else {
+                    None
+                };
                 updated.push(UpdateEntry {
+                    source_url,
                     extension_id: id.clone(),
                     old_version: old_version.unwrap_or_default(),
                     new_version,
@@ -105,12 +121,12 @@ pub fn update_all(force: bool) -> UpdateAllResult {
         }
     }
 
-    UpdateAllResult {
+    Ok(UpdateAllResult {
         updated,
         skipped,
         skipped_details,
         repaired_source_metadata,
-    }
+    })
 }
 
 /// A linked monorepo is refreshed once per Git root. Every extension still gets
@@ -150,7 +166,7 @@ mod tests {
     #[test]
     fn test_update_all() {
         homeboy_core::test_support::with_isolated_home(|_| {
-            let result = update_all(false);
+            let result = update_all(false, |_, _, _| Ok(())).unwrap();
 
             assert!(result.updated.is_empty());
             assert!(result.skipped.is_empty());

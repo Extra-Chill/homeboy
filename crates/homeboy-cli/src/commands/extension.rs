@@ -1615,7 +1615,7 @@ fn update_extension(
 }
 
 fn update_all_extensions(force: bool) -> CmdResult<ExtensionOutput> {
-    let result = extension::lifecycle::update_all(force);
+    let result = extension::lifecycle::update_all(force, |_, _, _| Ok(()))?;
 
     Ok((
         ExtensionOutput::UpdateAll {
@@ -1657,7 +1657,7 @@ fn converge_extensions() -> CmdResult<ExtensionOutput> {
         .collect::<homeboy::core::Result<Vec<_>>>()?;
 
     let provider_catalog_before = provider_catalog_evidence(AgentTaskProviderCatalog::discover());
-    let result = extension::lifecycle::update_all(false);
+    let result = extension::lifecycle::update_all(false, |_, _, _| Ok(()))?;
     let changed_extension_ids = changed_extension_ids(&result.updated);
     let provider_catalog_after = provider_catalog_evidence(AgentTaskProviderCatalog::refresh());
     let (services_restarted, services_pending_restart) =

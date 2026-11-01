@@ -445,7 +445,7 @@ fn run_controller_upgrade_with_operation(
                     (vec![], vec![])
                 } else {
                     operation.set_phase_durable("refreshing installed extensions")?;
-                    let (updated, skipped) = update_all_extensions(operation.id())?;
+                    let (updated, skipped) = refresh_installed_extensions(operation.id())?;
                     let status = extension_component_status(true, false, &updated, &skipped);
                     operation.mark_extensions_durable(&status.status, &status.summary)?;
                     (updated, skipped)
@@ -857,7 +857,7 @@ fn run_controller_upgrade_with_operation(
             (vec![], vec![])
         } else if upgrade_completed && !skip_extensions {
             operation.set_phase_durable("refreshing installed extensions")?;
-            let (updated, skipped) = update_all_extensions(operation.id())?;
+            let (updated, skipped) = refresh_installed_extensions(operation.id())?;
             let status = extension_component_status(true, false, &updated, &skipped);
             operation.mark_extensions_durable(&status.status, &status.summary)?;
             (updated, skipped)
@@ -2485,137 +2485,74 @@ fn acquire_controller_upgrade_lease(
     Ok(lease)
 }
 
-/// Update all installed extensions. Best-effort — failures are logged, and the
-/// extension is added to the skipped list carrying its error reason so the
-/// structured result can say *why* it was skipped (#12181).
-fn update_all_extensions(
+/// Refresh through the shared grouped sweep while retaining durable upgrade progress.
+fn refresh_installed_extensions(
     operation_id: Option<&str>,
 ) -> Result<(Vec<ExtensionUpgradeEntry>, Vec<ExtensionUpgradeSkip>)> {
-    let extension_ids = homeboy_core::extension::catalog::available_extension_ids();
-    if extension_ids.is_empty() {
-        return Ok((vec![], vec![]));
-    }
-
-    homeboy_core::log_status!(
-        "upgrade",
-        "Updating {} installed extension(s)...",
-        extension_ids.len()
-    );
-
-    let mut updated = Vec::new();
-    let mut skipped = Vec::new();
-
-    let revisions = lifecycle::resolve_update_revisions(&extension_ids);
-    for (index, id) in extension_ids.iter().enumerate() {
-        let old_version = homeboy_core::extension::catalog::load_extension(id)
-            .ok()
-            .map(|m| m.version.clone())
-            .unwrap_or_default();
-
-        let current = index + 1;
-        let total = extension_ids.len();
-        report_extension_progress(operation_id, id, current, total, Duration::ZERO)?;
-        let progress_failure = std::sync::Mutex::new(None);
-        let update_result = run_with_upgrade_heartbeats(
-            UPGRADE_PROGRESS_HEARTBEAT_INTERVAL,
-            |elapsed| {
+    let active = std::sync::Mutex::new(None::<(String, usize, usize, std::time::Instant)>);
+    let progress_failure = std::sync::Mutex::new(None);
+    let result = run_with_upgrade_heartbeats(
+        UPGRADE_PROGRESS_HEARTBEAT_INTERVAL,
+        |_| {
+            let active = active.lock().expect("extension progress is not poisoned");
+            if let Some((id, current, total, started)) = active.as_ref() {
                 if let Err(error) =
-                    report_extension_progress(operation_id, id, current, total, elapsed)
+                    report_extension_progress(operation_id, id, *current, *total, started.elapsed())
                 {
-                    let mut failure = progress_failure
-                        .lock()
-                        .expect("record extension progress failure");
+                    let mut failure = progress_failure.lock().expect("extension progress failure");
                     if failure.is_none() {
                         *failure = Some(error);
                     }
                 }
-            },
-            || {
-                lifecycle::update(
-                    id,
-                    false,
-                    revisions.get(id).map(|revision| revision.as_deref()),
-                )
-            },
-        );
-        if let Some(error) = progress_failure
-            .into_inner()
-            .expect("extension progress failures are not poisoned")
-        {
-            return Err(error);
-        }
-
-        match update_result {
-            Ok(result) => {
-                let new_version = homeboy_core::extension::catalog::load_extension(id)
-                    .ok()
-                    .map(|m| m.version.clone())
-                    .unwrap_or_default();
-                let source_url = portable_extension_source_url(&result);
-                let source_revision = result
-                    .source_update
-                    .new_source_revision
-                    .clone()
-                    .or_else(|| homeboy_core::extension::lifecycle::read_source_revision(id));
-
-                if result.linked {
-                    let branch_detail = match (
-                        &result.source_update.old_branch,
-                        &result.source_update.new_branch,
-                    ) {
-                        (Some(old), Some(new)) if old != new => format!(" ({} → {})", old, new),
-                        (Some(branch), _) => format!(" ({})", branch),
-                        _ => String::new(),
-                    };
-                    homeboy_core::log_status!(
-                        "upgrade",
-                        "  {} {} → {} linked source updated{}",
-                        id,
-                        old_version,
-                        new_version,
-                        branch_detail
-                    );
-                } else if old_version != new_version {
-                    homeboy_core::log_status!(
-                        "upgrade",
-                        "  {} {} → {}",
-                        id,
-                        old_version,
-                        new_version
-                    );
-                } else {
-                    homeboy_core::log_status!("upgrade", "  {} {} (up to date)", id, new_version);
-                }
-
-                updated.push(ExtensionUpgradeEntry {
-                    extension_id: id.clone(),
-                    old_version,
-                    new_version,
-                    linked: result.linked,
-                    source_path: result
-                        .source_path
-                        .map(|path| path.to_string_lossy().to_string()),
-                    git_root: result
-                        .git_root
-                        .map(|path| path.to_string_lossy().to_string()),
-                    source_url,
-                    source_revision,
-                    source_update: result.source_update,
-                });
             }
-            Err(e) => {
-                if !e.message.starts_with(DIRTY_LINKED_PREFIX) {
-                    homeboy_core::log_status!("upgrade", "  {} skipped: {}", id, e.message);
+        },
+        || {
+            lifecycle::update_all(false, |id, current, total| {
+                if let Some(error) = progress_failure
+                    .lock()
+                    .expect("extension progress failure")
+                    .take()
+                {
+                    return Err(error);
                 }
-                skipped.push(ExtensionUpgradeSkip {
-                    extension_id: id.clone(),
-                    reason: e.message,
-                    recovery_commands: Vec::new(),
-                });
-            }
-        }
+                let mut active = active.lock().expect("extension progress is not poisoned");
+                report_extension_progress(operation_id, id, current, total, Duration::ZERO)?;
+                *active = Some((id.to_owned(), current, total, std::time::Instant::now()));
+                Ok(())
+            })
+        },
+    );
+    if let Some(error) = progress_failure
+        .into_inner()
+        .expect("extension progress failure")
+    {
+        return Err(error);
     }
-
+    let result = result?;
+    let updated = result
+        .updated
+        .into_iter()
+        .map(|entry| ExtensionUpgradeEntry {
+            extension_id: entry.extension_id,
+            old_version: entry.old_version,
+            new_version: entry.new_version,
+            linked: entry.linked,
+            source_path: entry.source_path,
+            git_root: entry.git_root,
+            source_url: entry.source_url,
+            source_revision: entry.source_update.new_source_revision.clone(),
+            source_update: entry.source_update,
+        })
+        .collect();
+    let skipped: Vec<_> = result
+        .skipped_details
+        .into_iter()
+        .map(|entry| ExtensionUpgradeSkip {
+            extension_id: entry.extension_id,
+            reason: entry.reason,
+            recovery_commands: Vec::new(),
+        })
+        .collect();
     let dirty = skipped
         .iter()
         .filter(|skip| is_dirty_linked_skip(skip))
@@ -2623,7 +2560,6 @@ fn update_all_extensions(
     if !dirty.is_empty() {
         upgrade_phase(&dirty_linked_summary(&dirty));
     }
-
     Ok((updated, skipped))
 }
 
@@ -2713,7 +2649,7 @@ fn warn_unrefreshed_symlinked_extensions(
 /// this upgrade could not refresh.
 ///
 /// Extension resolution is `$HOME`-scoped (`core::paths::extension`). When the
-/// upgrade runs under `sudo`, `$HOME` is root's, so `update_all_extensions()`
+/// upgrade runs under `sudo`, `$HOME` is root's, so `lifecycle::update_all()`
 /// only ever visits root's own extension copies. Any non-root user whose
 /// extension entry is a symlink into a workspace-managed git clone is therefore
 /// silently left stale — the upgraded binary ships a fix the user can never
@@ -2876,20 +2812,6 @@ fn git_commits_behind_upstream(git_root: &Path) -> Option<u32> {
     )
     .ok()?;
     count.trim().parse::<u32>().ok()
-}
-
-fn portable_extension_source_url(
-    result: &homeboy_core::extension::lifecycle::UpdateResult,
-) -> Option<String> {
-    if let Some(git_root) = result.git_root.as_ref() {
-        return git::remote_origin_url(git_root);
-    }
-
-    if is_git_url(&result.url) {
-        Some(result.url.clone())
-    } else {
-        None
-    }
 }
 
 /// Deterministic source-upgrade contract:
@@ -3584,6 +3506,102 @@ mod runner_source_upgrade_tests {
             "fixture-revision",
         )
         .expect("registered revision");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn upgrade_refreshes_shared_linked_root_once() {
+        let git_fixture = |path: &Path, args: &[&str]| {
+            let output = Command::new("git")
+                .arg("-C")
+                .arg(path)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let source = home.path().join("source");
+            std::fs::create_dir_all(&source).unwrap();
+            for id in ["fixture-a", "fixture-b"] {
+                link_registered_extension(home.path(), id, &source.join(id));
+            }
+            git_fixture(&source, &["init", "-b", "main"]);
+            git_fixture(&source, &["config", "user.email", "fixture@example.com"]);
+            git_fixture(&source, &["config", "user.name", "Fixture"]);
+            git_fixture(&source, &["add", "."]);
+            git_fixture(&source, &["commit", "-m", "initial extensions"]);
+            let remote = home.path().join("remote.git");
+            git_fixture(
+                home.path(),
+                &[
+                    "clone",
+                    "--bare",
+                    source.to_str().unwrap(),
+                    remote.to_str().unwrap(),
+                ],
+            );
+            git_fixture(
+                &source,
+                &["remote", "add", "origin", remote.to_str().unwrap()],
+            );
+            git_fixture(&source, &["fetch", "origin"]);
+            git_fixture(
+                &source,
+                &["branch", "--set-upstream-to=origin/main", "main"],
+            );
+
+            // Callback failures must stop the shared sweep before any Git update.
+            let error = lifecycle::update_all(false, |_, _, _| {
+                Err(Error::internal_unexpected("progress persistence failed"))
+            })
+            .unwrap_err();
+            assert!(error.message.contains("progress persistence failed"));
+
+            // Scope the transport probe to this repository, so parallel tests'
+            // Git commands cannot contaminate the count. One root update opens
+            // two remote sessions: default-branch discovery and the fetch.
+            let probe = home.path().join("upload-pack-probe");
+            let sessions = home.path().join("remote-sessions");
+            std::fs::write(
+                &probe,
+                format!(
+                    "#!/bin/sh\nprintf 'session\\n' >> '{}'\nexec git-upload-pack \"$@\"\n",
+                    sessions.display(),
+                ),
+            )
+            .unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&probe, std::fs::Permissions::from_mode(0o755)).unwrap();
+            git_fixture(
+                &source,
+                &[
+                    "config",
+                    "remote.origin.uploadpack",
+                    probe.to_str().unwrap(),
+                ],
+            );
+            let result = refresh_installed_extensions(None);
+            let (updated, skipped) = result.expect("upgrade extension sweep");
+            assert!(skipped.is_empty(), "{skipped:?}");
+            assert_eq!(updated.len(), 2);
+            assert!(updated
+                .iter()
+                .all(|entry| entry.source_url.is_some() && entry.source_revision.is_some()));
+            assert!(updated
+                .iter()
+                .all(|entry| entry.source_update.update_note.as_deref()
+                    == Some("Linked source group updated transactionally.")));
+            assert_eq!(
+                std::fs::read_to_string(sessions).unwrap().lines().count(),
+                2,
+                "the shared root must perform only one discovery and one fetch"
+            );
+        });
     }
 
     #[test]
