@@ -319,6 +319,9 @@ pub(super) fn outcome(
     let mut text = String::new();
     let mut retry = String::new();
     let mut usage = [0.0_f64; 6];
+    let mut model_ms = 0.0;
+    let mut tool_ms = 0.0;
+    let mut tool_ms_by_name = std::collections::BTreeMap::<String, f64>::new();
     for line in stdout.lines().filter(|s| !s.trim().is_empty()) {
         let event: Value = match serde_json::from_str(line) {
             Ok(value) => value,
@@ -347,6 +350,7 @@ pub(super) fn outcome(
             }
             "message_end" if event["message"]["role"] == "assistant" => {
                 final_message = event["message"].clone();
+                model_ms += final_message["durationMs"].as_f64().unwrap_or_default();
                 for (index, key) in ["input", "output", "cacheRead", "cacheWrite", "totalTokens"]
                     .iter()
                     .enumerate()
@@ -368,10 +372,17 @@ pub(super) fn outcome(
                     text = content.trim().into();
                 }
             }
+            "message_end" if event["message"]["role"] == "toolResult" => {
+                let duration = event["message"]["durationMs"].as_f64().unwrap_or_default();
+                tool_ms += duration;
+                if let Some(name) = event["message"]["toolName"].as_str() {
+                    *tool_ms_by_name.entry(name.into()).or_default() += duration;
+                }
+            }
             _ => {}
         }
     }
-    let mut metadata = json!({"command": program, "cwd": cwd.map(|p| p.display().to_string()), "turns": turns, "tool_calls": tools, "tool_errors": tool_errors,
+    let mut metadata = json!({"command": program, "cwd": cwd.map(|p| p.display().to_string()), "turns": turns, "model_ms": model_ms, "tool_ms": tool_ms, "tool_ms_by_name": tool_ms_by_name, "tool_calls": tools, "tool_errors": tool_errors,
         "exit_code": exit_code, "usage": {"input_tokens": usage[0], "output_tokens": usage[1], "cache_read_tokens": usage[2], "cache_write_tokens": usage[3], "total_tokens": usage[4], "cost_usd": (usage[5] * 1e6).round() / 1e6}});
     for (source, target) in [
         ("provider", "provider"),

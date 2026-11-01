@@ -73,6 +73,41 @@ fn recorded_stream_outcomes() {
 }
 
 #[test]
+fn message_durations_are_summed_by_role_and_tool() {
+    let messages = [
+        json!({"role":"assistant","durationMs":100.5}),
+        json!({"role":"toolResult","toolName":"bash","durationMs":200}),
+        json!({"role":"toolResult","toolName":"read","durationMs":30.5}),
+        json!({"role":"assistant","durationMs":50,"stopReason":"stop"}),
+        json!({"role":"toolResult","toolName":"bash","durationMs":400}),
+    ];
+    let recorded = messages.into_iter().map(stream).collect::<String>();
+    let result = outcome(&json!({}), &recorded, "", Some(0), "pi", None);
+    assert_eq!(result.metadata["model_ms"], 150.5);
+    assert_eq!(result.metadata["tool_ms"], 630.5);
+    assert_eq!(
+        result.metadata["tool_ms_by_name"],
+        json!({"bash":600.0,"read":30.5})
+    );
+
+    let legacy = [
+        json!({"role":"assistant","stopReason":"stop"}),
+        json!({"role":"toolResult","toolName":"bash"}),
+        json!({"role":"toolResult","toolName":"read","durationMs":"invalid"}),
+    ]
+    .into_iter()
+    .map(stream)
+    .collect::<String>();
+    let result = outcome(&json!({}), &legacy, "", Some(0), "pi", None);
+    assert_eq!(result.metadata["model_ms"], 0.0);
+    assert_eq!(result.metadata["tool_ms"], 0.0);
+    assert_eq!(
+        result.metadata["tool_ms_by_name"],
+        json!({"bash":0.0,"read":0.0})
+    );
+}
+
+#[test]
 fn prompt_session_and_model_contract() {
     let temp = tempfile::tempdir().unwrap();
     let request = json!({"task_id":"a/b", "instructions":"é".repeat(60 * 1024), "executor":{"model":"roadie/test"}, "output_declarations":[{"name":"review_form","required":true}]});
