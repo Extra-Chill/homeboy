@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.443.0] - 2026-11-01
+
+### Added
+- content-keyed package cache shared by build, deploy and release
+- exact-ref --outdated selection from remote state with receipt-scoped checks
+
+### Changed
+- Collapse provider command runners and remove dead resolved-tool output
+
 ## [0.442.0] - 2026-11-01
 
 ### Added
