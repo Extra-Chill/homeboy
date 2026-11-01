@@ -2354,32 +2354,11 @@ impl ProviderRoute {
 
 fn provider_next_command(
     route: Option<&ProviderRoute>,
-    dispatchability: Option<
+    _dispatchability: Option<
         &homeboy::agents::agent_tasks::provider::AgentTaskProviderDispatchability,
     >,
 ) -> Option<String> {
-    let route = route?;
-    if dispatchability
-        .and_then(|verdict| verdict.configuration_diagnosis.as_ref())
-        .is_some_and(|diagnosis| diagnosis.kind == "missing_readiness_invocation")
-    {
-        if let ProviderRoute::Resolved {
-            backend,
-            provider_id,
-            ..
-        } = route
-        {
-            // Re-running live validation cannot repair a missing contract. Show
-            // the owner-bearing static record instead of suggesting a command
-            // known to fail in the same way.
-            return Some(format!(
-                "homeboy agent-task providers --full --backend {} --selector {}",
-                shell_arg(backend),
-                shell_arg(provider_id)
-            ));
-        }
-    }
-    Some(route.next_command())
+    Some(route?.next_command())
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -3448,7 +3427,7 @@ mod tests {
                 .0;
             // Structural routing and live inference answer different
             // questions (see AgentTaskProviderDispatchability). Neither
-            // fixture provider declares a readiness_invocation and
+            // fixture provider uses the built-in Pi probe and
             // --validate-readiness was not requested, so the verdict is
             // structurally dispatchable without a live-validated "ready".
             assert_eq!(
@@ -3618,12 +3597,7 @@ mod tests {
             pi.install_catalog_config();
             let ready = |id: &str, backend: &str| {
                 let mut provider = provider(id, backend);
-                provider.readiness_invocation = Some(
-                    serde_json::from_value(serde_json::json!({
-                        "argv": ["sh", "-c", "cat >/dev/null; printf '%s' '{\"schema\":\"homeboy/agent-task-provider-readiness-result/v1\",\"ready\":true,\"classification\":\"ready\",\"retryable\":false,\"remediation\":\"\",\"reason\":\"\",\"cache_key\":\"test\",\"identity\":{}}'"]
-                    }))
-                    .expect("readiness invocation"),
-                );
+                provider.provider_defaults = pi.provider().provider_defaults;
                 provider
             };
             let catalog = provider_catalog(vec![ready("alpha.provider", "alpha"), pi.provider()]);
@@ -3665,29 +3639,6 @@ mod tests {
                 before.agent_task.default_backend
             );
             assert_eq!(after.agent_task.rotation, before.agent_task.rotation);
-        });
-    }
-
-    #[test]
-    fn providers_report_resolved_route_configuration_invalid_before_missing_credentials() {
-        crate::test_support::with_isolated_home(|_| {
-            save_provider_policy(None, None);
-            let mut args = providers_args();
-            args.backend = Some("claude-code".to_string());
-            let output = providers_with_catalog(
-                args,
-                provider_catalog(vec![credential_declaring_provider()]),
-            )
-            .expect("provider report")
-            .0;
-
-            assert_eq!(output["operator_summary"]["state"], "configuration_invalid");
-            assert_eq!(
-                render_agent_task_summary(AgentTaskSummaryKind::Providers, &output),
-                Some(
-                    "Agent task providers\nStatus: configuration_invalid\nProviders shown: 1\nNext: homeboy agent-task providers --full --backend claude-code --selector claude-code.agent-task-executor".to_string()
-                )
-            );
         });
     }
 
@@ -3996,88 +3947,18 @@ mod tests {
             None,
             false,
         );
-        assert_eq!(provider_status(&provider, &present), "unavailable");
-        assert!(provider_matches_status(&provider, &present, "unavailable"));
-        assert_eq!(
-            compact_provider(&provider, &present)["status"],
-            "unavailable"
-        );
+        assert_eq!(provider_status(&provider, &present), "present");
+        assert!(provider_matches_status(&provider, &present, "present"));
+        assert_eq!(compact_provider(&provider, &present)["status"], "present");
         assert_eq!(
             compact_provider(&provider, &present)["state"],
-            "configuration_invalid"
+            "credentials_present"
         );
         assert_eq!(
             compact_provider(&provider, &present)["dispatchability"]["checks"]["credentials"]
                 ["status"],
             "present"
         );
-
-        let unverified = evaluate_provider_dispatchability(
-            &catalog,
-            &provider.backend,
-            Some(&provider.id),
-            None,
-            true,
-        );
-        assert_eq!(provider_status(&provider, &unverified), "unavailable");
-        assert_eq!(unverified.state, "configuration_invalid");
-        assert_eq!(
-            compact_provider(&provider, &unverified)["dispatchability"]["checks"]["credentials"]
-                ["status"],
-            "unverified"
-        );
-    }
-
-    #[test]
-    fn missing_readiness_invocation_has_a_source_owned_static_diagnosis_and_safe_next_action() {
-        crate::test_support::with_isolated_home(|_| {
-            save_provider_policy(None, None);
-            let mut provider: AgentTaskExecutorProvider =
-                serde_json::from_value(serde_json::json!({
-                    "id": "contract.owner.provider",
-                    "backend": "contract-owner",
-                    "capabilities": ["provider_owned_auth"],
-                }))
-                .expect("provider fixture");
-            provider.runtime_id = Some("contract-runtime".to_string());
-            provider.extension_id = Some("contract-extension".to_string());
-            provider.runtime_package_source = Some("extension-package".to_string());
-            let mut args = providers_args();
-            args.backend = Some("contract-owner".to_string());
-
-            let output = providers_with_catalog(args, provider_catalog(vec![provider]))
-                .expect("static contract diagnosis")
-                .0;
-
-            assert_eq!(output["operator_summary"]["state"], "configuration_invalid");
-            assert_eq!(output["providers"][0]["state"], "configuration_invalid");
-            assert_eq!(
-                output["providers"][0]["dispatchability"]["checks"]["credentials"]["status"],
-                "unverified"
-            );
-            assert_eq!(
-                output["dispatchability"]["configuration_diagnosis"]["kind"],
-                "missing_readiness_invocation"
-            );
-            assert_eq!(
-                output["dispatchability"]["configuration_diagnosis"]["owner"]["extension_id"],
-                "contract-extension"
-            );
-            assert_eq!(
-                output["operator_summary"]["next_action"],
-                "homeboy agent-task providers --full --backend contract-owner --selector contract.owner.provider"
-            );
-            assert!(!output["operator_summary"]["next_action"]
-                .as_str()
-                .expect("next action")
-                .contains("--validate-readiness"));
-            assert_eq!(
-                render_agent_task_summary(AgentTaskSummaryKind::Providers, &output),
-                Some(
-                    "Agent task providers\nStatus: configuration_invalid\nProviders shown: 1\nNext: homeboy agent-task providers --full --backend contract-owner --selector contract.owner.provider".to_string()
-                )
-            );
-        });
     }
 
     #[test]
@@ -4114,8 +3995,7 @@ mod tests {
     #[test]
     fn readiness_validation_reports_effective_identity_not_raw_arguments() {
         let provider: AgentTaskExecutorProvider = serde_json::from_value(serde_json::json!({
-            "id": "resolved.provider", "backend": "resolved-backend",
-            "readiness_invocation": { "argv": ["true"] }
+            "id": "resolved.provider", "backend": "resolved-backend"
         }))
         .expect("provider");
         let identity = (
@@ -4153,8 +4033,8 @@ mod tests {
                 .expect("provider envelope")
                 .0;
 
-            assert_eq!(output["dispatchability"]["state"], "configuration_invalid");
-            assert_eq!(output["operator_summary"]["state"], "configuration_invalid");
+            assert_eq!(output["dispatchability"]["state"], "credentials_missing");
+            assert_eq!(output["operator_summary"]["state"], "credentials_missing");
             assert_eq!(output["dispatchability"]["checks"]["route"]["ready"], true);
             assert_eq!(
                 output["dispatchability"]["checks"]["credentials"]["ready"],

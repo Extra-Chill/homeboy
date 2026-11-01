@@ -71,17 +71,11 @@ fn capacity_walks_the_rotation_dedupes_routes_and_probes_capacity_only() {
 fn capacity_never_reports_a_mode_ignoring_runtime_as_publishing_capacity() {
     crate::test_support::with_isolated_home(|_home| {
         save_provider_policy(Some("ignorant"), None);
-        let mut provider: AgentTaskExecutorProvider = serde_json::from_value(json!({
+        let provider: AgentTaskExecutorProvider = serde_json::from_value(json!({
             "id": "ignorant.agent",
             "backend": "ignorant"
         }))
         .expect("provider fixture");
-        provider.readiness_invocation = Some(
-            serde_json::from_value(json!({
-                "argv": ["sh", "-c", "cat >/dev/null; printf '%s' '{\"schema\":\"homeboy/agent-task-provider-readiness-result/v1\",\"ready\":true,\"classification\":\"ready\",\"retryable\":false,\"remediation\":\"\",\"reason\":\"\",\"cache_key\":\"test\",\"identity\":{}}'"]
-            }))
-            .expect("readiness invocation"),
-        );
 
         let (payload, _) = capacity_with_catalog(capacity_args(), catalog_with(vec![provider]))
             .expect("capacity report");

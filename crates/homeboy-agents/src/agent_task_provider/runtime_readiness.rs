@@ -14,7 +14,7 @@ use crate::agent_task_scheduler::AgentTaskPlan;
 use homeboy_core::{Error, Result};
 
 use super::command_runner::{
-    run_provider_readiness_invocation_with_env_and_timeout,
+    run_provider_readiness_probe_with_env_and_timeout,
     validate_provider_immediate_failure_patterns, DurableProviderReadinessIdentity,
     ProviderReadinessInvocationResult, PROVIDER_READINESS_CAPACITY_MODE,
 };
@@ -533,7 +533,7 @@ fn run_readiness_probe_with_gate(
                     ));
                     break;
                 };
-                result = run_provider_readiness_invocation_with_env_and_timeout(
+                result = run_provider_readiness_probe_with_env_and_timeout(
                     provider,
                     config,
                     credential_env,
@@ -596,10 +596,10 @@ fn map_readiness_result(
     provider: &AgentTaskExecutorProvider,
     result: std::result::Result<ProviderReadinessInvocationResult, String>,
 ) -> Result<ProviderReadinessInvocationResult> {
-    result.map_err(|message| readiness_invocation_error(provider, message))
+    result.map_err(|message| readiness_probe_error(provider, message))
 }
 
-fn readiness_invocation_error(provider: &AgentTaskExecutorProvider, message: String) -> Error {
+fn readiness_probe_error(provider: &AgentTaskExecutorProvider, message: String) -> Error {
     let mut error = Error::validation_invalid_argument(
         "provider_runtime_readiness",
         format!(
@@ -656,23 +656,6 @@ pub fn preflight_plan_provider_runtime_readiness_with_providers(
         let Some(provider) = select_provider(providers, task) else {
             continue;
         };
-        if provider.readiness_invocation.is_none() {
-            if provider_requires_live_auth_validation(provider) {
-                return Err(unverified_provider_auth_error(provider));
-            }
-            validate_provider_immediate_failure_patterns(provider).map_err(|message| {
-                Error::validation_invalid_argument(
-                    "immediate_failure_patterns",
-                    format!(
-                        "provider '{}' has invalid immediate failure configuration: {message}",
-                        provider.id
-                    ),
-                    Some(provider.backend.clone()),
-                    None,
-                )
-            })?;
-            continue;
-        }
         validate_provider_immediate_failure_patterns(provider).map_err(|message| {
             Error::validation_invalid_argument(
                 "immediate_failure_patterns",
@@ -708,21 +691,6 @@ pub(crate) fn provider_requires_live_auth_validation(provider: &AgentTaskExecuto
         .capabilities
         .iter()
         .any(|capability| capability == "provider_owned_auth")
-}
-
-pub(crate) fn unverified_provider_auth_error(provider: &AgentTaskExecutorProvider) -> Error {
-    Error::validation_invalid_argument(
-        "provider_runtime_readiness",
-        format!(
-            "agent-task backend '{}' is not dispatchable: provider-owned authentication has no live validation route. Update provider '{}' to declare a bounded readiness_invocation that validates its provider-owned authentication, or select a verified backend",
-            provider.backend, provider.id
-        ),
-        Some(provider.backend.clone()),
-        Some(vec![format!(
-            "Update provider '{}' to declare a bounded readiness_invocation that validates its provider-owned authentication, or select a verified backend.",
-            provider.id
-        )]),
-    )
 }
 
 #[cfg(test)]
@@ -904,11 +872,7 @@ pub(crate) fn readiness_verdict_with_credentials_and_deadline_for_generated_fano
                 let provider = provider.clone();
                 let config = config.clone();
                 let credential_env = credential_env.to_vec();
-                let probe_timeout = provider
-                    .readiness_invocation
-                    .as_ref()
-                    .map(|invocation| Duration::from_millis(invocation.timeout_ms))
-                    .unwrap_or(Duration::from_secs(20));
+                let probe_timeout = Duration::from_millis(provider.pi_readiness.timeout_ms);
                 // The worker owns a permit and a child process, so it must share the
                 // caller's absolute deadline rather than merely letting the caller stop
                 // waiting while the work continues in the background.
@@ -1097,14 +1061,10 @@ fn readiness_request_key_for_generated_fanout_context(
         normalize_generated_fanout_client_context(&mut provider_config);
     }
     let environment = provider
-        .readiness_invocation
-        .as_ref()
-        .and_then(|invocation| invocation.extra.get("env_allowlist"))
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-        .map(str::to_string)
+        .pi_readiness
+        .env_allowlist
+        .iter()
+        .cloned()
         .chain(super::credential_readiness::provider_required_secret_env_names(provider))
         .chain(["PATH".to_string(), "HOME".to_string()])
         .collect::<Vec<_>>();
@@ -1128,7 +1088,7 @@ fn readiness_request_key_for_generated_fanout_context(
     let mut value = json!({
         "provider_id": provider.id,
         "runtime_path": provider.runtime_path,
-        "invocation": provider.readiness_invocation,
+        "pi_readiness": provider.pi_readiness,
         "effective_config": provider_config,
         "environment": environment,
     });
@@ -1203,11 +1163,6 @@ pub(crate) fn stable_identity_home() -> homeboy_core::test_support::HomeGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent_task::{
-        AgentTaskExecutor, AgentTaskLimits, AgentTaskPolicy, AgentTaskRequest, AgentTaskWorkspace,
-        AGENT_TASK_REQUEST_SCHEMA,
-    };
-    use homeboy_core::command_invocation::CommandInvocation;
 
     use super::super::test_pi::FakePi;
 
@@ -1232,34 +1187,12 @@ mod tests {
         ProviderRuntimeReadinessCache::isolated()
     }
 
-    fn provider(script: &std::path::Path, count: &std::path::Path) -> AgentTaskExecutorProvider {
-        let mut provider: AgentTaskExecutorProvider = serde_json::from_value(json!({
+    fn provider() -> AgentTaskExecutorProvider {
+        serde_json::from_value(json!({
             "id": "runtime.provider",
             "backend": "runtime"
         }))
-        .expect("provider fixture");
-        provider.readiness_invocation = Some(
-            CommandInvocation {
-                argv: vec![
-                    "node".to_string(),
-                    script.display().to_string(),
-                    count.display().to_string(),
-                ],
-                ..CommandInvocation::default()
-            }
-            .into(),
-        );
-        provider
-    }
-
-    fn readiness_script(root: &std::path::Path) -> std::path::PathBuf {
-        let script = root.join("readiness.js");
-        std::fs::write(
-            &script,
-            "const fs=require('fs');const request=JSON.parse(fs.readFileSync(0,'utf8'));const count=process.argv[2];fs.writeFileSync(count,String((Number(fs.existsSync(count)?fs.readFileSync(count,'utf8'):0))+1));const classification=request.effective_config.model;process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:classification==='ready',classification,retryable:classification==='transient_failure',remediation:'repair '+classification,reason:classification,cache_key:'cache-'+classification,identity:{model:classification}}));",
-        )
-        .expect("readiness script");
-        script
+        .expect("provider fixture")
     }
 
     #[test]
@@ -1543,59 +1476,6 @@ mod tests {
         }
 
         assert_eq!(probe_count(&count), 2);
-    }
-
-    #[test]
-    fn provider_owned_auth_without_a_probe_fails_plan_admission() {
-        let provider: AgentTaskExecutorProvider = serde_json::from_value(json!({
-            "id": "unverified.provider",
-            "backend": "unverified",
-            "capabilities": ["cli_runtime", "provider_owned_auth"]
-        }))
-        .expect("provider fixture");
-        let plan = AgentTaskPlan::new(
-            "unverified-plan",
-            vec![AgentTaskRequest {
-                schema: AGENT_TASK_REQUEST_SCHEMA.to_string(),
-                task_id: "task".to_string(),
-                group_key: None,
-                parent_plan_id: None,
-                executor: AgentTaskExecutor {
-                    backend: "unverified".to_string(),
-                    selector: None,
-                    runtime_selection: None,
-                    required_capabilities: Vec::new(),
-                    secret_env: Vec::new(),
-                    model: None,
-                    config: Value::Null,
-                },
-                instructions: "test".to_string(),
-                inputs: Value::Null,
-                source_refs: Vec::new(),
-                workspace: AgentTaskWorkspace::default(),
-                component_contracts: Vec::new(),
-                policy: AgentTaskPolicy::default(),
-                limits: AgentTaskLimits::default(),
-                expected_artifacts: Vec::new(),
-                artifact_declarations: Vec::new(),
-                output_declarations: Vec::new(),
-                runtime_tools: Vec::new(),
-                metadata: Value::Null,
-            }],
-        );
-
-        let error = preflight_plan_provider_runtime_readiness_with_providers(
-            &plan,
-            &[provider],
-            &mut test_cache(),
-        )
-        .expect_err("provider-owned auth requires a live probe");
-
-        assert!(
-            error.message.contains("no live validation route"),
-            "{error}"
-        );
-        assert!(error.message.contains("readiness_invocation"), "{error}");
     }
 
     #[test]
@@ -2058,9 +1938,7 @@ mod tests {
 
     #[test]
     fn expired_execution_deadline_returns_typed_timeout_without_a_probe() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let count = root.path().join("count");
-        let provider = provider(&readiness_script(root.path()), &count);
+        let provider = provider();
 
         let error = readiness_verdict_with_credentials_and_deadline(
             &provider,
@@ -2073,7 +1951,6 @@ mod tests {
 
         assert_eq!(error.details["classification"], "timeout");
         assert_eq!(error.details["zero_provider_executions"], true);
-        assert!(!count.exists());
     }
 
     #[test]

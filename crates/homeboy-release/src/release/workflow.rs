@@ -1600,7 +1600,7 @@ mod tests {
     }
 
     #[test]
-    fn sequential_same_commit_readiness_invocations_retain_distinct_records() {
+    fn sequential_same_commit_readiness_probes_retain_distinct_records() {
         with_isolated_home(|_| {
             let source = "same-commit";
             for _ in 0..2 {
@@ -1629,7 +1629,7 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_same_commit_readiness_invocations_retain_distinct_records() {
+    fn concurrent_same_commit_readiness_probes_retain_distinct_records() {
         with_isolated_home(|_| {
             let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
             let workers = (0..2)

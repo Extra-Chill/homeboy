@@ -990,10 +990,10 @@ used as a substitute.
 `unverified`, `verified`, `unusable`, and `not_required`. Readable credential
 material is only `present`: a revoked or expired provider-owned credential stays
 on disk after revocation. A provider that declares the `provider_owned_auth`
-capability is dispatchable only after its bounded `readiness_invocation` runs
-and passes, producing `verified`. A failed probe reports `unusable` and preserves
-the provider-owned reason and remediation; an absent probe reports `unverified`
-and tells the operator to update the provider or select a verified backend.
+capability is dispatchable only after the bounded built-in Pi probe runs
+and passes, producing `verified`. An authentication failure reports `unusable`
+and preserves the probe's reason and remediation; static inspection alone
+cannot verify credentials.
 Cook performs this live admission against the final provider configuration
 before scheduler reservation can consume provider-execution budget (#13628).
 
@@ -1277,9 +1277,9 @@ belong on each `agent_task_executors[]` entry:
       "remediation": "Configure EXAMPLE_API_TOKEN with homeboy agent-task auth."
     }
   ],
-  "readiness_invocation": {
-    "argv": ["example-provider", "--readiness"],
-    "timeout_ms": 30000
+  "pi_readiness": {
+    "timeout_ms": 30000,
+    "env_allowlist": ["EXAMPLE_API_TOKEN"]
   },
   "workspace_materialization": {
     "cwd": "git_checkout",
@@ -1306,10 +1306,10 @@ Homeboy treats these declarations as generic contracts:
 
 - `secret_env_requirements` and `runner_readiness` describe required secret env
   names and redacted readiness probes without exposing values.
-- `readiness_invocation.timeout_ms` bounds the complete provider-owned readiness
-  command, including all child probes. It defaults to 20,000 milliseconds and
-  must be between 1 and 120,000 milliseconds; providers must keep their own
-  sequential child budgets within this total.
+- `pi_readiness.timeout_ms` bounds the complete built-in Pi probe. It defaults
+  to 20,000 milliseconds and must be between 1 and 120,000 milliseconds.
+  `pi_readiness.env_allowlist` names environment variables passed to that probe
+  and included in its cache identity. Readiness commands are not configurable.
 - `workspace_materialization` describes the checkout shape a provider needs; it
   does not name any workspace manager or product runtime.
 - `timeout_artifact_discovery` extends timeout evidence recovery with declared

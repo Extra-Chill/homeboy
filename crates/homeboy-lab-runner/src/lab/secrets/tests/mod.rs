@@ -96,7 +96,7 @@ pub(super) fn fixture_provider_with_example_defaults_at(path: &str) -> AgentTask
         workspace_materialization: None,
         provider_defaults,
         runner_readiness: Vec::new(),
-        readiness_invocation: None,
+        pi_readiness: Default::default(),
         runner_sources: Vec::new(),
         dependency_failure_patterns: Vec::new(),
         immediate_failure_patterns: Vec::new(),

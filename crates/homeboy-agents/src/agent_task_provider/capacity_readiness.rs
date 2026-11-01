@@ -280,7 +280,7 @@ fn capacity_accounts(
 }
 
 /// Capacity readiness for a route whose live probe did not run (not
-/// requested, no `readiness_invocation` declared, or an earlier structural
+/// requested, or an earlier structural
 /// check already failed). Absence of a probe is itself a reason, named
 /// explicitly rather than left for a caller to infer from a missing field.
 pub fn capacity_readiness_unknown(reason: impl Into<String>) -> AgentTaskProviderCapacityReadiness {

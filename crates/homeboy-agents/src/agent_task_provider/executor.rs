@@ -1153,7 +1153,7 @@ mod tests {
         let mut provider = super::discovery::discover_agent_task_executor_providers().remove(0);
         provider.secret_env_requirements =
             serde_json::from_value(json!([{ "env": ["HOMEBOY_TEST_READINESS_TOKEN"] }])).unwrap();
-        provider.readiness_invocation.as_mut().unwrap().timeout_ms = timeout_ms;
+        provider.pi_readiness.timeout_ms = timeout_ms;
         let executor = ExtensionProviderAgentTaskExecutor::with_providers(vec![provider]);
         let mut request = readiness_request(
             &std::env::var("HOMEBOY_TEST_READINESS_MODEL").expect("worker model"),
