@@ -1661,33 +1661,12 @@ fn remote_runner_job_rejects_inline_secret_env_before_durable_persistence() {
 }
 
 fn provider_credential_secret_env_plan() -> crate::secret_env_plan::SecretEnvPlan {
-    use crate::secret_env_plan::{
-        SecretEnvCredentialSource, SecretEnvPlan, SecretEnvProviderCredentialMapping,
-    };
+    use crate::secret_env_plan::SecretEnvPlan;
 
     const ACCESS_TOKEN: &str = "AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN";
     const REFRESH_TOKEN: &str = "AI_PROVIDER_OPENAI_CODEX_REFRESH_TOKEN";
     let mut plan = SecretEnvPlan::default();
     plan.extend_secret_env_names([ACCESS_TOKEN.to_string(), REFRESH_TOKEN.to_string()]);
-    plan.provider_credentials.insert(
-        "test.pi-provider".to_string(),
-        SecretEnvProviderCredentialMapping {
-            secret_env: vec![ACCESS_TOKEN.to_string(), REFRESH_TOKEN.to_string()],
-            sources: std::collections::BTreeMap::from([(
-                ACCESS_TOKEN.to_string(),
-                SecretEnvCredentialSource {
-                    source: "json-file".to_string(),
-                    env_var: None,
-                    path: None,
-                    scope: None,
-                    name: Some("~/.codex/auth.json".to_string()),
-                    field: Some("tokens.access_token".to_string()),
-                    fallback_fields: Vec::new(),
-                    fallback_value: None,
-                },
-            )]),
-        },
-    );
     plan
 }
 
@@ -1704,7 +1683,7 @@ fn remote_runner_job_with_provider_credential_plan_accepts_value_free_env() {
     request.secret_env_names = vec!["AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN".to_string()];
     request.secret_env_plan = provider_credential_secret_env_plan();
     // The dispatch env carries references only: no inline values for any name
-    // the plan declares, including names contributed by `provider_credentials`.
+    // the plan declares.
     request
         .env
         .insert("PUBLIC_FLAG".to_string(), "1".to_string());

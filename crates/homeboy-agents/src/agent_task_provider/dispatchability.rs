@@ -6,8 +6,8 @@ use super::{
     executor::effective_provider_for_request,
     resolve_provider_for_backend,
     runtime_readiness::provider_requires_live_auth_validation,
-    validate_provider_immediate_failure_patterns, AgentTaskProviderCapacityReadiness,
-    AgentTaskProviderCatalog, ProviderResolution, ProviderRuntimeReadinessCache,
+    AgentTaskProviderCapacityReadiness, AgentTaskProviderCatalog, ProviderResolution,
+    ProviderRuntimeReadinessCache,
 };
 use crate::agent_task_scheduler::{
     AgentTaskPlan, AgentTaskScheduleSupport, ProviderRouteDiagnosticData, ProviderRouteEvidence,
@@ -75,7 +75,6 @@ pub struct AgentTaskProviderDispatchabilityChecks {
     pub route: AgentTaskProviderDispatchabilityCheck,
     pub model: AgentTaskProviderDispatchabilityCheck,
     pub credentials: AgentTaskProviderDispatchabilityCredentialCheck,
-    pub configuration: AgentTaskProviderDispatchabilityCheck,
     pub runtime: AgentTaskProviderDispatchabilityCheck,
 }
 
@@ -213,22 +212,6 @@ pub fn evaluate_provider_capacity_with_config(
             );
         }
     };
-    let supported = provider
-        .cli
-        .profiles
-        .iter()
-        .filter_map(|profile| profile.model.as_deref())
-        .collect::<Vec<_>>();
-    if !model.is_none_or(|model| supported.is_empty() || supported.contains(&model)) {
-        return capacity_readiness_unknown(
-            "the selected model is not declared by the routed provider",
-        );
-    }
-    if validate_provider_immediate_failure_patterns(provider).is_err() {
-        return capacity_readiness_unknown(
-            "provider immediate-failure configuration is invalid, so capacity was not probed",
-        );
-    }
     let effective_config = effective_provider_config(config, model);
     match super::runtime_readiness::capacity_mode_readiness_verdict_with_deadline(
         provider,
@@ -317,16 +300,7 @@ fn evaluate_provider_dispatchability_with_config_credentials_and_deadline(
     deadline_unix_ms: Option<u64>,
     generated_fanout_context: bool,
 ) -> AgentTaskProviderDispatchability {
-    let candidate_providers = catalog
-        .providers()
-        .iter()
-        .filter(|provider| provider.backend == backend)
-        .collect::<Vec<_>>();
     let unresolved = |state: &'static str, reason: &'static str, route_reason: String| {
-        let configuration_ready = !candidate_providers.is_empty()
-            && candidate_providers
-                .iter()
-                .all(|provider| validate_provider_immediate_failure_patterns(provider).is_ok());
         let checks = AgentTaskProviderDispatchabilityChecks {
             route: AgentTaskProviderDispatchabilityCheck {
                 ready: false,
@@ -348,10 +322,6 @@ fn evaluate_provider_dispatchability_with_config_credentials_and_deadline(
                         .to_string(),
                 ),
                 remediation: Vec::new(),
-            },
-            configuration: AgentTaskProviderDispatchabilityCheck {
-                ready: configuration_ready,
-                reason: None,
             },
             runtime: AgentTaskProviderDispatchabilityCheck {
                 ready: false,
@@ -386,25 +356,8 @@ fn evaluate_provider_dispatchability_with_config_credentials_and_deadline(
             );
         }
     };
-    let supported = provider
-        .cli
-        .profiles
-        .iter()
-        .filter_map(|profile| profile.model.as_deref())
-        .collect::<Vec<_>>();
-    let model_ready = model.is_none_or(|model| supported.is_empty() || supported.contains(&model));
-    let configuration = match validate_provider_immediate_failure_patterns(provider) {
-        Ok(()) => AgentTaskProviderDispatchabilityCheck {
-            ready: true,
-            reason: None,
-        },
-        Err(reason) => AgentTaskProviderDispatchabilityCheck {
-            ready: false,
-            reason: Some(reason),
-        },
-    };
     let mut runtime_remediation = Vec::new();
-    let (runtime, runtime_evidence) = if probe_runtime && model_ready && configuration.ready {
+    let (runtime, runtime_evidence) = if probe_runtime {
         let config = effective_provider_config(config, model);
         match super::runtime_readiness::readiness_verdict_with_credentials_and_deadline_for_generated_fanout_context(
                 provider,
@@ -544,19 +497,7 @@ fn evaluate_provider_dispatchability_with_config_credentials_and_deadline(
     } else {
         (AgentTaskProviderCredentialStatus::Unverified, None)
     };
-    let (state, ready, reason) = if !model_ready {
-        (
-            "model_unavailable",
-            false,
-            "the selected model is not declared by the routed provider",
-        )
-    } else if !configuration.ready {
-        (
-            "configuration_invalid",
-            false,
-            "provider immediate-failure configuration is invalid",
-        )
-    } else if provider_owned_auth && !probe_runtime {
+    let (state, ready, reason) = if provider_owned_auth && !probe_runtime {
         (
             "credentials_unverified",
             false,
@@ -633,8 +574,8 @@ fn evaluate_provider_dispatchability_with_config_credentials_and_deadline(
             reason: Some(provider.id.clone()),
         },
         model: AgentTaskProviderDispatchabilityCheck {
-            ready: model_ready,
-            reason: (!model_ready).then_some("unsupported selected model".to_string()),
+            ready: true,
+            reason: None,
         },
         credentials: AgentTaskProviderDispatchabilityCredentialCheck {
             status: credential_status,
@@ -644,7 +585,6 @@ fn evaluate_provider_dispatchability_with_config_credentials_and_deadline(
             reason: credential_reason,
             remediation: runtime_remediation,
         },
-        configuration,
         runtime,
     };
     let readiness = readiness_scopes(&checks, probe_runtime, runtime_evidence.clone());
@@ -663,12 +603,9 @@ fn readiness_scopes(
     probe_requested: bool,
     evidence: Option<AgentTaskProviderRuntimeEvidence>,
 ) -> AgentTaskProviderReadiness {
-    let structural_ready = checks.route.ready
-        && checks.model.ready
-        && checks.credentials.ready
-        && checks.configuration.ready;
+    let structural_ready = checks.route.ready && checks.model.ready && checks.credentials.ready;
     let structural_reason = if structural_ready {
-        "route, model, credentials, and configuration are structurally dispatchable".to_string()
+        "route, model, and credentials are structurally dispatchable".to_string()
     } else {
         "one or more structural dispatchability checks failed".to_string()
     };
@@ -950,7 +887,6 @@ fn unavailable_request_dispatchability(
                     ),
                     remediation: Vec::new(),
                 },
-                configuration: unavailable.clone(),
                 runtime: unavailable,
             },
         },
@@ -1032,10 +968,8 @@ fn preflight_provider_dispatchability_with_config_and_probe(
     }
     let detail = verdict
         .checks
-        .configuration
+        .credentials
         .reason
-        .as_deref()
-        .or(verdict.checks.credentials.reason.as_deref())
         .as_deref()
         .or(verdict.checks.runtime.reason.as_deref())
         .filter(|reason| *reason != "not requested")
@@ -1691,23 +1625,6 @@ mod tests {
         assert!(!serialized.contains("runtime-secret"));
         // Pi exposes a stable reason code instead of echoing raw probe stderr.
         assert!(serialized.contains("model_list_probe_interrupted"));
-    }
-
-    #[test]
-    fn shared_evaluator_rejects_invalid_immediate_failure_configuration() {
-        let mut provider: super::super::AgentTaskExecutorProvider =
-            serde_json::from_value(json!({ "id": "test.provider", "backend": "test" }))
-                .expect("provider fixture");
-        provider.immediate_failure_patterns = vec![serde_json::from_value(json!({
-            "id": "",
-            "error_contains_any": []
-        }))
-        .expect("invalid immediate failure fixture")];
-        let verdict =
-            evaluate_provider_dispatchability(&catalog(provider), "test", None, None, true);
-
-        assert_eq!(verdict.state, "configuration_invalid");
-        assert!(!verdict.checks.configuration.ready);
     }
 
     #[test]

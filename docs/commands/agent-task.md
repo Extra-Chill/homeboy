@@ -1278,18 +1278,6 @@ belong on each `agent_task_executors[]` entry:
     "requires_git": true,
     "write_scope": "workspace",
     "artifact_paths": ["artifacts"]
-  },
-  "timeout_artifact_discovery": {
-    "config_path_keys": ["provider_artifact_root"],
-    "paths": ["/var/tmp/example-provider/latest"],
-    "artifact_patterns": [
-      {
-        "kind": "metrics",
-        "filename_patterns": ["*-metrics.ndjson"],
-        "mime": "application/x-ndjson",
-        "metadata": { "role": "telemetry" }
-      }
-    ]
   }
 }
 ```
@@ -1304,10 +1292,6 @@ Homeboy treats these declarations as generic contracts:
   and included in its cache identity. Readiness commands are not configurable.
 - `workspace_materialization` describes the checkout shape a provider needs; it
   does not name any workspace manager or product runtime.
-- `timeout_artifact_discovery` extends timeout evidence recovery with declared
-  paths, request metadata/config path keys, and typed filename/extension patterns.
-  Discovered files are normalized into `AgentTaskArtifact` entries with generic
-  `kind`, `mime`, and opaque metadata.
 - Provider-specific sessions, APIs, artifact namespaces, and backend payloads stay
   outside Homeboy core and are represented only as artifacts, evidence refs,
   diagnostics, workflow steps, or opaque metadata.

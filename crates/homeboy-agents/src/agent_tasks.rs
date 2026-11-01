@@ -87,8 +87,7 @@ pub use super::agent_task_secrets::{
     secret_env_status, secret_env_status_with_fallbacks, AgentTaskSecretEnvStatus,
 };
 pub use homeboy_core::secret_env_plan::{
-    SecretEnvCredentialSource, SecretEnvPlan, SecretEnvProviderCredentialMapping,
-    SecretEnvRedactionPolicy, SECRET_ENV_PLAN_SCHEMA,
+    SecretEnvCredentialSource, SecretEnvPlan, SecretEnvRedactionPolicy, SECRET_ENV_PLAN_SCHEMA,
 };
 
 // Provider helpers used directly from the facade root for common callers.

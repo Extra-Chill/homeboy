@@ -1,39 +1,5 @@
 use super::*;
 
-pub(crate) fn role_aliases_for_executor(
-    backend: &str,
-    selector: Option<&str>,
-) -> AgentTaskProviderRoleAliases {
-    let catalog = AgentTaskProviderCatalog::discover();
-    select_provider_by_backend(catalog.providers(), backend, selector)
-        .map(|provider| provider.role_aliases.clone())
-        .unwrap_or_default()
-}
-
-pub(crate) fn timeout_artifact_discovery_for_executor(
-    backend: &str,
-    selector: Option<&str>,
-) -> AgentTaskProviderTimeoutArtifactDiscovery {
-    let catalog = AgentTaskProviderCatalog::discover();
-    select_provider_by_backend(catalog.providers(), backend, selector)
-        .map(|provider| provider.timeout_artifact_discovery.clone())
-        .unwrap_or_default()
-}
-
-pub(crate) fn role_aliases_for_provider(
-    provider_id_or_backend: &str,
-) -> AgentTaskProviderRoleAliases {
-    let catalog = AgentTaskProviderCatalog::discover();
-    catalog
-        .providers()
-        .iter()
-        .find(|provider| {
-            provider.id == provider_id_or_backend || provider.backend == provider_id_or_backend
-        })
-        .map(|provider| provider.role_aliases.clone())
-        .unwrap_or_default()
-}
-
 pub(super) fn provider_requires_cwd_git_checkout_with_providers(
     providers: &[AgentTaskExecutorProvider],
     backend: &str,
@@ -41,10 +7,10 @@ pub(super) fn provider_requires_cwd_git_checkout_with_providers(
 ) -> bool {
     select_provider_by_backend(providers, backend, selector)
         .map(|provider| {
-            provider.runtime_contract.apply_back.requires_git_checkout == Some(true)
-                || provider.workspace_materialization.as_ref().is_some_and(
-                    AgentTaskProviderWorkspaceMaterialization::requires_cwd_git_checkout,
-                )
+            provider
+                .workspace_materialization
+                .as_ref()
+                .is_some_and(AgentTaskProviderWorkspaceMaterialization::requires_cwd_git_checkout)
         })
         .unwrap_or(false)
 }
@@ -78,43 +44,6 @@ pub enum ProviderResolution<'a> {
     },
 }
 
-pub(crate) fn selector_runtime_provider_hint(
-    backend: &str,
-    selector: Option<&str>,
-) -> Option<String> {
-    let selector = selector?.trim();
-    let catalog = AgentTaskProviderCatalog::discover();
-    let reserved = catalog
-        .providers()
-        .iter()
-        .flat_map(|provider| provider.cli.reserved_selector_hints.iter())
-        .any(|hint| hint == selector);
-    if !reserved {
-        return None;
-    }
-
-    Some(format!(
-        "'{selector}' is declared by an executor provider as runtime-specific provider configuration, not a dispatch selector. --selector selects the Homeboy executor provider id for backend '{backend}'; pass runtime/provider configuration through --provider-config instead."
-    ))
-}
-
-fn selector_runtime_provider_hint_from_providers(
-    providers: &[&AgentTaskExecutorProvider],
-    backend: &str,
-    selector: Option<&str>,
-) -> Option<String> {
-    let selector = selector?.trim();
-    let reserved = providers
-        .iter()
-        .flat_map(|provider| provider.cli.reserved_selector_hints.iter())
-        .any(|hint| hint == selector);
-    reserved.then(|| {
-        format!(
-            "'{selector}' is declared by an executor provider as runtime-specific provider configuration, not a dispatch selector. --selector selects the Homeboy executor provider id for backend '{backend}'; pass runtime/provider configuration through --provider-config instead."
-        )
-    })
-}
-
 impl<'a> ProviderResolution<'a> {
     pub(crate) fn resolved(self) -> Option<&'a AgentTaskExecutorProvider> {
         match self {
@@ -146,11 +75,7 @@ pub fn resolve_provider_for_backend<'a>(
             return ProviderResolution::Resolved(provider);
         }
         return ProviderResolution::SelectorMismatch {
-            selector_hint: selector_runtime_provider_hint_from_providers(
-                &exact_matches,
-                backend,
-                selector,
-            ),
+            selector_hint: None,
             available_ids: exact_matches
                 .iter()
                 .map(|provider| provider.id.clone())

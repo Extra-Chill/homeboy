@@ -161,7 +161,7 @@ fn bare_homeboy_argv_uses_configured_runner_executable_in_real_subprocess() {
 
 #[cfg(unix)]
 #[test]
-fn homeboy_runtime_contract_keeps_direct_script_and_login_shell_worktrees_on_owner_repo() {
+fn homeboy_execution_keeps_direct_script_and_login_shell_worktrees_on_owner_repo() {
     fn git(args: &[&str]) -> String {
         let output = Command::new("git")
             .args(args)

@@ -3229,33 +3229,6 @@ fn a_termination_the_host_could_not_carry_out_is_recorded_as_a_failure() {
 }
 
 #[test]
-fn provider_run_result_reads_declared_output_alias() {
-    let role_aliases: AgentTaskProviderRoleAliases = serde_json::from_value(json!({
-        "outputs": {
-            "provider_run_result": ["custom_run_result"]
-        }
-    }))
-    .expect("role aliases");
-    let outcome = AgentTaskOutcome {
-        task_id: "task-a".to_string(),
-        status: crate::agent_task::AgentTaskOutcomeStatus::Failed,
-        outputs: json!({
-            "custom_run_result": {
-                "run_id": "custom-run-1"
-            }
-        }),
-        ..Default::default()
-    };
-
-    assert_eq!(
-        provider_run_result(&outcome, &role_aliases)
-            .and_then(|result| result.get("run_id"))
-            .and_then(Value::as_str),
-        Some("custom-run-1")
-    );
-}
-
-#[test]
 fn local_cook_logs_surface_running_provider_execution_before_aggregate() {
     // #8396: while a local cook runs the provider (no aggregate yet), logs must
     // advance past "task submitted" to reflect the durable running provider

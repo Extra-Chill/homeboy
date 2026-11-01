@@ -1,6 +1,6 @@
 use super::resolution::{
     provider_requires_cwd_git_checkout_with_providers,
-    required_extension_ids_for_plan_with_providers, select_provider,
+    required_extension_ids_for_plan_with_providers,
 };
 use super::*;
 use homeboy_engine_primitives::content_hash;
@@ -91,115 +91,6 @@ impl AgentTaskProviderCatalog {
         selector: Option<&str>,
     ) -> bool {
         provider_requires_cwd_git_checkout_with_providers(&self.providers, backend, selector)
-    }
-
-    /// Resolve the AI-assistance disclosure string (`ai_tool`) for an effective
-    /// backend/selector/model selection.
-    ///
-    /// This is the single typed disclosure source consumed by direct cook,
-    /// fanout plan/run, and PR finalization so a `--model` override produces a
-    /// correct AI-assistance statement. Resolution order:
-    ///
-    /// 1. The matching provider's profile whose declared `model` equals the
-    ///    effective model — its `ai_disclosure`.
-    /// 2. The provider's `default_ai_disclosure`.
-    /// 3. `None` (callers fall back to their generic default).
-    ///
-    /// A profile without a declared `model` is treated as a wildcard so a
-    /// provider with a single unmodeled profile still supplies its disclosure.
-    pub fn ai_disclosure_for(
-        &self,
-        backend: &str,
-        selector: Option<&str>,
-        model: Option<&str>,
-    ) -> Option<String> {
-        let provider =
-            resolve_provider_for_backend(&self.providers, backend, selector).resolved()?;
-
-        if let Some(model) = model.map(str::trim).filter(|model| !model.is_empty()) {
-            if let Some(disclosure) = provider
-                .cli
-                .profiles
-                .iter()
-                .find(|profile| profile.model.as_deref() == Some(model))
-                .and_then(|profile| profile.ai_disclosure.clone())
-            {
-                return Some(disclosure);
-            }
-        }
-
-        provider.cli.default_ai_disclosure.clone().or_else(|| {
-            provider
-                .cli
-                .profiles
-                .iter()
-                .find(|profile| profile.model.is_none())
-                .and_then(|profile| profile.ai_disclosure.clone())
-        })
-    }
-
-    /// Validate the concrete model selection before provider dispatch. A Cook
-    /// candidate needs durable model provenance, so a provider that cannot name
-    /// its selected model is not dispatchable for Cook.
-    pub fn validate_selected_models(&self, plan: &AgentTaskPlan) -> homeboy_core::Result<()> {
-        for task in &plan.tasks {
-            let selected = task
-                .executor
-                .model()
-                .or_else(|| task.metadata["model_selection"]["selected"].as_str());
-            let ProviderResolution::Resolved(provider) = resolve_provider_for_backend(
-                &self.providers,
-                &task.executor.backend,
-                task.executor.selector.as_deref(),
-            ) else {
-                continue;
-            };
-            let mut supported = provider
-                .cli
-                .profiles
-                .iter()
-                .filter_map(|profile| profile.model.clone())
-                .collect::<Vec<_>>();
-            supported.sort();
-            supported.dedup();
-            let Some(selected) = selected.filter(|model| !model.trim().is_empty()) else {
-                // Providers without a declared model catalog can only attest an
-                // actual model at runtime. Preserve that generic adapter path;
-                // terminal provenance remains mandatory before promotion.
-                if supported.is_empty() {
-                    continue;
-                }
-                return Err(Error::validation_invalid_argument(
-                    "model",
-                    format!(
-                        "provider `{}` has no concrete selected model; pass --model or configure provider model selection",
-                        provider.id
-                    ),
-                    None,
-                    Some(vec!["Run `homeboy agent-task providers --backend <backend> --validate-readiness` to inspect configured model selection.".to_string()]),
-                ));
-            };
-            if !supported.is_empty() && !supported.iter().any(|model| model == selected) {
-                return Err(Error::validation_invalid_argument(
-                    "model",
-                    format!(
-                        "provider `{}` does not support selected model `{selected}`",
-                        provider.id
-                    ),
-                    Some(selected.to_string()),
-                    Some(vec![format!("supported models: {}", supported.join(", "))]),
-                ));
-            }
-        }
-        Ok(())
-    }
-
-    /// Run declared runtime preflight checks for each task's resolved provider.
-    pub fn enforce_runtime_preflight_checks_for_plan(
-        &self,
-        plan: &AgentTaskPlan,
-    ) -> homeboy_core::Result<()> {
-        enforce_runtime_preflight_checks_for_plan_with_providers(plan, &self.providers)
     }
 }
 
@@ -358,27 +249,6 @@ pub fn provider_requires_cwd_git_checkout(backend: &str, selector: Option<&str>)
     AgentTaskProviderCatalog::discover().provider_requires_cwd_git_checkout(backend, selector)
 }
 
-pub fn enforce_runtime_preflight_checks_for_plan(plan: &AgentTaskPlan) -> homeboy_core::Result<()> {
-    AgentTaskProviderCatalog::discover().enforce_runtime_preflight_checks_for_plan(plan)
-}
-
-pub(super) fn enforce_runtime_preflight_checks_for_plan_with_providers(
-    plan: &AgentTaskPlan,
-    providers: &[AgentTaskExecutorProvider],
-) -> homeboy_core::Result<()> {
-    for request in &plan.tasks {
-        let Some(provider) = select_provider(providers, request) else {
-            continue;
-        };
-        let checks = &provider.runtime_contract.preflight_checks;
-        if checks.is_empty() {
-            continue;
-        }
-        ensure_runtime_preflight_checks(checks, &request.component_contracts)?;
-    }
-    Ok(())
-}
-
 pub(super) fn default_backend_from_policy_sources<F>(
     component: Option<&component::Component>,
     extensions: Vec<homeboy_extension_contract::ExtensionManifest>,
@@ -466,38 +336,6 @@ mod tests {
         assert!(empty.starts_with("resolved:"));
     }
 
-    fn disclosure_provider() -> AgentTaskExecutorProvider {
-        // Deserialize from JSON so schema-string and other required defaults are
-        // populated the same way discovery populates them.
-        serde_json::from_value(serde_json::json!({
-            "id": "test.pi",
-            "backend": "pi",
-            "cli": {
-                "default_ai_disclosure": "Pi (GPT-5.5)",
-                "profiles": [
-                    {
-                        "name": "terra",
-                        "model": "openai/gpt-5.6-terra",
-                        "ai_disclosure": "Pi (GPT-5.6 Terra)"
-                    },
-                    {
-                        "name": "sol",
-                        "model": "openai/gpt-5.6-sol",
-                        "ai_disclosure": "Pi (GPT-5.6 Sol)"
-                    }
-                ]
-            }
-        }))
-        .expect("valid provider fixture")
-    }
-
-    fn disclosure_catalog() -> AgentTaskProviderCatalog {
-        AgentTaskProviderCatalog {
-            providers: vec![disclosure_provider()],
-            ..Default::default()
-        }
-    }
-
     fn provider_with_backend(id: &str, backend: &str) -> AgentTaskExecutorProvider {
         serde_json::from_value(serde_json::json!({
             "id": id,
@@ -533,102 +371,5 @@ mod tests {
     #[test]
     fn backends_of_an_empty_catalog_is_empty() {
         assert!(AgentTaskProviderCatalog::default().backends().is_empty());
-    }
-
-    #[test]
-    fn ai_disclosure_for_uses_the_model_matching_profile() {
-        let catalog = disclosure_catalog();
-        assert_eq!(
-            catalog
-                .ai_disclosure_for("pi", None, Some("openai/gpt-5.6-terra"))
-                .as_deref(),
-            Some("Pi (GPT-5.6 Terra)"),
-            "a model override must derive its matching profile disclosure"
-        );
-        assert_eq!(
-            catalog
-                .ai_disclosure_for("pi", None, Some("openai/gpt-5.6-sol"))
-                .as_deref(),
-            Some("Pi (GPT-5.6 Sol)")
-        );
-    }
-
-    #[test]
-    fn ai_disclosure_for_falls_back_to_provider_default() {
-        let catalog = disclosure_catalog();
-        // No model and an unknown model both fall back to the provider default.
-        assert_eq!(
-            catalog.ai_disclosure_for("pi", None, None).as_deref(),
-            Some("Pi (GPT-5.5)")
-        );
-        assert_eq!(
-            catalog
-                .ai_disclosure_for("pi", None, Some("openai/unknown-model"))
-                .as_deref(),
-            Some("Pi (GPT-5.5)")
-        );
-    }
-
-    #[test]
-    fn ai_disclosure_for_unknown_backend_is_none() {
-        let catalog = disclosure_catalog();
-        assert_eq!(
-            catalog.ai_disclosure_for("no-such-backend", None, Some("m")),
-            None
-        );
-    }
-
-    #[test]
-    fn declared_provider_rejects_unsupported_explicit_model_with_diagnostics() {
-        let catalog = disclosure_catalog();
-        let mut plan = AgentTaskPlan::new("model-preflight", Vec::new());
-        plan.tasks.push(
-            serde_json::from_value(serde_json::json!({
-                "schema": crate::agent_task::AGENT_TASK_REQUEST_SCHEMA,
-                "task_id": "task",
-                "executor": { "backend": "pi" },
-                "instructions": "Cook",
-                "workspace": { "mode": "existing" },
-                "metadata": {
-                    "model_selection": {
-                        "requested": "openai/gpt-5.6-unknown",
-                        "selected": "openai/gpt-5.6-unknown",
-                        "reason": "explicit-request"
-                    }
-                }
-            }))
-            .expect("task"),
-        );
-
-        let error = catalog
-            .validate_selected_models(&plan)
-            .expect_err("unsupported model");
-        assert!(error.message.contains("does not support selected model"));
-        assert_eq!(
-            error.details["tried"][0].as_str(),
-            Some("supported models: openai/gpt-5.6-sol, openai/gpt-5.6-terra")
-        );
-    }
-
-    #[test]
-    fn selected_model_is_required_before_provider_dispatch() {
-        let catalog = disclosure_catalog();
-        let mut plan = AgentTaskPlan::new("missing-model", Vec::new());
-        plan.tasks.push(
-            serde_json::from_value(serde_json::json!({
-                "schema": crate::agent_task::AGENT_TASK_REQUEST_SCHEMA,
-                "task_id": "task",
-                "executor": { "backend": "pi" },
-                "instructions": "Cook",
-                "workspace": { "mode": "existing" }
-            }))
-            .expect("task"),
-        );
-
-        let error = catalog
-            .validate_selected_models(&plan)
-            .expect_err("missing model must fail before execution");
-        assert_eq!(error.details["field"], "model");
-        assert!(error.message.contains("no concrete selected model"));
     }
 }

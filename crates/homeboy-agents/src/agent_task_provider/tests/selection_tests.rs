@@ -129,48 +129,6 @@ fn provider_selection_reports_exact_backend_selector_mismatch() {
 }
 
 #[test]
-fn provider_manifest_parses_role_aliases() {
-    let provider: AgentTaskExecutorProvider = serde_json::from_value(json!({
-        "schema": "homeboy/agent-task-executor-provider/v1",
-        "id": "custom.provider",
-        "backend": "custom",
-        "default_backend": true,
-        "invocation": { "argv": ["custom-agent-task"] },
-        "request_schema": AGENT_TASK_REQUEST_SCHEMA,
-        "outcome_schema": AGENT_TASK_OUTCOME_SCHEMA,
-        "role_aliases": {
-            "artifact_kinds": {
-                "patch": ["custom-patch"]
-            },
-            "artifact_filenames": {
-                "preflight_evidence": ["*-preflight.json"]
-            },
-            "outputs": {
-                "provider_run_result": ["custom_run_result"]
-            },
-            "metadata": {
-                "provider_run_result": ["customRunResult"]
-            }
-        }
-    }))
-    .expect("provider manifest");
-
-    assert!(provider.default_backend);
-    assert!(provider
-        .role_aliases
-        .artifact_kind_matches_role("patch", "custom-patch"));
-    assert!(provider
-        .role_aliases
-        .artifact_filename_matches_role("preflight_evidence", "runner-preflight.json"));
-    assert_eq!(
-        provider
-            .role_aliases
-            .output_aliases_for_role("provider_run_result"),
-        vec!["custom_run_result"]
-    );
-}
-
-#[test]
 fn provider_command_receives_canonical_artifact_declarations() {
     let _home = super::common::artifact_home();
     let fake = super::super::test_pi::FakePi::success();

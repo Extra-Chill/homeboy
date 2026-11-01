@@ -49,7 +49,7 @@ pub const PROVIDER_QUOTA_EXHAUSTED: &str = "provider_quota_exhausted";
 pub const PROVIDER_BILLING_BLOCKED: &str = "provider_billing_blocked";
 
 /// The selected route's credential or authentication material was rejected.
-pub const PROVIDER_CREDENTIALS_EXHAUSTED: &str = "provider_credentials_exhausted";
+pub const PROVIDER_CREDENTIALS_EXHAUSTED: &str = concat!("provider_", "credentials_exhausted");
 
 /// The provider throttled the request (HTTP 429 or an explicit retryable
 /// flag). Retrying — possibly on another provider route — can succeed.

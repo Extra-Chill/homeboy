@@ -2220,7 +2220,6 @@ fn compact_provider(
                     "reason": dispatchability.checks.credentials.reason.as_deref().map(|value| bounded_text(value, 128)),
                     "remediation": dispatchability.checks.credentials.remediation.iter().take(4).map(|value| bounded_text(value, 256)).collect::<Vec<_>>(),
                 },
-                "configuration": compact_check(dispatchability.checks.configuration.ready, dispatchability.checks.configuration.reason.as_deref()),
                 "runtime": compact_check(dispatchability.checks.runtime.ready, dispatchability.checks.runtime.reason.as_deref()),
             },
             // Per-connected-account capacity as typed readiness evidence
@@ -2467,25 +2466,6 @@ fn resolve_provider_route_for(
         route.selector.as_deref(),
     ) {
         ProviderResolution::Resolved(provider) => {
-            if probe_runtime
-                && route.model.as_deref().is_none_or(str::is_empty)
-                && provider
-                    .cli
-                    .profiles
-                    .iter()
-                    .any(|profile| profile.model.is_some())
-            {
-                return Some(ProviderRoute::Blocked {
-                    reason: format!(
-                        "Cook resolved backend `{}` but no concrete model; pass --model or configure provider model selection",
-                        route.backend
-                    ),
-                    next_command: format!(
-                        "homeboy agent-task providers --backend {} --model <model> --validate-readiness",
-                        shell_arg(&route.backend)
-                    ),
-                });
-            }
             Some(ProviderRoute::Resolved {
                 backend: route.backend,
                 provider_id: provider.id.clone(),
@@ -2618,10 +2598,9 @@ fn validate_effective_provider_route(
     if !verdict.ready {
         let detail = verdict
             .checks
-            .configuration
+            .credentials
             .reason
             .as_deref()
-            .or(verdict.checks.credentials.reason.as_deref())
             .or(verdict.checks.runtime.reason.as_deref())
             .filter(|reason| *reason != "not requested")
             .map(|reason| format!(": {reason}"))
@@ -3585,37 +3564,6 @@ mod tests {
             assert_eq!(provider_status(&provider, &dispatchability), "available");
             assert!(compact_provider(&provider, &dispatchability)["reason"].is_null());
         });
-    }
-
-    #[test]
-    fn inventory_and_selection_choices_exclude_configuration_unavailable_providers() {
-        let invalid: AgentTaskExecutorProvider = serde_json::from_value(serde_json::json!({
-            "id": "invalid.provider",
-            "backend": "invalid",
-            "immediate_failure_patterns": [{ "id": "", "error_contains_any": [] }]
-        }))
-        .expect("invalid provider");
-        let ready = provider("ready.provider", "ready");
-        let catalog = provider_catalog(vec![invalid.clone(), ready]);
-        let verdict = evaluate_provider_dispatchability(
-            &catalog,
-            &invalid.backend,
-            Some(&invalid.id),
-            None,
-            false,
-        );
-
-        assert_eq!(
-            compact_provider(&invalid, &verdict)["status"],
-            "unavailable"
-        );
-        assert_eq!(
-            dispatchable_backend_choices(&catalog, false)
-                .into_iter()
-                .map(|choice| choice.backend)
-                .collect::<Vec<_>>(),
-            vec!["ready"]
-        );
     }
 
     #[test]

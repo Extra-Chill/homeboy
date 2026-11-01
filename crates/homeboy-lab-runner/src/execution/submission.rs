@@ -246,16 +246,9 @@ mod tests {
         // Extra-Chill/homeboy#14382: the durable runner envelope must
         // persist provider credentials as SecretEnvPlan references — names,
         // requirements, and provider credential provenance, never values.
-        let mut plan = SecretEnvPlan::from_secret_env_names([
-            "AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN".to_string(),
+        let plan = SecretEnvPlan::from_secret_env_names([
+            "AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN".to_string()
         ]);
-        plan.provider_credentials.insert(
-            "test.pi-provider".to_string(),
-            homeboy_core::secret_env_plan::SecretEnvProviderCredentialMapping {
-                secret_env: vec!["AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN".to_string()],
-                sources: Default::default(),
-            },
-        );
         // The controller already stripped every planned secret value from the
         // dispatch env before building the envelope.
         let env = HashMap::from([("PUBLIC_FLAG".to_string(), "1".to_string())]);
@@ -295,9 +288,6 @@ mod tests {
         assert!(carried_plan
             .secret_env_names()
             .contains(&"AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN".to_string()));
-        assert!(carried_plan
-            .provider_credentials
-            .contains_key("test.pi-provider"));
         let dispatch = envelope.dispatch.as_ref().expect("envelope dispatch");
         assert!(!dispatch
             .env

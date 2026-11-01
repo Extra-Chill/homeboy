@@ -16,7 +16,7 @@ pub(crate) fn discover_agent_task_executor_providers() -> Vec<AgentTaskExecutorP
         "provider_defaults": { "pi": { "command": "pi", "command_args": ["--mode", "json"] } },
         "request_required_fields": ["schema", "task_id", "executor.backend", "instructions"],
         "outcome_statuses": ["succeeded", "no_op", "unable_to_remediate", "provider_error", "timeout", "candidate_recoverable", "failed", "follow_up_issue", "cancelled"],
-        "failure_classifications": ["provider", "transient", "timeout", "stalled", "rate_limited", "provider_account_blocked", "provider_quota_exhausted", "provider_billing_blocked", "provider_credentials_exhausted", "policy_denied", "capability_missing", "invalid_input", "execution_failed", "unknown"],
+        "failure_classifications": ["provider", "transient", "timeout", "stalled", "rate_limited", "provider_account_blocked", "provider_quota_exhausted", "provider_billing_blocked", super::structured_error::PROVIDER_CREDENTIALS_EXHAUSTED, "policy_denied", "capability_missing", "invalid_input", "execution_failed", "unknown"],
         "redacted_metadata_keys": ["secret_env_values", "secretEnvValues", "secrets"],
         "lifecycle": { "completion": "synchronous_process", "cancellation": "process_signal" },
         "status": "experimental",

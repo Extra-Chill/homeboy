@@ -12,7 +12,6 @@ use crate::agent_task::{
     AgentTaskWorkspace, AgentTaskWorkspaceMode, AGENT_TASK_OUTCOME_SCHEMA,
     AGENT_TASK_REQUEST_SCHEMA,
 };
-use crate::agent_task_provider::{role_aliases_for_provider, AgentTaskProviderRoleAliases};
 use crate::agent_task_scheduler::{
     AgentTaskAggregate, AgentTaskAggregateTotals, AgentTaskPlan, AgentTaskProgressEvent,
     AgentTaskQueueStatus, AgentTaskState, AGENT_TASK_AGGREGATE_SCHEMA,

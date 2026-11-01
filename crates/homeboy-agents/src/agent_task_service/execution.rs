@@ -145,23 +145,12 @@ pub fn validate_plan_spec(spec: &str) -> AgentTaskPlanValidationReport {
             error,
         );
     }
-    for (kind, result) in [
-        (
-            AgentTaskPlanValidationKind::UnavailableCapability,
-            catalog.validate_selected_models(&plan),
-        ),
-        (
+    if let Err(error) = preflight_plan_secret_env(&plan) {
+        return invalid_plan_report(
+            plan_id,
             AgentTaskPlanValidationKind::MissingReadiness,
-            catalog.enforce_runtime_preflight_checks_for_plan(&plan),
-        ),
-        (
-            AgentTaskPlanValidationKind::MissingReadiness,
-            preflight_plan_secret_env(&plan),
-        ),
-    ] {
-        if let Err(error) = result {
-            return invalid_plan_report(plan_id, kind, error);
-        }
+            error,
+        );
     }
     AgentTaskPlanValidationReport {
         schema: AGENT_TASK_PLAN_VALIDATION_SCHEMA.to_string(),
@@ -3095,8 +3084,6 @@ fn preflight_plan_provider_eligibility_with_catalog(
     )?;
     // Admission owns live route selection. These are the remaining static and
     // material checks for the selected route, not a second route derivation.
-    catalog.validate_selected_models(&admitted)?;
-    catalog.enforce_runtime_preflight_checks_for_plan(&admitted)?;
     preflight_plan_secret_env(&admitted)?;
     *plan = admitted;
     Ok(())

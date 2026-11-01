@@ -216,7 +216,7 @@ fn dispatch_with_provider_catalog(
             &mut readiness_cache,
         ) {
             Ok(plan) => {
-                validate_selected_execution_plan(&plan, catalog)?;
+                validate_selected_execution_plan(&plan)?;
                 plan
             }
             Err(error) if error.retryable == Some(true) => {
@@ -375,7 +375,6 @@ pub fn preflight_dispatch_provider_admission(
     ) {
         Ok(plan) => plan,
         Err(error) => {
-            catalog.validate_selected_models(&plan)?;
             preflight_dispatch_provider_secrets(&plan)?;
             crate::agent_task_provider::preflight_plan_provider_dispatchability_without_runtime_with_providers(
             &plan,
@@ -388,23 +387,11 @@ pub fn preflight_dispatch_provider_admission(
     // `plan` is the admission-derived selected route (fixture/gate bypass
     // already applied). Re-deriving dispatchability from scratch here would
     // drop that bypass and hard-fail a route admission just approved (#13974).
-    catalog.validate_selected_models(&plan)?;
     preflight_dispatch_provider_secrets(&plan)
 }
 
-fn validate_selected_execution_plan(
-    plan: &AgentTaskPlan,
-    catalog: &AgentTaskProviderCatalog,
-) -> Result<()> {
-    // `plan` already cleared full dispatchability (including live runtime
-    // probing) for its selected route during admission, with the fixture/gate
-    // bypass that route selection depends on. Re-deriving dispatchability here
-    // from scratch would re-run that evaluation without the bypass and hard-fail
-    // a plan admission just approved (#13974). Only run the checks admission
-    // does not already cover: declared model support, provider-declared runtime
-    // preflight checks and task secret material.
-    catalog.validate_selected_models(plan)?;
-    catalog.enforce_runtime_preflight_checks_for_plan(plan)?;
+fn validate_selected_execution_plan(plan: &AgentTaskPlan) -> Result<()> {
+    // Admission already checked dispatchability; validate task secret material.
     preflight_dispatch_provider_secrets(plan)
 }
 

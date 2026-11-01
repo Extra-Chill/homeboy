@@ -174,37 +174,6 @@ impl CookOptions {
         }
         Ok(flags)
     }
-
-    pub(crate) fn resolve_provider_profile(&mut self) {
-        use homeboy::agents::agent_tasks::provider::AgentTaskProviderCatalog;
-        let Some(name) = self.provider_profile.as_deref() else {
-            return;
-        };
-        let catalog = AgentTaskProviderCatalog::discover();
-        let profile = catalog
-            .providers()
-            .iter()
-            .flat_map(|provider| &provider.cli.profiles)
-            .find(|profile| profile.name == name.trim())
-            .cloned();
-        if let Some(profile) = profile {
-            self.merge_provider_profile(profile);
-        }
-    }
-
-    fn merge_provider_profile(
-        &mut self,
-        profile: homeboy::agents::agent_task_provider::AgentTaskProviderProfileDeclaration,
-    ) {
-        self.values.backend = self.values.backend.take().or(profile.backend);
-        self.values.selector = self.values.selector.take().or(profile.selector);
-        self.values.model = self.values.model.take().or(profile.model);
-        self.values.provider_config = self
-            .values
-            .provider_config
-            .take()
-            .or_else(|| profile.provider_config.map(|value| value.to_string()));
-    }
 }
 
 /// A bounded, controller-projected input available to the provider as read-only
@@ -887,90 +856,6 @@ mod tests {
                 args.cook.child_flags().unwrap()
             );
         }
-    }
-
-    #[test]
-    fn cook_provider_profile_supplies_defaults_and_explicit_flags_win() {
-        use homeboy::agents::agent_task_provider::AgentTaskProviderProfileDeclaration;
-        let profile = AgentTaskProviderProfileDeclaration {
-            name: "test".into(),
-            backend: Some("profile-backend".into()),
-            selector: Some("profile-selector".into()),
-            model: Some("profile-model".into()),
-            provider_config: Some(serde_json::json!({"profile": true})),
-            ..Default::default()
-        };
-        crate::test_support::with_isolated_home(|_| {
-            for explicit in [false, true] {
-                let mut argv = vec![
-                    "homeboy",
-                    "agent-task",
-                    "cook",
-                    "--provider-profile",
-                    "test",
-                ];
-                if explicit {
-                    argv.extend([
-                        "--backend",
-                        "explicit",
-                        "--selector",
-                        "explicit",
-                        "--model",
-                        "explicit",
-                        "--provider-config",
-                        "{}",
-                    ]);
-                }
-                let cli = crate::cli_surface::Cli::try_parse_from(argv).unwrap();
-                let crate::cli_surface::Commands::AgentTask(task) = cli.command else {
-                    panic!("agent-task")
-                };
-                let super::super::AgentTaskCommand::Cook(mut cook) = task.command else {
-                    panic!("cook")
-                };
-                cook.dispatch.cook.merge_provider_profile(profile.clone());
-                let expected = if explicit {
-                    "explicit"
-                } else {
-                    "profile-backend"
-                };
-                assert_eq!(cook.backend.as_deref(), Some(expected));
-                assert_eq!(
-                    cook.selector.as_deref(),
-                    Some(if explicit {
-                        "explicit"
-                    } else {
-                        "profile-selector"
-                    })
-                );
-                assert_eq!(
-                    cook.model.as_deref(),
-                    Some(if explicit {
-                        "explicit"
-                    } else {
-                        "profile-model"
-                    })
-                );
-                assert_eq!(
-                    cook.provider_config.as_deref(),
-                    Some(if explicit {
-                        "{}"
-                    } else {
-                        r#"{"profile":true}"#
-                    })
-                );
-                let dispatch: homeboy::agents::agent_task_dispatch_service::AgentTaskDispatchCommand =
-                cook.dispatch.into();
-                assert_eq!(
-                    dispatch.core.provider_config.as_deref(),
-                    Some(if explicit {
-                        "{}"
-                    } else {
-                        r#"{"profile":true}"#
-                    })
-                );
-            }
-        });
     }
 
     #[test]
