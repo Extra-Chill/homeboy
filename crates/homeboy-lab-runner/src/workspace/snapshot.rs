@@ -813,7 +813,16 @@ mod tests {
         );
         // Materialize working-tree bytes, not the committed blob.
         fs::write(source.path().join(".DS_Store"), b"modified metadata").unwrap();
-        fs::write(source.path().join(".env"), b"SECRET=private\n").unwrap();
+        let secrets = [
+            ".env",
+            ".env.local",
+            "sub/.env.production",
+            "wp-config.php",
+            "sub/wp-config.php",
+        ];
+        for secret in secrets {
+            fs::write(source.path().join(secret), b"SECRET=private\n").unwrap();
+        }
         fs::write(source.path().join("vendor/x.php"), b"untracked dependency").unwrap();
         let mut excludes = homeboy_runner_contract::source_snapshot::default_sync_excludes();
         excludes.push("vendor/".to_string());
@@ -830,7 +839,12 @@ mod tests {
             fs::read(destination.path().join("vendor/tracked.php")).unwrap(),
             b"<?php tracked\n"
         );
-        assert!(!destination.path().join(".env").exists());
+        for secret in secrets {
+            assert!(
+                !destination.path().join(secret).exists(),
+                "bundled untracked {secret}"
+            );
+        }
         assert!(!destination.path().join("vendor/x.php").exists());
     }
 

@@ -38,6 +38,7 @@ const DEFAULT_SYNC_EXCLUDES: &[&str] = &[
     "**/._*",
     ".env",
     ".env.*",
+    "wp-config.php",
 ];
 
 /// The default set of sync-exclude globs applied to every source snapshot.

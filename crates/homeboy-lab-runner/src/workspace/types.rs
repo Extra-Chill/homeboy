@@ -19,6 +19,7 @@ pub(crate) const DEFAULT_EXCLUDES: &[&str] = &[
     "**/._*",
     ".env",
     ".env.*",
+    "wp-config.php",
     "*.pem",
     "*.key",
     "id_rsa",
@@ -32,6 +33,7 @@ pub(crate) const DEFAULT_EXCLUDES: &[&str] = &[
 /// Secret-shaped patterns in [`DEFAULT_EXCLUDES`]. They exist to keep stray
 /// local credentials off runners, not to drop committed repository content.
 pub(crate) const SECRET_EXCLUDES: &[&str] = &[
+    "wp-config.php",
     ".env",
     ".env.*",
     "*.pem",
