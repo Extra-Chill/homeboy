@@ -59,6 +59,7 @@
       "bash scripts/test/test-runner-file-routing-smoke.sh",
       "bash scripts/test/wp-codebox-mount-translation-smoke.sh",
       "bash scripts/build/build-clean-vendor-smoke.sh",
+      "bash scripts/build/build-composer-invocations-smoke.sh",
       "bash scripts/build/build-helper-smoke.sh",
       "bash scripts/build/wp-scripts-extension-toolchain-backward-compat-smoke.sh",
       "bash scripts/build/wp-scripts-extension-toolchain-no-local-smoke.sh",

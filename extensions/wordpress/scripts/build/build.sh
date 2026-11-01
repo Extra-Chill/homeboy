@@ -18,7 +18,8 @@
 # - Installs production dependencies (composer --no-dev)
 # - Copies files using rsync with .buildignore exclusions, or exact files from a declared package profile
 # - Validates build structure before packaging
-# - Restores dev dependencies after build
+# - Restores dev dependencies after build, unless the source is disposable
+#   (HOMEBOY_BUILD_SOURCE_DISPOSABLE=1, e.g. an exact-ref deploy checkout)
 #
 # Usage: Run from plugin or theme directory: ./build.sh
 
@@ -37,14 +38,17 @@ remove_staging_tree() {
     rm -rf "${STAGING_ROOT:?}" 2>/dev/null || true
 }
 
-# Cleanup on exit (restore dev deps if build fails unexpectedly)
+# Whether vendor/ currently holds the production (--no-dev) install that the
+# developer's checkout still needs swapped back to dev dependencies.
+DEV_DEPS_PENDING_RESTORE=0
+
+# Cleanup on exit. Staging is removed unconditionally; dev dependencies are
+# restored only when a build failed after replacing them.
 cleanup() {
     local exit_code=$?
-    # Unconditionally, not only on failure. A successful build previously left
-    # its entire staging tree in the component directory.
     remove_staging_tree
-    if [ -f "composer.json" ]; then
-        composer install --no-interaction --quiet 2>&1 || true
+    if [ "$DEV_DEPS_PENDING_RESTORE" = "1" ]; then
+        restore_dev_deps || true
     fi
     exit $exit_code
 }
@@ -436,6 +440,7 @@ install_production_deps() {
         # Drop any carried-in vendor/ so the install can never trip over a
         # source/git package whose .git was stripped during the build copy.
         rm -rf vendor
+        source_is_disposable || DEV_DEPS_PENDING_RESTORE=1
         composer install --no-dev --optimize-autoloader --prefer-dist --no-interaction --quiet 2>&1
         print_success "Production dependencies installed"
     else
@@ -443,14 +448,22 @@ install_production_deps() {
     fi
 }
 
-# Restore development dependencies
-restore_dev_deps() {
-    print_status "Restoring development dependencies..."
+# A disposable source (Homeboy's exact-ref deploy checkout) is discarded after
+# the build, so its dev dependencies never need restoring.
+source_is_disposable() {
+    case "${HOMEBOY_BUILD_SOURCE_DISPOSABLE:-}" in
+        1|true|TRUE|yes|YES) return 0 ;;
+    esac
+    return 1
+}
 
-    if [ -f "composer.json" ]; then
-        composer install --no-interaction --quiet 2>&1
-        print_success "Development dependencies restored"
-    fi
+# Restore development dependencies in a persistent checkout, at most once.
+restore_dev_deps() {
+    [ "$DEV_DEPS_PENDING_RESTORE" = "1" ] || return 0
+    DEV_DEPS_PENDING_RESTORE=0
+    print_status "Restoring development dependencies..."
+    composer install --no-interaction --quiet 2>&1
+    print_success "Development dependencies restored"
 }
 
 # Install npm dependencies if missing/stale for detected build tool.
@@ -649,29 +662,17 @@ build_nested_packages() {
     # Find source-owned package.json files. Composer/vendor trees can contain
     # dependency fixtures with package.json files; those are not component
     # frontend packages and must not be built as part of the plugin artifact.
-    while IFS= read -r -d '' pkg_dir; do
-        # Skip root package.json and dependency/vendor trees.
-        if [ "$pkg_dir" != "." ] \
-            && [[ ! "$pkg_dir" =~ (^|/)node_modules($|/) ]] \
-            && [[ ! "$pkg_dir" =~ (^|/)vendor($|/) ]] \
-            && [[ ! "$pkg_dir" =~ (^|/)vendor_prefixed($|/) ]] \
-            && [[ ! "$pkg_dir" =~ (^|/)vendor-prefixed($|/) ]] \
-            && [[ ! "$pkg_dir" =~ (^|/)vendor_scoped($|/) ]] \
-            && [[ ! "$pkg_dir" =~ (^|/)vendor-scoped($|/) ]]; then
-            nested_packages+=("$pkg_dir")
-        fi
-    done < <(find . -name "package.json" \
-        -not -path "*/node_modules/*" \
-        -not -path "*/vendor/*" \
-        -not -path "*/vendor_prefixed/*" \
-        -not -path "*/vendor-prefixed/*" \
-        -not -path "*/vendor_scoped/*" \
-        -not -path "*/vendor-scoped/*" \
-        -exec dirname {} \; | sed 's|^\./||' | sort -u | while read -r dir; do
-        if [ -n "$dir" ]; then
-            printf '%s\0' "$dir"
-        fi
-    done)
+    # Dependency, VCS, and build-output trees are pruned, never walked.
+    local pkg_json
+    while IFS= read -r -d '' pkg_json; do
+        [ "$pkg_json" = "./package.json" ] && continue
+        pkg_json="${pkg_json#./}"
+        nested_packages+=("${pkg_json%/package.json}")
+    done < <(find . \( -type d \( -name node_modules -o -name vendor \
+            -o -name vendor_prefixed -o -name vendor-prefixed \
+            -o -name vendor_scoped -o -name vendor-scoped \
+            -o -name .git -o -path ./build \) \) -prune \
+        -o -type f -name package.json -print0 | LC_ALL=C sort -z)
 
     if [ ${#nested_packages[@]} -eq 0 ]; then
         print_status "No nested package.json files found"
@@ -1355,49 +1356,33 @@ run_tests() {
     return 0
 }
 
-# PHP syntax validation (runs on staged files)
+# PHP syntax validation. The only lint pass of the build: it covers exactly the
+# shipped files, production vendor/ included, in parallel batches. `php -l`
+# deliberately uses the ambient interpreter (see resolve_tooling_php_bin).
 validate_php_syntax() {
     print_status "Running PHP syntax check on build..."
 
     local staging_dir="${STAGING_ROOT}/$PROJECT_NAME"
-    local staging_abs=""
-    local php_file_list="/tmp/.wordpress-php-syntax-files-$$.list"
-    local php_errors=0
+    local jobs
 
     if [ ! -d "$staging_dir" ]; then
         print_error "Staging directory not found for PHP syntax validation: $staging_dir"
         return 1
     fi
 
-    staging_abs="$(cd "$staging_dir" && pwd)"
+    jobs="$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)"
 
-    if ! find "$staging_abs" -type f -name "*.php" -print > "$php_file_list"; then
-        rm -f "$php_file_list"
-        print_error "Could not enumerate staged PHP files under: $staging_dir"
-        return 1
-    fi
-
-    LC_ALL=C sort -o "$php_file_list" "$php_file_list"
-
-    while IFS= read -r file; do
-        [ -n "$file" ] || continue
-
-        if [ ! -f "$file" ]; then
-            print_error "Staged PHP file disappeared during syntax validation: ${file#$staging_abs/}"
-            php_errors=1
-            continue
-        fi
-
-        local lint_output=""
-        if ! lint_output="$(php -l "$file" 2>&1)"; then
-            printf '%s\n' "$lint_output"
-            php_errors=1
-        fi
-    done < "$php_file_list"
-
-    rm -f "$php_file_list"
-
-    if [ $php_errors -eq 1 ]; then
+    # Each batch lints its files one by one (older interpreters lint only the
+    # first file given to `php -l`) and prints only failures.
+    # shellcheck disable=SC2016
+    if ! find "$staging_dir" -type f -name "*.php" -print0 \
+        | xargs -0 -n 50 -P "$jobs" sh -c '
+            status=0
+            for file in "$@"; do
+                output="$(php -l "$file" 2>&1)" || { printf "%s\n" "$output"; status=1; }
+            done
+            exit "$status"
+        ' php-lint; then
         print_error "PHP syntax errors found. Build aborted."
         return 1
     fi
@@ -1425,13 +1410,10 @@ create_production_zip() {
     # Create ZIP from staging directory (must be in staging root for correct paths)
     (cd "$STAGING_ROOT" && zip -r "$zip_file" "$PROJECT_NAME/" -q)
 
-    # Get file size
-    local file_size=$(ls -lh "$zip_file" | awk '{print $5}')
+    local file_size
+    file_size=$(ls -lh "$zip_file" | awk '{print $5}')
 
-    # Show contents summary
-    local total_files=$(unzip -l "$zip_file" | tail -1 | awk '{print $2}')
-
-    print_success "Production ZIP created: $zip_file ($file_size, $total_files files)"
+    print_success "Production ZIP created: $zip_file ($file_size)"
 
 }
 
@@ -1456,15 +1438,14 @@ build_project() {
     install_production_deps
     copy_project_files
 
+    # Failures exit through the EXIT trap, which restores dev dependencies.
     if ! validate_php_syntax; then
         print_error "PHP syntax validation failed"
-        restore_dev_deps
         exit 1
     fi
 
     if ! validate_build; then
         print_error "Build validation failed"
-        restore_dev_deps
         exit 1
     fi
 
@@ -1472,7 +1453,6 @@ build_project() {
     if [ -f "${EXTENSION_PATH}/scripts/build/validate-psr4.sh" ]; then
         if ! bash "${EXTENSION_PATH}/scripts/build/validate-psr4.sh" "${STAGING_ROOT}/$PROJECT_NAME"; then
             print_error "PSR-4 autoload validation failed"
-            restore_dev_deps
             exit 1
         fi
     fi

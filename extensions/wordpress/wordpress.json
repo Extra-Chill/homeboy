@@ -333,7 +333,6 @@
     ],
     "command_template": "bash {{script}}",
     "extension_script": "scripts/build/build.sh",
-    "pre_build_script": "scripts/build/validate-build.sh",
     "artifact_pattern": "build/{component_id}.zip",
     "cleanup_paths": [
       "node_modules",
