@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.439.5] - 2026-11-01
+
+### Changed
+- delete the dead provider readiness_invocation contract
+- derive candidate lifecycle from the projection state
+- use app-token v3 client-id, author publishes as homeboy-ci, drop the dead major-tag hook
+- Remove obsolete extension agent-runtime discovery
+- develop the action in action/ and publish releases to homeboy-action
+
 ## [0.439.4] - 2026-11-01
 
 ### Changed
