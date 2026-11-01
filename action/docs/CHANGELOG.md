@@ -2,6 +2,13 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.25.1] - 2026-11-01
+
+### Changed
+- use app-token v3 client-id, author publishes as homeboy-ci, drop the dead major-tag hook
+- assert the monorepo release flow and read compilers from the resolver's cwd
+- develop the action in action/ and publish releases to homeboy-action
+
 ## [2.25.0] - 2026-11-01
 
 ### Added
