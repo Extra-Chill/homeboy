@@ -4,6 +4,17 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.439.1] - 2026-11-01
+
+### Changed
+- Delete the dead agent-runtimes, runtime-agent-ci and agent-task-contracts extension trees
+- upgrade --upgrade-runner uses connect's binary convergence
+- classify candidates only from the canonical projection
+- multiplex ssh, scp, and rsync over one homeboy-owned master
+
+### Fixed
+- apply the pre-1.0 major→minor downgrade to path-resolved components
+
 ## [0.439.0] - 2026-11-01
 
 ### Added
