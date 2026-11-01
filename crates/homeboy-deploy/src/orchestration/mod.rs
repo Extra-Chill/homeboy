@@ -703,6 +703,13 @@ fn prepare_materialized_source(
 ) -> Result<()> {
     let subject = phase_clock::component_subject(&checkout.component.id);
     phase_clock::time(timer, &subject, "source.verify", || checkout.verify())?;
+    // Lookup before hydration: package cache hits need neither install state nor builds.
+    if homeboy_core::extension::build::cache::content_key(&checkout.component)
+        .as_deref()
+        .is_some_and(|key| homeboy_core::extension::build::cache::restore(&checkout.component, key))
+    {
+        return Ok(());
+    }
     phase_clock::time(timer, &subject, "source.dependencies", || {
         checkout.hydrate_dependencies(skip_deps_hydration)
     })?;

@@ -1004,3 +1004,44 @@ Extension manifests are stored in the extension directory:
 
 - [Extension command](../../commands/extension.md) - Manage extension installation and execution
 - [Template variables](../template-variables.md) - Variable reference for templates
+
+
+## Shared build package cache
+
+`homeboy review build <project> --all` (or selected project components) uses the
+same package artifact cache as deploy and release builds. Evidence includes
+`status` (`built` or `cached`), `key` (null for uncacheable inputs), and
+`duration_ms`. Workspace inputs build before their consumers; up to three lanes
+run concurrently (`HOMEBOY_BUILD_CONCURRENCY`, 1–32).
+
+Extensions opt in through `build.cache`:
+
+```json
+{
+  "recipe": "package-v1",
+  "toolchains": ["node -p 'process.versions.node.split(\".\")[0]'"],
+  "dependencies_setting": "local_workspace_dependencies"
+}
+```
+
+Toolchain commands print the extension's relevant version identity (for example
+Node major or PHP major/minor). The dependency setting holds entries with `path`
+and optional `package_dir`, relative to the component. Each dependency must have
+a portable `homeboy.json`; cycles are rejected. Core does not interpret language
+or package-manager-specific settings.
+
+Keys cover clean git index blobs under the component path, transitive dependency
+keys, component configuration, extension id/version, recipe declarations, bundled
+build/pre-build script bytes, and declared toolchain output. Dirty or untracked
+inputs under any keyed path disable reuse. Builds with changed-scope requests,
+undeclared recipes, explicit component environment, or artifact inputs also bypass
+the cache conservatively.
+
+`HOMEBOY_BUILD_CACHE_DIR` overrides the default `build-cache` directory beneath
+Homeboy's configured artifact root. CI can persist this directory with
+`actions/cache`, using Homeboy version as its outer cache namespace. Entries are
+published atomically and per-key OS locks serialize builders. Only the exact
+package artifact is restored, not dependency install directories. Deploy checks
+before detached-source dependency hydration and reports `build.cached` when it
+reuses an entry. Keep extension recipe versions current when changing build
+helpers or other undeclared inputs; toolchain probes must be deterministic.
