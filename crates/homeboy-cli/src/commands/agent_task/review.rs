@@ -18,9 +18,9 @@ use homeboy::agents::agent_tasks::gate::VerifyGateOptions;
 use homeboy::agents::agent_tasks::lifecycle as agent_task_lifecycle;
 use homeboy::agents::agent_tasks::promotion::{AgentTaskPromotionReport, AgentTaskPromotionStatus};
 use homeboy::agents::agent_tasks::provider::{
-    evaluate_provider_dispatchability_with_config, resolve_provider_for_backend,
-    AgentTaskExecutorProvider, AgentTaskProviderCatalog, ExtensionProviderAgentTaskExecutor,
-    ProviderResolution, ProviderRuntimeReadinessCache,
+    evaluate_provider_dispatchability, resolve_provider_for_backend, AgentTaskExecutorProvider,
+    AgentTaskProviderCatalog, ExtensionProviderAgentTaskExecutor, ProviderResolution,
+    ProviderRuntimeReadinessCache,
 };
 use homeboy::agents::agent_tasks::review_dossier::{
     homeboy_tool_disclosure, resolve_review_profile, validate_issue_reference,
@@ -1933,14 +1933,18 @@ fn providers_with_catalog(
         ),
     };
     let dispatchability = resolved_dispatchability.unwrap_or_else(|| {
-        evaluate_provider_dispatchability_with_config(
+        evaluate_provider_dispatchability(
             &catalog,
             dispatch_backend,
             dispatch_selector,
             dispatch_model,
             &provider_config,
             args.validate_readiness,
+            &[],
             &mut readiness_cache,
+            &mut None,
+            None,
+            false,
         )
     });
     // An absent `--backend` sweeps every declared backend instead of inheriting
@@ -2347,14 +2351,18 @@ fn resolved_provider_dispatchability(
     else {
         return None;
     };
-    let verdict = evaluate_provider_dispatchability_with_config(
+    let verdict = evaluate_provider_dispatchability(
         catalog,
         backend,
         Some(provider_id),
         model.as_deref(),
         provider_config,
         probe_runtime,
+        &[],
         cache,
+        &mut None,
+        None,
+        false,
     );
     *dispatchable = verdict.ready;
     Some(verdict)
@@ -2375,14 +2383,18 @@ fn provider_dispatchability(
         return resolved_dispatchability.clone();
     }
     let mut cache = ProviderRuntimeReadinessCache::default();
-    evaluate_provider_dispatchability_with_config(
+    evaluate_provider_dispatchability(
         catalog,
         &provider.backend,
         Some(&provider.id),
         None,
         provider_config,
         probe_runtime,
+        &[],
         &mut cache,
+        &mut None,
+        None,
+        false,
     )
 }
 
@@ -2477,14 +2489,18 @@ fn dispatchable_backend_choices(
         .providers()
         .iter()
         .filter(|provider| {
-            evaluate_provider_dispatchability_with_config(
+            evaluate_provider_dispatchability(
                 catalog,
                 &provider.backend,
                 Some(&provider.id),
                 None,
                 &provider_config,
                 probe_runtime,
+                &[],
                 &mut cache,
+                &mut None,
+                None,
+                false,
             )
             .ready
         })
@@ -3141,6 +3157,12 @@ mod tests {
                     &provider.backend,
                     Some(&provider.id),
                     None,
+                    &serde_json::json!({}),
+                    false,
+                    &[],
+                    &mut ProviderRuntimeReadinessCache::default(),
+                    &mut None,
+                    None,
                     false,
                 );
                 compact_provider(&provider, &dispatchability)
@@ -3351,10 +3373,20 @@ mod tests {
                 ("test/missing", true, "unavailable"),
                 ("test/model", false, "structurally_dispatchable"),
             ] {
-                let dispatchability = homeboy::agents::agent_task_provider::evaluate_provider_dispatchability_with_config(
-                    &catalog, "pi", Some(&provider.id), Some(model), &fake.config(), validate,
-                    &mut Default::default(),
-                );
+                let dispatchability =
+                    homeboy::agents::agent_task_provider::evaluate_provider_dispatchability(
+                        &catalog,
+                        "pi",
+                        Some(&provider.id),
+                        Some(model),
+                        &fake.config(),
+                        validate,
+                        &[],
+                        &mut Default::default(),
+                        &mut None,
+                        None,
+                        false,
+                    );
                 let projection = readiness_validation_projection(
                     None,
                     Some(&provider),
@@ -3515,6 +3547,12 @@ mod tests {
                 &catalog,
                 &provider.backend,
                 Some(&provider.id),
+                None,
+                &serde_json::json!({}),
+                false,
+                &[],
+                &mut ProviderRuntimeReadinessCache::default(),
+                &mut None,
                 None,
                 false,
             );

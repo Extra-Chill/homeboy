@@ -115,7 +115,7 @@ fn production_execution_preflight(
     evidence: &Arc<Mutex<ProviderEvidenceStore>>,
     credential_env: Option<&[(String, String)]>,
 ) -> Option<AgentTaskOutcome> {
-    let Ok(Some(provider)) = effective_provider_for_request(request, providers) else {
+    let Ok(Some(_)) = effective_provider_for_request(request, providers) else {
         return None;
     };
     let catalog = AgentTaskProviderCatalog {
@@ -127,22 +127,12 @@ fn production_execution_preflight(
         .lock()
         .map(|evidence| evidence.readiness.clone())
         .unwrap_or_default();
-    let dispatchability = match credential_env {
-        Some(credential_env) => {
-            super::dispatchability::evaluate_request_dispatchability_with_credentials(
-                &catalog,
-                request,
-                provider,
-                credential_env,
-                &mut readiness_cache,
-            )
-        }
-        None => super::dispatchability::evaluate_request_dispatchability(
-            &catalog,
-            request,
-            &mut readiness_cache,
-        ),
-    }
+    let dispatchability = super::dispatchability::evaluate_request_dispatchability(
+        &catalog,
+        request,
+        credential_env.unwrap_or(&[]),
+        &mut readiness_cache,
+    )
     .dispatchability;
     if dispatchability.ready {
         return None;
@@ -346,10 +336,9 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
         }
         .readiness
         .clone();
-        let evaluated = super::dispatchability::evaluate_request_dispatchability_with_credentials(
+        let evaluated = super::dispatchability::evaluate_request_dispatchability(
             &catalog,
             &request,
-            provider.clone(),
             &credential_env,
             &mut readiness_cache,
         );
@@ -1074,10 +1063,11 @@ mod tests {
             format!("child-admission-{}", request.task_id),
             vec![request.clone()],
         );
-        super::dispatchability::admit_plan_provider_dispatchability_with_providers(
+        super::dispatchability::admit_plan_provider_dispatchability(
             &plan,
             &catalog,
             &mut ProviderRuntimeReadinessCache::default(),
+            None,
         )
         .expect("real child provider admission");
         let readiness = executor.provider_route_readiness(&request);

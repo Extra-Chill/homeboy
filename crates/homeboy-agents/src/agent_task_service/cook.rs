@@ -2840,10 +2840,13 @@ pub fn compile_cook_attempt_with_catalog_and_readiness_cache(
     }
     // Lab placement proves provider readiness on the runner with the runner's
     // credentials (#15198); only local placement is admitted live here.
-    match crate::agent_task_provider::admit_plan_provider_dispatchability_for_placement(
+    match crate::agent_task_provider::admit_plan_provider_dispatchability(
         &options.identity.initial_plan,
         catalog,
         readiness_cache,
+        homeboy_core::parsed_command_preflight::captured_result()
+            .as_ref()
+            .map(|result| &result.placement),
     ) {
         Ok(selected_plan) => {
             super::execution::preflight_plan_secret_env(&selected_plan)?;
@@ -2889,7 +2892,7 @@ pub fn compile_cook_attempt_static_with_catalog_and_readiness_cache(
     // are checked as complete effective plans below so an unavailable primary
     // cannot hide a valid fallback. The in-tree test double is not a catalog
     // provider; plan admission selects it through the same `is_fixture_backend`
-    // gate [`crate::agent_task_provider::admit_plan_provider_dispatchability_with_providers`]
+    // gate [`crate::agent_task_provider::admit_plan_provider_dispatchability`]
     // applies, so the static preflight must not reject it ahead of that gate.
     if initial_route
         .rotation
@@ -2897,12 +2900,13 @@ pub fn compile_cook_attempt_static_with_catalog_and_readiness_cache(
         .is_none_or(|rotation| rotation.entries.is_empty())
         && !crate::agent_task_provider::is_fixture_backend(&initial_route.backend)
     {
-        crate::agent_task_provider::preflight_provider_dispatchability_without_runtime_with_config(
+        crate::agent_task_provider::preflight_provider_dispatchability(
             catalog,
             &initial_route.backend,
             initial_route.selector.as_deref(),
             initial_route.model.as_deref(),
             &serde_json::Value::Object(Default::default()),
+            false,
             readiness_cache,
         )?;
     }

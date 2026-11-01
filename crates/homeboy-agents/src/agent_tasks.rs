@@ -247,8 +247,7 @@ pub mod provider {
     /// before a workspace or a provider execution is spent (#11479).
     pub use crate::agent_task_provider::{
         evaluate_provider_capacity_with_config, evaluate_provider_dispatchability,
-        evaluate_provider_dispatchability_with_config,
-        preflight_provider_dispatchability_with_config, AgentTaskProviderDispatchability,
+        preflight_provider_dispatchability, AgentTaskProviderDispatchability,
     };
 }
 
