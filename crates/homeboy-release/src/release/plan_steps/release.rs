@@ -149,7 +149,10 @@ pub(in crate::release) fn build_release_steps_with_reconciliation(
     steps.push(ready_step(
         "git.commit",
         "git.commit",
-        format!("Commit release: v{}", new_version),
+        format!(
+            "Commit {}",
+            homeboy_core::git::release_commit_subject(new_version, release_scope.tag_prefix())
+        ),
         package_needs,
         StepConfig::new(),
     ));

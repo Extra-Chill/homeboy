@@ -906,7 +906,11 @@ fn prepared_release_pr_resume_intent(
             Error::git_command_failed(format!("read release commit subject: {error}"))
         })?;
     if !subject.status.success()
-        || String::from_utf8_lossy(&subject.stdout).trim() != format!("release: {tag}")
+        || !matches!(
+            String::from_utf8_lossy(&subject.stdout).trim(),
+            value if value == format!("release: {tag}")
+                || git::matches_release_subject(value, Some(&version), release_scope.tag_prefix())
+        )
     {
         return Err(Error::validation_invalid_argument(
             "protected-branch",

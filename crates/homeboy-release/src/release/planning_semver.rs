@@ -288,7 +288,9 @@ pub(super) fn authoritative_descendant_release_tag(
     if !subject.status.success()
         || !matches!(
             String::from_utf8_lossy(&subject.stdout).trim(),
-            value if value == format!("release: {tag}") || value == format!("release:{tag}")
+            value if value == format!("release: {tag}")
+                || value == format!("release:{tag}")
+                || git::matches_release_subject(value, Some(&tag_version.to_string()), scope.tag_prefix())
         )
     {
         return Ok(None);
