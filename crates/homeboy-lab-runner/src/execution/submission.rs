@@ -242,10 +242,9 @@ mod tests {
     }
 
     #[test]
-    fn durable_envelope_carries_provider_credential_plan_without_inline_values() {
-        // Extra-Chill/homeboy#14382: the durable runner envelope must
-        // persist provider credentials as SecretEnvPlan references — names,
-        // requirements, and provider credential provenance, never values.
+    fn durable_envelope_carries_secret_plan_without_inline_values() {
+        // Extra-Chill/homeboy#14382: the durable runner envelope must persist
+        // secrets as SecretEnvPlan references (names and requirements), never values.
         let plan = SecretEnvPlan::from_secret_env_names([
             "AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN".to_string()
         ]);
@@ -292,11 +291,9 @@ mod tests {
         assert!(!dispatch
             .env
             .contains_key("AI_PROVIDER_OPENAI_CODEX_ACCESS_TOKEN"));
-        // The serialized durable payload records credential provenance without
-        // any secret value.
+        // The serialized durable payload carries no secret value.
         let durable = serde_json::to_string(&envelope).expect("envelope json");
         assert!(!durable.contains("access-secret-value"));
-        assert!(durable.contains("test.pi-provider"));
     }
 
     #[test]
