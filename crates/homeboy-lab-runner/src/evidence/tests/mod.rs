@@ -27,7 +27,10 @@ use homeboy_core::observation::{
 use super::detail::{
     explicit_observation_run_ids, remote_detail_artifacts, remote_detail_to_run_record,
 };
-use super::download::{content_disposition_filename, download_remote_artifact, resolve_placement};
+use super::download::{
+    artifact_body_read_error, content_disposition_filename, download_remote_artifact,
+    resolve_placement,
+};
 use super::mirror::{
     bounded_remote_events, controller_artifact_metadata, import_mirrored_artifact_with_downloader,
     mirror_daemon_evidence, mirror_job_run, mirror_job_run_request,
@@ -2451,4 +2454,22 @@ fn terminal_mirroring_rejects_unrelated_missing_run_projections() {
 
         assert_eq!(error.details["path"], "/runs/other-run");
     });
+}
+
+#[test]
+fn interrupted_artifact_body_read_is_retryable_and_names_the_timeout() {
+    // A truncated candidate bundle transfer is transport, not a missing
+    // artifact; promotion must be able to re-acquire it (homeboy#16842).
+    let timed_out = artifact_body_read_error("error decoding response body", true);
+    assert_eq!(timed_out.retryable, Some(true));
+    assert!(
+        timed_out.message.contains("timed out after 900s"),
+        "{}",
+        timed_out.message
+    );
+    assert!(timed_out.message.contains("error decoding response body"));
+
+    let reset = artifact_body_read_error("connection reset", false);
+    assert_eq!(reset.retryable, Some(true));
+    assert!(!reset.message.contains("timed out"));
 }

@@ -602,6 +602,16 @@ fn evaluate_provider_dispatchability_with_config_credentials_and_deadline(
             "runtime_unavailable: {}",
             runtime.reason.as_deref().unwrap_or(reason)
         )
+    } else if state == "credentials_unusable" {
+        // The generic sentence alone reads as "the login was revoked" even
+        // when the provider reported a concrete, different cause (for example
+        // an agent directory with no models). Carry the provider's own
+        // classification through so operators see what actually failed
+        // (Extra-Chill/homeboy#16841).
+        match runtime.reason.as_deref() {
+            Some(cause) if !cause.trim().is_empty() => format!("{reason} ({cause})"),
+            _ => reason.to_string(),
+        }
     } else if state == "capacity_exhausted" {
         let detail = runtime.reason.as_deref().unwrap_or(reason);
         let capacity = runtime_evidence.as_ref().map(|evidence| &evidence.capacity);
@@ -1274,7 +1284,12 @@ fn selected_plan_provider_dispatchability_with_providers(
                 "provider_dispatchability",
                 format!(
                     "agent-task backend `{}` is not dispatchable across any reachable rotation route: {}",
-                    candidate.executor.backend, first_verdict.reason
+                    candidate.executor.backend,
+                    rotation_failure_detail(
+                        &first_verdict.reason,
+                        &current_skipped,
+                        homeboy_core::process::host_identity().as_deref(),
+                    )
                 ),
                 Some(candidate.executor.backend),
                 hints,
@@ -1287,6 +1302,43 @@ fn selected_plan_provider_dispatchability_with_providers(
         return Err(error);
     }
     Ok(admitted)
+}
+
+/// Render the rotation-level admission failure so every route's own cause, the
+/// provider's remediation, and the host the readiness was evaluated on reach
+/// the operator. Admission can run on the controller or on a runner; without
+/// the host an operator cannot tell a controller-local catalog gap from a
+/// broken runner (Extra-Chill/homeboy#16841, #15198).
+fn rotation_failure_detail(
+    first_reason: &str,
+    routes: &[ProviderRouteEvidence],
+    host: Option<&str>,
+) -> String {
+    fn route_label(route: &ProviderRouteEvidence) -> String {
+        route
+            .model
+            .clone()
+            .or_else(|| route.selector.clone())
+            .unwrap_or_else(|| route.backend.clone())
+    }
+    let mut detail = match routes.first() {
+        Some(first) => format!("{}: {first_reason}", route_label(first)),
+        None => first_reason.to_string(),
+    };
+    for route in routes.iter().skip(1) {
+        detail.push_str(&format!("; {}: {}", route_label(route), route.reason));
+    }
+    if let Some(remediation) = routes
+        .iter()
+        .filter_map(|route| route.remediation.as_deref())
+        .find(|remediation| !remediation.trim().is_empty())
+    {
+        detail.push_str(&format!(". Remediation: {remediation}"));
+    }
+    if let Some(host) = host.filter(|host| !host.trim().is_empty()) {
+        detail.push_str(&format!(" (readiness evaluated on host `{host}`)"));
+    }
+    detail
 }
 
 /// Reject deterministic provider contract defects after the effective executor
@@ -1531,6 +1583,66 @@ mod tests {
         assert!(!count.exists());
     }
 
+    fn skipped_route(
+        model: &str,
+        state: &str,
+        reason: &str,
+        remediation: Option<&str>,
+    ) -> ProviderRouteEvidence {
+        ProviderRouteEvidence {
+            backend: "pi".to_string(),
+            selector: None,
+            model: Some(model.to_string()),
+            state: state.to_string(),
+            reason: reason.to_string(),
+            reset_at: None,
+            classification: None,
+            retryable: false,
+            remediation: remediation.map(str::to_string),
+            cache_identity: None,
+            provider_identity: None,
+            runtime_evidence: None,
+            checks: None,
+            diagnostic_data: None,
+        }
+    }
+
+    #[test]
+    fn rotation_failure_names_every_route_cause_remediation_and_host() {
+        let routes = vec![
+            skipped_route(
+                "roadie/cook-heavy",
+                "runtime_unavailable",
+                "runtime_unavailable: deterministic_incompatibility: model_not_available",
+                Some("Select a model available in Pi agent directory /home/op/.roadie/pi-agent."),
+            ),
+            skipped_route(
+                "roadie/sol",
+                "credentials_unusable",
+                "provider-owned authentication or its runtime is revoked or unusable (auth_failure: no_models_available)",
+                None,
+            ),
+        ];
+
+        let detail = rotation_failure_detail(&routes[0].reason, &routes, Some("controller-1"));
+
+        assert_eq!(
+            detail,
+            "roadie/cook-heavy: runtime_unavailable: deterministic_incompatibility: model_not_available; \
+             roadie/sol: provider-owned authentication or its runtime is revoked or unusable (auth_failure: no_models_available). \
+             Remediation: Select a model available in Pi agent directory /home/op/.roadie/pi-agent. \
+             (readiness evaluated on host `controller-1`)"
+        );
+    }
+
+    #[test]
+    fn rotation_failure_without_route_evidence_or_host_is_the_first_reason() {
+        assert_eq!(
+            rotation_failure_detail("plain cause", &[], None),
+            "plain cause"
+        );
+    }
+
     #[test]
     fn revoked_or_unusable_credentials_preserve_provider_remediation() {
         let fake = route_pi("printf 'No models available\\n'");
@@ -1547,6 +1659,15 @@ mod tests {
 
         assert_eq!(verdict.state, "credentials_unusable");
         assert!(!verdict.ready);
+        // The provider's concrete cause travels with the generic sentence so
+        // an empty agent dir is not reported as a bare revoked login (#16841).
+        assert!(
+            verdict
+                .reason
+                .contains("(auth_failure: no_models_available)"),
+            "{}",
+            verdict.reason
+        );
         assert_eq!(
             verdict.checks.credentials.status,
             AgentTaskProviderCredentialStatus::Unusable

@@ -203,6 +203,24 @@ pub(super) fn resolve_placement(
     })
 }
 
+const ARTIFACT_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const ARTIFACT_TRANSFER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+/// A body read that fails part-way is a transport failure, not proof the
+/// artifact is gone: name the timeout when that is the cause and mark the
+/// error retryable so callers can re-acquire instead of giving up.
+pub(super) fn artifact_body_read_error(detail: &str, timed_out: bool) -> Error {
+    let message = if timed_out {
+        format!(
+            "read runner artifact response: timed out after {}s: {detail}",
+            ARTIFACT_TRANSFER_TIMEOUT.as_secs()
+        )
+    } else {
+        format!("read runner artifact response: {detail}")
+    };
+    Error::internal_unexpected(message).with_retryable(true)
+}
+
 fn download_direct_runner_artifact(
     artifact_root: &Path,
     token: &RemoteArtifactToken,
@@ -230,8 +248,14 @@ fn download_direct_runner_artifact(
         return Ok(None);
     };
 
+    // Artifact content (candidate git bundles in particular) can be large on
+    // monorepos. A 30s whole-request budget cut the body read off mid-stream
+    // and surfaced as reqwest's opaque "error decoding response body",
+    // stranding a finished Lab candidate (Extra-Chill/homeboy#16842). Bound
+    // connection setup tightly and give the transfer itself room.
     let client = Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
+        .connect_timeout(ARTIFACT_CONNECT_TIMEOUT)
+        .timeout(ARTIFACT_TRANSFER_TIMEOUT)
         .build()
         .map_err(|err| Error::internal_unexpected(format!("build daemon HTTP client: {err}")))?;
     let path = format!(
@@ -242,7 +266,9 @@ fn download_direct_runner_artifact(
     let response = client
         .get(format!("{}{}", local_url.trim_end_matches('/'), path))
         .send()
-        .map_err(|err| Error::internal_unexpected(format!("query runner daemon: {err}")))?;
+        .map_err(|err| {
+            Error::internal_unexpected(format!("query runner daemon: {err}")).with_retryable(true)
+        })?;
     let status = response.status();
     let headers = response.headers().clone();
     if !status.is_success() {
@@ -259,9 +285,9 @@ fn download_direct_runner_artifact(
         ));
     }
 
-    let bytes = response.bytes().map_err(|err| {
-        Error::internal_unexpected(format!("read runner artifact response: {err}"))
-    })?;
+    let bytes = response
+        .bytes()
+        .map_err(|err| artifact_body_read_error(&err.to_string(), err.is_timeout()))?;
     // `Content-Disposition` is parsed by splitting on `;` and trimming quotes,
     // so the value reaching here is whatever the daemon sent, `../` included.
     let remote_file_name = content_disposition_filename(&headers).filter(|name| !name.is_empty());
