@@ -840,7 +840,7 @@ jobs:
         if: steps.baseline-selection-policy.outputs.runner != ''
         env:
           HOMEBOY_TEST_INVENTORY_ONLY: '1'
-          HOMEBOY_TEST_INVENTORY_FILE: ${{ github.workspace }}/homeboy-test-inventory.json
+          HOMEBOY_TEST_INVENTORY_FILE: ${{ github.workspace }}/${{ inputs.component != '' && format('{0}/', inputs.component) || '' }}homeboy-test-inventory.json
           HOMEBOY_RUST_TEST_RUNNER: ${{ steps.baseline-selection-policy.outputs.runner }}
           HOMEBOY_RUST_NEXTEST_FALLBACK: '0'
         uses: ./.homeboy-action
@@ -861,6 +861,13 @@ jobs:
           test-timeout-seconds: ${{ inputs.test-timeout-seconds }}
           cleanup-timeout-seconds: ${{ inputs.cleanup-timeout-seconds }}
           pr-comment: 'false'
+      # Keep all consumers and transport artifacts at the historical root path.
+      # This targets explicit subdirectory components, not Cargo workspace discovery.
+      - name: Copy base Test inventory to workspace root
+        if: steps.baseline-selection-policy.outputs.runner != '' && inputs.component != ''
+        env:
+          INVENTORY_SOURCE: ${{ github.workspace }}/${{ inputs.component }}/homeboy-test-inventory.json
+        run: cp -- "${INVENTORY_SOURCE}" "${GITHUB_WORKSPACE}/homeboy-test-inventory.json"
       - name: Materialize base-bound candidate Test selection
         id: baseline-selection
         if: steps.baseline-selection-policy.outputs.runner != ''
@@ -1012,7 +1019,7 @@ jobs:
         continue-on-error: true
         env:
           HOMEBOY_TEST_INVENTORY_ONLY: '1'
-          HOMEBOY_TEST_INVENTORY_FILE: ${{ github.workspace }}/homeboy-test-inventory.json
+          HOMEBOY_TEST_INVENTORY_FILE: ${{ github.workspace }}/${{ inputs.component != '' && format('{0}/', inputs.component) || '' }}homeboy-test-inventory.json
           HOMEBOY_RUST_TEST_RUNNER: nextest
           HOMEBOY_RUST_NEXTEST_FALLBACK: '0'
           HOMEBOY_RUST_NEXTEST_ARCHIVE: ${{ steps.test-archive.outputs.path }}
@@ -1036,9 +1043,18 @@ jobs:
           test-timeout-seconds: ${{ inputs.test-timeout-seconds }}
           cleanup-timeout-seconds: ${{ inputs.cleanup-timeout-seconds }}
           pr-comment: 'false'
+      # Normalize before planning so shard execution, aggregation, and artifacts
+      # continue using the same root-level inventory as repository-root callers.
+      - name: Copy candidate Test inventory to workspace root
+        id: copy-inventory
+        if: always() && steps.inventory.outcome == 'success' && inputs.component != ''
+        continue-on-error: true
+        env:
+          INVENTORY_SOURCE: ${{ github.workspace }}/${{ inputs.component }}/homeboy-test-inventory.json
+        run: cp -- "${INVENTORY_SOURCE}" "${GITHUB_WORKSPACE}/homeboy-test-inventory.json"
       - name: Plan candidate Test shards
         id: plan
-        if: always() && steps.inventory.outcome == 'success'
+        if: always() && steps.inventory.outcome == 'success' && steps.copy-inventory.outcome != 'failure'
         continue-on-error: true
         env:
           TEST_INVENTORY_FILE: ${{ github.workspace }}/homeboy-test-inventory.json
