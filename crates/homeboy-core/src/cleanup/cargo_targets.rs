@@ -713,6 +713,9 @@ fn acquire_explicit_cargo_target_in(
 /// Collect the target identity from repository inputs and the declared child
 /// environment. Cargo fingerprints individual crates within the selected
 /// target, while this boundary prevents incompatible build universes sharing it.
+/// `Cargo.lock` is deliberately absent: every release rewrites it, and Cargo
+/// already separates crate versions inside one target, so keying on it only
+/// cold-started the next build after each release (Extra-Chill/homeboy#16899).
 pub fn cargo_target_compatibility(
     source_path: &Path,
     declared_environment: &[(&str, &str)],
@@ -727,7 +730,6 @@ pub fn cargo_target_compatibility(
         format!("{}/{}", std::env::consts::OS, std::env::consts::ARCH),
     );
     for name in [
-        "Cargo.lock",
         "rust-toolchain",
         "rust-toolchain.toml",
         ".cargo/config",
@@ -1355,9 +1357,9 @@ fn remove_store_if_unleased(
 
 /// How many idle shared Cargo target stores to keep besides the ones an
 /// acquisition is using. Each is a full Cargo target (1-3 GB for Homeboy
-/// itself), one per compatibility identity and one per released run, and a
-/// lockfile changes on nearly every release, so the store otherwise grew
-/// until reserve admission refused work (Extra-Chill/homeboy#15474). Mirrors
+/// itself), one per compatibility identity and one per released run, so the
+/// store otherwise grew until reserve admission refused work
+/// (Extra-Chill/homeboy#15474). Mirrors
 /// the Rust gate cache bound from #15447.
 const SHARED_CARGO_TARGET_RETAINED_STORES: usize = 2;
 
@@ -1989,8 +1991,9 @@ mod tests {
             ],
         );
         assert_eq!(first, warm);
+        // A release rewrites Cargo.lock; the warm store must survive it.
         fs::write(workspace.path().join("Cargo.lock"), "lock-b").unwrap();
-        assert_ne!(
+        assert_eq!(
             first,
             cargo_target_compatibility(
                 workspace.path(),
