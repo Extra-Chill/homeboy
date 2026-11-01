@@ -40,66 +40,6 @@ fn controller_owned_publication_is_reported_as_not_attempted() {
 }
 
 #[test]
-fn provider_runner_secret_env_contracts_are_applied_to_selected_plan_tasks() {
-    let (mut request_a, mut provider_a) = request("task-a", "node provider-a.js".to_string());
-    request_a.executor.backend = "provider-a".to_string();
-    request_a.runtime_tools = vec![serde_json::from_value(json!({
-        "id": "fixture.mcp",
-        "command": ["fixture-mcp"],
-        "secret_env": ["FIXTURE_MCP_TOKEN"]
-    }))
-    .expect("runtime tool")];
-    provider_a.backend = "provider-a".to_string();
-    provider_a.runner_readiness = vec![AgentTaskProviderRunnerReadiness {
-        id: "provider-a.auth".to_string(),
-        label: "Provider A auth".to_string(),
-        required_extensions: Vec::new(),
-        invocation: None,
-        secret_env: vec!["PROVIDER_A_TOKEN".to_string()],
-        env_path: None,
-        executable: None,
-        remediation: Some("Configure provider A auth.".to_string()),
-        extra: BTreeMap::new(),
-    }];
-    let (mut request_b, mut provider_b) = request("task-b", "node provider-b.js".to_string());
-    request_b.executor.backend = "provider-b".to_string();
-    request_b.executor.secret_env = vec!["EXPLICIT_SECRET".to_string()];
-    provider_b.backend = "provider-b".to_string();
-    provider_b.runner_readiness = vec![AgentTaskProviderRunnerReadiness {
-        id: "provider-b.auth".to_string(),
-        label: "Provider B auth".to_string(),
-        required_extensions: Vec::new(),
-        invocation: None,
-        secret_env: vec![
-            "PROVIDER_B_TOKEN".to_string(),
-            "EXPLICIT_SECRET".to_string(),
-        ],
-        env_path: None,
-        executable: None,
-        remediation: None,
-        extra: BTreeMap::new(),
-    }];
-    let mut plan = AgentTaskPlan::new("plan-a", vec![request_a, request_b]);
-
-    apply_provider_runner_secret_env_contracts_with_providers(&mut plan, &[provider_a, provider_b]);
-
-    assert_eq!(
-        plan.tasks[0].executor.secret_env,
-        vec![
-            "FIXTURE_MCP_TOKEN".to_string(),
-            "PROVIDER_A_TOKEN".to_string()
-        ]
-    );
-    assert_eq!(
-        plan.tasks[1].executor.secret_env,
-        vec![
-            "EXPLICIT_SECRET".to_string(),
-            "PROVIDER_B_TOKEN".to_string()
-        ]
-    );
-}
-
-#[test]
 fn provider_outcome_roles_normalize_from_declared_aliases() {
     let (_, mut provider) = request("task-a", "node provider.js".to_string());
     provider.role_aliases = serde_json::from_value(json!({

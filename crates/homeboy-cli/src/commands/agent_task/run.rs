@@ -1269,23 +1269,8 @@ fn unresolved_cook_backend_preview(
     let catalog = homeboy::agents::agent_tasks::provider::AgentTaskProviderCatalog::discover();
     Ok(Some(missing_backend_preview_resolution(
         args,
-        ready_cook_backends(&catalog),
+        catalog.backends(),
     )))
-}
-
-fn ready_cook_backends(
-    catalog: &homeboy::agents::agent_tasks::provider::AgentTaskProviderCatalog,
-) -> Vec<String> {
-    catalog
-        .backends()
-        .into_iter()
-        .filter(|backend| {
-            homeboy::agents::agent_tasks::provider::validate_provider_runner_readiness_for_backend_with_catalog(
-                &catalog, backend, None,
-            )
-            .is_ok()
-        })
-        .collect()
 }
 
 fn is_missing_default_backend_policy_error(error: &homeboy::core::Error) -> bool {
@@ -2269,26 +2254,6 @@ mod preview_tests {
             "backend_required_no_ready_route"
         );
         assert!(replay.argv.iter().all(|arg| arg != "--backend"));
-    }
-
-    #[test]
-    fn backend_preview_does_not_select_unrelated_account_default_credentials() {
-        let _home = homeboy::core::test_support::HomeGuard::new();
-        let fake = FakePi::with_probes("exit 99", "printf 'test model\\n'");
-        fake.install_catalog_config();
-        let mut provider = fake.provider();
-        provider.provider_defaults.insert(
-            "unused-account".into(),
-            serde_json::json!({
-                "required_secret_env": ["UNUSED_ACCOUNT_TOKEN"]
-            }),
-        );
-        let catalog = provider::AgentTaskProviderCatalog {
-            providers: vec![provider],
-            ..Default::default()
-        };
-
-        assert_eq!(ready_cook_backends(&catalog), vec!["pi"]);
     }
 
     #[test]

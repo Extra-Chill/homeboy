@@ -223,7 +223,6 @@ fn acknowledged_cook_launches_pi_with_the_concrete_cli_model() {
             .as_object_mut()
             .expect("provider object")
             .remove("readiness_invocation");
-        provider["runner_readiness"] = json!([]);
     }
     std::fs::write(
         runtime_root.join("pi.json"),

@@ -75,8 +75,7 @@ impl AgentTaskProviderCatalog {
     /// backend error a papercut (#11478).
     ///
     /// Presence here means a provider *declares* the backend, not that the
-    /// backend is usable right now — runner/config readiness is a separate,
-    /// side-effecting probe (`validate_provider_runner_readiness_for_backend`).
+    /// backend is usable right now — live readiness is a separate probe.
     /// Callers that enumerate these must not imply readiness.
     pub fn backends(&self) -> Vec<String> {
         let mut backends = self
@@ -317,184 +316,12 @@ pub fn default_backend_for_component(
     )
 }
 
-#[derive(Debug, Clone)]
-pub struct AgentTaskProviderRunnerReadinessContract {
-    pub provider_id: String,
-    pub backend: String,
-    pub runtime_id: Option<String>,
-    pub runtime_path: Option<String>,
-    pub readiness: AgentTaskProviderRunnerReadiness,
-}
-
-pub fn provider_runner_readiness_contracts() -> Vec<AgentTaskProviderRunnerReadinessContract> {
-    AgentTaskProviderCatalog::discover()
-        .providers
-        .into_iter()
-        .flat_map(|provider| {
-            provider.runner_readiness.into_iter().map(move |readiness| {
-                AgentTaskProviderRunnerReadinessContract {
-                    provider_id: provider.id.clone(),
-                    backend: provider.backend.clone(),
-                    runtime_id: provider.runtime_id.clone(),
-                    runtime_path: provider.runtime_path.clone(),
-                    readiness,
-                }
-            })
-        })
-        .collect()
-}
-
-pub fn provider_runner_source_contracts() -> Vec<AgentTaskProviderRunnerSource> {
-    AgentTaskProviderCatalog::discover()
-        .providers
-        .into_iter()
-        .flat_map(|provider| provider.runner_sources)
-        .collect()
-}
-
 pub fn dependency_failure_patterns() -> Vec<AgentTaskProviderDependencyFailurePattern> {
     AgentTaskProviderCatalog::discover()
         .providers
         .into_iter()
         .flat_map(|provider| provider.dependency_failure_patterns)
         .collect()
-}
-
-pub fn validate_provider_runner_readiness_for_backend(
-    backend: &str,
-    selector: Option<&str>,
-) -> homeboy_core::Result<()> {
-    let catalog = AgentTaskProviderCatalog::discover();
-    validate_provider_runner_readiness_for_backend_with_catalog(&catalog, backend, selector)
-}
-
-pub fn validate_provider_runner_readiness_for_backend_with_catalog(
-    catalog: &AgentTaskProviderCatalog,
-    backend: &str,
-    selector: Option<&str>,
-) -> homeboy_core::Result<()> {
-    validate_provider_runner_readiness_for_backend_with_diagnostics(
-        catalog.providers(),
-        catalog.diagnostics(),
-        backend,
-        selector,
-    )
-}
-
-#[cfg(test)]
-pub(super) fn validate_provider_runner_readiness_for_backend_with_providers(
-    providers: &[AgentTaskExecutorProvider],
-    backend: &str,
-    selector: Option<&str>,
-) -> homeboy_core::Result<()> {
-    validate_provider_runner_readiness_for_backend_with_diagnostics(
-        providers,
-        &[],
-        backend,
-        selector,
-    )
-}
-
-fn validate_provider_runner_readiness_for_backend_with_diagnostics(
-    providers: &[AgentTaskExecutorProvider],
-    diagnostics: &[AgentRuntimeDiscoveryDiagnostic],
-    backend: &str,
-    selector: Option<&str>,
-) -> homeboy_core::Result<()> {
-    let provider = match resolve_provider_for_backend(providers, backend, selector) {
-        ProviderResolution::Resolved(provider) => provider,
-        ProviderResolution::NotFound => {
-            let matching_diagnostics =
-                runtime_discovery_diagnostics_for_backend(diagnostics, backend);
-            let mut suggestions = vec![
-                "Run `homeboy agent-task providers` on the same machine/runner to inspect registered providers.".to_string(),
-                "Install or sync the extension/runtime that declares the requested backend, or pass --backend with a registered backend.".to_string(),
-            ];
-            suggestions.extend(
-                matching_diagnostics
-                    .iter()
-                    .map(format_runtime_discovery_diagnostic),
-            );
-            return Err(Error::validation_invalid_argument(
-                "backend",
-                provider_not_found_message(backend, &matching_diagnostics),
-                Some(backend.to_string()),
-                Some(suggestions),
-            ));
-        }
-        ProviderResolution::SelectorMismatch {
-            available_ids,
-            selector_hint,
-        } => {
-            let mut suggestions = vec![format!(
-                "Available provider ids for backend '{backend}': {}.",
-                available_ids.join(", ")
-            )];
-            if let Some(hint) = selector_hint {
-                suggestions.push(hint);
-            }
-            return Err(Error::validation_invalid_argument(
-                "selector",
-                format!(
-                    "no extension agent-task provider for backend '{backend}' matched selector '{}'",
-                    selector.unwrap_or("")
-                ),
-                selector.map(str::to_string),
-                Some(suggestions),
-            ));
-        }
-    };
-
-    super::command_runner::validate_provider_immediate_failure_patterns(provider).map_err(
-        |message| {
-            Error::validation_invalid_argument(
-                "immediate_failure_patterns",
-                format!(
-                    "provider '{}' has invalid immediate failure configuration: {message}",
-                    provider.id
-                ),
-                Some(provider.backend.clone()),
-                None,
-            )
-        },
-    )?;
-
-    let effective_config =
-        crate::agent_task_config_materialization::materialize_provider_config_refs(Value::Object(
-            defaults::load_config().settings.into_iter().collect(),
-        ))?;
-    let verdict = super::command_runner::run_provider_readiness_probe_with_env(provider, &effective_config, &[]).map_err(
-        |message| {
-            Error::validation_invalid_argument(
-                "backend",
-                format!(
-                    "agent-task backend '{backend}' is registered but configured readiness failed for provider '{}': {message}",
-                    provider.id
-                ),
-                Some(backend.to_string()),
-                None,
-            )
-        },
-    )?;
-    if !verdict.ready {
-        return Err(Error::validation_invalid_argument(
-            "backend",
-            format!(
-                "agent-task backend '{backend}' is registered but configured readiness failed for provider '{}': {}",
-                provider.id,
-                if verdict.reason.is_empty() {
-                    "provider-owned readiness check failed"
-                } else {
-                    &verdict.reason
-                }
-            ),
-            Some(backend.to_string()),
-            (!verdict.remediation.is_empty()).then(|| vec![verdict.remediation]),
-        )
-        .with_retryable(verdict.retryable));
-    }
-
-    Ok(())
 }
 
 pub(super) fn runtime_discovery_diagnostics_for_backend(

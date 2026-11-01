@@ -97,12 +97,8 @@ pub struct AgentTaskExecutorProvider {
     pub workspace_materialization: Option<AgentTaskProviderWorkspaceMaterialization>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub provider_defaults: BTreeMap<String, Value>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub runner_readiness: Vec<AgentTaskProviderRunnerReadiness>,
     #[serde(default)]
     pub pi_readiness: PiReadinessConfig,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub runner_sources: Vec<AgentTaskProviderRunnerSource>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dependency_failure_patterns: Vec<AgentTaskProviderDependencyFailurePattern>,
     /// Adapter-owned classifications for failures that prove an otherwise
@@ -460,65 +456,4 @@ pub(crate) fn wildcard_match(pattern: &str, value: &str) -> bool {
         remainder = &remainder[index + part.len()..];
     }
     !anchored_end || value.ends_with(parts[parts.len() - 1])
-}
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct AgentTaskProviderRunnerReadiness {
-    pub id: String,
-    pub label: String,
-    /// Extensions that must pass runner parity before this readiness command
-    /// may execute.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub required_extensions: Vec<String>,
-    /// Optional extension-owned readiness command run by runner doctor.
-    /// `{{runtime_path}}` is resolved against the selected runner's runtime.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub invocation: Option<CommandInvocation>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub secret_env: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub env_path: Option<AgentTaskProviderEnvPathReadiness>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub executable: Option<AgentTaskProviderExecutableReadiness>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub remediation: Option<String>,
-    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub extra: BTreeMap<String, Value>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct AgentTaskProviderEnvPathReadiness {
-    pub env: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub revision: Option<bool>,
-    /// Optional extension-declared canonical root (e.g. a managed source clone
-    /// kept under the runner's homeboy cache). When set, doctor WARNS if the
-    /// env-resolved path does not live under this canonical root, catching
-    /// stale / non-canonical checkout drift before it corrupts results.
-    ///
-    /// Core is runtime-agnostic: it does not know what the canonical path
-    /// represents (a runtime checkout, a toolchain, etc.) — the value is supplied
-    /// entirely by the declaring extension.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub canonical_path: Option<String>,
-    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub extra: BTreeMap<String, Value>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct AgentTaskProviderExecutableReadiness {
-    /// Environment variable names that should receive the resolved executable path.
-    /// Existing non-empty env values win before binary candidate discovery.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub env: Vec<String>,
-    /// Ordered executable names or paths to try when env does not already point
-    /// at an executable. Bare names are resolved on PATH; paths are checked as-is.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub candidates: Vec<String>,
-    /// Optional arguments a caller can use to probe the resolved executable version.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub version_command: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub install_hint: Option<String>,
-    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub extra: BTreeMap<String, Value>,
 }

@@ -70,7 +70,6 @@ pub fn apply(
         return;
     }
 
-    repair_managed_sources(client, report);
     repair_extension_parity(client, id, runner_config, options, report);
 
     if let Some(repair) = terminal_daemon_recovery_repair(report) {
@@ -280,21 +279,6 @@ fn repair_extension_parity(
         .all(|check| check.status == RunnerDoctorStatus::Ok);
     report.checks.retain(|check| check.id != "extension.parity");
     report.checks.extend(parity_checks);
-    if parity_ready {
-        let catalog = homeboy::agents::agent_tasks::provider::AgentTaskProviderCatalog::discover();
-        let selected_provider_ids = probes::eligible_provider_ids(
-            catalog.providers(),
-            options.agent_backend.as_deref(),
-            options.agent_selector.as_deref(),
-        );
-        report.checks.extend(probes::provider_readiness_checks(
-            client,
-            &probes::selected_provider_readiness_contracts(
-                homeboy::agents::agent_tasks::provider::provider_runner_readiness_contracts(),
-                &selected_provider_ids,
-            ),
-        ));
-    }
     report.repairs.push(RunnerRepair {
         transport_failure: None,
         id: "repair.extension_parity".to_string(),
@@ -934,7 +918,7 @@ pub(super) fn apply_typed_action(
     target: &target::RunnerTarget,
     action: &RunnerRepairAction,
 ) -> Result<(), TypedRepairFailure> {
-    let target::RunnerTarget::Ssh { id, client, .. } = target else {
+    let target::RunnerTarget::Ssh { id, .. } = target else {
         return Err("typed Lab runner repairs require an SSH runner target"
             .to_string()
             .into());
@@ -949,36 +933,6 @@ pub(super) fn apply_typed_action(
             .and_then(|_| refresh_outcome(id, git_ref.clone(), *allow_downgrade))
             .map_err(Into::into),
         RunnerRepairAction::Reconnect => reconnect_transport(target, id),
-        RunnerRepairAction::RefreshManagedSources => {
-            let mut report = RunnerDoctorOutput {
-                variant: "doctor",
-                command: "runner.doctor",
-                runner_id: id.clone(),
-                runner: types::RunnerTargetSummary {
-                    target_type: "ssh",
-                    registry: None,
-                    server: None,
-                },
-                status: RunnerDoctorStatus::Ok,
-                failure: None,
-                capabilities: Default::default(),
-                resources: Default::default(),
-                checks: Vec::new(),
-                secret_env_migration: None,
-                diagnostics: None,
-                daemon_recovery: None,
-                admission_summary: None,
-                provider_readiness: None,
-                repairs: Vec::new(),
-            };
-            repair_managed_sources(client, &mut report);
-            report
-                .repairs
-                .iter()
-                .find(|repair| repair.status == RunnerDoctorStatus::Error)
-                .map(|repair| Err(repair.message.clone().into()))
-                .unwrap_or(Ok(()))
-        }
     }
 }
 
@@ -999,51 +953,4 @@ fn reconnect_transport(
             transport_failure: runner::TransportFailure::of(&error),
             message: error.message,
         })
-}
-
-fn repair_managed_sources(client: &SshClient, report: &mut RunnerDoctorOutput) {
-    let contracts = homeboy::agents::agent_tasks::provider::provider_runner_source_contracts();
-    let plans = runner::plan_managed_runner_source_syncs(&contracts);
-    if plans.is_empty() {
-        return;
-    }
-
-    let mut failed = false;
-    for plan in plans {
-        let output = client.execute(&plan.script);
-        if !output.success {
-            failed = true;
-            report.repairs.push(RunnerRepair {
-                transport_failure: None,
-                id: format!("repair.managed_source.{}", plan.id),
-                status: RunnerDoctorStatus::Error,
-                message: format!(
-                    "Could not refresh managed runner source `{}`: {}",
-                    plan.label,
-                    output.stderr.trim()
-                ),
-                commands: Vec::new(),
-            });
-            continue;
-        }
-
-        report.repairs.push(RunnerRepair {
-            transport_failure: None,
-            id: format!("repair.managed_source.{}", plan.id),
-            status: RunnerDoctorStatus::Ok,
-            message: format!("Refreshed managed runner source `{}`", plan.label),
-            commands: Vec::new(),
-        });
-    }
-
-    if failed {
-        return;
-    }
-
-    report
-        .checks
-        .retain(|check| !check.id.starts_with("lab.managed_source."));
-    report
-        .checks
-        .extend(probes::managed_runner_source_checks(client, &contracts));
 }

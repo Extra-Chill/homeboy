@@ -5,9 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use homeboy::agents::agent_tasks::provider::{
-    AgentTaskExecutorProvider, AgentTaskProviderRunnerReadiness, AgentTaskProviderRunnerSource,
-};
+use homeboy::agents::agent_tasks::provider::AgentTaskExecutorProvider;
 use homeboy::core::engine::shell;
 use homeboy::core::server::{self, Server, SshClient};
 use homeboy::runner::runners::{
@@ -480,9 +478,6 @@ fn compact_remediation_action(action: Option<&types::RunnerRepairAction>) -> ser
             "allow_downgrade": allow_downgrade,
         }),
         Some(types::RunnerRepairAction::Reconnect) => serde_json::json!({ "action": "reconnect" }),
-        Some(types::RunnerRepairAction::RefreshManagedSources) => {
-            serde_json::json!({ "action": "refresh_managed_sources" })
-        }
         None => serde_json::Value::Null,
     }
 }

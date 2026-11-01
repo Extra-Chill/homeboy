@@ -1611,8 +1611,7 @@ mod materialize_specs_tests {
                     "resolved_runtime_identity": {
                         "provider": {
                             "extension_path": "/controller/provider-plugin",
-                            "runtime_path": "/controller/runtime-overlay/runtime",
-                            "runner_sources": [{ "path": "/controller/runtime-source" }]
+                            "runtime_path": "/controller/runtime-overlay/runtime"
                         },
                         "materialization_plan": {
                             "runtime_path": "/controller/runtime-overlay/runtime",

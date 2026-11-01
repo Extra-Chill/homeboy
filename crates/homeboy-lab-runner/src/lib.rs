@@ -143,12 +143,6 @@ pub use lab_selection::{
 mod lab_workspace_provenance_provider;
 mod lab_workspaces;
 mod lab_workspaces_deps;
-mod managed_source;
-mod runner_state_lock;
-mod workspace_root_provider;
-pub use managed_source::{
-    plan_managed_runner_source_sync, plan_managed_runner_source_syncs, ManagedRunnerSourceSyncPlan,
-};
 mod offload_changed_since;
 mod offload_metadata;
 mod origin_refs;
@@ -159,6 +153,7 @@ mod resource_metrics;
 mod rig_materialization;
 mod runner_cache;
 pub mod runner_probe_gate;
+mod runner_state_lock;
 mod runtime_materialization_status;
 mod runtime_overlay_freshness;
 mod session;
@@ -168,6 +163,7 @@ mod tool_registry;
 mod transport;
 mod validation_dependencies;
 mod validation_dependency_cache;
+mod workspace_root_provider;
 pub use runner_cache::{
     prune_homeboy_binary_cache, RunnerBinaryCachePruneEntry, RunnerBinaryCachePruneOptions,
     RunnerBinaryCachePruneOutput,

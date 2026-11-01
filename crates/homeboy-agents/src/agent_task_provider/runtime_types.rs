@@ -25,8 +25,6 @@ pub struct ResolvedAgentRuntimeExecutionContract {
     )]
     pub secret_env_plan: ResolvedAgentRuntimeSecretEnvPlan,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub readiness_checks: Vec<AgentTaskProviderRunnerReadiness>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub capabilities: Vec<String>,
     #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extra: BTreeMap<String, Value>,
@@ -277,17 +275,6 @@ mod tests {
                     "EXAMPLE_TOKEN".to_string()
                 ])),
             },
-            readiness_checks: vec![AgentTaskProviderRunnerReadiness {
-                id: "example-token".to_string(),
-                label: "Example token".to_string(),
-                required_extensions: Vec::new(),
-                invocation: None,
-                secret_env: vec!["EXAMPLE_TOKEN".to_string()],
-                env_path: None,
-                executable: None,
-                remediation: None,
-                extra: BTreeMap::new(),
-            }],
             capabilities: vec!["apply_back".to_string()],
             extra: BTreeMap::new(),
         };
@@ -308,7 +295,6 @@ mod tests {
             value["secret_env_plan"]["object"]["secret_env_names"][0],
             "EXAMPLE_TOKEN"
         );
-        assert_eq!(value["readiness_checks"][0]["id"], "example-token");
         assert_eq!(value["capabilities"][0], "apply_back");
     }
 

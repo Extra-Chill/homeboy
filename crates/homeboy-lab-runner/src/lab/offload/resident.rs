@@ -1,14 +1,9 @@
-//! Runner-resident Lab offload path and managed-source refresh.
+//! Runner-resident Lab offload path.
 
 use super::*;
-use homeboy_core::runner_execution_envelope::{
-    PathMaterializationEntry, PathMaterializationPlan, PATH_MATERIALIZATION_MODE_EXISTING_REMOTE,
-    PATH_MATERIALIZATION_STATUS_VALIDATED,
-};
+use homeboy_core::runner_execution_envelope::PathMaterializationPlan;
 use homeboy_core::secret_env_plan::SECRET_ENV_PLAN_ENV_DELTA_SOURCE;
-use homeboy_lab_contract::path_materialization::{
-    primary_workspace_existing_remote, PATH_MATERIALIZATION_OWNER_LAB_EXECUTION_CONTEXT,
-};
+use homeboy_lab_contract::path_materialization::primary_workspace_existing_remote;
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_runner_resident_lab_offload(
@@ -16,46 +11,14 @@ pub(crate) fn run_runner_resident_lab_offload(
     selection: LabRunnerSelection,
     contract: LabOffloadCommand,
     mut plan: HomeboyPlan,
-    mut messages: Vec<String>,
+    messages: Vec<String>,
     runner_workspace_root: &str,
     homeboy_path: &str,
     runner_status: &RunnerStatusReport,
-    mut observation: OffloadObservation,
+    observation: OffloadObservation,
 ) -> Result<LabOffloadOutcome> {
     let runner_id = &selection.runner_id;
     let runner_homeboy = lab_runner_homeboy_metadata(runner_id, homeboy_path, runner_status);
-    let managed_sources_timer = observation.timer.start("stage.lab.materialize");
-    let source_syncs = refresh_managed_runner_sources(runner_id, runner_workspace_root)?;
-    drop(managed_sources_timer);
-    if source_syncs.is_empty() {
-        plan = with_step(
-            plan,
-            PlanStep::builder(
-                "lab.managed_sources",
-                "lab.managed_sources",
-                PlanStepStatus::Skipped,
-            )
-            .skip_reason("no extension-declared managed runner sources")
-            .build(),
-        );
-    } else {
-        let syncs_json = serde_json::to_value(&source_syncs).map_err(|err| {
-            Error::internal_json(
-                format!("failed to serialize managed source syncs: {err}"),
-                None,
-            )
-        })?;
-        plan = with_step(
-            plan,
-            PlanStep::ready("lab.managed_sources", "lab.managed_sources")
-                .inputs(PlanValues::new().json("sources", &syncs_json))
-                .build(),
-        );
-        messages.push(format!(
-            "Lab offload: refreshed {} managed runner source checkout(s) before dispatch.",
-            source_syncs.len()
-        ));
-    }
     plan = with_step(
         plan,
         PlanStep::ready("lab.runner_homeboy", "lab.runner_homeboy")
@@ -97,7 +60,7 @@ pub(crate) fn run_runner_resident_lab_offload(
 
     let source_path = lab_offload_source_path(request.normalized_args)?;
     let path_materialization_plan =
-        runner_resident_path_materialization_plan(runner_workspace_root, &source_syncs);
+        runner_resident_path_materialization_plan(runner_workspace_root);
 
     eprintln!(
         "Lab offload: running `{}` on runner `{}` in `{}`.",
@@ -215,56 +178,15 @@ fn runner_resident_exec_noise_policy(read_only_polling: bool) -> (bool, bool) {
 
 pub(crate) fn runner_resident_path_materialization_plan(
     runner_workspace_root: &str,
-    source_syncs: &[ManagedRunnerSourceRefreshOutput],
 ) -> PathMaterializationPlan {
-    let mut entries = vec![primary_workspace_existing_remote(runner_workspace_root)];
-    entries.extend(source_syncs.iter().map(|source| {
-        PathMaterializationEntry::new(
-            format!("managed_source:{}", source.id),
-            PATH_MATERIALIZATION_OWNER_LAB_EXECUTION_CONTEXT,
-            None,
-            source.path.clone(),
-            PATH_MATERIALIZATION_MODE_EXISTING_REMOTE,
-            PATH_MATERIALIZATION_STATUS_VALIDATED,
-        )
-    }));
-    PathMaterializationPlan::new(entries)
+    PathMaterializationPlan::new(vec![primary_workspace_existing_remote(
+        runner_workspace_root,
+    )])
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn runner_resident_path_materialization_plan_marks_existing_remote_sources() {
-        let source_syncs = vec![ManagedRunnerSourceRefreshOutput {
-            id: "runtime-agent-ci".to_string(),
-            label: "Runtime Agent CI".to_string(),
-            path: "/srv/homeboy/managed/runtime-agent-ci".to_string(),
-            remote_url: Some("git@example.com:repo/runtime-agent-ci.git".to_string()),
-            git_ref: Some("main".to_string()),
-            stdout: String::new(),
-            stderr: String::new(),
-        }];
-
-        let plan = runner_resident_path_materialization_plan(
-            "/srv/homeboy/resident/homeboy",
-            &source_syncs,
-        );
-
-        assert_eq!(plan.entries.len(), 2);
-        assert_eq!(plan.entries[0].role, "primary_workspace");
-        assert_eq!(plan.entries[0].remote_path, "/srv/homeboy/resident/homeboy");
-        assert_eq!(plan.entries[0].materialization_mode, "existing_remote");
-        assert_eq!(plan.entries[0].validation_status, "validated");
-        assert_eq!(plan.entries[1].role, "managed_source:runtime-agent-ci");
-        assert_eq!(
-            plan.entries[1].remote_path,
-            "/srv/homeboy/managed/runtime-agent-ci"
-        );
-        assert_eq!(plan.entries[1].materialization_mode, "existing_remote");
-        assert_eq!(plan.entries[1].validation_status, "validated");
-    }
 
     #[test]
     fn runner_resident_preflight_rejects_controller_local_path_env() {
@@ -279,7 +201,7 @@ mod tests {
             fixture_root.display().to_string(),
         )]);
         let plan =
-            runner_resident_path_materialization_plan("/srv/homeboy/_lab_workspaces/homeboy", &[]);
+            runner_resident_path_materialization_plan("/srv/homeboy/_lab_workspaces/homeboy");
         let path_remaps = path_remaps_from_materialization_plan(
             &plan,
             Some((&source, "/srv/homeboy/_lab_workspaces/homeboy")),
@@ -305,61 +227,4 @@ mod tests {
             .is_some_and(|id| id.contains("env `FIXTURE_ROOT`")
                 && id.contains(&fixture_root.display().to_string())));
     }
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-pub(crate) struct ManagedRunnerSourceRefreshOutput {
-    id: String,
-    label: String,
-    path: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    remote_url: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    git_ref: Option<String>,
-    stdout: String,
-    stderr: String,
-}
-
-pub(crate) fn refresh_managed_runner_sources(
-    runner_id: &str,
-    cwd: &str,
-) -> Result<Vec<ManagedRunnerSourceRefreshOutput>> {
-    let plans = plan_managed_runner_source_syncs(&provider_runner_source_contracts());
-    let mut refreshed = Vec::new();
-
-    for source in plans {
-        let (output, exit_code) = exec(
-            runner_id,
-            RunnerExecOptions::command(vec![
-                "sh".to_string(),
-                "-lc".to_string(),
-                source.script.clone(),
-            ])
-            .with_cwd(cwd),
-        )?;
-        if exit_code != 0 {
-            return Err(Error::validation_invalid_argument(
-                "managed_runner_source",
-                format!(
-                    "Managed runner source `{}` could not be refreshed before Lab dispatch",
-                    source.label
-                ),
-                Some(source.id),
-                Some(vec![format!(
-                    "Run `homeboy runner doctor {runner_id} --scope lab-offload --repair` for the first-class repair report before retrying."
-                )]),
-            ));
-        }
-        refreshed.push(ManagedRunnerSourceRefreshOutput {
-            id: source.id,
-            label: source.label,
-            path: source.path,
-            remote_url: source.remote_url,
-            git_ref: source.git_ref,
-            stdout: output.stdout,
-            stderr: output.stderr,
-        });
-    }
-
-    Ok(refreshed)
 }

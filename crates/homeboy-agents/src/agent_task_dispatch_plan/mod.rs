@@ -1162,11 +1162,9 @@ mod tests {
                     "id": "controller-selector",
                     "backend": "controller-backend",
                     "capabilities": ["runner-capability"],
-                    "runner_readiness": [{
-                        "id": "runner-secrets",
-                        "label": "Runner secrets",
-                        "secret_env": ["RUNNER_LOCAL_SECRET"]
-                    }]
+                    "invocation": {
+                        "env": [{ "name": "RUNNER_LOCAL_SECRET", "source": "secret_env" }]
+                    }
                 }))
                 .expect("runner provider")],
                 ..Default::default()

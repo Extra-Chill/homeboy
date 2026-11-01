@@ -1269,14 +1269,6 @@ belong on each `agent_task_executors[]` entry:
       }
     }
   ],
-  "runner_readiness": [
-    {
-      "id": "example-auth",
-      "label": "Example provider auth",
-      "secret_env": ["EXAMPLE_API_TOKEN"],
-      "remediation": "Configure EXAMPLE_API_TOKEN with homeboy agent-task auth."
-    }
-  ],
   "pi_readiness": {
     "timeout_ms": 30000,
     "env_allowlist": ["EXAMPLE_API_TOKEN"]
@@ -1304,8 +1296,8 @@ belong on each `agent_task_executors[]` entry:
 
 Homeboy treats these declarations as generic contracts:
 
-- `secret_env_requirements` and `runner_readiness` describe required secret env
-  names and redacted readiness probes without exposing values.
+- `secret_env_requirements` describes required secret env names without exposing
+  values.
 - `pi_readiness.timeout_ms` bounds the complete built-in Pi probe. It defaults
   to 20,000 milliseconds and must be between 1 and 120,000 milliseconds.
   `pi_readiness.env_allowlist` names environment variables passed to that probe

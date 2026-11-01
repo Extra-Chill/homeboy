@@ -143,14 +143,9 @@ pub use usage_cap::{
 };
 pub use workspace_types::*;
 
-// AgentTaskProviderRunnerSource lives in the below-core contract (core reads its
-// git ref); re-export it here so agent-side consumers keep the same path.
-pub use homeboy_lab_contract::AgentTaskProviderRunnerSource;
-
 #[cfg(test)]
 use catalog::{
     component_default_backend, enforce_runtime_preflight_checks_for_plan_with_providers,
-    validate_provider_runner_readiness_for_backend_with_providers,
 };
 /// Empty-change classification shared with the scheduler's review-form deferral
 /// guard (#15880), so both entry points reach one verdict.
@@ -174,4 +169,4 @@ use outcome_normalization::{
 #[cfg(test)]
 use resolution::{provider_requires_cwd_git_checkout_with_providers, select_provider_by_backend};
 #[cfg(test)]
-use secrets::{apply_provider_runner_secret_env_contracts_with_providers, provider_secret_sources};
+use secrets::provider_secret_sources;
