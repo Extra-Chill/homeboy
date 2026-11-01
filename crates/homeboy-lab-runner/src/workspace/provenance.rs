@@ -1853,7 +1853,7 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_git_cook_harvest_ignores_excluded_tracked_context_but_fails_closed_on_drift() {
+    fn snapshot_git_cook_harvest_materializes_tracked_context_but_fails_closed_on_drift() {
         crate::test_support::with_isolated_home(|_| {
             crate::register_lab_workspace_provenance_provider();
             let source = tempfile::tempdir().expect("source");
@@ -1902,9 +1902,18 @@ mod tests {
             .expect("materialize exclusion-aware snapshot-git");
             let remote = PathBuf::from(&synced.remote_path);
             assert!(remote.join("file.txt").is_file());
-            assert!(!remote.join("AGENTS.md").exists());
-            assert!(!remote.join(".claude").exists());
-            assert!(!remote.join(".datamachine").exists());
+            assert_eq!(
+                std::fs::read(remote.join("AGENTS.md")).unwrap(),
+                b"injected context\n"
+            );
+            assert_eq!(
+                std::fs::read(remote.join(".claude/settings.json")).unwrap(),
+                b"{}\n"
+            );
+            assert_eq!(
+                std::fs::read(remote.join(".datamachine/context.json")).unwrap(),
+                b"{}\n"
+            );
 
             let mut snapshot = homeboy_core::source_snapshot::collect_local(
                 "lab-excluded-context",
