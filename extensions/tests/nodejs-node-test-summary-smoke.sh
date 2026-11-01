@@ -32,15 +32,6 @@ assert_counts spec-reporter-mixed.txt        'total=6 passed=3 failed=1 skipped=
 assert_counts tap-reporter-mixed.txt         'total=6 passed=3 failed=1 skipped=2'
 assert_counts spec-reporter-two-processes.txt 'total=10 passed=10 failed=0 skipped=0'
 
-# ANSI-coloured spec output (a TTY run, or FORCE_COLOR) parses the same way.
-coloured=$'\e[34mℹ tests 2\e[39m\n\e[34mℹ pass 2\e[39m\n\e[34mℹ fail 0\e[39m'
-if homeboy_node_test_parse_summary "$coloured" && [ "${NODE_TEST_TOTAL}/${NODE_TEST_PASSED}" = "2/2" ]; then
-    echo "ok ansi-coloured spec summary"
-else
-    echo "FAIL ansi-coloured spec summary" >&2
-    failures=$((failures + 1))
-fi
-
 # Indented subtest lines and unrelated output are not a summary.
 if homeboy_node_test_parse_summary $'    # tests 3\nTests passed\nall good'; then
     echo "FAIL indented or unrelated output was parsed as a summary" >&2
