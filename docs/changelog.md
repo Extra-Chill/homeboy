@@ -4,6 +4,17 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.439.0] - 2026-11-01
+
+### Added
+- runner connect brings the runner binary to the controller's release
+
+### Changed
+- root the reusable workflows, pin CI to the monorepo, add desktop CI and releases
+
+### Fixed
+- pass component settings and path to dependency hydration
+
 ## [0.438.3] - 2026-10-31
 
 ### Fixed
