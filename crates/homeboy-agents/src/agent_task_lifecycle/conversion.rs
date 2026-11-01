@@ -397,14 +397,15 @@ pub(crate) fn provider_handle_from_outcome_metadata(
     outcome: &AgentTaskOutcome,
 ) -> Option<AgentTaskRunProviderHandle> {
     let provider = outcome.metadata.get("provider").and_then(Value::as_str)?;
-    let role_aliases = role_aliases_for_provider(provider);
     let provider_run_id = outcome
         .metadata
         .get("remote_run_id")
         .or_else(|| outcome.metadata.get("provider_run_id"))
         .and_then(Value::as_str)
         .or_else(|| {
-            provider_run_result(outcome, &role_aliases)
+            outcome
+                .outputs
+                .get("provider_run_result")
                 .and_then(|result| result.get("run_id").or_else(|| result.get("id")))
                 .and_then(Value::as_str)
         })?;
@@ -422,44 +423,6 @@ pub(crate) fn provider_handle_from_outcome_metadata(
         state: Some(AgentTaskState::from_outcome_status(outcome.status)),
         metadata: outcome.metadata.clone(),
     })
-}
-
-pub(crate) fn normalize_provider_run_result(outcome: &mut AgentTaskOutcome) {
-    if outcome.outputs.get("provider_run_result").is_some() {
-        return;
-    }
-    let role_aliases = outcome
-        .metadata
-        .get("provider")
-        .and_then(Value::as_str)
-        .map(role_aliases_for_provider)
-        .unwrap_or_default();
-    if let Some(result) = provider_run_result(outcome, &role_aliases).cloned() {
-        let mut outputs = outcome.outputs.as_object().cloned().unwrap_or_default();
-        outputs.insert("provider_run_result".to_string(), result);
-        outcome.outputs = Value::Object(outputs);
-    }
-}
-
-pub(crate) fn provider_run_result<'a>(
-    outcome: &'a AgentTaskOutcome,
-    role_aliases: &AgentTaskProviderRoleAliases,
-) -> Option<&'a Value> {
-    outcome
-        .outputs
-        .get("provider_run_result")
-        .or_else(|| {
-            role_aliases
-                .output_aliases_for_role("provider_run_result")
-                .into_iter()
-                .find_map(|alias| outcome.outputs.get(alias))
-        })
-        .or_else(|| {
-            role_aliases
-                .metadata_aliases_for_role("provider_run_result")
-                .into_iter()
-                .find_map(|alias| outcome.metadata.get(alias))
-        })
 }
 
 pub(crate) fn provider_handle_from_value(value: &Value) -> Option<AgentTaskExecutionHandle> {

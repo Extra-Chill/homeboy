@@ -216,11 +216,8 @@ pub fn agent_task_core_contract() -> AgentTaskCoreContract {
                 "workspace_materialization",
                 "provider_defaults",
                 "provider_preflight",
-                "timeout_artifact_discovery",
                 "lifecycle",
                 "artifact_contract",
-                "role_aliases",
-                "runtime_contract",
                 "integration_contract",
                 "extension_id",
                 "extension_path",
@@ -468,10 +465,6 @@ mod tests {
             .redaction_defaults
             .sensitive_keys
             .contains(&"refresh_token".to_string()));
-        assert!(contract
-            .provider_capability
-            .executor_provider_fields
-            .contains(&"timeout_artifact_discovery".to_string()));
         assert!(contract
             .provider_capability
             .workspace_materialization_fields

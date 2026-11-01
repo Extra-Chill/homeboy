@@ -1,5 +1,6 @@
 use super::common::request;
 use super::*;
+use crate::agent_task::AgentTaskTypedArtifact;
 
 #[test]
 fn controller_owned_publication_is_reported_as_not_attempted() {
@@ -37,54 +38,6 @@ fn controller_owned_publication_is_reported_as_not_attempted() {
     );
     assert_eq!(outcome.status, AgentTaskOutcomeStatus::Succeeded);
     assert!(outcome.failure_classification.is_none());
-}
-
-#[test]
-fn provider_outcome_roles_normalize_from_declared_aliases() {
-    let (_, mut provider) = request("task-a", "node provider.js".to_string());
-    provider.role_aliases = serde_json::from_value(json!({
-        "artifact_kinds": {
-            "patch": ["custom-patch"]
-        },
-        "outputs": {
-            "provider_run_result": ["custom_run_result"]
-        }
-    }))
-    .expect("role aliases");
-    let patch_path = std::env::temp_dir().join("custom.patch");
-    fs::write(&patch_path, "diff --git a/a b/a\n").expect("patch");
-    let mut outcome = AgentTaskOutcome {
-        task_id: "task-a".to_string(),
-        status: AgentTaskOutcomeStatus::Succeeded,
-        artifacts: vec![fixture_artifact(
-            "patch",
-            "custom-patch",
-            &patch_path,
-            Some("text/x-patch"),
-        )],
-        outputs: json!({
-            "custom_run_result": {
-                "run_id": "custom-run-1"
-            }
-        }),
-        ..Default::default()
-    };
-
-    normalize_provider_outcome_roles(&mut outcome, &provider);
-
-    assert_eq!(outcome.artifacts[0].kind, "patch");
-    assert_eq!(
-        outcome.artifacts[0].metadata["provider_kind"],
-        "custom-patch"
-    );
-    assert_eq!(
-        outcome.outputs["provider_run_result"]["run_id"],
-        "custom-run-1"
-    );
-    assert_eq!(
-        outcome.outputs["custom_run_result"]["run_id"],
-        "custom-run-1"
-    );
 }
 
 #[test]
@@ -766,91 +719,7 @@ fn revision_bound_no_change_verdict_without_patch_accepts_review_only_for_clean_
 }
 
 #[test]
-fn declared_sandbox_result_contract_rejects_private_runtime_result_shape() {
-    let (_, mut provider) = request("task-sandbox-private", "node provider.js".to_string());
-    provider.backend = "runtime-provider".to_string();
-    provider.result_contract = sandbox_result_contract();
-    let mut outcome = failed_outcome_with_run_result(json!({
-        "agent_result": { "status": "succeeded" },
-        "metadata": { "agent_runtime": { "id": "runtime-private" } }
-    }));
-    outcome.status = AgentTaskOutcomeStatus::Succeeded;
-    outcome.failure_classification = None;
-
-    normalize_provider_outcome_roles(&mut outcome, &provider);
-
-    assert_eq!(outcome.status, AgentTaskOutcomeStatus::Failed);
-    assert_eq!(
-        outcome.failure_classification,
-        Some(AgentTaskFailureClassification::Provider)
-    );
-    let diagnostic = outcome
-        .diagnostics
-        .iter()
-        .find(|diagnostic| diagnostic.class == "sandbox.public_result_envelope_missing")
-        .expect("missing public envelope diagnostic");
-    assert_eq!(diagnostic.data["private_shape_detected"], true);
-    assert!(outcome.typed_artifacts.is_empty());
-}
-
-#[test]
-fn declared_sandbox_result_contract_consumes_public_typed_artifacts() {
-    let (_, mut provider) = request("task-sandbox-public", "node provider.js".to_string());
-    provider.backend = "runtime-provider".to_string();
-    provider.result_contract = sandbox_result_contract();
-    let mut outcome = failed_outcome_with_run_result(json!({
-        "schema": "sample-runtime/artifact-result-envelope/v1",
-        "status": "succeeded",
-        "typed_artifacts": [{
-            "name": "agent_result",
-            "type": "agent_result",
-            "artifact_schema": "sample-runtime/agent-result/v1",
-            "payload": { "summary": "created patch" }
-        }]
-    }));
-    outcome.status = AgentTaskOutcomeStatus::Succeeded;
-    outcome.failure_classification = None;
-
-    normalize_provider_outcome_roles(&mut outcome, &provider);
-
-    assert_eq!(outcome.status, AgentTaskOutcomeStatus::Succeeded);
-    assert!(outcome.diagnostics.is_empty());
-    assert_eq!(outcome.typed_artifacts.len(), 1);
-    assert_eq!(outcome.typed_artifacts[0].name, "agent_result");
-    assert_eq!(
-        outcome.typed_artifacts[0].artifact_schema.as_deref(),
-        Some("sample-runtime/agent-result/v1")
-    );
-    assert_eq!(
-        outcome.typed_artifacts[0].payload["summary"],
-        "created patch"
-    );
-}
-
-#[test]
-fn declared_sandbox_result_contract_reports_missing_typed_artifacts() {
-    let (_, mut provider) = request("task-sandbox-empty", "node provider.js".to_string());
-    provider.backend = "runtime-provider".to_string();
-    provider.result_contract = sandbox_result_contract();
-    let mut outcome = failed_outcome_with_run_result(json!({
-        "schema": "sample-runtime/artifact-result-envelope/v1",
-        "status": "succeeded",
-        "typed_artifacts": []
-    }));
-    outcome.status = AgentTaskOutcomeStatus::Succeeded;
-    outcome.failure_classification = None;
-
-    normalize_provider_outcome_roles(&mut outcome, &provider);
-
-    assert_eq!(outcome.status, AgentTaskOutcomeStatus::Failed);
-    assert!(outcome.diagnostics.iter().any(|diagnostic| {
-        diagnostic.class == "sandbox.public_result_typed_artifacts_missing"
-            && diagnostic.message.contains("typed artifacts")
-    }));
-}
-
-#[test]
-fn unknown_provider_without_result_contract_keeps_generic_outcome() {
+fn generic_provider_keeps_untyped_outcome() {
     let (_, provider) = request("task-generic-provider", "node provider.js".to_string());
     let mut outcome = failed_outcome_with_run_result(json!({
         "agent_result": { "status": "succeeded" },
@@ -865,20 +734,6 @@ fn unknown_provider_without_result_contract_keeps_generic_outcome() {
     assert_eq!(outcome.failure_classification, None);
     assert!(outcome.diagnostics.is_empty());
     assert!(outcome.typed_artifacts.is_empty());
-}
-
-fn sandbox_result_contract() -> AgentTaskProviderResultContract {
-    serde_json::from_value(json!({
-        "typed_artifact_envelope": {
-            "schema": "sample-runtime/artifact-result-envelope/v1",
-            "output": "provider_run_result",
-            "provider_label": "Managed Sandbox",
-            "diagnostic_class_prefix": "sandbox",
-            "private_shape_markers": ["agent_result", "metadata.agent_runtime"],
-            "require_typed_artifacts": true
-        }
-    }))
-    .expect("sandbox result contract")
 }
 
 fn failed_outcome_with_run_result(run_result: Value) -> AgentTaskOutcome {

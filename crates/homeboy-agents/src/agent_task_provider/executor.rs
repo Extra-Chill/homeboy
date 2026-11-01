@@ -123,32 +123,6 @@ fn production_execution_preflight(
         diagnostics: diagnostics.to_vec(),
         version: None,
     };
-    let execution_plan = AgentTaskPlan::new(
-        format!("execution-preflight-{}", request.task_id),
-        vec![request.clone()],
-    );
-    for preflight in [
-        catalog.validate_selected_models(&execution_plan),
-        catalog.enforce_runtime_preflight_checks_for_plan(&execution_plan),
-    ] {
-        if let Err(error) = preflight {
-            return Some(AgentTaskOutcome {
-                task_id: request.task_id.clone(),
-                status: AgentTaskOutcomeStatus::Failed,
-                failure_classification: Some(AgentTaskFailureClassification::InvalidInput),
-                summary: Some(format!(
-                    "provider route failed execution preflight: {}",
-                    error.message
-                )),
-                diagnostics: vec![AgentTaskDiagnostic {
-                    class: "agent_task.provider_execution_preflight_failed".to_string(),
-                    message: error.message,
-                    data: error.details,
-                }],
-                ..Default::default()
-            });
-        }
-    }
     let mut readiness_cache = evidence
         .lock()
         .map(|evidence| evidence.readiness.clone())
@@ -711,19 +685,6 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
             }
         };
         let workspace_root = request.request.workspace.root.clone();
-        if let Err(message) = validate_provider_immediate_failure_patterns(&provider) {
-            return failure_outcome(
-                &request,
-                AgentTaskOutcomeStatus::Failed,
-                AgentTaskFailureClassification::InvalidInput,
-                "agent_task.provider_immediate_failure_configuration_invalid",
-                format!(
-                    "provider '{}' has invalid immediate failure configuration: {message}",
-                    provider.id
-                ),
-                json!({ "provider_id": provider.id, "backend": provider.backend }),
-            );
-        }
         bind_workspace_permission_root(
             &mut request.request.executor,
             workspace_root.as_deref(),
@@ -977,15 +938,11 @@ fn provider_resolution_failure_outcome(
 }
 
 fn selector_mismatch_message(backend: &str, selector: Option<&str>) -> String {
-    let base = format!(
+    format!(
         "no extension agent-task provider for backend '{}' matched selector '{}'",
         backend,
         selector.unwrap_or("")
-    );
-    match selector_runtime_provider_hint(backend, selector) {
-        Some(hint) => format!("{base}; {hint}"),
-        None => base,
-    }
+    )
 }
 
 #[cfg(test)]

@@ -1295,8 +1295,6 @@ pub fn record_remote_dispatch_failure(
 fn enrich_remote_dispatch_aggregate(envelope: &Value, aggregate: &mut AgentTaskAggregate) {
     let remote_run_id = envelope.get("run_id").and_then(Value::as_str);
     for outcome in &mut aggregate.outcomes {
-        normalize_provider_run_result(outcome);
-
         if outcome.evidence_refs.is_empty() {
             if let Some(remote_run_id) = remote_run_id {
                 outcome.evidence_refs.extend([

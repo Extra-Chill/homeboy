@@ -472,48 +472,6 @@ fn provider_manifest_preserves_unknown_metadata_on_export() {
         "provider_metadata": {
             "runtime": "provider-owned"
         },
-        "timeout_artifact_discovery": {
-            "paths": ["artifacts"],
-            "provider_discovery": true,
-            "artifact_patterns": [{
-                "kind": "log",
-                "filename_contains": ["provider"],
-                "provider_role": "diagnostic"
-            }]
-        },
-        "role_aliases": {
-            "outputs": { "patch": ["diff"] },
-            "provider_alias_policy": "strict"
-        },
-        "result_contract": {
-            "typed_artifact_envelope": {
-                "schema": "provider/artifact-result-envelope/v1",
-                "output": "provider_run_result",
-                "provider_label": "Provider Runtime",
-                "diagnostic_class_prefix": "provider_runtime",
-                "private_shape_markers": ["private_result"],
-                "require_typed_artifacts": true
-            }
-        },
-        "runtime_contract": {
-            "capabilities": ["sandbox", "artifacts"],
-            "lifecycle_states": {
-                "execution_states": { "queued": "queued", "done": "succeeded" },
-                "outcome_statuses": { "ok": "succeeded", "error": "failed" },
-                "failure_classifications": { "error": "provider" }
-            },
-            "normalization": {
-                "status_path": "outputs.runtime.status",
-                "summary_path": "outputs.runtime.summary",
-                "output_artifacts": [{
-                    "name": "patch",
-                    "type": "patch",
-                    "artifact_schema": "text/x-patch",
-                    "path": "outputs.runtime.artifacts.patch",
-                    "kind": "patch"
-                }]
-            }
-        },
         "workspace_materialization": {
             "cwd": WorkspaceCwdMode::GitCheckout.to_string(),
             "provider_workspace_mode": "linked"
@@ -526,53 +484,6 @@ fn provider_manifest_preserves_unknown_metadata_on_export() {
         "provider-owned"
     );
     assert_eq!(
-        provider.timeout_artifact_discovery.extra["provider_discovery"],
-        true
-    );
-    assert_eq!(
-        provider.timeout_artifact_discovery.artifact_patterns[0].extra["provider_role"],
-        "diagnostic"
-    );
-    assert_eq!(
-        provider.role_aliases.extra["provider_alias_policy"],
-        "strict"
-    );
-    let result_contract = provider
-        .result_contract
-        .typed_artifact_envelope
-        .as_ref()
-        .expect("typed artifact envelope contract");
-    assert_eq!(
-        result_contract.schema,
-        "provider/artifact-result-envelope/v1"
-    );
-    assert_eq!(result_contract.output, "provider_run_result");
-    assert_eq!(
-        result_contract.diagnostic_class_prefix.as_deref(),
-        Some("provider_runtime")
-    );
-    assert_eq!(
-        result_contract.private_shape_markers,
-        vec!["private_result"]
-    );
-    assert_eq!(result_contract.require_typed_artifacts, Some(true));
-    assert_eq!(
-        provider.runtime_contract.capabilities,
-        vec!["sandbox".to_string(), "artifacts".to_string()]
-    );
-    assert_eq!(
-        provider
-            .runtime_contract
-            .lifecycle_states
-            .outcome_statuses
-            .get("ok"),
-        Some(&AgentTaskOutcomeStatus::Succeeded)
-    );
-    assert_eq!(
-        provider.runtime_contract.normalization.output_artifacts[0].name,
-        "patch"
-    );
-    assert_eq!(
         provider
             .workspace_materialization
             .as_ref()
@@ -583,28 +494,6 @@ fn provider_manifest_preserves_unknown_metadata_on_export() {
 
     let exported = serde_json::to_value(&provider).expect("provider export");
     assert_eq!(exported["provider_metadata"]["runtime"], "provider-owned");
-    assert_eq!(
-        exported["timeout_artifact_discovery"]["provider_discovery"],
-        true
-    );
-    assert_eq!(
-        exported["timeout_artifact_discovery"]["artifact_patterns"][0]["provider_role"],
-        "diagnostic"
-    );
-    assert_eq!(exported["role_aliases"]["provider_alias_policy"], "strict");
-    assert_eq!(
-        exported["result_contract"]["typed_artifact_envelope"]["schema"],
-        "provider/artifact-result-envelope/v1"
-    );
-    assert_eq!(
-        exported["result_contract"]["typed_artifact_envelope"]["private_shape_markers"][0],
-        "private_result"
-    );
-    assert_eq!(exported["runtime_contract"]["capabilities"][0], "sandbox");
-    assert_eq!(
-        exported["runtime_contract"]["normalization"]["output_artifacts"][0]["name"],
-        "patch"
-    );
     assert_eq!(
         exported["workspace_materialization"]["provider_workspace_mode"],
         "linked"

@@ -44,7 +44,6 @@ impl FakePi {
         provider
             .provider_defaults
             .insert("pi".into(), self.config());
-        provider.cli.profiles.clear();
         provider
     }
 }

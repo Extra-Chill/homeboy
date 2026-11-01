@@ -1450,7 +1450,6 @@ impl CliRuntime {
             if let crate::commands::agent_task::AgentTaskCommand::Cook(cook) =
                 &mut agent_task.command
             {
-                cook.dispatch.cook.resolve_provider_profile();
                 if let Err(err) = crate::commands::agent_task::run::snapshot_cook_prompt(cook) {
                     output_runtime::emit_json_result_for_identity(
                         Err(err),

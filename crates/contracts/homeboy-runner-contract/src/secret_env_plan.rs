@@ -24,8 +24,6 @@ pub struct SecretEnvPlan {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub requirements: Vec<SecretEnvRequirement>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub provider_credentials: BTreeMap<String, SecretEnvProviderCredentialMapping>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env_name_mapping: BTreeMap<String, Vec<String>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub status: Vec<SecretEnvStatus>,
@@ -346,7 +344,6 @@ impl Default for SecretEnvPlan {
             public_env: BTreeMap::new(),
             secret_env_names: Vec::new(),
             requirements: Vec::new(),
-            provider_credentials: BTreeMap::new(),
             env_name_mapping: BTreeMap::new(),
             status: Vec::new(),
             redaction: SecretEnvRedactionPolicy::default(),
@@ -486,7 +483,6 @@ impl SecretEnvPlan {
         self.extend_secret_env_names(plan.secret_env_names);
         self.requirements =
             normalize_requirements(self.requirements.iter().cloned().chain(plan.requirements));
-        self.provider_credentials.extend(plan.provider_credentials);
         for (key, names) in plan.env_name_mapping {
             self.map_env_names(key, names);
         }
@@ -510,10 +506,6 @@ impl SecretEnvPlan {
     }
 
     pub fn secret_env_names(&self) -> Vec<String> {
-        let mapped_names = self
-            .provider_credentials
-            .values()
-            .flat_map(|mapping| mapping.secret_env.iter().cloned());
         let env_name_mapping_names = self
             .env_name_mapping
             .values()
@@ -526,7 +518,6 @@ impl SecretEnvPlan {
                     std::iter::once(requirement.name.clone())
                         .chain(requirement.source_env_names.iter().cloned())
                 }))
-                .chain(mapped_names)
                 .chain(env_name_mapping_names),
         )
     }
@@ -704,11 +695,6 @@ impl SecretEnvPlan {
             .filter(|requirement| !requirement.name.is_empty())
             .map(|requirement| (requirement.name.clone(), requirement))
             .collect::<BTreeMap<_, _>>();
-
-        let mapped_names = self
-            .provider_credentials
-            .values()
-            .flat_map(|mapping| mapping.secret_env.iter().cloned());
         let env_name_mapping_names = self
             .env_name_mapping
             .values()
@@ -718,7 +704,6 @@ impl SecretEnvPlan {
             self.secret_env_names
                 .iter()
                 .cloned()
-                .chain(mapped_names)
                 .chain(env_name_mapping_names),
         ) {
             requirements
@@ -922,14 +907,6 @@ impl SecretEnvInheritancePolicy {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SecretEnvProviderCredentialMapping {
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub secret_env: Vec<String>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub sources: BTreeMap<String, SecretEnvCredentialSource>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SecretEnvCredentialSource {
     #[serde(default = "default_secret_env_source")]
     pub source: String,
@@ -1119,32 +1096,12 @@ mod tests {
 
     #[test]
     fn secret_env_plan_redacts_secret_values_without_storing_them() {
-        let mut provider_credentials = BTreeMap::new();
-        provider_credentials.insert(
-            "example-oauth".to_string(),
-            SecretEnvProviderCredentialMapping {
-                secret_env: vec!["EXAMPLE_PROVIDER_REFRESH_TOKEN".to_string()],
-                sources: BTreeMap::from([(
-                    "EXAMPLE_PROVIDER_REFRESH_TOKEN".to_string(),
-                    SecretEnvCredentialSource {
-                        source: "keychain-bundle".to_string(),
-                        path: None,
-                        scope: Some("agent-task".to_string()),
-                        name: Some("example-oauth".to_string()),
-                        field: Some("refresh_token".to_string()),
-                        env_var: None,
-                        fallback_fields: Vec::new(),
-                        fallback_value: None,
-                    },
-                )]),
-            },
-        );
         let plan = SecretEnvPlan {
             public_env: BTreeMap::from([(
                 "PUBLIC_ENDPOINT".to_string(),
                 "https://example.test/?token=abc&ok=1".to_string(),
             )]),
-            provider_credentials,
+            secret_env_names: vec!["EXAMPLE_PROVIDER_REFRESH_TOKEN".to_string()],
             ..SecretEnvPlan::default()
         };
 
@@ -1159,49 +1116,6 @@ mod tests {
         assert_eq!(
             redacted.get("EXAMPLE_PROVIDER_REFRESH_TOKEN"),
             Some(&"[REDACTED]".to_string())
-        );
-    }
-
-    #[test]
-    fn secret_env_plan_rejects_string_credential_fallback_values() {
-        let error = serde_json::from_value::<SecretEnvPlan>(serde_json::json!({
-            "provider_credentials": {
-                "provider": {
-                    "sources": {
-                        "PROVIDER_FEDRAMP": {
-                            "source": "json-file",
-                            "fallback_value": "false"
-                        }
-                    }
-                }
-            }
-        }))
-        .expect_err("credential fallback values must be JSON booleans");
-
-        assert!(error.to_string().contains("invalid type"));
-    }
-
-    #[test]
-    fn secret_env_plan_deduplicates_direct_and_provider_secret_names() {
-        let plan = SecretEnvPlan {
-            secret_env_names: vec!["B_SECRET".to_string(), "A_SECRET".to_string()],
-            provider_credentials: BTreeMap::from([(
-                "provider".to_string(),
-                SecretEnvProviderCredentialMapping {
-                    secret_env: vec!["A_SECRET".to_string(), "C_SECRET".to_string()],
-                    sources: BTreeMap::new(),
-                },
-            )]),
-            ..SecretEnvPlan::default()
-        };
-
-        assert_eq!(
-            plan.secret_env_names(),
-            vec![
-                "A_SECRET".to_string(),
-                "B_SECRET".to_string(),
-                "C_SECRET".to_string()
-            ]
         );
     }
 
@@ -1223,13 +1137,6 @@ mod tests {
                     metadata: BTreeMap::from([("account".to_string(), "default".to_string())]),
                 }),
             }],
-            provider_credentials: BTreeMap::from([(
-                "provider".to_string(),
-                SecretEnvProviderCredentialMapping {
-                    secret_env: vec!["PROVIDER_REFRESH".to_string()],
-                    sources: BTreeMap::new(),
-                },
-            )]),
             env_name_mapping: BTreeMap::from([(
                 "runtime".to_string(),
                 vec!["RUNTIME_SECRET".to_string()],
@@ -1250,7 +1157,6 @@ mod tests {
             target.secret_env_names(),
             vec![
                 "EXPLICIT_SECRET".to_string(),
-                "PROVIDER_REFRESH".to_string(),
                 "PROVIDER_TOKEN".to_string(),
                 "RUNTIME_SECRET".to_string(),
                 "SOURCE_TOKEN".to_string()
@@ -1263,7 +1169,6 @@ mod tests {
                 .map(|hint| hint.provider.as_str()),
             Some("provider-auth")
         );
-        assert!(target.provider_credentials.contains_key("provider"));
         assert_eq!(
             target.inheritance.allowed_env_names,
             vec!["HOMEBOY_RUNTIME_SECRET_ENV".to_string()]

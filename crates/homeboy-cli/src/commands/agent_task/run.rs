@@ -505,7 +505,6 @@ pub(super) fn aggregate_value_with_failure_reasons(aggregate: &AgentTaskAggregat
 }
 
 pub(crate) fn run_cook(mut args: AgentTaskCookArgs) -> CmdResult<Value> {
-    args.dispatch.cook.resolve_provider_profile();
     snapshot_cook_prompt(&mut args)?;
     args.gates.snapshot_file_inputs()?;
     run_cook_with_executor(
@@ -627,7 +626,6 @@ pub(crate) fn preview_cook(
     mut args: AgentTaskCookArgs,
     provenance: Option<&crate::cli_surface::CommandArgumentProvenance>,
 ) -> CmdResult<Value> {
-    args.dispatch.cook.resolve_provider_profile();
     let mut progress = Vec::new();
     record_preview_phase(&mut progress, "prompt_input");
     if args
@@ -7474,7 +7472,6 @@ pub(crate) fn run_cook_with_executor_and_dispatcher_with_progress(
         .and_then(|repo| repo.as_ref())
         .map(|repo| &repo.component);
     let retained_gate_contract = args.gates.has_retained_contract();
-    args.dispatch.cook.resolve_provider_profile();
     snapshot_cook_prompt(&mut args)?;
     args.gates.snapshot_file_inputs()?;
     apply_component_verify_gates(&mut args, retained_gate_contract, component)?;
@@ -7557,7 +7554,6 @@ pub(crate) fn preflight_cook_execution_request(
     args: &mut AgentTaskCookArgs,
     provenance: Option<&crate::cli_surface::CommandArgumentProvenance>,
 ) -> homeboy::core::Result<()> {
-    args.dispatch.cook.resolve_provider_profile();
     snapshot_cook_prompt(&mut *args)?;
     args.gates.snapshot_file_inputs()?;
     validate_cook_request_with_provenance(args, provenance, None)?;
@@ -8023,14 +8019,7 @@ fn run_preflight_cook_execution(
                 protected_branches: args.protected_branches,
             },
             ai_disclosure: homeboy::agents::agent_task_service::CookAiDisclosure {
-                ai_tool: resolve_ai_tool_disclosure(
-                    &args.dispatch.cook.values.ai_tool,
-                    selected_identity.as_ref().map(|(backend, _, _)| backend.as_str()),
-                    selected_identity
-                        .as_ref()
-                        .and_then(|(_, selector, _)| selector.as_deref()),
-                    selected_model.as_deref(),
-                ),
+                ai_tool: args.dispatch.cook.values.ai_tool.clone(),
             // Model identity comes only from explicit/config/rotation selection
             // (`--model`, provider profile). Disclosure text like
             // `Pi (GPT-5.5)` is presentation, not execution provenance, and
@@ -8697,7 +8686,6 @@ fn validate_cook_provider_execution_plan(
             &catalog,
             &mut readiness_cache,
         )?;
-    catalog.validate_selected_models(&selected_plan)?;
     Ok(selected_plan)
 }
 
@@ -11352,47 +11340,6 @@ fn explicit_local_retry_admission_refusal(
         None,
         None,
     ))
-}
-
-/// Generic fallback disclosure used when no provider supplies one. Also the
-/// sentinel that marks `ai_tool` as "not explicitly overridden by the operator",
-/// so a `--model` selection can derive a concrete disclosure instead.
-const GENERIC_AI_DISCLOSURE: &str = "AI-assisted";
-
-/// Resolve the effective `ai_tool` disclosure for a cook.
-///
-/// When the operator explicitly supplied `--ai-tool`, that value is preserved.
-/// Otherwise (`ai_tool` is empty or the generic default) the disclosure is
-/// derived from the effective backend/selector/model via the provider catalog —
-/// the single typed disclosure source — so a `--model` override produces a
-/// correct AI-assistance statement rather than a stale hard-coded default.
-/// (#8404)
-pub(super) fn resolve_ai_tool_disclosure(
-    ai_tool: &str,
-    backend: Option<&str>,
-    selector: Option<&str>,
-    model: Option<&str>,
-) -> String {
-    let is_operator_override =
-        !ai_tool.trim().is_empty() && ai_tool.trim() != GENERIC_AI_DISCLOSURE;
-    if is_operator_override {
-        return ai_tool.to_string();
-    }
-
-    let backend = match backend {
-        Some(backend) if !backend.trim().is_empty() => backend.to_string(),
-        _ => match homeboy::agents::agent_tasks::provider::default_backend()
-            .ok()
-            .flatten()
-        {
-            Some(backend) => backend,
-            None => return ai_tool.to_string(),
-        },
-    };
-
-    homeboy::agents::agent_tasks::provider::AgentTaskProviderCatalog::discover()
-        .ai_disclosure_for(&backend, selector, model)
-        .unwrap_or_else(|| ai_tool.to_string())
 }
 
 #[cfg(test)]

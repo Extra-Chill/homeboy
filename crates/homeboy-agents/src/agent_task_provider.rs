@@ -16,10 +16,10 @@ use serde_json::{json, Value};
 
 pub(crate) use crate::agent_task::{
     AgentTaskArtifact, AgentTaskArtifactsPathProvenance, AgentTaskDiagnostic, AgentTaskEvidenceRef,
-    AgentTaskExecutionState, AgentTaskExecutorRequest, AgentTaskFailureClassification,
-    AgentTaskOutcome, AgentTaskOutcomeStatus, AgentTaskRequest, AgentTaskTypedArtifact,
-    AGENT_TASK_ARTIFACT_SCHEMA, AGENT_TASK_OUTCOME_SCHEMA, AGENT_TASK_REQUEST_SCHEMA,
-    AGENT_TOOL_POLICY_SCHEMA, AGENT_TOOL_REQUEST_SCHEMA, AGENT_TOOL_RESULT_SCHEMA,
+    AgentTaskExecutorRequest, AgentTaskFailureClassification, AgentTaskOutcome,
+    AgentTaskOutcomeStatus, AgentTaskRequest, AGENT_TASK_ARTIFACT_SCHEMA,
+    AGENT_TASK_OUTCOME_SCHEMA, AGENT_TASK_REQUEST_SCHEMA, AGENT_TOOL_POLICY_SCHEMA,
+    AGENT_TOOL_REQUEST_SCHEMA, AGENT_TOOL_RESULT_SCHEMA,
 };
 use crate::agent_task_scheduler::{
     AgentTaskExecutionContext, AgentTaskExecutorAdapter, AgentTaskPlan,
@@ -50,7 +50,6 @@ mod fixtures;
 mod outcome_normalization;
 mod resolution;
 mod runner_readiness;
-mod runtime_preflight_checks;
 mod runtime_readiness;
 mod runtime_types;
 pub mod structured_error;
@@ -73,8 +72,7 @@ pub use capacity_readiness::{
 };
 pub use catalog::*;
 pub use command_runner::{
-    provider_command_parts, run_provider_readiness_probe,
-    validate_provider_immediate_failure_patterns, ProviderReadinessInvocationCapacity,
+    provider_command_parts, run_provider_readiness_probe, ProviderReadinessInvocationCapacity,
     ProviderReadinessInvocationResult, PROVIDER_READINESS_RESULT_SCHEMA,
 };
 pub use dispatchability::{
@@ -102,14 +100,6 @@ pub use launch_context::{
     AGENT_TASK_PROVIDER_LAUNCH_CONTEXT_SCHEMA,
 };
 pub use resolution::{resolve_provider_for_backend, ProviderResolution};
-pub(crate) use resolution::{
-    role_aliases_for_executor, role_aliases_for_provider, selector_runtime_provider_hint,
-    timeout_artifact_discovery_for_executor,
-};
-pub use runtime_preflight_checks::{
-    ensure_runtime_preflight_checks, evaluate_runtime_preflight_checks, RuntimePreflightConflict,
-    RuntimePreflightReadiness,
-};
 pub(crate) use runtime_readiness::{effective_provider_config, readiness_request_key};
 pub use runtime_readiness::{
     preflight_plan_provider_runtime_readiness_with_providers, ProviderRuntimeReadinessCache,
@@ -121,7 +111,6 @@ pub use structured_error::{
     structured_error_failure_classification, PROVIDER_ACCOUNT_BLOCKED, PROVIDER_ERROR,
     PROVIDER_RATE_LIMITED, PROVIDER_STRUCTURED_ERROR_SCHEMA,
 };
-pub(crate) use types::wildcard_match;
 pub use types::*;
 pub(crate) use usage_cap::provider_capacity_config;
 pub use usage_cap::{
@@ -132,9 +121,7 @@ pub use usage_cap::{
 pub use workspace_types::*;
 
 #[cfg(test)]
-use catalog::{
-    component_default_backend, enforce_runtime_preflight_checks_for_plan_with_providers,
-};
+use catalog::component_default_backend;
 /// Empty-change classification shared with the scheduler's review-form deferral
 /// guard (#15880), so both entry points reach one verdict.
 pub(crate) use outcome_normalization::{
@@ -144,8 +131,8 @@ pub(crate) use outcome_normalization::{
 
 #[cfg(test)]
 use command_runner::{
-    immediate_provider_failure, is_transient_provider_error, provider_command_env,
-    run_provider_command, run_provider_command_once, PROVIDER_TRANSIENT_MAX_ATTEMPTS,
+    is_transient_provider_error, provider_command_env, run_provider_command,
+    run_provider_command_once, PROVIDER_TRANSIENT_MAX_ATTEMPTS,
 };
 #[cfg(test)]
 use fixtures::fixture_artifact;
