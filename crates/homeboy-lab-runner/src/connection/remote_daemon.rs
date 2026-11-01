@@ -1268,7 +1268,7 @@ pub(super) fn remote_daemon_connect_action_for_runner(
             .is_none_or(|identity| identity.trim().is_empty())
         {
             return Err(format!(
-                "remote daemon under lease `{}` reachable endpoint did not provide a build identity; refusing reattachment",
+                "remote daemon under lease `{}` reachable endpoint did not provide a build identity; refusing reattachment. Run `homeboy runner status {runner_id} --json` to inspect it.",
                 daemon.lease_id.as_deref().unwrap_or("unavailable"),
             ));
         }
