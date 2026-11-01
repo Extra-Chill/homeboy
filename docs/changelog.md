@@ -4,6 +4,18 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.441.0] - 2026-11-01
+
+### Added
+- allow disposable up pipelines on Lab runners
+
+### Changed
+- Prefetch runner releases over the daemon transport when connected
+- Refresh independent extension units concurrently in update_all
+
+### Fixed
+- Lab gate hydration and command share one deadline
+
 ## [0.440.3] - 2026-11-01
 
 ### Changed
