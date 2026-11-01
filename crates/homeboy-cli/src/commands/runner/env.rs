@@ -18,14 +18,6 @@ pub(super) fn env(runner_id: &str) -> CmdResult<RunnerEnvOutput> {
         .map(|key| (key, REDACTED_ENV_VALUE.to_string()))
         .collect();
 
-    let selected_tool = super::status::declared_diagnostics_contracts()
-        .iter()
-        .flat_map(|contract| contract.tools.iter())
-        .next()
-        .map(|declaration| {
-            super::status::declared_tool_diagnostics(declaration, Some(runner_id), &diagnostic_env)
-        });
-
     let secret_env = runner
         .secret_env
         .into_iter()
@@ -44,7 +36,7 @@ pub(super) fn env(runner_id: &str) -> CmdResult<RunnerEnvOutput> {
             diagnostics: RunnerEnvDiagnostics {
                 server_shell_env: "Use `homeboy ssh <server> -- printenv NAME` to inspect the server login shell environment; it does not include runner job env by default.".to_string(),
                 runner_job_env: "This output shows configured public env Homeboy injects into runner jobs. secret_env entries are shown as refs only; their values resolve on the runner at execution time and are never printed here.".to_string(),
-                selected_tool,
+                selected_tool: None,
             },
         },
         0,

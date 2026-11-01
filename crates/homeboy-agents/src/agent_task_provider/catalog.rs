@@ -35,17 +35,6 @@ fn shared_provider_evidence() -> Arc<Mutex<ProviderEvidenceStore>> {
     Arc::clone(PROVIDER_EVIDENCE.get_or_init(|| Arc::new(Mutex::new(Default::default()))))
 }
 
-/// The discovered catalog, keyed by the config root it was discovered from.
-///
-/// Providers come from agent-runtime manifests under the config root, so a
-/// catalog is only valid for the root that produced it. Caching it unkeyed made
-/// the first root a process ever looked at answer for every later one, which is
-/// invisible in production (one root per process) and load-bearing under test,
-/// where each hermetic home is a new root in the same process.
-#[cfg(not(test))]
-static PROVIDER_CATALOG: OnceLock<RwLock<Option<(PathBuf, AgentTaskProviderCatalog)>>> =
-    OnceLock::new();
-
 #[derive(Debug, Clone, Default)]
 pub struct ExtensionProviderAgentTaskExecutor {
     providers: Vec<AgentTaskExecutorProvider>,
@@ -64,39 +53,11 @@ pub struct AgentTaskProviderCatalog {
 
 impl AgentTaskProviderCatalog {
     pub fn discover() -> Self {
-        #[cfg(not(test))]
-        {
-            let root = catalog_config_root();
-            let cache = PROVIDER_CATALOG.get_or_init(|| RwLock::new(None));
-            if let Ok(slot) = cache.read() {
-                if let Some((cached_root, catalog)) = slot.as_ref() {
-                    if *cached_root == root {
-                        return catalog.clone();
-                    }
-                }
-            }
-            return Self::refresh();
-        }
-        #[cfg(test)]
-        {
-            discover_provider_catalog()
-        }
+        discover_provider_catalog()
     }
 
     pub fn refresh() -> Self {
-        #[cfg(not(test))]
-        {
-            let refreshed = discover_provider_catalog();
-            let cache = PROVIDER_CATALOG.get_or_init(|| RwLock::new(None));
-            if let Ok(mut slot) = cache.write() {
-                *slot = Some((catalog_config_root(), refreshed.clone()));
-            }
-            refreshed
-        }
-        #[cfg(test)]
-        {
-            discover_provider_catalog()
-        }
+        discover_provider_catalog()
     }
 
     pub fn providers(&self) -> &[AgentTaskExecutorProvider] {
@@ -256,15 +217,6 @@ impl AgentTaskProviderCatalog {
     ) -> HashMap<String, defaults::AgentTaskSecretSource> {
         provider_secret_sources_for_providers(&self.providers)
     }
-}
-
-/// The config root a cached catalog belongs to.
-///
-/// An unresolvable root is its own key, so a failed resolution never adopts the
-/// catalog of whatever root resolved last.
-#[cfg(not(test))]
-fn catalog_config_root() -> PathBuf {
-    homeboy_core::paths::homeboy().unwrap_or_else(|_| PathBuf::from("<unresolved-config-root>"))
 }
 
 fn discover_provider_catalog() -> AgentTaskProviderCatalog {
@@ -479,19 +431,6 @@ fn validate_provider_runner_readiness_for_backend_with_diagnostics(
                 provider_not_found_message(backend, &matching_diagnostics),
                 Some(backend.to_string()),
                 Some(suggestions),
-            ));
-        }
-        ProviderResolution::AmbiguousExtensionAlias { candidate_ids } => {
-            return Err(Error::validation_invalid_argument(
-                "backend",
-                format!(
-                    "backend '{backend}' matches multiple extension agent-task providers; pass --selector with one provider id"
-                ),
-                Some(backend.to_string()),
-                Some(vec![format!(
-                    "Available provider ids for selector: {}.",
-                    candidate_ids.join(", ")
-                )]),
             ));
         }
         ProviderResolution::SelectorMismatch {

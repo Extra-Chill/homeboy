@@ -1392,7 +1392,7 @@ fn run_plan_runtime_syncs_extension_shared_assets_and_standalone_runtime_root() 
     // The runtime lives inside a larger Git checkout, reached through a
     // symlinked parent: exactly the controller layout from #15259.
     let extensions = temp.path().join("extensions");
-    let runtime = extensions.join("agent-runtimes/pi");
+    let runtime = extensions.join("shared-assets/pi");
     std::fs::create_dir_all(runtime.join("scripts")).expect("runtime");
     std::fs::write(
         runtime.join("scripts/readiness.cjs"),
@@ -1402,7 +1402,7 @@ fn run_plan_runtime_syncs_extension_shared_assets_and_standalone_runtime_root() 
     std::fs::write(extensions.join("unrelated.txt"), "big checkout\n").expect("unrelated");
     std::fs::write(
         extensions.join("homeboy-extension-root.json"),
-        r#"{"shared_assets":["agent-runtimes","runtime-agent-ci","agent-task-contracts"]}"#,
+        r#"{"shared_assets":["shared-assets","runtime-agent-ci","agent-task-contracts"]}"#,
     )
     .expect("extension manifest");
     git(&extensions, &["init", "-b", "main"]);
@@ -1411,7 +1411,7 @@ fn run_plan_runtime_syncs_extension_shared_assets_and_standalone_runtime_root() 
     git(&extensions, &["add", "."]);
     git(&extensions, &["commit", "-m", "initial"]);
     let config = temp.path().join("config");
-    std::os::unix::fs::symlink(extensions.join("agent-runtimes"), &config).expect("symlink");
+    std::os::unix::fs::symlink(extensions.join("shared-assets"), &config).expect("symlink");
     let declared = config.join("pi");
 
     let args = vec![
@@ -1437,7 +1437,7 @@ fn run_plan_runtime_syncs_extension_shared_assets_and_standalone_runtime_root() 
     assert_eq!(
         runtime_workspaces[0].snapshot_includes,
         vec![
-            "agent-runtimes".to_string(),
+            "shared-assets".to_string(),
             "runtime-agent-ci".to_string(),
             "agent-task-contracts".to_string()
         ]

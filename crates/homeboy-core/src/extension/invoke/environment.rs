@@ -370,14 +370,6 @@ pub(crate) fn build_exec_env(
                 shared_lib_dir.to_string_lossy().to_string(),
             ));
         }
-
-        let agent_runtimes_dir = homeboy_core::paths::agent_runtimes_in_root(&config_root);
-        if agent_runtimes_dir.is_dir() {
-            env.push((
-                exec_context::AGENT_RUNTIMES_DIR.to_string(),
-                agent_runtimes_dir.to_string_lossy().to_string(),
-            ));
-        }
     }
 
     if let Ok(helper_pairs) = runtime_helper::ensure_all_helpers() {

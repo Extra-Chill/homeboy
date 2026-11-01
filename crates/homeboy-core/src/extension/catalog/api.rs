@@ -150,12 +150,6 @@ fn api_descriptor_from_manifest(extension: &ExtensionManifest) -> ExtensionApiDe
                 }),
         );
     }
-    capabilities.extend(
-        extension
-            .agent_runtimes
-            .iter()
-            .map(|runtime| capability_descriptor(&format!("agent-runtime.{}", runtime.id))),
-    );
     capabilities.sort_by(|left, right| left.id.cmp(&right.id));
     capabilities.dedup_by(|left, right| left.id == right.id);
 

@@ -4,9 +4,6 @@ use homeboy_engine_primitives::shell::shell_arg;
 use serde::{Deserialize, Serialize};
 
 use homeboy::agents::agent_tasks::provider::AgentTaskProviderCatalog;
-use homeboy::core::agent_runtime_manifest::{
-    discover_agent_runtime_catalog, AgentRuntimeDiagnosticsContract,
-};
 use homeboy::core::git;
 use homeboy::core::project::{self, Project};
 use homeboy::core::server::{self, SshClient};
@@ -40,7 +37,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::Command;
 
-use crate::commands::runner::{declared_tool_diagnostics, RunnerToolDiagnostics};
+use crate::commands::runner::RunnerToolDiagnostics;
 use crate::commands::CmdResult;
 
 #[derive(Args)]
@@ -1784,26 +1781,6 @@ fn extension_runtime_diagnostics(
         .and_then(|extension| extension.extension_path.as_ref())
         .and_then(|path| runtime_root_manifest_path(Path::new(path)))
         .map(|path| path.to_string_lossy().to_string());
-    let matching_manifests = discover_agent_runtime_catalog()
-        .manifests
-        .into_iter()
-        .filter(|manifest| manifest.extension_id.as_deref() == Some(extension_id))
-        .collect::<Vec<_>>();
-    let runtime_ids = matching_manifests
-        .iter()
-        .map(|manifest| manifest.id.clone())
-        .collect::<Vec<_>>();
-    let env = runtime_diagnostic_env(
-        matching_manifests
-            .iter()
-            .map(|manifest| &manifest.materialization.diagnostics),
-    );
-    let tools = matching_manifests
-        .iter()
-        .flat_map(|manifest| manifest.materialization.diagnostics.tools.iter())
-        .map(|declaration| declared_tool_diagnostics(declaration, None, &env))
-        .collect::<Vec<_>>();
-
     ExtensionRuntimeDiagnostics {
         extension_id: extension_id.to_string(),
         path,
@@ -1811,14 +1788,14 @@ fn extension_runtime_diagnostics(
         source_revision,
         root_manifest_path,
         runtime_generation: active_runtime_generation(),
-        runtime_manifest_found: !runtime_ids.is_empty(),
-        runtime_ids,
-        tools,
+        runtime_manifest_found: false,
+        runtime_ids: Vec::new(),
+        tools: Vec::new(),
         freshness: ExtensionRuntimeFreshness {
             source_revision_source: "installed extension source metadata".to_string(),
             refresh_behavior: "extension refresh replaces the installed extension from the supplied source/ref and reports the installed source revision when available".to_string(),
         },
-        path_behavior: "Shared agent runtime paths come from the extension manifest and generic runtime materialization declarations; Homeboy core does not special-case individual providers.".to_string(),
+        path_behavior: "Agent task execution uses built-in Pi.".to_string(),
         commands: ExtensionRuntimeDiagnosticCommands {
             show: format!("homeboy extension show {}", shell_arg(extension_id)),
             refresh: format!("homeboy extension refresh <source> --id {}", shell_arg(extension_id)),
@@ -1829,12 +1806,7 @@ fn extension_runtime_diagnostics(
 fn runtime_root_manifest_path(extension_path: &Path) -> Option<std::path::PathBuf> {
     let extension_path = std::fs::canonicalize(extension_path).ok()?;
     let parent = extension_path.parent()?;
-    let root = if parent.file_name()?.to_str()? == "agent-runtimes" {
-        parent.parent()?
-    } else {
-        parent
-    };
-    let manifest = root.join("homeboy-extension-root.json");
+    let manifest = parent.join("homeboy-extension-root.json");
     manifest.is_file().then_some(manifest)
 }
 
@@ -1843,41 +1815,6 @@ fn active_runtime_generation() -> Option<String> {
         .ok()
         .and_then(|root| std::fs::read_link(root.join("runtime-generations/current")).ok())
         .and_then(|generation| generation.to_str().map(str::to_string))
-}
-
-fn runtime_diagnostic_env<'a>(
-    contracts: impl Iterator<Item = &'a AgentRuntimeDiagnosticsContract>,
-) -> BTreeMap<String, String> {
-    let mut names = Vec::new();
-    for contract in contracts {
-        for declaration in &contract.tools {
-            names.extend(declaration.configured_binary_env.iter().cloned());
-            if let Some(name) = &declaration.install_dir_env {
-                names.push(name.clone());
-            }
-        }
-        for declaration in &contract.runtimes {
-            names.extend(declaration.configured_binary_env.iter().cloned());
-            if let Some(name) = &declaration.install_dir_env {
-                names.push(name.clone());
-            }
-            for package in &declaration.packages {
-                if let Some(name) = &package.env_override {
-                    names.push(name.clone());
-                }
-            }
-            for diagnostic in &declaration.source_consistency {
-                if !diagnostic.path.contains("${") && diagnostic.path != "configured_binary" {
-                    names.push(diagnostic.path.clone());
-                }
-            }
-        }
-    }
-
-    names
-        .into_iter()
-        .filter_map(|name| std::env::var(&name).ok().map(|value| (name, value)))
-        .collect()
 }
 
 fn run_action(
@@ -2438,85 +2375,23 @@ mod tests {
         });
     }
 
-    #[test]
-    fn extension_runtime_diagnostics_reports_generic_materialization_guidance() {
-        with_isolated_home(|home| {
-            let extension_id = "generic-runtime";
-            let extension_dir = home
-                .path()
-                .join(".config/homeboy/extensions")
-                .join(extension_id);
-            fs::create_dir_all(&extension_dir).expect("extension dir");
-            fs::write(
-                extension_dir.join(format!("{extension_id}.json")),
-                r#"{
-  "name": "Generic runtime extension",
-  "version": "1.0.0",
-  "agent_runtimes": [{
-    "id": "generic-runtime/v1",
-    "agent_task_executors": [{
-      "id": "generic-runtime.default",
-      "backend": "generic-runtime"
-    }],
-    "materialization": {
-      "diagnostics": {
-        "tools": [{
-          "tool": "generic-tool",
-          "configured_binary_env": ["HOMEBOY_GENERIC_TOOL_BIN"],
-          "install_dir_env": "HOMEBOY_GENERIC_TOOL_INSTALL_DIR",
-          "default_install_dir": "/tmp/homeboy/generic-tool",
-          "managed_cache_source": "${install_dir}/source",
-          "managed_cache_binary": "${managed_cache_source}/bin/generic-tool",
-          "effective_binary_rule": "managed cache binary, configured binary, then PATH",
-          "diagnostic_script": "generic-tool --version"
-        }]
-      }
-    }
-  }]
-}"#,
-            )
-            .expect("extension manifest");
-            std::env::set_var("HOMEBOY_GENERIC_TOOL_BIN", "/custom/bin/generic-tool");
-
-            let diagnostics =
-                extension_runtime_diagnostics(extension_id, Some("abc1234".to_string()));
-
-            assert_eq!(diagnostics.extension_id, extension_id);
-            assert_eq!(diagnostics.source_revision.as_deref(), Some("abc1234"));
-            assert!(diagnostics.runtime_manifest_found);
-            assert_eq!(diagnostics.runtime_ids, vec!["generic-runtime/v1"]);
-            assert_eq!(diagnostics.tools.len(), 1);
-            assert_eq!(diagnostics.tools[0].tool, "generic-tool");
-            assert_eq!(
-                diagnostics.tools[0].configured_binary.as_deref(),
-                Some("/custom/bin/generic-tool")
-            );
-            assert!(diagnostics
-                .path_behavior
-                .contains("does not special-case individual providers"));
-            assert!(diagnostics.freshness.refresh_behavior.contains("reports"));
-
-            std::env::remove_var("HOMEBOY_GENERIC_TOOL_BIN");
-        });
-    }
-
     #[cfg(unix)]
     #[test]
     fn extension_runtime_diagnostics_reports_durable_root_and_generation() {
         with_isolated_home(|home| {
             let config = home.path().join(".config/homeboy");
-            let source = config.join("extension-sources/pi/agent-runtimes/pi");
+            let source = config.join("extension-sources/pi/fixture");
             fs::create_dir_all(&source).expect("durable extension source");
             fs::write(source.join("pi.json"), r#"{"name":"Pi","version":"2.0.0"}"#)
                 .expect("extension manifest");
             fs::write(
                 config.join("extension-sources/pi/homeboy-extension-root.json"),
-                r#"{"shared_assets":["agent-runtimes"]}"#,
+                r#"{"shared_assets":["shared-assets"]}"#,
             )
             .expect("root manifest");
             fs::create_dir_all(config.join("extensions")).expect("extensions directory");
             symlink(&source, config.join("extensions/pi")).expect("extension link");
-            fs::create_dir_all(config.join("runtime-generations/generation-2/agent-runtimes"))
+            fs::create_dir_all(config.join("runtime-generations/generation-2/shared-assets"))
                 .expect("runtime generation");
             symlink("generation-2", config.join("runtime-generations/current"))
                 .expect("current generation link");

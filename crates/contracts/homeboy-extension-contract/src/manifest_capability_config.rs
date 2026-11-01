@@ -88,26 +88,6 @@ pub struct ReleasePreflightConfig {
     pub needs: Vec<String>,
 }
 
-/// Agent runtime package declarations supplied by an extension manifest.
-///
-/// These are intentionally provider-agnostic at the extension layer. Consumers
-/// such as agent-task parse the provider-specific payloads they understand.
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
-pub struct AgentRuntimeManifestConfig {
-    pub id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub label: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub agent_task_executors: Vec<serde_json::Value>,
-    /// JSON field selectors in provider configuration payloads whose values are
-    /// controller paths requiring Lab materialization. Selectors use dotted
-    /// object keys and `[]`/`*` for array or map values.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub config_path_fields: Vec<String>,
-    #[serde(flatten, default, skip_serializing_if = "HashMap::is_empty")]
-    pub extra: HashMap<String, serde_json::Value>,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct ExtensionToolDiagnosticDeclaration {
     pub id: String,

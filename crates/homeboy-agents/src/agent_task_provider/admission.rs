@@ -141,24 +141,6 @@ impl AgentTaskProviderAdmissionPlan {
                 }),
             });
             required_runtime_sources.push(identity.source_revision.clone());
-            let materialization = serde_json::from_value::<
-                homeboy_core::agent_runtime_manifest::AgentRuntimeMaterializationPlan,
-            >(identity.materialization_plan.clone())
-            .ok();
-            let sources_materialized = materialization
-                .as_ref()
-                .is_none_or(|plan| plan.runtime_sources.is_empty() || plan.runtime_path.is_some());
-            if let Some(plan) = materialization.as_ref() {
-                required_runtime_sources
-                    .extend(plan.runtime_sources.iter().map(|source| source.id.clone()));
-            }
-            predicates.push(AgentTaskProviderAdmissionPredicate {
-                id: "runtime_sources_materialized".to_string(),
-                satisfied: sources_materialized,
-                detail: (!sources_materialized).then(|| {
-                    "controller runtime sources require runner materialization".to_string()
-                }),
-            });
             if !revision_matches {
                 actions.push(AgentTaskProviderAdmissionAction::MaterializeRuntime {
                     provider_id: identity.provider_id.clone(),
@@ -230,11 +212,6 @@ fn predicate_for_resolution(
                 .map(|provider| provider.id.as_str())
                 .collect::<Vec<_>>()
                 .join(", ")
-        )),
-        ProviderResolution::AmbiguousExtensionAlias { candidate_ids } => Some(format!(
-            "backend `{}` is ambiguous: {}",
-            request.backend,
-            candidate_ids.join(", ")
         )),
         ProviderResolution::SelectorMismatch { available_ids, .. } => Some(format!(
             "selector `{}` does not match backend `{}` providers: {}",
@@ -340,33 +317,6 @@ mod tests {
             action,
             AgentTaskProviderAdmissionAction::MaterializeRuntime { .. }
         )));
-    }
-
-    #[test]
-    fn plan_blocks_unmaterialized_runtime_sources_without_mutating() {
-        let revision = "0123456789abcdef0123456789abcdef01234567";
-        let identity = homeboy_core::agent_task_config::ResolvedAgentTaskRuntimeIdentity {
-            runtime_id: "runtime".to_string(),
-            provider_id: "alpha.a".to_string(),
-            source_selector: "extension:alpha".to_string(),
-            source_revision: revision.to_string(),
-            freshness: homeboy_core::agent_task_config::ResolvedAgentTaskRuntimeFreshness::Pinned,
-            provider: serde_json::json!({"id":"alpha.a","backend":"alpha"}),
-            materialization_plan: serde_json::json!({"schema":"homeboy/agent-runtime-materialization-plan/v2","runtime_id":"runtime","runtime_sources":[{"id":"source","locator":{"kind":"local_path","path":"/controller/source"},"content_identity":revision,"destination_path":"runtime"}]}),
-        };
-        let plan = AgentTaskProviderAdmissionPlan::compile(
-            AgentTaskProviderAdmissionRequest {
-                backend: "alpha".to_string(),
-                selector: Some("alpha.a".to_string()),
-                model: None,
-                runtime_identity: Some(identity),
-            },
-            &[provider("alpha.a", "alpha", Some(revision))],
-        );
-        assert!(!plan.is_ready());
-        assert!(plan.predicates.iter().any(|predicate| predicate.id
-            == "runtime_sources_materialized"
-            && !predicate.satisfied));
     }
 
     #[test]

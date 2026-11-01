@@ -70,16 +70,8 @@ pub(super) fn select_provider<'a>(
 pub enum ProviderResolution<'a> {
     /// Exactly one provider matched the backend/selector.
     Resolved(&'a AgentTaskExecutorProvider),
-    /// No provider matched the backend either exactly or via extension alias.
     NotFound,
-    /// Multiple providers share `extension_id == backend` and no selector
-    /// disambiguated them, so the alias is ambiguous. The candidate provider
-    /// ids are surfaced so callers can tell the operator which `--selector`
-    /// values would resolve it.
-    AmbiguousExtensionAlias { candidate_ids: Vec<String> },
-    /// One or more providers matched the backend/extension alias, but the
-    /// supplied selector did not match any of them. The selectable provider
-    /// ids are surfaced so the operator can correct the `--selector`.
+    /// The selector did not match a provider for the backend.
     SelectorMismatch {
         available_ids: Vec<String>,
         selector_hint: Option<String>,
@@ -165,7 +157,7 @@ pub fn resolve_provider_for_backend<'a>(
                 .collect(),
         };
     }
-    resolve_provider_by_extension_alias(providers, backend, selector)
+    ProviderResolution::NotFound
 }
 
 pub(super) fn select_provider_by_backend<'a>(
@@ -174,53 +166,6 @@ pub(super) fn select_provider_by_backend<'a>(
     selector: Option<&str>,
 ) -> Option<&'a AgentTaskExecutorProvider> {
     resolve_provider_for_backend(providers, backend, selector).resolved()
-}
-
-fn resolve_provider_by_extension_alias<'a>(
-    providers: &'a [AgentTaskExecutorProvider],
-    backend: &str,
-    selector: Option<&str>,
-) -> ProviderResolution<'a> {
-    let alias_matches: Vec<&AgentTaskExecutorProvider> = providers
-        .iter()
-        .filter(|provider| provider.extension_id.as_deref() == Some(backend))
-        .collect();
-
-    if alias_matches.is_empty() {
-        return ProviderResolution::NotFound;
-    }
-
-    match selector {
-        None => {
-            if alias_matches.len() == 1 {
-                ProviderResolution::Resolved(alias_matches[0])
-            } else {
-                ProviderResolution::AmbiguousExtensionAlias {
-                    candidate_ids: alias_matches
-                        .iter()
-                        .map(|provider| provider.id.clone())
-                        .collect(),
-                }
-            }
-        }
-        Some(selector) => match alias_matches
-            .iter()
-            .find(|provider| provider.id == selector)
-        {
-            Some(provider) => ProviderResolution::Resolved(provider),
-            None => ProviderResolution::SelectorMismatch {
-                selector_hint: selector_runtime_provider_hint_from_providers(
-                    &alias_matches,
-                    backend,
-                    Some(selector),
-                ),
-                available_ids: alias_matches
-                    .iter()
-                    .map(|provider| provider.id.clone())
-                    .collect(),
-            },
-        },
-    }
 }
 
 pub(super) fn required_extension_ids_for_plan_with_providers(

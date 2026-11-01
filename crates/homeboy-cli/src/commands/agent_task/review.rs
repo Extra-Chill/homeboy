@@ -1958,7 +1958,6 @@ fn providers_with_catalog(
             Some(provider_id.as_str()),
             model.as_deref(),
         ),
-        Some(ProviderRoute::Ambiguous { backend, .. }) => (backend.as_str(), None, None),
         _ => (
             args.backend.as_deref().unwrap_or_default(),
             args.selector.as_deref(),
@@ -2300,10 +2299,6 @@ enum ProviderRoute {
     SelectionRequired {
         choices: Vec<ProviderSelectionChoice>,
     },
-    Ambiguous {
-        backend: String,
-        candidate_ids: Vec<String>,
-    },
 }
 
 #[derive(Debug, Clone)]
@@ -2328,7 +2323,6 @@ impl ProviderRoute {
             }
             | Self::Blocked { .. } => "configuration_unavailable",
             Self::SelectionRequired { .. } => "selection_required",
-            Self::Ambiguous { .. } => "configuration_ambiguous",
         }
     }
 
@@ -2354,18 +2348,6 @@ impl ProviderRoute {
                 .expect("selection-required routes have choices")
                 .command
                 .clone(),
-            Self::Ambiguous {
-                backend,
-                candidate_ids,
-            } => format!(
-                "homeboy agent-task providers --backend {} --selector {} --validate-readiness",
-                shell_arg(backend),
-                shell_arg(
-                    candidate_ids
-                        .first()
-                        .expect("ambiguous routes have candidates")
-                ),
-            ),
         }
     }
 }
@@ -2577,13 +2559,6 @@ fn resolve_provider_route_for(
                 dispatchable: true,
             })
         }
-        ProviderResolution::AmbiguousExtensionAlias { mut candidate_ids } => {
-            candidate_ids.sort();
-            Some(ProviderRoute::Ambiguous {
-                backend: route.backend,
-                candidate_ids,
-            })
-        }
         ProviderResolution::NotFound | ProviderResolution::SelectorMismatch { .. } => {
             Some(ProviderRoute::Blocked {
                 reason: format!(
@@ -2662,10 +2637,7 @@ fn provider_report_state(
 ) -> &'static str {
     // These routes identify the next operator decision. An empty backend passed
     // to dispatchability is not a concrete route and must not overwrite it.
-    if matches!(
-        route,
-        Some(ProviderRoute::SelectionRequired { .. } | ProviderRoute::Ambiguous { .. })
-    ) {
+    if matches!(route, Some(ProviderRoute::SelectionRequired { .. })) {
         return route.expect("matched route").state();
     }
     if let Some(verdict) = dispatchability {
@@ -2699,9 +2671,6 @@ fn validate_effective_provider_route(
             ProviderRoute::Blocked { reason, .. } => reason.clone(),
             ProviderRoute::SelectionRequired { .. } => {
                 "Cook requires an explicit --backend selection".to_string()
-            }
-            ProviderRoute::Ambiguous { backend, .. } => {
-                format!("Cook's effective backend `{backend}` requires --selector")
             }
             ProviderRoute::Resolved { .. } => unreachable!(),
         };
@@ -3857,22 +3826,8 @@ mod tests {
     }
 
     #[test]
-    fn providers_end_to_end_reports_ambiguous_and_missing_default_routes() {
+    fn providers_end_to_end_reports_missing_default_route() {
         crate::test_support::with_isolated_home(|_| {
-            save_provider_policy(Some("extension"), None);
-            let mut first = provider("first.provider", "first");
-            first.extension_id = Some("extension".to_string());
-            let mut second = provider("second.provider", "second");
-            second.extension_id = Some("extension".to_string());
-            let output =
-                providers_with_catalog(providers_args(), provider_catalog(vec![first, second]))
-                    .expect("ambiguous output")
-                    .0;
-            assert_eq!(
-                output["operator_summary"]["state"],
-                "configuration_ambiguous"
-            );
-
             save_provider_policy(None, None);
             let output = providers_with_catalog(providers_args(), provider_catalog(Vec::new()))
                 .expect("missing-default output")

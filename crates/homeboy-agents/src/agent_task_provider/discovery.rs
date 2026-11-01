@@ -1,7 +1,7 @@
 //! The Pi executor is built in; provider discovery never reads extensions.
 
+use super::AgentRuntimeDiscoveryDiagnostic;
 use super::AgentTaskExecutorProvider;
-use homeboy_core::agent_runtime_manifest::AgentRuntimeDiscoveryDiagnostic;
 use serde::{Deserialize, Serialize};
 
 pub(crate) fn discover_agent_task_executor_providers() -> Vec<AgentTaskExecutorProvider> {

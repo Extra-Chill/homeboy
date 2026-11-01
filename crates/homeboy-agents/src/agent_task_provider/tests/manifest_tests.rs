@@ -109,7 +109,7 @@ fn provider_missing_chains_matching_runtime_discovery_diagnostics() {
     let executor = ExtensionProviderAgentTaskExecutor::from_catalog(AgentTaskProviderCatalog {
         providers: Vec::new(),
         diagnostics: vec![AgentRuntimeDiscoveryDiagnostic {
-            class: "agent_runtime_manifest.schema_mismatch".to_string(),
+            class: "provider.invalid".to_string(),
             message: "invalid type: map, expected string at line 12 column 18".to_string(),
             runtime_id: Some("pi".to_string()),
             extension_id: None,
@@ -132,12 +132,12 @@ fn provider_missing_chains_matching_runtime_discovery_diagnostics() {
 
     let summary = outcome.summary.as_deref().expect("summary");
     assert!(summary.contains("no extension agent-task provider found for backend 'pi'"));
-    assert!(summary.contains("agent_runtime_manifest.schema_mismatch"));
+    assert!(summary.contains("provider.invalid"));
     assert!(summary.contains("invalid type: map, expected string at line 12 column 18"));
     assert_eq!(outcome.diagnostics[0].class, "agent_task.provider_missing");
     assert_eq!(
         outcome.diagnostics[0].data["runtime_discovery_diagnostics"][0]["class"],
-        "agent_runtime_manifest.schema_mismatch"
+        "provider.invalid"
     );
 }
 
@@ -167,7 +167,7 @@ fn provider_readiness_invocation_defaults_and_validates_its_total_timeout() {
             .as_ref()
             .expect("readiness invocation")
             .timeout_ms,
-        homeboy_extension_contract::agent_task_executor_declaration::DEFAULT_PROVIDER_READINESS_INVOCATION_TIMEOUT_MS
+        DEFAULT_PROVIDER_READINESS_INVOCATION_TIMEOUT_MS
     );
     assert_eq!(
         serde_json::to_value(&provider).expect("provider export")["readiness_invocation"]

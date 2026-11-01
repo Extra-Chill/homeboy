@@ -645,13 +645,6 @@ pub fn extension_manifest(id: &str) -> Result<PathBuf> {
     Ok(extension_manifest_in_root(&homeboy()?, id))
 }
 
-/// Agent runtime manifest file path below an already-resolved config root.
-pub fn agent_runtime_manifest_in_root(config_root: &Path, id: &str) -> PathBuf {
-    agent_runtimes_in_root(config_root)
-        .join(id)
-        .join(format!("{}.json", id))
-}
-
 /// Key file path
 pub fn key(server_id: &str) -> Result<PathBuf> {
     Ok(keys_in_root(&homeboy()?).join(format!("{}_id_rsa", server_id)))

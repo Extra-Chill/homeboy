@@ -829,7 +829,7 @@ mod tests {
     }
 
     #[test]
-    fn relink_materializes_declared_shared_agent_runtimes() {
+    fn relink_materializes_declared_shared_assets() {
         with_isolated_home(|home| {
             let home = home.path();
             let old_source = home.join("old-source");
@@ -859,7 +859,7 @@ mod tests {
     }
 
     #[test]
-    fn replace_from_monorepo_root_with_id_materializes_declared_shared_agent_runtimes() {
+    fn replace_from_monorepo_root_with_id_materializes_declared_shared_assets() {
         with_isolated_home(|home| {
             let home = home.path();
             let old_source = home.join("old-source");

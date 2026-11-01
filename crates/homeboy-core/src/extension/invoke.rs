@@ -754,11 +754,6 @@ mod tests {
             std::os::windows::fs::symlink_dir(&shared_source, &shared_lib_dir)
                 .expect("link shared library into active runtime");
 
-            let agent_runtimes_dir = homeboy_core::paths::agent_runtimes_in_root(&config_root);
-            std::fs::create_dir_all(&agent_runtimes_dir).expect("agent runtimes");
-            std::fs::write(agent_runtimes_dir.join("fixture-runtime"), "active")
-                .expect("agent runtime asset");
-
             let hashed_extension_source = home
                 .path()
                 .join("extension-snapshots")
@@ -779,10 +774,7 @@ mod tests {
                 None,
             );
 
-            for (name, expected) in [
-                (exec_context::SHARED_LIB_DIR, &shared_lib_dir),
-                (exec_context::AGENT_RUNTIMES_DIR, &agent_runtimes_dir),
-            ] {
+            for (name, expected) in [(exec_context::SHARED_LIB_DIR, &shared_lib_dir)] {
                 assert_eq!(
                     env.iter()
                         .find(|(key, _)| key == name)
@@ -793,7 +785,7 @@ mod tests {
             }
 
             let result = execute_extension_command(
-                "sh -c '. \"$HOMEBOY_SHARED_LIB_DIR/fixture-helper.sh\"; fixture_helper; test -f \"$HOMEBOY_AGENT_RUNTIMES_DIR/fixture-runtime\"'",
+                "sh -c '. \"$HOMEBOY_SHARED_LIB_DIR/fixture-helper.sh\"; fixture_helper'",
                 &[],
                 Some(&hashed_extension_source.to_string_lossy()),
                 &env,
@@ -818,11 +810,6 @@ mod tests {
                 !env.iter()
                     .any(|(key, _)| key == exec_context::SHARED_LIB_DIR),
                 "missing shared library assets must not produce a bogus binding"
-            );
-            assert!(
-                !env.iter()
-                    .any(|(key, _)| key == exec_context::AGENT_RUNTIMES_DIR),
-                "missing agent runtime assets must not produce a bogus binding"
             );
         });
     }

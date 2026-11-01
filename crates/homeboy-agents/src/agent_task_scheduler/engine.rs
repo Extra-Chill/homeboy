@@ -74,17 +74,13 @@ pub enum ProviderRouteDiagnosticData {
     ProviderMissing {
         backend: String,
         runtime_discovery_diagnostics:
-            Vec<homeboy_core::agent_runtime_manifest::AgentRuntimeDiscoveryDiagnostic>,
+            Vec<crate::agent_task_provider::AgentRuntimeDiscoveryDiagnostic>,
     },
     ProviderSelectorMismatch {
         backend: String,
         selector: Option<String>,
         available_provider_ids: Vec<String>,
         hint: Option<String>,
-    },
-    ProviderAmbiguous {
-        backend: String,
-        available_provider_ids: Vec<String>,
     },
     ProviderCapabilityUnavailable {
         layer: String,
@@ -2398,9 +2394,6 @@ fn provider_readiness_exhausted_outcome(
             ProviderRouteDiagnosticData::ProviderMissing { .. } => "agent_task.provider_missing",
             ProviderRouteDiagnosticData::ProviderSelectorMismatch { .. } => {
                 "agent_task.provider_selector_mismatch"
-            }
-            ProviderRouteDiagnosticData::ProviderAmbiguous { .. } => {
-                "agent_task.provider_ambiguous"
             }
             ProviderRouteDiagnosticData::ProviderCapabilityUnavailable { .. } => return None,
         };
