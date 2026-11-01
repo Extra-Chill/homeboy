@@ -445,8 +445,9 @@ pub struct RunnerConnectFailureEvidence {
     pub failure_evidence_ref: Option<RunnerConnectFailureEvidenceRef>,
 }
 
-/// How `homeboy runner connect` reconciled the runner's configured Homeboy
-/// binary with the controller's own release before attaching.
+/// How runner-binary convergence reconciled the runner's configured Homeboy
+/// binary with a target controller release: `homeboy runner connect`'s own
+/// build, or the controller `homeboy upgrade --upgrade-runner` installed.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum RunnerBinaryConvergenceStatus {
@@ -454,7 +455,7 @@ pub enum RunnerBinaryConvergenceStatus {
     Converged,
     /// The configured binary already runs the controller's release version.
     AlreadyCurrent,
-    /// The daemon has active jobs; a later connect converges.
+    /// The daemon has active jobs; a later convergence installs the release.
     PendingActiveJobs,
     /// The controller is not a published release build.
     SkippedDevBuild,
@@ -462,7 +463,7 @@ pub enum RunnerBinaryConvergenceStatus {
     SkippedRemoteNewer,
     /// The configured binary's identity could not be read.
     SkippedUnverifiable,
-    /// Installing the controller's release failed; connect used the existing binary.
+    /// Installing the controller's release failed; the existing binary stays configured.
     Failed,
 }
 

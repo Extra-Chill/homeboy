@@ -1,7 +1,9 @@
 //! Runner upgrade orchestration, split into focused submodules.
 //!
-//! Every SSH runner converges through controller-owned managed-slot refresh,
-//! followed by extension sync and service-binary convergence.
+//! Every SSH runner's binary converges through the same decision
+//! `runner connect` makes (`connection::binary_convergence`), aimed at the
+//! controller the upgrade installed. Only a converged or already-current
+//! binary is followed by extension sync and service-binary convergence.
 
 mod commands;
 mod extensions;

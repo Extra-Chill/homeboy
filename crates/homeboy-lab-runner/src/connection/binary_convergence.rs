@@ -1,11 +1,14 @@
-//! `homeboy runner connect` brings the runner's configured Homeboy binary to
-//! the controller's own release before attaching (#16825).
+//! Runner-binary convergence: bring a runner's configured Homeboy binary to a
+//! target controller release. `homeboy runner connect` converges to its own
+//! build before attaching (#16825); `homeboy upgrade --upgrade-runner`
+//! converges to the controller it just installed, because the process running
+//! the upgrade is still the old controller (#16845).
 //!
-//! Convergence is one decision over three observations: the controller's
-//! build, the configured remote binary's identity, and the daemon's active
-//! jobs. Installation reuses the verified release path of `refresh-homeboy`
-//! pinned to the controller's exact version tag, so it never resolves
-//! "latest" and never builds from source. That refresh owns its own
+//! Convergence is one decision over three observations: the target
+//! controller build, the configured remote binary's identity, and the
+//! daemon's active jobs. Installation reuses the verified release path of
+//! `refresh-homeboy` pinned to the target's exact version tag, so it never
+//! resolves "latest" and never builds from source. That refresh owns its own
 //! runtime-promotion lease and replaces the daemon through its existing
 //! `--reconnect` mechanism (in-place restart or service-unit repoint). It runs
 //! before connect takes its own lease, and refresh's reconnect attaches
@@ -23,25 +26,29 @@ use crate::{RunnerBinaryConvergence, RunnerBinaryConvergenceStatus};
 
 /// The configured remote binary, as its identity probe reported it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct ObservedRemoteBinary {
-    pub(super) version: String,
-    pub(super) build_identity: Option<String>,
+pub(crate) struct ObservedRemoteBinary {
+    pub(crate) version: String,
+    pub(crate) build_identity: Option<String>,
 }
 
-/// Converge `runner_id`'s configured binary on the controller's release.
+/// Converge `runner_id`'s configured binary on the `controller` release.
 /// Never fails: every outcome, including an install failure, is reported so
-/// connect proceeds with whichever binary is configured afterwards.
-pub(super) fn converge_runner_binary(runner_id: &str) -> RunnerBinaryConvergence {
+/// the caller decides what follows from whichever binary is configured
+/// afterwards.
+pub(crate) fn converge_runner_binary(
+    runner_id: &str,
+    controller: &BuildIdentity,
+) -> RunnerBinaryConvergence {
     converge_runner_binary_with(
-        &homeboy_product_identity::build_identity(),
+        controller,
         || configured_remote_binary(runner_id),
         || active_daemon_job_ids(runner_id),
-        || install_controller_release(runner_id),
+        || install_controller_release(runner_id, controller),
     )
 }
 
 /// [`converge_runner_binary`] with its observations and install injected.
-pub(super) fn converge_runner_binary_with(
+pub(crate) fn converge_runner_binary_with(
     controller: &BuildIdentity,
     remote: impl FnOnce() -> Result<ObservedRemoteBinary, String>,
     active_jobs: impl FnOnce() -> Result<Vec<String>, String>,
@@ -55,8 +62,8 @@ pub(super) fn converge_runner_binary_with(
         detail,
         blocking_job_ids: Vec::new(),
     };
-    // A dev or source build has no published release to install; connect
-    // keeps today's behavior and does not even probe the remote binary.
+    // A dev or source build has no published release to install; the runner
+    // binary is left alone and not even probed.
     let Some(controller_version) = controller_release_version(controller) else {
         return report(
             RunnerBinaryConvergenceStatus::SkippedDevBuild,
@@ -93,8 +100,8 @@ pub(super) fn converge_runner_binary_with(
         );
     };
     // Same release version: the runner is current. A different build commit
-    // at the same version is an explicit dev-sync or select, which connect
-    // must not override.
+    // at the same version is an explicit dev-sync or select, which
+    // convergence must not override.
     if remote_version == controller_version {
         return report(RunnerBinaryConvergenceStatus::AlreadyCurrent, from, None);
     }
@@ -141,7 +148,7 @@ fn pending(
         from,
         to,
         detail: Some(format!(
-            "the daemon has active jobs ({}); connect attached to the current daemon and a later connect converges",
+            "the daemon has active jobs ({}); the runner binary was left in place and converges once they finish",
             job_ids.join(", ")
         )),
         blocking_job_ids: job_ids,
@@ -161,8 +168,8 @@ fn controller_release_version(controller: &BuildIdentity) -> Option<semver::Vers
 
 fn configured_remote_binary(runner_id: &str) -> Result<ObservedRemoteBinary, String> {
     let runner = load(runner_id).map_err(|error| error.message)?;
-    let homeboy =
-        remote_runner_homeboy_path(&runner, "runner connect").map_err(|error| error.message)?;
+    let homeboy = remote_runner_homeboy_path(&runner, "runner binary convergence")
+        .map_err(|error| error.message)?;
     let Some((_, _, client)) = resolve_ssh_runner(&runner).map_err(|error| error.message)? else {
         return Err("binary convergence applies to SSH runners only".to_string());
     };

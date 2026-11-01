@@ -3,7 +3,9 @@ use crate as runner;
 use crate::Runner;
 use crate::RunnerExecOptions;
 use crate::RunnerStatusReport;
+use crate::{RunnerBinaryConvergence, RunnerBinaryConvergenceStatus};
 use homeboy_core::Result;
+use homeboy_product_identity::BuildIdentity;
 use homeboy_runner_contract::RunnerKind;
 use homeboy_upgrade::upgrade::ExtensionUpgradeEntry;
 use homeboy_upgrade::upgrade::RunnerUpgradeEntry;
@@ -695,6 +697,7 @@ pub(crate) fn upgrade_runners(
     status: impl Fn(&str) -> Result<RunnerStatusReport>,
     expected_controller_identity: Option<&str>,
 ) -> (Vec<RunnerUpgradeEntry>, Vec<RunnerUpgradeEntry>) {
+    let target = runner_upgrade_target(expected_controller_identity);
     let mut updated = Vec::new();
     let mut skipped = Vec::new();
 
@@ -702,9 +705,10 @@ pub(crate) fn upgrade_runners(
         let entry = upgrade_runner_with_executor(
             runner,
             extension_updates,
+            &target,
             &mut exec,
             &status,
-            expected_controller_identity,
+            &mut converge_configured_runner_binary,
         );
         if entry.deferred {
             homeboy_core::log_status!(
@@ -731,231 +735,164 @@ pub(crate) fn upgrade_runners(
     (updated, skipped)
 }
 
-pub fn upgrade_runner_with_executor(
-    runner: &Runner,
-    extension_updates: &[ExtensionUpgradeEntry],
-    exec: &mut impl FnMut(&str, RunnerExecOptions) -> Result<(runner::RunnerExecOutput, i32)>,
-    status: &impl Fn(&str) -> Result<RunnerStatusReport>,
-    expected_controller_identity: Option<&str>,
-) -> RunnerUpgradeEntry {
-    let original_homeboy_path = runner
+/// The controller release configured runners converge to: the controller
+/// this upgrade installed when its identity is known, else this process's
+/// build.
+///
+/// `homeboy upgrade` runs its runner phase in the pre-upgrade process, so
+/// this process's own build is the version being replaced (#15552, #16845).
+pub(crate) fn runner_upgrade_target(expected_controller_identity: Option<&str>) -> BuildIdentity {
+    expected_controller_identity
+        .and_then(homeboy_upgrade::upgrade::parse_build_identity_display)
+        .unwrap_or_else(homeboy_product_identity::build_identity)
+}
+
+/// The runner-binary step's outcome and the binary configured after it.
+pub(crate) struct RunnerBinaryStep {
+    pub(crate) convergence: RunnerBinaryConvergence,
+    pub(crate) homeboy_path: String,
+}
+
+/// Production runner-binary step: the same convergence `runner connect`
+/// runs, aimed at `target`, then the binary the runner is configured with
+/// afterwards (an install repoints it at the new release slot).
+fn converge_configured_runner_binary(runner: &Runner, target: &BuildIdentity) -> RunnerBinaryStep {
+    let convergence =
+        crate::connection::binary_convergence::converge_runner_binary(&runner.id, target);
+    let homeboy_path = runner::load(&runner.id)
+        .map(|runner| configured_homeboy_path(&runner))
+        .unwrap_or_else(|_| configured_homeboy_path(runner));
+    RunnerBinaryStep {
+        convergence,
+        homeboy_path,
+    }
+}
+
+fn configured_homeboy_path(runner: &Runner) -> String {
+    runner
         .settings
         .homeboy_path
         .clone()
-        .unwrap_or_else(|| "homeboy".to_string());
-    // Observe before any installation, source sync, reconnect, or extension work.
-    // The refresh handoff also rechecks idleness before replacing a daemon.
-    if let Ok(report) = status(&runner.id) {
-        let live_jobs = report.active_job_count.max(report.active_jobs.len());
-        if live_jobs > 0 {
-            let mut entry = runner_upgrade_failure_entry(
-                &runner.id,
-                original_homeboy_path,
-                None,
+        .unwrap_or_else(|| "homeboy".to_string())
+}
+
+/// Upgrade one runner: converge its binary on `target`, then — only once the
+/// binary is converged or already current — sync extensions and report the
+/// daemon drift that remains. Service-unit binaries are reconciled afterwards
+/// by [`converge_service_binaries_for_entries`].
+pub fn upgrade_runner_with_executor(
+    runner: &Runner,
+    extension_updates: &[ExtensionUpgradeEntry],
+    target: &BuildIdentity,
+    exec: &mut impl FnMut(&str, RunnerExecOptions) -> Result<(runner::RunnerExecOutput, i32)>,
+    status: &impl Fn(&str) -> Result<RunnerStatusReport>,
+    converge: &mut impl FnMut(&Runner, &BuildIdentity) -> RunnerBinaryStep,
+) -> RunnerUpgradeEntry {
+    let RunnerBinaryStep {
+        convergence,
+        homeboy_path,
+    } = converge(runner, target);
+    let previous_version = convergence
+        .from
+        .as_deref()
+        .and_then(parse_cli_version_output);
+    let target_identity = convergence
+        .to
+        .clone()
+        .unwrap_or_else(|| target.display.clone());
+    let reason = convergence.detail.clone().unwrap_or_default();
+    let not_converged = |exit_code: i32, detail: String, recovery_commands: Vec<String>| {
+        let mut entry = runner_upgrade_failure_entry(
+            &runner.id,
+            homeboy_path.clone(),
+            previous_version.clone(),
+            exit_code,
+            detail,
+        );
+        entry.recovery_commands = recovery_commands;
+        entry
+    };
+    let upgraded = match convergence.status {
+        RunnerBinaryConvergenceStatus::Converged => true,
+        RunnerBinaryConvergenceStatus::AlreadyCurrent => false,
+        RunnerBinaryConvergenceStatus::PendingActiveJobs => {
+            let mut entry = not_converged(
                 0,
-                format!("runner busy: {live_jobs} live job(s)"),
+                format!("runner busy: {reason}"),
+                vec![format!(
+                    "homeboy upgrade --upgrade-runner {}",
+                    shell_arg(&runner.id)
+                )],
             );
             entry.success = true;
             entry.deferred = true;
-            entry.recovery_commands.clear();
             return entry;
         }
-    }
-    let previous_version = runner_homeboy_version(runner, &original_homeboy_path, exec)
-        .ok()
-        .flatten();
-    refresh_managed_immutable_runner(
-        runner,
-        original_homeboy_path,
-        previous_version,
-        expected_controller_identity,
-        extension_updates,
-        exec,
-        crate::refresh_homeboy_binary,
-    )
-}
-
-#[test]
-fn upgrade_runners_refresh_failure_keeps_attributed_cause() {
-    let runner = super::tests::ssh_runner("lab", Some("/homeboy"));
-    let entry = refresh_managed_immutable_runner(
-        &runner,
-        "/homeboy".into(),
-        None,
-        Some("homeboy 0.401.0+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
-        &[],
-        &mut |_, _| panic!("failed refresh must not execute reconciliation"),
-        |_| {
-            let mut error = homeboy_core::Error::internal_unexpected("IO error");
-            error.details =
-                serde_json::json!({"context": "publish slot", "error": "permission denied"});
-            Err(error)
-        },
-    );
-    assert!(
-        entry
-            .detail
-            .contains("IO error: publish slot: permission denied"),
-        "{}",
-        entry.detail
-    );
-}
-
-fn refresh_managed_immutable_runner(
-    runner: &Runner,
-    previous_homeboy_path: String,
-    previous_version: Option<String>,
-    expected_controller_identity: Option<&str>,
-    extension_updates: &[ExtensionUpgradeEntry],
-    exec: &mut impl FnMut(&str, RunnerExecOptions) -> Result<(runner::RunnerExecOutput, i32)>,
-    refresh: impl FnOnce(
-        crate::HomeboyBinaryRefreshOptions,
-    ) -> Result<(crate::HomeboyBinaryRefreshOutput, i32)>,
-) -> RunnerUpgradeEntry {
-    let Some(controller_commit) =
-        managed_immutable_runner_target_revision(expected_controller_identity)
-    else {
-        return managed_immutable_runner_failure_entry(
-            &runner.id,
-            previous_homeboy_path,
-            previous_version,
-            None,
-            1,
-            "managed immutable runner refresh requires the controller's immutable commit identity; no mutable version-tag recovery action was emitted".to_string(),
-        );
-    };
-    let recovery_commands = managed_immutable_runner_recovery_commands_with_commit(
-        &runner.id,
-        Some(&controller_commit),
-    );
-    let options = crate::HomeboyBinaryRefreshOptions {
-        runner_id: runner.id.clone(),
-        mode: crate::HomeboyBinaryRefreshMode::Materialize,
-        source: None,
-        git_ref: Some(crate::homeboy_refresh::controller_refresh_ref()),
-        target_dir: None,
-        reconnect: true,
-        force: false,
-        allow_downgrade: false,
-        dry_run: false,
-    };
-    let (refreshed, exit_code) = match refresh(options) {
-        Ok(result) => result,
-        Err(error) => {
-            return managed_immutable_runner_failure_entry(
-                &runner.id,
-                previous_homeboy_path,
-                previous_version,
-                Some(&controller_commit),
+        RunnerBinaryConvergenceStatus::Failed => {
+            let mut entry = not_converged(
                 1,
-                format!(
-                    "managed immutable runner refresh failed: {}; recover with {}",
-                    error.attributed_message(),
-                    recovery_commands.join(" && ")
-                ),
+                format!("runner binary convergence to {target_identity} failed: {reason}"),
+                runner_binary_refresh_recovery_commands(&runner.id, target),
             );
+            entry.path_drift = Some(BINARY_NOT_CONVERGED.to_string());
+            return entry;
+        }
+        RunnerBinaryConvergenceStatus::SkippedUnverifiable => {
+            let mut entry = not_converged(
+                1,
+                format!("runner binary could not be verified against {target_identity}: {reason}"),
+                runner_binary_refresh_recovery_commands(&runner.id, target),
+            );
+            entry.path_drift = Some(BINARY_NOT_CONVERGED.to_string());
+            return entry;
+        }
+        RunnerBinaryConvergenceStatus::SkippedRemoteNewer
+        | RunnerBinaryConvergenceStatus::SkippedDevBuild => {
+            let mut entry = not_converged(
+                1,
+                format!("runner binary not converged on {target_identity}: {reason}"),
+                Vec::new(),
+            );
+            entry.path_drift = Some(BINARY_NOT_CONVERGED.to_string());
+            return entry;
         }
     };
-    if !managed_refresh_can_reconcile(
-        exit_code,
-        refreshed.daemon_refreshed,
-        refreshed.failure.is_some(),
-    ) {
-        return RunnerUpgradeEntry {
-            runner_id: runner.id.clone(),
-            homeboy_path: refreshed.selected_binary_path,
-            success: false,
-            upgraded: false,
-            deferred: false,
-            previous_version,
-            new_version: None,
-            bare_homeboy_version: None,
-            path_drift: Some("managed immutable runner refresh did not converge".to_string()),
-            recovery_commands,
-            extensions_synced: Vec::new(),
-            extensions_skipped: Vec::new(),
-            extensions_failed: Vec::new(),
-            stale_daemon: None,
-            daemon_previous_version: None,
-            daemon_new_version: None,
-            service_binaries: Vec::new(),
-            exit_code,
-            detail: format!(
-                "managed immutable runner refresh failed in {} (exit {exit_code}): {}",
-                refreshed
-                    .phase_summary
-                    .iter()
-                    .find(|phase| phase.status == "failed")
-                    .map(|phase| phase.name)
-                    .unwrap_or("convergence"),
-                refreshed
-                    .failure
-                    .as_ref()
-                    .map(|failure| failure
-                        .verification
-                        .as_deref()
-                        .unwrap_or(&failure.stderr)
-                        .lines()
-                        .rev()
-                        .take(10)
-                        .collect::<Vec<_>>()
-                        .into_iter()
-                        .rev()
-                        .collect::<Vec<_>>()
-                        .join("\n"))
-                    .unwrap_or_default()
-            ),
-        };
-    }
-    let reconciled = match runner::reconcile_status(&runner.id) {
-        Ok(report) => report,
-        Err(error) => {
-            return managed_immutable_runner_failure_entry(
-                &runner.id,
-                refreshed.selected_binary_path,
-                previous_version,
-                Some(&controller_commit),
-                1,
-                format!(
-                    "managed immutable runner refresh completed but reconciliation failed: {}; recover with {}",
-                    error.attributed_message(),
-                    recovery_commands.join(" && ")
-                ),
-            );
-        }
-    };
-    let homeboy_path = refreshed.selected_binary_path;
-    let new_version = reconciled
-        .session
-        .as_ref()
-        .map(|session| session.homeboy_version.clone())
-        .or_else(|| {
-            runner_homeboy_version(runner, &homeboy_path, exec)
-                .ok()
-                .flatten()
-        });
+
     let (extensions_synced, extensions_skipped, extensions_failed) =
         sync_runner_extensions(runner, &homeboy_path, extension_updates, exec);
-    let admission_ready = managed_immutable_admission_ready(&reconciled);
-    let stale_daemon = reconciled.stale_daemon.map(runner_daemon_drift_entry);
-    let success = new_version.is_some()
-        && admission_ready
-        && stale_daemon.is_none()
-        && extensions_failed.is_empty();
+    let stale_daemon = status(&runner.id)
+        .ok()
+        .and_then(|report| report.stale_daemon)
+        .map(runner_daemon_drift_entry);
+    let success = stale_daemon.is_none() && extensions_failed.is_empty();
+    let binary = if upgraded {
+        format!(
+            "runner binary converged from {} to {target_identity}",
+            convergence.from.as_deref().unwrap_or("an unknown build")
+        )
+    } else {
+        format!("runner binary already runs {target_identity}")
+    };
     RunnerUpgradeEntry {
         runner_id: runner.id.clone(),
-        homeboy_path: homeboy_path.clone(),
+        homeboy_path,
         success,
-        upgraded: homeboy_path != previous_homeboy_path,
+        upgraded,
         deferred: false,
         previous_version,
-        new_version,
+        new_version: Some(target.version.trim_start_matches('v').to_string()),
         bare_homeboy_version: None,
-        path_drift: (!success).then(|| {
-            "managed immutable runner did not satisfy binary, daemon, and admission convergence"
-                .to_string()
-        }),
-        recovery_commands: (!success).then_some(recovery_commands).unwrap_or_default(),
+        path_drift: stale_daemon
+            .is_some()
+            .then(|| "runner daemon still runs another homeboy build".to_string()),
+        recovery_commands: (!success)
+            .then(|| {
+                vec![format!(
+                    "homeboy upgrade --upgrade-runner {}",
+                    shell_arg(&runner.id)
+                )]
+            })
+            .unwrap_or_default(),
         extensions_synced,
         extensions_skipped,
         extensions_failed,
@@ -964,78 +901,215 @@ fn refresh_managed_immutable_runner(
         daemon_new_version: None,
         service_binaries: Vec::new(),
         exit_code: i32::from(!success),
-        detail: format!(
-            "managed immutable runner refreshed through controller-owned promotion, daemon rotation, and reconciliation; admission ready: {admission_ready}"
-        ),
+        detail: binary,
     }
 }
 
-/// The commit a managed immutable runner converges to: the controller the upgrade installed,
-/// else this process's own build.
-///
-/// `homeboy upgrade` runs its runner phase in the pre-upgrade process. Falling
-/// straight back to this process's build commit refreshed runners to the
-/// version being replaced, and its recovery command named that old commit too.
-pub(super) fn managed_immutable_runner_target_revision(
-    expected_controller_identity: Option<&str>,
-) -> Option<String> {
-    expected_controller_identity
-        .and_then(|identity| {
-            // Upgrade identities historically select the final build suffix.
-            let suffix = &identity[identity.rfind('+')?..];
-            crate::homeboy_refresh::build_identity_commit(suffix)
+const BINARY_NOT_CONVERGED: &str =
+    "runner binary did not converge on the target controller release";
+
+#[cfg(test)]
+mod upgrade_runner_tests {
+    use super::super::tests::{runner_status, ssh_runner};
+    use super::*;
+    use crate::connection::binary_convergence::{
+        converge_runner_binary_with, ObservedRemoteBinary,
+    };
+    use crate::homeboy_refresh::{install_controller_release_with, ControllerReleaseInstall};
+
+    const INSTALLED: &str = "homeboy 0.401.0+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    fn target() -> BuildIdentity {
+        runner_upgrade_target(Some(INSTALLED))
+    }
+
+    fn remote(version: &str) -> std::result::Result<ObservedRemoteBinary, String> {
+        Ok(ObservedRemoteBinary {
+            version: version.to_string(),
+            build_identity: Some(format!("homeboy {version}+def5678")),
         })
-        .filter(|commit| {
-            commit.len() >= 7
-                && commit.len() <= 64
-                && commit.bytes().all(|byte| byte.is_ascii_hexdigit())
-        })
-        .map(str::to_string)
-        .or_else(|| homeboy_product_identity::build_identity().git_commit)
-}
+    }
 
-pub(super) fn managed_immutable_admission_ready(status: &crate::RunnerStatusReport) -> bool {
-    status.admission_summary().accepting_jobs
-}
+    fn no_jobs() -> std::result::Result<Vec<String>, String> {
+        Ok(Vec::new())
+    }
 
-pub(super) fn managed_refresh_can_reconcile(
-    exit_code: i32,
-    daemon_refreshed: bool,
-    refresh_failed: bool,
-) -> bool {
-    !refresh_failed && (exit_code == 0 || daemon_refreshed)
-}
+    fn no_exec(_: &str, _: RunnerExecOptions) -> Result<(runner::RunnerExecOutput, i32)> {
+        panic!("a runner with no extension updates and no converged binary executes nothing")
+    }
 
-fn managed_immutable_runner_failure_entry(
-    runner_id: &str,
-    homeboy_path: String,
-    previous_version: Option<String>,
-    target_revision: Option<&str>,
-    exit_code: i32,
-    detail: String,
-) -> RunnerUpgradeEntry {
-    RunnerUpgradeEntry {
-        runner_id: runner_id.to_string(),
-        homeboy_path,
-        success: false,
-        upgraded: false,
-        deferred: false,
-        previous_version,
-        new_version: None,
-        bare_homeboy_version: None,
-        path_drift: Some("managed immutable runner refresh did not converge".to_string()),
-        recovery_commands: managed_immutable_runner_recovery_commands_with_commit(
-            runner_id,
-            target_revision,
-        ),
-        extensions_synced: Vec::new(),
-        extensions_skipped: Vec::new(),
-        extensions_failed: Vec::new(),
-        stale_daemon: None,
-        daemon_previous_version: None,
-        daemon_new_version: None,
-        service_binaries: Vec::new(),
-        exit_code,
-        detail,
+    fn upgrade(
+        converge: impl FnOnce(&BuildIdentity) -> RunnerBinaryConvergence,
+    ) -> RunnerUpgradeEntry {
+        let runner = ssh_runner("lab", Some("/homeboy"));
+        let mut converge = Some(converge);
+        upgrade_runner_with_executor(
+            &runner,
+            &[],
+            &target(),
+            &mut no_exec,
+            &runner_status,
+            &mut |_, target| RunnerBinaryStep {
+                convergence: converge.take().expect("converged once")(target),
+                homeboy_path: "/slot/homeboy".to_string(),
+            },
+        )
+    }
+
+    #[test]
+    fn the_target_is_the_installed_controller_not_the_running_build() {
+        assert_ne!(
+            homeboy_product_identity::build_identity().display,
+            INSTALLED
+        );
+        let mut refs = Vec::new();
+        let entry = upgrade(|target| {
+            assert_eq!(target.display, INSTALLED);
+            converge_runner_binary_with(
+                target,
+                || remote("0.400.0"),
+                no_jobs,
+                || {
+                    install_controller_release_with("lab", target, |options| {
+                        refs.push(options.git_ref.clone());
+                        Err(homeboy_core::Error::internal_unexpected("stop"))
+                    })
+                },
+            )
+        });
+        assert_eq!(refs, [Some("v0.401.0".to_string())]);
+        assert_eq!(
+            entry.recovery_commands,
+            ["homeboy runner refresh-homeboy lab --ref v0.401.0 --reconnect"]
+        );
+        assert_eq!(
+            runner_upgrade_target(None),
+            homeboy_product_identity::build_identity()
+        );
+    }
+
+    #[test]
+    fn a_busy_daemon_defers_and_names_its_jobs() {
+        let entry = upgrade(|target| {
+            converge_runner_binary_with(
+                target,
+                || remote("0.400.0"),
+                || Ok(vec!["job-1".to_string(), "job-2".to_string()]),
+                || panic!("a busy daemon must not be replaced"),
+            )
+        });
+        assert!(entry.deferred && entry.success, "{entry:?}");
+        assert!(entry.detail.contains("job-1, job-2"), "{}", entry.detail);
+        assert_eq!(entry.exit_code, 0);
+        assert_eq!(
+            entry.recovery_commands,
+            ["homeboy upgrade --upgrade-runner lab"]
+        );
+    }
+
+    #[test]
+    fn extensions_are_not_synced_onto_an_unconverged_binary() {
+        let runner = ssh_runner("lab", Some("/homeboy"));
+        let updates = [super::super::tests::extension_update("rust", "abcdef1")];
+        let entry = upgrade_runner_with_executor(
+            &runner,
+            &updates,
+            &target(),
+            &mut no_exec,
+            &runner_status,
+            &mut |_, target| RunnerBinaryStep {
+                convergence: converge_runner_binary_with(
+                    target,
+                    || remote("0.400.0"),
+                    || Ok(vec!["job-1".to_string()]),
+                    || panic!("a busy daemon must not be replaced"),
+                ),
+                homeboy_path: "/homeboy".to_string(),
+            },
+        );
+        assert!(entry.deferred);
+        assert!(entry.extensions_synced.is_empty());
+    }
+
+    #[test]
+    fn a_converged_binary_reports_the_installed_release() {
+        let entry = upgrade(|target| {
+            converge_runner_binary_with(
+                target,
+                || remote("0.400.0"),
+                no_jobs,
+                || ControllerReleaseInstall::Installed {
+                    identity: Some(INSTALLED.to_string()),
+                },
+            )
+        });
+        assert!(
+            entry.success && entry.upgraded && !entry.deferred,
+            "{entry:?}"
+        );
+        assert_eq!(entry.previous_version.as_deref(), Some("0.400.0"));
+        assert_eq!(entry.new_version.as_deref(), Some("0.401.0"));
+        assert_eq!(entry.homeboy_path, "/slot/homeboy");
+        assert!(entry.recovery_commands.is_empty());
+        assert!(entry.detail.contains(INSTALLED), "{}", entry.detail);
+    }
+
+    #[test]
+    fn an_already_current_binary_skips_the_install() {
+        let entry = upgrade(|target| {
+            converge_runner_binary_with(
+                target,
+                || remote("0.401.0"),
+                no_jobs,
+                || panic!("a current binary must not be reinstalled"),
+            )
+        });
+        assert!(entry.success && !entry.upgraded, "{entry:?}");
+        assert_eq!(entry.new_version.as_deref(), Some("0.401.0"));
+        assert!(entry.detail.contains("already runs"), "{}", entry.detail);
+    }
+
+    #[test]
+    fn upgrade_runners_refresh_failure_keeps_attributed_cause() {
+        let entry = upgrade(|target| {
+            converge_runner_binary_with(
+                target,
+                || remote("0.400.0"),
+                no_jobs,
+                || {
+                    install_controller_release_with("lab", target, |_| {
+                        let mut error = homeboy_core::Error::internal_unexpected("IO error");
+                        error.details = serde_json::json!({
+                            "context": "publish slot",
+                            "error": "permission denied"
+                        });
+                        Err(error)
+                    })
+                },
+            )
+        });
+        assert!(!entry.success && !entry.deferred);
+        assert_eq!(entry.exit_code, 1);
+        assert!(
+            entry
+                .detail
+                .contains("IO error: publish slot: permission denied"),
+            "{}",
+            entry.detail
+        );
+    }
+
+    #[test]
+    fn a_newer_runner_is_never_downgraded_and_not_reported_converged() {
+        let entry = upgrade(|target| {
+            converge_runner_binary_with(
+                target,
+                || remote("0.402.0"),
+                no_jobs,
+                || panic!("never downgraded"),
+            )
+        });
+        assert!(!entry.success, "{entry:?}");
+        assert!(entry.recovery_commands.is_empty());
     }
 }

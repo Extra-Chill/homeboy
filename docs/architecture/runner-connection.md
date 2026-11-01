@@ -69,6 +69,12 @@ service unit repoint and restart. That refresh holds its own runtime promotion
 lease and finishes before connect takes its lease; its reconnect attaches
 through the non-converging connect, so convergence never recurses.
 
+`homeboy upgrade --upgrade-runner` runs the same convergence decision, but
+targets the controller identity the upgrade just installed rather than the
+running (pre-upgrade) process's build (#16845). See
+[`homeboy upgrade`](../commands/upgrade.md#runner-convergence) for how each
+status maps onto the runner upgrade entry.
+
 `homeboy runner refresh-homeboy` remains for explicit refs (`--ref`), dev
 builds (`runner dev-sync`), and selecting an existing binary (`--select`).
 

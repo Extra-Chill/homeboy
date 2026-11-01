@@ -10,15 +10,27 @@ homeboy upgrade [OPTIONS]
 
 Upgrades Homeboy to the latest version. The command auto-detects the installation method (Homebrew, source build, or downloaded release binary) and runs the appropriate upgrade process.
 
-By default, after a successful local upgrade, Homeboy also checks configured SSH runners and runs their configured Homeboy binary through the same upgrade path. This keeps lab runners from drifting behind the local CLI.
+By default, after a successful local upgrade, Homeboy also converges configured SSH runners on the installed controller release. This keeps lab runners from drifting behind the local CLI.
 
-Runner sync uses this contract:
+### Runner convergence
 
-- Run each configured SSH runner through its configured `homeboy_path`, falling back to bare `homeboy` only when no path is configured.
-- Sync every parent extension that has portable source metadata (`source_url` plus `source_revision`) to the runner.
-- Isolate extension sync failures per extension so one failed extension does not prevent later extensions from being attempted.
-- Report configured `homeboy_path` versus bare `homeboy` version drift when both can be observed.
-- Report a stale connected runner daemon when the daemon session version no longer matches the configured runner executable version.
+Each selected SSH runner goes through the same runner-binary convergence as `homeboy runner connect` (see [runner connection](../architecture/runner-connection.md#binary-convergence)). The target is the controller identity the upgrade just installed, not the build of the process running the upgrade. Convergence compares the runner's configured `homeboy_path` (its `self identity`) with that target and installs the target's exact release tag through `refresh-homeboy`'s verified release path only when the runner is older. It never downgrades, and it never replaces a daemon that has active jobs.
+
+Each convergence outcome maps onto the runner's upgrade entry like this:
+
+| Convergence status | Entry |
+| --- | --- |
+| `converged` | `success: true`, `upgraded: true`, `new_version` is the target version |
+| `already_current` | `success: true`, `upgraded: false`; nothing is installed |
+| `pending_active_jobs` | `deferred: true`; `detail` names the blocking job IDs; recover with `homeboy upgrade --upgrade-runner <runner>` once they finish |
+| `failed`, `skipped_unverifiable` | `success: false`; `detail` keeps the attributed cause; recover with `homeboy runner refresh-homeboy <runner> --ref v<target> --reconnect` |
+| `skipped_remote_newer`, `skipped_dev_build` | `success: false`, with no recovery command (the runner is never downgraded, and a dev build has no published release) |
+
+Only a `converged` or `already_current` binary continues to:
+
+- sync every parent extension that has portable source metadata (`source_url` plus `source_revision`) to the runner, isolating failures per extension;
+- report a stale connected runner daemon (`stale_daemon`) whose session version does not match the target;
+- reconcile the runner-service unit binaries (`service_binaries`), restarting this controller's stale unit through the idle-gated `refresh-homeboy --reconnect` handoff.
 
 Controller upgrades install the verified binary, stop the resident daemon by
 its exact lease, and start the installed binary in the same state directory.
@@ -151,9 +163,10 @@ Upgrades run in the foreground through binary promotion and daemon restart
 resumption. A queued worker is not reported as successful completion. Only the
 controller admission window is fenced while existing Cooks finish. Runner jobs
 keep running and later complete through the upgraded controller. After the
-controller upgrade, each selected runner gets a refresh request: idle runners
-refresh at once, and runners with live jobs go in `runners_deferred` with
-`runner busy: N live job(s)`. Deferred runners do not make the upgrade partial.
+controller upgrade, each selected runner converges on the installed release:
+idle runners converge at once, and runners whose daemon has active jobs go in
+`runners_deferred` with `runner busy: the daemon has active jobs (<job-ids>); ...`.
+Deferred runners do not make the upgrade partial.
 
 `homeboy upgrade` data payload:
 

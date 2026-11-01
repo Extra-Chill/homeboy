@@ -420,16 +420,28 @@ pub(crate) enum ControllerReleaseInstall {
     Failed(String),
 }
 
-/// Install the controller's exact release tag into `runner_id` through the
+/// Install the `controller` release's exact tag into `runner_id` through the
 /// verified release path and replace its daemon with the `--reconnect`
 /// mechanism. Never a source build, never "latest", never a downgrade, and
 /// never interrupting a job the restarted daemon cannot re-adopt.
-pub(crate) fn install_controller_release(runner_id: &str) -> ControllerReleaseInstall {
-    let refreshed = refresh_homeboy_binary(HomeboyBinaryRefreshOptions {
+pub(crate) fn install_controller_release(
+    runner_id: &str,
+    controller: &homeboy_product_identity::BuildIdentity,
+) -> ControllerReleaseInstall {
+    install_controller_release_with(runner_id, controller, refresh_homeboy_binary)
+}
+
+/// [`install_controller_release`] with the refresh injected.
+pub(crate) fn install_controller_release_with(
+    runner_id: &str,
+    controller: &homeboy_product_identity::BuildIdentity,
+    refresh: impl FnOnce(HomeboyBinaryRefreshOptions) -> Result<(HomeboyBinaryRefreshOutput, i32)>,
+) -> ControllerReleaseInstall {
+    let refreshed = refresh(HomeboyBinaryRefreshOptions {
         runner_id: runner_id.to_string(),
         mode: HomeboyBinaryRefreshMode::Materialize,
         source: None,
-        git_ref: Some(controller_refresh_ref()),
+        git_ref: Some(release_ref(&controller.version)),
         target_dir: None,
         reconnect: true,
         force: false,
@@ -438,7 +450,7 @@ pub(crate) fn install_controller_release(runner_id: &str) -> ControllerReleaseIn
     });
     let (output, exit_code) = match refreshed {
         Ok(refreshed) => refreshed,
-        Err(error) => return ControllerReleaseInstall::Failed(error.message),
+        Err(error) => return ControllerReleaseInstall::Failed(error.attributed_message()),
     };
     if let Some(deferred) = output.reconnect_deferred {
         return ControllerReleaseInstall::DeferredByActiveJobs(deferred.active_job_ids);
@@ -3360,7 +3372,12 @@ fn dev_sync_next_actions(runner_id: &str, options: &RunnerDevSyncOptions) -> Vec
 }
 
 pub(crate) fn controller_refresh_ref() -> String {
-    format!("v{}", homeboy_product_identity::product_version())
+    release_ref(homeboy_product_identity::product_version())
+}
+
+/// The release tag of `version` (`0.439.0` -> `v0.439.0`).
+pub(crate) fn release_ref(version: &str) -> String {
+    format!("v{}", version.trim_start_matches('v'))
 }
 
 fn default_target_dir(workspace_root: &str, git_ref: &str) -> String {

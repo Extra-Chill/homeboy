@@ -3,18 +3,15 @@ use crate::RunnerExecOptions;
 use homeboy_runner_contract::RunnerCapabilityPreflight;
 use homeboy_runner_contract::RunnerRequiredTool;
 
-pub(crate) fn managed_immutable_runner_recovery_commands_with_commit(
+/// Re-run the verified release install pinned to `target`'s exact tag.
+pub(crate) fn runner_binary_refresh_recovery_commands(
     runner_id: &str,
-    commit: Option<&str>,
+    target: &homeboy_product_identity::BuildIdentity,
 ) -> Vec<String> {
-    if commit.is_none() {
-        return Vec::new();
-    }
-    let tag = crate::homeboy_refresh::controller_refresh_ref();
     vec![format!(
         "homeboy runner refresh-homeboy {} --ref {} --reconnect",
         shell_arg(runner_id),
-        shell_arg(&tag)
+        shell_arg(&crate::homeboy_refresh::release_ref(&target.version))
     )]
 }
 
