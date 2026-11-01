@@ -680,6 +680,8 @@ mod build_failure_tests {
     #[test]
     fn timed_out_build_error_is_reproducible_and_bounded() {
         let build = homeboy_core::extension::build::BuildOutput {
+            status: "built".into(),
+            key: None,
             command: "build.run".to_string(),
             component_id: "example".to_string(),
             build_command: "make release".to_string(),

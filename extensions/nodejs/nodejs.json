@@ -215,6 +215,7 @@
         "limitations": []
       },
       "build": {
+    "cache": {"recipe": "nodejs-package-v1", "toolchains": ["node -p 'process.versions.node.split(\".\")[0]'"], "dependencies_setting": "local_workspace_dependencies"},
         "check_names": ["Build", "build"],
         "command": "build",
         "env": { "CI": "1" },

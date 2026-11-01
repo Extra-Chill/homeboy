@@ -210,6 +210,9 @@ pub struct SinceTagConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BuildConfig {
+    /// Opt-in content-addressed package caching contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache: Option<BuildCacheConfig>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifact_extensions: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -247,6 +250,17 @@ pub struct BuildConfig {
     /// is the caller's responsibility.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lockfile_paths: Vec<String>,
+}
+
+/// Extension-owned build inputs. Commands must print stable toolchain identities.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuildCacheConfig {
+    pub recipe: String,
+    #[serde(default)]
+    pub toolchains: Vec<String>,
+    /// Setting containing entries with `path` and optional `package_dir`.
+    #[serde(default)]
+    pub dependencies_setting: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

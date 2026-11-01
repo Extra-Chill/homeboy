@@ -145,9 +145,21 @@ pub(crate) fn prepare_component_deploy(
         if is_git_deploy || is_file_deploy || config.skip_build || release_artifact.is_some() {
             (Some(0), None)
         } else {
-            phase_clock::time(&mut timer, &subject, "build", || {
-                build::build_component(component)
-            })
+            let cached = build::cache::content_key(component)
+                .as_deref()
+                .is_some_and(|key| build::cache::restore(component, key));
+            phase_clock::time(
+                &mut timer,
+                &subject,
+                if cached { "build.cached" } else { "build" },
+                || {
+                    if cached {
+                        (Some(0), None)
+                    } else {
+                        build::build_component(component)
+                    }
+                },
+            )
         };
 
     if let Some(ref error) = build_error {

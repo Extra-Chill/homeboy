@@ -19,6 +19,7 @@ use homeboy_extension_contract::exec_context;
 use homeboy_extension_contract::ExtensionCapability;
 use homeboy_extension_contract::ExtensionPhaseTiming;
 
+pub mod cache;
 mod local_permissions;
 
 const DEFAULT_BUILD_TIMEOUT: Duration = Duration::from_secs(30 * 60);
@@ -171,6 +172,8 @@ pub(crate) fn resolve_build_command(component: &Component) -> Result<ResolvedBui
 
 #[derive(Debug, Clone, Serialize)]
 pub struct BuildOutput {
+    pub status: String,
+    pub key: Option<String>,
     pub command: String,
     pub component_id: String,
     pub build_command: String,
@@ -385,27 +388,12 @@ fn run_bulk_changed_since(
 ) -> Result<(BuildResult, i32)> {
     let input = parse_bulk_ids(json_spec)?;
 
-    let mut builder = BulkResultBuilder::with_capacity("build", input.component_ids.len());
-
-    for id in &input.component_ids {
-        match execute_build(id, None, changed_since) {
-            Ok((output, _)) => {
-                if output.success {
-                    builder.record_success(id.clone(), output);
-                } else {
-                    builder.record_failed_result(id.clone(), output);
-                }
-            }
-            Err(e) => {
-                builder.record_error(id.clone(), e.to_string());
-            }
-        }
-    }
-
-    let output = builder.finish();
-    let exit_code = if output.summary.failed > 0 { 1 } else { 0 };
-
-    Ok((BuildResult::Bulk(output), exit_code))
+    let components = input
+        .component_ids
+        .iter()
+        .map(|id| component::resolve_effective(Some(id), None, None))
+        .collect::<Result<Vec<_>>>()?;
+    run_components_with_changed_since(&components, changed_since)
 }
 
 /// Build a pre-resolved component (supports both registered and discovered components).
@@ -430,27 +418,104 @@ pub fn run_components_with_changed_since(
     components: &[Component],
     changed_since: Option<&str>,
 ) -> Result<(BuildResult, i32)> {
-    let mut builder = BulkResultBuilder::with_capacity("build", components.len());
-
+    use std::collections::{BTreeMap, BTreeSet};
+    // Resolve the entire DAG before running any recipe. One node per canonical path,
+    // even for dirty builds that deliberately have no content key.
+    fn visit(
+        comp: &Component,
+        nodes: &mut BTreeMap<PathBuf, Component>,
+        edges: &mut BTreeMap<PathBuf, Vec<PathBuf>>,
+    ) -> Result<()> {
+        let path = paths::canonical_or_normalized_local_path(&comp.local_path);
+        if nodes.contains_key(&path) {
+            return Ok(());
+        }
+        nodes.insert(path.clone(), comp.clone());
+        let dependencies = cache::dependencies(comp)?;
+        edges.insert(
+            path,
+            dependencies
+                .iter()
+                .map(|c| paths::canonical_or_normalized_local_path(&c.local_path))
+                .collect(),
+        );
+        for dependency in dependencies {
+            visit(&dependency, nodes, edges)?;
+        }
+        Ok(())
+    }
+    let mut nodes = BTreeMap::new();
+    let mut edges = BTreeMap::new();
     for component in components {
-        match execute_build_component(component, changed_since) {
-            Ok((output, _)) => {
-                if output.success {
-                    builder.record_success(component.id.clone(), output);
-                } else {
-                    builder.record_failed_result(component.id.clone(), output);
-                }
+        cache::validate_graph(component)?;
+        visit(component, &mut nodes, &mut edges)?;
+    }
+    let mut completed = BTreeSet::new();
+    let mut results = BTreeMap::new();
+    let lanes = std::env::var("HOMEBOY_BUILD_CONCURRENCY")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(3)
+        .clamp(1, 32);
+    while !nodes.is_empty() {
+        let ready: Vec<_> = nodes
+            .keys()
+            .filter(|path| edges[*path].iter().all(|p| completed.contains(p)))
+            .take(lanes)
+            .cloned()
+            .collect();
+        if ready.is_empty() {
+            return Err(Error::validation_invalid_argument(
+                "build.dependencies",
+                "Dependency cycle",
+                None,
+                None,
+            ));
+        }
+        let batch: Vec<_> = ready
+            .iter()
+            .map(|p| nodes.remove(p).expect("ready node"))
+            .collect();
+        let outputs = std::thread::scope(|scope| {
+            let handles: Vec<_> = batch
+                .iter()
+                .map(|component| {
+                    scope.spawn(move || execute_build_node(component, changed_since, false))
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| {
+                    handle.join().unwrap_or_else(|_| {
+                        Err(Error::validation_invalid_argument(
+                            "build",
+                            "Build worker panicked",
+                            None,
+                            None,
+                        ))
+                    })
+                })
+                .collect::<Vec<_>>()
+        });
+        for (path, result) in ready.into_iter().zip(outputs) {
+            if !result.as_ref().is_ok_and(|(output, _)| output.success) {
+                return match result {
+                    Err(error) => Err(error),
+                    Ok((output, code)) => Ok((BuildResult::Single(Box::new(output)), code)),
+                };
             }
-            Err(error) => {
-                builder.record_error(component.id.clone(), error.to_string());
-            }
+            completed.insert(path.clone());
+            results.insert(path, result);
         }
     }
-
-    let output = builder.finish();
-    let exit_code = if output.summary.failed > 0 { 1 } else { 0 };
-
-    Ok((BuildResult::Bulk(output), exit_code))
+    let mut builder = BulkResultBuilder::with_capacity("build", components.len());
+    for component in components {
+        let path = paths::canonical_or_normalized_local_path(&component.local_path);
+        if let Some(Ok((output, _))) = results.remove(&path) {
+            builder.record_success(component.id.clone(), output);
+        }
+    }
+    Ok((BuildResult::Bulk(builder.finish()), 0))
 }
 
 fn execute_build(
@@ -463,6 +528,72 @@ fn execute_build(
 }
 
 fn execute_build_component(
+    comp: &Component,
+    changed_since: Option<&str>,
+) -> Result<(BuildOutput, i32)> {
+    cache::validate_graph(comp)?;
+    execute_build_node(comp, changed_since, true)
+}
+
+fn execute_build_node(
+    comp: &Component,
+    changed_since: Option<&str>,
+    build_dependencies: bool,
+) -> Result<(BuildOutput, i32)> {
+    let started = Instant::now();
+    let key = if changed_since.is_none() {
+        cache::content_key(comp)
+    } else {
+        None
+    };
+    let _lease = key.as_deref().and_then(cache::lock);
+    if key.as_deref().is_some_and(|key| cache::restore(comp, key)) {
+        return Ok((
+            BuildOutput {
+                status: "cached".into(),
+                key,
+                command: "build.run".into(),
+                component_id: comp.id.clone(),
+                build_command: String::new(),
+                active_env_keys: configured_env_keys(comp),
+                output: CapturedOutput::new(String::new(), String::new()),
+                artifact_inputs: Vec::new(),
+                extension_phase_timings: Vec::new(),
+                changed_scope: None,
+                cargo_target: None,
+                success: true,
+                duration_ms: started.elapsed().as_millis(),
+                termination: Some("completed".into()),
+            },
+            0,
+        ));
+    }
+    if build_dependencies {
+        let dependencies = cache::dependencies(comp)?;
+        if !dependencies.is_empty() {
+            let (_, code) = run_components_with_changed_since(&dependencies, changed_since)?;
+            if code != 0 {
+                return Err(Error::validation_invalid_argument(
+                    "build.dependencies",
+                    "Dependency build failed",
+                    None,
+                    None,
+                ));
+            }
+        }
+    }
+    let (mut output, code) = execute_uncached_build_component(comp, changed_since)?;
+    if output.success {
+        if let Some(key) = &key {
+            cache::store(comp, key);
+        }
+    }
+    output.key = key;
+    output.duration_ms = started.elapsed().as_millis();
+    Ok((output, code))
+}
+
+fn execute_uncached_build_component(
     comp: &Component,
     changed_since: Option<&str>,
 ) -> Result<(BuildOutput, i32)> {
@@ -503,6 +634,8 @@ fn execute_build_component(
     ) {
         return Ok((
             BuildOutput {
+                status: "built".into(),
+                key: None,
                 command: "build.run".to_string(),
                 component_id: comp.id.clone(),
                 build_command: build_cmd,
@@ -539,6 +672,8 @@ fn execute_build_component(
         if exit_code != 0 {
             return Ok((
                 BuildOutput {
+                    status: "built".into(),
+                    key: None,
                     command: "build.run".to_string(),
                     component_id: comp.id.clone(),
                     build_command: build_cmd,
@@ -626,6 +761,8 @@ fn execute_build_component(
 
     let result = (
         BuildOutput {
+            status: "built".into(),
+            key: None,
             command: "build.run".to_string(),
             component_id: comp.id.clone(),
             build_command: build_cmd,
@@ -1115,6 +1252,8 @@ mod tests {
     #[test]
     fn build_result_single_serializes_with_the_existing_output_shape() {
         let result = BuildResult::Single(Box::new(BuildOutput {
+            status: "built".into(),
+            key: None,
             command: "build.run".to_string(),
             component_id: "example".to_string(),
             build_command: "make build".to_string(),

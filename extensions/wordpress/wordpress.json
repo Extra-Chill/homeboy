@@ -294,6 +294,7 @@
     }
   },
   "build": {
+    "cache": {"recipe": "wordpress-package-v1", "toolchains": ["node -p 'process.versions.node.split(\".\")[0]'", "php -r 'echo PHP_MAJOR_VERSION, \".\", PHP_MINOR_VERSION;'"], "dependencies_setting": "local_workspace_dependencies"},
     "artifact_extensions": [
       ".zip"
     ],
