@@ -43,9 +43,6 @@ pub struct RunnerServiceReport {
     pub daemon_lease_id: Option<String>,
     pub daemon_address: Option<String>,
     pub daemon_build_identity: Option<String>,
-    /// Leases of the idle pre-#16752 legacy-layout daemons that
-    /// install stopped (see `legacy_layout`).
-    pub stopped_legacy_leases: Vec<String>,
 }
 
 pub(crate) fn service_unit_name(runner_id: &str) -> String {
@@ -282,20 +279,6 @@ fn repoint_script_with_env(
     )
 }
 
-/// The one-time legacy-layout step for a service runner, run before the unit
-/// (re)starts its daemon in the new state dir. A unit written by older
-/// Homeboy still points at a legacy dir; rewriting it here moves it.
-fn move_off_legacy_layout(
-    client: &SshClient,
-    homeboy: &str,
-    runner_id: &str,
-) -> Result<Vec<String>> {
-    let stopped = super::legacy_layout::stop_remote_legacy_daemons(client, homeboy, runner_id)
-        .map_err(|error| error.into_error(runner_id))?;
-    super::legacy_layout::forget_stopped_legacy_session(runner_id, &stopped)?;
-    Ok(stopped)
-}
-
 fn run_remote(client: &SshClient, script: &str, what: &str) -> Result<String> {
     let output = client.execute_with_timeout(script, SERVICE_SSH_TIMEOUT);
     if output.success {
@@ -375,12 +358,7 @@ fn wait_for_service_daemon(
     }
 }
 
-fn report_for(
-    runner_id: &str,
-    binary: &str,
-    daemon: Option<&RemoteDaemon>,
-    stopped_legacy_leases: Vec<String>,
-) -> RunnerServiceReport {
+fn report_for(runner_id: &str, binary: &str, daemon: Option<&RemoteDaemon>) -> RunnerServiceReport {
     RunnerServiceReport {
         runner_id: runner_id.to_string(),
         unit: service_unit_name(runner_id),
@@ -391,7 +369,6 @@ fn report_for(
         daemon_lease_id: daemon.and_then(|daemon| daemon.lease_id.clone()),
         daemon_address: daemon.map(|daemon| daemon.address.clone()),
         daemon_build_identity: daemon.and_then(|daemon| daemon.build_identity.clone()),
-        stopped_legacy_leases,
     }
 }
 
@@ -418,7 +395,6 @@ pub fn install(runner_id: &str) -> Result<RunnerServiceReport> {
         ));
     }
 
-    let stopped_legacy_leases = move_off_legacy_layout(client, homeboy, runner_id)?;
     run_remote(
         client,
         &install_script_with_env(
@@ -449,12 +425,7 @@ pub fn install(runner_id: &str) -> Result<RunnerServiceReport> {
         wait_for_service_daemon(client, homeboy, runner_id).map_err(Error::internal_unexpected)?;
 
     super::super::merge(Some(runner_id), r#"{"service_managed":true}"#, &[])?;
-    Ok(report_for(
-        runner_id,
-        homeboy,
-        Some(&daemon),
-        stopped_legacy_leases,
-    ))
+    Ok(report_for(runner_id, homeboy, Some(&daemon)))
 }
 
 /// Report the runner service and the daemon lease it currently holds.
@@ -465,7 +436,7 @@ pub fn service_status(runner_id: &str) -> Result<RunnerServiceReport> {
         .ok()
         .filter(|status| status.fresh && status.reachable)
         .and_then(|status| status.daemon);
-    Ok(report_for(runner_id, homeboy, daemon.as_ref(), Vec::new()))
+    Ok(report_for(runner_id, homeboy, daemon.as_ref()))
 }
 
 /// Point the service at `binary` and restart it in place. The unit keeps its
@@ -479,8 +450,6 @@ pub fn service_status(runner_id: &str) -> Result<RunnerServiceReport> {
 /// behind (#15087).
 pub(crate) fn repoint_and_restart(runner_id: &str, binary: &str) -> Result<()> {
     let target = service_target(runner_id)?;
-    let homeboy = remote_runner_homeboy_path(&target.runner, "runner service restart")?;
-    move_off_legacy_layout(&target.client, homeboy, runner_id)?;
     let startup_token = uuid::Uuid::new_v4().to_string();
     run_remote(
         &target.client,
