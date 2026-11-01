@@ -70,6 +70,12 @@ const HELPERS: &[RuntimeHelper] = &[
         env_var: SIDECAR_WRITER_ENV,
     },
     RuntimeHelper {
+        id: "local-workspace-deps",
+        filename: "local-workspace-deps.sh",
+        content: assets::LOCAL_WORKSPACE_DEPS_SH,
+        env_var: LOCAL_WORKSPACE_DEPS_ENV,
+    },
+    RuntimeHelper {
         id: "resolve-context",
         filename: "resolve-context.sh",
         content: assets::RESOLVE_CONTEXT_SH,

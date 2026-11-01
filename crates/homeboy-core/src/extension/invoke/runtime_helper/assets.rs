@@ -6,6 +6,7 @@ pub(super) const FAILURE_TRAP_SH: &str = include_str!("../../runtime/failure-tra
 pub(super) const WRITE_TEST_RESULTS_SH: &str = include_str!("../../runtime/write-test-results.sh");
 pub(super) const EMIT_TEST_FAILURE_SH: &str = include_str!("../../runtime/emit-test-failure.sh");
 pub(super) const SIDECAR_WRITER_SH: &str = include_str!("../../runtime/sidecar-writer.sh");
+pub(super) const LOCAL_WORKSPACE_DEPS_SH: &str = include_str!("../../runtime/local-workspace-deps.sh");
 pub(super) const RESOLVE_CONTEXT_SH: &str = include_str!("../../runtime/resolve-context.sh");
 pub(super) const DISPOSABLE_LOCAL_DB_SH: &str =
     include_str!("../../runtime/disposable-local-db.sh");
@@ -28,6 +29,7 @@ mod tests {
             WRITE_TEST_RESULTS_SH,
             EMIT_TEST_FAILURE_SH,
             SIDECAR_WRITER_SH,
+            LOCAL_WORKSPACE_DEPS_SH,
             RESOLVE_CONTEXT_SH,
             DISPOSABLE_LOCAL_DB_SH,
             BENCH_HELPER_SH,

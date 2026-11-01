@@ -32,8 +32,8 @@ homeboy_runner_init --bash 4 --failure-trap
 source "$COMMAND_CAPTURE_HELPER"
 # shellcheck source=../lib/node-helpers.sh
 source "${SCRIPT_DIR}/../lib/node-helpers.sh"
-# shellcheck source=../lib/local-workspace-deps.sh
-source "${HOMEBOY_RUNTIME_LOCAL_WORKSPACE_DEPS:-${SCRIPT_DIR}/../lib/local-workspace-deps.sh}"
+# shellcheck source=/dev/null
+source "${HOMEBOY_RUNTIME_LOCAL_WORKSPACE_DEPS:?HOMEBOY_RUNTIME_LOCAL_WORKSPACE_DEPS is required}"
 homeboy_require_package_json
 homeboy_detect_package_manager
 homeboy_ensure_node_dependencies

@@ -2,6 +2,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+source "$ROOT_DIR/scripts/lib/runtime-helper-resolver.sh"
+export HOMEBOY_RUNTIME_LOCAL_WORKSPACE_DEPS="$(homeboy_runtime_helper "$ROOT_DIR" HOMEBOY_RUNTIME_LOCAL_WORKSPACE_DEPS local-workspace-deps.sh)"
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/homeboy-lwd-install.XXXXXX")"
 trap 'rm -rf "$TMP_DIR"' EXIT
 fail() { echo "FAIL: $1" >&2; exit 1; }

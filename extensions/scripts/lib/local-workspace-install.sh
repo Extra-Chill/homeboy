@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # Shared post-install bridge for extension dependency runners. Keep build/pack/
-# install logic in the Node.js helper; an empty declaration needs no sibling.
+# install logic in the core runtime helper; an empty declaration needs no helper.
 homeboy_apply_local_workspace_install() {
     local consumer_dir="$1"
     local collection_dir="$2"
@@ -17,7 +17,7 @@ homeboy_apply_local_workspace_install() {
         return 0
     fi
 
-    local helper="${HOMEBOY_RUNTIME_LOCAL_WORKSPACE_DEPS:-${collection_dir}/nodejs/scripts/lib/local-workspace-deps.sh}"
+    local helper="${HOMEBOY_RUNTIME_LOCAL_WORKSPACE_DEPS:-}"
     if [ ! -f "$helper" ]; then
         echo "local_workspace_dependencies declared but helper not found: $helper" >&2
         return 1

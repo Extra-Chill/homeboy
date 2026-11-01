@@ -16,8 +16,19 @@ ROOT_DIR="$(cd "${EXTENSION_DIR}/.." && pwd)"
 # shellcheck source=../../../scripts/lib/runtime-helper-resolver.sh
 source "${ROOT_DIR}/scripts/lib/runtime-helper-resolver.sh"
 RESOLVE_CONTEXT_CORE_HELPER="$(homeboy_runtime_helper "$ROOT_DIR" HOMEBOY_RUNTIME_RESOLVE_CONTEXT resolve-context.sh)"
+WORKSPACE_CORE_HELPER="$(homeboy_runtime_helper "$ROOT_DIR" HOMEBOY_RUNTIME_LOCAL_WORKSPACE_DEPS local-workspace-deps.sh)"
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/homeboy-wordpress-lwd.XXXXXX")"
 trap 'rm -rf "$TMP_DIR"' EXIT
+
+# Simulate an action install: only WordPress plus the shared runner libraries.
+# Runtime helpers live outside the extension tree, as provisioned by core.
+mkdir -p "$TMP_DIR/extensions" "$TMP_DIR/runtime"
+cp -R "$EXTENSION_DIR" "$TMP_DIR/extensions/wordpress"
+cp -R "$ROOT_DIR/scripts" "$TMP_DIR/extensions/scripts"
+cp "$WORKSPACE_CORE_HELPER" "$TMP_DIR/runtime/local-workspace-deps.sh"
+export HOMEBOY_RUNTIME_LOCAL_WORKSPACE_DEPS="$TMP_DIR/runtime/local-workspace-deps.sh"
+EXTENSION_DIR="$TMP_DIR/extensions/wordpress"
+[ ! -e "$TMP_DIR/extensions/nodejs" ] || exit 1
 
 if ! command -v npm >/dev/null 2>&1; then
     echo "npm is required for the WordPress local workspace deps smoke" >&2

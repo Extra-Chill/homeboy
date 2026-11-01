@@ -62,6 +62,26 @@ mod general {
     }
 
     #[test]
+    fn local_workspace_helper_is_exported_without_extensions() {
+        with_isolated_home(|home| {
+            let pairs = ensure_all_helpers().expect("materialize runtime helpers");
+            let (_, path) = pairs
+                .iter()
+                .find(|(key, _)| key == LOCAL_WORKSPACE_DEPS_ENV)
+                .expect("workspace helper exported for every runner");
+            assert_eq!(
+                std::fs::read_to_string(path).expect("workspace helper contents"),
+                assets::LOCAL_WORKSPACE_DEPS_SH
+            );
+            assert!(!home.path().join(".config/homeboy/extensions/nodejs").exists());
+            assert_eq!(
+                helper_path(LOCAL_WORKSPACE_DEPS_ENV).unwrap(),
+                PathBuf::from(path)
+            );
+        });
+    }
+
+    #[test]
     fn helper_path_resolves_by_filename_and_env_var() {
         with_isolated_home(|_| {
             let by_filename = helper_path("command-capture.sh").expect("helper path by filename");

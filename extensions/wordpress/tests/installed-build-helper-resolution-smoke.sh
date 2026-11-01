@@ -3,24 +3,20 @@ set -euo pipefail
 
 WORDPRESS_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD_RUNNER="${WORDPRESS_ROOT}/scripts/build/build.sh"
+source "${WORDPRESS_ROOT}/../scripts/lib/runtime-helper-resolver.sh"
+HELPER="$(homeboy_runtime_helper "${WORDPRESS_ROOT}/.." HOMEBOY_RUNTIME_LOCAL_WORKSPACE_DEPS local-workspace-deps.sh)"
 FIXTURE_ROOT="$(mktemp -d)"
 trap 'rm -rf "$FIXTURE_ROOT"' EXIT
 
-mkdir -p \
-    "${FIXTURE_ROOT}/extension-sources/wordpress" \
-    "${FIXTURE_ROOT}/extensions/nodejs/scripts/lib"
+mkdir -p "${FIXTURE_ROOT}/extension-sources/wordpress" "${FIXTURE_ROOT}/extensions" "${FIXTURE_ROOT}/runtime"
 ln -s "${FIXTURE_ROOT}/extension-sources/wordpress" "${FIXTURE_ROOT}/extensions/wordpress"
-touch "${FIXTURE_ROOT}/extensions/nodejs/scripts/lib/local-workspace-deps.sh"
+cp "$HELPER" "${FIXTURE_ROOT}/runtime/local-workspace-deps.sh"
+export EXTENSION_PATH="${FIXTURE_ROOT}/extensions/wordpress"
+export HOMEBOY_RUNTIME_LOCAL_WORKSPACE_DEPS="${FIXTURE_ROOT}/runtime/local-workspace-deps.sh"
+eval "$(awk '/^LOCAL_WORKSPACE_DEPS_HELPER=/{print; exit}' "$BUILD_RUNNER")"
 
-EXTENSION_PATH="${FIXTURE_ROOT}/extensions/wordpress"
-export EXTENSION_PATH
-unset HOMEBOY_RUNTIME_LOCAL_WORKSPACE_DEPS || true
-eval "$(awk '/^EXTENSION_COLLECTION_PATH=/{print; next} /^LOCAL_WORKSPACE_DEPS_HELPER=/{print; exit}' "$BUILD_RUNNER")"
-
-EXPECTED="${FIXTURE_ROOT}/extensions/nodejs/scripts/lib/local-workspace-deps.sh"
-if [ "$LOCAL_WORKSPACE_DEPS_HELPER" != "$EXPECTED" ] || [ ! -f "$LOCAL_WORKSPACE_DEPS_HELPER" ]; then
-    printf 'FAIL: symlinked extension resolved helper to %s\n' "$LOCAL_WORKSPACE_DEPS_HELPER" >&2
-    exit 1
-fi
-
-printf '%s\n' 'installed build helper resolution smoke passed'
+[ ! -e "${FIXTURE_ROOT}/extensions/nodejs" ]
+[ "$LOCAL_WORKSPACE_DEPS_HELPER" = "$HOMEBOY_RUNTIME_LOCAL_WORKSPACE_DEPS" ]
+source "$LOCAL_WORKSPACE_DEPS_HELPER"
+declare -F homeboy_apply_local_workspace_dependencies >/dev/null
+printf '%s\n' 'installed WordPress-only build helper resolution smoke passed'

@@ -644,9 +644,9 @@ the resolved package. When `build` is omitted the dependency's own `build`
 script is run after installing its dependencies. The override runs after the
 consumer's own dependencies are installed and before the consumer build, and a
 declared override that fails is a fatal build error. The mechanism is generic
-Node.js behavior shared with the `nodejs` build runner
-(`nodejs/scripts/lib/local-workspace-deps.sh`); it carries no WordPress
-specifics.
+Node.js behavior shared with the `nodejs` build runner. Homeboy core supplies
+`local-workspace-deps.sh` via `HOMEBOY_RUNTIME_LOCAL_WORKSPACE_DEPS`; the
+`nodejs` extension does not need to be installed. It carries no WordPress specifics.
 
 ### wp-scripts (JavaScript build toolchain)
 
