@@ -143,9 +143,14 @@ Runs the `up` pipeline. Mutating rig commands acquire a resource lease first whe
 `rig up` also participates in resource-policy warnings. If the machine is
 already warm or hot, Homeboy warns on stderr before adding more load. The warning
 is advisory only; use global `--placement local` when the extra pressure is expected.
-`rig up` is intentionally local-only for Lab offload: the pipeline can manage local
-services, leases, ports, and declared filesystem paths that are not portable
-through the current single-workspace runner snapshot.
+Persistent `rig up` is local-only for Lab offload: its services, leases, ports,
+and paths cannot be mirrored safely. A rig with `"lifecycle": {"mode": "disposable"}`
+can run `rig up` on the Lab; it must not declare services. Disposable pipelines
+boot a throwaway environment, write artifacts, and exit.
+
+`rig up` accepts repeatable `--setting KEY=VALUE` (strings) and
+`--setting-json KEY=JSON` (typed values). Commands receive their merged object as
+`HOMEBOY_SETTINGS_JSON`; JSON overrides take precedence over string settings.
 
 For command-only rigs, agents can ask Homeboy for a portable runner plan instead
 of materializing the rig locally:

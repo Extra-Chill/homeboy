@@ -63,27 +63,25 @@ impl RigArgs {
                 rig_id,
                 dry_run: true,
                 refs,
+                ..
             } if refs.is_empty() => Some(rig_id),
             _ => None,
         }
     }
 
     pub(crate) fn portability_contract(&self) -> CommandPortabilityContract {
-        if let RigCommand::Check { target, .. } = &self.command {
+        let portable_target = match &self.command {
+            RigCommand::Check { target, .. } => Some((target.as_str(), RIG_CHECK_LAB_LABEL)),
+            RigCommand::Up { rig_id, .. } if disposable_rig(rig_id) => {
+                Some((rig_id.as_str(), "rig up"))
+            }
+            _ => None,
+        };
+        if let Some((target, label)) = portable_target {
             let contract = if rig_check_uses_linked_local_source(target) {
-                LabCommandContract::explicit_runner(
-                    RIG_CHECK_LAB_LABEL,
-                    None,
-                    false,
-                    LAB_NO_EXTRA_CAPABILITIES,
-                )
+                LabCommandContract::explicit_runner(label, None, false, LAB_NO_EXTRA_CAPABILITIES)
             } else {
-                LabCommandContract::portable_workload(
-                    RIG_CHECK_LAB_LABEL,
-                    None,
-                    false,
-                    LAB_NO_EXTRA_CAPABILITIES,
-                )
+                LabCommandContract::portable_workload(label, None, false, LAB_NO_EXTRA_CAPABILITIES)
             };
             return CommandPortabilityContract::lab(contract);
         }
@@ -109,6 +107,12 @@ impl RigArgs {
         }
         CommandPortabilityContract::none()
     }
+}
+
+fn disposable_rig(rig_id: &str) -> bool {
+    super::bench::bench_config_root()
+        .and_then(|root| rig::load(&root, rig_id))
+        .is_ok_and(|spec| spec.is_disposable())
 }
 
 fn rig_check_uses_linked_local_source(rig_id: &str) -> bool {
@@ -145,6 +149,8 @@ enum RigCommand {
         /// Build an execution plan without running the rig.
         #[arg(long)]
         dry_run: bool,
+        #[command(flatten)]
+        setting_args: SettingArgs,
     },
     /// Run a rig's `check` pipeline and report health
     Check {
@@ -381,7 +387,8 @@ pub fn run(args: RigArgs) -> CmdResult<RigCommandOutput> {
             rig_id,
             dry_run,
             refs,
-        } => up(config_root, &rig_id, dry_run, &refs),
+            setting_args,
+        } => up(config_root, &rig_id, dry_run, &refs, &setting_args),
         RigCommand::Check { target, id, path } => {
             check(config_root, &target, id.as_deref(), path.as_deref())
         }
@@ -622,6 +629,7 @@ fn up(
     rig_id: &str,
     dry_run: bool,
     refs: &[String],
+    setting_args: &SettingArgs,
 ) -> CmdResult<RigCommandOutput> {
     let rig = rig::load(config_root, rig_id)?;
     if dry_run {
@@ -657,7 +665,24 @@ fn up(
             ));
         }
     }
-    let report = rig::run_up_with_refs(&rig, &overrides)?;
+    let mut settings = materialized_setting_env_args(setting_args)?;
+    let mut merged = serde_json::Map::new();
+    merged.extend(setting_args.settings_profile_json_overrides()?);
+    merged.extend(
+        setting_args
+            .settings_overrides()?
+            .into_iter()
+            .map(|(key, value)| (key, serde_json::Value::String(value))),
+    );
+    merged.extend(setting_args.settings_json_overrides()?);
+    // Only when settings were given, so a caller's exported value survives.
+    if !merged.is_empty() {
+        settings.push((
+            "HOMEBOY_SETTINGS_JSON".into(),
+            serde_json::Value::Object(merged).to_string(),
+        ));
+    }
+    let report = rig::run_up_with_refs_and_settings(&rig, &overrides, &settings)?;
     let exit_code = if report.success { 0 } else { 1 };
     Ok((
         RigCommandOutput::Up(RigUpOutput {
@@ -1126,6 +1151,84 @@ mod tests {
     }
 
     #[test]
+    fn disposable_up_contract_and_settings_environment() {
+        crate::test_support::with_isolated_home(|home| {
+            let output = home.path().join("settings.json");
+            write_rig(
+                home.path(),
+                "disposable",
+                serde_json::json!({
+                    "id": "disposable", "lifecycle": {"mode": "disposable"},
+                    "pipeline": {"up": [{"kind": "command", "command": format!("printf '%s' \"$HOMEBOY_SETTINGS_JSON\" > '{}'", output.display())}]}
+                }),
+            );
+            let cli = TestCli::try_parse_from([
+                "homeboy",
+                "up",
+                "disposable",
+                "--setting",
+                "name=fan",
+                "--setting-json",
+                "journeys=[\"ratings\"]",
+            ])
+            .unwrap();
+            assert_eq!(
+                cli.rig.portability_contract(),
+                CommandPortabilityContract::lab(LabCommandContract::portable_workload(
+                    "rig up",
+                    None,
+                    false,
+                    LAB_NO_EXTRA_CAPABILITIES
+                ))
+            );
+            let RigCommand::Up { setting_args, .. } = cli.rig.command else {
+                panic!()
+            };
+            let (_, code) =
+                up(&test_config_root(), "disposable", false, &[], &setting_args).unwrap();
+            assert_eq!(code, 0);
+            let json: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(output).unwrap()).unwrap();
+            assert_eq!(
+                json,
+                serde_json::json!({"name": "fan", "journeys": ["ratings"]})
+            );
+        });
+    }
+
+    #[test]
+    fn persistent_up_stays_local_and_disposable_services_are_rejected() {
+        crate::test_support::with_isolated_home(|home| {
+            write_rig(
+                home.path(),
+                "persistent",
+                serde_json::json!({"id": "persistent"}),
+            );
+            let cli = TestCli::try_parse_from(["homeboy", "up", "persistent"]).unwrap();
+            assert_eq!(
+                cli.rig.portability_contract(),
+                CommandPortabilityContract::lab(LabCommandContract::local_only(
+                    "rig up",
+                    RIG_UP_LAB_UNSUPPORTED_REASON
+                ))
+            );
+            write_rig(
+                home.path(),
+                "invalid",
+                serde_json::json!({
+                    "id": "invalid", "lifecycle": {"mode": "disposable"},
+                    "services": {"web": {"kind": "command", "command": "sleep 1"}}
+                }),
+            );
+            let error = rig::load(&test_config_root(), "invalid").unwrap_err();
+            assert!(
+                error.message.contains("must not declare services"),
+                "{error:?}"
+            );
+        });
+    }
+
+    #[test]
     fn parses_sources_without_nested_subcommand() {
         let cli = TestCli::try_parse_from(["homeboy", "sources"])
             .expect("rig sources should parse without nested subcommand");
@@ -1193,6 +1296,7 @@ mod tests {
             rig_id,
             refs,
             dry_run,
+            ..
         } = cli.rig.command
         else {
             panic!("expected rig up command");

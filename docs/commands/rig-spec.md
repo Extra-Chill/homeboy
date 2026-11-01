@@ -50,6 +50,19 @@ touching component checkouts.
 | `bench_profiles` | object | No | Named benchmark scenario profiles keyed by profile name. |
 | `app_launcher` | object | No | Optional desktop launcher wrapper config. |
 
+## Disposable Rigs
+
+The optional top-level `lifecycle.mode` is `persistent` by default. Set
+`"lifecycle": {"mode": "disposable"}` for a pipeline that boots a throwaway
+environment, runs to completion, writes artifacts, and exits. Disposable rigs
+must not declare `services` (validation rejects them). Their `rig up` pipeline
+can run on a Lab runner, like `rig check`; linked local sources require an
+explicit runner. Persistent rigs remain local-only for `rig up`.
+
+`mode` can coexist with the existing `lifecycle.cleanup` resource defaults.
+Invocation settings from `rig up --setting KEY=VALUE` and
+`--setting-json KEY=JSON` are passed to command steps as `HOMEBOY_SETTINGS_JSON`.
+
 ## Workload Lifecycle Contracts
 
 Workload entries in `bench_workloads`, `trace_workloads`, and `fuzz_workloads`
