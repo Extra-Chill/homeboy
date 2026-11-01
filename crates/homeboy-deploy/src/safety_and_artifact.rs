@@ -14,8 +14,12 @@ use homeboy_core::server::SshClient;
 use homeboy_extension_contract::DeployVerification;
 use std::time::Instant;
 
-use super::transfer::{upload_directory, upload_file};
+use super::install_script::{self, shown, Step, StepOutput};
+use super::transfer::{scp_file, upload_directory, upload_file};
 use super::types::{DeployEffect, DeployResult};
+use super::version_overrides::deploy_override_template_vars;
+use homeboy_extension_contract::manifest_toolchain_config::DeployOverride;
+use homeboy_extension_contract::ExtensionManifest;
 
 /// Framework-neutral shared directory names that typically contain sibling components.
 const DANGEROUS_PATH_SUFFIXES: &[&str] = &["/node_modules", "/vendor", "/packages", "/extensions"];
@@ -113,263 +117,330 @@ pub(super) fn deploy_via_git(
     Ok(DeployResult::success(0).with_phase_timings(timer))
 }
 
-/// Main entry point - uploads artifact and runs extract command if configured
+/// How an uploaded artifact is installed at its target.
+pub(super) enum ArtifactInstall<'a> {
+    /// Upload in place: archives go into the target directory and run the
+    /// component's extract command; other files and directories land as-is.
+    Extract(Option<&'a str>),
+    /// An extension-defined override (e.g. an archive install policy): upload
+    /// to its staging path and run its install command.
+    Override(OverrideInstall<'a>),
+}
+
+pub(super) struct OverrideInstall<'a> {
+    pub config: &'a DeployOverride,
+    pub extension: &'a ExtensionManifest,
+    pub site_root: Option<&'a str>,
+    pub domain: Option<&'a str>,
+    pub cli_path: Option<&'a str>,
+}
+
+/// The single artifact install path: upload once, then run every install,
+/// permission, verification, and cleanup step as one remote script.
 pub(super) fn deploy_artifact(
     ssh_client: &SshClient,
     local_path: &Path,
     remote_path: &str,
-    extract_command: Option<&str>,
+    install: &ArtifactInstall<'_>,
     verification: Option<&DeployVerification>,
     remote_owner: Option<&str>,
     mut observation: Option<&mut DeployObservation>,
 ) -> Result<DeployResult> {
-    let mut uploaded_artifact_path: Option<String> = None;
-    let mut verified = false;
     let mut timer = PhaseTimer::new();
     let subject = format!("target={remote_path}");
-
     if let Some(observation) = observation.as_deref_mut() {
         observation.phase("transfer", true)?;
     }
+    let started = Instant::now();
+    let mut vars = HashMap::from([(
+        TemplateVars::TARGET_DIR.to_string(),
+        remote_path.to_string(),
+    )]);
+    let mut steps = Vec::new();
+    let mut fix_permissions = true;
+    let mut installs = true;
+    let mut cleanup = None;
 
-    // Step 1: Upload (directory or file)
-    if local_path.is_dir() {
-        let started = Instant::now();
-        let result = upload_directory(ssh_client, local_path, remote_path)?;
-        if !result.success {
-            return Ok(result);
-        }
-        phase_clock::record(&mut timer, &subject, "transfer", started);
-
-        // Directory artifacts bypass the extraction branch below, so normalize
-        // them here instead of preserving the build user's ownership and modes.
-        homeboy_core::log_status!("deploy", "Fixing file permissions");
-        phase_clock::time(&mut timer, &subject, "permissions", || {
-            permissions::fix_deployed_permissions(ssh_client, remote_path, remote_owner)
-        })?;
-    } else {
-        // Validate: archive artifacts require an extract command
-        let is_archive = local_path
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .map(|ext| matches!(ext, "zip" | "tar" | "gz" | "tgz"))
-            .unwrap_or(false);
-
-        if is_archive && extract_command.is_none() {
-            return Ok(DeployResult::failure(
-                1,
-                format!(
-                    "Archive artifact '{}' requires an extractCommand. \
-                     Add one with: homeboy component set <id> --json '{{\"extract_command\": \"unzip -o {{{{artifact}}}} && rm {{{{artifact}}}}\"}}'",
-                    local_path.display()
-                ),
-            ));
-        }
-
-        // For archives, upload to temp location in target directory
-        let deploy_defaults = defaults::load_defaults().deploy;
-        let artifact_prefix = &deploy_defaults.artifact_prefix;
-        let artifact_filename = local_path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .ok_or_else(|| {
-                Error::validation_invalid_argument(
-                    "buildArtifact",
-                    "Build artifact path must include a file name",
-                    Some(local_path.display().to_string()),
-                    None,
-                )
-            })?
-            .to_string();
-        let artifact_filename = format!("{}{}", artifact_prefix, artifact_filename);
-
-        let upload_path = if extract_command.is_some() {
-            // Archives are uploaded into the target directory (often with a prefix) then extracted.
-            format!("{}/{}", remote_path, artifact_filename)
-        } else {
-            // Non-archives (or archives with no extract) should upload directly to a file path.
-            // Using an explicit file path allows atomic replacement via a temp upload + mv.
-            let local_filename = local_path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .ok_or_else(|| {
-                    Error::validation_invalid_argument(
-                        "buildArtifact",
-                        "Build artifact path must include a file name",
-                        Some(local_path.display().to_string()),
-                        None,
-                    )
-                })?;
-            format!("{}/{}", remote_path, local_filename)
-        };
-
-        // Create target directory
-        let started = Instant::now();
-        let mkdir_cmd = format!("mkdir -p {}", shell::quote_path(remote_path));
-        homeboy_core::log_status!("deploy", "Creating directory: {}", remote_path);
-        let mkdir_output = ssh_client.execute(&mkdir_cmd);
-        if !mkdir_output.success {
-            return Ok(DeployResult::failure(
-                mkdir_output.exit_code,
-                format!("Failed to create remote directory: {}", mkdir_output.stderr),
-            ));
-        }
-
-        let result = upload_file(ssh_client, local_path, &upload_path)?;
-        if !result.success {
-            return Ok(result);
-        }
-        phase_clock::record(&mut timer, &subject, "transfer", started);
-        uploaded_artifact_path = Some(upload_path.clone());
-
-        // Step 2: Execute extract command if configured
-        if let Some(cmd_template) = extract_command {
-            if let Some(observation) = observation.as_deref_mut() {
-                observation.phase("extract", true)?;
-            }
-            let started = Instant::now();
-            // Defense-in-depth: refuse to clean known shared parent directories.
-            // The upstream validate_deploy_target() should already catch this,
-            // but since this executes `rm -rf` we add an extra guard.
-            let normalized_remote = remote_path.trim_end_matches('/');
-            let is_dangerous = DANGEROUS_PATH_SUFFIXES
-                .iter()
-                .any(|suffix| normalized_remote.ends_with(suffix));
-            if is_dangerous {
-                return Ok(DeployResult::failure(
-                    1,
-                    format!(
-                        "Refusing to clean '{}' — it is a shared parent directory. \
-                         This would delete sibling components. Fix the component's remote_path.",
-                        remote_path
-                    ),
-                ));
-            }
-
-            // Clean the target directory before extraction to prevent stale files.
-            // This handles directory renames (e.g. blocks/ → Blocks/) where the old
-            // casing would persist because unzip merges into existing directories.
-            // We remove everything except the uploaded artifact itself.
-            let clean_cmd = format!(
-                "cd {} && find . -mindepth 1 -maxdepth 1 ! -name {} -exec rm -rf {{}} +",
-                shell::quote_path(remote_path),
-                shell::quote_arg(&artifact_filename),
-            );
-            homeboy_core::log_status!("deploy", "Cleaning target directory before extraction");
-            let clean_output = ssh_client.execute(&clean_cmd);
-            if !clean_output.success {
-                let error_detail = if clean_output.stderr.is_empty() {
-                    clean_output.stdout.clone()
-                } else {
-                    clean_output.stderr.clone()
-                };
-                return Ok(DeployResult::failure(
-                    clean_output.exit_code,
-                    format!(
-                        "Failed to clean target directory before extraction (exit {}): {}",
-                        clean_output.exit_code, error_detail
-                    ),
-                ));
-            }
-
-            let mut vars = HashMap::new();
-            vars.insert("artifact".to_string(), artifact_filename);
-            vars.insert("targetDir".to_string(), remote_path.to_string());
-
-            let rendered_cmd = render_extract_command(cmd_template, &vars);
-
-            let extract_cmd = format!("cd {} && {}", shell::quote_path(remote_path), rendered_cmd);
-            homeboy_core::log_status!("deploy", "Extracting: {}", rendered_cmd);
-
-            let extract_output = ssh_client.execute(&extract_cmd);
-            if !extract_output.success {
-                let error_detail = if extract_output.stderr.is_empty() {
-                    extract_output.stdout.clone()
-                } else {
-                    extract_output.stderr.clone()
-                };
-                return Ok(DeployResult::failure(
-                    extract_output.exit_code,
-                    format!(
-                        "Extract command failed (exit {}): {}",
-                        extract_output.exit_code, error_detail
-                    ),
-                ));
-            }
-
-            // Step 2b: Flatten an accidental single top-level directory.
-            //
-            // Build archives commonly contain a single top-level directory named
-            // after the component. When the component's remote_path already points
-            // at that directory, extracting in place produces a double-nested layout
-            // (`.../component/component/...`) that runtimes cannot load. Detect that
-            // signature and lift the inner directory's contents up one level so the
-            // artifact lands flat.
-            if let Some(result) = flatten_double_nested_dir(ssh_client, remote_path)? {
+    let uploaded_artifact_path = match install {
+        ArtifactInstall::Extract(_) if local_path.is_dir() => {
+            // Directory artifacts bypass extraction but still get their
+            // permissions normalized instead of keeping the build user's.
+            installs = false;
+            let result = upload_directory(ssh_client, local_path, remote_path)?;
+            if !result.success {
                 return Ok(result);
             }
-
-            // Step 2c: Fail loudly if the layout is still double-nested.
-            //
-            // This is independent of the optional user-configured `verification`
-            // step below. A false success on a broken layout is the worst symptom:
-            // it silently breaks the install while reporting `success: true`. If the
-            // double-nest directory still exists after the flatten attempt, refuse to
-            // report success.
-            if let Some(result) = ensure_not_double_nested(ssh_client, remote_path) {
-                return Ok(result);
+            None
+        }
+        ArtifactInstall::Extract(extract_command) => {
+            let local_filename = artifact_file_name(local_path)?;
+            let artifact_filename = match extract_command {
+                Some(_) => {
+                    if let Some(failure) = refuse_dangerous_clean(remote_path) {
+                        return Ok(failure);
+                    }
+                    // Archives upload into the target directory with a prefix, then extract.
+                    let prefix = defaults::load_defaults().deploy.artifact_prefix;
+                    format!("{}{}", prefix, local_filename)
+                }
+                None if is_archive(local_path) => {
+                    return Ok(DeployResult::failure(
+                        1,
+                        format!(
+                            "Archive artifact '{}' requires an extractCommand. \
+                             Add one with: homeboy component set <id> --json '{{\"extract_command\": \"unzip -o {{{{artifact}}}} && rm {{{{artifact}}}}\"}}'",
+                            local_path.display()
+                        ),
+                    ));
+                }
+                // Other files upload to their own path, replaced atomically via temp + mv.
+                None => local_filename.to_string(),
+            };
+            let upload_path = format!("{}/{}", remote_path, artifact_filename);
+            if let Some(failure) =
+                upload_into(ssh_client, local_path, remote_path, &upload_path, false)?
+            {
+                return Ok(failure);
             }
-            phase_clock::record(&mut timer, &subject, "install", started);
-
-            // Fix file permissions after extraction
-            homeboy_core::log_status!("deploy", "Fixing file permissions");
-            phase_clock::time(&mut timer, &subject, "permissions", || {
-                permissions::fix_deployed_permissions(ssh_client, remote_path, remote_owner)
-            })?;
-        }
-    }
-
-    // Step 3: Run verification if configured
-    if verification.is_some() {
-        if let Some(observation) = observation {
-            observation.phase("verify", true)?;
-        }
-    }
-    if let Some((v, verify_cmd_template)) = verification
-        .as_ref()
-        .and_then(|v| v.verify_command.as_ref().map(|cmd| (v, cmd)))
-    {
-        let mut vars = HashMap::new();
-        vars.insert(
-            TemplateVars::TARGET_DIR.to_string(),
-            remote_path.to_string(),
-        );
-        if let Some(upload_path) = uploaded_artifact_path.as_ref() {
+            match extract_command {
+                Some(cmd_template) => {
+                    steps.extend(extract_steps(remote_path, artifact_filename, cmd_template));
+                }
+                None => {
+                    fix_permissions = false;
+                    installs = false;
+                }
+            }
             vars.insert("stagingArtifact".to_string(), upload_path.clone());
+            Some(upload_path)
         }
-        let verify_cmd = render_map(verify_cmd_template, &vars);
+        ArtifactInstall::Override(install) => {
+            let artifact_filename = artifact_file_name(local_path)?;
+            let staging_path = &install.config.staging_path;
+            let staging_artifact = format!("{}/{}", staging_path, artifact_filename);
+            homeboy_core::log_status!(
+                "deploy",
+                "Using extension deploy override: {}",
+                install.extension.id
+            );
+            if let Some(failure) = upload_into(
+                ssh_client,
+                local_path,
+                staging_path,
+                &staging_artifact,
+                true,
+            )? {
+                return Ok(failure);
+            }
+            // Resolution order: component/project cli_path override → extension default → "wp"
+            let default_cli = install.extension.cli.as_ref();
+            let cli_path = install
+                .cli_path
+                .or_else(|| default_cli.and_then(|c| c.default_cli_path.as_deref()))
+                .unwrap_or("wp");
+            vars = deploy_override_template_vars(
+                artifact_filename,
+                &staging_artifact,
+                remote_path,
+                install.site_root,
+                cli_path,
+                install.domain,
+            );
+            steps.push(symlink_notice_step(remote_path));
+            let install_cmd = render_map(&install.config.install_command, &vars);
+            homeboy_core::log_status!("deploy", "Running install command: {}", install_cmd);
+            steps.push(Step::new(install_cmd, |output| {
+                Ok(failure_with_detail("Install command failed", output))
+            }));
+            fix_permissions = !install.config.skip_permissions_fix;
+            cleanup = install.config.cleanup_command.as_ref();
+            Some(staging_artifact)
+        }
+    };
 
-        let verify_output = phase_clock::time(&mut timer, &subject, "verify", || {
-            ssh_client.execute(&verify_cmd)
-        });
-        if !verify_output.success || verify_output.stdout.trim().is_empty() {
-            let error_msg = v
-                .verify_error_message
-                .as_ref()
-                .map(|msg| render_map(msg, &vars))
-                .unwrap_or_else(|| format!("Deploy verification failed for {}", remote_path));
-            return Ok(DeployResult::failure(1, error_msg));
-        }
-        verified = true;
+    phase_clock::record(&mut timer, &subject, "transfer", started);
+
+    if fix_permissions {
+        homeboy_core::log_status!("deploy", "Fixing file permissions");
+        steps.extend(permissions::fix_deployed_permissions_steps(
+            remote_path,
+            remote_owner,
+        ));
+    }
+    let verify = verification.and_then(|v| v.verify_command.as_ref().map(|cmd| (v, cmd)));
+    if let Some((v, template)) = verify {
+        let error_msg = v
+            .verify_error_message
+            .as_ref()
+            .map(|msg| render_map(msg, &vars))
+            .unwrap_or_else(|| format!("Deploy verification failed for {}", remote_path));
+        steps.push(Step::requiring_output(
+            &render_map(template, &vars),
+            move |_| Ok(DeployResult::failure(1, error_msg.clone())),
+        ));
+    }
+    // Cleanup runs after verification so verifiers can compare the installed
+    // files against the exact uploaded payload.
+    if let Some(cleanup) = cleanup {
+        let cleanup_cmd = render_map(cleanup, &vars);
+        homeboy_core::log_status!("deploy", "Running cleanup: {}", cleanup_cmd);
+        steps.push(Step::best_effort(cleanup_cmd));
     }
 
+    if installs {
+        if let Some(observation) = observation.as_deref_mut() {
+            observation.phase("extract", true)?;
+        }
+    }
+    // Install, permissions, verification, and cleanup run as one remote
+    // script, so they are timed as a single `install` phase.
+    let failure = if steps.is_empty() {
+        None
+    } else {
+        phase_clock::time(&mut timer, &subject, "install", || {
+            install_script::run(ssh_client, &steps)
+        })?
+    };
+    if let (Some(observation), Some(_)) = (observation, verification) {
+        observation.phase("verify", true)?;
+    }
+    if let Some(failure) = failure {
+        return Ok(failure);
+    }
     Ok(DeployResult::success(0)
         .with_effect(DeployEffect {
             remote_path: remote_path.to_string(),
             artifact_path: uploaded_artifact_path,
-            verified,
+            verified: verify.is_some(),
         })
         .with_phase_timings(timer))
+}
+
+fn is_archive(local_path: &Path) -> bool {
+    local_path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| matches!(ext, "zip" | "tar" | "gz" | "tgz"))
+}
+
+fn artifact_file_name(local_path: &Path) -> Result<&str> {
+    local_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "buildArtifact",
+                "Build artifact path must include a file name",
+                Some(local_path.display().to_string()),
+                None,
+            )
+        })
+}
+
+/// Create `dir` and upload the artifact to `upload_path` inside it. Override
+/// staging uploads in place; target uploads replace atomically via temp + mv.
+fn upload_into(
+    ssh_client: &SshClient,
+    local_path: &Path,
+    dir: &str,
+    upload_path: &str,
+    staging: bool,
+) -> Result<Option<DeployResult>> {
+    let (created, failed) = if staging {
+        ("staging directory", "staging directory")
+    } else {
+        ("directory", "remote directory")
+    };
+    homeboy_core::log_status!("deploy", "Creating {}: {}", created, dir);
+    let mkdir = ssh_client.execute(&format!("mkdir -p {}", shell::quote_path(dir)));
+    if !mkdir.success {
+        return Ok(Some(DeployResult::failure(
+            mkdir.exit_code,
+            format!("Failed to create {}: {}", failed, mkdir.stderr),
+        )));
+    }
+    let upload = if staging {
+        scp_file(ssh_client, local_path, upload_path)?
+    } else {
+        upload_file(ssh_client, local_path, upload_path)?
+    };
+    Ok((!upload.success).then_some(upload))
+}
+
+fn failure_with_detail(what: &str, output: &StepOutput) -> DeployResult {
+    DeployResult::failure(
+        output.exit_code,
+        format!("{what} (exit {}): {}", output.exit_code, output.detail()),
+    )
+}
+
+/// Defense-in-depth: refuse to clean known shared parent directories. The
+/// upstream validate_deploy_target() should already catch this, but the
+/// extract steps run `rm -rf`, so guard again.
+fn refuse_dangerous_clean(remote_path: &str) -> Option<DeployResult> {
+    let normalized_remote = remote_path.trim_end_matches('/');
+    DANGEROUS_PATH_SUFFIXES
+        .iter()
+        .any(|suffix| normalized_remote.ends_with(suffix))
+        .then(|| {
+            DeployResult::failure(
+                1,
+                format!(
+                    "Refusing to clean '{}' — it is a shared parent directory. \
+                     This would delete sibling components. Fix the component's remote_path.",
+                    remote_path
+                ),
+            )
+        })
+}
+
+fn extract_steps(remote_path: &str, artifact_filename: String, cmd_template: &str) -> Vec<Step> {
+    // Clean the target directory before extraction to prevent stale files.
+    // This handles directory renames (e.g. blocks/ → Blocks/) where the old
+    // casing would persist because unzip merges into existing directories.
+    // We remove everything except the uploaded artifact itself.
+    let clean_cmd = format!(
+        "cd {} && find . -mindepth 1 -maxdepth 1 ! -name {} -exec rm -rf {{}} +",
+        shell::quote_path(remote_path),
+        shell::quote_arg(&artifact_filename),
+    );
+    homeboy_core::log_status!("deploy", "Cleaning target directory before extraction");
+    let vars = HashMap::from([
+        ("artifact".to_string(), artifact_filename),
+        ("targetDir".to_string(), remote_path.to_string()),
+    ]);
+    let rendered_cmd = render_extract_command(cmd_template, &vars);
+    let extract_cmd = format!("cd {} && {}", shell::quote_path(remote_path), rendered_cmd);
+    homeboy_core::log_status!("deploy", "Extracting: {}", rendered_cmd);
+
+    let mut steps = vec![
+        Step::new(clean_cmd, |output| {
+            Ok(failure_with_detail(
+                "Failed to clean target directory before extraction",
+                output,
+            ))
+        }),
+        Step::new(extract_cmd, |output| {
+            Ok(failure_with_detail("Extract command failed", output))
+        }),
+    ];
+    steps.extend(flatten_double_nested_step(remote_path));
+    steps.extend(ensure_not_double_nested_step(remote_path));
+    steps
+}
+
+/// Warn when the target is a symlink: the install replaces it with a real
+/// directory, which changes the target's resolved path. A dev/rig workflow may
+/// symlink an external checkout into the deploy location, and an environment
+/// caching the old resolved path may need a refresh. Generic: no assumptions
+/// about the target runtime or its caching behavior.
+fn symlink_notice_step(remote_path: &str) -> Step {
+    Step::best_effort(format!(
+        "if [ -L {} ]; then echo \"{}⚠ Deploy target {} is currently a symlink; the install will replace it with a real directory. Any environment that caches the symlink's resolved path may need to be refreshed or recycled to pick up the new location.\"; fi",
+        shell::quote_path(remote_path),
+        install_script::LOG_MARKER,
+        shown(remote_path),
+    ))
 }
 
 /// Return the final path segment of `remote_path` (its basename), if any.
@@ -383,109 +454,70 @@ fn remote_basename(remote_path: &str) -> Option<&str> {
         .filter(|segment| !segment.is_empty())
 }
 
-/// Detect and repair the classic double-nested layout produced when a build ZIP
-/// has a single top-level directory equal to the deploy target's own basename.
+/// Repair the classic double-nested layout produced when a build ZIP has a
+/// single top-level directory equal to the deploy target's own basename.
 ///
-/// The signature we repair is: after extraction, `remote_path` contains exactly
-/// one entry, and that entry is a directory whose name equals `basename(remote_path)`
-/// (e.g. `.../component/component/`). When that holds, the inner
-/// directory's contents (including dotfiles) are lifted up into `remote_path` and
-/// the now-empty inner directory is removed.
-///
-/// Returns `Ok(Some(failure))` only if the flatten was attempted but failed, so the
-/// caller can short-circuit and report failure. Returns `Ok(None)` when there was
-/// nothing to flatten or the flatten succeeded.
-fn flatten_double_nested_dir(
-    ssh_client: &SshClient,
-    remote_path: &str,
-) -> Result<Option<DeployResult>> {
-    let Some(basename) = remote_basename(remote_path) else {
-        return Ok(None);
-    };
-
+/// Build archives commonly contain a single top-level directory named after
+/// the component. When the component's remote_path already points at that
+/// directory, extracting in place produces `.../component/component/...`,
+/// which runtimes cannot load. When `remote_path` contains exactly one entry
+/// and it is a directory named `basename(remote_path)`, the inner directory's
+/// contents (including dotfiles) are lifted up and the inner directory removed.
+/// A same-named subdirectory alongside other entries is left alone.
+fn flatten_double_nested_step(remote_path: &str) -> Option<Step> {
+    let basename = remote_basename(remote_path)?;
     let normalized = remote_path.trim_end_matches('/');
     let nested_dir = format!("{}/{}", normalized, basename);
+    let target = shell::quote_path(normalized);
 
-    // Only flatten when the nested directory is the *sole* entry in remote_path.
-    // This avoids clobbering a legitimate same-named subdirectory that lives
-    // alongside other top-level files (which would not be a double-nest artifact).
-    //
-    // `entries` counts the non-hidden + hidden top-level entries; we require it to be
-    // exactly the nested directory and nothing else.
-    let detect_cmd = format!(
-        "test -d {nested} && \
-         [ \"$(cd {target} && find . -mindepth 1 -maxdepth 1 | wc -l | tr -d '[:space:]')\" = \"1\" ] && \
-         [ \"$(cd {target} && find . -mindepth 1 -maxdepth 1 -exec basename {{}} \\;)\" = {basename_arg} ] && echo NESTED || echo OK",
-        nested = shell::quote_path(&nested_dir),
-        target = shell::quote_path(normalized),
-        basename_arg = shell::quote_arg(basename),
-    );
-    let detect_output = ssh_client.execute(&detect_cmd);
-    if !detect_output.success {
-        // Detection is best-effort; if we cannot determine the layout, let the
-        // mandatory sanity check below decide.
-        return Ok(None);
-    }
-    if detect_output.stdout.trim() != "NESTED" {
-        return Ok(None);
-    }
-
-    homeboy_core::log_status!(
-        "deploy",
-        "Detected double-nested directory '{}'; flattening into '{}'",
-        nested_dir,
-        normalized
-    );
-
-    // Move the inner directory aside, then lift its contents (including dotfiles)
-    // up into remote_path, then remove the now-empty staging directory. Using a
-    // temp staging name avoids the "cannot move a directory into itself" problem
-    // when the inner dir shares the basename with its parent.
+    // Move the inner directory aside, then lift its contents up into
+    // remote_path, then remove the now-empty staging directory. A temp
+    // staging name avoids "cannot move a directory into itself" when the
+    // inner dir shares the basename with its parent. Detection is
+    // best-effort: if it cannot run, the mandatory layout check decides.
     let staging = ".artifact-flatten-staging";
-    let flatten_cmd = format!(
-        "cd {target} && rm -rf {staging} && mv {nested} {staging} && \
+    let command = format!(
+        "if test -d {nested} && \
+         [ \"$(cd {target} && find . -mindepth 1 -maxdepth 1 | wc -l | tr -d '[:space:]')\" = \"1\" ] && \
+         [ \"$(cd {target} && find . -mindepth 1 -maxdepth 1 -exec basename {{}} \\;)\" = {basename_arg} ]; then \
+         echo \"{log}Detected double-nested directory '{shown_nested}'; flattening into '{shown_target}'\" && \
+         cd {target} && rm -rf {staging} && mv {inner} {staging} && \
          find {staging} -mindepth 1 -maxdepth 1 -exec mv {{}} . \\; && \
-         rmdir {staging}",
-        target = shell::quote_path(normalized),
-        nested = shell::quote_path(basename),
+         rmdir {staging}; fi",
+        nested = shell::quote_path(&nested_dir),
+        basename_arg = shell::quote_arg(basename),
+        inner = shell::quote_path(basename),
         staging = shell::quote_path(staging),
+        log = install_script::LOG_MARKER,
+        shown_nested = shown(&nested_dir),
+        shown_target = shown(normalized),
     );
-    let flatten_output = ssh_client.execute(&flatten_cmd);
-    if !flatten_output.success {
-        let error_detail = if flatten_output.stderr.is_empty() {
-            flatten_output.stdout.clone()
-        } else {
-            flatten_output.stderr.clone()
-        };
-        return Ok(Some(DeployResult::failure(
-            flatten_output.exit_code,
+    Some(Step::new(command, move |output| {
+        Ok(DeployResult::failure(
+            output.exit_code,
             format!(
                 "Failed to flatten double-nested directory '{}' (exit {}): {}",
-                nested_dir, flatten_output.exit_code, error_detail
+                nested_dir,
+                output.exit_code,
+                output.detail()
             ),
-        )));
-    }
-
-    Ok(None)
+        ))
+    }))
 }
 
 /// Mandatory post-extract sanity check: fail the deploy if the artifact landed
 /// double-nested (`remote_path/<basename(remote_path)>/` still exists).
 ///
-/// This guards against silently reporting `success: true` while the install is
-/// broken on disk. Returns `Some(failure)` when the broken layout is detected.
-fn ensure_not_double_nested(ssh_client: &SshClient, remote_path: &str) -> Option<DeployResult> {
-    let basename = remote_basename(remote_path)?;
-    let normalized = remote_path.trim_end_matches('/');
+/// This is independent of the optional user-configured verification. A false
+/// success on a broken layout is the worst symptom: it silently breaks the
+/// install while reporting `success: true`.
+fn ensure_not_double_nested_step(remote_path: &str) -> Option<Step> {
+    let basename = remote_basename(remote_path)?.to_string();
+    let normalized = remote_path.trim_end_matches('/').to_string();
     let nested_dir = format!("{}/{}", normalized, basename);
-
-    let check_cmd = format!(
-        "test -d {} && echo NESTED || echo OK",
-        shell::quote_path(&nested_dir)
-    );
-    let check_output = ssh_client.execute(&check_cmd);
-    if check_output.stdout.trim() == "NESTED" {
-        return Some(DeployResult::failure(
+    let command = format!("! test -d {}", shell::quote_path(&nested_dir));
+    Some(Step::new(command, move |_| {
+        Ok(DeployResult::failure(
             1,
             format!(
                 "Deploy produced a double-nested layout: '{nested}' exists, so the artifact \
@@ -498,9 +530,8 @@ fn ensure_not_double_nested(ssh_client: &SshClient, remote_path: &str) -> Option
                 target = normalized,
                 base = basename,
             ),
-        ));
-    }
-    None
+        ))
+    }))
 }
 
 fn render_extract_command(template: &str, vars: &HashMap<String, String>) -> String {
@@ -514,11 +545,13 @@ fn render_extract_command(template: &str, vars: &HashMap<String, String>) -> Str
 #[cfg(test)]
 mod tests {
     use super::{
-        deploy_artifact, deploy_via_git, ensure_not_double_nested, flatten_double_nested_dir,
-        remote_basename, render_extract_command, DANGEROUS_PATH_SUFFIXES,
+        deploy_artifact, deploy_via_git, ensure_not_double_nested_step, flatten_double_nested_step,
+        install_script, remote_basename, render_extract_command, ArtifactInstall,
+        DANGEROUS_PATH_SUFFIXES,
     };
     use crate::lifecycle::DeployObservation;
     use crate::test_support::local_client;
+    use crate::types::DeployResult;
     use homeboy_core::observation::ObservationStore;
     use homeboy_core::server::SshClient;
     use homeboy_extension_contract::DeployVerification;
@@ -529,6 +562,21 @@ mod tests {
     use std::io::Write;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+
+    fn ensure_not_double_nested(ssh_client: &SshClient, remote_path: &str) -> Option<DeployResult> {
+        let step = ensure_not_double_nested_step(remote_path)?;
+        install_script::run(ssh_client, &[step]).expect("layout check")
+    }
+
+    fn flatten_double_nested_dir(
+        ssh_client: &SshClient,
+        remote_path: &str,
+    ) -> homeboy_core::error::Result<Option<DeployResult>> {
+        match flatten_double_nested_step(remote_path) {
+            Some(step) => install_script::run(ssh_client, &[step]),
+            None => Ok(None),
+        }
+    }
 
     fn local_client_with_env(env: HashMap<String, String>) -> SshClient {
         SshClient {
@@ -649,7 +697,7 @@ mod tests {
                 &local_client(),
                 &source,
                 target.to_str().expect("target path"),
-                None,
+                &ArtifactInstall::Extract(None),
                 None,
                 None,
                 None,
@@ -699,7 +747,7 @@ mod tests {
             &local_client(),
             &artifact,
             target.to_str().expect("target path"),
-            None,
+            &ArtifactInstall::Extract(None),
             Some(&verification),
             None,
             None,
@@ -749,7 +797,7 @@ mod tests {
             &local_client_with_env(env),
             &artifact,
             target.to_str().expect("target path"),
-            Some("true"),
+            &ArtifactInstall::Extract(Some("true")),
             None,
             None,
             None,
@@ -838,7 +886,7 @@ mod tests {
             &local_client(),
             &archive,
             target.to_str().expect("target path"),
-            Some("unzip -o {artifact} && rm {artifact}"),
+            &ArtifactInstall::Extract(Some("unzip -o {artifact} && rm {artifact}")),
             None,
             None,
             None,
@@ -878,7 +926,7 @@ mod tests {
             &local_client(),
             &archive,
             target.to_str().expect("target path"),
-            Some("unzip -o {artifact} && rm {artifact}"),
+            &ArtifactInstall::Extract(Some("unzip -o {artifact} && rm {artifact}")),
             None,
             None,
             None,
@@ -914,7 +962,7 @@ mod tests {
                 &local_client(),
                 &archive,
                 target.to_str().expect("target path"),
-                Some("unzip -o {artifact} && rm {artifact}"),
+                &ArtifactInstall::Extract(Some("unzip -o {artifact} && rm {artifact}")),
                 Some(&verification),
                 None,
                 Some(&mut observation),
@@ -986,7 +1034,7 @@ mod tests {
             &local_client(),
             &archive,
             target.to_str().expect("target"),
-            None,
+            &ArtifactInstall::Extract(None),
             None,
             None,
             None,

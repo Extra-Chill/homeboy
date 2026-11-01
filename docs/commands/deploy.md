@@ -145,7 +145,7 @@ are omitted. Span ids:
 - `source.materialize`, `source.verify`, `source.dependencies`, `source.package_inputs` — exact-ref (`--ref`) or isolated tag checkout, verification, dependency hydration, declared package inputs
 - `build`, `package` — local build/payload preparation and archive manifest/hash
 - `preflight.manifest` — remote content-manifest re-probe before the first write
-- `transfer`, `install`, `permissions`, `verify` — upload, remote extract/install command, permission fix, extension verify command
+- `transfer`, `install` — upload; then the single remote install script (extract/install command, permission fix, extension verify command, cleanup)
 - `verify.version` — post-deploy remote version read
 - `hooks` — component `post:deploy` hooks
 - `project.hooks`, `project.smoke` — project-scoped `post:deploy:project` hooks and smoke check; they run once per deploy and are attributed to every applied component
