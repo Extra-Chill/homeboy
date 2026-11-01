@@ -575,6 +575,9 @@ impl AdapterDependencyProvider {
         let Some(install) = manager.commands.install.as_ref() else {
             return Ok(None);
         };
+        if install.requires_lockfile && !self.adapter.has_declared_lockfile() {
+            return Ok(None);
+        }
         let reusable =
             manager
                 .commands
@@ -602,13 +605,7 @@ impl AdapterDependencyProvider {
     }
 
     fn run(&self, command: &AdapterCommand, operation: &str) -> Result<DependencyCommandResult> {
-        if command.requires_lockfile
-            && !self
-                .adapter
-                .lockfile_priority
-                .iter()
-                .any(|lockfile| self.adapter.install_path.join(lockfile).exists())
-        {
+        if command.requires_lockfile && !self.adapter.has_declared_lockfile() {
             return Err(Error::validation_invalid_argument(
                 "dependency_provider",
                 format!(
@@ -779,6 +776,15 @@ struct InstalledDependencyAdapter {
 }
 
 impl InstalledDependencyAdapter {
+    /// Whether one of the adapter's declared lockfiles exists in the install
+    /// root. Lockfile-gated commands (for example `npm ci`) are only runnable
+    /// and only plannable when this holds.
+    fn has_declared_lockfile(&self) -> bool {
+        self.lockfile_priority
+            .iter()
+            .any(|lockfile| self.install_path.join(lockfile).exists())
+    }
+
     fn matches(&self, path: &Path) -> bool {
         let mut matched = self
             .project_signals
@@ -2314,6 +2320,88 @@ esac
 
             assert_eq!(providers.len(), 1);
             assert_eq!(providers[0].adapter.id, "fixture");
+        });
+    }
+
+    #[test]
+    fn adapter_deps_provider_hydration_plan_skips_lockfile_required_install_without_a_lockfile() {
+        crate::test_support::with_isolated_home(|_| {
+            let project = tempdir().unwrap();
+            fs::write(
+                project.path().join("package.json"),
+                r#"{"name":"fixture/project","dependencies":{"fixture/package":"^1.0"}}"#,
+            )
+            .unwrap();
+            let adapter_dir = paths::extensions()
+                .unwrap()
+                .join("fixture-extension/dependency-adapters");
+            fs::create_dir_all(&adapter_dir).unwrap();
+            fs::write(
+                adapter_dir.join("index.json"),
+                r#"{
+                    "schema": "homeboy-extension/dependency-adapter-index/v1",
+                    "manifests": [{ "id": "fixture", "ecosystem": "fixture", "path": "fixture.json" }]
+                }"#,
+            )
+            .unwrap();
+            fs::write(
+                adapter_dir.join("fixture.json"),
+                r#"{
+                    "schema": "homeboy-extension/dependency-adapter-manifest/v1",
+                    "id": "fixture",
+                    "version": 1,
+                    "ecosystem": "fixture",
+                    "project_signals": { "root_files": ["package.json"] },
+                    "lockfile_priority": ["package-lock.json"],
+                    "package_managers": [{
+                        "id": "fixture-npm",
+                        "selection": { "priority": 1, "default": true },
+                        "commands": {
+                            "install": { "command": "npm ci", "requires_lockfile": true }
+                        },
+                        "package_identity": {
+                            "manifest": "package.json",
+                            "name": "name",
+                            "dependencies": ["dependencies"]
+                        },
+                        "outputs": [{ "kind": "directory", "path": "node_modules" }]
+                    }]
+                }"#,
+            )
+            .unwrap();
+
+            let component = Component::new(
+                "fixture".to_string(),
+                project.path().display().to_string(),
+                String::new(),
+                None,
+            );
+            let providers = AdapterDependencyProvider::load(project.path()).unwrap();
+            let [provider] = providers.as_slice() else {
+                panic!("expected exactly one adapter provider");
+            };
+            let control = CooperativeControl::unbounded();
+            let context = DependencyProviderContext {
+                component: &component,
+                path: project.path(),
+            };
+
+            assert!(
+                provider
+                    .hydration_plan(context, &control)
+                    .unwrap()
+                    .is_none(),
+                "a lockfile-required install must not be planned without a declared lockfile"
+            );
+
+            fs::write(project.path().join("package-lock.json"), "{}").unwrap();
+            let plan = provider
+                .hydration_plan(context, &control)
+                .unwrap()
+                .expect("the declared lockfile makes the lockfile-required install plannable");
+            assert_eq!(plan.provider_id, "fixture-npm");
+            assert_eq!(plan.install.argv(), vec!["sh", "-c", "npm ci"]);
+            assert_eq!(plan.install.cwd, project.path());
         });
     }
 
