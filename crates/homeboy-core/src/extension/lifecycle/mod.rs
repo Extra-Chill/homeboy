@@ -1745,6 +1745,79 @@ exec '{}' "$@"
         });
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn update_all_refreshes_independent_linked_roots_concurrently() {
+        with_isolated_home(|home| {
+            let mut remotes = Vec::new();
+            let mut revisions = Vec::new();
+            for id in ["fixture-a", "fixture-b"] {
+                let source = home.path().join(id);
+                fs::create_dir_all(&source).unwrap();
+                let remote = prepare_git_extension_repo(&source, id).expect("git fixture");
+                install(&source.join(id).to_string_lossy(), Some(id)).unwrap();
+                let old = git_output(&source, &["rev-parse", "HEAD"]).unwrap();
+                advance_remote(&source, &remote.path().join("extension.git"));
+                // The scratch clone is not part of the source worktree.
+                fs::remove_dir_all(source.join("advance-clone")).unwrap();
+                let probe = home.path().join(format!("{id}-upload-pack"));
+                homeboy_test_support::write_executable(
+                    &probe,
+                    // Discovery and fetch open separate sessions. Delay only
+                    // discovery so each root has one second of network latency.
+                    format!(
+                        "#!/bin/sh\nif [ ! -e '{marker}' ]; then\n  touch '{marker}'\n  echo start >> '{log}'\n  sleep 1\n  echo end >> '{log}'\nfi\nexec git-upload-pack \"$@\"\n",
+                        marker = home.path().join(format!("{id}-probed")).display(),
+                        log = home.path().join("discovery-sessions").display(),
+                    ),
+                    0o755,
+                )
+                .unwrap();
+                assert!(run_git(
+                    &source,
+                    &[
+                        "config",
+                        "remote.origin.uploadpack",
+                        probe.to_str().unwrap()
+                    ]
+                ));
+                revisions.push((source, old));
+                remotes.push(remote);
+            }
+
+            let mut progress_ids = Vec::new();
+            let result = update_all(false, |id, index, total| {
+                progress_ids.push(id.to_string());
+                assert_eq!(index, progress_ids.len());
+                assert_eq!(total, 2);
+                Ok(())
+            })
+            .unwrap();
+            // Both roots' slow discovery sessions overlap: serial refreshes
+            // would log start/end/start/end.
+            assert_eq!(
+                fs::read_to_string(home.path().join("discovery-sessions")).unwrap(),
+                "start\nstart\nend\nend\n",
+                "independent linked roots must refresh concurrently"
+            );
+            assert!(result.skipped.is_empty(), "{:?}", result.skipped_details);
+            assert_eq!(progress_ids, ["fixture-a", "fixture-b"]);
+            assert_eq!(result.updated.len(), 2);
+            for (index, (entry, (source, old))) in result.updated.iter().zip(revisions).enumerate()
+            {
+                assert_eq!(entry.extension_id, progress_ids[index]);
+                let new = git_output(&source, &["rev-parse", "HEAD"]).unwrap();
+                assert_ne!(old, new);
+                assert!(
+                    old.starts_with(entry.source_update.old_source_revision.as_deref().unwrap())
+                );
+                assert!(
+                    new.starts_with(entry.source_update.new_source_revision.as_deref().unwrap())
+                );
+            }
+        });
+    }
+
     #[test]
     fn linked_update_reports_reinstall_repair_when_source_is_not_git_backed() {
         with_isolated_home(|home| {

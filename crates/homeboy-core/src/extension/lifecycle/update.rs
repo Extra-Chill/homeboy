@@ -37,13 +37,25 @@ pub fn resolve_update_revisions(
                 .push(id.clone());
         }
     }
-    groups
-        .into_iter()
-        .flat_map(|((url, requested_ref), ids)| {
-            let revision = git::remote_revision(&url, requested_ref.as_deref());
-            ids.into_iter().map(move |id| (id, revision.clone()))
-        })
-        .collect()
+    let groups: Vec<_> = groups.into_iter().collect();
+    let mut revisions = std::collections::HashMap::new();
+    for batch in groups.chunks(4) {
+        std::thread::scope(|scope| {
+            // remote_revision only configures its child git process; it does not
+            // mutate the parent's environment or working directory.
+            let handles: Vec<_> = batch
+                .iter()
+                .map(|((url, requested_ref), ids)| {
+                    scope.spawn(move || (ids, git::remote_revision(url, requested_ref.as_deref())))
+                })
+                .collect();
+            for handle in handles {
+                let (ids, revision) = handle.join().expect("revision lookup worker panicked");
+                revisions.extend(ids.iter().map(|id| (id.clone(), revision.clone())));
+            }
+        });
+    }
+    revisions
 }
 
 /// Update an installed extension by pulling latest changes. `remote_revision`
