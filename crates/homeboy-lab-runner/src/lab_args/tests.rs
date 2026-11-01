@@ -1126,15 +1126,15 @@ mod run_plan_remap_tests {
 
     /// A run-plan's resolved runtime identity must name the runner's synced
     /// copy of the runtime, even when the controller reaches the runtime
-    /// through a symlinked parent (#15259: `~/.config/homeboy/agent-runtimes`
+    /// through a symlinked parent (#15259: `~/.config/homeboy/shared-assets`
     /// linked into an extensions checkout).
     #[test]
     fn remap_agent_task_run_plan_rebinds_symlinked_runtime_identity() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let real_runtime = temp.path().join("extensions/agent-runtimes/pi");
+        let real_runtime = temp.path().join("extensions/shared-assets/pi");
         std::fs::create_dir_all(&real_runtime).expect("runtime");
         let config = temp.path().join("config");
-        std::os::unix::fs::symlink(temp.path().join("extensions/agent-runtimes"), &config)
+        std::os::unix::fs::symlink(temp.path().join("extensions/shared-assets"), &config)
             .expect("symlink");
         let declared = config.join("pi").display().to_string();
         let remote = "/home/runner/_lab_workspaces/pi-runtime".to_string();

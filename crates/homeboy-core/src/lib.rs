@@ -63,7 +63,6 @@ pub mod config;
 // Compatibility exports for existing `crate::<module>` consumers. Prefer the
 // facade modules above for new code so implementation files can move without
 // becoming accidental public API.
-pub mod agent_runtime_manifest;
 pub mod agent_task_secret_provider;
 pub use homeboy_lab_contract::agent_task_config;
 pub mod api_jobs;

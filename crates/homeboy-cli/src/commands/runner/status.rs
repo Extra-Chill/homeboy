@@ -1,11 +1,5 @@
 use std::collections::BTreeMap;
 
-use homeboy::core::agent_runtime_manifest::{
-    discover_agent_runtime_catalog, AgentRuntimeDiagnosticFollowup,
-    AgentRuntimeDiagnosticsContract, AgentRuntimeExecutableRequirement,
-    AgentRuntimeRuntimeDiagnosticDeclaration, AgentRuntimeSourceConsistencyDiagnostic,
-    AgentRuntimeToolDiagnosticDeclaration,
-};
 use homeboy::core::daemon::{DaemonRecoveryEvidence, DaemonStaleReasonCode};
 use homeboy::runner::readonly_probe;
 use homeboy::runner::runners::{
@@ -17,13 +11,10 @@ use homeboy_runner_contract::RunnerKind;
 use super::super::CmdResult;
 use super::types::{
     LabFollowup, LabRunnerConnectionCapability, LabRunnerHomeboyOutput, LabSelectedRunnerOutput,
-    RunnerArtifactFeatureDiagnostics, RunnerConnectionOutput,
-    RunnerExecutableRequirementDiagnostics, RunnerExecutionCapabilities, RunnerExecutionCapability,
-    RunnerExtra, RunnerOperatorCommand, RunnerOperatorSummary, RunnerOutput,
-    RunnerReconciliationOutcome, RunnerReconciliationStatus, RunnerRuntimeDiagnostics,
-    RunnerRuntimePackageDiagnostics, RunnerStatusInspection, RunnerStatusUnavailable,
-    RunnerToolDiagnostics, RunnerTruncation, RunnerWorkflowBinaryGuidance, RuntimeDiagnostic,
-    RuntimePackageOutput, RuntimeProbeValue, SelectedRuntimeOutput,
+    RunnerArtifactFeatureDiagnostics, RunnerConnectionOutput, RunnerExecutionCapabilities,
+    RunnerExecutionCapability, RunnerExtra, RunnerOperatorCommand, RunnerOperatorSummary,
+    RunnerOutput, RunnerReconciliationOutcome, RunnerReconciliationStatus, RunnerStatusInspection,
+    RunnerStatusUnavailable, RunnerTruncation, RunnerWorkflowBinaryGuidance,
 };
 
 const DEFAULT_STATUS_SESSION_LIMIT: usize = 20;
@@ -724,62 +715,20 @@ fn selected_lab_runner_status(
         .homeboy_path
         .clone()
         .unwrap_or_else(|| "homeboy".to_string());
-    let effective_env = runner::effective_env(runner_id)?
-        .into_iter()
-        .collect::<BTreeMap<_, _>>();
-    let runtime_diagnostics =
-        declared_runtime_diagnostics_collection(Some(runner_id), &effective_env);
-    let executable_requirements = declared_executable_requirement_diagnostics_collection();
     Ok(Some(LabSelectedRunnerOutput {
         runner_id: runner_id.to_string(),
         kind: format!("{:?}", runner_config.kind).to_ascii_lowercase(),
         configured_executable: configured_executable.clone(),
         runner_homeboy: lab_runner_homeboy_output(runner_id, &configured_executable, &status),
-        executable_requirements,
-        selected_runtime: runtime_diagnostics
-            .first()
-            .map(selected_runtime_output_from_generic),
-        runtime_diagnostics,
+        executable_requirements: Vec::new(),
+        selected_runtime: None,
+        runtime_diagnostics: Vec::new(),
         daemon_enabled: runner_config.settings.daemon,
         workspace_root: runner_config.workspace_root.clone(),
         readiness_state: format!("{:?}", status.state).to_ascii_lowercase(),
         connected: status.connected,
         availability: status.admission_availability(runner_config.settings.concurrency_limit),
     }))
-}
-
-pub(super) fn declared_executable_requirement_diagnostics_collection(
-) -> Vec<RunnerExecutableRequirementDiagnostics> {
-    discover_agent_runtime_catalog()
-        .manifests
-        .into_iter()
-        .flat_map(|manifest| {
-            let runtime = manifest.id;
-            manifest
-                .materialization
-                .executable_requirements
-                .into_iter()
-                .map(move |requirement| {
-                    declared_executable_requirement_diagnostics(&runtime, requirement)
-                })
-        })
-        .collect()
-}
-
-pub(super) fn declared_executable_requirement_diagnostics(
-    runtime: &str,
-    requirement: AgentRuntimeExecutableRequirement,
-) -> RunnerExecutableRequirementDiagnostics {
-    RunnerExecutableRequirementDiagnostics {
-        runtime: runtime.to_string(),
-        id: requirement.id,
-        label: requirement.label,
-        env: requirement.env,
-        candidates: requirement.candidates,
-        version_command: requirement.version_command,
-        install_hint: requirement.install_hint,
-        diagnostic_state: "declared",
-    }
 }
 
 pub(super) fn lab_runner_homeboy_output(
@@ -865,436 +814,6 @@ fn lab_runner_homeboy_output_with_recovery_guidance(
         dev_sync: runner::load(runner_id)
             .ok()
             .and_then(|runner| runner.resources.get("dev_sync").cloned()),
-    }
-}
-
-pub(crate) fn declared_tool_diagnostics(
-    declaration: &AgentRuntimeToolDiagnosticDeclaration,
-    runner_id: Option<&str>,
-    env: &BTreeMap<String, String>,
-) -> RunnerToolDiagnostics {
-    let (configured, configured_binary_source) =
-        configured_value(env, &declaration.configured_binary_env);
-    let (install_dir, _, _) = install_dir(
-        env,
-        declaration.install_dir_env.as_deref(),
-        declaration.default_install_dir.as_deref(),
-    );
-    let managed_cache_source =
-        render_diagnostic_template(&declaration.managed_cache_source, &install_dir, "");
-    let managed_cache_binary = render_diagnostic_template(
-        &declaration.managed_cache_binary,
-        &install_dir,
-        &managed_cache_source,
-    );
-    RunnerToolDiagnostics {
-        tool: declaration.tool.clone(),
-        configured_binary: configured,
-        configured_binary_source,
-        managed_cache_source,
-        managed_cache_binary,
-        effective_binary_rule: declaration.effective_binary_rule.clone(),
-        diagnostic_command: diagnostic_command(runner_id, &declaration.diagnostic_script),
-    }
-}
-
-pub(crate) fn declared_runtime_diagnostics(
-    declaration: &AgentRuntimeRuntimeDiagnosticDeclaration,
-    runner_id: Option<&str>,
-    env: &BTreeMap<String, String>,
-) -> RunnerRuntimeDiagnostics {
-    let (configured, configured_binary_source) =
-        configured_value(env, &declaration.configured_binary_env);
-    let (install_dir, install_dir_source, default_install_dir) = install_dir(
-        env,
-        declaration.install_dir_env.as_deref(),
-        declaration.default_install_dir.as_deref(),
-    );
-    let managed_cache_source =
-        render_diagnostic_template(&declaration.managed_cache_source, &install_dir, "");
-    let managed_cache_binary = render_diagnostic_template(
-        &declaration.managed_cache_binary,
-        &install_dir,
-        &managed_cache_source,
-    );
-    let default_managed_cache_source =
-        render_diagnostic_template(&declaration.managed_cache_source, &default_install_dir, "");
-    let default_managed_cache_binary = render_diagnostic_template(
-        &declaration.managed_cache_binary,
-        &default_install_dir,
-        &default_managed_cache_source,
-    );
-    let packages = declared_runtime_packages(
-        declaration,
-        RuntimePackageContext {
-            runner_id,
-            env,
-            install_dir: &install_dir,
-            install_dir_source: &install_dir_source,
-            managed_cache_source: &managed_cache_source,
-            default_install_dir: &default_install_dir,
-            default_managed_cache_source: &default_managed_cache_source,
-        },
-    );
-    let mut diagnostics = declared_runtime_source_diagnostics(
-        &declaration.source_consistency,
-        env,
-        configured.as_deref(),
-        &install_dir,
-        &managed_cache_source,
-    );
-    diagnostics.extend(configured_binary_override_diagnostics(
-        declaration,
-        runner_id,
-        configured.as_deref(),
-        &configured_binary_source,
-        &default_managed_cache_binary,
-    ));
-    diagnostics.extend(package_override_diagnostics(
-        declaration,
-        runner_id,
-        &packages,
-    ));
-
-    RunnerRuntimeDiagnostics {
-        runtime: declaration.tool.clone(),
-        configured_binary: configured,
-        configured_binary_source,
-        managed_cache_source: managed_cache_source.clone(),
-        managed_cache_binary,
-        effective_binary_rule: declaration.effective_binary_rule.clone(),
-        packages,
-        probes: declared_probe_values(declaration),
-        runtime_probe_command: diagnostic_command(runner_id, &declaration.runtime_probe_script),
-        diagnostics,
-    }
-}
-
-pub(crate) fn declared_runtime_diagnostics_collection(
-    runner_id: Option<&str>,
-    env: &BTreeMap<String, String>,
-) -> Vec<RunnerRuntimeDiagnostics> {
-    declared_diagnostics_contracts()
-        .iter()
-        .flat_map(|contract| contract.runtimes.iter())
-        .map(|declaration| declared_runtime_diagnostics(declaration, runner_id, env))
-        .collect()
-}
-
-fn selected_runtime_output_from_generic(
-    diagnostics: &RunnerRuntimeDiagnostics,
-) -> SelectedRuntimeOutput {
-    SelectedRuntimeOutput {
-        tool: diagnostics.runtime.clone(),
-        configured_binary: diagnostics.configured_binary.clone(),
-        configured_binary_source: diagnostics.configured_binary_source.clone(),
-        managed_cache_source: diagnostics.managed_cache_source.clone(),
-        managed_cache_binary: diagnostics.managed_cache_binary.clone(),
-        effective_binary_rule: diagnostics.effective_binary_rule.clone(),
-        primary_package: diagnostics
-            .packages
-            .iter()
-            .find(|package| package.field == "primary_package")
-            .or_else(|| diagnostics.packages.first())
-            .map(runtime_package_output_from_generic)
-            .unwrap_or_else(empty_package),
-        secondary_package: diagnostics
-            .packages
-            .iter()
-            .find(|package| package.field == "secondary_package")
-            .or_else(|| diagnostics.packages.get(1))
-            .map(runtime_package_output_from_generic)
-            .unwrap_or_else(empty_package),
-        source_git_sha: diagnostics
-            .probes
-            .get("source_git_sha")
-            .cloned()
-            .unwrap_or_else(default_runtime_probe_value),
-        dist_build_freshness: diagnostics
-            .probes
-            .get("dist_build_freshness")
-            .cloned()
-            .unwrap_or_else(default_runtime_probe_value),
-        runtime_probe_command: diagnostics.runtime_probe_command.clone(),
-        diagnostics: diagnostics.diagnostics.clone(),
-    }
-}
-
-fn runtime_package_output_from_generic(
-    package: &RunnerRuntimePackageDiagnostics,
-) -> RuntimePackageOutput {
-    RuntimePackageOutput {
-        package: package.package.clone(),
-        expected_path: package.expected_path.clone(),
-        default_path: package.default_path.clone(),
-        selection_source: package.selection_source.clone(),
-        env_override: package.env_override.clone(),
-        remediation_command: package.remediation_command.clone(),
-        resolution: package.resolution.clone(),
-    }
-}
-
-pub(crate) fn declared_runtime_source_diagnostics(
-    declarations: &[AgentRuntimeSourceConsistencyDiagnostic],
-    env: &BTreeMap<String, String>,
-    configured_binary: Option<&str>,
-    install_dir: &str,
-    managed_cache_source: &str,
-) -> Vec<RuntimeDiagnostic> {
-    let mut diagnostics = Vec::new();
-    for declaration in declarations {
-        let path = match declaration.path.as_str() {
-            "configured_binary" => configured_binary.map(str::to_string),
-            other => env.get(other).cloned(),
-        }
-        .unwrap_or_else(|| {
-            render_diagnostic_template(&declaration.path, install_dir, managed_cache_source)
-        });
-        let root = render_diagnostic_template(&declaration.root, install_dir, managed_cache_source);
-        if !path.starts_with(&root) {
-            diagnostics.push(RuntimeDiagnostic {
-                id: declaration.id.clone(),
-                severity: declaration.severity.clone(),
-                message: render_path_message(&declaration.message, &path, &root),
-                remediation: declaration.remediation.clone(),
-            });
-        }
-    }
-    diagnostics
-}
-
-pub(crate) fn declared_diagnostics_contracts() -> Vec<AgentRuntimeDiagnosticsContract> {
-    discover_agent_runtime_catalog()
-        .manifests
-        .into_iter()
-        .map(|manifest| manifest.materialization.diagnostics)
-        .filter(|contract| !contract.is_empty())
-        .collect()
-}
-
-fn configured_value(env: &BTreeMap<String, String>, keys: &[String]) -> (Option<String>, String) {
-    for key in keys {
-        if let Some(value) = env.get(key) {
-            return (Some(value.clone()), key.clone());
-        }
-    }
-    (None, "unset".to_string())
-}
-
-fn install_dir(
-    env: &BTreeMap<String, String>,
-    key: Option<&str>,
-    default_value: Option<&str>,
-) -> (String, String, String) {
-    let default_value = default_value.unwrap_or_default().to_string();
-    if let Some((key, value)) = key.and_then(|key| env.get(key).map(|value| (key, value.clone()))) {
-        return (value, format!("env:{key}"), default_value);
-    }
-    (
-        default_value.clone(),
-        "installed_default".to_string(),
-        default_value,
-    )
-}
-
-fn render_diagnostic_template(
-    template: &str,
-    install_dir: &str,
-    managed_cache_source: &str,
-) -> String {
-    template
-        .replace("${install_dir}", install_dir.trim_end_matches('/'))
-        .replace(
-            "${managed_cache_source}",
-            managed_cache_source.trim_end_matches('/'),
-        )
-}
-
-fn render_path_message(template: &str, path: &str, root: &str) -> String {
-    template.replace("${path}", path).replace("${root}", root)
-}
-
-struct RuntimePackageContext<'a> {
-    runner_id: Option<&'a str>,
-    env: &'a BTreeMap<String, String>,
-    install_dir: &'a str,
-    install_dir_source: &'a str,
-    managed_cache_source: &'a str,
-    default_install_dir: &'a str,
-    default_managed_cache_source: &'a str,
-}
-
-fn declared_runtime_packages(
-    declaration: &AgentRuntimeRuntimeDiagnosticDeclaration,
-    context: RuntimePackageContext<'_>,
-) -> Vec<RunnerRuntimePackageDiagnostics> {
-    declaration
-        .packages
-        .iter()
-        .map(|package| {
-            let effective_path = render_diagnostic_template(
-                &package.expected_path,
-                context.install_dir,
-                context.managed_cache_source,
-            );
-            let default_path = render_diagnostic_template(
-                &package.expected_path,
-                context.default_install_dir,
-                context.default_managed_cache_source,
-            );
-            let override_value = package
-                .env_override
-                .as_deref()
-                .and_then(|key| context.env.get(key).map(|value| (key, value.clone())));
-            let (expected_path, selection_source, env_override, remediation_command) =
-                if let Some((key, value)) = override_value {
-                    let remediation_command = if value != default_path {
-                        Some(runner_env_update_command(
-                            context.runner_id,
-                            key,
-                            &default_path,
-                        ))
-                    } else {
-                        None
-                    };
-                    (
-                        value,
-                        format!("env:{key}"),
-                        Some(key.to_string()),
-                        remediation_command,
-                    )
-                } else {
-                    (
-                        effective_path,
-                        context.install_dir_source.to_string(),
-                        None,
-                        None,
-                    )
-                };
-            RunnerRuntimePackageDiagnostics {
-                field: package.field.clone(),
-                package: package.package.clone(),
-                expected_path,
-                default_path,
-                selection_source,
-                env_override,
-                remediation_command,
-                resolution: RuntimeProbeValue {
-                    value: None,
-                    source: "runtime_probe_command".to_string(),
-                },
-            }
-        })
-        .collect()
-}
-
-fn configured_binary_override_diagnostics(
-    declaration: &AgentRuntimeRuntimeDiagnosticDeclaration,
-    runner_id: Option<&str>,
-    configured_binary: Option<&str>,
-    configured_binary_source: &str,
-    managed_cache_binary: &str,
-) -> Vec<RuntimeDiagnostic> {
-    let Some(configured_binary) = configured_binary else {
-        return Vec::new();
-    };
-    if configured_binary_source == "unset" || configured_binary == managed_cache_binary {
-        return Vec::new();
-    }
-    vec![RuntimeDiagnostic {
-        id: format!("{}.configured_binary_env_override", declaration.tool),
-        severity: "warning".to_string(),
-        message: format!(
-            "Configured runtime binary `{configured_binary}` from `{configured_binary_source}` differs from installed default `{managed_cache_binary}`; runner jobs will use the declaration's effective binary rule before workload execution."
-        ),
-        remediation: runner_env_update_command(runner_id, configured_binary_source, managed_cache_binary),
-    }]
-}
-
-fn package_override_diagnostics(
-    declaration: &AgentRuntimeRuntimeDiagnosticDeclaration,
-    runner_id: Option<&str>,
-    packages: &[RunnerRuntimePackageDiagnostics],
-) -> Vec<RuntimeDiagnostic> {
-    packages
-        .iter()
-        .filter(|package| package.env_override.is_some() && package.expected_path != package.default_path)
-        .map(|package| RuntimeDiagnostic {
-            id: format!("{}.{}.env_override", declaration.tool, package.field),
-            severity: "warning".to_string(),
-            message: format!(
-                "Configured runtime package `{}` path `{}` from `{}` differs from installed default `{}`.",
-                package.package, package.expected_path, package.selection_source, package.default_path
-            ),
-            remediation: runner_env_update_command(
-                runner_id,
-                package.env_override.as_deref().unwrap_or_default(),
-                &package.default_path,
-            ),
-        })
-        .collect()
-}
-
-fn runner_env_update_command(runner_id: Option<&str>, key: &str, value: &str) -> String {
-    let json = serde_json::json!({ "env": { key: value } }).to_string();
-    match runner_id {
-        Some(runner_id) => format!(
-            "homeboy runner set {} --json {}",
-            shell_arg(runner_id),
-            shell_arg(&json)
-        ),
-        None => format!("homeboy runner set <runner-id> --json {}", shell_arg(&json)),
-    }
-}
-
-fn empty_package() -> RuntimePackageOutput {
-    RuntimePackageOutput {
-        package: String::new(),
-        expected_path: String::new(),
-        default_path: String::new(),
-        selection_source: "runtime_probe_command".to_string(),
-        env_override: None,
-        remediation_command: None,
-        resolution: RuntimeProbeValue {
-            value: None,
-            source: "runtime_probe_command".to_string(),
-        },
-    }
-}
-
-fn declared_probe_values(
-    declaration: &AgentRuntimeRuntimeDiagnosticDeclaration,
-) -> BTreeMap<String, RuntimeProbeValue> {
-    declaration
-        .probes
-        .iter()
-        .map(|probe| {
-            (
-                probe.field.clone(),
-                RuntimeProbeValue {
-                    value: None,
-                    source: probe.source.clone(),
-                },
-            )
-        })
-        .collect()
-}
-
-fn default_runtime_probe_value() -> RuntimeProbeValue {
-    RuntimeProbeValue {
-        value: None,
-        source: "runtime_probe_command".to_string(),
-    }
-}
-
-fn diagnostic_command(runner_id: Option<&str>, script: &str) -> String {
-    match runner_id {
-        Some(runner_id) => format!(
-            "homeboy runner exec --raw {} -- bash -lc {}",
-            shell_arg(runner_id),
-            shell_arg(script)
-        ),
-        None => format!("bash -lc {}", shell_arg(script)),
     }
 }
 
@@ -1462,7 +981,6 @@ pub(super) fn runner_followups(
             )
         });
     }
-    followups.extend(declared_followups(None, Some(runner_id)));
     if let Ok(path) = std::env::current_dir() {
         followups.push(LabFollowup {
             label: "workspace_sync".to_string(),
@@ -1589,16 +1107,7 @@ pub(crate) fn declared_run_followups(
         .collect()
 }
 
-fn declared_followups(run_kind: Option<&str>, runner_id: Option<&str>) -> Vec<LabFollowup> {
-    declared_diagnostics_contracts()
-        .iter()
-        .flat_map(|contract| contract.followups.iter())
-        .filter(|followup| followup_matches(followup, run_kind))
-        .map(|followup| declared_followup(followup, runner_id))
-        .collect()
-}
-
-fn followup_matches(followup: &AgentRuntimeDiagnosticFollowup, run_kind: Option<&str>) -> bool {
+fn followup_matches(followup: &RunFollowup, run_kind: Option<&str>) -> bool {
     let declared_kind = followup
         .run_kind
         .as_deref()
@@ -1610,7 +1119,7 @@ fn followup_matches(followup: &AgentRuntimeDiagnosticFollowup, run_kind: Option<
     }
 }
 
-fn default_run_followup_declarations() -> Vec<AgentRuntimeDiagnosticFollowup> {
+fn default_run_followup_declarations() -> Vec<RunFollowup> {
     vec![
         run_followup(
             "recent_runs",
@@ -1662,8 +1171,8 @@ fn run_followup(
     run_kind: Option<&str>,
     command_script: &str,
     purpose: &str,
-) -> AgentRuntimeDiagnosticFollowup {
-    AgentRuntimeDiagnosticFollowup {
+) -> RunFollowup {
+    RunFollowup {
         label: label.to_string(),
         run_kind: run_kind.map(str::to_string),
         workload: None,
@@ -1672,18 +1181,7 @@ fn run_followup(
     }
 }
 
-fn declared_followup(
-    declaration: &AgentRuntimeDiagnosticFollowup,
-    runner_id: Option<&str>,
-) -> LabFollowup {
-    LabFollowup {
-        label: declaration.label.clone(),
-        command: diagnostic_command(runner_id, &declaration.command_script),
-        purpose: declaration.purpose.clone(),
-    }
-}
-
-fn declared_run_followup(declaration: &AgentRuntimeDiagnosticFollowup) -> LabFollowup {
+fn declared_run_followup(declaration: &RunFollowup) -> LabFollowup {
     LabFollowup {
         label: declaration.label.clone(),
         command: declaration.command_script.clone(),
@@ -2232,4 +1730,12 @@ mod tests {
             session_path: "/tmp/homeboy-lab.json".to_string(),
         }
     }
+}
+
+struct RunFollowup {
+    label: String,
+    command_script: String,
+    purpose: String,
+    workload: Option<String>,
+    run_kind: Option<String>,
 }

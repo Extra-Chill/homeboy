@@ -1,8 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-#[cfg(not(test))]
-use std::sync::RwLock;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -32,7 +30,7 @@ use crate::agent_task_secrets::{
     AgentTaskSecretResolutionError,
 };
 use crate::agent_task_timeout::timeout_with_grace;
-use homeboy_core::agent_runtime_manifest::AgentRuntimeDiscoveryDiagnostic;
+
 pub(crate) use homeboy_core::command_invocation::CommandInvocation;
 use homeboy_core::engine::shell;
 pub(crate) use homeboy_core::secret_env_plan::{SecretEnvPlan, SecretEnvStatus};

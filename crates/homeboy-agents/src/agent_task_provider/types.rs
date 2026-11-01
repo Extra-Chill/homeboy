@@ -1,14 +1,34 @@
 use super::*;
 use std::ops::Deref;
 
-use homeboy_extension_contract::agent_task_executor_declaration::{
-    validate_provider_readiness_invocation_timeout_ms,
-    DEFAULT_PROVIDER_READINESS_INVOCATION_TIMEOUT_MS,
-};
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentRuntimeDiscoveryDiagnostic {
+    pub class: String,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extension_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+}
 
-/// Re-exported from the owning contract so the wire identifier has one
-/// definition rather than two that can drift apart at a version bump.
-pub use homeboy_extension_contract::agent_task_executor_declaration::AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA;
+pub const AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA: &str = "homeboy/agent-task-executor-provider/v1";
+pub const DEFAULT_PROVIDER_READINESS_INVOCATION_TIMEOUT_MS: u64 = 20_000;
+const MAX_PROVIDER_READINESS_INVOCATION_TIMEOUT_MS: u64 = 120_000;
+
+fn validate_provider_readiness_invocation_timeout_ms(
+    timeout_ms: u64,
+) -> std::result::Result<(), String> {
+    if (1..=MAX_PROVIDER_READINESS_INVOCATION_TIMEOUT_MS).contains(&timeout_ms) {
+        Ok(())
+    } else {
+        Err(format!(
+            "readiness_invocation.timeout_ms must be between 1 and {MAX_PROVIDER_READINESS_INVOCATION_TIMEOUT_MS} milliseconds"
+        ))
+    }
+}
+
 pub const AGENT_TASK_PROVIDER_CAPABILITY_CONTRACT_SCHEMA: &str =
     "homeboy/agent-task-provider-capability-contract/v1";
 /// Provider accepts `executor.config.workspace_permission_root` as the exact

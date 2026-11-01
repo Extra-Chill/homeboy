@@ -234,52 +234,6 @@ fn provider_readiness_rejects_invalid_immediate_failure_configuration_before_exe
 }
 
 #[test]
-fn provider_selection_matches_unique_extension_alias() {
-    let (_, mut provider) = request("task-a", "node provider.js".to_string());
-    provider.id = "extension-a.provider".to_string();
-    provider.backend = "renamed-backend".to_string();
-    provider.extension_id = Some("extension-a".to_string());
-
-    let providers = [provider];
-    let selected =
-        select_provider_by_backend(&providers, "extension-a", None).expect("provider selected");
-
-    assert_eq!(selected.backend, "renamed-backend");
-}
-
-#[test]
-fn provider_selection_rejects_ambiguous_extension_alias() {
-    let (_, mut provider_a) = request("task-a", "node provider-a.js".to_string());
-    provider_a.id = "provider-a".to_string();
-    provider_a.backend = "renamed-backend".to_string();
-    provider_a.extension_id = Some("extension-a".to_string());
-    let (_, mut provider_b) = request("task-b", "node provider-b.js".to_string());
-    provider_b.id = "provider-b".to_string();
-    provider_b.backend = "fixture".to_string();
-    provider_b.extension_id = Some("extension-a".to_string());
-
-    assert!(select_provider_by_backend(&[provider_a, provider_b], "extension-a", None).is_none());
-}
-
-#[test]
-fn provider_selection_applies_selector_to_unique_extension_alias() {
-    let (_, mut provider) = request("task-a", "node provider.js".to_string());
-    provider.id = "selected-provider".to_string();
-    provider.backend = "renamed-backend".to_string();
-    provider.extension_id = Some("extension-a".to_string());
-
-    assert!(
-        select_provider_by_backend(&[provider.clone()], "extension-a", Some("missing")).is_none()
-    );
-    assert_eq!(
-        select_provider_by_backend(&[provider], "extension-a", Some("selected-provider"))
-            .expect("provider selected")
-            .id,
-        "selected-provider"
-    );
-}
-
-#[test]
 fn provider_manifest_parses_role_aliases() {
     let provider: AgentTaskExecutorProvider = serde_json::from_value(json!({
         "schema": "homeboy/agent-task-executor-provider/v1",

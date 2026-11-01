@@ -73,19 +73,6 @@ pub fn extension_source_root(id: &str) -> Result<PathBuf> {
     Ok(extension_sources_in_root(&homeboy()?).join(id))
 }
 
-/// Agent runtime package directory below an already-resolved config root.
-///
-/// This is the documented and process-stable runtime boundary. Generation
-/// activation changes only runtime-generations/current behind this path.
-pub fn agent_runtimes_in_root(config_root: &Path) -> PathBuf {
-    config_root.join("agent-runtimes")
-}
-
-/// Agent runtime package directory
-pub fn agent_runtimes() -> Result<PathBuf> {
-    Ok(agent_runtimes_in_root(&homeboy()?))
-}
-
 /// Keys directory below an already-resolved config root.
 pub fn keys_in_root(config_root: &Path) -> PathBuf {
     config_root.join("keys")

@@ -1,3 +1,8 @@
+fn is_immutable_revision(value: &str) -> bool {
+    let value = value.trim();
+    value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 use super::command_runner::{failure_outcome, run_materialized_provider_command_with_credentials};
 use super::*;
 
@@ -15,7 +20,7 @@ pub(super) fn effective_provider_for_request(
         let identity: homeboy_core::agent_task_config::ResolvedAgentTaskRuntimeIdentity =
             serde_json::from_value(identity.clone())
                 .map_err(|error| format!("invalid controller runtime identity: {error}"))?;
-        if !homeboy_core::agent_runtime_manifest::is_immutable_revision(&identity.source_revision) {
+        if !is_immutable_revision(&identity.source_revision) {
             return Err(format!(
                 "controller runtime identity for provider '{}' has a non-immutable source revision '{}'",
                 identity.provider_id, identity.source_revision
@@ -297,28 +302,16 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
                         available_ids,
                         selector_hint,
                     } => (
-                            "provider_selector_mismatch",
-                            selector_mismatch_message(
-                                &request.executor.backend,
-                                request.executor.selector.as_deref(),
-                            ),
-                            ProviderRouteDiagnosticData::ProviderSelectorMismatch {
-                                backend: request.executor.backend.clone(),
-                                selector: request.executor.selector.clone(),
-                                available_provider_ids: available_ids,
-                                hint: selector_hint,
-                            },
+                        "provider_selector_mismatch",
+                        selector_mismatch_message(
+                            &request.executor.backend,
+                            request.executor.selector.as_deref(),
                         ),
-                    ProviderResolution::AmbiguousExtensionAlias { candidate_ids } => (
-                        "provider_ambiguous",
-                        format!(
-                            "multiple extension agent-task providers match backend '{}'; pass --selector with one provider id: {}",
-                            request.executor.backend,
-                            candidate_ids.join(", ")
-                        ),
-                        ProviderRouteDiagnosticData::ProviderAmbiguous {
+                        ProviderRouteDiagnosticData::ProviderSelectorMismatch {
                             backend: request.executor.backend.clone(),
-                            available_provider_ids: candidate_ids,
+                            selector: request.executor.selector.clone(),
+                            available_provider_ids: available_ids,
+                            hint: selector_hint,
                         },
                     ),
                     ProviderResolution::Resolved(_) => (
@@ -1014,10 +1007,8 @@ fn provider_resolution_failure_outcome(
     match resolution {
         ProviderResolution::Resolved(_) => unreachable!("resolved provider handled before failure"),
         ProviderResolution::NotFound => {
-            let matching_diagnostics = runtime_discovery_diagnostics_for_backend(
-                diagnostics,
-                &request.executor.backend,
-            );
+            let matching_diagnostics =
+                runtime_discovery_diagnostics_for_backend(diagnostics, &request.executor.backend);
             failure_outcome(
                 request,
                 AgentTaskOutcomeStatus::Failed,
@@ -1030,20 +1021,6 @@ fn provider_resolution_failure_outcome(
                 }),
             )
         }
-        ProviderResolution::AmbiguousExtensionAlias { candidate_ids } => failure_outcome(
-            request,
-            AgentTaskOutcomeStatus::Failed,
-            AgentTaskFailureClassification::CapabilityMissing,
-            "agent_task.provider_ambiguous",
-            format!(
-                "multiple extension agent-task providers match backend '{}'; pass --selector with one provider id",
-                request.executor.backend
-            ),
-            json!({
-                "backend": request.executor.backend,
-                "available_provider_ids": candidate_ids,
-            }),
-        ),
         ProviderResolution::SelectorMismatch {
             available_ids,
             selector_hint,

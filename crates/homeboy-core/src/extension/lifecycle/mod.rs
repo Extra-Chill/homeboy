@@ -446,29 +446,6 @@ mod tests {
         });
     }
 
-    fn write_extension_fixture_with_agent_runtime_provider(root: &Path, id: &str) {
-        let dir = root.join(id);
-        fs::create_dir_all(&dir).expect("extension dir");
-        fs::write(
-            dir.join(format!("{}.json", id)),
-            format!(
-                r#"{{
-  "name": "{} extension",
-  "version": "1.0.0",
-  "agent_runtimes": [{{
-    "id": "{}-runtime",
-    "agent_task_executors": [{{
-      "id": "{}.default",
-      "backend": "{}"
-    }}]
-  }}]
-}}"#,
-                id, id, id, id
-            ),
-        )
-        .expect("extension manifest");
-    }
-
     fn write_component_fixture(root: &Path, extensions: &[&str]) {
         let extension_json = extensions
             .iter()
@@ -1275,7 +1252,7 @@ exec '{}' "$@"
     }
 
     #[test]
-    fn cloned_monorepo_install_materializes_declared_shared_agent_runtimes() {
+    fn cloned_monorepo_install_materializes_declared_shared_assets() {
         with_isolated_home(|home| {
             let home = home.path();
             let source = home.join("source-repo");
@@ -1341,7 +1318,7 @@ exec '{}' "$@"
     }
 
     #[test]
-    fn extracted_monorepo_update_materializes_declared_shared_agent_runtimes() {
+    fn extracted_monorepo_update_materializes_declared_shared_assets() {
         with_isolated_home(|home| {
             let home = home.path();
             let source = home.join("source-repo");
@@ -1414,7 +1391,7 @@ exec '{}' "$@"
     }
 
     #[test]
-    fn linked_monorepo_install_materializes_declared_shared_agent_runtimes() {
+    fn linked_monorepo_install_materializes_declared_shared_assets() {
         with_isolated_home(|home| {
             let home = home.path();
             let source = home.join("source-repo");
@@ -1550,7 +1527,7 @@ exec '{}' "$@"
     }
 
     #[test]
-    fn linked_monorepo_root_install_with_id_materializes_declared_shared_agent_runtimes() {
+    fn linked_monorepo_root_install_with_id_materializes_declared_shared_assets() {
         with_isolated_home(|home| {
             let home = home.path();
             let source = home.join("source-repo");
@@ -1579,7 +1556,7 @@ exec '{}' "$@"
             let home = home.path();
             let source = home.join("source-repo");
             fs::create_dir_all(&source).expect("source repo");
-            write_extension_fixture_with_agent_runtime_provider(&source, "wordpress");
+            write_extension_fixture(&source, "wordpress");
 
             let result = install(
                 &source.join("wordpress").to_string_lossy(),

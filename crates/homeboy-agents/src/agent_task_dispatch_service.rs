@@ -670,7 +670,6 @@ fn controller_resolved_execution_policy_with_sources(
     catalog: &AgentTaskProviderCatalog,
     rotation: Option<AgentTaskProviderRotationPolicy>,
 ) -> ResolvedAgentTaskProviderPolicy {
-    let requested_runtime_identity = selected_runtime_identity(request, catalog);
     let explicit_backend = request
         .backend_selection
         .as_ref()
@@ -685,9 +684,13 @@ fn controller_resolved_execution_policy_with_sources(
                     .as_deref()
                     .is_none_or(|backend| backend == request.backend)
                     && entry.selector.as_deref().is_none_or(|selector| {
-                        requested_runtime_identity
-                            .as_ref()
-                            .is_some_and(|identity| identity.provider_id == selector)
+                        resolve_provider_for_backend(
+                            catalog.providers(),
+                            &request.backend,
+                            request.selector.as_deref(),
+                        )
+                        .resolved()
+                        .is_some_and(|provider| provider.id == selector)
                     })
             });
         }
@@ -702,24 +705,6 @@ fn controller_resolved_execution_policy_with_sources(
             || rotation
                 .as_ref()
                 .is_some_and(|rotation| !rotation.entries.is_empty()));
-    let runtime_identity = if rotation_starts_with_first_entry {
-        if let Some(entry) = rotation
-            .as_ref()
-            .and_then(|rotation| rotation.entries.first())
-        {
-            let backend = entry.backend.as_deref().unwrap_or(&request.backend);
-            let selector = entry.selector.as_deref().or(request.selector.as_deref());
-            selected_runtime_identity_for_route(backend, selector, catalog).or_else(|| {
-                (backend == request.backend && selector == request.selector.as_deref())
-                    .then(|| requested_runtime_identity.clone())
-                    .flatten()
-            })
-        } else {
-            requested_runtime_identity.clone()
-        }
-    } else {
-        requested_runtime_identity
-    };
     ResolvedAgentTaskProviderPolicy {
         backend: request.backend.clone(),
         selector: request.selector.clone(),
@@ -735,59 +720,8 @@ fn controller_resolved_execution_policy_with_sources(
         // An explicit model is immutable for the initial invocation. Rotation
         // remains available for retries, but cannot silently replace it.
         rotation_starts_with_first_entry,
-        runtime_identity,
+        runtime_identity: None,
     }
-}
-
-fn selected_runtime_identity(
-    request: &AgentTaskDispatchRequest,
-    catalog: &AgentTaskProviderCatalog,
-) -> Option<homeboy_core::agent_task_config::ResolvedAgentTaskRuntimeIdentity> {
-    selected_runtime_identity_for_route(&request.backend, request.selector.as_deref(), catalog)
-}
-
-pub(crate) fn selected_runtime_identity_for_route(
-    backend: &str,
-    selector: Option<&str>,
-    catalog: &AgentTaskProviderCatalog,
-) -> Option<homeboy_core::agent_task_config::ResolvedAgentTaskRuntimeIdentity> {
-    let ProviderResolution::Resolved(provider) =
-        resolve_provider_for_backend(catalog.providers(), backend, selector)
-    else {
-        return None;
-    };
-    runtime_identity_for_provider(provider)
-}
-
-pub(crate) fn runtime_identity_for_provider(
-    provider: &crate::agent_task_provider::AgentTaskExecutorProvider,
-) -> Option<homeboy_core::agent_task_config::ResolvedAgentTaskRuntimeIdentity> {
-    let plan = provider.extra.get("runtime_materialization_plan")?;
-    let plan: homeboy_core::agent_runtime_manifest::AgentRuntimeMaterializationPlan =
-        serde_json::from_value(plan.clone()).ok()?;
-    let source_revision = plan.source_revision.clone()?;
-    if !homeboy_core::agent_runtime_manifest::is_immutable_revision(&source_revision) {
-        return None;
-    }
-    let materialization_plan = serde_json::to_value(&plan).ok()?;
-    Some(
-        homeboy_core::agent_task_config::ResolvedAgentTaskRuntimeIdentity {
-            runtime_id: plan.runtime_id,
-            provider_id: plan.provider_id,
-            source_selector: plan.source_selector,
-            source_revision,
-            freshness: match plan.freshness {
-                homeboy_core::agent_runtime_manifest::AgentRuntimeFreshness::Pinned => {
-                    homeboy_core::agent_task_config::ResolvedAgentTaskRuntimeFreshness::Pinned
-                }
-                homeboy_core::agent_runtime_manifest::AgentRuntimeFreshness::Unverifiable => {
-                    homeboy_core::agent_task_config::ResolvedAgentTaskRuntimeFreshness::Unverifiable
-                }
-            },
-            provider: serde_json::to_value(provider).ok()?,
-            materialization_plan,
-        },
-    )
 }
 
 /// Build a controller-owned plan with a durable execution policy when the
@@ -1959,59 +1893,6 @@ mod tests {
         assert_eq!(selection.source, BackendSelectionSource::Policy);
         // Default-policy selections never count as an explicit override.
         assert!(!selection.overrides_default);
-    }
-
-    #[test]
-    fn explicit_backend_keeps_its_runtime_pin_when_default_rotation_targets_another_backend() {
-        let mut provider: crate::agent_task_provider::AgentTaskExecutorProvider =
-            serde_json::from_value(serde_json::json!({
-                "id": "codex.agent-task-executor",
-                "backend": "codex",
-                "invocation": { "argv": ["provider"] }
-            }))
-            .expect("provider fixture");
-        provider.extra.insert(
-            "runtime_materialization_plan".to_string(),
-            serde_json::json!({
-                "schema": homeboy_core::agent_runtime_manifest::AGENT_RUNTIME_MATERIALIZATION_PLAN_SCHEMA,
-                "runtime_id": "codex",
-                "provider_id": "codex.agent-task-executor",
-                "source_selector": "codex-runtime",
-                "source_revision": "0123456789abcdef0123456789abcdef01234567",
-                "freshness": "pinned"
-            }),
-        );
-        let catalog = AgentTaskProviderCatalog {
-            providers: vec![provider],
-            ..Default::default()
-        };
-        let request = resolve_dispatch_request_with_default_and_config(
-            command_with_backend(Some("codex")),
-            |_| Ok(Some("pi".to_string())),
-            || Some("pi".to_string()),
-        )
-        .expect("explicit Codex request");
-        let policy = controller_resolved_execution_policy_with_sources(
-            &request,
-            &catalog,
-            Some(AgentTaskProviderRotationPolicy {
-                entries: vec![
-                    crate::agent_task_scheduler::AgentTaskProviderRotationEntry {
-                        backend: Some("pi".to_string()),
-                        ..Default::default()
-                    },
-                ],
-                ..Default::default()
-            }),
-        );
-
-        assert_eq!(policy.backend, "codex");
-        assert!(!policy.rotation_starts_with_first_entry);
-        assert!(policy.rotation.expect("rotation").entries.is_empty());
-        let identity = policy.runtime_identity.expect("Codex runtime identity");
-        assert_eq!(identity.runtime_id, "codex");
-        assert_eq!(identity.provider_id, "codex.agent-task-executor");
-        assert_eq!(identity.provider["backend"], "codex");
     }
 
     #[test]

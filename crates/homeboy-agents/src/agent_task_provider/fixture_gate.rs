@@ -1,7 +1,7 @@
 //! Compile-time gate for the `fixture` test-double backend.
 //!
 //! `fixture` is not an agent runtime. It has no provider manifest under
-//! `_extensions/agent-runtimes/`, it is never discovered by the extension
+//! the extension directory, it is never discovered by the extension
 //! catalog, and it cannot be resolved by `resolve_provider_for_backend`. It
 //! exists only so tests can dispatch a deterministic executor that writes
 //! predictable artifacts without credentials or an external process.

@@ -65,7 +65,6 @@ pub use ci_config::{
     CiCachePath, CiCachePathRoot, CiCacheSpec, CiCapability, CiJobFidelity, CiJobMapping,
     CiJobSpec, CiLocalContext, CiProfileSpec,
 };
-pub use manifest_capability_config::AgentRuntimeManifestConfig;
 pub use manifest_capability_config::{
     DiscoveryMarkerConfig, RecipeRunProviderDeclaration, RecipeRunProviderDescriptor, ScriptsConfig,
 };
@@ -75,7 +74,6 @@ pub use manifest_toolchain_config::{
 };
 pub use manifest_toolchain_config::{CliConfig, RemotePathInferenceRule};
 pub mod action_types;
-pub mod agent_task_executor_declaration;
 pub mod bench_artifact;
 pub mod bench_diagnostics;
 pub mod bench_distribution;

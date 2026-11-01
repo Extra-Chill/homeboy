@@ -1,5 +1,4 @@
 use super::*;
-use homeboy::core::agent_runtime_manifest::{self, AgentRuntimeManifest};
 use homeboy_core;
 use homeboy_extension_contract::api::v1::{
     ExtensionApiCatalogEntryStatus, ExtensionApiCatalogRequest,
@@ -28,11 +27,7 @@ pub(crate) fn capabilities_from(
 }
 
 pub(crate) fn declared_tool_specs_by_source() -> BTreeMap<String, Vec<RunnerToolSpec>> {
-    let mut by_source = declared_extension_tool_specs_by_source();
-    by_source.extend(declared_tool_specs_by_source_from_manifests(
-        &agent_runtime_manifest::discover_agent_runtime_tool_diagnostic_manifests(),
-    ));
-    by_source
+    declared_extension_tool_specs_by_source()
 }
 
 pub(super) fn declared_extension_tool_specs_by_source() -> BTreeMap<String, Vec<RunnerToolSpec>> {
@@ -71,31 +66,6 @@ pub(super) fn declared_extension_tool_specs_by_source() -> BTreeMap<String, Vec<
     by_source
 }
 
-pub(super) fn declared_tool_specs_by_source_from_manifests(
-    manifests: &[AgentRuntimeManifest],
-) -> BTreeMap<String, Vec<RunnerToolSpec>> {
-    let mut by_source = BTreeMap::new();
-    for manifest in manifests {
-        let mut specs = manifest
-            .materialization
-            .diagnostics
-            .tools
-            .iter()
-            .filter_map(|tool| declared_tool_spec(manifest, tool.tool.as_str()))
-            .collect::<Vec<_>>();
-        if specs.is_empty() {
-            continue;
-        }
-        specs.sort_by(|left, right| left.id.cmp(&right.id));
-        by_source.insert(declared_tool_source(manifest), specs);
-    }
-    by_source
-}
-
-fn declared_tool_spec(manifest: &AgentRuntimeManifest, tool: &str) -> Option<RunnerToolSpec> {
-    declared_tool_spec_from_parts(&declared_tool_source(manifest), tool, None, &[], None)
-}
-
 fn declared_tool_spec_from_parts(
     source: &str,
     tool: &str,
@@ -126,14 +96,6 @@ fn declared_tool_spec_from_parts(
             .map(str::to_string)
             .unwrap_or_else(|| format!("Install '{id}' on the runner and ensure it is on PATH.")),
     })
-}
-
-fn declared_tool_source(manifest: &AgentRuntimeManifest) -> String {
-    manifest
-        .extension_id
-        .as_ref()
-        .map(|extension_id| format!("{extension_id}/{}", manifest.id))
-        .unwrap_or_else(|| manifest.id.clone())
 }
 
 pub(crate) fn tool_available(tools: &BTreeMap<String, ToolProbe>, id: &str) -> bool {
@@ -485,134 +447,6 @@ fn selected_providers<'a>(
         .collect()
 }
 
-/// A provider command represented relative to a named agent runtime. This is
-/// safe to send to a remote runner because the runner expands it below its own
-/// Homeboy runtime materialization root instead of receiving a controller path.
-pub(super) struct RemoteProviderExecutorEntrypoint {
-    pub(super) runtime_id: String,
-    pub(super) program: RemoteProviderExecutorEntrypointPart,
-    pub(super) args: Vec<RemoteProviderExecutorEntrypointPart>,
-    pub(super) cwd: Option<String>,
-}
-
-pub(super) enum RemoteProviderExecutorEntrypointPart {
-    Literal(String),
-    RuntimeRelative(String),
-}
-
-impl RemoteProviderExecutorEntrypoint {
-    pub(super) fn display(&self) -> String {
-        let mut argv = vec![self.part_display(&self.program)];
-        argv.extend(self.args.iter().map(|arg| self.part_display(arg)));
-        argv.join(" ")
-    }
-
-    fn part_display(&self, part: &RemoteProviderExecutorEntrypointPart) -> String {
-        match part {
-            RemoteProviderExecutorEntrypointPart::Literal(value) => value.clone(),
-            RemoteProviderExecutorEntrypointPart::RuntimeRelative(value) => {
-                format!("<runtime:{}>/{}", self.runtime_id, value)
-            }
-        }
-    }
-}
-
-fn runtime_relative_entrypoint_part(
-    runtime_root: &Path,
-    value: &str,
-) -> Option<RemoteProviderExecutorEntrypointPart> {
-    let path = Path::new(value);
-    if !path.is_absolute() {
-        if !runtime_relative_path_is_safe(path) {
-            return None;
-        }
-        return Some(RemoteProviderExecutorEntrypointPart::Literal(
-            value.to_string(),
-        ));
-    }
-    path.strip_prefix(runtime_root)
-        .ok()
-        .filter(|path| runtime_relative_path_is_safe(path))
-        .map(|path| {
-            RemoteProviderExecutorEntrypointPart::RuntimeRelative(
-                path.to_string_lossy().to_string(),
-            )
-        })
-}
-
-fn runtime_relative_path(runtime_root: &Path, value: &str) -> Option<String> {
-    Path::new(value)
-        .strip_prefix(runtime_root)
-        .ok()
-        .filter(|path| runtime_relative_path_is_safe(path))
-        .map(|path| path.to_string_lossy().to_string())
-}
-
-fn runtime_relative_path_is_safe(path: &Path) -> bool {
-    !path
-        .components()
-        .any(|component| matches!(component, std::path::Component::ParentDir))
-}
-
-pub(super) fn bounded_invocation_output(stdout: &str, stderr: &str, max_lines: usize) -> String {
-    let stderr = stderr.trim();
-    let stdout = stdout.trim();
-    let combined = match (stderr.is_empty(), stdout.is_empty()) {
-        (false, false) => format!("{stderr}\n{stdout}"),
-        (false, true) => stderr.to_string(),
-        (true, false) => stdout.to_string(),
-        (true, true) => String::new(),
-    };
-    combined
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .take(max_lines)
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-pub(super) fn provider_command_readiness_failure_check(
-    id: impl Into<String>,
-    label: &str,
-    remediation: Option<String>,
-    mut details: BTreeMap<String, String>,
-    timed_out: bool,
-    stdout: &str,
-    stderr: &str,
-) -> RunnerCheck {
-    if !stdout.trim().is_empty() {
-        details.insert(
-            "stdout".to_string(),
-            bounded_invocation_output(stdout, "", 8),
-        );
-    }
-    if !stderr.trim().is_empty() {
-        details.insert(
-            "stderr".to_string(),
-            bounded_invocation_output("", stderr, 8),
-        );
-    }
-    let bounded = bounded_invocation_output(stdout, stderr, 8);
-    let (message, detail) = if timed_out {
-        (
-            format!("{label} readiness invocation timed out on the Lab runner"),
-            "readiness invocation timed out".to_string(),
-        )
-    } else if bounded.is_empty() {
-        (
-            format!("{label} readiness invocation failed on the Lab runner"),
-            "readiness invocation exited non-zero without stdout or stderr".to_string(),
-        )
-    } else {
-        (
-            format!("{label} readiness invocation failed on the Lab runner:\n{bounded}"),
-            bounded,
-        )
-    };
-    details.insert("detail".to_string(), detail);
-    checks::error(id, message, remediation, details)
-}
-
 /// #3818: report the state of every extension-declared managed runner
 /// source checkout. Surfaces a missing checkout (error) or a checkout that
 /// tracks a different remote than the declared canonical remote (warning)
@@ -795,9 +629,6 @@ fn provider_readiness_check(
     client: &SshClient,
     contract: &homeboy::agents::agent_tasks::provider::AgentTaskProviderRunnerReadinessContract,
 ) -> Option<RunnerCheck> {
-    if contract.readiness.invocation.is_some() {
-        return Some(provider_command_readiness_check(client, contract));
-    }
     let contract = &contract.readiness;
     let env_path = contract.env_path.as_ref()?;
     let env_names = env_path
@@ -871,212 +702,6 @@ fn provider_readiness_check(
     ))
 }
 
-fn provider_command_readiness_check(
-    client: &SshClient,
-    contract: &homeboy::agents::agent_tasks::provider::AgentTaskProviderRunnerReadinessContract,
-) -> RunnerCheck {
-    let readiness = &contract.readiness;
-    let mut details = BTreeMap::new();
-    details.insert("provider_id".to_string(), contract.provider_id.clone());
-    let Some(runtime_id) = contract
-        .runtime_id
-        .as_deref()
-        .filter(|id| !id.trim().is_empty())
-    else {
-        return checks::error(
-            readiness.id.clone(),
-            format!(
-                "{} cannot run because its provider has no runtime identity",
-                readiness.label
-            ),
-            readiness.remediation.clone(),
-            details,
-        );
-    };
-    let Some(runtime_path) = contract
-        .runtime_path
-        .as_deref()
-        .filter(|path| !path.trim().is_empty())
-    else {
-        return checks::error(
-            readiness.id.clone(),
-            format!(
-                "{} cannot run because its provider has no runtime path",
-                readiness.label
-            ),
-            readiness.remediation.clone(),
-            details,
-        );
-    };
-    let invocation = readiness.invocation.as_ref().expect("checked invocation");
-    let Some(entrypoint) = remote_readiness_entrypoint(runtime_id, runtime_path, invocation) else {
-        return checks::error(
-            readiness.id.clone(),
-            format!(
-                "{} declares an invalid runtime-relative readiness invocation",
-                readiness.label
-            ),
-            readiness.remediation.clone(),
-            details,
-        );
-    };
-    details.insert("command".to_string(), entrypoint.display());
-    details.insert("runtime_id".to_string(), runtime_id.to_string());
-
-    let request = serde_json::json!({
-        "schema": "homeboy/agent-task-provider-readiness-request/v1",
-        "provider_id": contract.provider_id,
-        "backend": contract.backend,
-        "effective_config": {},
-    });
-    let request = match serde_json::to_string(&request) {
-        Ok(request) => request,
-        Err(error) => {
-            return checks::error(
-                readiness.id.clone(),
-                format!(
-                    "{} readiness request could not be encoded: {error}",
-                    readiness.label
-                ),
-                readiness.remediation.clone(),
-                details,
-            );
-        }
-    };
-    let output = client.execute(&provider_readiness_remote_shell(&entrypoint, &request));
-    if !output.success {
-        return provider_command_readiness_failure_check(
-            readiness.id.clone(),
-            &readiness.label,
-            readiness.remediation.clone(),
-            details,
-            output.timed_out,
-            &output.stdout,
-            &output.stderr,
-        );
-    }
-    let result: homeboy::agents::agent_tasks::provider::ProviderReadinessInvocationResult =
-        match serde_json::from_str::<serde_json::Value>(output.stdout.trim()) {
-            Ok(result)
-                if result.get("schema").and_then(serde_json::Value::as_str)
-                    == Some(
-                        homeboy::agents::agent_tasks::provider::PROVIDER_READINESS_RESULT_SCHEMA,
-                    ) =>
-            {
-                match serde_json::from_value(result) {
-                    Ok(result) => result,
-                    Err(_) => {
-                        return checks::error(
-                            readiness.id.clone(),
-                            format!(
-                                "{} readiness invocation returned an invalid result",
-                                readiness.label
-                            ),
-                            readiness.remediation.clone(),
-                            details,
-                        )
-                    }
-                }
-            }
-            _ => {
-                return checks::error(
-                    readiness.id.clone(),
-                    format!(
-                        "{} readiness invocation returned an invalid result",
-                        readiness.label
-                    ),
-                    readiness.remediation.clone(),
-                    details,
-                );
-            }
-        };
-    details.insert("classification".to_string(), result.classification.clone());
-    details.insert("reason".to_string(), result.reason.clone());
-    details.insert("remediation".to_string(), result.remediation.clone());
-    details.insert("retryable".to_string(), result.retryable.to_string());
-    details.insert("identity".to_string(), result.identity.to_string());
-    if result.ready {
-        checks::ok_with_details(
-            readiness.id.clone(),
-            format!("{} is ready on the Lab runner", readiness.label),
-            details,
-        )
-    } else {
-        let remediation = (!result.remediation.trim().is_empty())
-            .then(|| result.remediation.clone())
-            .or_else(|| readiness.remediation.clone());
-        let reason = if result.reason.trim().is_empty() {
-            "provider-owned readiness check failed"
-        } else {
-            &result.reason
-        };
-        checks::error(
-            readiness.id.clone(),
-            format!(
-                "{} is not ready on the Lab runner: {reason}",
-                readiness.label
-            ),
-            remediation,
-            details,
-        )
-    }
-}
-
-pub(super) fn remote_readiness_entrypoint(
-    runtime_id: &str,
-    runtime_path: &str,
-    invocation: &homeboy::core::command_invocation::CommandInvocation,
-) -> Option<RemoteProviderExecutorEntrypoint> {
-    let runtime_root = Path::new(runtime_path);
-    let render = |value: &str| value.replace("{{runtime_path}}", runtime_path);
-    let mut argv = invocation.argv.iter().map(|value| render(value));
-    let program = runtime_relative_entrypoint_part(runtime_root, &argv.next()?)?;
-    let args = argv
-        .map(|value| runtime_relative_entrypoint_part(runtime_root, &value))
-        .collect::<Option<Vec<_>>>()?;
-    let cwd = invocation
-        .cwd
-        .as_deref()
-        .map(render)
-        .and_then(|cwd| runtime_relative_path(runtime_root, &cwd));
-    Some(RemoteProviderExecutorEntrypoint {
-        runtime_id: runtime_id.to_string(),
-        program,
-        args,
-        cwd,
-    })
-}
-
-pub(super) fn provider_readiness_remote_shell(
-    entrypoint: &RemoteProviderExecutorEntrypoint,
-    request: &str,
-) -> String {
-    let runtime_root = format!(
-        "runtime_root=\"$HOME/.config/homeboy/agent-runtimes\"/{}",
-        common::shell_word(&entrypoint.runtime_id)
-    );
-    let runner_path = |value: &str| format!("\"$runtime_root\"/{}", common::shell_word(value));
-    let shell_part = |part: &RemoteProviderExecutorEntrypointPart| match part {
-        RemoteProviderExecutorEntrypointPart::Literal(value) => common::shell_word(value),
-        RemoteProviderExecutorEntrypointPart::RuntimeRelative(value) => runner_path(value),
-    };
-    let mut argv = vec![shell_part(&entrypoint.program)];
-    argv.extend(entrypoint.args.iter().map(shell_part));
-    let invocation = argv.join(" ");
-    let cwd = entrypoint
-        .cwd
-        .as_deref()
-        .map(runner_path)
-        .unwrap_or_else(|| "\"$runtime_root\"".to_string());
-    format!(
-        "{runtime_root}; test -d \"$runtime_root\" && cd {cwd} && printf '%s' {} | exec {invocation}",
-        common::shell_word(request)
-    )
-}
-
-/// Returns true when `path` is the canonical root itself or lives beneath
-/// it. Comparison is path-segment aware so `/a/source` is not treated as a
-/// child of `/a/sour`.
 pub(super) fn path_within_canonical_root(path: &str, canonical_root: &str) -> bool {
     let normalize = |value: &str| {
         let trimmed = value.trim().trim_end_matches('/');

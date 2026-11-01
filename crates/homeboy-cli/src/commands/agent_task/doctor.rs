@@ -105,9 +105,6 @@ fn provider_stage(args: &AgentTaskDoctorArgs) -> ProviderStage {
                 }
                 resolution => {
                     let candidate_count = match resolution {
-                        ProviderResolution::AmbiguousExtensionAlias { ref candidate_ids } => {
-                            candidate_ids.len()
-                        }
                         ProviderResolution::SelectorMismatch {
                             ref available_ids, ..
                         } => available_ids.len(),

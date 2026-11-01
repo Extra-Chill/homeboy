@@ -494,10 +494,10 @@ mod tests {
             .unwrap();
             std::fs::write(
                 extension_dir.join(".homeboy-extension-root.json"),
-                r#"{"shared_assets":["agent-runtimes",{"path":"dependency-adapters"},"scripts/lib"]}"#,
+                r#"{"shared_assets":["shared-assets",{"path":"dependency-adapters"},"scripts/lib"]}"#,
             )
             .unwrap();
-            for root in ["agent-runtimes", "dependency-adapters", "scripts"] {
+            for root in ["shared-assets", "dependency-adapters", "scripts"] {
                 std::fs::create_dir_all(extensions_dir.join(root)).unwrap();
             }
 

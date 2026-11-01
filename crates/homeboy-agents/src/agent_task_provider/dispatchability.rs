@@ -234,9 +234,7 @@ pub fn evaluate_provider_capacity_with_config(
 ) -> AgentTaskProviderCapacityReadiness {
     let provider = match resolve_provider_for_backend(catalog.providers(), backend, selector) {
         ProviderResolution::Resolved(provider) => provider,
-        ProviderResolution::NotFound
-        | ProviderResolution::AmbiguousExtensionAlias { .. }
-        | ProviderResolution::SelectorMismatch { .. } => {
+        ProviderResolution::NotFound | ProviderResolution::SelectorMismatch { .. } => {
             return capacity_readiness_unknown(
                 "the requested backend/selector route did not resolve",
             );
@@ -428,13 +426,6 @@ fn evaluate_provider_dispatchability_with_config_credentials_and_deadline(
                 "route_unavailable",
                 "the requested backend/selector route did not resolve",
                 "no matching provider".to_string(),
-            );
-        }
-        ProviderResolution::AmbiguousExtensionAlias { candidate_ids } => {
-            return unresolved(
-                "route_ambiguous",
-                "the requested backend route requires a provider selector",
-                format!("multiple matching providers: {}", candidate_ids.join(", ")),
             );
         }
         ProviderResolution::SelectorMismatch { available_ids, .. } => {
@@ -988,14 +979,6 @@ pub(crate) fn evaluate_request_dispatchability(
                         selector: request.executor.selector.clone(),
                         available_provider_ids: available_ids,
                         hint: selector_hint,
-                    },
-                ),
-                ProviderResolution::AmbiguousExtensionAlias { candidate_ids } => (
-                    "provider_ambiguous",
-                    "capability",
-                    ProviderRouteDiagnosticData::ProviderAmbiguous {
-                        backend: request.executor.backend.clone(),
-                        available_provider_ids: candidate_ids,
                     },
                 ),
             };
@@ -2058,22 +2041,6 @@ mod tests {
         let missing = evaluate_provider_dispatchability(&catalog, "missing", None, None, false);
         assert_eq!(missing.state, "route_unavailable");
         assert!(!missing.checks.route.ready);
-
-        let mut first: super::super::AgentTaskExecutorProvider = serde_json::from_value(
-            json!({ "id": "one", "backend": "one", "extension_id": "shared" }),
-        )
-        .expect("first provider");
-        first.extension_id = Some("shared".to_string());
-        let mut second = first.clone();
-        second.id = "two".to_string();
-        let ambiguous_catalog = AgentTaskProviderCatalog {
-            providers: vec![first, second],
-            ..Default::default()
-        };
-        let ambiguous =
-            evaluate_provider_dispatchability(&ambiguous_catalog, "shared", None, None, false);
-        assert_eq!(ambiguous.state, "route_ambiguous");
-        assert!(!ambiguous.checks.route.ready);
     }
 
     #[test]

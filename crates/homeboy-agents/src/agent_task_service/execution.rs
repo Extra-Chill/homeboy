@@ -389,19 +389,6 @@ fn validate_plan_provider_capabilities(
                     vec![task.executor.backend.clone()],
                 ));
             }
-            ProviderResolution::AmbiguousExtensionAlias { candidate_ids } => {
-                return Err(Error::validation_invalid_argument(
-                    "tasks.executor.selector",
-                    format!(
-                        "task '{}' backend '{}' is ambiguous; select one of: {}",
-                        task.task_id,
-                        task.executor.backend,
-                        candidate_ids.join(", ")
-                    ),
-                    task.executor.selector.clone(),
-                    None,
-                ));
-            }
             ProviderResolution::SelectorMismatch { available_ids, .. } => {
                 return Err(Error::validation_invalid_argument(
                     "tasks.executor.selector",
