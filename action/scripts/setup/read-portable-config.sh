@@ -99,9 +99,9 @@ if [ -n "${HOMEBOY_CONFIG_DIR_INPUT}" ]; then
     kind=$2
     pattern=${3:-}
     if [ -n "${pattern}" ]; then
-      find "${root}" -mindepth 1 -maxdepth 1 -type "${kind}" -name "${pattern}" -exec basename {} \;
+      find "${root}" -mindepth 1 -maxdepth 1 -type "${kind}" -name "${pattern}" -exec basename {} \; 2>/dev/null
     else
-      find "${root}" -mindepth 1 -maxdepth 1 -type "${kind}" -exec basename {} \;
+      find "${root}" -mindepth 1 -maxdepth 1 -type "${kind}" -exec basename {} \; 2>/dev/null
     fi
   }
 
