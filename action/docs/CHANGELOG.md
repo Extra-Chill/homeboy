@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.25.0] - 2026-11-01
+
+### Added
+- reuse provisioning across repeated invocations in one job
+
 ## [2.24.0] - 2026-10-31
 
 ### Added
