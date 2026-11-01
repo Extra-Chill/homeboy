@@ -381,8 +381,10 @@ pub(crate) fn resolve_dependency_providers_optional_with_control(
 /// selection matches `path`, and manifest providers, report `path` itself.
 /// Provider kinds resolved only through an admitted component (component
 /// scripts, extensions) install at `path` and report no roots here.
-/// A directory no provider matches reports no roots.
-pub(crate) fn dependency_selection_roots(path: &Path) -> Result<Vec<PathBuf>> {
+/// A directory no provider matches reports no roots. When `allow_default` is
+/// false, installed adapters must match their declared selection files; a
+/// default fallback alone does not declare a descendant dependency root.
+pub(crate) fn dependency_selection_roots(path: &Path, allow_default: bool) -> Result<Vec<PathBuf>> {
     let local_adapter_providers = AdapterDependencyProvider::load_local(path)?;
     if !local_adapter_providers.is_empty() {
         return Ok(local_adapter_providers
@@ -399,6 +401,14 @@ pub(crate) fn dependency_selection_roots(path: &Path) -> Result<Vec<PathBuf>> {
     if !adapter_providers.is_empty() {
         return Ok(adapter_providers
             .iter()
+            .filter(|provider| {
+                allow_default
+                    || provider
+                        .adapter
+                        .package_manager()
+                        .selection_root(path)
+                        .is_some()
+            })
             .map(|provider| provider.adapter.install_path.clone())
             .collect());
     }
