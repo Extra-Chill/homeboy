@@ -5,6 +5,7 @@ mod keys;
 mod process_cleanup;
 mod session;
 pub mod ssh_args;
+pub mod ssh_mux;
 pub mod transfer;
 
 pub use client::DELEGATED_RUN_STATUS_FILE_ENV;

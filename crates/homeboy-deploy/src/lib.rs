@@ -128,6 +128,8 @@ use uuid::Uuid;
 /// This is the preferred entry point for callers - it handles project loading
 /// and SSH context resolution, keeping those details encapsulated.
 pub fn run(project_id: &str, config: &DeployConfig) -> Result<DeployOrchestrationResult> {
+    // One deploy reuses one SSH connection per server (#16806).
+    let _ssh_mux = homeboy_core::server::ssh_mux::scope();
     let mut artifacts = preparation::DeploymentArtifactStore::default();
     // Single-project deploy is its own unit of work: resolve once here so the
     // receipt read, write, and invalidation below all address one home (#7505).
@@ -539,6 +541,7 @@ pub fn run_multi(
     component_ids: &[String],
     config: &DeployConfig,
 ) -> Result<MultiDeployResult> {
+    let _ssh_mux = homeboy_core::server::ssh_mux::scope();
     if component_ids.is_empty() {
         return Err(Error::validation_invalid_argument(
             "component_ids",

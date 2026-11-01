@@ -193,20 +193,21 @@ fn scp_transfer(
         };
     }
 
-    let deploy_defaults = defaults::load_defaults().deploy;
-    let mut scp_args: Vec<String> = deploy_defaults.scp_flags.clone();
+    let mut scp_args: Vec<String> = defaults::load_defaults().deploy.scp_flags;
 
     if recursive {
         scp_args.push("-r".to_string());
     }
 
-    if let Some(identity_file) = &ssh_client.identity_file {
-        scp_args.extend(["-i".to_string(), identity_file.clone()]);
-    }
-
-    if ssh_client.port != deploy_defaults.default_ssh_port {
-        scp_args.extend(["-P".to_string(), ssh_client.port.to_string()]);
-    }
+    scp_args.extend(homeboy_core::server::ssh_args::client_option_args(
+        ssh_client,
+        homeboy_core::server::ssh_args::SshArgOptions {
+            batch_mode: true,
+            connect_timeout: true,
+            port_flag: Some(homeboy_core::server::ssh_args::SshPortFlag::Uppercase),
+            ..homeboy_core::server::ssh_args::SshArgOptions::default()
+        },
+    ));
 
     scp_args.push(local_path.to_string_lossy().to_string());
     scp_args.push(format!(
