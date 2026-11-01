@@ -27,10 +27,11 @@ exit 64
 
 #[test]
 fn upgrade_recovery_ref_passes_refresh_validation() {
-    let commands = crate::upgrade_runners::managed_immutable_runner_recovery_commands_with_commit(
-        "lab",
-        Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
-    );
+    let target = homeboy_upgrade::upgrade::parse_build_identity_display(
+        "homeboy 0.401.0+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    )
+    .unwrap();
+    let commands = crate::upgrade_runners::runner_binary_refresh_recovery_commands("lab", &target);
     let args: Vec<_> = commands[0].split_whitespace().collect();
     let tag = args[args.iter().position(|arg| *arg == "--ref").unwrap() + 1].trim_matches('\'');
     assert!(release_version(tag).is_ok(), "{tag}");

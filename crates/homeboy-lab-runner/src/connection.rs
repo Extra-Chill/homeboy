@@ -334,7 +334,10 @@ pub fn connect(runner_id: &str) -> Result<(RunnerConnectReport, i32)> {
 /// never re-enters itself. Convergence never fails connect: its outcome is
 /// reported on [`RunnerConnectReport::binary_convergence`].
 pub fn connect_converging_binary(runner_id: &str) -> Result<(RunnerConnectReport, i32)> {
-    let convergence = binary_convergence::converge_runner_binary(runner_id);
+    let convergence = binary_convergence::converge_runner_binary(
+        runner_id,
+        &homeboy_product_identity::build_identity(),
+    );
     let (mut report, exit_code) = connect(runner_id)?;
     report.binary_convergence = Some(convergence);
     Ok((report, exit_code))
@@ -3555,7 +3558,7 @@ mod status_read_purity_tests {
     }
 }
 
-mod binary_convergence;
+pub(crate) mod binary_convergence;
 mod legacy_layout;
 pub(crate) mod remote_daemon;
 mod replacement_journal;

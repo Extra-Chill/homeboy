@@ -117,5 +117,4 @@ pub(super) fn exec_output(
     }
 }
 
-mod part_b;
 mod part_c;
