@@ -265,7 +265,7 @@ pub(super) fn prepare_components(
     // Resolve first, then materialize immutable detached worktrees for real deploys.
     // Dry-run resolves in `run_dry_run_mode` and never creates a worktree.
     // A clean checkout already at the resolved commit builds in place; every
-    // other (repository, commit) pair is materialized once as a sparse tree.
+    // other (repository, commit) pair is materialized once as a full tree.
     // Shared materialization time is attributed to every component it served.
     let mut timers: HashMap<String, PhaseTimer> = HashMap::new();
     let exact_ref_checkouts = if !config.dry_run && !config.check && config.has_requested_refs() {

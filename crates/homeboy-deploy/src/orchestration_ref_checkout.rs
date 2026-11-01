@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -74,9 +73,9 @@ pub(super) struct ExactRefCheckout {
 #[derive(Clone)]
 enum SourceTree {
     /// The configured checkout, proven to sit at the resolved commit with no
-    /// modified, untracked, or ignored paths under component or dependency prefixes.
+    /// modified, untracked, or ignored paths anywhere in the repository.
     InPlace(PathBuf),
-    /// A disposable sparse checkout shared by every component that resolved to
+    /// A disposable full checkout shared by every component that resolved to
     /// the same (repository, commit) pair in one invocation.
     Materialized(Arc<MaterializedTree>),
 }
@@ -174,7 +173,9 @@ impl ExactRefCheckout {
     /// Resolve every request once, then provide one source tree per
     /// (repository, commit): the configured checkout itself when `in_place`
     /// allows it and the checkout is provably that commit, otherwise a single
-    /// sparse checkout containing the requested components and their local dependencies.
+    /// full checkout. Builds may read anything in the repository (local
+    /// `file:` dependencies, workspace roots, shared config), so the tree is
+    /// never narrowed to the component paths.
     pub(crate) fn materialize_all(
         requests: &[ExactRefRequest<'_>],
         project: Option<&homeboy_core::project::Project>,
@@ -202,30 +203,12 @@ impl ExactRefCheckout {
         for members in groups {
             let first = &resolved[members[0]];
             let sha = first.identity.resolved_sha.as_str();
-            let prefixes: Vec<Option<&str>> = members
-                .iter()
-                .map(|&index| resolved[index].prefix.as_deref())
-                .collect();
-            let dependency_prefixes = local_dependency_prefixes(&first.source_root, sha, &prefixes);
-            let mut source_prefixes = prefixes.clone();
-            source_prefixes.extend(dependency_prefixes.iter().map(|prefix| {
-                if prefix == "." {
-                    None
-                } else {
-                    Some(prefix.as_str())
-                }
-            }));
             let tree = if in_place == InPlace::Allow
-                && checkout_is_exact_commit(&first.source_root, sha, &source_prefixes)
+                && checkout_is_exact_commit(&first.source_root, sha)
             {
                 SourceTree::InPlace(first.source_root.clone())
             } else {
-                SourceTree::Materialized(Arc::new(materialize_tree(
-                    &first.source_root,
-                    sha,
-                    &source_prefixes,
-                    &dependency_prefixes,
-                )?))
+                SourceTree::Materialized(Arc::new(materialize_tree(&first.source_root, sha)?))
             };
             for &index in &members {
                 checkouts[index] = Some(bind_source(&resolved[index], &tree, project)?);
@@ -413,11 +396,13 @@ fn resolve_request<'a>(request: &ExactRefRequest<'a>) -> Result<ResolvedRequest<
     })
 }
 
-/// Whether the configured checkout is provably `sha` for every prefix: HEAD is
-/// exactly that commit and no tracked change, untracked file, or ignored file
-/// exists under any prefix. Ignored files count because stale build outputs or
-/// dependency trees would otherwise leak local bytes into the artifact.
-fn checkout_is_exact_commit(source_root: &Path, sha: &str, prefixes: &[Option<&str>]) -> bool {
+/// Whether the configured checkout is provably `sha`: HEAD is exactly that
+/// commit and no tracked change, untracked file, or ignored file exists
+/// anywhere in the repository. The whole repository counts because builds
+/// read outside their component (local `file:` dependencies, workspace
+/// roots), and ignored files count because stale build outputs or dependency
+/// trees would otherwise leak local bytes into the artifact.
+fn checkout_is_exact_commit(source_root: &Path, sha: &str) -> bool {
     let head = git::run_git(
         source_root,
         &["rev-parse", "--verify", "HEAD^{commit}"],
@@ -426,134 +411,21 @@ fn checkout_is_exact_commit(source_root: &Path, sha: &str, prefixes: &[Option<&s
     if !head.is_ok_and(|head| head.trim() == sha) {
         return false;
     }
-    let mut args = vec![
-        "status",
-        "--porcelain=v1",
-        "--untracked-files=all",
-        "--ignored=matching",
-        "--",
-    ];
-    if prefixes.iter().any(Option::is_none) {
-        args.push(".");
-    } else {
-        args.extend(prefixes.iter().flatten().copied());
-    }
     git::run_git(
         source_root,
-        &args,
+        &[
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+            "--ignored=matching",
+        ],
         "check exact deploy ref checkout cleanliness",
     )
     .is_ok_and(|status| status.trim().is_empty())
 }
 
-/// Resolve simple relative directories lexically, without consulting checkout bytes.
-/// Reject URLs, globs, absolute paths, and paths escaping the repository.
-fn resolve_local_directory(prefix: &str, relative: &str) -> Option<String> {
-    if relative.is_empty()
-        || relative.starts_with(['/', '~'])
-        || relative.contains([':', '\\', '*', '?', '[', ']', '{', '}'])
-    {
-        return None;
-    }
-    let mut parts: Vec<&str> = prefix
-        .split('/')
-        .filter(|part| *part != "." && !part.is_empty())
-        .collect();
-    for part in relative.split('/') {
-        match part {
-            "" | "." => {}
-            ".." => {
-                parts.pop()?;
-            }
-            ".git" => return None,
-            part => parts.push(part),
-        }
-    }
-    Some(if parts.is_empty() {
-        ".".to_string()
-    } else {
-        parts.join("/")
-    })
-}
-
-/// Discover local package inputs from the selected commit, never the working
-/// copy. The visited set handles cycles and shared transitive dependencies.
-fn local_dependency_prefixes(
-    source_root: &Path,
-    sha: &str,
-    prefixes: &[Option<&str>],
-) -> Vec<String> {
-    let mut pending: Vec<String> = prefixes
-        .iter()
-        .map(|prefix| prefix.unwrap_or(".").to_string())
-        .collect();
-    let mut visited: HashSet<String> = pending.iter().cloned().collect();
-    let mut added = Vec::new();
-    while let Some(prefix) = pending.pop() {
-        for manifest in ["package.json", "composer.json"] {
-            let path = if prefix == "." {
-                manifest.to_string()
-            } else {
-                format!("{prefix}/{manifest}")
-            };
-            let Ok(contents) = git::run_git(
-                source_root,
-                &["show", &format!("{sha}:{path}")],
-                "read exact-ref dependency manifest",
-            ) else {
-                continue;
-            };
-            let Ok(value) = serde_json::from_str::<serde_json::Value>(&contents) else {
-                continue;
-            };
-            let mut relatives = Vec::new();
-            if manifest == "package.json" {
-                for section in [
-                    "dependencies",
-                    "devDependencies",
-                    "optionalDependencies",
-                    "peerDependencies",
-                ] {
-                    if let Some(dependencies) = value[section].as_object() {
-                        relatives.extend(dependencies.values().filter_map(|value| {
-                            let value = value.as_str()?;
-                            value
-                                .strip_prefix("file:")
-                                .or_else(|| value.strip_prefix("link:"))
-                        }));
-                    }
-                }
-            } else if let Some(repositories) = value["repositories"].as_array() {
-                relatives.extend(
-                    repositories
-                        .iter()
-                        .filter(|repository| repository["type"] == "path")
-                        .filter_map(|repository| repository["url"].as_str()),
-                );
-            }
-            for relative in relatives {
-                if let Some(path) = resolve_local_directory(&prefix, relative) {
-                    if visited.insert(path.clone()) {
-                        pending.push(path.clone());
-                        added.push(path);
-                    }
-                }
-            }
-        }
-    }
-    added.sort();
-    added
-}
-
-/// Create one disposable checkout of `sha`. When every component lives below
-/// the repository root, a cone-mode sparse checkout limits the working tree to
-/// those prefixes (including local dependencies) plus repository-root files.
-fn materialize_tree(
-    source_root: &Path,
-    sha: &str,
-    prefixes: &[Option<&str>],
-    dependency_prefixes: &[String],
-) -> Result<MaterializedTree> {
+/// Create one disposable full checkout of `sha`.
+fn materialize_tree(source_root: &Path, sha: &str) -> Result<MaterializedTree> {
     // The exact-ref worktree used to land in `std::env::temp_dir()`, which put
     // it outside every cleanup surface -- no owner record, no pin, no run
     // binding, invisible to `cleanup --include runtime-tmp` and to the
@@ -574,31 +446,11 @@ fn materialize_tree(
         source_root.to_str().unwrap_or_default(),
         &tree_arg,
     )?;
-    if prefixes.iter().all(Option::is_some) {
-        git::run_git(
-            &tree.0,
-            &["sparse-checkout", "init", "--cone"],
-            "enable sparse exact deploy ref checkout",
-        )?;
-        let mut args = vec!["sparse-checkout", "set", "--"];
-        args.extend(prefixes.iter().flatten().copied());
-        git::run_git(
-            &tree.0,
-            &args,
-            "limit exact deploy ref checkout to components",
-        )?;
-    }
     homeboy_core::log_status!(
         "deploy",
-        "phase=exact_ref_materialize commit={} cwd={} prefixes={} dependency_prefixes={}",
+        "phase=exact_ref_materialize commit={} cwd={}",
         sha,
-        tree.0.display(),
-        prefixes
-            .iter()
-            .map(|prefix| prefix.unwrap_or("."))
-            .collect::<Vec<_>>()
-            .join(","),
-        dependency_prefixes.join(",")
+        tree.0.display()
     );
     git::run_git(
         &tree.0,
@@ -1569,11 +1421,13 @@ mod tests {
                 false,
             ),
             (
+                // Builds read sibling paths (local `file:` dependencies), so
+                // dirt anywhere in the repository rules out building in place.
                 "change outside component prefixes",
                 |root| {
                     std::fs::write(root.join("c/payload.txt"), "local\n").expect("other");
                 },
-                true,
+                false,
             ),
         ];
         for (name, mutate, expect_in_place) in cases {
@@ -1629,7 +1483,7 @@ mod tests {
     }
 
     #[test]
-    fn older_ref_materializes_one_sparse_tree_shared_by_every_component() {
+    fn older_ref_materializes_one_full_tree_shared_by_every_component() {
         let (repo, old_sha) = monorepo_fixture();
         let components = monorepo_components(repo.path());
 
@@ -1661,8 +1515,8 @@ mod tests {
             "repository-root files are kept"
         );
         assert!(
-            !root.join("c").exists(),
-            "unrequested prefixes are not checked out"
+            root.join("c/payload.txt").exists(),
+            "sibling paths a build may depend on are checked out"
         );
 
         drop(checkouts);
@@ -1715,49 +1569,6 @@ mod tests {
     }
 
     #[test]
-    fn older_ref_materializes_transitive_local_dependencies_from_target_manifests() {
-        let (repo, sha, component) = local_dependency_fixture();
-        std::fs::write(repo.path().join("plugins/a/package.json"), "{}").expect("new manifest");
-        git(repo.path(), &["add", "."]);
-        commit(repo.path(), "remove dependencies at HEAD");
-
-        let checkouts = materialize_monorepo(&[component], &sha);
-        let root = checkouts[0].tree.root();
-        for path in [
-            "packages/dep/package.json",
-            "packages/shared/package.json",
-            "packages/dev/package.json",
-            "packages/optional/package.json",
-            "packages/peer/payload.txt",
-            "packages/php/composer.json",
-            "packages/php-shared/composer.json",
-        ] {
-            assert!(root.join(path).exists(), "missing {path}");
-        }
-        assert!(!root.join("packages/unrelated").exists());
-        assert!(!root.join("unrelated").exists());
-        checkouts[0].verify().expect("verify");
-    }
-
-    #[test]
-    fn escaping_local_dependency_is_ignored() {
-        let (repo, _, component) = local_dependency_fixture();
-        std::fs::write(
-            repo.path().join("plugins/a/package.json"),
-            r#"{"dependencies":{"escape":"file:../../../outside"}}"#,
-        )
-        .expect("manifest");
-        std::fs::remove_file(repo.path().join("plugins/a/composer.json")).expect("remove composer");
-        git(repo.path(), &["add", "."]);
-        commit(repo.path(), "escaping dependency");
-        let sha = git_output(repo.path(), &["rev-parse", "HEAD"]);
-        assert!(local_dependency_prefixes(repo.path(), &sha, &[Some("plugins/a")]).is_empty());
-        let checkout =
-            ExactRefCheckout::materialize(&component, &sha, None, None).expect("materialize");
-        assert!(!checkout.tree.root().join("packages").exists());
-    }
-
-    #[test]
     fn dirty_local_dependencies_prevent_in_place_builds() {
         for path in [
             "packages/dep/package.json",
@@ -1778,28 +1589,6 @@ mod tests {
                 "{path}"
             );
         }
-    }
-
-    #[test]
-    fn local_directory_resolution_rejects_non_relative_directories() {
-        for path in [
-            "../../../outside",
-            "/tmp/pkg",
-            "https://example.test/pkg",
-            "../*",
-            "~/pkg",
-            "../.git",
-        ] {
-            assert_eq!(resolve_local_directory("plugins/a", path), None, "{path}");
-        }
-        assert_eq!(
-            resolve_local_directory("plugins/a", "../../packages/dep"),
-            Some("packages/dep".to_string())
-        );
-        assert_eq!(
-            resolve_local_directory("plugins/a", "../.."),
-            Some(".".to_string())
-        );
     }
 
     fn fixture_repo() -> tempfile::TempDir {
