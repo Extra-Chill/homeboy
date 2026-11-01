@@ -892,7 +892,7 @@ fn persisted_session_version_drift_rejects_admission_with_bounded_recovery() {
             "refresh-homeboy",
             "homeboy-lab",
             "--ref",
-            "1e63f1ae0369",
+            &crate::controller_refresh_ref(),
             "--reconnect",
         ]
     );
@@ -1058,14 +1058,17 @@ fn unverifiable_identity_warning_is_actionable_without_claiming_a_mismatch() {
     assert!(warning.message.contains("could not be verified"));
     assert!(!warning.message.contains("different Homeboy build"));
     assert!(warning.message.contains("/opt/homeboy self identity"));
-    assert!(warning.safe_recovery_commands().is_empty());
+    assert_eq!(warning.safe_recovery_commands().len(), 1);
     let diagnostics = serde_json::to_value(warning.sanitized_for_output())
         .expect("serialize unverifiable identity");
     assert_eq!(
         diagnostics["mismatch_predicate"],
         "immutable_build_identity(active_daemon_control_plane_build_identity) && immutable_build_identity(job_command_binary_build_identity) == false"
     );
-    assert!(diagnostics.get("recovery_commands").is_none());
+    assert_eq!(
+        diagnostics["recovery_commands"].as_array().unwrap().len(),
+        1
+    );
 }
 
 #[test]
@@ -1184,7 +1187,10 @@ fn runtime_path_warning_uses_rebuild_specific_message() {
     assert!(warning.message.contains("runtime paths are stale"));
     assert_eq!(
         warning.recovery_commands,
-        ["homeboy runner refresh-homeboy homeboy-lab --ref 1e63f1ae0369 --reconnect"]
+        [format!(
+            "homeboy runner refresh-homeboy homeboy-lab --ref {} --reconnect",
+            crate::controller_refresh_ref()
+        )]
     );
 }
 

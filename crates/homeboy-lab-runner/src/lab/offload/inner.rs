@@ -2866,7 +2866,7 @@ mod tests {
             &serde_json::json!({
                 "active_daemon_build_identity": "homeboy 0.353.1+old",
                 "refresh_commands": [
-                    "homeboy runner refresh-homeboy lab --ref abc --reconnect",
+                    "homeboy runner refresh-homeboy lab --ref v0.353.1 --reconnect",
                     "homeboy runner connect lab"
                 ],
             }),
@@ -2874,7 +2874,7 @@ mod tests {
 
         assert_eq!(
             progress,
-            "Lab offload: runner `lab` Homeboy binary `/runner/homeboy`; active daemon homeboy 0.353.1+old; refresh with `homeboy runner refresh-homeboy lab --ref abc --reconnect && homeboy runner connect lab`."
+            "Lab offload: runner `lab` Homeboy binary `/runner/homeboy`; active daemon homeboy 0.353.1+old; refresh with `homeboy runner refresh-homeboy lab --ref v0.353.1 --reconnect && homeboy runner connect lab`."
         );
     }
 

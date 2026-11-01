@@ -1259,8 +1259,7 @@ mod status_serialization_tests {
             active_daemon_control_plane_build_identity: None,
             job_command_binary_build_identity: None,
             refresh_command:
-                "homeboy runner refresh-homeboy homeboy-lab --ref c8a6673b6abc --reconnect"
-                    .to_string(),
+                "homeboy runner refresh-homeboy homeboy-lab --ref v0.299.2 --reconnect".to_string(),
             stale_runtime_paths: Vec::new(),
             changed_runtime_paths: Vec::new(),
             message: "stale".to_string(),
@@ -1303,44 +1302,21 @@ mod status_serialization_tests {
     }
 
     #[test]
-    fn recovery_command_targets_the_configured_job_binary_commit() {
-        let initiating = homeboy_product_identity::BuildIdentity {
-            version: "0.323.1".to_string(),
-            git_commit: Some("6899aabbccdd".to_string()),
-            git_dirty: Some(false),
-            display: "homeboy 0.323.1+6899aabbccdd".to_string(),
-        };
-
-        let actions = recovery_action(
+    fn persisted_session_drift_recommends_an_accepted_release_tag() {
+        let warning = RunnerStaleDaemonWarning::new(
             "homeboy-lab",
-            Some("homeboy 0.323.1+c8a6673b6abc"),
-            &initiating,
-        );
-
-        // The rendered text is derived from the argv, so asserting on both
-        // pins that a consumer executing this recovery runs exactly what the
-        // operator was shown (#11104).
-        assert_eq!(
-            rendered_commands(&actions),
-            ["homeboy runner refresh-homeboy homeboy-lab --ref c8a6673b6abc --reconnect"]
-        );
-        assert_eq!(
-            actions[0].args,
-            [
-                "runner",
-                "refresh-homeboy",
-                "homeboy-lab",
-                "--ref",
-                "c8a6673b6abc",
-                "--reconnect"
-            ]
-        );
-        for configured in [
-            "homeboy 0.323.1+c8a6673b6abc-dirty",
-            "homeboy not-a-version",
-        ] {
-            assert!(recovery_action("homeboy-lab", Some(configured), &initiating).is_empty());
-        }
+            "0.323.1".to_string(),
+            "0.323.1".to_string(),
+            Some("homeboy 0.323.1+c8a6673b6abc".to_string()),
+            Some("homeboy 0.323.1+c8a6673b6abc".to_string()),
+        )
+        .with_persisted_session_version("homeboy-lab", "0.323.0".to_string());
+        let commands = warning.safe_recovery_commands();
+        assert_eq!(commands.len(), 1);
+        let args: Vec<_> = commands[0].split_whitespace().collect();
+        let target = args.windows(2).find(|args| args[0] == "--ref").unwrap()[1];
+        assert!(crate::homeboy_refresh::release_version(target).is_ok());
+        assert_eq!(target, crate::homeboy_refresh::controller_refresh_ref());
     }
 
     #[test]
@@ -1460,7 +1436,7 @@ mod status_serialization_tests {
                 crate::daemon_repair::RUNNER_REFRESH_HOMEBOY,
                 crate::daemon_repair::refresh_homeboy_action_for_ref(
                     "homeboy-lab",
-                    Some("5159b413bc0e0e46be3642fac202f4e0866d93b1"),
+                    Some("v0.428.2"),
                 ),
             )],
         });
@@ -1479,9 +1455,7 @@ mod status_serialization_tests {
         assert!(idle.safe_to_rotate);
         assert_eq!(
             idle.next_action.as_deref(),
-            Some(
-                "homeboy runner refresh-homeboy homeboy-lab --ref 5159b413bc0e0e46be3642fac202f4e0866d93b1 --reconnect"
-            ),
+            Some("homeboy runner refresh-homeboy homeboy-lab --ref v0.428.2 --reconnect"),
             "once drained, the refresh is the next action again"
         );
     }
@@ -1518,7 +1492,7 @@ mod status_serialization_tests {
                 crate::daemon_repair::RUNNER_REFRESH_HOMEBOY,
                 crate::daemon_repair::refresh_homeboy_action_for_ref(
                     "homeboy-lab",
-                    Some("d1a1a6d2092f250780ccf40a57a12becff2a164f"),
+                    Some("v0.371.0"),
                 ),
             )],
         });
@@ -1529,9 +1503,7 @@ mod status_serialization_tests {
         assert_eq!(summary.active_job_count, Some(0));
         assert_eq!(
             summary.next_action.as_deref(),
-            Some(
-                "homeboy runner refresh-homeboy homeboy-lab --ref d1a1a6d2092f250780ccf40a57a12becff2a164f --reconnect"
-            )
+            Some("homeboy runner refresh-homeboy homeboy-lab --ref v0.371.0 --reconnect")
         );
     }
 
@@ -1754,9 +1726,8 @@ impl RunnerStaleDaemonWarning {
     /// Recovery commands safe to publish to an operator or machine consumer.
     ///
     /// Persisted command text is evidence, not authority. A refresh is exposed
-    /// only when its typed immutable ref is the observed configured job binary
-    /// and it cannot request a downgrade. Refresh promotion then validates that
-    /// exact target against the runner's authoritative source checkout.
+    /// only when its release tag is no older than the configured job binary
+    /// and it cannot request a downgrade. Unreleased builds use dev-sync.
     pub fn safe_recovery_commands(&self) -> Vec<String> {
         self.safe_recovery_actions()
             .into_iter()
@@ -1764,26 +1735,33 @@ impl RunnerStaleDaemonWarning {
             .collect()
     }
 
-    /// Typed mutating actions authorized by the same monotonic contract as the
+    /// Typed actions authorized by the same monotonic contract as the
     /// published command projection. Callers must not reconstruct actions from
     /// persisted command text.
     pub(crate) fn safe_recovery_actions(&self) -> Vec<ExecutableAction> {
-        let Some(configured) = self
-            .job_command_binary_build_identity
-            .as_deref()
-            .and_then(build_identity_commit)
-        else {
-            return Vec::new();
-        };
         self.recovery_actions
             .iter()
             .filter_map(|action| {
+                if action.safety == ActionSafety::ReadOnly {
+                    return Some(action.clone());
+                }
+                if action.args.get(1).map(String::as_str) != Some("refresh-homeboy") {
+                    return None;
+                }
+                let configured = semver::Version::parse(
+                    self.job_command_binary_version
+                        .trim()
+                        .strip_prefix("homeboy ")
+                        .unwrap_or(self.job_command_binary_version.trim()),
+                )
+                .ok()?;
                 let target = action
                     .args
                     .windows(2)
                     .find_map(|args| (args[0] == "--ref").then(|| args[1].as_str()))?;
-                (target == configured && !action.args.iter().any(|arg| arg == "--allow-downgrade"))
-                    .then(|| action.clone())
+                (crate::homeboy_refresh::release_version(target).ok()? >= configured
+                    && !action.args.iter().any(|arg| arg == "--allow-downgrade"))
+                .then(|| action.clone())
             })
             .collect()
     }
@@ -1962,9 +1940,7 @@ impl RunnerStaleDaemonWarning {
                 "connected runner daemon build identity could not be verified against configured executable `{configured_executable}`; run `{} self identity` on the runner and ensure it reports `git_commit` or an exact `display`, then run recovery_commands if needed",
                 shell::quote_arg(configured_executable),
             );
-            self.set_recovery(vec![crate::daemon_repair::refresh_homeboy_action(
-                runner_id,
-            )]);
+            self.set_recovery(recovery_action(runner_id));
         }
         self
     }
@@ -1986,11 +1962,7 @@ impl RunnerStaleDaemonWarning {
                 "persisted runner session version `{}` differs from configured job command binary version `{}`; run recovery_commands in order when runner active jobs are drained",
                 self.session_homeboy_version, self.current_homeboy_version,
             );
-            self.set_recovery(recovery_action(
-                runner_id,
-                self.current_homeboy_build_identity.as_deref(),
-                &crate::controller_identity::compatibility_controller_identity(),
-            ));
+            self.set_recovery(recovery_action(runner_id));
         }
         self
     }
@@ -2030,15 +2002,8 @@ impl RunnerStaleDaemonWarning {
                 "connected runner daemon runtime paths are stale: {}; run recovery_commands after active jobs are drained to replace the active daemon with the configured runtime paths",
                 stale_paths.chain(changed_paths).collect::<Vec<_>>().join("; ")
             );
-            // Keep the exact immutable recovery reference established by
-            // `new`; runtime-path drift must not silently turn it into a
-            // mutable semver tag.
             if self.recovery_actions.is_empty() {
-                self.set_recovery(recovery_action(
-                    runner_id,
-                    self.current_homeboy_build_identity.as_deref(),
-                    &crate::controller_identity::compatibility_controller_identity(),
-                ));
+                self.set_recovery(recovery_action(runner_id));
             }
         }
         self
@@ -2052,17 +2017,11 @@ fn redact_runtime_value(value: &str) -> String {
 /// The recovery for an identity-drifted runner daemon, as argv.
 ///
 /// A rendered string is derived from this; nothing derives argv from a string.
-fn recovery_action(
-    runner_id: &str,
-    configured_identity: Option<&str>,
-    initiating_identity: &homeboy_product_identity::BuildIdentity,
-) -> Vec<ExecutableAction> {
-    recovery_ref(configured_identity, initiating_identity)
-        .map(|recovery_ref| {
-            crate::daemon_repair::refresh_homeboy_action_for_ref(runner_id, Some(&recovery_ref))
-        })
-        .into_iter()
-        .collect()
+fn recovery_action(runner_id: &str) -> Vec<ExecutableAction> {
+    vec![crate::daemon_repair::refresh_homeboy_action_for_ref(
+        runner_id,
+        Some(&crate::homeboy_refresh::controller_refresh_ref()),
+    )]
 }
 
 fn rendered_commands(actions: &[ExecutableAction]) -> Vec<String> {
@@ -2070,40 +2029,6 @@ fn rendered_commands(actions: &[ExecutableAction]) -> Vec<String> {
         .iter()
         .map(ExecutableAction::render_command)
         .collect()
-}
-
-fn recovery_ref(
-    configured_identity: Option<&str>,
-    initiating_identity: &homeboy_product_identity::BuildIdentity,
-) -> Option<String> {
-    match configured_identity {
-        // The runner's configured executable is the desired post-recovery job
-        // binary. A present but dirty or unverifiable identity must not be
-        // replaced with the initiating controller's unrelated commit.
-        Some(identity) => homeboy_upgrade::upgrade::parse_build_identity_display(identity)
-            .filter(|identity| identity.git_dirty != Some(true))
-            .and_then(|identity| identity.git_commit)
-            .filter(|commit| is_immutable_build_commit(commit)),
-        None if initiating_identity.git_dirty != Some(true) => initiating_identity
-            .git_commit
-            .as_deref()
-            .filter(|commit| is_immutable_build_commit(commit))
-            .map(str::to_string),
-        None => None,
-    }
-}
-
-fn build_identity_commit(identity: &str) -> Option<String> {
-    homeboy_upgrade::upgrade::parse_build_identity_display(identity)
-        .filter(|identity| identity.git_dirty != Some(true))
-        .and_then(|identity| identity.git_commit)
-        .filter(|commit| is_immutable_build_commit(commit))
-}
-
-/// A Homeboy build display carries a Git object ID, not an arbitrary Git ref.
-/// The short form is accepted because product builds embed abbreviated SHAs.
-fn is_immutable_build_commit(commit: &str) -> bool {
-    (7..=64).contains(&commit.len()) && commit.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn same_homeboy_version(left: &str, right: &str) -> bool {

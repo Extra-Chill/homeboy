@@ -762,7 +762,7 @@ fn lab_runner_preparation_falls_back_for_stale_default_runtime_paths() {
     assert_eq!(
         prepared,
         LabRunnerPreparation::FallBackLocal {
-            reason: "connected runner `lab` daemon runtime is stale after runner-side rebuilds or path changes; restart the active daemon with `homeboy runner refresh-homeboy lab --ref bbbbbbbbbbbb --reconnect`".to_string()
+            reason: format!("connected runner `lab` daemon runtime is stale after runner-side rebuilds or path changes; restart the active daemon with `homeboy runner refresh-homeboy lab --ref {} --reconnect`", crate::controller_refresh_ref())
         }
     );
 }

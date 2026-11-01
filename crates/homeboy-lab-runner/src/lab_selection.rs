@@ -1619,11 +1619,6 @@ mod daemon_repair_step_tests {
 
     #[test]
     fn stale_daemon_recovery_uses_only_an_exact_safe_typed_action() {
-        // #14508 "expose pinned configured-daemon recovery" validates a
-        // candidate `--ref` as an immutable build commit (7-64 hex chars via
-        // `is_immutable_build_commit`); the short placeholder `new` fails
-        // that shape and is silently dropped, which the fixture is not
-        // exercising here.
         let warning = RunnerStaleDaemonWarning::new(
             "homeboy-lab",
             "homeboy 0.218.0".to_string(),
@@ -1649,7 +1644,10 @@ mod daemon_repair_step_tests {
                 .iter()
                 .map(|step| step.command.clone())
                 .collect::<Vec<_>>(),
-            ["homeboy runner refresh-homeboy homeboy-lab --ref abcdef12 --reconnect"]
+            [format!(
+                "homeboy runner refresh-homeboy homeboy-lab --ref {} --reconnect",
+                crate::controller_refresh_ref()
+            )]
         );
         assert!(steps
             .iter()

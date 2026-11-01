@@ -1101,7 +1101,10 @@ fn exact_active_daemon_target_remains_available_in_metadata_and_offload_error() 
         Some("homeboy 0.265.0+aaaaaaaa".to_string()),
         Some("homeboy 0.265.0+aaaaaaaa".to_string()),
     ));
-    let refresh = "homeboy runner refresh-homeboy lab --ref aaaaaaaa --reconnect";
+    let refresh = format!(
+        "homeboy runner refresh-homeboy lab --ref {} --reconnect",
+        crate::controller_refresh_ref()
+    );
 
     status.stale_daemon = status.stale_daemon.take().map(|warning| {
         warning.with_runtime_paths(
@@ -1123,7 +1126,7 @@ fn exact_active_daemon_target_remains_available_in_metadata_and_offload_error() 
     assert!(error.details["tried"].as_array().is_some_and(|tried| {
         tried
             .iter()
-            .any(|hint| hint.as_str().is_some_and(|hint| hint.contains(refresh)))
+            .any(|hint| hint.as_str().is_some_and(|hint| hint.contains(&refresh)))
     }));
 }
 
