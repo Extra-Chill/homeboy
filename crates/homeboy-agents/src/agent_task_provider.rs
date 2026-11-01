@@ -80,6 +80,7 @@ pub use command_runner::{
 pub use dispatchability::{
     admit_plan_provider_dispatchability_for_placement,
     admit_plan_provider_dispatchability_for_runner_ownership,
+    admit_plan_provider_dispatchability_with_placement,
     admit_plan_provider_dispatchability_with_providers, evaluate_provider_capacity_with_config,
     evaluate_provider_dispatchability, evaluate_provider_dispatchability_with_cache,
     evaluate_provider_dispatchability_with_config,
