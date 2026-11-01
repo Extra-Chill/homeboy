@@ -1965,7 +1965,7 @@ fn refresh_promotion_authorities_in_roots(
     })
 }
 
-fn release_version(tag: &str) -> Result<semver::Version> {
+pub(crate) fn release_version(tag: &str) -> Result<semver::Version> {
     tag.strip_prefix('v').and_then(|version| semver::Version::parse(version).ok())
         .filter(|version| version.pre.is_empty() && version.build.is_empty())
         .ok_or_else(|| Error::validation_invalid_argument(
@@ -3366,7 +3366,7 @@ fn dev_sync_next_actions(runner_id: &str, options: &RunnerDevSyncOptions) -> Vec
     actions
 }
 
-pub(crate) fn controller_refresh_ref() -> String {
+pub fn controller_refresh_ref() -> String {
     release_ref(homeboy_product_identity::product_version())
 }
 

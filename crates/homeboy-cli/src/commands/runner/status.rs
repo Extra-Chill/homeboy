@@ -1049,7 +1049,7 @@ pub(crate) fn selected_admission_summary(
 
 /// Recovery targets the controller release; refresh enforces the version guard.
 fn recovery_refresh_guidance(_status: &RunnerStatusReport) -> RecoveryRefreshGuidance {
-    RecoveryRefreshGuidance::Refresh(format!("v{}", homeboy_product_identity::product_version()))
+    RecoveryRefreshGuidance::Refresh(homeboy::runner::controller_refresh_ref())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1625,24 +1625,31 @@ mod tests {
         let serialized = serde_json::to_value(output).expect("serialize output");
         assert!(serialized.get("stale_daemon_refresh_command").is_none());
         assert!(serialized["stale_daemon"].get("refresh_command").is_none());
-        assert!(serialized["stale_daemon"]
-            .get("recovery_commands")
-            .is_none());
+        assert_eq!(
+            serialized["stale_daemon"]["recovery_commands"],
+            serde_json::json!([format!(
+                "homeboy runner refresh-homeboy homeboy-lab --ref {} --reconnect",
+                homeboy::runner::controller_refresh_ref()
+            )])
+        );
         assert!(!serialized
             .to_string()
             .contains("--ref 93bc3e103459 --reconnect"));
 
         let report = sanitized_status_for_output(report);
         let serialized = serde_json::to_value(report).expect("serialize full status");
-        assert!(serialized["stale_daemon"].get("refresh_command").is_none());
+        assert_eq!(
+            serialized["stale_daemon"]["refresh_command"],
+            format!(
+                "homeboy runner refresh-homeboy homeboy-lab --ref {} --reconnect",
+                homeboy::runner::controller_refresh_ref()
+            )
+        );
         assert!(!serialized
             .to_string()
             .contains("--ref 93bc3e103459 --reconnect"));
 
         let nested = serde_json::json!({ "selected_lab_runner": { "status": serialized } });
-        assert!(nested["selected_lab_runner"]["status"]["stale_daemon"]
-            .get("refresh_command")
-            .is_none());
         assert!(!nested
             .to_string()
             .contains("--ref 93bc3e103459 --reconnect"));
@@ -1674,10 +1681,13 @@ mod tests {
                 }],
             ),
         );
-        let refresh = "homeboy runner refresh-homeboy homeboy-lab --ref 7e29bde24e00 --reconnect";
+        let refresh = format!(
+            "homeboy runner refresh-homeboy homeboy-lab --ref {} --reconnect",
+            homeboy::runner::controller_refresh_ref()
+        );
         let commands = runner_status_operator_commands_with_recovery_guidance(
             &report,
-            RecoveryRefreshGuidance::Refresh("7e29bde24e00".to_string()),
+            RecoveryRefreshGuidance::Refresh(homeboy::runner::controller_refresh_ref()),
         );
         assert!(commands
             .iter()
@@ -1687,7 +1697,7 @@ mod tests {
             "homeboy-lab",
             "/opt/homeboy",
             &report,
-            RecoveryRefreshGuidance::Refresh("7e29bde24e00".to_string()),
+            RecoveryRefreshGuidance::Refresh(homeboy::runner::controller_refresh_ref()),
         );
         let serialized = serde_json::to_value(output).expect("serialize output");
         assert_eq!(serialized["stale_daemon_refresh_command"], refresh);
