@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.8.5] - 2026-11-01
+
+### Fixed
+- keep extension and desktop releases published and off GitHub latest
+
 ## [1.8.4] - 2026-10-11
 
 ### Changed
