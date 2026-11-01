@@ -1,15 +1,17 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::permissions;
+use super::phase_clock;
 use homeboy_core::component::{Component, VersionTarget};
 use homeboy_core::engine::hooks::{self, HookFailureMode};
 use homeboy_core::engine::shell;
 use homeboy_core::engine::template::{render_map, TemplateVars};
 use homeboy_core::error::{Error, Result};
 use homeboy_core::paths as base_path;
+use homeboy_core::phase_timing::PhaseTimer;
 use homeboy_core::project::Project;
 use homeboy_core::server::SshClient;
 use homeboy_extension_contract::manifest_toolchain_config::DeployOverride;
@@ -638,11 +640,14 @@ pub(super) fn deploy_with_override(
 
     let staging_artifact = format!("{}/{}", override_config.staging_path, artifact_filename);
     let mut verified = false;
+    let mut timer = PhaseTimer::new();
+    let subject = format!("target={remote_path}");
 
     // Step 1: Create staging directory
     if let Some(observation) = observation.as_deref_mut() {
         observation.phase("transfer", true)?;
     }
+    let started = Instant::now();
     let mkdir_cmd = format!(
         "mkdir -p {}",
         shell::quote_path(&override_config.staging_path)
@@ -673,11 +678,13 @@ pub(super) fn deploy_with_override(
     if !upload_result.success {
         return Ok(upload_result);
     }
+    phase_clock::record(&mut timer, &subject, "transfer", started);
 
     // Step 3: Render and execute install command
     if let Some(observation) = observation.as_deref_mut() {
         observation.phase("extract", true)?;
     }
+    let started = Instant::now();
     // Resolution order: component/project cli_path override → extension default → "wp"
     let cli_path = cli_path_override
         .or_else(|| {
@@ -730,11 +737,14 @@ pub(super) fn deploy_with_override(
             ),
         ));
     }
+    phase_clock::record(&mut timer, &subject, "install", started);
 
     // Step 4: Fix permissions unless skipped
     if !override_config.skip_permissions_fix {
         homeboy_core::log_status!("deploy", "Fixing file permissions");
-        permissions::fix_deployed_permissions(ssh_client, remote_path, remote_owner)?;
+        phase_clock::time(&mut timer, &subject, "permissions", || {
+            permissions::fix_deployed_permissions(ssh_client, remote_path, remote_owner)
+        })?;
     }
 
     // Step 5: Run verification if configured. Keep the staged artifact around
@@ -752,7 +762,9 @@ pub(super) fn deploy_with_override(
             );
             let verify_cmd = render_map(verify_cmd_template, &verify_vars);
 
-            let verify_output = ssh_client.execute(&verify_cmd);
+            let verify_output = phase_clock::time(&mut timer, &subject, "verify", || {
+                ssh_client.execute(&verify_cmd)
+            });
             if !verify_output.success || verify_output.stdout.trim().is_empty() {
                 let error_msg = v
                     .verify_error_message
@@ -772,11 +784,13 @@ pub(super) fn deploy_with_override(
         let _ = ssh_client.execute(&cleanup_cmd); // Best effort cleanup
     }
 
-    Ok(DeployResult::success(0).with_effect(DeployEffect {
-        remote_path: remote_path.to_string(),
-        artifact_path: Some(staging_artifact),
-        verified,
-    }))
+    Ok(DeployResult::success(0)
+        .with_effect(DeployEffect {
+            remote_path: remote_path.to_string(),
+            artifact_path: Some(staging_artifact),
+            verified,
+        })
+        .with_phase_timings(timer))
 }
 
 fn deploy_override_template_vars(

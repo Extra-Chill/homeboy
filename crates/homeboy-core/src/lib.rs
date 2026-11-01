@@ -1,4 +1,17 @@
-/// Macro for prefixed status logging to stderr (only when stderr is a terminal).
+/// Environment switch that forces `log_status!` lines on when stderr is not a
+/// terminal (CI logs, redirected stderr). `HOMEBOY_STATUS=1` (or `true`)
+/// enables them; interactive terminals always show them.
+pub const STATUS_ENV: &str = "HOMEBOY_STATUS";
+
+/// Whether `log_status!` lines are written: stderr is a terminal, or
+/// [`STATUS_ENV`] forces them on.
+pub fn status_output_enabled() -> bool {
+    ::std::io::IsTerminal::is_terminal(&::std::io::stderr())
+        || ::std::env::var(STATUS_ENV).is_ok_and(|value| matches!(value.as_str(), "1" | "true"))
+}
+
+/// Macro for prefixed status logging to stderr. Lines are written when stderr
+/// is a terminal or when `HOMEBOY_STATUS=1` is set (see [`status_output_enabled`]).
 ///
 /// Usage:
 /// ```ignore
@@ -8,7 +21,7 @@
 #[macro_export]
 macro_rules! log_status {
     ($prefix:expr, $($arg:tt)*) => {
-        if ::std::io::IsTerminal::is_terminal(&::std::io::stderr()) {
+        if $crate::status_output_enabled() {
             eprintln!("[{}] {}", $prefix, format_args!($($arg)*));
         }
     };

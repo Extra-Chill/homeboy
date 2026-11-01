@@ -3,13 +3,16 @@ use std::path::Path;
 
 use super::lifecycle::DeployObservation;
 use super::permissions;
+use super::phase_clock;
 use homeboy_core::component;
 use homeboy_core::defaults;
 use homeboy_core::engine::shell;
 use homeboy_core::engine::template::{render_map, TemplateVars};
 use homeboy_core::error::{Error, Result};
+use homeboy_core::phase_timing::PhaseTimer;
 use homeboy_core::server::SshClient;
 use homeboy_extension_contract::DeployVerification;
+use std::time::Instant;
 
 use super::transfer::{upload_directory, upload_file};
 use super::types::{DeployEffect, DeployResult};
@@ -36,11 +39,15 @@ pub(super) fn deploy_via_git(
         git_config.branch.clone()
     };
 
+    let mut timer = PhaseTimer::new();
+    let subject = format!("target={remote_path}");
+
     // Step 1: Fetch latest. `git fetch` writes remote-tracking refs and
     // FETCH_HEAD, so record the mutation boundary before issuing it.
     if let Some(observation) = observation {
         observation.phase("transfer", true)?;
     }
+    let started = Instant::now();
     homeboy_core::log_status!(
         "deploy:git",
         "Fetching from {} in {}",
@@ -59,6 +66,8 @@ pub(super) fn deploy_via_git(
             format!("git fetch failed: {}", fetch_output.stderr),
         ));
     }
+    phase_clock::record(&mut timer, &subject, "transfer", started);
+    let started = Instant::now();
 
     // Step 2: Checkout target (tag or branch)
     let is_tag = git_config.tag_pattern.is_some() && component_version.is_some();
@@ -99,8 +108,9 @@ pub(super) fn deploy_via_git(
         }
     }
 
+    phase_clock::record(&mut timer, &subject, "install", started);
     homeboy_core::log_status!("deploy:git", "Deploy complete for {}", remote_path);
-    Ok(DeployResult::success(0))
+    Ok(DeployResult::success(0).with_phase_timings(timer))
 }
 
 /// Main entry point - uploads artifact and runs extract command if configured
@@ -115,6 +125,8 @@ pub(super) fn deploy_artifact(
 ) -> Result<DeployResult> {
     let mut uploaded_artifact_path: Option<String> = None;
     let mut verified = false;
+    let mut timer = PhaseTimer::new();
+    let subject = format!("target={remote_path}");
 
     if let Some(observation) = observation.as_deref_mut() {
         observation.phase("transfer", true)?;
@@ -122,15 +134,19 @@ pub(super) fn deploy_artifact(
 
     // Step 1: Upload (directory or file)
     if local_path.is_dir() {
+        let started = Instant::now();
         let result = upload_directory(ssh_client, local_path, remote_path)?;
         if !result.success {
             return Ok(result);
         }
+        phase_clock::record(&mut timer, &subject, "transfer", started);
 
         // Directory artifacts bypass the extraction branch below, so normalize
         // them here instead of preserving the build user's ownership and modes.
         homeboy_core::log_status!("deploy", "Fixing file permissions");
-        permissions::fix_deployed_permissions(ssh_client, remote_path, remote_owner)?;
+        phase_clock::time(&mut timer, &subject, "permissions", || {
+            permissions::fix_deployed_permissions(ssh_client, remote_path, remote_owner)
+        })?;
     } else {
         // Validate: archive artifacts require an extract command
         let is_archive = local_path
@@ -188,6 +204,7 @@ pub(super) fn deploy_artifact(
         };
 
         // Create target directory
+        let started = Instant::now();
         let mkdir_cmd = format!("mkdir -p {}", shell::quote_path(remote_path));
         homeboy_core::log_status!("deploy", "Creating directory: {}", remote_path);
         let mkdir_output = ssh_client.execute(&mkdir_cmd);
@@ -202,6 +219,7 @@ pub(super) fn deploy_artifact(
         if !result.success {
             return Ok(result);
         }
+        phase_clock::record(&mut timer, &subject, "transfer", started);
         uploaded_artifact_path = Some(upload_path.clone());
 
         // Step 2: Execute extract command if configured
@@ -209,6 +227,7 @@ pub(super) fn deploy_artifact(
             if let Some(observation) = observation.as_deref_mut() {
                 observation.phase("extract", true)?;
             }
+            let started = Instant::now();
             // Defense-in-depth: refuse to clean known shared parent directories.
             // The upstream validate_deploy_target() should already catch this,
             // but since this executes `rm -rf` we add an extra guard.
@@ -300,10 +319,13 @@ pub(super) fn deploy_artifact(
             if let Some(result) = ensure_not_double_nested(ssh_client, remote_path) {
                 return Ok(result);
             }
+            phase_clock::record(&mut timer, &subject, "install", started);
 
             // Fix file permissions after extraction
             homeboy_core::log_status!("deploy", "Fixing file permissions");
-            permissions::fix_deployed_permissions(ssh_client, remote_path, remote_owner)?;
+            phase_clock::time(&mut timer, &subject, "permissions", || {
+                permissions::fix_deployed_permissions(ssh_client, remote_path, remote_owner)
+            })?;
         }
     }
 
@@ -327,7 +349,9 @@ pub(super) fn deploy_artifact(
         }
         let verify_cmd = render_map(verify_cmd_template, &vars);
 
-        let verify_output = ssh_client.execute(&verify_cmd);
+        let verify_output = phase_clock::time(&mut timer, &subject, "verify", || {
+            ssh_client.execute(&verify_cmd)
+        });
         if !verify_output.success || verify_output.stdout.trim().is_empty() {
             let error_msg = v
                 .verify_error_message
@@ -339,11 +363,13 @@ pub(super) fn deploy_artifact(
         verified = true;
     }
 
-    Ok(DeployResult::success(0).with_effect(DeployEffect {
-        remote_path: remote_path.to_string(),
-        artifact_path: uploaded_artifact_path,
-        verified,
-    }))
+    Ok(DeployResult::success(0)
+        .with_effect(DeployEffect {
+            remote_path: remote_path.to_string(),
+            artifact_path: uploaded_artifact_path,
+            verified,
+        })
+        .with_phase_timings(timer))
 }
 
 /// Return the final path segment of `remote_path` (its basename), if any.

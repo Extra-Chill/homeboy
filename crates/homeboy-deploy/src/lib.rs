@@ -13,6 +13,7 @@ mod orchestration_tag_checkout;
 mod parallel;
 mod path_roots;
 pub(crate) mod permissions;
+mod phase_clock;
 mod planning;
 mod policy;
 pub(crate) mod preparation;

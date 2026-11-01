@@ -14,6 +14,8 @@ mod cook_retry_projection_recursion;
 mod daemon_chaos;
 #[path = "cli_binary/daemon_serve_lifecycle.rs"]
 mod daemon_serve_lifecycle;
+#[path = "cli_binary/deploy_phase_timings.rs"]
+mod deploy_phase_timings;
 #[path = "cli_binary/extension_action_payload.rs"]
 mod extension_action_payload;
 #[path = "cli_binary/fake_pi.rs"]

@@ -1,8 +1,10 @@
 use std::collections::{BTreeMap, HashMap};
+use std::time::Instant;
 
 use homeboy_core::component::{resolve_component_scope, Component, ScopeCommand};
 use homeboy_core::context::RemoteProjectContext;
 use homeboy_core::error::{Error, Result};
+use homeboy_core::phase_timing::{PhaseTimer, PhaseTimingReport};
 use homeboy_core::project::Project;
 use homeboy_version::version;
 
@@ -19,6 +21,7 @@ use super::orchestration_tag_checkout::{
     restore_branches,
 };
 use super::path_roots::{project_with_detected_path_roots, resolve_effective_remote_path};
+use super::phase_clock;
 use super::planning::{
     load_project_components_with_projection, local_deploy_version, plan_components,
     ExtensionSkippedComponent,
@@ -72,6 +75,25 @@ pub(super) struct PreparedDeploymentPlan {
     /// `apply_prepared_components` name them in the real deploy result instead
     /// of dropping them once loading is done (Extra-Chill/extrachill-network#244).
     extension_skipped: Vec<ExtensionSkippedComponent>,
+    /// Ordered preparation phases per component, completed by apply.
+    phase_timings: HashMap<String, PhaseTimingReport>,
+}
+
+/// Record one shared `source.materialize` span on every component it served.
+fn record_materialize(
+    timers: &mut HashMap<String, PhaseTimer>,
+    checkouts: &[ExactRefCheckout],
+    started: Instant,
+) {
+    for checkout in checkouts {
+        let id = &checkout.component.id;
+        phase_clock::record(
+            timers.entry(id.clone()).or_default(),
+            &phase_clock::component_subject(id),
+            "source.materialize",
+            started,
+        );
+    }
 }
 
 pub(super) fn prepare_components(
@@ -244,6 +266,8 @@ pub(super) fn prepare_components(
     // Dry-run resolves in `run_dry_run_mode` and never creates a worktree.
     // A clean checkout already at the resolved commit builds in place; every
     // other (repository, commit) pair is materialized once as a sparse tree.
+    // Shared materialization time is attributed to every component it served.
+    let mut timers: HashMap<String, PhaseTimer> = HashMap::new();
     let exact_ref_checkouts = if !config.dry_run && !config.check && config.has_requested_refs() {
         let requests: Vec<ExactRefRequest<'_>> = components
             .iter()
@@ -257,7 +281,11 @@ pub(super) fn prepare_components(
                     })
             })
             .collect();
-        ExactRefCheckout::materialize_all(&requests, Some(&project), InPlace::Allow)?
+        let started = Instant::now();
+        let checkouts =
+            ExactRefCheckout::materialize_all(&requests, Some(&project), InPlace::Allow)?;
+        record_materialize(&mut timers, &checkouts, started);
+        checkouts
     } else {
         Vec::new()
     };
@@ -266,9 +294,12 @@ pub(super) fn prepare_components(
         .map(|checkout| (checkout.component.id.clone(), checkout.identity.clone()))
         .collect();
     for checkout in &exact_ref_checkouts {
-        checkout.verify()?;
-        checkout.hydrate_dependencies(config.skip_deps_hydration)?;
-        checkout.reconstruct_package_artifacts()?;
+        prepare_materialized_source(
+            timers.entry(checkout.component.id.clone()).or_default(),
+            checkout,
+            config.skip_deps_hydration,
+            true,
+        )?;
     }
     if let Some(artifact) = config.prepared_artifact.as_ref() {
         for checkout in &exact_ref_checkouts {
@@ -422,11 +453,17 @@ pub(super) fn prepare_components(
                 accepted_sha: entry.tag_commit_sha.as_deref(),
             })
             .collect();
+        let started = Instant::now();
         let materialized =
             ExactRefCheckout::materialize_all(&requests, Some(&project), InPlace::Never)?;
+        record_materialize(&mut timers, &materialized, started);
         for checkout in &materialized {
-            checkout.verify()?;
-            checkout.hydrate_dependencies(config.skip_deps_hydration)?;
+            prepare_materialized_source(
+                timers.entry(checkout.component.id.clone()).or_default(),
+                checkout,
+                config.skip_deps_hydration,
+                false,
+            )?;
         }
 
         tag_checkouts = checkout_resolved_deploy_tags(in_place)?;
@@ -505,10 +542,25 @@ pub(super) fn prepare_components(
         }
     };
 
+    let mut phase_timings: HashMap<String, PhaseTimingReport> = prepared_deployments
+        .iter()
+        .map(|prepared| {
+            let id = prepared.component.id.clone();
+            let mut report = timers.remove(&id).unwrap_or_default().into_report();
+            report
+                .spans
+                .extend(prepared.phase_timings.spans.iter().cloned());
+            (id, report)
+        })
+        .collect();
+
     // Re-probe immediately before the first destructive write. A same-version
     // mismatch is remote-only content drift, not an ordinary local update.
     for prepared in prepared_deployments.iter() {
         let exclusions = resolve_component_scope(&prepared.component, ScopeCommand::Deploy).exclude;
+        let mut timer = PhaseTimer::new();
+        let subject = phase_clock::component_subject(&prepared.component.id);
+        let started = std::time::Instant::now();
         let manifest = match (
             prepared.artifact_path.as_deref(),
             prepared.canonical_release_artifact.as_ref(),
@@ -533,6 +585,10 @@ pub(super) fn prepare_components(
             ),
             _ => continue,
         };
+        phase_clock::record(&mut timer, &subject, "preflight.manifest", started);
+        if let Some(report) = phase_timings.get_mut(&prepared.component.id) {
+            report.spans.extend(timer.into_report().spans);
+        }
         if prepared.local_version == prepared.remote_version
             && !config.force
             && manifest.status != "match"
@@ -632,8 +688,30 @@ pub(super) fn prepare_components(
             _exact_ref_checkouts: exact_ref_checkouts,
             _tag_ref_checkouts: tag_ref_checkouts,
             extension_skipped: loaded.extension_skipped,
+            phase_timings,
         },
     )))
+}
+
+/// Verify a materialized detached source and prepare its build inputs, timing
+/// each step on the component's timer.
+fn prepare_materialized_source(
+    timer: &mut PhaseTimer,
+    checkout: &ExactRefCheckout,
+    skip_deps_hydration: bool,
+    reconstruct_package_artifacts: bool,
+) -> Result<()> {
+    let subject = phase_clock::component_subject(&checkout.component.id);
+    phase_clock::time(timer, &subject, "source.verify", || checkout.verify())?;
+    phase_clock::time(timer, &subject, "source.dependencies", || {
+        checkout.hydrate_dependencies(skip_deps_hydration)
+    })?;
+    if reconstruct_package_artifacts {
+        phase_clock::time(timer, &subject, "source.package_inputs", || {
+            checkout.reconstruct_package_artifacts()
+        })?;
+    }
+    Ok(())
 }
 
 pub(super) fn apply_prepared_components(
@@ -655,6 +733,7 @@ pub(super) fn apply_prepared_components(
         _exact_ref_checkouts,
         _tag_ref_checkouts,
         extension_skipped,
+        mut phase_timings,
     } = plan;
 
     // Execute deployments only after every component passed the local preflight.
@@ -695,6 +774,11 @@ pub(super) fn apply_prepared_components(
             &project,
             observation.as_deref_mut(),
         );
+        let mut timings = phase_timings.remove(&component.id).unwrap_or_default();
+        timings
+            .spans
+            .extend(result.phase_timings.take().unwrap_or_default().spans);
+        result = result.with_phase_timings(timings);
 
         let exact_ref_identity = exact_ref_identities.get(&component.id);
         let deployed_ref = deployed_refs.get(&component.id).cloned();
@@ -766,8 +850,15 @@ pub(super) fn apply_prepared_components(
     // above), this event is declared only on the project and is never
     // resolved per component — see homeboy#14973 and the module docs on
     // `homeboy_core::engine::hooks`.
+    let mut project_timer = PhaseTimer::new();
+    let project_subject = format!("project={}", project.id);
     if succeeded > 0 {
-        run_project_scoped_post_deploy_hook(ctx, &project);
+        phase_clock::time(
+            &mut project_timer,
+            &project_subject,
+            "project.hooks",
+            || run_project_scoped_post_deploy_hook(ctx, &project),
+        );
     }
 
     // Post-deploy front-end smoke check (opt-in, project-scoped). Runs only when
@@ -779,7 +870,13 @@ pub(super) fn apply_prepared_components(
         observation.phase("verify", true)?;
     }
     if succeeded > 0 {
-        if let Some(smoke) = run_post_deploy_smoke(&project, &mut results) {
+        let smoke = phase_clock::time(
+            &mut project_timer,
+            &project_subject,
+            "project.smoke",
+            || run_post_deploy_smoke(&project, &mut results),
+        );
+        if let Some(smoke) = smoke {
             if smoke {
                 // Smoke failed and was not warn-only: flip every just-deployed
                 // component to failed so the overall deploy exit code is non-zero
@@ -791,6 +888,17 @@ pub(super) fn apply_prepared_components(
                 }
                 failed += succeeded;
                 succeeded = 0;
+            }
+        }
+    }
+
+    // Project-scoped steps run once for every deployed component; attribute
+    // them to each so a component's timings cover its whole deploy.
+    let project_spans = project_timer.into_report().spans;
+    if !project_spans.is_empty() {
+        for result in results.iter_mut() {
+            if let Some(report) = result.phase_timings.as_mut() {
+                report.spans.extend(project_spans.iter().cloned());
             }
         }
     }

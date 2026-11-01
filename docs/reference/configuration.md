@@ -41,6 +41,8 @@ the higher-level system model and core/extension boundary, see
 - `update_check` — Enable automatic update check on startup (default: true). Disable with `homeboy config set /update_check false` or set `HOMEBOY_NO_UPDATE_CHECK=1`.
 - `resident_services` — Long-running services to restart after `homeboy upgrade` swaps the on-disk binary.
 
+Progress status lines (such as `[deploy] …`) go to stderr only when it is a terminal. Set `HOMEBOY_STATUS=1` to emit them when stderr is redirected, e.g. in CI logs.
+
 Notification caller context can be supplied per process with
 `HOMEBOY_NOTIFICATION_TRANSPORT` and `HOMEBOY_NOTIFICATION_ROUTE`; both are
 required together, and setting only one is an error.
