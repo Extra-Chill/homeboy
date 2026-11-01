@@ -4,6 +4,32 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.440.0] - 2026-11-01
+
+### Added
+- add --ref to install-for-component
+
+### Changed
+- retire the one-time daemon-generations move
+- Delete dead provider behavior contracts for built-in Pi
+- Record Pi model and tool durations in outcome metadata
+- stale-runner advice says runner connect; drop refresh-homeboy --source/--target-dir
+- give the healthy declared-base resolve a load-tolerant budget
+- Keep the shared Cargo target warm across release lockfile bumps
+- Use shared grouped extension sweep during upgrades
+- publish to homeboy-action over SSH with a scoped deploy key
+
+### Fixed
+- materialize --ref as a full tree so builds can read sibling paths
+- run component lint self-checks alongside extensions
+- add source_url to the update_entry test fixture
+- stop recovery on an incomplete review form whatever the gate status
+- include local packages in exact-ref sparse checkouts
+- fail required-but-unavailable Lab placement before provider admission
+- name real readiness cause and keep interrupted candidate transfers recoverable
+- name the legacy-layout jobs that block runner migration
+- Fix lint changed-since baselines for moved components
+
 ## [0.439.9] - 2026-11-01
 
 ### Changed
