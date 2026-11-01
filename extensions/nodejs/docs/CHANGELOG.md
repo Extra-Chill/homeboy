@@ -2,6 +2,11 @@
 
 All notable changes to the **nodejs** extension will be documented in this file.
 
+## [3.9.1] - 2026-11-01
+
+### Fixed
+- strip ANSI before parsing test runner summaries
+
 ## [3.9.0] - 2026-11-01
 
 ### Added
