@@ -6,6 +6,7 @@ mod content_manifest;
 mod effect;
 mod execution;
 mod generated_artifacts;
+mod install_script;
 mod lifecycle;
 mod orchestration;
 mod orchestration_ref_checkout;

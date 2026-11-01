@@ -441,7 +441,15 @@ pub(super) fn verify_archive_hash(
     archive: &Path,
     artifact: &ReleaseArtifactLease,
 ) -> Result<(), Error> {
-    let actual = sha256(archive)?;
+    verify_archive_digest(archive, &sha256(archive)?, artifact)
+}
+
+/// [`verify_archive_hash`] against an already-computed digest of `archive`.
+pub(super) fn verify_archive_digest(
+    archive: &Path,
+    actual: &str,
+    artifact: &ReleaseArtifactLease,
+) -> Result<(), Error> {
     if actual != artifact.sha256 {
         return Err(Error::validation_invalid_argument(
             "release_artifact",
