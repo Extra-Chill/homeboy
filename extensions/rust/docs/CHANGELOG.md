@@ -2,6 +2,11 @@
 
 All notable changes to the **rust** extension will be documented in this file.
 
+## [1.37.11] - 2026-11-01
+
+### Fixed
+- keep extension and desktop releases published and off GitHub latest
+
 ## [1.37.10] - 2026-10-29
 
 ### Changed
