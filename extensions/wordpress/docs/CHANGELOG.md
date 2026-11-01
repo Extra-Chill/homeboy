@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.54.0] - 2026-11-01
+
+### Added
+- content-keyed package cache shared by build, deploy and release
+
 ## [3.53.19] - 2026-11-01
 
 ### Fixed
