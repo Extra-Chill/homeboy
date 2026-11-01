@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.53.15] - 2026-11-01
+
+### Changed
+- run composer and PHP lint once per build
+
 ## [3.53.14] - 2026-11-01
 
 ### Fixed
