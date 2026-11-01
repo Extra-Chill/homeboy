@@ -1034,6 +1034,7 @@ fn hydrate_lab_gate_workspace(
         "lab_gate_workspace",
         &policy,
         request.environment.admitted_component_id.as_deref(),
+        Some(&[request.argv.join(" ")]),
     );
     hydration.finish(setup.as_ref().is_ok_and(|setup| {
         setup

@@ -40,15 +40,19 @@ pub fn preflight_pr(
     preflight_pr_with_backend(options, &mut RealAgentTaskPrFinalizationBackend)
 }
 
-/// Hydrate dependencies for fresh manual gates in their immutable checkout.
+/// Hydrate dependencies for fresh manual gates in their immutable checkout:
+/// the root plus the descendant roots `commands` name (#16857).
 pub fn hydrate_manual_verification_dependencies(
     checkout: &std::path::Path,
+    commands: &[String],
 ) -> Result<Vec<AgentTaskGateSetupEvidence>> {
-    crate::agent_task_gate::hydrate_gate_dependency_roots_with_policy(
+    crate::agent_task_gate::hydrate_gate_dependency_roots_for_component(
         checkout,
         true,
         "manual_finalization_checkout",
         &homeboy_core::deps::DependencyHydrationPolicy::default(),
+        None,
+        Some(commands),
     )
 }
 

@@ -504,35 +504,18 @@ pub type AgentTaskGateSetupEvidence = homeboy_core::deps::DependencyHydrationOut
 /// Ask the generic dependency-provider resolver about the checkout root and its
 /// non-ignored descendant directories. This layer does not inspect manifests, infer ecosystems, or
 /// construct install commands.
-#[cfg(test)]
-pub(crate) fn hydrate_gate_dependency_roots(
-    checkout: &Path,
-    enabled: bool,
-    workspace: &str,
-) -> Result<Vec<AgentTaskGateSetupEvidence>> {
-    hydrate_gate_dependency_roots_with_policy(
-        checkout,
-        enabled,
-        workspace,
-        &homeboy_core::deps::DependencyHydrationPolicy::default(),
-    )
-}
-
-pub(crate) fn hydrate_gate_dependency_roots_with_policy(
-    checkout: &Path,
-    enabled: bool,
-    workspace: &str,
-    policy: &homeboy_core::deps::DependencyHydrationPolicy,
-) -> Result<Vec<AgentTaskGateSetupEvidence>> {
-    hydrate_gate_dependency_roots_for_component(checkout, enabled, workspace, policy, None)
-}
-
+///
+/// `gate_commands` holds the text of every gate this setup is for (each argv
+/// joined by spaces). A descendant root is hydrated only when a gate names its
+/// checkout-relative path. `None` is for setup that serves no particular gate
+/// (a provider's attempt workspace) and hydrates every descendant root.
 pub(crate) fn hydrate_gate_dependency_roots_for_component(
     checkout: &Path,
     enabled: bool,
     workspace: &str,
     policy: &homeboy_core::deps::DependencyHydrationPolicy,
     component_id: Option<&str>,
+    gate_commands: Option<&[String]>,
 ) -> Result<Vec<AgentTaskGateSetupEvidence>> {
     if !enabled {
         return Ok(Vec::new());
@@ -591,11 +574,17 @@ pub(crate) fn hydrate_gate_dependency_roots_for_component(
     // hydrate themselves.
     let mut hydrated_roots: HashSet<PathBuf> = HashSet::new();
     for candidate in candidates {
-        let relative = candidate
-            .strip_prefix(checkout)
-            .unwrap_or(&candidate)
-            .display()
-            .to_string();
+        let relative = checkout_relative_path(checkout, &candidate);
+        // Gate setup hydrates a descendant root only when a gate names it, as
+        // in `cd php-transformer && composer run lint` (#16109). Any other
+        // tracked lockfile is an install the gates do not need and one more
+        // way for setup to fail (#16857).
+        if candidate != checkout
+            && gate_commands
+                .is_some_and(|commands| !commands.iter().any(|command| command.contains(&relative)))
+        {
+            continue;
+        }
         let relative = if relative.is_empty() { "." } else { &relative };
         let selections = homeboy_core::deps::dependency_selection_roots(&candidate, true)?;
         // An installed adapter's default fallback declares the walk's own root
@@ -639,6 +628,18 @@ pub(crate) fn hydrate_gate_dependency_roots_for_component(
             .then_with(|| left.provider_id.cmp(&right.provider_id))
     });
     Ok(evidence)
+}
+
+/// `candidate`'s path from `checkout` as a `/`-separated string; empty for the
+/// checkout itself.
+fn checkout_relative_path(checkout: &Path, candidate: &Path) -> String {
+    candidate
+        .strip_prefix(checkout)
+        .unwrap_or(candidate)
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 /// The `children` git ignores in `checkout`. Outside a git checkout, or when
@@ -8013,6 +8014,26 @@ mod tests {
         );
     }
 
+    /// Gate setup for `gates`, under the default hydration policy.
+    fn hydrate_gate_dependency_roots(
+        checkout: &Path,
+        workspace: &str,
+        gates: &[&str],
+    ) -> Result<Vec<AgentTaskGateSetupEvidence>> {
+        let gates = gates
+            .iter()
+            .map(|gate| gate.to_string())
+            .collect::<Vec<_>>();
+        hydrate_gate_dependency_roots_for_component(
+            checkout,
+            true,
+            workspace,
+            &homeboy_core::deps::DependencyHydrationPolicy::default(),
+            None,
+            Some(&gates),
+        )
+    }
+
     #[test]
     fn root_declared_provider_hydrates_once_and_skips_unrelated_directories() {
         homeboy_core::test_support::with_isolated_home(|_| {
@@ -8027,8 +8048,8 @@ mod tests {
                 fs::create_dir(root.join(directory)).expect("unrelated directory");
             }
 
-            let evidence =
-                hydrate_gate_dependency_roots(root, true, "fixture").expect("dependency hydration");
+            let evidence = hydrate_gate_dependency_roots(root, "fixture", &["cargo check"])
+                .expect("dependency hydration");
             let succeeded = evidence
                 .iter()
                 .filter(|setup| {
@@ -8089,7 +8110,18 @@ mod tests {
             #[cfg(unix)]
             std::os::unix::fs::symlink(root.join("ignored"), root.join("linked")).unwrap();
 
-            let evidence = hydrate_gate_dependency_roots(root, true, "destination").unwrap();
+            let evidence = hydrate_gate_dependency_roots(
+                root,
+                "destination",
+                &[
+                    "cd php-transformer && composer run lint",
+                    "cd plugins/example && true",
+                    "cd packages/example && true",
+                    "cd ignored/deep && true",
+                    "cd submodule/deep && true",
+                ],
+            )
+            .unwrap();
             assert_eq!(
                 evidence
                     .iter()
@@ -8129,8 +8161,12 @@ mod tests {
             fs::write(root.join("vendor/.git"), "gitdir: ../.git/modules/vendor\n")
                 .expect("submodule gitfile");
 
-            let evidence =
-                hydrate_gate_dependency_roots(root, true, "fixture").expect("dependency hydration");
+            let evidence = hydrate_gate_dependency_roots(
+                root,
+                "fixture",
+                &["cd package && true", "cd vendor && true"],
+            )
+            .expect("dependency hydration");
             let roots = evidence
                 .iter()
                 .map(|setup| setup.package_root.as_str())
@@ -8169,8 +8205,12 @@ mod tests {
                     .expect("child provider");
             }
 
-            let evidence =
-                hydrate_gate_dependency_roots(root, true, "fixture").expect("dependency hydration");
+            let evidence = hydrate_gate_dependency_roots(
+                root,
+                "fixture",
+                &["cd package && true", "cd dist && true", "cd build && true"],
+            )
+            .expect("dependency hydration");
             let roots = evidence
                 .iter()
                 .map(|setup| setup.package_root.as_str())
@@ -8211,8 +8251,16 @@ mod tests {
                     .expect("child provider");
             }
 
-            let evidence =
-                hydrate_gate_dependency_roots(root, true, "fixture").expect("dependency hydration");
+            let evidence = hydrate_gate_dependency_roots(
+                root,
+                "fixture",
+                &[
+                    "cd build && true",
+                    "cd extensions/tool/build && true",
+                    "cd extensions/tool/node_modules/dep && true",
+                ],
+            )
+            .expect("dependency hydration");
             let roots = evidence
                 .iter()
                 .map(|setup| setup.package_root.as_str())
@@ -8304,7 +8352,10 @@ mod tests {
                 )
                 .unwrap();
 
-                let evidence = hydrate_gate_dependency_roots(root, true, "fixture").unwrap();
+                let gate = descendant
+                    .map(|directory| format!("cd {directory} && true"))
+                    .unwrap_or_else(|| "true".to_string());
+                let evidence = hydrate_gate_dependency_roots(root, "fixture", &[&gate]).unwrap();
                 let mut expected = vec!["."];
                 if nested_lock {
                     expected.push(descendant.unwrap());
@@ -8399,8 +8450,12 @@ mod tests {
                 )
                 .expect("adapter manifest");
 
-                let evidence = hydrate_gate_dependency_roots(root, true, "fixture")
-                    .expect("dependency hydration");
+                let evidence = hydrate_gate_dependency_roots(
+                    root,
+                    "fixture",
+                    &["cd apps/cli && true", "cd tools/generator && true"],
+                )
+                .expect("dependency hydration");
                 let roots = evidence
                     .iter()
                     .map(|setup| setup.package_root.as_str())
@@ -8435,6 +8490,60 @@ mod tests {
                     "{}",
                     case.description
                 );
+            });
+        }
+    }
+
+    /// Gate setup hydrates the checkout root and only the descendant roots a
+    /// gate names (#16857). A gate inside a member of a descendant root reaches
+    /// that root through the member's upward selection (#16109).
+    #[test]
+    fn gate_setup_hydrates_only_descendant_roots_a_gate_names() {
+        let cases: [(&str, &[&str]); 3] = [
+            ("cargo check", &["."]),
+            ("cd tool && npm test", &[".", "tool"]),
+            ("cd tool/sub && x", &[".", "tool"]),
+        ];
+        for (gate, expected_roots) in cases {
+            homeboy_core::test_support::with_isolated_home(|home| {
+                let checkout = tempfile::tempdir().expect("checkout");
+                let root = checkout.path();
+                fs::create_dir_all(root.join("tool/sub")).expect("member");
+                for (directory, lockfile) in [(".", true), ("tool", true), ("tool/sub", false)] {
+                    let directory = root.join(directory);
+                    fs::write(directory.join("project.json"), "{}").expect("project signal");
+                    if lockfile {
+                        fs::write(directory.join("workspace.lock"), "").expect("lockfile");
+                    }
+                }
+                let adapters = home
+                    .path()
+                    .join(".config/homeboy/extensions/dependency-adapters");
+                fs::create_dir_all(&adapters).expect("adapter directory");
+                fs::write(
+                    adapters.join("index.json"),
+                    r#"{"schema":"homeboy-extension/dependency-adapter-index/v1","manifests":[{"id":"fixture","ecosystem":"fixture","path":"fixture.json"}]}"#,
+                )
+                .expect("adapter index");
+                fs::write(
+                    adapters.join("fixture.json"),
+                    r#"{"schema":"homeboy-extension/dependency-adapter-manifest/v1","id":"fixture","version":1,"ecosystem":"fixture","project_signals":{"root_files":["project.json"]},"package_managers":[{"id":"fixture","selection":{"priority":1,"files":["workspace.lock"],"search":"upward"},"commands":{"install":{"command":"mkdir -p deps && printf installed > deps/installed"}},"outputs":[{"path":"deps","kind":"directory"}]}]}"#,
+                )
+                .expect("adapter manifest");
+
+                let evidence = hydrate_gate_dependency_roots(root, "fixture", &[gate])
+                    .expect("dependency hydration");
+                let roots = evidence
+                    .iter()
+                    .map(|setup| setup.package_root.as_str())
+                    .collect::<Vec<_>>();
+                assert_eq!(roots, expected_roots, "{gate}: {evidence:?}");
+                assert_eq!(
+                    root.join("tool/deps/installed").is_file(),
+                    expected_roots.contains(&"tool"),
+                    "{gate}"
+                );
+                assert!(!root.join("tool/sub/deps").exists(), "{gate}");
             });
         }
     }
