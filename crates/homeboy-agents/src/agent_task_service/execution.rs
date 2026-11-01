@@ -15,13 +15,9 @@ use crate::agent_task::{
     AgentTaskWorkspaceMode,
 };
 use crate::agent_task_lifecycle::{self, AgentTaskRunArtifacts, AgentTaskRunRecord};
-use crate::agent_task_provider::{
-    apply_provider_runner_secret_env_contracts, provider_secret_sources_for_plan,
-};
 use crate::agent_task_scheduler::{
     AgentTaskAggregate, AgentTaskExecutionBudget, AgentTaskPlan, SharedAgentTaskExecutor,
 };
-use crate::agent_task_secrets::validate_secret_env_with_fallbacks;
 use homeboy_core::secret_env_plan::SecretEnvPlan;
 use homeboy_core::{config, worktree, Error, Result};
 
@@ -3027,7 +3023,6 @@ fn run_claimed(
 
 fn prepare_plan_for_execution(plan: &mut AgentTaskPlan, run_id: Option<&str>) -> Result<()> {
     prepare_plan_workspaces(plan, run_id)?;
-    apply_provider_runner_secret_env_contracts(plan);
     preflight_plan_secret_env(plan)
 }
 
@@ -3056,10 +3051,7 @@ pub(crate) fn preflight_plan_secret_env(plan: &AgentTaskPlan) -> Result<()> {
         }
     }
 
-    validate_secret_env_with_fallbacks(
-        &secret_env_plan.secret_env_names(),
-        &provider_secret_sources_for_plan(plan),
-    )
+    crate::agent_task_secrets::validate_secret_env(&secret_env_plan.secret_env_names())
     .map_err(|error| {
         Error::validation_invalid_argument(
             "secret_env",

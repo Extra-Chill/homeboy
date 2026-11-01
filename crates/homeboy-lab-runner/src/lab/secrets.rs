@@ -8,14 +8,6 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use homeboy_agents::agent_tasks::provider::{
-    provider_controller_refreshes_for_plan_with_providers,
-    provider_route_secret_env_for_plan_with_providers,
-    provider_route_secret_sources_for_plan_with_providers,
-    provider_runner_secret_env_for_plan_with_providers,
-    provider_secret_sources_for_plan_with_providers, AgentTaskExecutorProvider,
-    ExtensionProviderAgentTaskExecutor, ProviderControllerRefresh,
-};
 use homeboy_agents::agent_tasks::scheduler::AgentTaskPlan;
 use homeboy_agents::agent_tasks::secrets as agent_task_secrets;
 use homeboy_agents::agent_tasks::{
@@ -92,12 +84,8 @@ pub(crate) fn build_lab_secret_env_handoff_plan(
         .into_iter()
         .filter(|(name, _)| !secret_env_names.contains(name))
         .collect::<BTreeMap<_, _>>();
-    let provider_credentials = declared_agent_task_provider_credentials(args)?;
-    let mut secret_env_plan = materialized_lab_secret_env_plan(
-        public_env,
-        secret_env_names.clone(),
-        provider_credentials,
-    )?;
+    let mut secret_env_plan =
+        materialized_lab_secret_env_plan(public_env, secret_env_names.clone())?;
     let resolved_secret_env_names = secret_env_plan.secret_env_names();
     let secret_values = env_delta
         .iter()
@@ -228,21 +216,16 @@ pub(crate) fn merge_managed_service_secret_env(
     handoff.diagnostics["secret_env_names"] = serde_json::json!(handoff.secret_env_names);
 }
 
-/// Project the admitted provider route into the Lab handoff. The CLI-shaped
-/// discovery above describes the requested route, but readiness may select a
-/// different effective route whose runner-owned identities only exist on the
-/// durable plan.
-pub(crate) fn merge_agent_task_provider_secret_env(
+/// Preserve task secret names from the admitted durable plan in the handoff.
+pub(crate) fn merge_agent_task_secret_env(
     handoff: &mut LabSecretEnvHandoffPlan,
     plan: &AgentTaskPlan,
 ) {
-    let providers = ExtensionProviderAgentTaskExecutor::discover();
-    let mut names = provider_runner_secret_env_for_plan_with_providers(plan, providers.providers());
-    names.extend(
-        plan.tasks
-            .iter()
-            .flat_map(|task| task.executor.secret_env.iter().cloned()),
-    );
+    let mut names = plan
+        .tasks
+        .iter()
+        .flat_map(|task| task.executor.secret_env.iter().cloned())
+        .collect::<Vec<_>>();
     names.sort();
     names.dedup();
     if names.is_empty() {
@@ -254,7 +237,9 @@ pub(crate) fn merge_agent_task_provider_secret_env(
         .extend_secret_env_names(names.clone());
     handoff.secret_env_names = handoff.secret_env_plan.secret_env_names();
     for name in &names {
-        handoff.env_delta.remove(name);
+        if handoff.env_delta.contains_key(name) {
+            continue;
+        }
         if !handoff.runner_deferred_secret_env.contains(name) {
             handoff.runner_deferred_secret_env.push(name.clone());
         }
@@ -327,10 +312,6 @@ fn empty_component_test_secret_env_metadata() -> serde_json::Value {
 fn materialized_lab_secret_env_plan(
     public_env: BTreeMap<String, String>,
     secret_env_names: Vec<String>,
-    provider_credentials: BTreeMap<
-        String,
-        homeboy_core::secret_env_plan::SecretEnvProviderCredentialMapping,
-    >,
 ) -> Result<SecretEnvPlan> {
     SecretEnvPlan::materialize_request(SecretEnvPlanMaterializeRequest {
         public_env,
@@ -338,11 +319,7 @@ fn materialized_lab_secret_env_plan(
         diagnostic_source: Some("lab-secret-env-handoff".to_string()),
         ..SecretEnvPlanMaterializeRequest::default()
     })
-    .map(|materialization| {
-        let mut plan = materialization.plan;
-        plan.provider_credentials = provider_credentials;
-        plan
-    })
+    .map(|materialization| materialization.plan)
     .map_err(|error| {
         Error::validation_invalid_argument(
             "secret-env-plan",
@@ -354,21 +331,6 @@ fn materialized_lab_secret_env_plan(
             ]),
         )
     })
-}
-
-fn declared_agent_task_provider_credentials(
-    args: &[String],
-) -> Result<BTreeMap<String, homeboy_core::secret_env_plan::SecretEnvProviderCredentialMapping>> {
-    let Some(plan) = agent_task_dispatch_provider_plan_from_args(args)?
-        .or_else(|| agent_task_run_plan_from_args(args))
-    else {
-        return Ok(BTreeMap::new());
-    };
-    let providers = ExtensionProviderAgentTaskExecutor::discover();
-    homeboy_agents::agent_tasks::provider::provider_secret_credential_mappings_for_plan_with_providers(
-        &plan,
-        providers.providers(),
-    )
 }
 
 fn redacted_lab_secret_env_plan(plan: &SecretEnvPlan) -> SecretEnvPlan {
@@ -488,21 +450,10 @@ pub(super) fn hydrate_agent_task_secret_env(
     args: &[String],
     env: &mut HashMap<String, String>,
 ) -> Result<serde_json::Value> {
-    let executor = ExtensionProviderAgentTaskExecutor::discover();
-    hydrate_agent_task_secret_env_with_providers(args, env, executor.providers())
-}
-
-fn hydrate_agent_task_secret_env_with_providers(
-    args: &[String],
-    _env: &mut HashMap<String, String>,
-    providers: &[AgentTaskExecutorProvider],
-) -> Result<serde_json::Value> {
-    let names = declared_agent_task_controller_secret_env_with_providers(args, providers)?;
-    let mut runner_deferred_names =
-        declared_agent_task_run_plan_secret_env_with_providers(args, providers);
-    // Provider credentials belong to the execution runner. Carry their names in
-    // the existing secret plan so the runner resolves its own references after
-    // durable replay; never materialize values into a broker submission.
+    let names = declared_agent_task_controller_secret_env(args)?;
+    let mut runner_deferred_names = declared_agent_task_run_plan_secret_env(args);
+    // Plan-only requirements remain runner-owned; explicit task secrets are
+    // resolved on the controller and forwarded through the existing handoff.
     runner_deferred_names.extend(names.iter().cloned());
     runner_deferred_names.sort();
     runner_deferred_names.dedup();
@@ -510,30 +461,19 @@ fn hydrate_agent_task_secret_env_with_providers(
         return Ok(empty_agent_task_secret_env_metadata());
     }
 
-    let fallback_sources = subcommand_index(args, "agent-task")
-        .map(|agent_task_index| {
-            declared_agent_task_controller_secret_sources_with_providers(
-                args,
-                agent_task_index,
-                providers,
-            )
-        })
-        .transpose()?
-        .unwrap_or_default();
-    let runner_source = |name: &str| {
-        fallback_sources
-            .get(name)
-            .map(|source| source.source.as_str())
-            .unwrap_or("runner")
-    };
+    let resolved = agent_task_secrets::resolve_secret_env(&names).map_err(|error| {
+        Error::validation_invalid_argument("secret-env", error.message, None, None)
+    })?;
+    env.extend(resolved);
+    runner_deferred_names.retain(|name| !env.contains_key(name));
     Ok(serde_json::json!({
         "schema": "homeboy/lab-agent-task-secret-env/v1",
-        "secret_env": agent_task_secrets::secret_env_status_with_fallbacks(&names, &fallback_sources),
+        "secret_env": agent_task_secrets::secret_env_status(&names),
         "runner_deferred_secret_env": runner_deferred_names
             .into_iter()
             .map(|name| serde_json::json!({
                 "name": name,
-                "source": runner_source(&name),
+                "source": "runner",
             }))
             .collect::<Vec<_>>(),
     }))
@@ -588,9 +528,7 @@ fn declared_agent_task_secret_env_for_handoff(args: &[String]) -> Result<Vec<Str
         return Ok(Vec::new());
     }
 
-    let executor = ExtensionProviderAgentTaskExecutor::discover();
-    let mut names =
-        declared_agent_task_controller_secret_env_with_providers(args, executor.providers())?;
+    let mut names = declared_agent_task_controller_secret_env(args)?;
     names.extend(declared_agent_task_run_plan_secret_env(args));
     names.sort();
     names.dedup();
@@ -606,12 +544,6 @@ pub(crate) fn preflight_agent_task_runner_secret_env_plan(
 ) -> Result<()> {
     let tasks = declared_agent_task_run_plan_secret_env_by_task(args);
     let required_names = secret_env_plan.secret_env_names();
-    let controller_delivered = agent_task_run_plan_from_args(args)
-        .map(|plan| {
-            let providers = ExtensionProviderAgentTaskExecutor::discover();
-            controller_delivered_provider_secret_env(&plan, providers.providers())
-        })
-        .unwrap_or_default();
     let mut ordered_required_names = Vec::new();
     for name in tasks.iter().flat_map(|task| task.secret_env.iter()) {
         if required_names.contains(name) && !ordered_required_names.contains(name) {
@@ -630,15 +562,7 @@ pub(crate) fn preflight_agent_task_runner_secret_env_plan(
     let mut missing: Vec<String> = Vec::new();
     let mut required_by_tasks: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
     for name in &ordered_required_names {
-        let task_sources = tasks
-            .iter()
-            .filter(|task| task.secret_env.iter().any(|task_name| task_name == name))
-            .any(|task| task.secret_sources.contains(name));
-        if env.contains_key(name)
-            || runner.secret_env.contains_key(name)
-            || task_sources
-            || controller_delivered.contains(name)
-        {
+        if env.contains_key(name) || runner.secret_env.contains_key(name) {
             continue;
         }
         missing.push(name.clone());
@@ -712,55 +636,15 @@ pub fn preflight_agent_task_runner_provider_secret_env_plan(
 
 /// Resolve only the effective provider's required runner secret identities.
 /// Both Cook admission and staging consume this set without resolving values.
-///
-/// Names the controller delivers itself are excluded (see
-/// [`controller_delivered_provider_secret_env`]): the runner does not need its
-/// own `secret_env` reference for them (#15260).
 pub fn agent_task_runner_provider_secret_env_names(plan: &AgentTaskPlan) -> Vec<String> {
-    let providers = ExtensionProviderAgentTaskExecutor::discover();
-    agent_task_runner_provider_secret_env_names_with_providers(plan, providers.providers())
-}
-
-pub(crate) fn agent_task_runner_provider_secret_env_names_with_providers(
-    plan: &AgentTaskPlan,
-    providers: &[AgentTaskExecutorProvider],
-) -> Vec<String> {
-    let mut names = provider_runner_secret_env_for_plan_with_providers(plan, providers);
-    names.extend(
-        plan.tasks
-            .iter()
-            .flat_map(|task| task.executor.secret_env.iter().cloned()),
-    );
-    let delivered = controller_delivered_provider_secret_env(plan, providers);
-    names.retain(|name| !delivered.contains(name));
+    let mut names = plan
+        .tasks
+        .iter()
+        .flat_map(|task| task.executor.secret_env.iter().cloned())
+        .collect::<Vec<_>>();
     names.sort();
     names.dedup();
     names
-}
-
-/// Provider-declared secret env names the controller delivers to the runner.
-///
-/// A provider route can declare where each of its secrets lives (for example a
-/// `json-file` auth store). When that source resolves on the controller, Lab
-/// staging hydrates the value into the forwarded env and syncs the declared
-/// store to the runner, so the name is controller-owned. Only names with a
-/// declared source that currently resolves on the controller qualify. A name
-/// the controller cannot resolve still has to come from the runner's own
-/// `secret_env` references, and admission keeps requiring it.
-pub(crate) fn controller_delivered_provider_secret_env(
-    plan: &AgentTaskPlan,
-    providers: &[AgentTaskExecutorProvider],
-) -> std::collections::BTreeSet<String> {
-    let sources = provider_secret_sources_for_plan_with_providers(plan, providers);
-    if sources.is_empty() {
-        return std::collections::BTreeSet::new();
-    }
-    let names = sources.keys().cloned().collect::<Vec<_>>();
-    agent_task_secrets::secret_env_status_with_fallbacks(&names, &sources)
-        .into_iter()
-        .filter(|status| status.configured)
-        .map(|status| status.name)
-        .collect()
 }
 
 pub(crate) fn preflight_lab_secret_env_handoff(
@@ -841,10 +725,7 @@ fn secret_env_handoff_remediation(entry: &SecretEnvHandoffEntry) -> String {
     }
 }
 
-fn declared_agent_task_controller_secret_env_with_providers(
-    args: &[String],
-    providers: &[AgentTaskExecutorProvider],
-) -> Result<Vec<String>> {
+fn declared_agent_task_controller_secret_env(args: &[String]) -> Result<Vec<String>> {
     let mut names = Vec::new();
     let mut index = 0;
     while index < args.len() {
@@ -872,111 +753,15 @@ fn declared_agent_task_controller_secret_env_with_providers(
         index += 1;
     }
     if let Some(plan) = agent_task_dispatch_provider_plan_from_args(args)? {
-        names.extend(provider_runner_secret_env_for_plan_with_providers(
-            &plan, providers,
-        ));
+        names.extend(
+            plan.tasks
+                .iter()
+                .flat_map(|task| task.executor.secret_env.iter().cloned()),
+        );
     }
     names.sort();
     names.dedup();
     Ok(names)
-}
-
-/// Controller credential sources for provisioning runner-side credential
-/// files: every unconditionally declared source, overlaid with the sources of
-/// the route the command's plan actually selects (`provider_defaults` and
-/// `when`-scoped requirements are only visible through the plan).
-pub(crate) fn agent_task_controller_credential_sources(
-    args: &[String],
-) -> Result<HashMap<String, homeboy_core::defaults::AgentTaskSecretSource>> {
-    let providers = ExtensionProviderAgentTaskExecutor::discover();
-    agent_task_controller_credential_sources_with_providers(args, providers.providers())
-}
-
-pub(crate) fn agent_task_controller_credential_sources_with_providers(
-    args: &[String],
-    providers: &[AgentTaskExecutorProvider],
-) -> Result<HashMap<String, homeboy_core::defaults::AgentTaskSecretSource>> {
-    let mut sources = HashMap::new();
-    if let Some(agent_task_index) = subcommand_index(args, "agent-task") {
-        sources.extend(
-            declared_agent_task_controller_secret_sources_with_providers(
-                args,
-                agent_task_index,
-                providers,
-            )?,
-        );
-    }
-    Ok(sources)
-}
-
-/// Controller refreshes for the plan's selected routes, resolved from the same
-/// args as [`agent_task_controller_credential_sources`] so a refresh runs for
-/// exactly the accounts whose sources are about to be delivered (#15783).
-pub(crate) fn agent_task_controller_credential_refreshes(
-    args: &[String],
-) -> Result<Vec<ProviderControllerRefresh>> {
-    let providers = ExtensionProviderAgentTaskExecutor::discover();
-    agent_task_controller_credential_refreshes_with_providers(args, providers.providers())
-}
-
-pub(crate) fn agent_task_controller_credential_refreshes_with_providers(
-    args: &[String],
-    providers: &[AgentTaskExecutorProvider],
-) -> Result<Vec<ProviderControllerRefresh>> {
-    Ok(agent_task_credential_plan_from_args(args)?
-        .map(|plan| provider_controller_refreshes_for_plan_with_providers(&plan, providers))
-        .unwrap_or_default())
-}
-
-/// Rotation-fallback credentials for best-effort Lab delivery (#15783): the
-/// secret env names of every route the plan may dispatch, and their declared
-/// sources. Admission keeps using the admitted route only.
-pub(crate) fn agent_task_controller_route_credentials(
-    args: &[String],
-) -> Result<(
-    Vec<String>,
-    HashMap<String, homeboy_core::defaults::AgentTaskSecretSource>,
-)> {
-    let providers = ExtensionProviderAgentTaskExecutor::discover();
-    let Some(plan) = agent_task_credential_plan_from_args(args)? else {
-        return Ok((Vec::new(), HashMap::new()));
-    };
-    Ok((
-        provider_route_secret_env_for_plan_with_providers(&plan, providers.providers()),
-        provider_route_secret_sources_for_plan_with_providers(&plan, providers.providers()),
-    ))
-}
-
-fn agent_task_credential_plan_from_args(args: &[String]) -> Result<Option<AgentTaskPlan>> {
-    let Some(agent_task_index) = subcommand_index(args, "agent-task") else {
-        return Ok(None);
-    };
-    if args.get(agent_task_index + 1).map(String::as_str) == Some("providers") {
-        return Ok(None);
-    }
-    Ok(match agent_task_dispatch_provider_plan_from_args(args)? {
-        Some(plan) => Some(plan),
-        None => agent_task_run_plan_from_args(args),
-    })
-}
-
-fn declared_agent_task_controller_secret_sources_with_providers(
-    args: &[String],
-    agent_task_index: usize,
-    providers: &[AgentTaskExecutorProvider],
-) -> Result<HashMap<String, homeboy_core::defaults::AgentTaskSecretSource>> {
-    if args.get(agent_task_index + 1).map(String::as_str) != Some("providers") {
-        if let Some(plan) = agent_task_dispatch_provider_plan_from_args(args)? {
-            return Ok(provider_secret_sources_for_plan_with_providers(
-                &plan, providers,
-            ));
-        }
-        return Ok(agent_task_run_plan_from_args(args)
-            .map(|plan| provider_secret_sources_for_plan_with_providers(&plan, providers))
-            .unwrap_or_default());
-    }
-
-    Ok(HashMap::new())
 }
 
 fn agent_task_dispatch_provider_plan_from_args(args: &[String]) -> Result<Option<AgentTaskPlan>> {
@@ -1286,15 +1071,7 @@ fn declared_provider_config_secret_env(spec: &str) -> Result<Vec<String>> {
 }
 
 fn declared_agent_task_run_plan_secret_env(args: &[String]) -> Vec<String> {
-    let executor = ExtensionProviderAgentTaskExecutor::discover();
-    declared_agent_task_run_plan_secret_env_with_providers(args, executor.providers())
-}
-
-fn declared_agent_task_run_plan_secret_env_with_providers(
-    args: &[String],
-    providers: &[AgentTaskExecutorProvider],
-) -> Vec<String> {
-    declared_agent_task_run_plan_secret_env_by_task_with_providers(args, providers)
+    declared_agent_task_run_plan_secret_env_by_task(args)
         .into_iter()
         .flat_map(|task| task.secret_env)
         .collect()
@@ -1306,35 +1083,14 @@ fn declared_agent_task_run_plan_secret_env_with_providers(
 struct PlanTaskSecretEnv {
     task_id: String,
     secret_env: Vec<String>,
-    secret_sources: Vec<String>,
 }
 
 fn declared_agent_task_run_plan_secret_env_by_task(args: &[String]) -> Vec<PlanTaskSecretEnv> {
-    let executor = ExtensionProviderAgentTaskExecutor::discover();
-    declared_agent_task_run_plan_secret_env_by_task_with_providers(args, executor.providers())
-}
-
-fn declared_agent_task_run_plan_secret_env_by_task_with_providers(
-    args: &[String],
-    providers: &[AgentTaskExecutorProvider],
-) -> Vec<PlanTaskSecretEnv> {
     let Some(plan) = agent_task_run_plan_from_args(args) else {
         return Vec::new();
     };
 
     let mut tasks = Vec::new();
-    let provider_names = provider_runner_secret_env_for_plan_with_providers(&plan, providers);
-    let provider_secret_sources: Vec<String> =
-        provider_secret_sources_for_plan_with_providers(&plan, providers)
-            .into_keys()
-            .collect();
-    if !provider_names.is_empty() {
-        tasks.push(PlanTaskSecretEnv {
-            task_id: PLAN_PROVIDER_PROVENANCE.to_string(),
-            secret_env: provider_names,
-            secret_sources: provider_secret_sources.clone(),
-        });
-    }
     for request in plan.tasks {
         let mut names = Vec::new();
         names.extend(request.executor.secret_env);
@@ -1352,7 +1108,6 @@ fn declared_agent_task_run_plan_secret_env_by_task_with_providers(
         tasks.push(PlanTaskSecretEnv {
             task_id: request.task_id,
             secret_env: names,
-            secret_sources: provider_secret_sources.clone(),
         });
     }
     tasks

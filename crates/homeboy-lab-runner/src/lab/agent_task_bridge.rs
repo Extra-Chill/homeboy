@@ -17,9 +17,6 @@ use homeboy_agents::agent_task::AgentTaskEvidenceRef;
 use homeboy_agents::agent_task_lifecycle::{
     cook_attempt_run_id, AgentTaskArtifactRef, AgentTaskRunRecord, AgentTaskRunState,
 };
-use homeboy_agents::agent_tasks::provider::{
-    dependency_failure_patterns, AgentTaskProviderDependencyFailurePattern,
-};
 use homeboy_agents::agent_tasks::scheduler::{AgentTaskAggregate, AgentTaskAggregateTotals};
 #[cfg(test)]
 use homeboy_agents::agent_tasks::{lifecycle as agent_task_lifecycle, scheduler::AgentTaskPlan};
@@ -570,12 +567,6 @@ pub(super) fn lab_pre_dispatch_failure_message(output: &str) -> Option<String> {
         return Some(message);
     }
 
-    if let Some(message) =
-        lab_pre_dispatch_dependency_failure_message(output, &dependency_failure_patterns())
-    {
-        return Some(message);
-    }
-
     output
         .lines()
         .map(str::trim)
@@ -637,46 +628,6 @@ fn structured_dependency_failure_message(envelope: &LabDependencyFailureEnvelope
     format!(
         "Lab runtime failed before agent dispatch while staging {kind} `{dependency}`: {reason}. {remediation}, then retry this cook run."
     )
-}
-
-fn lab_pre_dispatch_dependency_failure_message(
-    output: &str,
-    patterns: &[AgentTaskProviderDependencyFailurePattern],
-) -> Option<String> {
-    let pattern = patterns
-        .iter()
-        .find(|pattern| dependency_failure_pattern_matches(output, pattern))?;
-    let missing_path = first_quoted_dependency_path(output, &pattern.path_contains)
-        .unwrap_or_else(|| pattern.label.clone());
-    Some(format!(
-        "Lab runtime failed before agent dispatch while staging dependency `{missing_path}`. The selected Lab runner has a stale or misconfigured runtime dependency; {}, then retry this cook run.",
-        pattern
-            .remediation
-            .as_deref()
-            .unwrap_or("repair or refresh the runner runtime")
-    ))
-}
-
-fn dependency_failure_pattern_matches(
-    output: &str,
-    pattern: &AgentTaskProviderDependencyFailurePattern,
-) -> bool {
-    let lower = output.to_lowercase();
-    lower.contains(&pattern.path_contains.to_lowercase())
-        && (pattern.error_contains_any.is_empty()
-            || pattern
-                .error_contains_any
-                .iter()
-                .any(|needle| lower.contains(&needle.to_lowercase())))
-}
-
-fn first_quoted_dependency_path(output: &str, path_contains: &str) -> Option<String> {
-    output
-        .split(['\'', '"'])
-        .find(|part| part.contains(path_contains))
-        .map(str::trim)
-        .filter(|part| !part.is_empty())
-        .map(str::to_string)
 }
 
 #[cfg(test)]

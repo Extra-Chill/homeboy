@@ -2,10 +2,6 @@ use super::resolution::{
     provider_requires_cwd_git_checkout_with_providers,
     required_extension_ids_for_plan_with_providers, select_provider,
 };
-use super::secrets::{
-    apply_provider_runner_secret_env_contracts_with_providers,
-    provider_secret_sources_for_plan_with_providers,
-};
 use super::*;
 use homeboy_engine_primitives::content_hash;
 use std::sync::OnceLock;
@@ -140,10 +136,6 @@ impl AgentTaskProviderCatalog {
                 .find(|profile| profile.model.is_none())
                 .and_then(|profile| profile.ai_disclosure.clone())
         })
-    }
-
-    pub fn apply_provider_runner_secret_env_contracts(&self, plan: &mut AgentTaskPlan) {
-        apply_provider_runner_secret_env_contracts_with_providers(plan, &self.providers);
     }
 
     /// Validate the concrete model selection before provider dispatch. A Cook
@@ -316,14 +308,6 @@ pub fn default_backend_for_component(
     )
 }
 
-pub fn dependency_failure_patterns() -> Vec<AgentTaskProviderDependencyFailurePattern> {
-    AgentTaskProviderCatalog::discover()
-        .providers
-        .into_iter()
-        .flat_map(|provider| provider.dependency_failure_patterns)
-        .collect()
-}
-
 pub(super) fn runtime_discovery_diagnostics_for_backend(
     diagnostics: &[AgentRuntimeDiscoveryDiagnostic],
     backend: &str,
@@ -374,10 +358,6 @@ pub fn provider_requires_cwd_git_checkout(backend: &str, selector: Option<&str>)
     AgentTaskProviderCatalog::discover().provider_requires_cwd_git_checkout(backend, selector)
 }
 
-pub fn apply_provider_runner_secret_env_contracts(plan: &mut AgentTaskPlan) {
-    AgentTaskProviderCatalog::discover().apply_provider_runner_secret_env_contracts(plan);
-}
-
 pub fn enforce_runtime_preflight_checks_for_plan(plan: &AgentTaskPlan) -> homeboy_core::Result<()> {
     AgentTaskProviderCatalog::discover().enforce_runtime_preflight_checks_for_plan(plan)
 }
@@ -397,13 +377,6 @@ pub(super) fn enforce_runtime_preflight_checks_for_plan_with_providers(
         ensure_runtime_preflight_checks(checks, &request.component_contracts)?;
     }
     Ok(())
-}
-
-pub fn provider_secret_sources_for_plan(
-    plan: &AgentTaskPlan,
-) -> HashMap<String, defaults::AgentTaskSecretSource> {
-    let catalog = AgentTaskProviderCatalog::discover();
-    provider_secret_sources_for_plan_with_providers(plan, catalog.providers())
 }
 
 pub(super) fn default_backend_from_policy_sources<F>(

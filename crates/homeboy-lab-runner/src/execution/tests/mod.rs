@@ -4,7 +4,6 @@
 use super::extension_parity::required_extensions_for_command;
 use super::policy::{validate_runner_policy, RunnerPolicyRequest};
 use super::*;
-use homeboy_core::defaults::AgentTaskSecretSource;
 use homeboy_core::error::ErrorCode;
 use homeboy_core::server::{self, RunnerPolicy, RunnerSecretEnvRef, RunnerSettings};
 
@@ -119,18 +118,5 @@ impl Drop for EnvVarGuard {
             Some(value) => std::env::set_var(self.name, value),
             None => std::env::remove_var(self.name),
         }
-    }
-}
-
-pub(super) fn json_file_source(path: &str, field: &str) -> AgentTaskSecretSource {
-    AgentTaskSecretSource {
-        source: "json-file".to_string(),
-        env_var: None,
-        path: Some(path.to_string()),
-        scope: None,
-        name: None,
-        field: Some(field.to_string()),
-        fallback_fields: Vec::new(),
-        value: None,
     }
 }

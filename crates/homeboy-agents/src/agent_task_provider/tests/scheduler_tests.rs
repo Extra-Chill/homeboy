@@ -1382,7 +1382,7 @@ fn provider_command_receives_only_the_declared_launch_environment() {
 fn provider_command_receives_canonical_secret_env_plan_without_values() {
     let secret_name = format!("HOMEBOY_TEST_AGENT_TASK_PLAN_SECRET_{}", std::process::id());
     std::env::set_var(&secret_name, "hydrated-secret");
-    let fake = node_pi(&format!("let plan=JSON.parse(process.env.{});if(!(plan.env_name_mapping['pi.agent-task-executor']||[]).includes('{secret_name}')||!(plan.status||[]).some(i=>i.name==='{secret_name}'&&i.configured&&i.source==='env')||JSON.stringify(plan).includes('hydrated-secret'))process.exit(23);answer(JSON.stringify(plan));", homeboy_core::secret_env_plan::AGENT_TASK_SECRET_ENV_PLAN_JSON_ENV));
+    let fake = node_pi(&format!("let plan=JSON.parse(process.env.{});if(!plan.secret_env_names.includes('{secret_name}')||JSON.stringify(plan).includes('hydrated-secret')||process.env['{secret_name}']!=='hydrated-secret')process.exit(23);answer(JSON.stringify(plan));", homeboy_core::secret_env_plan::AGENT_TASK_SECRET_ENV_PLAN_JSON_ENV));
     let mut request = fake.request("task-secret-env-plan");
     let mut provider = fake.provider();
     provider.invocation.env.push(
@@ -1440,114 +1440,6 @@ fn missing_declared_secret_env_fails_before_provider_spawn() {
         aggregate.outcomes[0].diagnostics[0].data["missing_secret_env"],
         json!([secret_name])
     );
-}
-
-#[test]
-fn launched_execution_uses_the_exact_credentials_bound_by_readiness() {
-    let root = tempfile::tempdir().expect("tempdir");
-    let credential = root.path().join("account.json");
-    let observed = root.path().join("observed");
-    std::fs::write(&credential, r#"{"token":"bound-account"}"#).expect("initial credential");
-    let inference = node_pi(&format!("const token=process.env.TEST_BOUND_ACCOUNT_TOKEN;fs.writeFileSync({:?},token);if(token!=='bound-account')process.exit(23);answer('bound credential used');", observed));
-    let fake = FakePi::with_probes(
-        &format!("exec {} \"$@\"", shell_quote(inference.command.to_str().unwrap())),
-        "printf 'test-pi\\n'",
-        &format!("test \"$TEST_BOUND_ACCOUNT_TOKEN\" = bound-account || exit 23; printf '%s' '{{\"token\":\"rotated-account\"}}' > {}; printf 'test model\\n'", shell_quote(credential.to_str().unwrap())),
-    );
-    let mut request = fake.request("bound-launch-credential");
-    let mut provider = fake.provider();
-    request.executor.config["provider"] = json!("account");
-    provider.provider_defaults = serde_json::from_value(json!({
-        "account": {
-            "required_secret_env": ["TEST_BOUND_ACCOUNT_TOKEN"],
-            "secret_env_sources": {
-                "TEST_BOUND_ACCOUNT_TOKEN": {
-                    "source": "json-file",
-                    "path": credential,
-                    "field": "token"
-                }
-            }
-        }
-    }))
-    .expect("provider defaults");
-
-    let aggregate = AgentTaskScheduler::new(Arc::new(
-        ExtensionProviderAgentTaskExecutor::with_providers(vec![provider]),
-    ))
-    .run(AgentTaskPlan::new("bound-launch-credential", vec![request]));
-
-    assert_eq!(aggregate.totals.succeeded, 1, "{aggregate:?}");
-    assert_eq!(
-        std::fs::read_to_string(observed).expect("launched credential"),
-        "bound-account"
-    );
-    assert_eq!(
-        std::fs::read_to_string(credential).expect("rotated source"),
-        r#"{"token":"rotated-account"}"#
-    );
-}
-
-#[test]
-fn concurrent_launches_keep_each_readiness_bound_credential() {
-    let root = tempfile::tempdir().expect("tempdir");
-    let observed = root.path().join("observed");
-    std::fs::create_dir(&observed).expect("observed directory");
-    let inference = node_pi(&format!("const token=process.env.TEST_CONCURRENT_ACCOUNT_TOKEN;fs.writeFileSync(path.join({:?},launch.task_id),token);if(!token.startsWith('bound-'))process.exit(23);answer('credential observation');", observed));
-    let probe = format!("node -e {}", shell_quote(&format!("const fs=require('fs'),path=require('path');const token=process.env.TEST_CONCURRENT_ACCOUNT_TOKEN;fs.writeFileSync(path.join({:?},'account-'+token.split('-')[1]+'.json'),JSON.stringify({{token:'rotated-'+token}}));console.log('test model');", root.path())));
-    let fake = FakePi::with_probes(
-        &format!(
-            "exec {} \"$@\"",
-            shell_quote(inference.command.to_str().unwrap())
-        ),
-        "printf 'test-pi\\n'",
-        &probe,
-    );
-    let mut provider = fake.provider();
-    let mut tasks = Vec::new();
-    let mut credentials = Vec::new();
-    for index in 0..4 {
-        let account = format!("account-{index}");
-        let credential = root.path().join(format!("{account}.json"));
-        std::fs::write(&credential, format!(r#"{{"token":"bound-{index}"}}"#)).expect("credential");
-        provider.provider_defaults.insert(
-            account.clone(),
-            json!({
-                "required_secret_env": ["TEST_CONCURRENT_ACCOUNT_TOKEN"],
-                "secret_env_sources": {
-                    "TEST_CONCURRENT_ACCOUNT_TOKEN": {
-                        "source": "json-file",
-                        "path": credential,
-                        "field": "token"
-                    }
-                }
-            }),
-        );
-        let mut task = fake.request(&format!("concurrent-{index}"));
-        task.executor.config["provider"] = json!(account);
-        task.executor.config["credential_path"] = json!(credential);
-        tasks.push(task);
-        credentials.push(credential);
-    }
-    let mut plan = AgentTaskPlan::new("concurrent-bound-launch-credentials", tasks);
-    plan.options.max_concurrency = 4;
-
-    let aggregate = AgentTaskScheduler::new(Arc::new(
-        ExtensionProviderAgentTaskExecutor::with_providers(vec![provider]),
-    ))
-    .run(plan);
-
-    assert_eq!(aggregate.totals.succeeded, 4, "{aggregate:?}");
-    for (index, credential) in credentials.iter().enumerate() {
-        assert_eq!(
-            std::fs::read_to_string(observed.join(format!("concurrent-{index}")))
-                .expect("launched credential"),
-            format!("bound-{index}")
-        );
-        assert_eq!(
-            std::fs::read_to_string(credential).expect("rotated credential source"),
-            format!(r#"{{"token":"rotated-bound-{index}"}}"#)
-        );
-    }
 }
 
 #[test]

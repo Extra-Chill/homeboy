@@ -51,7 +51,6 @@ pub(super) fn request(
         workspace_materialization: None,
         provider_defaults: BTreeMap::new(),
         pi_readiness: Default::default(),
-        dependency_failure_patterns: Vec::new(),
         immediate_failure_patterns: Vec::new(),
         timeout_artifact_discovery: AgentTaskProviderTimeoutArtifactDiscovery::default(),
         role_aliases: AgentTaskProviderRoleAliases::default(),

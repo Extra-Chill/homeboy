@@ -750,27 +750,6 @@ pub(crate) fn evaluate_request_dispatchability(
                 &request.executor.backend,
                 request.executor.selector.as_deref(),
             );
-            if let Some(provider) = resolved.clone().resolved() {
-                let missing =
-                    super::secrets::provider_request_secret_env_missing(request, provider);
-                if !missing.is_empty() {
-                    let mut verdict = unavailable_request_dispatchability(
-                        "credentials_missing",
-                        "required provider credentials are not configured for this route",
-                        "auth_failure",
-                        false,
-                        Some("configure the required credential material for this provider route"),
-                    );
-                    verdict.dispatchability.checks.route = AgentTaskProviderDispatchabilityCheck {
-                        ready: true,
-                        reason: Some(provider.id.clone()),
-                    };
-                    verdict.dispatchability.checks.credentials.missing = missing;
-                    verdict.dispatchability.checks.credentials.status =
-                        AgentTaskProviderCredentialStatus::Missing;
-                    return verdict;
-                }
-            }
             let (state, classification, diagnostic_data) = match resolved {
                 ProviderResolution::Resolved(_) => (
                     "provider_capability_unavailable",
@@ -828,51 +807,7 @@ pub(crate) fn evaluate_request_dispatchability(
             )
         }
     };
-    let missing = super::secrets::provider_request_secret_env_missing(request, &provider);
-    if !missing.is_empty() {
-        let mut verdict = unavailable_request_dispatchability(
-            "credentials_missing",
-            "required provider credentials are not configured for this route",
-            "auth_failure",
-            false,
-            Some("configure the required credential material for this provider route"),
-        );
-        verdict.dispatchability.checks.route = AgentTaskProviderDispatchabilityCheck {
-            ready: true,
-            reason: Some(provider.id.clone()),
-        };
-        verdict.dispatchability.checks.credentials =
-            AgentTaskProviderDispatchabilityCredentialCheck {
-                status: AgentTaskProviderCredentialStatus::Missing,
-                ready: false,
-                missing,
-                verified: false,
-                reason: Some("required credential material is missing".to_string()),
-                remediation: Vec::new(),
-            };
-        return verdict;
-    }
-    let credential_env = match super::secrets::provider_request_credential_env(request, &provider) {
-        Ok(credential_env) => credential_env,
-        Err(_) => {
-            let mut verdict = unavailable_request_dispatchability(
-                "credentials_unusable",
-                "provider credentials could not be resolved for live validation",
-                "auth_failure",
-                false,
-                Some("repair the provider credential source or select another account"),
-            );
-            verdict.dispatchability.checks.route = AgentTaskProviderDispatchabilityCheck {
-                ready: true,
-                reason: Some(provider.id.clone()),
-            };
-            verdict.dispatchability.checks.credentials.status =
-                AgentTaskProviderCredentialStatus::Unusable;
-            verdict.dispatchability.checks.credentials.reason =
-                Some("credential material could not be resolved".to_string());
-            return verdict;
-        }
-    };
+    let credential_env = Vec::new();
     evaluate_request_dispatchability_with_credentials(
         catalog,
         request,
@@ -891,7 +826,7 @@ pub fn provider_runtime_readiness_cache_identity_for_plan(
     let task = plan.tasks.first().ok_or_else(|| {
         Error::internal_unexpected("provider readiness identity requires a provider task")
     })?;
-    let (mut request, _) =
+    let (request, _) =
         AgentTaskScheduleSupport::provider_route_candidates(task, plan.options.rotation.as_ref())
             .into_iter()
             .next()
@@ -915,26 +850,7 @@ pub fn provider_runtime_readiness_cache_identity_for_plan(
                 None,
             )
         })?;
-    let base_secret_env = request
-        .metadata
-        .get("provider_admission")
-        .and_then(|value| value.get("base_secret_env"))
-        .and_then(|value| serde_json::from_value::<Vec<String>>(value.clone()).ok())
-        .unwrap_or_else(|| request.executor.secret_env.clone());
-    super::secrets::apply_provider_runner_secret_env_contract_for_request(
-        &mut request,
-        &provider,
-        &base_secret_env,
-    );
-    let credential_env = super::secrets::provider_request_credential_env(&request, &provider)
-        .map_err(|error| {
-            Error::validation_invalid_argument(
-                "provider_runtime_readiness",
-                error.message,
-                Some(request.executor.backend.clone()),
-                None,
-            )
-        })?;
+    let credential_env = Vec::new();
     let config = effective_provider_config(&request.executor.config, request.executor.model());
     super::runtime_readiness::readiness_cache_identity_for_generated_fanout_context(
         &provider,
@@ -1251,12 +1167,6 @@ fn selected_plan_provider_dispatchability_with_providers(
             })
             .unwrap_or_default();
         let mut current_skipped = Vec::new();
-        let base_secret_env = task
-            .metadata
-            .get("provider_admission")
-            .and_then(|value| value.get("base_secret_env"))
-            .and_then(|value| serde_json::from_value::<Vec<String>>(value.clone()).ok())
-            .unwrap_or_else(|| task.executor.secret_env.clone());
         let candidates =
             AgentTaskScheduleSupport::provider_route_candidates(task, plan_rotation.as_ref());
         let mut selected = None;
@@ -1273,15 +1183,6 @@ fn selected_plan_provider_dispatchability_with_providers(
             if super::is_fixture_backend(&candidate.executor.backend) {
                 selected = Some((candidate, next_rotation_index));
                 break;
-            }
-            if let Ok(Some(provider)) =
-                effective_provider_for_request(&candidate, catalog.providers())
-            {
-                super::secrets::apply_provider_runner_secret_env_contract_for_request(
-                    &mut candidate,
-                    &provider,
-                    &base_secret_env,
-                );
             }
             let evaluated = evaluate_request_dispatchability(catalog, &candidate, cache);
             let diagnostic_data = evaluated.diagnostic_data;
@@ -2032,56 +1933,6 @@ mod tests {
             .metadata
             .get("provider_readiness_routing")
             .is_none());
-    }
-
-    #[test]
-    fn live_verification_receives_the_selected_fallback_credential() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let credential = root.path().join("account.json");
-        let count = root.path().join("count");
-        std::fs::write(&credential, r#"{"token":"fallback-account"}"#).unwrap();
-        let fake = route_pi(&format!("printf 'probe\\n' >> '{}'; if [ \"$TEST_ACCOUNT_TOKEN\" = fallback-account ]; then printf 'test model\\n'; else printf 'No models available\\n'; fi", count.display()));
-        let mut provider = fake.provider();
-        provider.provider_defaults.extend(
-            serde_json::from_value::<std::collections::BTreeMap<String, Value>>(json!({
-                "conditional-account": {
-                    "secret_env": ["TEST_ACCOUNT_TOKEN"],
-                    "secret_env_sources": {
-                        "TEST_ACCOUNT_TOKEN": {
-                            "source": "json-file",
-                            "path": credential,
-                            "field": "token"
-                        }
-                    }
-                }
-            }))
-            .expect("provider defaults"),
-        );
-        let mut task = pi_task(&fake, "test/model");
-        task.executor.config["provider"] = json!("conditional-account");
-        task.executor
-            .secret_env
-            .push(format!("UNRELATED_TASK_SECRET_{}", uuid::Uuid::new_v4()));
-
-        let verdict = evaluate_request_dispatchability(
-            &catalog(provider),
-            &task,
-            &mut ProviderRuntimeReadinessCache::default(),
-        )
-        .dispatchability;
-
-        assert!(verdict.ready, "{verdict:?}");
-        assert_eq!(
-            verdict.checks.credentials.status,
-            AgentTaskProviderCredentialStatus::Verified
-        );
-        assert_eq!(
-            std::fs::read_to_string(count).expect("probe count"),
-            "probe\n"
-        );
-        assert!(!serde_json::to_string(&verdict)
-            .expect("serialized verdict")
-            .contains("fallback-account"));
     }
 
     // Extension readiness JSON could publish known capacity and per-account

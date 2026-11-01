@@ -365,7 +365,7 @@ pub fn preflight_dispatch_provider_admission(
 ) -> Result<()> {
     let mut readiness_cache = crate::agent_task_provider::ProviderRuntimeReadinessCache::default();
     require_model_override_acknowledgement(request)?;
-    let mut plan = build_dispatch_plan_with_provider_requirements(request, |backend, selector| {
+    let plan = build_dispatch_plan_with_provider_requirements(request, |backend, selector| {
         catalog.provider_requires_cwd_git_checkout(backend, selector)
     })?;
     let plan = match crate::agent_task_provider::admit_plan_provider_dispatchability_with_providers(
@@ -375,7 +375,6 @@ pub fn preflight_dispatch_provider_admission(
     ) {
         Ok(plan) => plan,
         Err(error) => {
-            catalog.apply_provider_runner_secret_env_contracts(&mut plan);
             catalog.validate_selected_models(&plan)?;
             preflight_dispatch_provider_secrets(&plan)?;
             crate::agent_task_provider::preflight_plan_provider_dispatchability_without_runtime_with_providers(

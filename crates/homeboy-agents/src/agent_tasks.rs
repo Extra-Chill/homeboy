@@ -237,11 +237,10 @@ pub mod provider {
         capacity_readiness_from_outcome, AgentTaskProviderCapacityReadiness,
     };
     pub use crate::agent_task_provider::{
-        default_backend, default_backend_for_component, dependency_failure_patterns,
-        provider_capability_contract, provider_requires_cwd_git_checkout,
-        provider_runtime_readiness_cache_identity_for_plan, required_extension_ids_for_plan,
-        resolve_provider_for_backend, AgentTaskExecutorProvider, AgentTaskProviderCatalog,
-        AgentTaskProviderDependencyFailurePattern, ExtensionProviderAgentTaskExecutor,
+        default_backend, default_backend_for_component, provider_capability_contract,
+        provider_requires_cwd_git_checkout, provider_runtime_readiness_cache_identity_for_plan,
+        required_extension_ids_for_plan, resolve_provider_for_backend, AgentTaskExecutorProvider,
+        AgentTaskProviderCatalog, ExtensionProviderAgentTaskExecutor,
         ProviderReadinessInvocationResult, ProviderResolution, ProviderRuntimeReadinessCache,
         AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA, AGENT_TASK_PROVIDER_CAPABILITY_CONTRACT_SCHEMA,
         PROVIDER_READINESS_RESULT_SCHEMA,
@@ -253,18 +252,6 @@ pub mod provider {
         evaluate_provider_capacity_with_config, evaluate_provider_dispatchability,
         evaluate_provider_dispatchability_with_config,
         preflight_provider_dispatchability_with_config, AgentTaskProviderDispatchability,
-    };
-    /// Controller-owned credential refresh before Lab delivery (#15783).
-    pub use crate::agent_task_provider::{
-        provider_controller_refreshes_for_plan_with_providers,
-        provider_route_secret_env_for_plan_with_providers,
-        provider_route_secret_sources_for_plan_with_providers, run_provider_controller_refresh,
-        ProviderControllerRefresh,
-    };
-    pub use crate::agent_task_provider::{
-        provider_runner_secret_env_for_plan_with_providers,
-        provider_secret_credential_mappings_for_plan_with_providers,
-        provider_secret_sources_for_plan_with_providers,
     };
 }
 

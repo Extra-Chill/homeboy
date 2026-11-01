@@ -416,22 +416,3 @@ trailing log"#;
     assert!(message.contains("path missing"));
     assert!(message.contains("refresh runtime cache"));
 }
-
-#[test]
-fn pre_dispatch_failure_message_uses_declared_dependency_pattern() {
-    let output =
-        "Error: lstat '/remote/cache/prepared-dependencies/runtime-a': no such file or directory";
-    let patterns = vec![AgentTaskProviderDependencyFailurePattern {
-        id: "fixture.dependency".to_string(),
-        label: "Fixture dependency".to_string(),
-        path_contains: "prepared-dependencies/".to_string(),
-        error_contains_any: vec!["no such file or directory".to_string()],
-        remediation: Some("refresh fixture dependencies".to_string()),
-        extra: Default::default(),
-    }];
-
-    let message = lab_pre_dispatch_dependency_failure_message(output, &patterns).expect("message");
-
-    assert!(message.contains("prepared-dependencies/runtime-a"));
-    assert!(message.contains("refresh fixture dependencies"));
-}

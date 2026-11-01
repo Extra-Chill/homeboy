@@ -218,32 +218,6 @@ fn provider_invocation_argv_and_cwd_preserve_paths_with_spaces() {
     );
 }
 
-#[test]
-fn provider_manifest_parses_dependency_contracts() {
-    let provider: AgentTaskExecutorProvider = serde_json::from_value(json!({
-        "schema": "homeboy/agent-task-executor-provider/v1",
-        "id": "custom.provider",
-        "backend": "custom",
-        "invocation": { "argv": ["custom-agent-task"] },
-        "request_schema": AGENT_TASK_REQUEST_SCHEMA,
-        "outcome_schema": AGENT_TASK_OUTCOME_SCHEMA,
-        "dependency_failure_patterns": [{
-            "id": "custom.prepared_dependency",
-            "label": "Custom prepared dependency",
-            "path_contains": "prepared-dependencies/",
-            "error_contains_any": ["enoent", "no such file or directory"],
-            "remediation": "Refresh prepared dependencies."
-        }],
-
-    }))
-    .expect("provider manifest");
-
-    assert_eq!(
-        provider.dependency_failure_patterns[0].path_contains,
-        "prepared-dependencies/"
-    );
-}
-
 fn extension_policy(id: &str, backend: &str) -> homeboy_extension_contract::ExtensionManifest {
     serde_json::from_value(json!({
         "name": id,

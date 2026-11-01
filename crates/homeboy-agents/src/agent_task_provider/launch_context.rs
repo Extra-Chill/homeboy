@@ -97,8 +97,27 @@ impl AgentTaskProviderLaunchContext {
             .iter()
             .filter_map(|name| Some(((*name).to_string(), std::env::var_os(name)?)))
             .collect::<BTreeMap<_, _>>();
-        let secret_env_plan =
-            super::secrets::provider_secret_env_plan_with_status(provider, request);
+        let mut secret_env_plan =
+            SecretEnvPlan::from_secret_env_names(request.executor.secret_env.clone());
+        secret_env_plan.extend_secret_env_names(
+            request
+                .runtime_tools
+                .iter()
+                .flat_map(|tool| tool.secret_env.iter().cloned()),
+        );
+        let statuses =
+            crate::agent_task_secrets::secret_env_status(&secret_env_plan.secret_env_names());
+        secret_env_plan = secret_env_plan
+            .with_status(statuses.into_iter().map(|status| {
+                homeboy_core::secret_env_plan::SecretEnvStatus {
+                    name: status.name,
+                    configured: status.configured,
+                    source: status.source,
+                    source_env_name: None,
+                    missing_source_env_names: Vec::new(),
+                }
+            }))
+            .redacted();
         let secret_env_names = secret_env_plan
             .secret_env_names()
             .into_iter()

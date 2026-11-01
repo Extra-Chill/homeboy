@@ -3795,19 +3795,6 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
             &env,
             &secret_handoff.secret_env_plan,
         )?;
-        // The runtime reads declared provider credential files from the
-        // runner's home. Sync them from the controller before dispatch, as the
-        // Lab offload path does; without this, a staged cook ran against the
-        // runner's stale copy (#15783).
-        if runner.kind == crate::RunnerKind::Ssh {
-            crate::execution::provision_provider_file_secret_sources_for_runner(
-                &runner,
-                &dispatch_command,
-                &request.recipe.normalized_args,
-                &secret_handoff.secret_env_plan.secret_env_names(),
-                &env,
-            )?;
-        }
         Self::check_cancelled(cancellation)?;
         let submitted = crate::exec_with_status_snapshot(
             &request.recipe.runner_id,
@@ -4130,7 +4117,7 @@ fn durable_dispatch_env(
         &request.recipe.normalized_args,
         public_env,
     )?;
-    crate::lab::secrets::merge_agent_task_provider_secret_env(
+    crate::lab::secrets::merge_agent_task_secret_env(
         &mut secret_handoff,
         &request.durable_agent_task_plan,
     );

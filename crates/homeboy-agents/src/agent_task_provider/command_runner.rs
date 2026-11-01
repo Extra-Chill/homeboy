@@ -6,7 +6,6 @@ use super::outcome_normalization::{
     push_unique_diagnostic,
 };
 use super::runner_readiness::{executable_file, resolve_executable_candidate};
-use super::secrets::{provider_secret_env_plan_with_status, provider_secret_sources};
 use super::*;
 use crate::agent_task::ResolvedAgentTaskRuntimeTool;
 use crate::agent_task_executor_evidence::{
@@ -2747,7 +2746,7 @@ fn provider_preflight_digest(
         }
     }
 
-    let secret_status = provider_secret_env_plan_with_status(provider, request).status;
+    let secret_status = crate::agent_task_secrets::secret_env_status(&request.executor.secret_env);
     let missing_secret_env: Vec<String> = secret_status
         .iter()
         .filter(|status| !status.configured)
@@ -3047,104 +3046,6 @@ fn receive_readiness_output(
         .map_err(|error| format!("failed to read provider readiness output: {error}"))
 }
 
-/// Longest stderr excerpt carried into a readiness failure reason.
-const PROVIDER_CONTROLLER_REFRESH_TIMEOUT: Duration = Duration::from_secs(60);
-
-/// Run a provider account's declared `controller_refresh` on this host (#15783).
-///
-/// The command owns the account's refresh chain and must leave the declared
-/// credential source current, or exit non-zero. It receives no ambient
-/// credentials: only `PATH`, `HOME` and the XDG roots that locate the source.
-/// stdout is discarded; a bounded stderr tail becomes the failure message.
-pub fn run_provider_controller_refresh(
-    provider: &AgentTaskExecutorProvider,
-    invocation: &CommandInvocation,
-) -> Result<(), String> {
-    let Some((program, args, cwd)) = invocation_command_parts(provider, invocation) else {
-        return Err(format!(
-            "provider '{}' declares an empty controller_refresh invocation",
-            provider.id
-        ));
-    };
-    let timeout = invocation
-        .extra
-        .get("timeout_ms")
-        .and_then(Value::as_u64)
-        .map(Duration::from_millis)
-        .unwrap_or(PROVIDER_CONTROLLER_REFRESH_TIMEOUT)
-        .min(PROVIDER_CONTROLLER_REFRESH_TIMEOUT);
-    let mut command = Command::new(&program);
-    command
-        .args(&args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .env_clear();
-    for name in ["PATH", "HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME"] {
-        if let Some(value) = std::env::var_os(name) {
-            command.env(name, value);
-        }
-    }
-    if let Some(cwd) = cwd {
-        command.current_dir(cwd);
-    }
-    let mut child = command.spawn().map_err(|error| {
-        format!(
-            "failed to spawn provider '{}' controller_refresh `{program}`: {error}",
-            provider.id
-        )
-    })?;
-    let stderr_reader = child.stderr.take().map(|mut stderr| {
-        std::thread::spawn(move || {
-            let mut buffer = Vec::new();
-            let _ = stderr.read_to_end(&mut buffer);
-            buffer
-        })
-    });
-    let started = Instant::now();
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if started.elapsed() >= timeout => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(format!(
-                    "provider '{}' controller_refresh timed out after {}s",
-                    provider.id,
-                    timeout.as_secs()
-                ));
-            }
-            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
-            Err(error) => {
-                return Err(format!(
-                    "failed to wait for provider '{}' controller_refresh: {error}",
-                    provider.id
-                ))
-            }
-        }
-    };
-    if status.success() {
-        return Ok(());
-    }
-    let stderr = stderr_reader
-        .and_then(|reader| reader.join().ok())
-        .map(|bytes| String::from_utf8_lossy(&bytes).trim().to_string())
-        .unwrap_or_default();
-    let tail = stderr
-        .char_indices()
-        .rev()
-        .nth(1999)
-        .map_or(stderr.as_str(), |(index, _)| &stderr[index..]);
-    Err(format!(
-        "provider '{}' controller_refresh exited {}: {}",
-        provider.id,
-        status
-            .code()
-            .map_or_else(|| "by signal".to_string(), |code| code.to_string()),
-        if tail.is_empty() { "no message" } else { tail }
-    ))
-}
-
 fn render_provider_command_template(value: &str, provider: &AgentTaskExecutorProvider) -> String {
     let extension_path = provider.extension_path.as_deref().unwrap_or_default();
     let runtime_path = provider.runtime_path.as_deref().unwrap_or(extension_path);
@@ -3209,7 +3110,14 @@ fn provider_command_env_with_credentials(
         .clone()
         .or_else(|| provider.extension_path.clone())
         .unwrap_or_default();
-    let secret_env_plan = provider_secret_env_plan_with_status(provider, request);
+    let mut secret_env_plan =
+        SecretEnvPlan::from_secret_env_names(request.executor.secret_env.clone());
+    secret_env_plan.extend_secret_env_names(
+        request
+            .runtime_tools
+            .iter()
+            .flat_map(|tool| tool.secret_env.iter().cloned()),
+    );
     let mut env = vec![
         (
             "HOMEBOY_AGENT_TASK_PROVIDER_ID".to_string(),
@@ -3276,19 +3184,13 @@ fn provider_command_env_with_credentials(
             .filter(|name| !bound_names.contains(name.as_str()))
             .collect::<Vec<_>>();
         env.extend(
-            resolve_secret_env_with_fallbacks(
-                &remaining_names,
-                &provider_secret_sources(provider, Some(request)),
-            )
-            .map_err(ProviderCommandEnvError::Secret)?,
+            crate::agent_task_secrets::resolve_secret_env(&remaining_names)
+                .map_err(ProviderCommandEnvError::Secret)?,
         );
     } else {
         env.extend(
-            resolve_secret_env_with_fallbacks(
-                &secret_env_plan.secret_env_names(),
-                &provider_secret_sources(provider, Some(request)),
-            )
-            .map_err(ProviderCommandEnvError::Secret)?,
+            crate::agent_task_secrets::resolve_secret_env(&secret_env_plan.secret_env_names())
+                .map_err(ProviderCommandEnvError::Secret)?,
         );
     }
     // Enforce the executor git-mutation boundary: strip git push credentials so a

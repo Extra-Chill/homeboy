@@ -99,8 +99,6 @@ pub struct AgentTaskExecutorProvider {
     pub provider_defaults: BTreeMap<String, Value>,
     #[serde(default)]
     pub pi_readiness: PiReadinessConfig,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub dependency_failure_patterns: Vec<AgentTaskProviderDependencyFailurePattern>,
     /// Adapter-owned classifications for failures that prove an otherwise
     /// statically-ready provider cannot currently dispatch work.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -282,19 +280,6 @@ fn default_outcome_schema() -> String {
 
 fn is_false(value: &bool) -> bool {
     !*value
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct AgentTaskProviderDependencyFailurePattern {
-    pub id: String,
-    pub label: String,
-    pub path_contains: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub error_contains_any: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub remediation: Option<String>,
-    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub extra: BTreeMap<String, Value>,
 }
 
 /// A provider-specific failure signature that is safe to circuit-break when it
