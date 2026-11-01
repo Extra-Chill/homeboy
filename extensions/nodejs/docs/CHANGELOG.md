@@ -2,6 +2,11 @@
 
 All notable changes to the **nodejs** extension will be documented in this file.
 
+## [3.8.6] - 2026-11-01
+
+### Fixed
+- keep extension and desktop releases published and off GitHub latest
+
 ## [3.8.5] - 2026-11-01
 
 ### Fixed
