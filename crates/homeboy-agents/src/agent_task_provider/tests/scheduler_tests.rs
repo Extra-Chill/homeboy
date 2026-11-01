@@ -1385,17 +1385,13 @@ fn provider_command_receives_canonical_secret_env_plan_without_values() {
     let fake = node_pi(&format!("let plan=JSON.parse(process.env.{});if(!(plan.env_name_mapping['pi.agent-task-executor']||[]).includes('{secret_name}')||!(plan.status||[]).some(i=>i.name==='{secret_name}'&&i.configured&&i.source==='env')||JSON.stringify(plan).includes('hydrated-secret'))process.exit(23);answer(JSON.stringify(plan));", homeboy_core::secret_env_plan::AGENT_TASK_SECRET_ENV_PLAN_JSON_ENV));
     let mut request = fake.request("task-secret-env-plan");
     let mut provider = fake.provider();
-    provider.runner_readiness = vec![AgentTaskProviderRunnerReadiness {
-        id: "test.provider.auth".to_string(),
-        label: "Test provider auth".to_string(),
-        required_extensions: Vec::new(),
-        invocation: None,
-        secret_env: vec![secret_name.clone()],
-        env_path: None,
-        executable: None,
-        remediation: None,
-        extra: BTreeMap::new(),
-    }];
+    provider.invocation.env.push(
+        serde_json::from_value(json!({
+            "name": secret_name,
+            "source": "secret_env"
+        }))
+        .expect("secret env reference"),
+    );
     request.executor.secret_env = vec![secret_name.clone()];
     let scheduler = AgentTaskScheduler::new(Arc::new(
         ExtensionProviderAgentTaskExecutor::with_providers(vec![provider]),

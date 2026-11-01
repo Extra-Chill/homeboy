@@ -49,7 +49,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::resolve_lab_runner_hint;
 use homeboy_agents::agent_task_lifecycle;
-use homeboy_agents::agent_tasks::provider::provider_runner_source_contracts;
 use homeboy_core::engine::shell;
 use homeboy_core::lab_contract::LabRunnerWorkload;
 use homeboy_core::plan::{HomeboyPlan, PlanStep, PlanStepStatus, PlanValues};
@@ -106,12 +105,11 @@ use super::super::offload_changed_since::LabOffloadChangedSincePreflight;
 use super::super::{
     configured_runner_homeboy_build_identity, evaluate_lab_runner_capabilities_for_runner, exec,
     exec_with_status_snapshot, lab_offload_changed_since_ref, lab_offload_metadata,
-    lab_offload_metadata_with_workspace_mapping, load, plan_managed_runner_source_syncs,
-    preflight_lab_offload_changed_since, prepare_git_lab_offload_changed_since,
-    remote_runner_homeboy_path, rig_materialization, status, status_for_admission,
-    LabRunnerGateDecision, MaterializedWorkspace, Runner, RunnerCapabilityPreflight,
-    RunnerExecOptions, RunnerFileTransfer, RunnerStaleDaemonWarning, RunnerStatusReport,
-    RunnerTunnelMode, RunnerWorkspaceApplyOutput, RunnerWorkspaceOutputPaths,
+    lab_offload_metadata_with_workspace_mapping, load, preflight_lab_offload_changed_since,
+    prepare_git_lab_offload_changed_since, remote_runner_homeboy_path, rig_materialization, status,
+    status_for_admission, LabRunnerGateDecision, MaterializedWorkspace, Runner,
+    RunnerCapabilityPreflight, RunnerExecOptions, RunnerFileTransfer, RunnerStaleDaemonWarning,
+    RunnerStatusReport, RunnerTunnelMode, RunnerWorkspaceApplyOutput, RunnerWorkspaceOutputPaths,
     RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions, RunnerWorkspaceSyncOutput,
     WorkspaceCleanupPolicy, WorkspaceTerminalOutcome,
 };

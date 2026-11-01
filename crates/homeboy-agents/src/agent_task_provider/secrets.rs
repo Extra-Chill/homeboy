@@ -262,9 +262,6 @@ fn provider_secret_env(
             })
             .map(|env| env.name.clone()),
     );
-    for readiness in &provider.runner_readiness {
-        names.extend(readiness.secret_env.iter().cloned());
-    }
     if let Some(defaults) =
         request.and_then(|request| effective_provider_default(provider, request))
     {

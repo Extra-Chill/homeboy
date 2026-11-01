@@ -129,52 +129,6 @@ fn provider_selection_reports_exact_backend_selector_mismatch() {
 }
 
 #[test]
-fn provider_readiness_selector_mismatch_explains_runtime_provider_confusion() {
-    let (_, mut provider) = request("task-a", "node provider.js".to_string());
-    provider.id = "example.sandbox-agent-task-executor".to_string();
-    provider.backend = "sandbox".to_string();
-    provider.cli.reserved_selector_hints = vec!["codex".to_string()];
-
-    let error = validate_provider_runner_readiness_for_backend_with_providers(
-        &[provider],
-        "sandbox",
-        Some("codex"),
-    )
-    .expect_err("selector mismatch should fail before runner readiness");
-
-    assert_eq!(error.details["field"], "selector");
-    let suggestions = error.details["tried"]
-        .as_array()
-        .expect("tried suggestions");
-    assert!(suggestions.iter().any(|value| value
-        .as_str()
-        .is_some_and(|suggestion| suggestion.contains("runtime-specific provider configuration"))));
-    assert!(suggestions.iter().any(|value| value
-        .as_str()
-        .is_some_and(|suggestion| suggestion.contains("example.sandbox-agent-task-executor"))));
-}
-
-#[test]
-fn provider_readiness_rejects_invalid_immediate_failure_configuration_before_execution() {
-    let (_, mut provider) = request("task-a", "node provider.js".to_string());
-    provider.immediate_failure_patterns = vec![AgentTaskProviderImmediateFailurePattern {
-        id: "invalid".to_string(),
-        error_contains_any: vec!["server error".to_string()],
-        retryable: true,
-        error_ref_pattern: Some("[".to_string()),
-        log_lookup: None,
-        fallback_action: None,
-    }];
-
-    let error =
-        validate_provider_runner_readiness_for_backend_with_providers(&[provider], "test", None)
-            .expect_err("invalid adapter configuration must fail pre-dispatch");
-
-    assert_eq!(error.details["field"], "immediate_failure_patterns");
-    assert!(error.message.contains("invalid error_ref_pattern"));
-}
-
-#[test]
 fn provider_manifest_parses_role_aliases() {
     let provider: AgentTaskExecutorProvider = serde_json::from_value(json!({
         "schema": "homeboy/agent-task-executor-provider/v1",
@@ -265,7 +219,7 @@ fn provider_invocation_argv_and_cwd_preserve_paths_with_spaces() {
 }
 
 #[test]
-fn provider_manifest_parses_runner_and_dependency_contracts() {
+fn provider_manifest_parses_dependency_contracts() {
     let provider: AgentTaskExecutorProvider = serde_json::from_value(json!({
         "schema": "homeboy/agent-task-executor-provider/v1",
         "id": "custom.provider",
@@ -273,13 +227,6 @@ fn provider_manifest_parses_runner_and_dependency_contracts() {
         "invocation": { "argv": ["custom-agent-task"] },
         "request_schema": AGENT_TASK_REQUEST_SCHEMA,
         "outcome_schema": AGENT_TASK_OUTCOME_SCHEMA,
-        "runner_readiness": [{
-            "id": "custom.runtime_cache",
-            "label": "Custom runtime cache",
-            "secret_env": ["CUSTOM_RUNTIME_TOKEN"],
-            "env_path": { "env": ["CUSTOM_RUNTIME_BIN"], "revision": true },
-            "remediation": "Refresh the custom runtime cache."
-        }],
         "dependency_failure_patterns": [{
             "id": "custom.prepared_dependency",
             "label": "Custom prepared dependency",
@@ -291,15 +238,6 @@ fn provider_manifest_parses_runner_and_dependency_contracts() {
     }))
     .expect("provider manifest");
 
-    assert_eq!(provider.runner_readiness[0].id, "custom.runtime_cache");
-    assert_eq!(
-        provider.runner_readiness[0].secret_env,
-        vec!["CUSTOM_RUNTIME_TOKEN"]
-    );
-    assert_eq!(
-        provider.runner_readiness[0].env_path.as_ref().unwrap().env,
-        vec!["CUSTOM_RUNTIME_BIN"]
-    );
     assert_eq!(
         provider.dependency_failure_patterns[0].path_contains,
         "prepared-dependencies/"

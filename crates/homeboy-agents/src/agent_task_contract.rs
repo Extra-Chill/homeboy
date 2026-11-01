@@ -216,8 +216,6 @@ pub fn agent_task_core_contract() -> AgentTaskCoreContract {
                 "workspace_materialization",
                 "provider_defaults",
                 "provider_preflight",
-                "runner_readiness",
-                "runner_sources",
                 "dependency_failure_patterns",
                 "timeout_artifact_discovery",
                 "lifecycle",

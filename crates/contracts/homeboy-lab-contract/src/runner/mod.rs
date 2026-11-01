@@ -7,18 +7,11 @@
 //! `homeboy-runner-contract`; this module owns only Lab-specific runner policy
 //! and handoff contracts.
 //!
-//! Two single-type crates were folded in here earlier for the same reason —
-//! both are behavior-free runner contracts below core:
-//!
-//! - [`Placement`] (was `homeboy-cli-contract`): the requested execution
-//!   location, read by core's Lab routing and by the runner's Lab selection.
-//! - [`AgentTaskProviderRunnerSource`] (was `homeboy-agents-contract`): a
-//!   managed source checkout homeboy keeps synced on the runner, read by core's
-//!   agent-runtime manifest and by `homeboy-agents`.
+//! [`Placement`] describes the requested execution location, read by core's
+//! Lab routing and by the runner's Lab selection.
 
 mod execution_placement;
 mod placement;
-mod provider_source_types;
 
 pub use execution_placement::{
     EffectiveExecutionPlacement, ExecutionPlacementDecision, ExecutionPlacementFallback,
@@ -27,7 +20,6 @@ pub use execution_placement::{
     CONTROLLER_LOCAL_SUBMISSION_POLICY_ID,
 };
 pub use placement::Placement;
-pub use provider_source_types::AgentTaskProviderRunnerSource;
 
 use std::collections::{BTreeMap, BTreeSet};
 

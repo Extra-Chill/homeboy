@@ -63,45 +63,6 @@ fn provider_manifest_accepts_command_invocation_contract() {
 }
 
 #[test]
-fn provider_manifest_defaults_executable_readiness_env_when_omitted() {
-    let provider: AgentTaskExecutorProvider = serde_json::from_value(json!({
-        "id": "path-runtime.agent-task-executor",
-        "backend": "path-runtime",
-        "invocation": { "argv": ["node", "{{runtime_path}}/scripts/agent/homeboy-path-runtime-agent-task-executor.cjs"] },
-        "runner_readiness": [{
-            "id": "path-runtime.executable",
-            "label": "PATH runtime executable",
-            "executable": {
-                "candidates": ["path-runtime"],
-                "version_command": ["--version"],
-                "install_hint": "Install path-runtime so it is available on PATH."
-            }
-        }]
-    }))
-    .expect("provider manifest");
-
-    let executable = provider.runner_readiness[0]
-        .executable
-        .as_ref()
-        .expect("executable readiness");
-    assert!(executable.env.is_empty());
-    assert_eq!(executable.candidates, vec!["path-runtime".to_string()]);
-    assert_eq!(executable.version_command, vec!["--version".to_string()]);
-    assert_eq!(
-        executable.install_hint.as_deref(),
-        Some("Install path-runtime so it is available on PATH.")
-    );
-
-    let exported = serde_json::to_value(&provider).expect("provider export");
-    assert!(
-        exported["runner_readiness"][0]["executable"]
-            .get("env")
-            .is_none(),
-        "empty env should remain omitted on export: {exported:?}"
-    );
-}
-
-#[test]
 fn provider_missing_chains_matching_runtime_discovery_diagnostics() {
     let _home = artifact_home();
     let (mut request, _provider) = request("missing-pi", "unused".to_string());
@@ -511,22 +472,6 @@ fn provider_manifest_preserves_unknown_metadata_on_export() {
         "provider_metadata": {
             "runtime": "provider-owned"
         },
-        "runner_readiness": [{
-            "id": "ready",
-            "label": "Ready",
-            "provider_hint": "preserve-me",
-            "env_path": {
-                "env": ["PROVIDER_HOME"],
-                "path_kind": "provider-cache"
-            },
-            "executable": {
-                "env": ["PROVIDER_BIN"],
-                "candidates": ["provider-bin"],
-                "version_command": ["--version"],
-                "install_hint": "Install provider-bin.",
-                "provider_executable_hint": "preserve-me"
-            }
-        }],
         "timeout_artifact_discovery": {
             "paths": ["artifacts"],
             "provider_discovery": true,
@@ -580,30 +525,6 @@ fn provider_manifest_preserves_unknown_metadata_on_export() {
         provider.extra["provider_metadata"]["runtime"],
         "provider-owned"
     );
-    assert_eq!(
-        provider.runner_readiness[0].extra["provider_hint"],
-        "preserve-me"
-    );
-    assert_eq!(
-        provider.runner_readiness[0]
-            .env_path
-            .as_ref()
-            .expect("env path")
-            .extra["path_kind"],
-        "provider-cache"
-    );
-    let executable = provider.runner_readiness[0]
-        .executable
-        .as_ref()
-        .expect("executable readiness");
-    assert_eq!(executable.env, vec!["PROVIDER_BIN".to_string()]);
-    assert_eq!(executable.candidates, vec!["provider-bin".to_string()]);
-    assert_eq!(executable.version_command, vec!["--version".to_string()]);
-    assert_eq!(
-        executable.install_hint.as_deref(),
-        Some("Install provider-bin.")
-    );
-    assert_eq!(executable.extra["provider_executable_hint"], "preserve-me");
     assert_eq!(
         provider.timeout_artifact_discovery.extra["provider_discovery"],
         true
@@ -662,18 +583,6 @@ fn provider_manifest_preserves_unknown_metadata_on_export() {
 
     let exported = serde_json::to_value(&provider).expect("provider export");
     assert_eq!(exported["provider_metadata"]["runtime"], "provider-owned");
-    assert_eq!(
-        exported["runner_readiness"][0]["provider_hint"],
-        "preserve-me"
-    );
-    assert_eq!(
-        exported["runner_readiness"][0]["env_path"]["path_kind"],
-        "provider-cache"
-    );
-    assert_eq!(
-        exported["runner_readiness"][0]["executable"]["version_command"][0],
-        "--version"
-    );
     assert_eq!(
         exported["timeout_artifact_discovery"]["provider_discovery"],
         true

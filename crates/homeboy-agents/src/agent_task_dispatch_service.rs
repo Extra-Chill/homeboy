@@ -16,7 +16,6 @@ use crate::agent_task_dispatch_plan::{
 use crate::agent_task_lifecycle::{AgentTaskRunRecord, AgentTaskRunState};
 use crate::agent_task_provider::{
     default_backend_for_component, resolve_provider_for_backend, AgentTaskProviderCatalog,
-    ProviderResolution,
 };
 use crate::agent_task_scheduler::{
     AgentTaskAggregate, AgentTaskPlan, AgentTaskProviderRotationPolicy, AgentTaskRetryPolicy,
@@ -376,20 +375,6 @@ pub fn preflight_dispatch_provider_admission(
     ) {
         Ok(plan) => plan,
         Err(error) => {
-            if !matches!(
-                resolve_provider_for_backend(
-                    catalog.providers(),
-                    &request.backend,
-                    request.selector.as_deref()
-                ),
-                ProviderResolution::Resolved(_)
-            ) {
-                crate::agent_task_provider::validate_provider_runner_readiness_for_backend_with_catalog(
-                catalog,
-                &request.backend,
-                request.selector.as_deref(),
-            )?;
-            }
             catalog.apply_provider_runner_secret_env_contracts(&mut plan);
             catalog.validate_selected_models(&plan)?;
             preflight_dispatch_provider_secrets(&plan)?;

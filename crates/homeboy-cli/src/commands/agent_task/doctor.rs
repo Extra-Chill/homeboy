@@ -148,7 +148,7 @@ fn provider_stage(args: &AgentTaskDoctorArgs) -> ProviderStage {
 
 /// Stage 2: runner readiness/repair. Reuses `runner doctor --scope lab-offload`
 /// so the controller/runner binary, active daemon, installed extension
-/// revisions, managed runner sources, and provider runner readiness are checked
+/// revisions, connectivity, and capacity are checked
 /// (and safely repaired when `--repair` is set) without reimplementing any of
 /// that logic here.
 fn runner_stage(args: &AgentTaskDoctorArgs) -> homeboy::core::Result<Value> {
@@ -315,7 +315,7 @@ mod tests {
                     "details": { "url": "http://x" }
                 },
                 {
-                    "id": "lab.managed_source.x",
+                    "id": "lab.capacity",
                     "status": "error",
                     "message": "later error"
                 }

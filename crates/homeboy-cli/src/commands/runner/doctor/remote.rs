@@ -264,7 +264,6 @@ pub fn report(
             local_homeboy_version,
             &homeboy,
         ));
-        let catalog = homeboy::agents::agent_tasks::provider::AgentTaskProviderCatalog::discover();
         let parity_cwd = options.path.as_deref().unwrap_or(workspace_root.as_str());
         let parity_checks = normalized_extension_ids(&options.extensions)
             .iter()
@@ -279,29 +278,7 @@ pub fn report(
                 )
             })
             .collect::<Vec<_>>();
-        let global_parity_blocked = parity_checks
-            .iter()
-            .any(|check| check.status == RunnerDoctorStatus::Error);
         checks.extend(parity_checks);
-        if !global_parity_blocked {
-            let selected_provider_ids = probes::eligible_provider_ids(
-                catalog.providers(),
-                options.agent_backend.as_deref(),
-                options.agent_selector.as_deref(),
-            );
-            let readiness_contracts = probes::selected_provider_readiness_contracts(
-                homeboy::agents::agent_tasks::provider::provider_runner_readiness_contracts(),
-                &selected_provider_ids,
-            );
-            checks.extend(probes::provider_readiness_checks(
-                client,
-                &readiness_contracts,
-            ));
-        }
-        checks.extend(probes::managed_runner_source_checks(
-            client,
-            &homeboy::agents::agent_tasks::provider::provider_runner_source_contracts(),
-        ));
     }
 
     let daemon_timeout = client

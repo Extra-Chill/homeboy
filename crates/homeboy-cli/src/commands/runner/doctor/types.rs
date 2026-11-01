@@ -303,9 +303,6 @@ pub enum RunnerRepairAction {
     /// Re-establish the transport to the runner's recorded daemon without
     /// restarting it. Executor: `repair::reconnect_transport`.
     Reconnect,
-    /// Re-materialize provider-declared managed source checkouts.
-    /// Executor: `repair::repair_managed_sources`.
-    RefreshManagedSources,
 }
 
 impl RunnerRepairAction {
@@ -356,7 +353,6 @@ impl RunnerRepairAction {
                 ],
                 ActionSafety::Mutating,
             )),
-            Self::RefreshManagedSources => None,
         }
     }
 }
