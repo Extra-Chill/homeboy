@@ -126,6 +126,267 @@ fn exact_ref_deploy_reports_ordered_phase_timings_and_status_lines() {
     }
 }
 
+#[test]
+fn monorepo_outdated_ref_and_receipt_check() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let source = temp.path().join("source");
+    let site = temp.path().join("site");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::create_dir_all(&site).unwrap();
+    for id in ["alpha", "beta"] {
+        let dir = source.join(id);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("main.php"), "<?php\n/* Version: 1.0.0 */\n").unwrap();
+        std::fs::write(dir.join(".gitignore"), "build/\n").unwrap();
+        std::fs::write(dir.join("homeboy.json"), serde_json::json!({
+            "id": id, "remote_path": format!("plugins/{id}"),
+            "remote_url": "https://github.com/example/receipt-fixture",
+            "build_artifact": format!("build/{id}.zip"),
+            "extract_command": "unzip -oq {{artifact}} && rm {{artifact}}",
+            "version_targets": [{"file":"main.php", "pattern":"Version:\\s*([0-9.]+)"}],
+            "scripts": {"build": [format!("mkdir -p build && python3 -c \"import zipfile; z=zipfile.ZipFile('build/{id}.zip','w'); z.write('main.php','{id}/main.php'); z.close()\"")]}
+        }).to_string()).unwrap();
+    }
+    git(&source, &["init", "-q"]);
+    git(&source, &["add", "-A"]);
+    git(&source, &["commit", "-qm", "initial"]);
+    git(
+        &source,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/example/receipt-fixture",
+        ],
+    );
+    let sha = |source: &Path| {
+        String::from_utf8(git(source, &["rev-parse", "HEAD"]).stdout)
+            .unwrap()
+            .trim()
+            .to_string()
+    };
+    homeboy(
+        &home,
+        &[
+            "server",
+            "create",
+            "local",
+            "--host",
+            "localhost",
+            "--user",
+            "test",
+        ],
+    );
+    homeboy(
+        &home,
+        &[
+            "project",
+            "create",
+            "site",
+            "--server-id",
+            "local",
+            "--base-path",
+            site.to_str().unwrap(),
+        ],
+    );
+    for id in ["alpha", "beta"] {
+        homeboy(
+            &home,
+            &[
+                "project",
+                "components",
+                "attach-path",
+                "site",
+                source.join(id).to_str().unwrap(),
+            ],
+        );
+    }
+    homeboy(
+        &home,
+        &[
+            "deploy",
+            "site",
+            "--all",
+            "--ref",
+            &sha(&source),
+            "--confirm-dangerous",
+        ],
+    );
+    std::fs::write(
+        source.join("alpha/main.php"),
+        "<?php\n/* Version: 1.1.0 */\n",
+    )
+    .unwrap();
+    git(&source, &["add", "-A"]);
+    git(&source, &["commit", "-qm", "alpha only"]);
+    let head = sha(&source);
+    let output = temp.path().join("result.json");
+    let read_result = || -> serde_json::Value {
+        serde_json::from_slice(&std::fs::read(&output).unwrap()).unwrap()
+    };
+    homeboy(
+        &home,
+        &[
+            "deploy",
+            "site",
+            "--outdated",
+            "--ref",
+            &head,
+            "--dry-run",
+            "--output",
+            output.to_str().unwrap(),
+        ],
+    );
+    let preview = read_result();
+    assert_eq!(
+        preview["data"]["results"].as_array().unwrap().len(),
+        1,
+        "{preview}"
+    );
+    assert!(
+        preview["data"]["results"][0]["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|warning| warning
+                .as_str()
+                .unwrap_or_default()
+                .contains("remote version differs")),
+        "{preview}"
+    );
+    let changed = homeboy(
+        &home,
+        &[
+            "deploy",
+            "site",
+            "--outdated",
+            "--ref",
+            &head,
+            "--confirm-dangerous",
+            "--output",
+            output.to_str().unwrap(),
+        ],
+    );
+    let result = read_result();
+    let rows = result["data"]["results"].as_array().unwrap();
+    assert_eq!(rows.len(), 1, "{result}");
+    assert_eq!(rows[0]["id"], "alpha", "{result}");
+    assert_eq!(rows[0]["status"], "deployed", "{result}");
+    println!(
+        "changed selection: alpha deployed; {}",
+        String::from_utf8_lossy(&changed.stderr)
+    );
+    homeboy(
+        &home,
+        &[
+            "deploy",
+            "site",
+            "--outdated",
+            "--ref",
+            &head,
+            "--confirm-dangerous",
+            "--output",
+            output.to_str().unwrap(),
+        ],
+    );
+    let result = read_result();
+    assert_eq!(
+        result["data"]["results"].as_array().unwrap().len(),
+        0,
+        "{result}"
+    );
+    println!("second invocation: no components selected");
+    let check = homeboy(
+        &home,
+        &[
+            "deploy",
+            "site",
+            "--check",
+            "--output",
+            output.to_str().unwrap(),
+        ],
+    );
+    let result = read_result();
+    for row in result["data"]["results"].as_array().unwrap() {
+        assert_eq!(row["content_manifest"]["status"], "match", "{row}");
+        assert_eq!(
+            row["content_manifest"]["provenance"]["source"], "deployed-package-receipt",
+            "{row}"
+        );
+    }
+    assert!(!String::from_utf8_lossy(&check.stderr).contains("Verified release asset"));
+    println!("project check: alpha and beta receipt digests match; no release download");
+
+    // Same-version source updates must not disappear behind version equality.
+    std::fs::write(
+        source.join("alpha/main.php"),
+        "<?php\n/* Version: 1.1.0 */\n// changed content\n",
+    )
+    .unwrap();
+    git(&source, &["add", "-A"]);
+    git(&source, &["commit", "-qm", "same version content update"]);
+    let head = sha(&source);
+    homeboy(
+        &home,
+        &[
+            "deploy",
+            "site",
+            "--outdated",
+            "--ref",
+            &head,
+            "--verify",
+            "--confirm-dangerous",
+            "--output",
+            output.to_str().unwrap(),
+        ],
+    );
+    let result = read_result();
+    assert_eq!(
+        result["data"]["results"].as_array().unwrap().len(),
+        1,
+        "{result}"
+    );
+    assert_eq!(
+        result["data"]["results"][0]["content_manifest"]["status"], "match",
+        "{result}"
+    );
+    println!("same-version content update: alpha deployed and receipt-verified only");
+
+    // Simulate a failed/partial apply without any SHA marker.
+    std::fs::write(
+        site.join("plugins/alpha/main.php"),
+        "<?php\n/* Version: 1.1.0 */\n// partial apply\n",
+    )
+    .unwrap();
+    homeboy(
+        &home,
+        &[
+            "deploy",
+            "site",
+            "--outdated",
+            "--ref",
+            &head,
+            "--verify",
+            "--confirm-dangerous",
+            "--output",
+            output.to_str().unwrap(),
+        ],
+    );
+    let result = read_result();
+    assert_eq!(
+        result["data"]["results"].as_array().unwrap().len(),
+        1,
+        "{result}"
+    );
+    assert_eq!(
+        result["data"]["results"][0]["content_manifest"]["status"], "match",
+        "{result}"
+    );
+    println!("partial apply: alpha healed and receipt-verified without a recorded SHA");
+}
+
 fn homeboy(home: &Path, args: &[&str]) -> Output {
     let output = Command::new(homeboy_bin())
         .args(args)

@@ -19,10 +19,12 @@ Options:
 - `-c`, `--component`: component ID to deploy (can be repeated, alternative to positional)
 - `-p`, `--project`: explicit project ID; takes precedence over positional project/component detection
 - `--all`: deploy all configured components
-- `--outdated`: deploy only outdated components
+- `--outdated`: deploy only outdated components. With `--ref <sha>`, build the requested tree once per component in the shared checkout and compare remote versions and receipt content digests; missing receipts fall back to comparing the built package directly with the installed tree so interrupted applies heal. No last-deployed SHA is needed.
   - Determined from the first version target for each component.
 - `--behind-upstream`: deploy only components whose local checkout is behind upstream. Conflicts with `--outdated`.
-- `--check`: check component status without building or deploying
+- `--check`: check component status without building or deploying. A valid deploy receipt matching the installed remote version is checked first, without downloading a release asset; otherwise the release-asset comparison remains the fallback.
+- Exact-ref deploys install each component's declared extensions at the running Homeboy release before dependency hydration/build, refreshing older installed release pins. Components and project attachments remain the source of monorepo layout knowledge.
+- `--verify`: after deployment, receipt-check exactly the components successfully deployed by this invocation. It does not audit unchanged components. Use `--check` separately for a full project audit.
   - Shows all components for the project with version comparison status.
   - Combines with `--outdated` or component IDs to filter results.
 - `--dry-run`: preview what would be deployed without executing (no build, no upload)
@@ -39,7 +41,7 @@ Options:
 
 Real deploys with `--head`, `--ref`, or `--force` require `--confirm-dangerous`. Preview and status commands (`--dry-run` or `--check`) do not require `--confirm-dangerous`.
 
-`--ref` is an explicit source selector and conflicts with `--head`, `--tagged`, `--version`, `--outdated`, `--behind-upstream`, and `--check`. Without `--ref`, release and `--head` selection behave as before. File sources and `deploy_strategy: "git"` are rejected because those strategies cannot package and upload the selected Git tree.
+`--ref` is an explicit source selector and conflicts with `--head`, `--tagged`, `--behind-upstream`, and `--check`. It combines with `--outdated` and an independent `--version` assertion. Without `--ref`, release and `--head` selection behave as before. File sources and `deploy_strategy: "git"` are rejected because those strategies cannot package and upload the selected Git tree.
 
 Homeboy resolves `<git-ref-or-sha>^{commit}` in the repository containing the declared component `local_path`. If that checkout lacks the object, it fetches only the requested SHA or a single matching named ref through the checkout's configured Git remote, using the existing Git transport and credential policy. It pins the full commit SHA and uses a detached temporary worktree for local build and packaging without changing the configured checkout's branch, index, or worktree. Missing, non-commit, ambiguous, and unauthenticated refs fail before build or remote mutation. A dry run may add the resolved object to the local Git object database but does not build, deploy, or create a worktree.
 
@@ -53,7 +55,7 @@ Bulk JSON input uses `component_ids` (snake_case):
 
 Positional and flag component IDs can be mixed; both are merged into the deployment list.
 
-If no component IDs are provided and none of `--all`, `--outdated`, `--behind-upstream`, or `--check` is set, Homeboy returns an error. If `--outdated` or `--behind-upstream` finds no matching components, Homeboy returns an error.
+If no component IDs are provided and none of `--all`, `--outdated`, `--behind-upstream`, or `--check` is set, Homeboy returns an error. If `--outdated` finds no matching components, Homeboy succeeds with an empty selection.
 
 ## JSON output
 
@@ -195,6 +197,12 @@ Use `--dry-run` to see what would be deployed without executing:
 
 ```sh
 homeboy deploy myproject --outdated --dry-run
+
+# Monorepo: shared preflight, checkout, and remote connection; no SHA artifact
+homeboy deploy myproject --ref "$SHA" --outdated --verify --confirm-dangerous
+
+# Preview exact-ref selection (builds locally to compare content, no remote writes)
+homeboy deploy myproject --ref "$SHA" --outdated --dry-run
 homeboy deploy myproject --behind-upstream --dry-run
 homeboy deploy myproject my-plugin --version 1.2.3 --tagged --dry-run
 homeboy deploy myproject my-plugin --ref origin/reviewed-branch --dry-run

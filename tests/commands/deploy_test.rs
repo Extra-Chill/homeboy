@@ -257,7 +257,6 @@ fn deploy_ref_rejects_every_other_source_selector() {
     for conflicting in [
         vec!["--head"],
         vec!["--tagged"],
-        vec!["--outdated"],
         vec!["--behind-upstream"],
         vec!["--check"],
     ] {
@@ -290,6 +289,7 @@ fn deploy_args(mut customize: impl FnMut(&mut DeployArgs)) -> DeployArgs {
         dry_run: false,
         confirm_dangerous: false,
         check: false,
+        verify: false,
         force: false,
         keep_deps: false,
         version: None,

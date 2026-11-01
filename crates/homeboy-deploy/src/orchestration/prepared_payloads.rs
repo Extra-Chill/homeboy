@@ -14,7 +14,7 @@ use super::super::types::{ComponentDeployResult, DeployConfig};
 use homeboy_core::git::release_download::ReleaseArtifactLease;
 
 pub(super) struct PreparedDeployments {
-    deployments: Vec<PreparedComponentDeploy>,
+    pub(super) deployments: Vec<PreparedComponentDeploy>,
     #[cfg(test)]
     _payloads: Option<super::super::preparation::PreparedPayloadCollection>,
 }

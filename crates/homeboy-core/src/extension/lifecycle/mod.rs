@@ -151,6 +151,42 @@ pub fn install_for_component(
     })
 }
 
+/// Converge declared extensions to the requested product release before a build.
+/// Unlike ordinary bootstrap installation, an older installed pin is refreshed.
+pub fn install_for_component_release(
+    component: &homeboy_core::component::Component,
+    source: &str,
+    revision: &str,
+) -> Result<()> {
+    let Some(extensions) = component.extensions.as_ref() else {
+        return Ok(());
+    };
+    let mut ids: Vec<_> = extensions.keys().collect();
+    ids.sort();
+    for id in ids {
+        match load_extension(id) {
+            Ok(_)
+                if update::read_source_requested_ref(&homeboy_core::paths::extension(id)?)
+                    .as_deref()
+                    == Some(revision) => {}
+            Ok(_) => {
+                let candidate = std::path::Path::new(source).join(id);
+                let install_source =
+                    if !is_git_url(source) && candidate.join(format!("{id}.json")).exists() {
+                        candidate.to_string_lossy().into_owned()
+                    } else {
+                        source.to_string()
+                    };
+                refresh(&install_source, Some(id), Some(revision))?;
+            }
+            Err(_) => {
+                install_configured_extension(source, id, Some(revision))?;
+            }
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone)]
 pub struct RefreshResult {
     pub extension_id: String,
@@ -397,10 +433,10 @@ pub fn uninstall(extension_id: &str) -> Result<PathBuf> {
 mod tests {
     use super::update_all;
     use super::{
-        install, install_for_component, install_with_revision, is_extension_update_workdir_clean,
-        load_extension, read_source_revision, read_source_url, refresh,
-        register_component_install_runner, shared_assets_for_extension_source, source_metadata,
-        uninstall, update,
+        install, install_for_component, install_for_component_release, install_with_revision,
+        is_extension_update_workdir_clean, load_extension, read_source_revision, read_source_url,
+        refresh, register_component_install_runner, shared_assets_for_extension_source,
+        source_metadata, uninstall, update,
     };
 
     use homeboy_core::component;
@@ -720,6 +756,31 @@ exec '{}' "$@"
             assert!(home
                 .join(".config/homeboy/extensions/beta/beta.json")
                 .exists());
+        });
+    }
+
+    #[test]
+    fn component_release_install_converges_and_reuses_the_release_pin() {
+        with_isolated_home(|home| {
+            let home = home.path();
+            let source = home.join("source");
+            write_extension_fixture(&source, "alpha");
+            let dir = home.join("component");
+            fs::create_dir_all(&dir).unwrap();
+            write_component_fixture(&dir, &["alpha"]);
+            let component = component::discover_from_portable(&dir).unwrap();
+            install_for_component_release(&component, &source.to_string_lossy(), "v1").unwrap();
+            install_for_component_release(&component, &source.to_string_lossy(), "v1").unwrap();
+            let installed = home.join(".config/homeboy/extensions/alpha");
+            assert_eq!(
+                super::update::read_source_requested_ref(&installed).as_deref(),
+                Some("v1")
+            );
+            install_for_component_release(&component, &source.to_string_lossy(), "v2").unwrap();
+            assert_eq!(
+                super::update::read_source_requested_ref(&installed).as_deref(),
+                Some("v2")
+            );
         });
     }
 

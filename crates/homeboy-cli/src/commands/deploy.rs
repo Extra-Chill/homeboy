@@ -72,6 +72,9 @@ pub struct DeployArgs {
     /// Check component status without building or deploying
     #[arg(long)]
     pub check: bool,
+    /// Verify receipts for exactly the components deployed by this invocation
+    #[arg(long, conflicts_with_all = ["check", "dry_run"])]
+    pub verify: bool,
     /// Deploy even with uncommitted changes
     #[arg(long)]
     pub force: bool,
@@ -119,7 +122,7 @@ pub struct DeployArgs {
     #[arg(
         long = "ref",
         value_name = "GIT_REF_OR_SHA",
-        conflicts_with_all = ["head", "tagged", "outdated", "behind_upstream", "check"]
+        conflicts_with_all = ["head", "tagged", "behind_upstream", "check"]
     )]
     pub requested_ref: Option<String>,
     /// Force local tag-based build/deploy, ignoring reusable release assets
@@ -202,8 +205,10 @@ pub fn run(mut args: DeployArgs) -> CmdResult<DeployOutput> {
     }
 
     let config = build_config(&args, false);
+    // Keep the deploy and optional receipt verification on the same SSH master.
+    let _ssh_mux = homeboy_core::server::ssh_mux::scope();
 
-    let result = deploy::run(&project_id, &config).map_err(|e| {
+    let mut result = deploy::run(&project_id, &config).map_err(|e| {
         if e.message.contains("No components configured for project")
             || e.message.contains("No deployable components found")
         {
@@ -219,6 +224,9 @@ pub fn run(mut args: DeployArgs) -> CmdResult<DeployOutput> {
         }
     })?;
 
+    if args.verify {
+        deploy::verify_deployed(&project_id, &mut result)?;
+    }
     let exit_code = if result.summary.failed > 0 { 1 } else { 0 };
 
     Ok((

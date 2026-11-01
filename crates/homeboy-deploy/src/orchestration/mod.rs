@@ -117,6 +117,32 @@ pub(super) fn prepare_components(
     // root) must be reported and skipped, not abort the status/comparison of
     // every other component (#14813). A named/targeted deploy still fails
     // closed on the same failure.
+    if !config.check && config.has_requested_refs() {
+        let snapshot = homeboy_core::project::StandaloneComponentConfigSnapshot::load();
+        for attachment in &project.components {
+            if !config.component_ids.is_empty() && !config.component_ids.contains(&attachment.id) {
+                continue;
+            }
+            let component = super::planning::resolve_project_component(
+                project,
+                &attachment.id,
+                Some(&snapshot),
+                config.prepared_projection.as_ref(),
+            )?;
+            if component.is_active_lifecycle()
+                && component
+                    .extensions
+                    .as_ref()
+                    .is_some_and(|extensions| !extensions.is_empty())
+            {
+                homeboy_core::extension::lifecycle::install_for_component_release(
+                    &component,
+                    "https://github.com/Extra-Chill/homeboy",
+                    &format!("v{}", homeboy_product_identity::product_version()),
+                )?;
+            }
+        }
+    }
     let loaded = load_project_components_with_projection(
         project,
         &config.component_ids,
@@ -208,8 +234,15 @@ pub(super) fn prepare_components(
         "deploy",
     );
 
+    // Exact-ref selection must inspect the requested tree, not the caller's
+    // checkout. Defer outdated filtering until its payloads have been built.
+    let mut selection_config = config.clone();
+    if config.outdated && config.has_requested_refs() {
+        selection_config.outdated = false;
+        selection_config.all = true;
+    }
     let components = plan_components(
-        config,
+        &selection_config,
         &loaded.deployable,
         &loaded.skipped,
         &project,
@@ -255,9 +288,36 @@ pub(super) fn prepare_components(
         validate_effective_remote_paths(&components, &project, base_path)?;
     }
 
+    // A valid receipt for the installed version is the canonical check
+    // authority. Do not even resolve a release download for those targets.
+    let mut release_components = components.clone();
+    if config.check {
+        let installed =
+            fetch_remote_versions_for_project(&components, Some(&project), base_path, &ctx.client)
+                .versions;
+        release_components.retain(|component| {
+            let target =
+                super::path_roots::resolve_effective_remote_path(&project, component, base_path)
+                    .unwrap_or_default();
+            let exclusions = resolve_component_scope(component, ScopeCommand::Deploy).exclude;
+            !installed.get(&component.id).is_some_and(|version| {
+                matches!(
+                    super::receipt::load(
+                        data_root,
+                        &project,
+                        &component.id,
+                        &target,
+                        version,
+                        &exclusions
+                    ),
+                    Ok(Some(_))
+                )
+            })
+        });
+    }
     let (resolved_release_artifacts, unavailable_canonical_packages) =
         resolve_release_artifacts_for_deploy(
-            &components,
+            &release_components,
             config,
             &mut artifacts.release_artifacts,
         )?;
@@ -268,32 +328,45 @@ pub(super) fn prepare_components(
     // other (repository, commit) pair is materialized once as a full tree.
     // Shared materialization time is attributed to every component it served.
     let mut timers: HashMap<String, PhaseTimer> = HashMap::new();
-    let exact_ref_checkouts = if !config.dry_run && !config.check && config.has_requested_refs() {
-        let requests: Vec<ExactRefRequest<'_>> = components
-            .iter()
-            .filter_map(|component| {
-                config
-                    .requested_ref_for(&component.id)
-                    .map(|requested_ref| ExactRefRequest {
-                        component,
-                        requested_ref,
-                        accepted_sha: config.resolved_ref_for(&component.id),
-                    })
-            })
-            .collect();
-        let started = Instant::now();
-        let checkouts =
-            ExactRefCheckout::materialize_all(&requests, Some(&project), InPlace::Allow)?;
-        record_materialize(&mut timers, &checkouts, started);
-        checkouts
-    } else {
-        Vec::new()
-    };
+    let exact_ref_checkouts =
+        if (!config.dry_run || config.outdated) && !config.check && config.has_requested_refs() {
+            let requests: Vec<ExactRefRequest<'_>> = components
+                .iter()
+                .filter_map(|component| {
+                    config
+                        .requested_ref_for(&component.id)
+                        .map(|requested_ref| ExactRefRequest {
+                            component,
+                            requested_ref,
+                            accepted_sha: config.resolved_ref_for(&component.id),
+                        })
+                })
+                .collect();
+            let started = Instant::now();
+            let checkouts =
+                ExactRefCheckout::materialize_all(&requests, Some(&project), InPlace::Allow)?;
+            record_materialize(&mut timers, &checkouts, started);
+            checkouts
+        } else {
+            Vec::new()
+        };
     let exact_ref_identities: HashMap<String, ExactRefIdentity> = exact_ref_checkouts
         .iter()
         .map(|checkout| (checkout.component.id.clone(), checkout.identity.clone()))
         .collect();
     for checkout in &exact_ref_checkouts {
+        if checkout
+            .component
+            .extensions
+            .as_ref()
+            .is_some_and(|extensions| !extensions.is_empty())
+        {
+            homeboy_core::extension::lifecycle::install_for_component_release(
+                &checkout.component,
+                "https://github.com/Extra-Chill/homeboy",
+                &format!("v{}", homeboy_product_identity::product_version()),
+            )?;
+        }
         prepare_materialized_source(
             timers.entry(checkout.component.id.clone()).or_default(),
             checkout,
@@ -365,7 +438,7 @@ pub(super) fn prepare_components(
         attach_version_sources(&mut result, &components);
         return Ok(PreparedDeployment::Complete(result));
     }
-    if config.dry_run {
+    if config.dry_run && !(config.outdated && config.has_requested_refs()) {
         let mut result = run_dry_run_mode(
             &components,
             &local_versions,
@@ -509,7 +582,7 @@ pub(super) fn prepare_components(
         // completed package work that was still in progress.
         observation.phase("package", false)?;
     }
-    let prepared_deployments = match prepare_component_deployments_with_payloads(
+    let mut prepared_deployments = match prepare_component_deployments_with_payloads(
         PrepareDeploymentsInput {
             components: &components,
             config,
@@ -541,6 +614,100 @@ pub(super) fn prepare_components(
             return Ok(PreparedDeployment::Complete(result));
         }
     };
+
+    if config.outdated && config.has_requested_refs() {
+        let mut selected = Vec::new();
+        let mut selection_reasons = HashMap::new();
+        for prepared in prepared_deployments.deployments.drain(..) {
+            let exclusions =
+                resolve_component_scope(&prepared.component, ScopeCommand::Deploy).exclude;
+            let mut reason = "remote version differs";
+            let mut changed = prepared.local_version != prepared.remote_version;
+            if !changed {
+                if let Some(receipt) = super::receipt::load(
+                    data_root,
+                    &project,
+                    &prepared.component.id,
+                    &prepared.install_dir,
+                    prepared.remote_version.as_deref().unwrap_or_default(),
+                    &exclusions,
+                )? {
+                    let current = super::content_manifest::compare_saved_package_manifest(
+                        &receipt.manifest,
+                        &prepared.install_dir,
+                        &ctx.client,
+                        &exclusions,
+                        receipt.provenance(),
+                    );
+                    let desired = prepared.package_manifest.as_ref();
+                    changed = current.status != "match"
+                        || desired
+                            .is_some_and(|manifest| manifest.digest() != receipt.manifest.digest());
+                    reason = "content digest differs";
+                } else {
+                    // A fresh controller or interrupted apply may have no receipt.
+                    // Compare the desired package directly rather than relying on
+                    // version text or a last-successful SHA marker.
+                    changed = match prepared.package_manifest.as_ref() {
+                        Some(manifest) => {
+                            super::content_manifest::compare_saved_package_manifest(
+                                manifest,
+                                &prepared.install_dir,
+                                &ctx.client,
+                                &exclusions,
+                                super::types::ContentManifestProvenance {
+                                    source: "requested-ref-package".to_string(),
+                                    artifact_name: None,
+                                    artifact_sha256: None,
+                                    artifact_tag: None,
+                                    artifact_commit: None,
+                                },
+                            )
+                            .status
+                                != "match"
+                        }
+                        None => true,
+                    };
+                    reason = "installed content differs from requested package";
+                }
+            }
+            homeboy_core::log_status!(
+                "deploy",
+                "{}: {}",
+                prepared.component.id,
+                if changed {
+                    reason
+                } else {
+                    "remote version and recorded content match"
+                }
+            );
+            if changed {
+                selection_reasons.insert(prepared.component.id.clone(), reason.to_string());
+                selected.push(prepared);
+            }
+        }
+        prepared_deployments.deployments = selected;
+        if config.dry_run || prepared_deployments.is_empty() {
+            let mut result = run_dry_run_mode(
+                &prepared_deployments
+                    .iter()
+                    .map(|p| p.component.clone())
+                    .collect::<Vec<_>>(),
+                &local_versions,
+                &remote_versions,
+                &project,
+                base_path,
+                config,
+            )?;
+            for entry in &mut result.results {
+                if let Some(reason) = selection_reasons.get(&entry.id) {
+                    entry.warnings.push(format!("outdated selection: {reason}"));
+                }
+            }
+            attach_version_sources(&mut result, &components);
+            return Ok(PreparedDeployment::Complete(result));
+        }
+    }
 
     let mut phase_timings: HashMap<String, PhaseTimingReport> = prepared_deployments
         .iter()
@@ -591,6 +758,7 @@ pub(super) fn prepare_components(
         }
         if prepared.local_version == prepared.remote_version
             && !config.force
+            && !(config.outdated && config.has_requested_refs())
             && manifest.status != "match"
             && manifest.status != "missing"
         {

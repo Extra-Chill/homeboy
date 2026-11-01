@@ -12,7 +12,7 @@ fn review_test_help_and_execution_accept_the_same_options() {
             "test",
             "--changed-since=-base",
             "--placement=local",
-            "--summary",
+            "--json-summary",
             "--help",
         ])
         .env_clear()
@@ -51,7 +51,7 @@ fn review_test_help_and_execution_accept_the_same_options() {
             "test",
             "missing-component",
             "--changed-since=-base",
-            "--summary",
+            "--json-summary",
         ])
         .env_clear()
         .env("HOME", home.path())
