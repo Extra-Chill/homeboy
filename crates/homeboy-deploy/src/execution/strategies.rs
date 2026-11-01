@@ -10,11 +10,12 @@ use super::super::effect::{remote_version_after_deploy_effect, PostDeployVerific
 use super::super::generated_artifacts::GeneratedBuildArtifactCleanupGuard;
 use super::super::lifecycle::DeployObservation;
 use super::super::planning::{calculate_directory_size, format_bytes};
-use super::super::safety_and_artifact::{deploy_artifact, deploy_via_git};
+use super::super::safety_and_artifact::{
+    deploy_artifact, deploy_via_git, ArtifactInstall, OverrideInstall,
+};
 use super::super::types::{ComponentDeployResult, DeployConfig, DeployResult};
 use super::super::version_overrides::{
-    deploy_with_override, find_deploy_override, find_deploy_verification, is_self_deploy,
-    run_post_deploy_hooks,
+    find_deploy_override, find_deploy_verification, is_self_deploy, run_post_deploy_hooks,
 };
 use super::prepare::PreparedComponentDeploy;
 
@@ -274,7 +275,7 @@ pub(super) fn execute_artifact_deploy(
     ctx: &RemoteProjectContext,
     base_path: &str,
     project: &Project,
-    mut observation: Option<&mut DeployObservation>,
+    observation: Option<&mut DeployObservation>,
 ) -> ComponentDeployResult {
     let component = &prepared.component;
     let config = &prepared.config;
@@ -297,6 +298,11 @@ pub(super) fn execute_artifact_deploy(
         .with_build_exit_code(prepared.build_exit_code);
         return with_prepared_artifact_source(result, prepared);
     };
+    // Hash the artifact once for both the post-preflight drift check and the
+    // canonical release asset check.
+    let actual_sha256 = (prepared.payload_sha256.is_some()
+        || prepared.canonical_release_artifact.is_some())
+    .then(|| crate::sha256_file(artifact_path));
     if let (Some(expected_manifest), Some(expected_sha256)) =
         (&prepared.package_manifest, &prepared.payload_sha256)
     {
@@ -308,8 +314,11 @@ pub(super) fn execute_artifact_deploy(
         let manifest_matches =
             super::super::content_manifest::package_manifest(artifact_path, &exclusions)
                 .is_ok_and(|manifest| manifest == *expected_manifest);
-        let sha_matches =
-            crate::sha256_file(artifact_path).is_ok_and(|sha256| sha256 == *expected_sha256);
+        let sha_matches = actual_sha256.as_ref().is_some_and(|sha256| {
+            sha256
+                .as_ref()
+                .is_ok_and(|sha256| sha256 == expected_sha256)
+        });
         if !manifest_matches || !sha_matches {
             let result = ComponentDeployResult::failed(
                 component,
@@ -324,9 +333,16 @@ pub(super) fn execute_artifact_deploy(
         }
     }
     if let Some(artifact) = prepared.canonical_release_artifact.as_ref() {
-        if let Err(error) =
-            super::super::content_manifest::verify_archive_hash(artifact_path, artifact)
-        {
+        let verified = match actual_sha256.as_ref() {
+            Some(Ok(actual)) => super::super::content_manifest::verify_archive_digest(
+                artifact_path,
+                actual,
+                artifact,
+            ),
+            Some(Err(error)) => Err(error.clone()),
+            None => super::super::content_manifest::verify_archive_hash(artifact_path, artifact),
+        };
+        if let Err(error) = verified {
             let result = ComponentDeployResult::failed(
                 component,
                 base_path,
@@ -359,32 +375,26 @@ pub(super) fn execute_artifact_deploy(
     let verification = find_deploy_verification(install_dir);
 
     // Check for extension-defined deploy override
-    let deploy_result =
-        if let Some((override_config, extension)) = find_deploy_override(install_dir) {
-            deploy_with_override(
-                &ctx.client,
-                artifact_path,
-                install_dir,
-                &override_config,
-                &extension,
-                verification.as_ref(),
-                Some(base_path),
-                project.domain.as_deref(),
-                component.remote_owner.as_deref(),
-                component.cli_path.as_deref(),
-                observation.as_deref_mut(),
-            )
-        } else {
-            deploy_artifact(
-                &ctx.client,
-                artifact_path,
-                install_dir,
-                component.extract_command.as_deref(),
-                verification.as_ref(),
-                component.remote_owner.as_deref(),
-                observation,
-            )
-        };
+    let deploy_override = find_deploy_override(install_dir);
+    let install = match &deploy_override {
+        Some((config, extension)) => ArtifactInstall::Override(OverrideInstall {
+            config,
+            extension,
+            site_root: Some(base_path),
+            domain: project.domain.as_deref(),
+            cli_path: component.cli_path.as_deref(),
+        }),
+        None => ArtifactInstall::Extract(component.extract_command.as_deref()),
+    };
+    let deploy_result = deploy_artifact(
+        &ctx.client,
+        artifact_path,
+        install_dir,
+        &install,
+        verification.as_ref(),
+        component.remote_owner.as_deref(),
+        observation,
+    );
 
     match deploy_result {
         Ok(DeployResult {

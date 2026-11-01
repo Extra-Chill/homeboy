@@ -3,12 +3,10 @@ use std::fs;
 use std::path::Path;
 use std::time::Duration;
 
-use super::permissions;
 use homeboy_core::component::{Component, VersionTarget};
 use homeboy_core::engine::hooks::{self, HookFailureMode};
 use homeboy_core::engine::shell;
-use homeboy_core::engine::template::{render_map, TemplateVars};
-use homeboy_core::error::{Error, Result};
+use homeboy_core::engine::template::TemplateVars;
 use homeboy_core::paths as base_path;
 use homeboy_core::project::Project;
 use homeboy_core::server::SshClient;
@@ -19,10 +17,7 @@ use homeboy_extension_contract::{
 };
 use homeboy_version::version;
 
-use super::lifecycle::DeployObservation;
 use super::path_roots::resolve_effective_remote_path;
-use super::transfer::scp_file;
-use super::types::{DeployEffect, DeployResult};
 
 const REMOTE_VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -592,194 +587,7 @@ fn glob_to_awk_regex(glob: &str) -> String {
     regex
 }
 
-/// Detect whether the current deploy target exists as a symlink.
-///
-/// A dev/rig workflow may symlink an external checkout into the deploy location.
-/// When an override install replaces that symlink with a real directory, the
-/// resolved (real) path of the target changes. Surfacing this lets callers and
-/// environments that cache a path mapping for the old destination know they may
-/// need to refresh/recycle. This stays generic: it makes no assumptions about
-/// the runtime that owns the target or how (or whether) it caches paths.
-fn target_is_symlink(ssh_client: &SshClient, target_path: &str) -> bool {
-    if target_path.is_empty() {
-        return false;
-    }
-    ssh_client
-        .execute(&format!("test -L {}", shell::quote_path(target_path)))
-        .success
-}
-
-/// Deploy using extension-defined override strategy.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn deploy_with_override(
-    ssh_client: &SshClient,
-    local_path: &Path,
-    remote_path: &str,
-    override_config: &DeployOverride,
-    extension: &ExtensionManifest,
-    verification: Option<&DeployVerification>,
-    site_root: Option<&str>,
-    domain: Option<&str>,
-    remote_owner: Option<&str>,
-    cli_path_override: Option<&str>,
-    mut observation: Option<&mut DeployObservation>,
-) -> Result<DeployResult> {
-    let artifact_filename = local_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "buildArtifact",
-                "Build artifact path must include a file name",
-                Some(local_path.display().to_string()),
-                None,
-            )
-        })?;
-
-    let staging_artifact = format!("{}/{}", override_config.staging_path, artifact_filename);
-    let mut verified = false;
-
-    // Step 1: Create staging directory
-    if let Some(observation) = observation.as_deref_mut() {
-        observation.phase("transfer", true)?;
-    }
-    let mkdir_cmd = format!(
-        "mkdir -p {}",
-        shell::quote_path(&override_config.staging_path)
-    );
-    homeboy_core::log_status!(
-        "deploy",
-        "Using extension deploy override: {}",
-        extension.id
-    );
-    homeboy_core::log_status!(
-        "deploy",
-        "Creating staging directory: {}",
-        override_config.staging_path
-    );
-    let mkdir_output = ssh_client.execute(&mkdir_cmd);
-    if !mkdir_output.success {
-        return Ok(DeployResult::failure(
-            mkdir_output.exit_code,
-            format!(
-                "Failed to create staging directory: {}",
-                mkdir_output.stderr
-            ),
-        ));
-    }
-
-    // Step 2: Upload artifact to staging
-    let upload_result = scp_file(ssh_client, local_path, &staging_artifact)?;
-    if !upload_result.success {
-        return Ok(upload_result);
-    }
-
-    // Step 3: Render and execute install command
-    if let Some(observation) = observation.as_deref_mut() {
-        observation.phase("extract", true)?;
-    }
-    // Resolution order: component/project cli_path override → extension default → "wp"
-    let cli_path = cli_path_override
-        .or_else(|| {
-            extension
-                .cli
-                .as_ref()
-                .and_then(|c| c.default_cli_path.as_deref())
-        })
-        .unwrap_or("wp");
-
-    let vars = deploy_override_template_vars(
-        artifact_filename,
-        &staging_artifact,
-        remote_path,
-        site_root,
-        cli_path,
-        domain,
-    );
-
-    // Surface a symlink -> real-directory transition before the swap happens. A
-    // dev/rig workflow may symlink an external checkout into the deploy location;
-    // the install command atomically replaces that symlink with a real directory,
-    // which changes the resolved (real) path of the target. Environments caching
-    // a path mapping for the old symlink destination may need to be recycled or
-    // refreshed to pick up the new location. Generic: no assumptions about the
-    // target runtime or its caching behavior.
-    if target_is_symlink(ssh_client, remote_path) {
-        homeboy_core::log_status!(
-            "deploy",
-            "⚠ Deploy target {} is currently a symlink; the install will replace it with a real directory. Any environment that caches the symlink's resolved path may need to be refreshed or recycled to pick up the new location.",
-            remote_path
-        );
-    }
-
-    let install_cmd = render_map(&override_config.install_command, &vars);
-    homeboy_core::log_status!("deploy", "Running install command: {}", install_cmd);
-
-    let install_output = ssh_client.execute(&install_cmd);
-    if !install_output.success {
-        let error_detail = if install_output.stderr.is_empty() {
-            install_output.stdout.clone()
-        } else {
-            install_output.stderr.clone()
-        };
-        return Ok(DeployResult::failure(
-            install_output.exit_code,
-            format!(
-                "Install command failed (exit {}): {}",
-                install_output.exit_code, error_detail
-            ),
-        ));
-    }
-
-    // Step 4: Fix permissions unless skipped
-    if !override_config.skip_permissions_fix {
-        homeboy_core::log_status!("deploy", "Fixing file permissions");
-        permissions::fix_deployed_permissions(ssh_client, remote_path, remote_owner)?;
-    }
-
-    // Step 5: Run verification if configured. Keep the staged artifact around
-    // until after this step so extension verifiers can compare installed files
-    // against the exact uploaded payload.
-    if let Some(v) = verification {
-        if let Some(observation) = observation {
-            observation.phase("verify", true)?;
-        }
-        if let Some(ref verify_cmd_template) = v.verify_command {
-            let mut verify_vars = vars.clone();
-            verify_vars.insert(
-                TemplateVars::TARGET_DIR.to_string(),
-                remote_path.to_string(),
-            );
-            let verify_cmd = render_map(verify_cmd_template, &verify_vars);
-
-            let verify_output = ssh_client.execute(&verify_cmd);
-            if !verify_output.success || verify_output.stdout.trim().is_empty() {
-                let error_msg = v
-                    .verify_error_message
-                    .as_ref()
-                    .map(|msg| render_map(msg, &verify_vars))
-                    .unwrap_or_else(|| format!("Deploy verification failed for {}", remote_path));
-                return Ok(DeployResult::failure(1, error_msg));
-            }
-            verified = true;
-        }
-    }
-
-    // Step 6: Run cleanup command if configured
-    if let Some(cleanup_cmd_template) = &override_config.cleanup_command {
-        let cleanup_cmd = render_map(cleanup_cmd_template, &vars);
-        homeboy_core::log_status!("deploy", "Running cleanup: {}", cleanup_cmd);
-        let _ = ssh_client.execute(&cleanup_cmd); // Best effort cleanup
-    }
-
-    Ok(DeployResult::success(0).with_effect(DeployEffect {
-        remote_path: remote_path.to_string(),
-        artifact_path: Some(staging_artifact),
-        verified,
-    }))
-}
-
-fn deploy_override_template_vars(
+pub(super) fn deploy_override_template_vars(
     artifact_filename: &str,
     staging_artifact: &str,
     target_dir: &str,
@@ -879,12 +687,39 @@ mod tests {
     use super::*;
     use crate::test_support::local_client;
     use homeboy_core::component::VersionTarget;
+    use homeboy_core::engine::template::render_map;
     use homeboy_extension_contract::manifest_toolchain_config::DeployOverride;
     use homeboy_extension_contract::{
         DeployArchiveInstallPolicy, DeployRequiredHeader, DeployVerification, ExtensionManifest,
     };
     use std::fs;
     use std::io::Write;
+
+    fn deploy_with_override(
+        ssh_client: &SshClient,
+        local_path: &Path,
+        remote_path: &str,
+        config: &DeployOverride,
+        verification: Option<&DeployVerification>,
+        site_root: Option<&str>,
+    ) -> homeboy_core::error::Result<crate::types::DeployResult> {
+        let install = crate::safety_and_artifact::OverrideInstall {
+            config,
+            extension: &extension(),
+            site_root,
+            domain: None,
+            cli_path: None,
+        };
+        crate::safety_and_artifact::deploy_artifact(
+            ssh_client,
+            local_path,
+            remote_path,
+            &crate::safety_and_artifact::ArtifactInstall::Override(install),
+            verification,
+            None,
+            None,
+        )
+    }
 
     fn extension() -> ExtensionManifest {
         serde_json::from_value(serde_json::json!({
@@ -1127,13 +962,8 @@ mod tests {
             &artifact,
             target.to_str().expect("target path"),
             &override_config,
-            &extension(),
             Some(&verification),
             Some(temp.path().to_str().expect("site root")),
-            None,
-            None,
-            None,
-            None,
         )
         .expect("deploy result");
 
@@ -1151,6 +981,7 @@ mod tests {
         let artifact = temp.path().join("fixture.zip");
         let staging = temp.path().join("staging");
         let target = temp.path().join("packages/fixture");
+        let remote_commands = temp.path().join("remote-commands");
 
         fs::create_dir_all(&target).expect("target dir");
         fs::write(target.join("stale.php"), "stale").expect("stale file");
@@ -1159,29 +990,40 @@ mod tests {
             &[("fixture/fixture.manifest", "Package Name: Fixture\n")],
         );
 
-        let policy = package_archive_policy(staging.to_string_lossy().to_string());
+        let mut policy = package_archive_policy(staging.to_string_lossy().to_string());
+        policy.skip_permissions_fix = false;
         let override_config = archive_install_override(&policy);
         let verification = archive_install_verification(&policy).expect("verification");
+        // The client's PATH export is double-quoted, so this substitution runs
+        // once per remote command and counts round trips.
+        let client = SshClient {
+            env: HashMap::from([(
+                "PATH".to_string(),
+                format!("$(printf x >> {})$PATH", remote_commands.display()),
+            )]),
+            ..local_client()
+        };
 
         let result = deploy_with_override(
-            &local_client(),
+            &client,
             &artifact,
             target.to_str().expect("target path"),
             &override_config,
-            &extension(),
             Some(&verification),
             Some(temp.path().to_str().expect("site root")),
-            None,
-            None,
-            None,
-            None,
         )
         .expect("deploy result");
 
         assert!(result.success, "deploy failed: {:?}", result.error);
+        assert!(result.effect.expect("effect").verified);
         assert!(target.join("fixture.manifest").exists());
         assert!(!target.join("stale.php").exists());
         assert!(!staging.join("fixture.zip").exists());
+        assert_eq!(
+            fs::read_to_string(&remote_commands).expect("remote command count"),
+            "xx",
+            "staging mkdir, then install + permissions + verify + cleanup in one script"
+        );
     }
 
     #[test]
@@ -1208,13 +1050,8 @@ mod tests {
             &artifact,
             target.to_str().expect("target path"),
             &override_config,
-            &extension(),
             Some(&verification),
             Some(temp.path().to_str().expect("site root")),
-            None,
-            None,
-            None,
-            None,
         )
         .expect("deploy result");
 
@@ -1247,13 +1084,8 @@ mod tests {
             &artifact,
             target.to_str().expect("target path"),
             &override_config,
-            &extension(),
             Some(&verification),
             Some(temp.path().to_str().expect("site root")),
-            None,
-            None,
-            None,
-            None,
         )
         .expect("deploy result");
 
@@ -1282,13 +1114,8 @@ mod tests {
             &artifact,
             target.to_str().expect("target path"),
             &override_config,
-            &extension(),
             Some(&verification),
             Some(temp.path().to_str().expect("site root")),
-            None,
-            None,
-            None,
-            None,
         )
         .expect("deploy result");
 
@@ -1369,13 +1196,8 @@ mod tests {
             &artifact,
             target.to_str().expect("target path"),
             &override_config,
-            &extension(),
             None,
             Some(temp.path().to_str().expect("site root")),
-            None,
-            None,
-            None,
-            None,
         )
         .expect("deploy result");
 
@@ -1419,13 +1241,8 @@ mod tests {
             &artifact,
             target.to_str().expect("target path"),
             &override_config,
-            &extension(),
             None,
             Some(temp.path().to_str().expect("site root")),
-            None,
-            None,
-            None,
-            None,
         )
         .expect("deploy result");
 
@@ -1468,13 +1285,8 @@ mod tests {
             &artifact,
             target.to_str().expect("target path"),
             &override_config,
-            &extension(),
             None,
             Some(temp.path().to_str().expect("site root")),
-            None,
-            None,
-            None,
-            None,
         )
         .expect("deploy result");
 
@@ -1678,13 +1490,8 @@ mod tests {
             &artifact,
             target.to_str().expect("target path"),
             &override_config,
-            &extension(),
             None,
             Some(temp.path().to_str().expect("site root")),
-            None,
-            None,
-            None,
-            None,
         )
         .expect("deploy result");
 
@@ -1832,30 +1639,6 @@ mod tests {
         assert!(list_adjacent_install_temp_dirs(&parent, "component").is_empty());
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn target_is_symlink_detects_symlink_vs_real_dir() {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let real = temp.path().join("real");
-        fs::create_dir(&real).expect("real dir");
-        let link = temp.path().join("link");
-        std::os::unix::fs::symlink(&real, &link).expect("symlink");
-
-        assert!(target_is_symlink(
-            &local_client(),
-            link.to_str().expect("link path")
-        ));
-        assert!(!target_is_symlink(
-            &local_client(),
-            real.to_str().expect("real path")
-        ));
-        assert!(!target_is_symlink(
-            &local_client(),
-            temp.path().join("missing").to_str().expect("missing path")
-        ));
-        assert!(!target_is_symlink(&local_client(), ""));
-    }
-
     // A dev symlink at the deploy target must be replaced by a real directory
     // atomically, without writing *through* the symlink into the external
     // checkout it points at. This is the exact footgun from issue #6867.
@@ -1889,13 +1672,8 @@ mod tests {
             &artifact,
             target.to_str().expect("target path"),
             &override_config,
-            &extension(),
             Some(&verification),
             Some(temp.path().to_str().expect("site root")),
-            None,
-            None,
-            None,
-            None,
         )
         .expect("deploy result");
 
