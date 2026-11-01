@@ -177,7 +177,11 @@ pub(crate) fn cook_recovery_step(inputs: &CookRecoveryInputs<'_>) -> CookRecover
     if inputs.exact_checkpoint_candidate_mismatch && inputs.retry_admitted {
         return CookRecoveryStep::ForkReplacement;
     }
-    if status == CookStatus::CandidateRecoverable {
+    // A publishable candidate whose agent declared the task incomplete stops
+    // here whatever the gate status: rearming would replay provider work only
+    // to re-read the same verdict (#16772).
+    let publishable = inputs.verified_unpublished && !status_is_settled(&status);
+    if status == CookStatus::CandidateRecoverable || publishable {
         if let Some(reason) = inputs.agent_incomplete_reason {
             return CookRecoveryStep::none(format!(
                 "The agent's review form declares the task incomplete: {reason}. Continuing would re-read the same verdict, so `recover` cannot publish this candidate on its own. Inspect it with `agent-task diagnose {run}`; if the task is in fact done, publish it with a complete review form via `agent-task recover {run} --review-form @FORM.json --review-form-tool <TOOL> --review-form-model <MODEL> --review-form-author <IDENTITY>`, otherwise start a fresh Cook.",
@@ -186,10 +190,7 @@ pub(crate) fn cook_recovery_step(inputs: &CookRecoveryInputs<'_>) -> CookRecover
             ));
         }
     }
-    if inputs.verified_unpublished
-        && inputs.agent_incomplete_reason.is_none()
-        && !status_is_settled(&status)
-    {
+    if publishable {
         return CookRecoveryStep::Publish;
     }
     if status == CookStatus::CandidateRecoverable && inputs.continuation_completed {
@@ -1231,15 +1232,20 @@ mod tests {
                 "{status} is already settled"
             );
         }
-        assert_eq!(
-            step("candidate_recoverable", |inputs| {
-                inputs.verified_unpublished = true;
-                inputs.agent_incomplete_reason = Some("not done");
-            })
-            .action_name(),
-            None,
-            "an agent-declared incomplete form is never published"
-        );
+        // Replacement gates can leave a green candidate under a gate-failure
+        // status whose continuation still needs rearming (#16772).
+        for status in ["candidate_recoverable", "baseline_red"] {
+            assert_eq!(
+                step(status, |inputs| {
+                    inputs.verified_unpublished = true;
+                    inputs.continuation_rearm_required = true;
+                    inputs.agent_incomplete_reason = Some("not done");
+                })
+                .action_name(),
+                None,
+                "{status}: an agent-declared incomplete form is neither published nor replayed"
+            );
+        }
     }
 
     #[test]
