@@ -16,6 +16,7 @@ use homeboy_core::daemon::controller_job_driver::{
 use homeboy_core::Result;
 
 use crate::agent_task_lifecycle;
+pub use crate::agent_task_promotion::promotion_is_resumable;
 use crate::agent_task_promotion::{
     promote_with_checkpoint, resume_promoted_patch, with_gate_supervision, with_promotion_progress,
     AgentTaskPromotionReport, AgentTaskPromotionRequest, PromotionProgressCallback,
@@ -460,14 +461,6 @@ fn bind_promotion_request_fingerprint(
     }
     report.provenance["promotion_request_fingerprint"] =
         Value::String(request_fingerprint.to_string());
-}
-
-pub fn promotion_is_resumable(previous: &Value, rerun_completed_gates: bool) -> bool {
-    let status = previous.get("status").and_then(Value::as_str);
-    matches!(
-        status,
-        Some("gate_failed" | "verification_pending" | "gates_deferred" | "gate_deferred")
-    ) || (rerun_completed_gates && status == Some("applied"))
 }
 
 #[cfg(test)]
