@@ -569,6 +569,95 @@ fn live_runner_snapshot_appends_runner_progress_once() {
 }
 
 #[test]
+fn oversize_pre_execution_failure_preserves_cause_and_terminal_record() {
+    // Exercise message and details independently, plus JSON escaping expansion.
+    for (case, message, details) in [
+        (
+            "message",
+            format!("gate probe failed: {}", "é".repeat(48 * 1024)),
+            json!({}),
+        ),
+        (
+            "details",
+            "gate probe failed: missing toolchain".to_string(),
+            json!({"probe_output": "x".repeat(96 * 1024)}),
+        ),
+        (
+            "escaped",
+            format!("gate probe failed: {}", "\u{01}".repeat(96 * 1024)),
+            json!({}),
+        ),
+    ] {
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let store = AgentTaskLifecycleStore::new(context.path_roots());
+        let run_id = format!("oversize-pre-execution-{case}");
+        let plan = test_plan();
+        store
+            .submit_plan_with_runtime_admission(&plan, &run_id, |_| Ok(json!({})))
+            .expect("submitted");
+        let mut error = Error::internal_unexpected(&message);
+        error.details = details.clone();
+        record_pre_execution_failure_in_store(
+            &store,
+            &run_id,
+            &plan,
+            "admit.gate_toolchains",
+            &error,
+        )
+        .expect("original failure must terminalize, not fail event validation");
+        let record = store.read_record(&run_id).expect("durable record");
+        assert_eq!(record.state(), AgentTaskRunState::Failed);
+        assert_eq!(record.metadata["pre_execution_failure"]["message"], message);
+        assert_eq!(record.metadata["pre_execution_failure"]["details"], details);
+        let aggregate: AgentTaskAggregate = serde_json::from_slice(
+            &std::fs::read(store.aggregate_path(&run_id)).expect("aggregate file"),
+        )
+        .expect("aggregate");
+        let full_message = aggregate.events[0]
+            .message
+            .as_deref()
+            .expect("full message");
+        assert!(full_message.ends_with(&message));
+        assert_eq!(aggregate.outcomes[0].outputs["details"], details);
+        assert_eq!(
+            store
+                .read_aggregate_readonly(&run_id)
+                .expect("authoritative aggregate")
+                .events[0]
+                .message,
+            aggregate.events[0].message,
+        );
+        let (snapshot, mirrored) = store
+            .read_record_with_aggregate_bounded(&run_id)
+            .expect("status snapshot resolves externalized evidence");
+        assert_eq!(snapshot.state(), AgentTaskRunState::Failed);
+        assert_eq!(
+            mirrored.expect("mirrored aggregate").events[0].message,
+            aggregate.events[0].message
+        );
+        let events = durable_events(&store, &run_id);
+        let failed = events
+            .iter()
+            .find(|event| event.kind == "task.state_changed" && event.data["state"] == "failed")
+            .expect("failed event");
+        let projected = failed.data["message"].as_str().expect("projected message");
+        assert!(projected.starts_with(
+            "agent-task pre-execution admit.gate_toolchains failed: gate probe failed:"
+        ));
+        assert!(!projected.contains("append input exceeds its bound"));
+        assert!(serde_json::to_vec(&failed.data).expect("event data").len() < 32 * 1024);
+        if case != "details" {
+            assert!(projected.contains(&format!("{} bytes", full_message.len())));
+            assert!(
+                projected.contains(&homeboy_engine_primitives::content_hash::sha256_hex(
+                    full_message.as_bytes()
+                ))
+            );
+        }
+    }
+}
+
+#[test]
 fn oversize_runner_transport_appends_a_bounded_projection() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
     let lifecycle_store = AgentTaskLifecycleStore::new(context.path_roots());

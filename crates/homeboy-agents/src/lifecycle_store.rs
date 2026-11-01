@@ -676,6 +676,7 @@ impl AgentTaskLifecycleStore {
                 None,
             )
         })?;
+        let run = resolve_run_payloads(&observations, run)?;
         let value = run
             .metadata_json
             .get("agent_task_aggregate")
@@ -964,7 +965,7 @@ impl AgentTaskLifecycleStore {
                 None,
             ));
         }
-        snapshot_from_run(&run)
+        snapshot_from_run(&resolve_run_payloads(&store, run)?)
     }
 
     /// List every durable agent-task record from this store's own observation
@@ -1225,7 +1226,7 @@ impl AgentTaskLifecycleStore {
                 None,
             )
         })?;
-        snapshot_from_run(&run)
+        snapshot_from_run(&resolve_run_payloads(&store, run)?)
     }
 
     /// Read one record and its mirrored aggregate from the same read-only
@@ -1244,7 +1245,7 @@ impl AgentTaskLifecycleStore {
                 None,
             )
         })?;
-        record_and_aggregate_from_run(&run)
+        record_and_aggregate_from_run(&resolve_run_payloads(&store, run)?)
     }
 
     /// Replace a record unconditionally, ignoring its revision. Test fixtures
@@ -2475,7 +2476,7 @@ pub(super) fn write_record_guarded(
     {
         mirror_cook_row_in_store(lifecycle_store, &store, cook_id)?;
     }
-    snapshot_from_run(&committed).map(GuardedRecordWrite::Committed)
+    snapshot_from_run(&resolve_run_payloads(&store, committed)?).map(GuardedRecordWrite::Committed)
 }
 
 /// A Cook handed off to its attempts: its own record holds the handoff, and
@@ -3107,7 +3108,18 @@ fn read_mirrored_aggregate_in_store(
     let Some(run) = store.get_run(run_id)? else {
         return Ok(None);
     };
-    aggregate_from_run(&run)
+    aggregate_from_run(&resolve_run_payloads(&store, run)?)
+}
+
+/// Large authoritative values may be content-addressed to keep SQLite rows
+/// bounded. Resolve them before deserializing typed lifecycle fields.
+fn resolve_run_payloads(store: &ObservationStore, mut run: RunRecord) -> Result<RunRecord> {
+    run.metadata_json =
+        homeboy_core::observation::store::metadata_payloads::resolve_metadata_payload(
+            &run.metadata_json,
+            &store.artifact_root()?,
+        )?;
+    Ok(run)
 }
 
 fn aggregate_from_run(run: &RunRecord) -> Result<Option<AgentTaskAggregate>> {

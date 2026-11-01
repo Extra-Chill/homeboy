@@ -171,7 +171,11 @@ pub(crate) fn prepared_progress_events(
                     None,
                     json!({
                         "state": event.state,
-                        "message": event.message,
+                        "message": event.message.clone().map(|message| bounded_event_message(
+                            message,
+                            "aggregate message",
+                            "the run aggregate",
+                        )),
                         "progress": { "attempt": event.attempt },
                         "source_schema": AGENT_TASK_AGGREGATE_SCHEMA,
                     }),
@@ -748,16 +752,32 @@ fn bounded_runner_transport(data: Value) -> Value {
 /// the head of an oversize message plus its size and digest; the full text
 /// stays in the runner job log.
 fn bounded_runner_message(message: String) -> String {
+    bounded_event_message(message, "runner message", "the runner job log")
+}
+
+/// Bound only the ledger projection; authoritative evidence remains intact.
+/// Budget JSON-escaped bytes as well as UTF-8 bytes so captured control
+/// characters cannot expand the head past the event's bound on serialization.
+fn bounded_event_message(message: String, label: &str, source: &str) -> String {
     let limit = CONTROL_PLANE_EVENT_DATA_MAX_BYTES / 4;
-    if message.len() <= limit {
+    let mut bytes = 0;
+    let mut end = message.len();
+    for (index, ch) in message.char_indices() {
+        bytes += match ch {
+            '"' | '\\' | '\n' | '\r' | '\t' | '\u{08}' | '\u{0c}' => 2,
+            '\u{00}'..='\u{1f}' => 6,
+            _ => ch.len_utf8(),
+        };
+        if bytes > limit {
+            end = index;
+            break;
+        }
+    }
+    if end == message.len() {
         return message;
     }
-    let end = (0..=limit)
-        .rev()
-        .find(|index| message.is_char_boundary(*index))
-        .unwrap_or(0);
     format!(
-        "{}\n[runner message truncated: {} bytes, sha256 {}; read it from the runner job log]",
+        "{}\n[{label} truncated: {} bytes, sha256 {}; read it from {source}]",
         &message[..end],
         message.len(),
         homeboy_engine_primitives::content_hash::sha256_hex(message.as_bytes()),
