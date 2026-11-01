@@ -54,9 +54,9 @@ Published from Extra-Chill/homeboy@${source_sha} (${source_tag}).
 Develop in https://github.com/Extra-Chill/homeboy/tree/main/action."
 
 commit="$(GIT_AUTHOR_NAME="${GIT_AUTHOR_NAME:-homeboy-ci[bot]}" \
-  GIT_AUTHOR_EMAIL="${GIT_AUTHOR_EMAIL:-homeboy-ci[bot]@users.noreply.github.com}" \
+  GIT_AUTHOR_EMAIL="${GIT_AUTHOR_EMAIL:-266378653+homeboy-ci[bot]@users.noreply.github.com}" \
   GIT_COMMITTER_NAME="${GIT_COMMITTER_NAME:-homeboy-ci[bot]}" \
-  GIT_COMMITTER_EMAIL="${GIT_COMMITTER_EMAIL:-homeboy-ci[bot]@users.noreply.github.com}" \
+  GIT_COMMITTER_EMAIL="${GIT_COMMITTER_EMAIL:-266378653+homeboy-ci[bot]@users.noreply.github.com}" \
   git commit-tree "${tree}" -p "${parent}" -m "${message}")"
 
 echo "Built ${commit} (tree ${tree}) on top of mirror main ${parent}."

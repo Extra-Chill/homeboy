@@ -57,10 +57,10 @@ jobs:
 
       - name: Generate app token
         id: app-token
-        uses: actions/create-github-app-token@v1
+        uses: actions/create-github-app-token@v3
         continue-on-error: true
         with:
-          app-id: ${{ secrets.HOMEBOY_APP_ID }}
+          client-id: ${{ secrets.HOMEBOY_APP_ID }}
           private-key: ${{ secrets.HOMEBOY_APP_PRIVATE_KEY }}
 
       - uses: Extra-Chill/homeboy-action@v2
@@ -92,9 +92,9 @@ jobs:
 
       - name: Generate homeboy-action token
         id: mirror-token
-        uses: actions/create-github-app-token@v1
+        uses: actions/create-github-app-token@v3
         with:
-          app-id: ${{ secrets.HOMEBOY_APP_ID }}
+          client-id: ${{ secrets.HOMEBOY_APP_ID }}
           private-key: ${{ secrets.HOMEBOY_APP_PRIVATE_KEY }}
           owner: Extra-Chill
           repositories: homeboy-action
