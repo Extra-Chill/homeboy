@@ -188,6 +188,10 @@ pub(crate) fn unsupported_component_interpolations(input: &str) -> Vec<String> {
 pub(crate) fn settings_env(settings: &[(String, String)]) -> BTreeMap<String, String> {
     let mut env = BTreeMap::new();
     for (key, value) in settings {
+        if key == "HOMEBOY_SETTINGS_JSON" {
+            env.insert(key.clone(), value.clone());
+            continue;
+        }
         env.insert(
             format!("HOMEBOY_SETTINGS_{}", key.to_uppercase()),
             value.clone(),

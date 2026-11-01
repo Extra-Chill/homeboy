@@ -80,8 +80,9 @@ pub use runner::{
     head_sha_and_branch, preflight_effective_component_checkouts, record_effective_component_path,
     run_bench_prepare, run_check, run_check_groups, run_check_groups_with_settings,
     run_check_with_settings, run_down_with_settings, run_fuzz_prepare, run_lint, run_repair,
-    run_status, run_up, run_up_with_refs, snapshot_state, BenchPrepareReport, CheckReport,
-    DownReport, FuzzPrepareReport, RepairReport, RigStatusReport, UpReport,
+    run_status, run_up, run_up_with_refs, run_up_with_refs_and_settings, snapshot_state,
+    BenchPrepareReport, CheckReport, DownReport, FuzzPrepareReport, RepairReport, RigStatusReport,
+    UpReport,
 };
 // Reachable through `RepairReport`/`RigStatusReport` public fields.
 #[allow(unused_imports)] // consumed by `tests/core/rig/*` via the crate root
@@ -395,6 +396,14 @@ fn read_spec_from_path(
 }
 
 pub(crate) fn validate_rig_spec(spec: &RigSpec) -> Result<()> {
+    if spec.is_disposable() && !spec.services.is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "services",
+            "disposable rigs (lifecycle.mode: disposable) must not declare services",
+            Some(spec.id.clone()),
+            None,
+        ));
+    }
     let mut errors = validate_dependency_materialization_steps(spec);
     // Generic `workloads` keys name extension-declared workload kinds, so a
     // key must satisfy the same slug rule as a manifest `workloads.<kind>`.

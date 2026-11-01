@@ -201,6 +201,15 @@ pub fn run_up(rig: &RigSpec) -> Result<UpReport> {
 }
 
 pub fn run_up_with_refs(rig: &RigSpec, overrides: &BTreeMap<String, String>) -> Result<UpReport> {
+    run_up_with_refs_and_settings(rig, overrides, &[])
+}
+
+pub fn run_up_with_refs_and_settings(
+    rig: &RigSpec,
+    overrides: &BTreeMap<String, String>,
+    settings: &[(String, String)],
+) -> Result<UpReport> {
+    crate::validate_rig_spec(rig)?;
     let (effective, component_refs) =
         crate::ref_materialization::materialize_components(rig, overrides)?;
     let rig = &effective;
@@ -256,7 +265,7 @@ pub fn run_up_with_refs(rig: &RigSpec, overrides: &BTreeMap<String, String>) -> 
     let observer = RigRunObserver::start(rig, "up", &roots);
 
     let execute = || {
-        let outcome = run_pipeline(&state_store, rig, "up", true)?;
+        let outcome = run_pipeline_with_settings(&state_store, rig, "up", true, settings)?;
 
         if outcome.is_success() {
             let mut state = state_store.load(&rig.id)?;
