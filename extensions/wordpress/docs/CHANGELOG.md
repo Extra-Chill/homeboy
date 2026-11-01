@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.53.18] - 2026-11-01
+
+### Fixed
+- stop flushing the object cache on every deploy
+
 ## [3.53.17] - 2026-11-01
 
 ### Fixed
