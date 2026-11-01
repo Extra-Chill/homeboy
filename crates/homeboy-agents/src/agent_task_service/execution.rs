@@ -2770,11 +2770,28 @@ pub(super) fn cook_retry_plans_match(expected: &AgentTaskPlan, observed: &AgentT
 
     // Submission assigns fresh workspace authority to the successor. Lease
     // tokens, expirations and lifecycle revisions identify its owner, not work.
-    // homeboy_plan is a derived, non-serialized projection and may be stale
-    // after a request override or rebuilt by a different controller build.
+    // Submission also stamps the submitting caller's `client_context`, which
+    // likewise names the owner. homeboy_plan is a derived, non-serialized
+    // projection and may be stale after a request override or rebuilt by a
+    // different controller build.
     let mut normalized = observed.clone();
     normalized.workspace_owner_lease = expected.workspace_owner_lease.clone();
     normalized.workspace_lifecycle_revision = expected.workspace_lifecycle_revision;
+    match (
+        expected.metadata.get("client_context"),
+        normalized.metadata.as_object_mut(),
+    ) {
+        (Some(context), Some(metadata)) => {
+            metadata.insert("client_context".to_string(), context.clone());
+        }
+        (None, Some(metadata)) => {
+            metadata.remove("client_context");
+            if metadata.is_empty() && expected.metadata.is_null() {
+                normalized.metadata = Value::Null;
+            }
+        }
+        _ => {}
+    }
     for (expected_task, observed_task) in expected.tasks.iter().zip(&mut normalized.tasks) {
         let expected_identity = expected_task.metadata.get("cook_workspace_identity");
         if observed_task.metadata.get("cook_workspace_identity") == expected_identity {
@@ -4073,6 +4090,35 @@ mod tests {
         different_work.workspace_identity =
             Some(homeboy_runner_contract::WorkspaceIdentity::new("test", "other").unwrap());
         assert!(!cook_retry_plans_match(&overridden, &different_work));
+    }
+
+    /// Submission stamps the submitting caller's `client_context` from the
+    /// ambient `HOMEBOY_CALLER_CONTEXT`/`HOMEBOY_REQUESTER`. A Cook retry
+    /// prepared without it, or submitted by a different session, is the same
+    /// work; before this, every Cook retry from a Roadie session failed with
+    /// "reserved controller plan differs from the frozen retry preparation".
+    #[test]
+    fn retry_identity_ignores_the_submitting_caller_context() {
+        let workspace = tempfile::tempdir().unwrap();
+        let prepared = one_task_plan("caller-retry", workspace.path());
+        for (expected, observed) in [
+            (
+                Value::Null,
+                json!({"client_context": {"caller_context": "roadie:session:b"}}),
+            ),
+            (
+                json!({"client_context": {"caller_context": "roadie:session:a"}, "repo": "r"}),
+                json!({"client_context": {"requester": "discord:user:1"}, "repo": "r"}),
+            ),
+        ] {
+            let mut expected_plan = prepared.clone();
+            expected_plan.metadata = expected;
+            let mut frozen = prepared.clone();
+            frozen.metadata = observed;
+            assert!(cook_retry_plans_match(&expected_plan, &frozen));
+            frozen.metadata["repo"] = json!("other work");
+            assert!(!cook_retry_plans_match(&expected_plan, &frozen));
+        }
     }
 
     #[test]
