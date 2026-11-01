@@ -74,11 +74,10 @@ homeboy_runner_harness_init --component-alias PLUGIN_PATH
 
 # Generic local-workspace-dependency override helper. The mechanism (build a
 # local sibling package, pack it, install the built tarball so peer deps dedupe)
-# is generic Node.js behavior and lives in the nodejs extension, which is
-# installed alongside this one. Resolve via an explicit runtime override first,
-# then the sibling extension path.
-EXTENSION_COLLECTION_PATH="$(dirname "$EXTENSION_PATH")"
-LOCAL_WORKSPACE_DEPS_HELPER="${HOMEBOY_RUNTIME_LOCAL_WORKSPACE_DEPS:-${EXTENSION_COLLECTION_PATH}/nodejs/scripts/lib/local-workspace-deps.sh}"
+# is generic Node.js behavior shared with the nodejs extension. It lives in the
+# collection's scripts/lib, which ships with every extension; nodejs/ may not be
+# installed. Resolve via an explicit runtime override first.
+LOCAL_WORKSPACE_DEPS_HELPER="${HOMEBOY_RUNTIME_LOCAL_WORKSPACE_DEPS:-${SHARED_LIB_DIR}/local-workspace-deps.sh}"
 
 # Resolves `wp-scripts` to the extension's own pinned @wordpress/scripts
 # whenever a component invokes it without vendoring a local copy (#2870).

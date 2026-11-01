@@ -18,7 +18,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EXTENSION_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
-HELPER="${EXTENSION_DIR}/scripts/lib/local-workspace-deps.sh"
+HELPER="${EXTENSION_DIR}/../scripts/lib/local-workspace-deps.sh"
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/homeboy-lwd-smoke.XXXXXX")"
 trap 'rm -rf "$TMP_DIR"' EXIT
 

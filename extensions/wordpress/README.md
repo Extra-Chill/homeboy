@@ -645,7 +645,7 @@ script is run after installing its dependencies. The override runs after the
 consumer's own dependencies are installed and before the consumer build, and a
 declared override that fails is a fatal build error. The mechanism is generic
 Node.js behavior shared with the `nodejs` build runner
-(`nodejs/scripts/lib/local-workspace-deps.sh`); it carries no WordPress
+(`scripts/lib/local-workspace-deps.sh`, shared by the nodejs and wordpress extensions); it carries no WordPress
 specifics.
 
 ### wp-scripts (JavaScript build toolchain)
