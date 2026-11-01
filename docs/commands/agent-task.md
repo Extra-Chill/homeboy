@@ -423,7 +423,10 @@ Each `--verify` runs against the same clean committed candidate in an isolated
 detached checkout, before Homeboy reserves a manual-finalization lifecycle
 record. Homeboy hydrates declared dependencies there, retains structured setup
 provenance, and derives one durable gate result and reviewer test step per
-command. Existing `--gate-result`, `--targeted-check-run`, and `--test-step` remain
+command. Gate setup, here and before promotion gates, hydrates the checkout
+root plus only the descendant dependency roots whose checkout-relative path a
+gate command names (for example `cd php-transformer && composer run lint`).
+Existing `--gate-result`, `--targeted-check-run`, and `--test-step` remain
 the explicit external-proof import path for verification that already occurred;
 they cannot be combined with `--verify`.
 

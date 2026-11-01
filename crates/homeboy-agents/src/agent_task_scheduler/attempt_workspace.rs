@@ -832,6 +832,7 @@ fn hydrate_attempt_workspace(
         ATTEMPT_SETUP_WORKSPACE,
         &homeboy_core::deps::DependencyHydrationPolicy::default(),
         component_id.as_deref(),
+        None,
     ) {
         Ok(installs) => outcomes.extend(installs),
         Err(failure) => error = Some(failure.message),

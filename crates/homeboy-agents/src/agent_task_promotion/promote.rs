@@ -1688,6 +1688,19 @@ fn run_promotion_gates(
     }
 }
 
+/// The text of every gate a promotion runs, so destination setup hydrates only
+/// the dependency roots those gates name (#16857).
+fn promotion_gate_commands(gates: &crate::agent_task_gate::VerifyGateOptions) -> Vec<String> {
+    gates
+        .test_execution_plan
+        .iter()
+        .filter_map(|plan| plan.declared_command().ok())
+        .map(|argv| argv.join(" "))
+        .chain(gates.verify.iter().cloned())
+        .chain(gates.private_verify.iter().cloned())
+        .collect()
+}
+
 fn run_promotion_gates_inner(
     options: &AgentTaskPromotionRequest,
     worktree_path: &Path,
@@ -1795,6 +1808,7 @@ fn run_promotion_gates_inner(
                         .gate_environment
                         .admitted_component_id
                         .as_deref(),
+                    Some(&promotion_gate_commands(&options.gates)),
                 )
                 .map_err(|error| {
                     gate_setup_failure(

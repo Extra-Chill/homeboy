@@ -1294,6 +1294,7 @@ fn execute_manual_verification(
         let setup =
             homeboy::agents::agent_tasks::finalization::hydrate_manual_verification_dependencies(
                 checkout.path(),
+                commands,
             )?;
         if manual_checkout_has_tracked_changes(&checkout_path)? {
             let mut error = homeboy::core::Error::validation_invalid_argument(
