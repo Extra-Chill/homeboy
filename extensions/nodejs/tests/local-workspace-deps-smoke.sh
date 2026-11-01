@@ -89,12 +89,14 @@ settings_json="$(node -e '
   }));
 ')"
 
-out_file="${TMP_DIR}/apply.out"
-(
+run_apply() {
     HOMEBOY_SETTINGS_JSON="$settings_json" \
         bash -c 'source "$1"; homeboy_apply_local_workspace_dependencies "$2"' \
-        _ "$HELPER" "$consumer_dir"
-) > "$out_file" 2>&1 || { sed 's/^/  /' "$out_file" >&2; fail "override application failed"; }
+        _ "$HELPER" "$1"
+}
+
+out_file="${TMP_DIR}/apply.out"
+run_apply "$consumer_dir" > "$out_file" 2>&1 || { sed 's/^/  /' "$out_file" >&2; fail "override application failed"; }
 
 # The BUILT dependency must be installed in the consumer.
 dep_built="${consumer_dir}/node_modules/@scope/widget/dist/index.js"
@@ -117,6 +119,43 @@ grep -Fq '"type":"nodejs.local_workspace_dependency"' "$out_file" \
 grep -Fq '"name":"@scope/widget"' "$out_file" || fail "evidence missing dependency name"
 
 echo "ok: real build + pack + install with peer dedup"
+
+# --- Reuse at one clean commit -------------------------------------------------
+# Every consumer and pass at a clean commit reuses one build, and a consumer
+# that already has that tarball skips the install. Any uncommitted input
+# rebuilds. Builds are counted outside the repository so they keep it clean.
+builds_log="${TMP_DIR}/builds.log"
+cat > "${widget_dir}/build.js" <<JS
+const fs = require('fs');
+fs.appendFileSync('${builds_log}', 'build\\n');
+fs.mkdirSync('dist', { recursive: true });
+fs.writeFileSync('dist/index.js', 'module.exports = { widget: "built" };\\n');
+JS
+printf 'dist/\nnode_modules/\n' > "${monorepo_dir}/.gitignore"
+git -C "$monorepo_dir" init -q
+git -C "$monorepo_dir" add -A
+git -C "$monorepo_dir" -c user.name=t -c user.email=t@t commit -qm init
+second_consumer="${TMP_DIR}/consumer-two"
+cp -R "$consumer_dir" "$second_consumer"
+for consumer in "$consumer_dir" "$second_consumer"; do
+    rm -rf "${consumer}/node_modules/@scope" "${consumer}/node_modules/.homeboy-local-workspace-deps"
+done
+
+: > "$builds_log"
+reuse_out="${TMP_DIR}/reuse.out"
+for consumer in "$consumer_dir" "$consumer_dir" "$second_consumer" "$second_consumer"; do
+    run_apply "$consumer" >> "$reuse_out" 2>&1 || { sed 's/^/  /' "$reuse_out" >&2; fail "reuse application failed"; }
+done
+[ "$(wc -l < "$builds_log" | tr -d ' ')" = 1 ] || { sed 's/^/  /' "$reuse_out" >&2; fail "clean commit built more than once"; }
+[ "$(grep -c "installing built tarball into consumer" "$reuse_out")" = 2 ] \
+    || { sed 's/^/  /' "$reuse_out" >&2; fail "expected one install per consumer"; }
+grep -Fq 'built' "${second_consumer}/node_modules/@scope/widget/dist/index.js" \
+    || fail "reused tarball not installed into second consumer"
+
+printf 'export const widget = "edited";\n' > "${widget_dir}/src/index.js"
+run_apply "$consumer_dir" >> "$reuse_out" 2>&1 || fail "dirty application failed"
+[ "$(wc -l < "$builds_log" | tr -d ' ')" = 2 ] || fail "dirty repository reused a cached build"
+echo "ok: one build per clean commit, one install per consumer"
 
 # --- No-op cases ---------------------------------------------------------------
 run_helper() {
