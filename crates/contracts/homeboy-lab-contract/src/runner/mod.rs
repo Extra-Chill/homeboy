@@ -294,7 +294,7 @@ pub fn admit_lab_runner(
             let version = runtime.lab_contract_version.unwrap_or(LAB_CONTRACT_VERSION);
             (version != controller_version).then(|| {
                 rejection_code = Some(LabAdmissionRejection::LabContractVersionMismatch);
-                format!("lab_contract_version_mismatch: controller Lab contract version {controller_version}, runner Lab contract version {version}; refresh the runner with `homeboy runner refresh-homeboy <runner-id> --reconnect`, then retry")
+                format!("lab_contract_version_mismatch: controller Lab contract version {controller_version}, runner Lab contract version {version}; update the runner with `homeboy runner connect <runner-id>`, which installs the controller's release on it, then retry")
             })
         });
 

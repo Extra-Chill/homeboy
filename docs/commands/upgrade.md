@@ -16,6 +16,8 @@ By default, after a successful local upgrade, Homeboy also converges configured 
 
 Each selected SSH runner goes through the same runner-binary convergence as `homeboy runner connect` (see [runner connection](../architecture/runner-connection.md#binary-convergence)). The target is the controller identity the upgrade just installed, not the build of the process running the upgrade. Convergence compares the runner's configured `homeboy_path` (its `self identity`) with that target and installs the target's exact release tag through `refresh-homeboy`'s verified release path only when the runner is older. It never downgrades, and it never replaces a daemon that has active jobs.
 
+Outside an upgrade, `homeboy runner connect <runner>` runs this same convergence against the current controller, so it is the normal way to bring a single runner up to date. `homeboy runner refresh-homeboy` is for explicit refs (`--ref`), selecting an existing binary (`--select`), downgrades (`--allow-downgrade`), dev builds (`runner dev-sync`), and the manual fallback below when convergence failed.
+
 Each convergence outcome maps onto the runner's upgrade entry like this:
 
 | Convergence status | Entry |

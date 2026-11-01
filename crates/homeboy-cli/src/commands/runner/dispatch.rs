@@ -213,9 +213,7 @@ pub fn run(args: RunnerArgs) -> CmdResult<RunnerCommandOutput> {
         RunnerCommand::RefreshHomeboy {
             runner_id,
             select,
-            source,
             git_ref,
-            target_dir,
             reconnect,
             force,
             allow_downgrade,
@@ -228,9 +226,7 @@ pub fn run(args: RunnerArgs) -> CmdResult<RunnerCommandOutput> {
                     Some(binary_path) => runner::HomeboyBinaryRefreshMode::Select { binary_path },
                     None => runner::HomeboyBinaryRefreshMode::Materialize,
                 },
-                source,
                 git_ref,
-                target_dir,
                 reconnect,
                 force,
                 allow_downgrade,
@@ -953,9 +949,7 @@ mod tests {
                 &runner::HomeboyBinaryRefreshOptions {
                     runner_id: "lab".to_string(),
                     mode: runner::HomeboyBinaryRefreshMode::Materialize,
-                    source: None,
                     git_ref: None,
-                    target_dir: None,
                     reconnect: false,
                     force: false,
                     allow_downgrade: false,
@@ -1013,9 +1007,7 @@ mod tests {
                     mode: runner::HomeboyBinaryRefreshMode::Select {
                         binary_path: "/runner/homeboy".to_string(),
                     },
-                    source: None,
                     git_ref: None,
-                    target_dir: None,
                     reconnect: false,
                     force: false,
                     allow_downgrade: false,
@@ -1040,9 +1032,7 @@ mod tests {
                 plan: runner::HomeboyBinaryRefreshPlan {
                     runner_id: "lab".to_string(),
                     mode: "materialize".to_string(),
-                    source: None,
                     git_ref: None,
-                    target_dir: None,
                     binary_path: "/runner/homeboy".to_string(),
                     script: String::new(),
                     reconnect: false,
@@ -1069,7 +1059,6 @@ mod tests {
                 failure: Some(runner::HomeboyBinaryRefreshFailure {
                     exit_code: 2,
                     failed_command: vec!["git".to_string()],
-                    source: None,
                     git_ref: None,
                     source_sha: None,
                     build_path: "/runner/homeboy".to_string(),
@@ -1143,9 +1132,7 @@ mod tests {
                 plan: runner::HomeboyBinaryRefreshPlan {
                     runner_id: "lab".to_string(),
                     mode: "materialize".to_string(),
-                    source: None,
                     git_ref: None,
-                    target_dir: None,
                     binary_path: "/runner/homeboy".to_string(),
                     script: "build script".to_string(),
                     reconnect: false,
@@ -1195,7 +1182,7 @@ mod tests {
     fn refresh_error_persists_a_durable_error_artifact() {
         homeboy::test_support::with_isolated_home(|_| {
             let error = homeboy::core::Error::validation_invalid_argument(
-                "target_dir",
+                "workspace_root",
                 "invalid refresh plan",
                 None,
                 None,

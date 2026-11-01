@@ -198,7 +198,7 @@ pub(crate) fn homeboy_version_skew_check(
     }
     let reference = format!("v{local_version}");
     Some(error("homeboy.version_skew", message, Some(format!(
-        "Align runner with `homeboy runner refresh-homeboy {} --ref {reference} --reconnect`; use runner dev-sync for unreleased builds",
+        "Align runner with `homeboy runner connect {}`, which installs this controller's release on the runner; use runner dev-sync for unreleased builds",
         shell::quote_arg(runner_id),
     )), details).with_action(RunnerRepairAction::RefreshHomeboy {
         git_ref: Some(reference), allow_downgrade: false,

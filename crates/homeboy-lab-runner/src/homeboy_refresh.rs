@@ -101,7 +101,6 @@ impl Drop for RefreshLiveGuard {
     }
 }
 
-const DEFAULT_HOMEBOY_REMOTE: &str = "https://github.com/Extra-Chill/homeboy.git";
 const DISCONNECTED_SSH_REFRESH_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 // A reconnect owner is bounded by the runner connection contract. Admission
 // shares that bound so an equivalent refresh can converge while a stuck owner
@@ -130,9 +129,7 @@ pub enum HomeboyBinaryRefreshMode {
 pub struct HomeboyBinaryRefreshOptions {
     pub runner_id: String,
     pub mode: HomeboyBinaryRefreshMode,
-    pub source: Option<String>,
     pub git_ref: Option<String>,
-    pub target_dir: Option<String>,
     pub reconnect: bool,
     pub force: bool,
     pub allow_downgrade: bool,
@@ -143,10 +140,11 @@ pub struct HomeboyBinaryRefreshOptions {
 pub struct HomeboyBinaryRefreshPlan {
     pub runner_id: String,
     pub mode: String,
-    pub source: Option<String>,
     #[serde(rename = "ref", skip_serializing_if = "Option::is_none")]
     pub git_ref: Option<String>,
-    pub target_dir: Option<String>,
+    /// Select: the binary being selected. Materialize: the runner directory
+    /// the content-addressed `homeboy-<sha256>/homeboy` slot is published
+    /// under; the exact slot path is only known once the script reports it.
     pub binary_path: String,
     pub script: String,
     pub reconnect: bool,
@@ -298,8 +296,6 @@ pub struct HomeboyBootstrapProvenance {
 pub struct HomeboyBinaryRefreshFailure {
     pub exit_code: i32,
     pub failed_command: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub source: Option<String>,
     #[serde(rename = "ref", skip_serializing_if = "Option::is_none")]
     pub git_ref: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -440,9 +436,7 @@ pub(crate) fn install_controller_release_with(
     let refreshed = refresh(HomeboyBinaryRefreshOptions {
         runner_id: runner_id.to_string(),
         mode: HomeboyBinaryRefreshMode::Materialize,
-        source: None,
         git_ref: Some(release_ref(&controller.version)),
-        target_dir: None,
         reconnect: true,
         force: false,
         allow_downgrade: false,
@@ -491,9 +485,7 @@ fn refresh_homeboy_binary_inner_in_roots(
             HomeboyBinaryRefreshPlan {
                 runner_id: runner_id.clone(),
                 mode: "select".to_string(),
-                source: None,
                 git_ref: None,
-                target_dir: None,
                 binary_path: binary_path.to_string(),
                 script,
                 reconnect: options.reconnect,
@@ -503,48 +495,22 @@ fn refresh_homeboy_binary_inner_in_roots(
         HomeboyBinaryRefreshMode::Materialize => {
             let workspace_root = runner.workspace_root.as_deref().ok_or_else(|| {
                 Error::validation_invalid_argument(
-                    "target_dir",
-                    "runner refresh-homeboy requires --target-dir when the runner has no workspace_root",
-                    None,
+                    "workspace_root",
+                    "runner refresh-homeboy requires the runner to have a workspace_root",
+                    Some(runner_id.clone()),
                     None,
                 )
             })?;
-            let source = options
-                .source
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .unwrap_or(DEFAULT_HOMEBOY_REMOTE);
             let controller_tag = controller_refresh_ref();
             let git_ref = options.git_ref.as_deref().unwrap_or(&controller_tag);
             release_version(git_ref)?;
-            if source != DEFAULT_HOMEBOY_REMOTE {
-                return Err(Error::validation_invalid_argument(
-                    "source",
-                    "runner refresh installs official releases only; use runner dev-sync for unreleased builds",
-                    None,
-                    None,
-                ));
-            }
-            let target_dir = options
-                .target_dir
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string)
-                .unwrap_or_else(|| default_target_dir(workspace_root, git_ref));
-            let binary_path = format!(
-                "{}/target/release/homeboy",
-                target_dir.trim_end_matches('/')
-            );
-            let script = materialize_script(source, git_ref, &target_dir, &binary_path);
+            let binaries_dir = release_binaries_dir(workspace_root);
+            let script = materialize_script(git_ref, &binaries_dir);
             HomeboyBinaryRefreshPlan {
                 runner_id: runner_id.clone(),
                 mode: "materialize".to_string(),
-                source: Some(source.to_string()),
                 git_ref: Some(git_ref.to_string()),
-                target_dir: Some(target_dir),
-                binary_path,
+                binary_path: binaries_dir,
                 script,
                 reconnect: options.reconnect,
                 followup_commands: refresh_followups(&runner_id, options.reconnect),
@@ -1431,7 +1397,6 @@ fn refresh_failure(
     HomeboyBinaryRefreshFailure {
         exit_code,
         failed_command: execution.argv.clone(),
-        source: plan.source.clone(),
         git_ref: plan.git_ref.clone(),
         source_sha: source_sha_from_output(&execution.stdout),
         build_path: plan.binary_path.clone(),
@@ -2216,9 +2181,7 @@ pub fn runner_dev_sync(options: RunnerDevSyncOptions) -> Result<(RunnerDevSyncOu
             mode: HomeboyBinaryRefreshMode::Select {
                 binary_path: remote_binary.clone(),
             },
-            source: None,
             git_ref: None,
-            target_dir: None,
             reconnect: options.reconnect,
             force: false,
             allow_downgrade: false,
@@ -2454,10 +2417,8 @@ fn installed_homeboy_env(
 /// Acquire a verified release in stage-only mode and publish an immutable slot.
 const MATERIALIZE_SCRIPT: &str = r#"set -e
 printf '%s\n' 'HOMEBOY_RUNNER_PROGRESS {"schema":"homeboy/runner-progress/v1","phase":"fetch"}'
-source=@SOURCE@
 ref=@REF@
-dir=@DIR@
-binary=@BINARY@
+binaries=@BINARIES@
 release_tag="$ref"
 homeboy_installer=@INSTALLER@
 hash_binary() { (sha256sum "$1" 2>/dev/null || shasum -a 256 "$1") | awk '{print $1}'; }
@@ -2468,17 +2429,17 @@ cleanup_release_stage() {
     release_stage=
   fi
 }
-mkdir -p "$(dirname "$dir")"
+mkdir -p "$binaries"
   # A tag already acquired here (e.g. by the upgrade's early acquisition)
   # resolves to its content-addressed slot once the slot's hash re-verifies.
-  release_marker="$(dirname "$dir")/.release-$release_tag.sha256"
+  release_marker="$binaries/.release-$release_tag.sha256"
   cached_sha=$(cat "$release_marker" 2>/dev/null || true)
-  cached_binary="$(dirname "$dir")/homeboy-$cached_sha/homeboy"
+  cached_binary="$binaries/homeboy-$cached_sha/homeboy"
   if [ -n "$cached_sha" ] && [ -x "$cached_binary" ] && [ "$(hash_binary "$cached_binary")" = "$cached_sha" ]; then
     binary="$cached_binary"
     echo "HOMEBOY_REFRESH_BINARY_ORIGIN=release-cache:$release_tag"
   else
-    release_stage=$(mktemp -d "$(dirname "$dir")/.stage-XXXXXX")
+    release_stage=$(mktemp -d "$binaries/.stage-XXXXXX")
     trap cleanup_release_stage EXIT HUP INT TERM
     HOMEBOY_INSTALL_STAGE_ONLY=1 HOMEBOY_INSTALL_PATH="$release_stage/homeboy" HOMEBOY_UPGRADE_RELEASE_TAG="$release_tag" HOMEBOY_UPGRADE_RELEASE_VERSION="${release_tag#v}" sh -c "$homeboy_installer"
     binary="$release_stage/homeboy"
@@ -2490,7 +2451,7 @@ if [ -z "$binary_sha" ]; then
   exit 1
 fi
 printf '%s\n' 'HOMEBOY_RUNNER_PROGRESS {"schema":"homeboy/runner-progress/v1","phase":"install"}'
-slot_dir="$(dirname "$dir")/homeboy-$binary_sha"
+slot_dir="$binaries/homeboy-$binary_sha"
 immutable_binary="$slot_dir/homeboy"
 mkdir -p "$slot_dir"
 if [ -e "$immutable_binary" ]; then
@@ -2520,7 +2481,7 @@ else
 fi
 cleanup_release_stage
 if [ -n "$release_tag" ]; then
-  staged_marker=$(mktemp "$(dirname "$dir")/.release-marker.XXXXXX")
+  staged_marker=$(mktemp "$binaries/.release-marker.XXXXXX")
   printf '%s' "$binary_sha" > "$staged_marker"
   mv -f "$staged_marker" "$release_marker"
 fi
@@ -2532,7 +2493,7 @@ identity_record=$(printf '%s' "$identity" | tr -d '\n')
 provenance="$slot_dir/provenance"
 staged_provenance=$(mktemp "$slot_dir/.provenance.XXXXXX")
 trap 'rm -f "$staged_provenance"' EXIT HUP INT TERM
-printf '%s\n%s\n%s\n%s\n%s\n%s\n' "$source" "" "$ref" "$ref" "$binary_sha" "$identity_record" > "$staged_provenance"
+printf '%s\n%s\n%s\n%s\n%s\n%s\n' 'https://github.com/Extra-Chill/homeboy.git' "" "$ref" "$ref" "$binary_sha" "$identity_record" > "$staged_provenance"
 # Source/cache/ref describe acquisition, not immutable content identity.
 provenance_matches() {
   { IFS= read -r recorded_source && IFS= read -r recorded_cache && IFS= read -r recorded_ref && IFS= read -r recorded_target && IFS= read -r recorded_sha && IFS= read -r recorded_identity && ! IFS= read -r extra; } < "$provenance" &&
@@ -2557,13 +2518,7 @@ pub(crate) fn acquire_release_slot(runner_id: &str, tag: &str) -> Result<()> {
     let root = runner.workspace_root.as_deref().ok_or_else(|| {
         Error::internal_unexpected(format!("runner {runner_id} has no workspace_root"))
     })?;
-    let dir = default_target_dir(root, tag);
-    let script = materialize_script(
-        DEFAULT_HOMEBOY_REMOTE,
-        tag,
-        &dir,
-        &format!("{dir}/target/release/homeboy"),
-    );
+    let script = materialize_script(tag, &release_binaries_dir(root));
     let (output, code) = super::exec(runner_id, RunnerExecOptions::diagnostic_raw_shell(script))?;
     if code != 0 {
         return Err(Error::internal_unexpected(format!(
@@ -2574,15 +2529,13 @@ pub(crate) fn acquire_release_slot(runner_id: &str, tag: &str) -> Result<()> {
     Ok(())
 }
 
-fn materialize_script(source: &str, git_ref: &str, target_dir: &str, binary_path: &str) -> String {
+fn materialize_script(git_ref: &str, binaries_dir: &str) -> String {
     let installer = quote_path(homeboy_upgrade::RELEASE_INSTALLER_SCRIPT);
     fill_script_template(
         MATERIALIZE_SCRIPT,
         &[
-            ("@SOURCE@", &quote_path(source)),
             ("@REF@", &quote_path(git_ref)),
-            ("@DIR@", &quote_path(target_dir)),
-            ("@BINARY@", &quote_path(binary_path)),
+            ("@BINARIES@", &quote_path(binaries_dir)),
             ("@INSTALLER@", &installer),
         ],
     )
@@ -3375,12 +3328,10 @@ pub(crate) fn release_ref(version: &str) -> String {
     format!("v{}", version.trim_start_matches('v'))
 }
 
-fn default_target_dir(workspace_root: &str, git_ref: &str) -> String {
-    format!(
-        "{}/_homeboy_binaries/homeboy-{}",
-        workspace_root.trim_end_matches('/'),
-        sanitize_ref(git_ref)
-    )
+/// The runner directory holding the content-addressed release slots
+/// (`homeboy-<sha256>/`) and their `.release-<tag>.sha256` markers.
+fn release_binaries_dir(workspace_root: &str) -> String {
+    format!("{}/_homeboy_binaries", workspace_root.trim_end_matches('/'))
 }
 
 fn refresh_followups(runner_id: &str, reconnect: bool) -> Vec<String> {
@@ -3494,19 +3445,6 @@ fn non_empty<'a>(name: &str, value: &'a str) -> Result<&'a str> {
         ));
     }
     Ok(trimmed)
-}
-
-fn sanitize_ref(value: &str) -> String {
-    let sanitized: String = value
-        .chars()
-        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
-        .collect();
-    let sanitized = sanitized.trim_matches('-');
-    if sanitized.is_empty() {
-        "main".to_string()
-    } else {
-        sanitized.to_string()
-    }
 }
 
 fn shell_arg(value: &str) -> String {

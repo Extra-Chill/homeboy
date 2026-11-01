@@ -137,7 +137,7 @@ pub(crate) fn capability_admission_error(
             if admission.rejection_code
                 == Some(homeboy_lab_contract::LabAdmissionRejection::LabContractVersionMismatch)
             {
-                "Refresh the runner with `homeboy runner refresh-homeboy <runner-id> --reconnect`, then retry."
+                "Update the runner with `homeboy runner connect <runner-id>`, which installs this controller's release on it, then retry."
             } else {
                 "Upgrade or reconnect the runner so its command and daemon advertise the required Lab handoff capabilities, then retry."
             },
@@ -146,7 +146,7 @@ pub(crate) fn capability_admission_error(
         (
             "exact_build_mismatch",
             "require_exact_homeboy_version requires the controller's exact build",
-            "Refresh the runner with `homeboy runner refresh-homeboy <runner-id> --reconnect`, then retry.",
+            "Update the runner with `homeboy runner connect <runner-id>`, which installs this controller's release on it, then retry. For an unreleased controller build, use `homeboy runner dev-sync`.",
         )
     };
     let message = if !admission.compatible {

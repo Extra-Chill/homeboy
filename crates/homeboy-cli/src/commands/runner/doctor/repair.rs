@@ -877,11 +877,9 @@ fn refresh_outcome(
     runner::refresh_homeboy_binary(runner::HomeboyBinaryRefreshOptions {
         runner_id: runner_id.to_string(),
         mode: runner::HomeboyBinaryRefreshMode::Materialize,
-        source: None,
         git_ref: Some(
             git_ref.unwrap_or_else(|| format!("v{}", homeboy_product_identity::product_version())),
         ),
-        target_dir: None,
         reconnect: true,
         force: false,
         allow_downgrade,

@@ -284,9 +284,7 @@ fn unconverged_refresh_fixture() -> (HomeboyBinaryRefreshPlan, RunnerExecOutput)
     let plan = HomeboyBinaryRefreshPlan {
         runner_id: "homeboy-lab".to_string(),
         mode: "select".to_string(),
-        source: None,
         git_ref: None,
-        target_dir: None,
         binary_path: "/runner/homeboy".to_string(),
         script: "fixture".to_string(),
         reconnect: true,
