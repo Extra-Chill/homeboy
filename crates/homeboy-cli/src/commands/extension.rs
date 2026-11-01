@@ -2237,6 +2237,7 @@ mod tests {
             linked: true,
             source_path: None,
             git_root: None,
+            source_url: None,
             source_update: ExtensionSourceUpdate {
                 old_source_revision: old_revision.map(str::to_string),
                 new_source_revision: new_revision.map(str::to_string),
