@@ -1597,13 +1597,13 @@ fn concurrent_runner_config_edit_survives_ssh_bootstrap_promotion() {
 }
 
 #[test]
-fn runner_binary_promotion_drains_a_live_foreign_cook_pin() {
+fn runner_binary_promotion_ignores_a_live_foreign_cook_pin() {
     crate::test_support::with_isolated_home(|_| {
         let root = homeboy_core::paths::runtime_promotion_dir_in_root(ambient_roots().data());
         let pins = root.join("pins");
         std::fs::create_dir_all(&pins).expect("create pin directory");
         let mut foreign = Command::new("sleep")
-            .arg("30")
+            .arg("60")
             .spawn()
             .expect("start live foreign pin owner");
         std::fs::write(
@@ -1617,28 +1617,23 @@ fn runner_binary_promotion_drains_a_live_foreign_cook_pin() {
             .expect("serialize foreign pin"),
         )
         .expect("write foreign pin");
-        let (stage_tx, stage_rx) = std::sync::mpsc::channel();
-        let promotion = std::thread::spawn(move || {
-            acquire_runner_binary_promotion_in_roots(
-                &ambient_roots(),
-                "lab",
-                "0123456789ab",
-                |event| {
-                    let _ = stage_tx.send(event.wait_stage);
-                },
-            )
-            .map(drop)
-        });
-        let stage = stage_rx.recv_timeout(Duration::from_secs(5));
+        let started = std::time::Instant::now();
+        let mut waits = Vec::new();
+        let promotion = acquire_runner_binary_promotion_in_roots(
+            &ambient_roots(),
+            "lab",
+            "0123456789ab",
+            |event| waits.push(event.wait_stage),
+        );
+        let elapsed = started.elapsed();
+        assert!(foreign.try_wait().expect("check foreign Cook").is_none());
         foreign.kill().expect("stop foreign pin owner");
         foreign.wait().expect("reap foreign pin owner");
-        assert_eq!(
-            stage.expect("runner binary promotion waits for the live Cook pin"),
-            "foreign_generation_pins"
+        promotion.expect("runner promotion must not drain controller-local Cook pins");
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "admission took {elapsed:?}"
         );
-        promotion
-            .join()
-            .expect("promotion exits")
-            .expect("promotion acquires once the pin drains");
+        assert!(waits.is_empty(), "unexpected admission waits: {waits:?}");
     });
 }

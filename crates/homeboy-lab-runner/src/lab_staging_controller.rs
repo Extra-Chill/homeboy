@@ -4182,8 +4182,8 @@ impl StageExecutionAdapter {
     ///
     /// Before bounding, a permanently-failing retryable observation — a daemon
     /// that keeps answering with malformed JSON, for instance — spun here at
-    /// 5 requests/second forever, holding a controller-job worker slot and a
-    /// runtime-generation pin until an external cancel arrived. Backoff grows
+    /// 5 requests/second forever, holding a controller-job worker slot and
+    /// staging custody until an external cancel arrived. Backoff grows
     /// so a long outage is polled cheaply; the budget guarantees the loop ends.
     fn observe_runner_within_budget(
         &self,
@@ -4253,10 +4253,6 @@ impl StageExecutionAdapter {
                     request.recipe.run_id.clone(),
                 )))
             });
-        // The controller process owns materialization after the initiating Cook
-        // returns. Keep the generic runtime-generation admission barrier until
-        // the runner job is durably bound, so a concurrent refresh cannot swap
-        // the selected binary between exact identity validation and dispatch.
         let token = cancellation.clone();
         let control = workspace_stage_control(
             Some(&request.durable_agent_task_plan),
@@ -4265,22 +4261,9 @@ impl StageExecutionAdapter {
         if checkpoint.final_runner_job_id.is_none() {
             control.checkpoint()?;
         }
-        let mut runtime_generation_pin = checkpoint
-            .final_runner_job_id
-            .is_none()
-            .then(|| {
-                homeboy_core::runtime_promotion::pin_cook_generation_waiting(
-                    &request.recipe.run_id,
-                    control
-                        .deadline()
-                        .expect("staging has a finite deadline")
-                        .saturating_duration_since(Instant::now()),
-                    || control.checkpoint().is_err(),
-                    |_| {},
-                )
-                .map_err(|error| control.checkpoint().err().unwrap_or(error))
-            })
-            .transpose()?;
+        // Handoff accepts contract-compatible builds; durable stage validation
+        // checks recorded IDs/digests, not the currently selected runner build.
+        // Controller generation pins therefore do not protect this handoff.
         self.operations
             .validate_recorded_identities(request, &checkpoint)?;
         loop {
@@ -4401,12 +4384,6 @@ impl StageExecutionAdapter {
                     return Err(error);
                 }
             };
-            // `dispatch_runner` binds the accepted job before returning. Once
-            // that binding exists, generation ownership moves to the durable
-            // runner record and this temporary admission pin can be released.
-            if matches!(effect, LabStagingStageEffect::Dispatch(_)) {
-                runtime_generation_pin.take();
-            }
             // Workspace completion has a durable attachment, and dispatch has
             // an accepted child binding: checkpoint those known effects before
             // observing cancellation. Other stages retain their existing
@@ -7279,18 +7256,8 @@ mod tests {
     }
 
     #[test]
-    fn cancellation_inside_workspace_preserves_custody_and_releases_only_its_pin() {
+    fn cancellation_inside_workspace_preserves_custody() {
         crate::test_support::with_isolated_home(|_| {
-            let unrelated =
-                homeboy_core::runtime_promotion::pin_cook_generation("unrelated-active-job")
-                    .unwrap();
-            let pins = homeboy_core::paths::runtime_promotion_dir()
-                .unwrap()
-                .join("pins");
-            let unrelated_records = std::fs::read_dir(&pins)
-                .unwrap()
-                .map(|entry| entry.unwrap().path())
-                .collect::<Vec<_>>();
             let operations = Arc::new(RecordedStageOperations::default());
             operations
                 .cancel_during_workspace
@@ -7326,11 +7293,6 @@ mod tests {
                 operations.calls(),
                 ["validate", "handoff-identity", "workspace"]
             );
-            assert_eq!(
-                std::fs::read_dir(&pins).unwrap().count(),
-                unrelated_records.len()
-            );
-            assert!(unrelated_records.iter().all(|path| path.exists()));
             // A fresh driver cannot treat retained partial effects as absence.
             assert!(adapter
                 .execute_with_checkpoint(
@@ -7344,8 +7306,6 @@ mod tests {
                 operations.calls(),
                 ["validate", "handoff-identity", "workspace", "validate"]
             );
-            drop(unrelated);
-            assert_eq!(std::fs::read_dir(&pins).unwrap().count(), 0);
         });
     }
 
