@@ -92,19 +92,3 @@ pub(super) fn select_provider_by_backend<'a>(
 ) -> Option<&'a AgentTaskExecutorProvider> {
     resolve_provider_for_backend(providers, backend, selector).resolved()
 }
-
-pub(super) fn required_extension_ids_for_plan_with_providers(
-    plan: &AgentTaskPlan,
-    providers: &[AgentTaskExecutorProvider],
-) -> Vec<String> {
-    let mut extension_ids = BTreeSet::new();
-    for request in &plan.tasks {
-        if let Some(extension_id) = select_provider(providers, request)
-            .and_then(|provider| provider.extension_id.as_ref())
-            .filter(|extension_id| !extension_id.trim().is_empty())
-        {
-            extension_ids.insert(extension_id.clone());
-        }
-    }
-    extension_ids.into_iter().collect()
-}

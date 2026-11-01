@@ -554,9 +554,6 @@ pub struct ProvidersArgs {
     /// Validate or report this exact model selection using Cook's provider route.
     #[arg(long = "model", value_name = "MODEL")]
     pub model: Option<String>,
-    /// Restrict results to the runtime that owns the provider.
-    #[arg(long = "runtime", value_name = "RUNTIME")]
-    pub runtime: Option<String>,
     /// Restrict results to `default`, `available`, or `unavailable` providers.
     ///
     /// `unavailable` means declared but not dispatchable — a provider whose

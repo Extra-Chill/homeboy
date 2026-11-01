@@ -91,7 +91,6 @@ pub use homeboy_core::secret_env_plan::{
 };
 
 // Provider helpers used directly from the facade root for common callers.
-pub use super::agent_task_provider::required_extension_ids_for_plan;
 
 // ----------------------------------------------------------------------------
 // Explicit API groups
@@ -238,11 +237,10 @@ pub mod provider {
     pub use crate::agent_task_provider::{
         default_backend, default_backend_for_component, provider_capability_contract,
         provider_requires_cwd_git_checkout, provider_runtime_readiness_cache_identity_for_plan,
-        required_extension_ids_for_plan, resolve_provider_for_backend, AgentTaskExecutorProvider,
-        AgentTaskProviderCatalog, ExtensionProviderAgentTaskExecutor,
-        ProviderReadinessInvocationResult, ProviderResolution, ProviderRuntimeReadinessCache,
-        AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA, AGENT_TASK_PROVIDER_CAPABILITY_CONTRACT_SCHEMA,
-        PROVIDER_READINESS_RESULT_SCHEMA,
+        resolve_provider_for_backend, AgentTaskExecutorProvider, AgentTaskProviderCatalog,
+        ExtensionProviderAgentTaskExecutor, ProviderReadinessInvocationResult, ProviderResolution,
+        ProviderRuntimeReadinessCache, AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA,
+        AGENT_TASK_PROVIDER_CAPABILITY_CONTRACT_SCHEMA, PROVIDER_READINESS_RESULT_SCHEMA,
     };
     /// Credential readiness: whether a *declared* provider is actually
     /// *dispatchable* here, and the pre-dispatch preflight that enforces it

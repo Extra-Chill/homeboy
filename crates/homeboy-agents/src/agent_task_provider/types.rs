@@ -83,8 +83,6 @@ pub struct AgentTaskExecutorProvider {
         skip_serializing_if = "String::is_empty"
     )]
     pub command: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub command_argv: Vec<String>,
     #[serde(default, skip_serializing_if = "CommandInvocation::is_empty")]
     pub invocation: CommandInvocation,
     #[serde(default = "default_request_schema")]
@@ -99,16 +97,6 @@ pub struct AgentTaskExecutorProvider {
     pub provider_defaults: BTreeMap<String, Value>,
     #[serde(default)]
     pub pi_readiness: PiReadinessConfig,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub extension_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub extension_path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub runtime_package_source: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub runtime_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub runtime_path: Option<String>,
     #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extra: BTreeMap<String, Value>,
 }

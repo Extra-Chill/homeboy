@@ -1673,8 +1673,8 @@ fn provider_credential_secret_env_plan() -> crate::secret_env_plan::SecretEnvPla
 #[test]
 fn remote_runner_job_with_provider_credential_plan_accepts_value_free_env() {
     // Regression for Extra-Chill/homeboy#14382: a Cook handoff that carries
-    // provider credentials as SecretEnvPlan references (names, requirements,
-    // and provider credential provenance — never values) must pass durable
+    // provider credentials as SecretEnvPlan references (secret environment
+    // names — never values) must pass durable
     // runner validation and persist as a queued job.
     let temp = tempfile::tempdir().expect("temp dir");
     let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);

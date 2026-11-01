@@ -43,8 +43,8 @@ fn provider_manifest_accepts_command_invocation_contract() {
         "backend": "invocation",
         "invocation": {
             "schema": "homeboy/command-invocation/v1",
-            "argv": ["{{runtime_path}}/bin/provider", "--json"],
-            "cwd": "{{runtime_path}}",
+            "argv": ["/bin/provider", "--json"],
+            "cwd": "/workspace",
             "env": [{ "name": "TOKEN", "source": "secret_env", "redacted": true }],
             "display": "provider --json",
             "redaction": { "env": ["TOKEN"] }
@@ -52,8 +52,8 @@ fn provider_manifest_accepts_command_invocation_contract() {
     }))
     .expect("provider manifest");
 
-    assert_eq!(provider.invocation.argv[0], "{{runtime_path}}/bin/provider");
-    assert_eq!(provider.invocation.cwd.as_deref(), Some("{{runtime_path}}"));
+    assert_eq!(provider.invocation.argv[0], "/bin/provider");
+    assert_eq!(provider.invocation.cwd.as_deref(), Some("/workspace"));
     assert_eq!(provider.invocation.env[0].name, "TOKEN");
     assert_eq!(
         provider.invocation.display.as_deref(),
@@ -100,17 +100,6 @@ fn provider_missing_chains_matching_runtime_discovery_diagnostics() {
         outcome.diagnostics[0].data["runtime_discovery_diagnostics"][0]["class"],
         "provider.invalid"
     );
-}
-
-#[test]
-fn provider_command_parts_uses_argv() {
-    let (_request, provider) = request("task-legacy-command", "legacy-provider --flag".to_string());
-
-    let (program, args, cwd) = provider_command_parts(&provider).expect("command parts");
-
-    assert_eq!(program, "legacy-provider");
-    assert_eq!(args, vec!["--flag"]);
-    assert_eq!(cwd, None);
 }
 
 #[test]
@@ -636,8 +625,6 @@ printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","stopReason
     let _home = artifact_home();
     let (mut request, _) = request("native-pi", String::new());
     let provider = discovery::discover_agent_task_executor_providers().remove(0);
-    assert!(provider.extension_id.is_none());
-    assert!(provider.runtime_path.is_none());
     request.executor.backend = "pi".into();
     request.executor.config = json!({"command":pi,"model":"roadie/test"});
     request.workspace.root = Some(temp.path().display().to_string());

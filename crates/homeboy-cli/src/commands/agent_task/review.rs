@@ -1771,7 +1771,6 @@ fn scope_providers(
 const DEFAULT_PROVIDER_LIMIT: usize = 10;
 const DEFAULT_DIAGNOSTIC_LIMIT: usize = 10;
 const DEFAULT_TEXT_LIMIT: usize = 256;
-const DEFAULT_SCOPE_SOURCE_LIMIT: usize = 20;
 pub(crate) const AGENT_TASK_PROVIDER_SCOPE_SCHEMA: &str = "homeboy/agent-task-provider-scope/v1";
 
 /// The execution scope a provider catalog describes.
@@ -1782,7 +1781,7 @@ pub(crate) const AGENT_TASK_PROVIDER_SCOPE_SCHEMA: &str = "homeboy/agent-task-pr
 /// `observed_scope` object: the pre-existing `scope` object keeps its meaning
 /// (which slice of the catalog is being presented) so existing parsers are
 /// unaffected (#9763).
-fn observed_provider_scope(all_providers: &[AgentTaskExecutorProvider]) -> Value {
+fn observed_provider_scope() -> Value {
     let runner_id = homeboy::core::resource_policy_context::lab_execution_runner_id();
     let identity = homeboy::core::build_identity::current();
     let label = match runner_id.as_deref() {
@@ -1795,27 +1794,6 @@ fn observed_provider_scope(all_providers: &[AgentTaskExecutorProvider]) -> Value
         "controller"
     };
 
-    let bounded_ids = |values: Vec<String>| {
-        let mut values = values;
-        values.sort();
-        values.dedup();
-        let total = values.len();
-        values.truncate(DEFAULT_SCOPE_SOURCE_LIMIT);
-        (total, values)
-    };
-    let (extension_total, extension_ids) = bounded_ids(
-        all_providers
-            .iter()
-            .filter_map(|provider| provider.extension_id.clone())
-            .collect(),
-    );
-    let (runtime_total, runtime_ids) = bounded_ids(
-        all_providers
-            .iter()
-            .filter_map(|provider| provider.runtime_id.clone())
-            .collect(),
-    );
-
     serde_json::json!({
         "schema": AGENT_TASK_PROVIDER_SCOPE_SCHEMA,
         "location": if runner_id.is_some() { "runner" } else { location },
@@ -1825,16 +1803,6 @@ fn observed_provider_scope(all_providers: &[AgentTaskExecutorProvider]) -> Value
             "version": identity.version,
             "display": identity.display,
             "git_commit": identity.git_commit,
-        },
-        "extension_source": {
-            "total": extension_total,
-            "shown": extension_ids.len(),
-            "extension_ids": extension_ids,
-        },
-        "runtime_source": {
-            "total": runtime_total,
-            "shown": runtime_ids.len(),
-            "runtime_ids": runtime_ids,
         },
         "observed_at": chrono::Utc::now().to_rfc3339(),
         "runner_scoped_command": "homeboy runner exec <runner-id> -- homeboy agent-task providers",
@@ -2021,10 +1989,6 @@ fn providers_with_catalog(
             args.selector
                 .as_deref()
                 .is_none_or(|selector| provider.id == selector)
-                && args
-                    .runtime
-                    .as_deref()
-                    .is_none_or(|runtime| provider.runtime_id.as_deref() == Some(runtime))
                 && args.status.as_deref().is_none_or(|status| {
                     let dispatchability = provider_dispatchability(
                         &catalog,
@@ -2096,12 +2060,11 @@ fn providers_with_catalog(
             },
             // Where this catalog was observed. Provider readiness is
             // scope-sensitive, so an unlabelled catalog is ambiguous (#9763).
-            "observed_scope": observed_provider_scope(all_providers),
+            "observed_scope": observed_provider_scope(),
             "scope": {
                 "backend": scoped_backend,
                 "filtered": scoped_backend.is_some()
                     || args.selector.is_some()
-                    || args.runtime.is_some()
                     || args.status.is_some(),
                 "shown": shown_providers.len(),
                 "matched": providers.len(),
@@ -2197,8 +2160,6 @@ fn compact_provider(
         "id": bounded_text(&provider.id, 160),
         "label": provider.label.as_deref().map(|value| bounded_text(value, 160)),
         "backend": bounded_text(&provider.backend, 160),
-        "runtime_id": provider.runtime_id.as_deref().map(|value| bounded_text(value, 160)),
-        "extension_id": provider.extension_id.as_deref().map(|value| bounded_text(value, 160)),
         "status": provider_status(provider, dispatchability),
         // Keep the row's state in the same vocabulary as the top-level
         // dispatchability verdict; `status` remains the filterable availability tier.
@@ -2818,7 +2779,6 @@ fn provider_full_command(args: &ProvidersArgs) -> String {
         ("backend", args.backend.as_deref()),
         ("selector", args.selector.as_deref()),
         ("model", args.model.as_deref()),
-        ("runtime", args.runtime.as_deref()),
         ("status", args.status.as_deref()),
     ] {
         if let Some(value) = value {
@@ -2832,13 +2792,14 @@ fn provider_identity_catalog(providers: &[AgentTaskExecutorProvider]) -> Vec<Val
     providers
         .iter()
         .map(|provider| {
-            let ai_provider_ids = provider.provider_defaults.keys().cloned().collect::<Vec<_>>();
+            let ai_provider_ids = provider
+                .provider_defaults
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>();
             serde_json::json!({
                 "executor_provider_id": provider.id,
                 "executor_backend": provider.backend,
-                "runtime_id": provider.runtime_id,
-                "runtime_package_source": provider.runtime_package_source.as_ref().or(provider.extension_id.as_ref()),
-                "runtime_path": provider.runtime_path,
                 "ai_provider_ids": ai_provider_ids,
                 "model": null,
             })
@@ -3169,8 +3130,6 @@ mod tests {
         let provider: AgentTaskExecutorProvider = serde_json::from_value(serde_json::json!({
             "id": "provider-".to_string() + &"x".repeat(10_000),
             "backend": "backend-".to_string() + &"x".repeat(10_000),
-            "extension_id": "extension-".to_string() + &"x".repeat(10_000),
-            "runtime_id": "runtime-".to_string() + &"x".repeat(10_000),
             "capabilities": vec!["capability-".to_string() + &"x".repeat(10_000); 100],
         }))
         .expect("provider fixture");
@@ -3258,7 +3217,6 @@ mod tests {
             backend: Some("backend; touch /tmp/unwanted".to_string()),
             selector: Some("provider id".to_string()),
             model: None,
-            runtime: None,
             status: None,
             secret_env: Vec::new(),
             validate_readiness: false,
@@ -3295,7 +3253,6 @@ mod tests {
             backend: None,
             selector: None,
             model: None,
-            runtime: None,
             status: None,
             secret_env: Vec::new(),
             validate_readiness: false,
@@ -3698,8 +3655,6 @@ mod tests {
         let provider: AgentTaskExecutorProvider = serde_json::from_value(serde_json::json!({
             "id": "sample.executor-provider",
             "backend": "sample",
-            "extension_id": "sample.extension",
-            "runtime_id": "sandbox-runtime",
             "provider_defaults": {
                 "codex": { "secret_env": ["CODEX_TOKEN"] }
             }
@@ -3743,13 +3698,10 @@ mod tests {
     }
 
     #[test]
-    fn provider_identity_catalog_uses_explicit_runtime_vocabulary() {
+    fn provider_identity_catalog_reports_executor_and_ai_providers() {
         let provider: AgentTaskExecutorProvider = serde_json::from_value(serde_json::json!({
             "id": "pi.agent-task-executor",
             "backend": "pi",
-            "extension_id": "sample-runtime",
-            "runtime_package_source": "sample-runtime",
-            "runtime_id": "pi-local-runtime",
             "provider_defaults": {
                 "openai": {},
                 "anthropic": {}
@@ -3761,8 +3713,6 @@ mod tests {
 
         assert_eq!(catalog[0]["executor_provider_id"], "pi.agent-task-executor");
         assert_eq!(catalog[0]["executor_backend"], "pi");
-        assert_eq!(catalog[0]["runtime_id"], "pi-local-runtime");
-        assert_eq!(catalog[0]["runtime_package_source"], "sample-runtime");
         assert_eq!(
             catalog[0]["ai_provider_ids"],
             serde_json::json!(["anthropic", "openai"])
@@ -4424,8 +4374,6 @@ esac
         serde_json::from_value(serde_json::json!({
             "id": id,
             "backend": backend,
-            "extension_id": format!("{backend}.extension"),
-            "runtime_id": format!("{backend}-runtime"),
         }))
         .expect("provider fixture")
     }
