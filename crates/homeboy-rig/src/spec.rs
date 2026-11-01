@@ -206,6 +206,9 @@ pub struct RigSpec {
 /// Rig-level resource lifecycle defaults.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RigLifecycleSpec {
+    /// Persistent by default; disposable rigs run to completion and cannot manage services.
+    #[serde(default, skip_serializing_if = "RigLifecycleMode::is_persistent")]
+    pub mode: RigLifecycleMode,
     /// Cleanup intent applied to generated rig resource lifecycle records.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cleanup: Option<RigCleanupSpec>,
@@ -213,7 +216,27 @@ pub struct RigLifecycleSpec {
 
 impl RigLifecycleSpec {
     pub fn is_empty(&self) -> bool {
-        self.cleanup.is_none()
+        self.cleanup.is_none() && self.mode == RigLifecycleMode::Persistent
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RigLifecycleMode {
+    #[default]
+    Persistent,
+    Disposable,
+}
+
+impl RigLifecycleMode {
+    fn is_persistent(&self) -> bool {
+        *self == Self::Persistent
+    }
+}
+
+impl RigSpec {
+    pub fn is_disposable(&self) -> bool {
+        self.lifecycle.mode == RigLifecycleMode::Disposable
     }
 }
 
