@@ -98,7 +98,6 @@ pub(super) fn fixture_provider_with_example_defaults_at(path: &str) -> AgentTask
         runner_sources: Vec::new(),
         dependency_failure_patterns: Vec::new(),
         immediate_failure_patterns: Vec::new(),
-        lab_runtime_components: Vec::new(),
         timeout_artifact_discovery: Default::default(),
         role_aliases: Default::default(),
         cli: Default::default(),

@@ -93,35 +93,6 @@ fn required_extension_ids_follow_selected_agent_task_providers() {
 }
 
 #[test]
-fn lab_runtime_component_ids_follow_selected_agent_task_providers() {
-    let (request_a, mut provider_a) = request("task-a", "node provider-a.js".to_string());
-    provider_a.id = "provider-a".to_string();
-    provider_a.lab_runtime_components =
-        vec!["agents-api".to_string(), "sample-component".to_string()];
-    let (mut request_b, mut provider_b) = request("task-b", "node provider-b.js".to_string());
-    request_b.executor.selector = Some("provider-b".to_string());
-    provider_b.id = "provider-b".to_string();
-    provider_b.lab_runtime_components =
-        vec!["sample-component".to_string(), "php-ai-client".to_string()];
-    let executor = ExtensionProviderAgentTaskExecutor::with_providers(vec![provider_a, provider_b]);
-
-    let component_ids = executor.lab_runtime_component_ids_for_plan(&AgentTaskPlan::new(
-        "plan-a",
-        vec![request_a, request_b],
-    ));
-
-    // `lab_runtime_component_ids_for_plan` dedups across the selected providers
-    // into a `BTreeSet`, so the result is deterministically sorted. provider_a
-    // and provider_b both contribute `sample-component`, which collapses to one
-    // entry. (#6705's rename of `data-machine` -> `sample-component` left the
-    // expected literal in the old, no-longer-sorted order.)
-    assert_eq!(
-        component_ids,
-        vec!["agents-api", "php-ai-client", "sample-component"]
-    );
-}
-
-#[test]
 fn provider_selection_matches_exact_backend_first() {
     let (_, mut exact_provider) = request("task-a", "node exact-provider.js".to_string());
     exact_provider.id = "exact-provider".to_string();
@@ -316,7 +287,7 @@ fn provider_manifest_parses_runner_and_dependency_contracts() {
             "error_contains_any": ["enoent", "no such file or directory"],
             "remediation": "Refresh prepared dependencies."
         }],
-        "lab_runtime_components": ["agents-api", "sample-component"]
+
     }))
     .expect("provider manifest");
 
@@ -332,10 +303,6 @@ fn provider_manifest_parses_runner_and_dependency_contracts() {
     assert_eq!(
         provider.dependency_failure_patterns[0].path_contains,
         "prepared-dependencies/"
-    );
-    assert_eq!(
-        provider.lab_runtime_components,
-        vec!["agents-api", "sample-component"]
     );
 }
 

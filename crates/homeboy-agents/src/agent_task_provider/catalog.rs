@@ -1,5 +1,4 @@
 use super::resolution::{
-    lab_runtime_component_ids_for_plan_with_providers,
     provider_requires_cwd_git_checkout_with_providers,
     required_extension_ids_for_plan_with_providers, select_provider,
 };
@@ -302,10 +301,6 @@ impl ExtensionProviderAgentTaskExecutor {
     pub fn required_extension_ids_for_plan(&self, plan: &AgentTaskPlan) -> Vec<String> {
         required_extension_ids_for_plan_with_providers(plan, &self.providers)
     }
-
-    pub fn lab_runtime_component_ids_for_plan(&self, plan: &AgentTaskPlan) -> Vec<String> {
-        lab_runtime_component_ids_for_plan_with_providers(plan, &self.providers)
-    }
 }
 
 pub fn default_backend() -> homeboy_core::Result<Option<String>> {
@@ -546,10 +541,6 @@ pub(super) fn format_runtime_discovery_diagnostic(
 
 pub fn required_extension_ids_for_plan(plan: &AgentTaskPlan) -> Vec<String> {
     ExtensionProviderAgentTaskExecutor::discover().required_extension_ids_for_plan(plan)
-}
-
-pub fn lab_runtime_component_ids_for_plan(plan: &AgentTaskPlan) -> Vec<String> {
-    ExtensionProviderAgentTaskExecutor::discover().lab_runtime_component_ids_for_plan(plan)
 }
 
 pub fn provider_requires_cwd_git_checkout(backend: &str, selector: Option<&str>) -> bool {

@@ -4,9 +4,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use homeboy_agents::agent_task_provider;
-use homeboy_agents::agent_task_scheduler::AgentTaskPlan;
-use homeboy_core::{component, Error, Result};
+use homeboy_core::{Error, Result};
 
 use super::lab_workspaces_deps::{
     accepted_extra_lab_workspaces, add_candidate_extra_workspace,
@@ -1137,59 +1135,6 @@ fn agent_task_plan_runtime_source_paths(plan: &serde_json::Value) -> Vec<String>
         .into_iter()
         .filter(|path| Path::new(path).is_absolute())
         .collect()
-}
-
-/// Resolve runtime components declared by the selected agent-task provider and
-/// add their controller-local checkouts to the Lab workspace handoff.
-pub(super) fn agent_task_provider_runtime_component_extra_workspaces(
-    args: &[String],
-    source_path: &Path,
-) -> Result<Vec<ExtraLabWorkspace>> {
-    let Some(spec) = agent_task_plan_spec(args) else {
-        return Ok(Vec::new());
-    };
-    let raw = read_agent_task_plan_spec_to_string(&spec, source_path)?;
-    let plan: AgentTaskPlan = serde_json::from_str(&raw).map_err(|error| {
-        Error::validation_invalid_argument(
-            "plan",
-            format!("invalid agent-task run-plan --plan payload: {error}"),
-            Some(spec.clone()),
-            Some(vec![
-                "Pass a valid AgentTaskPlan JSON payload or @file to `agent-task run-plan --plan`."
-                    .to_string(),
-            ]),
-        )
-    })?;
-
-    let source_canon = source_path
-        .canonicalize()
-        .unwrap_or_else(|_| source_path.to_path_buf());
-    let mut seen = BTreeSet::new();
-    let mut workspaces = Vec::new();
-    for component_id in agent_task_provider::lab_runtime_component_ids_for_plan(&plan) {
-        let resolved = component::resolve_effective(Some(&component_id), None, None).map_err(|error| {
-            Error::validation_invalid_argument(
-                "lab_runtime_components",
-                format!(
-                    "agent-task provider requires Lab runtime component `{component_id}`, but Homeboy could not resolve it: {}",
-                    error
-                ),
-                Some(component_id.clone()),
-                Some(vec![
-                    format!("Register component `{component_id}` on the controller or provide a component with that id before Lab offload."),
-                    "Run `homeboy component list` to inspect configured components.".to_string(),
-                ]),
-            )
-        })?;
-        add_candidate_extra_workspace(
-            &resolved.local_path,
-            "agent_task_runtime_component",
-            &source_canon,
-            &mut seen,
-            &mut workspaces,
-        )?;
-    }
-    Ok(workspaces)
 }
 
 pub(super) fn declared_path_input_values(args: &[String], path_inputs: &[String]) -> Vec<String> {
