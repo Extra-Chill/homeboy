@@ -32,8 +32,8 @@ finds the extension under `extensions/` and clones only that path. The old
 
 ## Reusable workflows
 
-`runtime-agent-full-run.yml` and `actions-run-once.yml` are reusable
-(`workflow_call`) workflows, so they live in the root `.github/workflows/`.
+`actions-run-once.yml` is a reusable (`workflow_call`) workflow, so it lives in
+the root `.github/workflows/`.
 Call them as `Extra-Chill/homeboy/.github/workflows/<name>@<ref>`; see
 [reusable-workflows.md](reusable-workflows.md). Pins to the old
 `Extra-Chill/homeboy-extensions/.github/workflows/...` paths keep resolving from
