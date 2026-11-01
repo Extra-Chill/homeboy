@@ -32,25 +32,21 @@ pub(super) fn clone_with_runner(
     mut run: impl FnMut(&Path, &[&str]) -> Result<String>,
 ) -> Result<()> {
     let sparse = (|| {
-        run(
-            Path::new("."),
-            &[
-                "clone",
-                "--filter=blob:none",
-                "--no-checkout",
-                "--sparse",
-                url,
-                &target.to_string_lossy(),
-            ],
-        )?;
-        let requested = revision.unwrap_or("HEAD");
-        // Non-default branches exist only as remote-tracking refs after clone.
-        let resolved = run(target, &["rev-parse", "--verify", requested]).or_else(|_| {
-            run(
-                target,
-                &["rev-parse", "--verify", &format!("origin/{requested}")],
-            )
-        })?;
+        let target_path = target.to_string_lossy();
+        let mut args = vec![
+            "clone",
+            "--depth=1",
+            "--filter=blob:none",
+            "--no-checkout",
+            "--sparse",
+        ];
+        if let Some(revision) = revision {
+            args.extend(["--branch", revision]);
+        }
+        args.extend([url, &target_path]);
+        run(Path::new("."), &args)?;
+        // --branch selects either a branch tip or a tag as the cloned HEAD.
+        let resolved = run(target, &["rev-parse", "--verify", "HEAD"])?;
         let revision = resolved.trim();
         let tree = run(target, &["ls-tree", "-r", "--name-only", "-z", revision])?;
         let files: Vec<_> = tree.split('\0').filter(|s| !s.is_empty()).collect();
@@ -99,7 +95,7 @@ pub(super) fn clone_with_runner(
             args.extend(paths.iter().map(String::as_str));
             run(target, &args)?;
         }
-        run(target, &["checkout", "--quiet", requested])?;
+        run(target, &["checkout", "--quiet", "HEAD"])?;
         Ok(())
     })();
     if let Err(error) = sparse {
