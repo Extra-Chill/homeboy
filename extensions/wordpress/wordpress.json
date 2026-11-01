@@ -1,6 +1,6 @@
 {
   "name": "WordPress",
-  "version": "3.53.13",
+  "version": "3.53.14",
   "source_url": "https://github.com/Extra-Chill/homeboy",
   "icon": "w.circle.fill",
   "description": "WordPress project type with WP-CLI integration",
