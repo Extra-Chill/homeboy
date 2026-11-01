@@ -35,7 +35,6 @@ const allowedTopLevelDirs = new Set([
   '.ci',
   '.claude',
   '.datamachine',
-  'agent-runtimes',
   'datamachine-agent-ci',
   'defaults',
   'docs',
@@ -321,7 +320,6 @@ const allowedHomeboyNamedFiles = new Map([
   ['homeboy-extension-root.json', 'this extension repository root manifest'],
   ['homeboy-artifact-manifest.json', 'runtime artifact Homeboy writes per invocation'],
   ['.homeboy-runtime-identity.json', 'managed runtime cache identity outside the consumer repo'],
-  ['homeboy-agent-task-core-contract.json', 'agent-runtimes fixture in this repository'],
 ]);
 
 // Existing consumer-repo declaration readers awaiting migration to homeboy.json

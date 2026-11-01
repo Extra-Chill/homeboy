@@ -35,7 +35,7 @@ export function ensureWpCodeboxCoreModule() {
 export function skipUnlessWpCodeboxCanonicalContract(label) {
 	const coreModule = ensureWpCodeboxCoreModule();
 	const { loadCanonicalRuntimeContractSourceSync } = require(
-		path.join(repoRoot, 'agent-runtimes', 'wp-codebox', 'lib', 'wp-codebox-runtime-contract-source.js')
+		path.join(repoRoot, 'wordpress', 'lib', 'wp-codebox-runtime-contract-source.js')
 	);
 	const resolved = loadCanonicalRuntimeContractSourceSync({ required: false, wpCodeboxCoreModule: coreModule });
 	if (!resolved) {

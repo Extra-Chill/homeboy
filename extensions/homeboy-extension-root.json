@@ -1,9 +1,6 @@
 {
   "shared_assets": [
     "scripts/lib",
-    "dependency-adapters",
-    "agent-runtimes",
-    "runtime-agent-ci",
-    "agent-task-contracts"
+    "dependency-adapters"
   ]
 }

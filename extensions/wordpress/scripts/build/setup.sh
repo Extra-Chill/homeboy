@@ -648,13 +648,8 @@ if [ -f "package.json" ]; then
     fi
 fi
 
-# Verify the shared agent-runtime files this extension's installed entrypoints
-# require. They live in a separate shared-asset tree that the extension payload
-# does not carry, so an install can succeed while leaving them absent — the
-# failure then surfaces only when a test shard boots and dies on
-# MODULE_NOT_FOUND, with zero tests executed (#12585). Fail here instead, before
-# anything is planned or fanned out.
-verify_shared_agent_runtime_assets() {
+# Verify the in-extension helpers before any test shard is planned.
+verify_wordpress_runtime_helpers() {
     # Resolve from this script's own location, not the working directory: the
     # resolver ships beside setup.sh in the extension payload, and that is the
     # payload whose completeness is in question.
@@ -667,12 +662,12 @@ verify_shared_agent_runtime_assets() {
     resolver="${script_dir}/../lib/agent-runtime-paths.cjs"
 
     if [ ! -f "${resolver}" ]; then
-        echo "Error: agent runtime resolver missing at ${resolver}; the WordPress extension payload is incomplete." >&2
+        echo "Error: WordPress runtime helper resolver missing at ${resolver}; the extension payload is incomplete." >&2
         return 1
     fi
 
     for dependency in \
-        "wp-codebox/scripts/lib/test-result-adapters.sh"; do
+        "scripts/lib/test-result-adapters.sh"; do
         if ! node "${resolver}" "${dependency}" >/dev/null; then
             missing=1
         fi
@@ -685,16 +680,16 @@ verify_shared_agent_runtime_assets() {
     fi
 
     if [ "${missing}" -ne 0 ]; then
-        echo "Error: shared agent runtime assets are missing from this installation; WordPress test shards cannot bootstrap." >&2
+        echo "Error: WordPress runtime helpers are missing from this installation; test shards cannot bootstrap." >&2
         return 1
     fi
 
-    echo "Shared WordPress runtime assets verified."
+    echo "WordPress runtime helpers verified."
 }
 
 install_wp_codebox
 
-verify_shared_agent_runtime_assets
+verify_wordpress_runtime_helpers
 
 echo "WordPress extension setup complete."
 echo "Default test backend: WP Codebox (WordPress Playground runtime)"

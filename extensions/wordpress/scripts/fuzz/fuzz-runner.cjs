@@ -161,9 +161,9 @@ function resolveWpCodeboxRuntimePath(options = {}) {
 	const env = options.env || process.env;
 	const candidates = [];
 	if (env.HOMEBOY_EXTENSION_PATH) {
-		candidates.push(path.resolve(env.HOMEBOY_EXTENSION_PATH, '..', '..', 'agent-runtimes', 'wp-codebox'));
+		candidates.push(path.resolve(env.HOMEBOY_EXTENSION_PATH, 'wp-codebox-runtime'));
 	}
-	candidates.push(path.resolve(__dirname, '..', '..', '..', 'agent-runtimes', 'wp-codebox'));
+	candidates.push(path.resolve(__dirname, '..', '..', 'wp-codebox-runtime'));
 
 	for (const candidate of candidates) {
 		if (fs.existsSync(path.join(candidate, 'index.js'))) {

@@ -22,13 +22,12 @@ export UPDATE_CALLS
 
 mkdir -p "${FAKE_BIN}" "${HOME_DIR}" "${EXTENSION_DIR}/scripts/build" "${ROOT_DIR}" "${ARTIFACT_ROOT}/wp-codebox-cli/bin" "${ARTIFACT_ROOT}/wp-codebox-cli/node_modules/@automattic/wp-codebox-core/dist" "${ARTIFACT_ROOT}/wp-codebox-cli/node_modules/sharp"
 
-# Reproduce Homeboy's setup generation: setup executes from a copied extension
-# source while shared runtimes are already materialized, but the final
-# extensions/wordpress sibling does not exist until setup completes.
+# Setup executes from a copied, self-contained extension before its final
+# installation directory exists.
 cp -R "${SOURCE_ROOT}/scripts" "${ROOT_DIR}/scripts"
 cp -R "${SOURCE_ROOT}/lib" "${ROOT_DIR}/lib"
+cp -R "${SOURCE_ROOT}/wp-codebox-runtime" "${ROOT_DIR}/wp-codebox-runtime"
 cp "${SOURCE_ROOT}/wordpress.json" "${ROOT_DIR}/wordpress.json"
-cp -R "${SOURCE_ROOT}/../agent-runtimes" "${GENERATION_ROOT}/agent-runtimes"
 
 for missing_sibling in "${GENERATION_ROOT}/extensions/wordpress" "${GENERATION_ROOT}/wordpress"; do
     if [ -e "${missing_sibling}" ]; then

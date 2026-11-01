@@ -232,15 +232,10 @@ fn lab_job_extension_overlay_command(
 }
 
 fn lab_job_shared_asset_target(runtime_root: &str, asset_path: &str) -> String {
-    let homeboy_root = format!(
-        "{}/home/.config/homeboy",
+    format!(
+        "{}/home/.config/homeboy/extensions/{asset_path}",
         runtime_root.trim_end_matches('/')
-    );
-    match asset_path {
-        "agent-runtimes" => format!("{homeboy_root}/agent-runtimes"),
-        "runtime-agent-ci" | "agent-task-contracts" => format!("{homeboy_root}/{asset_path}"),
-        _ => format!("{homeboy_root}/extensions/{asset_path}"),
-    }
+    )
 }
 
 #[cfg(test)]
@@ -1268,10 +1263,10 @@ mod tests {
             fs::create_dir_all(&scripts_lib).expect("shared scripts library");
             fs::create_dir_all(source_root.join("dependency-adapters"))
                 .expect("dependency adapters");
-            fs::create_dir_all(source_root.join("agent-runtimes")).expect("agent runtimes");
+            fs::create_dir_all(source_root.join("shared-tools")).expect("shared tools");
             fs::write(
                 source_root.join("homeboy-extension-root.json"),
-                r#"{"shared_assets":["scripts/lib",{"path":"dependency-adapters"},"agent-runtimes"]}"#,
+                r#"{"shared_assets":["scripts/lib",{"path":"dependency-adapters"},"shared-tools"]}"#,
             )
             .expect("root manifest");
             fs::write(
@@ -1330,7 +1325,7 @@ mod tests {
                 .join("home/.config/homeboy/extensions/dependency-adapters")
                 .exists());
             assert!(runtime_root
-                .join("home/.config/homeboy/agent-runtimes")
+                .join("home/.config/homeboy/extensions/shared-tools")
                 .exists());
 
             let project = tempfile::tempdir().expect("project");

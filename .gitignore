@@ -8,7 +8,7 @@ dist-manifest.json
 /artifacts/
 
 # Dependencies
-/node_modules/
+node_modules/
 
 # IDE
 .idea/

@@ -22,7 +22,5 @@ extension manifest owns the minimum supported WP Codebox version.
 
 ## Installed Layout
 
-Reach this package through `wordpress/scripts/lib/agent-runtime-paths.cjs` so
-both monorepo and copied extension layouts resolve correctly. Homeboy installs
-shared runtime assets at `<homeboy>/agent-runtimes`, beside
-`<homeboy>/extensions`.
+This package ships inside the WordPress extension at `wp-codebox-runtime/`.
+Checkout and installed copies use the same in-extension paths.

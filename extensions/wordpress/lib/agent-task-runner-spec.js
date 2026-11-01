@@ -1,3 +1,3 @@
 'use strict';
 
-module.exports = require('../agent-task-contracts');
+module.exports = require('./wordpress-task-contract');

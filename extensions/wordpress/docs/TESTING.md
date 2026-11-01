@@ -193,9 +193,6 @@ dot-path assertions against the manifest or example runner config. `bundle_dir`
 and `example_runner_config` are resolved relative to the spec file's parent
 directory so specs can live at repo root or under `tests/`.
 
-For full CI agent runs on the WP Codebox WordPress execution substrate, use the
-generic `runtime-agent-full-run.yml` workflow.
-
 ## WordPress test runtime status
 
 WordPress PHPUnit files run through the selected runtime backend, with

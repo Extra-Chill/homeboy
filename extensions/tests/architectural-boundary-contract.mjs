@@ -9,15 +9,15 @@ const require = createRequire(import.meta.url);
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 process.env.HOMEBOY_WP_CODEBOX_CORE_MODULE ||= path.join(repoRoot, 'tests', 'fixtures', 'wp-codebox-core-runtime-contract.cjs');
-const runtimePackage = require(path.join(repoRoot, 'agent-runtimes', 'wp-codebox'));
-const wpCodeboxPackageJson = JSON.parse(fs.readFileSync(path.join(repoRoot, 'agent-runtimes', 'wp-codebox', 'package.json'), 'utf8'));
+const runtimePackage = require(path.join(repoRoot, 'wordpress', 'lib', 'wp-codebox-runtime-contract-source.js'));
+const wpCodeboxPackageJson = JSON.parse(fs.readFileSync(path.join(repoRoot, 'wordpress', 'package.json'), 'utf8'));
 
 assert.equal(runtimePackage.runtimeContractManifest().schema, 'wp-codebox/runtime-contract-manifest/v1');
 
 const stableWpCodeboxConsumerExports = [
 	'.',
-	'./codebox-artifact-contract',
-	'./codebox-runtime-profile',
+	'./wp-codebox-artifact-contract',
+	'./wp-codebox-runtime-profile',
 	'./wp-codebox-runtime-contract-source',
 	'./wp-codebox-runtime-readiness',
 ];

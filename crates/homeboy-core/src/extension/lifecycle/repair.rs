@@ -564,14 +564,14 @@ mod tests {
 
     fn write_shared_runtime_fixture(root: &Path) {
         let runtime_script = root.join(
-            "agent-runtimes/sample-runtime/scripts/agent/sample-runtime-agent-task-executor.cjs",
+            "shared-tools/sample-runtime/scripts/agent/sample-runtime-agent-task-executor.cjs",
         );
         fs::create_dir_all(runtime_script.parent().expect("runtime script parent"))
             .expect("runtime script dir");
         fs::write(&runtime_script, "console.log('sample runtime');\n").expect("runtime script");
 
         let runtime_agent_ci_helper =
-            root.join("runtime-agent-ci/lib/agent-task-provider-contract.js");
+            root.join("shared-helpers/lib/agent-task-provider-contract.js");
         fs::create_dir_all(
             runtime_agent_ci_helper
                 .parent()
@@ -606,7 +606,7 @@ mod tests {
     }
 
     fn write_declared_runtime_shared_assets(root: &Path) {
-        write_shared_asset_manifest(root, &["agent-runtimes", "runtime-agent-ci"]);
+        write_shared_asset_manifest(root, &["shared-tools", "shared-helpers"]);
         write_shared_runtime_fixture(root);
     }
 
@@ -848,10 +848,12 @@ mod tests {
                 .expect("relink should materialize shared runtime");
 
             assert!(home
-                .join(".config/homeboy/agent-runtimes/sample-runtime/scripts/agent/sample-runtime-agent-task-executor.cjs")
+                .join(".config/homeboy/extensions/shared-tools/sample-runtime/scripts/agent/sample-runtime-agent-task-executor.cjs")
                 .exists());
             assert!(home
-                .join(".config/homeboy/runtime-agent-ci/lib/agent-task-provider-contract.js")
+                .join(
+                    ".config/homeboy/extensions/shared-helpers/lib/agent-task-provider-contract.js"
+                )
                 .exists());
         });
     }
@@ -882,10 +884,12 @@ mod tests {
                 new_source.join("wordpress")
             );
             assert!(home
-                .join(".config/homeboy/agent-runtimes/sample-runtime/scripts/agent/sample-runtime-agent-task-executor.cjs")
+                .join(".config/homeboy/extensions/shared-tools/sample-runtime/scripts/agent/sample-runtime-agent-task-executor.cjs")
                 .exists());
             assert!(home
-                .join(".config/homeboy/runtime-agent-ci/lib/agent-task-provider-contract.js")
+                .join(
+                    ".config/homeboy/extensions/shared-helpers/lib/agent-task-provider-contract.js"
+                )
                 .exists());
         });
     }

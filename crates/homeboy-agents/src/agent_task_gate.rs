@@ -9141,10 +9141,10 @@ mod tests {
         let helpers = root.path().join("scripts/lib");
         fs::create_dir_all(rust.join("scripts")).unwrap();
         fs::create_dir_all(&helpers).unwrap();
-        fs::create_dir_all(root.path().join("agent-runtimes")).unwrap();
+        fs::create_dir_all(root.path().join("assets")).unwrap();
         fs::write(
             root.path().join("homeboy-extension-root.json"),
-            r#"{"shared_assets":["scripts/lib","agent-runtimes"]}"#,
+            r#"{"shared_assets":["scripts/lib","assets"]}"#,
         )
         .unwrap();
         fs::write(
@@ -9205,7 +9205,7 @@ mod tests {
         }
         let provenance = &candidate.extension_inputs[0];
         assert_eq!(provenance.shared_assets.len(), 2);
-        assert!(home.join(".config/homeboy/agent-runtimes").is_dir());
+        assert!(home.join(".config/homeboy/extensions/assets").is_dir());
         let original_identity = extension_tree_identity(&rust).unwrap();
         assert_ne!(provenance.identity, original_identity);
         let replay = candidate.replay_policy();

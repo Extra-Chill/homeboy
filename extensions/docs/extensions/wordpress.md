@@ -92,13 +92,6 @@ aliases select the WP Codebox provider unless a caller passes `runtimeProvider`.
 The provider owns the `wp-codebox/workspace-recipe/v1` recipe shape, recipe file
 name, runtime output file name, dispatch function, and artifact normalization.
 
-## Fanout Runtime Boundary
-
-Generic fanout planning and reconcile primitives live in `runtime-agent-ci/lib`.
-The WordPress extension does not select or execute an agent runtime. WP Codebox
-remains available through its direct sandbox, browser, preview, fuzz, WP-CLI,
-and artifact contracts.
-
 ## Product Adapter Boundaries
 
 Generic WordPress helpers keep default profiling and helper manifests scoped to
@@ -1263,10 +1256,6 @@ Example `results.jsonl` row:
 Set `HOMEBOY_PLAYGROUND_RESULTS_ARTIFACT_DIR` to write these derived artifacts
 to a specific directory. Otherwise they are written beside
 `HOMEBOY_BENCH_RESULTS_FILE`.
-
-The same workload contract powers runtime-backed agent tasks on the WP Codebox
-WordPress substrate. See `.github/workflows/runtime-agent-full-run.yml` for the
-reusable runtime agent workflow contract.
 
 ## WP Codebox Validation Profile
 

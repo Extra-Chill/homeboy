@@ -14,7 +14,7 @@ const {
 	genericAgentTaskPlan,
 	genericAgentTaskRequest,
 	genericAgentTaskRunnerSpec,
-} = require('../agent-task-contracts');
+} = require('./wordpress-task-contract');
 const {
 	WORDPRESS_CRUD_OPERATION_RESULT_SCHEMA,
 } = require('./wordpress-generic-fuzz-primitives');

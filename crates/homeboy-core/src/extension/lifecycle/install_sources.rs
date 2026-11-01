@@ -338,16 +338,7 @@ fn installed_shared_asset_target(extension_dir: &Path, shared_dir: &str) -> Resu
             Some("resolve installed shared extension asset".to_string()),
         )
     })?;
-    // Installed metadata belongs to the declared source installation, not the
-    // process's ambient registry. A controller in a private HOME may explicitly
-    // select an extension from another installation without importing its config.
-    let config_root = extensions_dir.parent().ok_or_else(|| {
-        Error::internal_io(
-            "installed extension registry has no source config root",
-            Some("resolve installed shared extension asset".to_string()),
-        )
-    })?;
-    Ok(shared_asset_target(extensions_dir, config_root, shared_dir))
+    Ok(shared_asset_target(extensions_dir, shared_dir))
 }
 
 pub(crate) fn isolated_shared_asset_target(
@@ -367,17 +358,12 @@ pub(crate) fn isolated_shared_asset_target(
     }
     Ok(shared_asset_target(
         &config_root.join("extensions"),
-        config_root,
         asset_path,
     ))
 }
 
-fn shared_asset_target(extensions_root: &Path, config_root: &Path, asset_path: &str) -> PathBuf {
-    let root = match asset_path {
-        "agent-runtimes" | "runtime-agent-ci" | "agent-task-contracts" => config_root.to_path_buf(),
-        _ => extensions_root.to_path_buf(),
-    };
-    root.join(asset_path)
+fn shared_asset_target(extensions_root: &Path, asset_path: &str) -> PathBuf {
+    extensions_root.join(asset_path)
 }
 
 /// Remove a shared-asset install target if present, handling both real

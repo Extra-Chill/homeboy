@@ -80,36 +80,6 @@
       ]
     },
     {
-      "id": "wordpress.generic-fanout-reconcile-plan",
-      "phase": "planning",
-      "invocation": {
-        "script": "../runtime-agent-ci/scripts/homeboy-generic-fanout-reconcile.cjs",
-        "output_schema": "homeboy/fanout-reconcile-plan/v1"
-      },
-      "produces": [
-        {
-          "kind": "execution_plan",
-          "name": "fanout-reconcile-plan",
-          "schema": "homeboy/fanout-reconcile-plan/v1"
-        }
-      ]
-    },
-    {
-      "id": "wordpress.generic-fanout-reconcile-result",
-      "phase": "result",
-      "invocation": {
-        "script": "../runtime-agent-ci/scripts/homeboy-generic-fanout-reconcile.cjs",
-        "output_schema": "homeboy/generic-fanout-reconcile-result/v1"
-      },
-      "produces": [
-        {
-          "kind": "status",
-          "name": "generic-fanout-reconcile-result",
-          "schema": "homeboy/generic-fanout-reconcile-result/v1"
-        }
-      ]
-    },
-    {
       "id": "wordpress.lint-results",
       "phase": "result",
       "invocation": { "script": "scripts/lint/lint-runner.sh" },
