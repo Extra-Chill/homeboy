@@ -1,18 +1,11 @@
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
 
-use homeboy_agents::agent_tasks::provider::run_provider_controller_refresh;
-use homeboy_agents::agent_tasks::secrets as agent_task_secrets;
-use homeboy_core::engine::shell;
 use homeboy_core::error::{Error, Result};
 use homeboy_core::secret_env_plan::SecretEnvPlan;
-use homeboy_core::server::{self, SshClient};
+use homeboy_core::server;
 
 use super::super::resolve_runner_secret_env;
-use super::super::{Runner, RunnerCapabilityPreflight};
-
-#[allow(unused_imports)]
-use super::*;
+use super::super::RunnerCapabilityPreflight;
 
 pub(super) const RUNTIME_SECRET_ENV_ALLOWLIST_ENV: &str = "HOMEBOY_AGENT_RUNTIME_SECRET_ENV";
 
@@ -21,432 +14,22 @@ pub(super) fn resolve_runner_secret_env_for_plan(
     plan: &SecretEnvPlan,
     env: &HashMap<String, String>,
 ) -> Result<HashMap<String, String>> {
-    resolve_runner_secret_env_for_plan_with_sources(secret_env, plan, env, &HashMap::new())
-}
-
-pub(super) fn resolve_runner_secret_env_for_plan_with_sources(
-    secret_env: &HashMap<String, server::RunnerSecretEnvRef>,
-    plan: &SecretEnvPlan,
-    env: &HashMap<String, String>,
-    discovered_sources: &HashMap<String, homeboy_core::defaults::AgentTaskSecretSource>,
-) -> Result<HashMap<String, String>> {
-    let mut fallback_sources = discovered_sources.clone();
-    fallback_sources.extend(provider_secret_sources_from_plan(plan));
-    resolve_runner_secret_env_for_command_with_fallbacks(
-        secret_env,
-        &plan.secret_env_names(),
-        env,
-        &fallback_sources,
-    )
-}
-
-pub(super) fn resolve_runner_secret_env_for_command_with_fallbacks(
-    secret_env: &HashMap<String, server::RunnerSecretEnvRef>,
-    required_names: &[String],
-    env: &HashMap<String, String>,
-    fallback_sources: &HashMap<String, homeboy_core::defaults::AgentTaskSecretSource>,
-) -> Result<HashMap<String, String>> {
-    if required_names.is_empty() {
-        return Ok(HashMap::new());
-    }
-
     let mut refs = HashMap::new();
-    let mut resolved = HashMap::new();
-    for name in required_names {
-        if env.contains_key(name.as_str()) {
+    for name in plan.secret_env_names() {
+        if env.contains_key(&name) {
             continue;
         }
-        if let Some(source) = secret_env.get(name.as_str()) {
-            refs.insert(name.clone(), source.clone());
-            continue;
-        }
-        if fallback_sources.contains_key(name) {
-            match agent_task_secrets::resolve_secret_env_with_fallbacks(
-                std::slice::from_ref(name),
-                fallback_sources,
-            ) {
-                Ok(values) => {
-                    for (name, value) in values {
-                        resolved.insert(name, value);
-                    }
-                    continue;
-                }
-                Err(error) => {
-                    return Err(Error::validation_invalid_argument(
-                        "secret_env",
-                        format!("runner secret source for {name} failed: {}", error.message),
-                        Some(name.clone()),
-                        Some(vec![
-                            "Repair the configured runner-side provider secret source, then retry the runner dispatch.".to_string(),
-                        ]),
-                    ));
-                }
-            }
-        }
-        return Err(Error::validation_invalid_argument(
-            "secret_env",
-            format!("missing runner secret env ref for {name}"),
-            Some(name.clone()),
-            Some(vec![
-                "Configure the selected runner secret_env reference, declare provider secret_env_sources that resolve on the runner, or pass the secret in the exec request environment.".to_string(),
-            ]),
-        ));
-    }
-
-    resolved.extend(resolve_runner_secret_env(&refs)?);
-    Ok(resolved)
-}
-
-pub(crate) fn provision_provider_file_secret_sources_for_runner(
-    runner: &Runner,
-    command: &[String],
-    source_args: &[String],
-    required_names: &[String],
-    request_env: &HashMap<String, String>,
-) -> Result<()> {
-    if !is_agent_task_run_plan_command(command) || required_names.is_empty() {
-        return Ok(());
-    }
-    // Resolve against the plan's selected route so provider-scoped credential
-    // files (for example an `openai-oauth` default) are provisioned too.
-    let mut fallback_sources =
-        crate::lab::secrets::agent_task_controller_credential_sources(source_args)?;
-    // Rotation fallbacks are delivered too, best-effort: a fallback the
-    // controller cannot serve is skipped, never made mandatory (#15783). The
-    // admitted route's sources keep precedence for any shared name.
-    let (route_names, route_sources) =
-        crate::lab::secrets::agent_task_controller_route_credentials(source_args)?;
-    for (name, source) in route_sources {
-        fallback_sources.entry(name).or_insert(source);
-    }
-    let mut candidate_names = required_names.to_vec();
-    candidate_names.extend(route_names);
-    candidate_names.sort();
-    candidate_names.dedup();
-    // A forwarded env value does not make the declared file redundant: a
-    // runtime may read its credential store, not the env. The
-    // delivery is a projection of declared fields, so syncing it every run is
-    // safe and keeps the runner's copy current (#15783).
-    let _ = request_env;
-    let pending = provider_file_secret_source_provisions(&candidate_names, &fallback_sources);
-    if pending.is_empty() {
-        return Ok(());
-    }
-    let is_required = |names: &[String]| names.iter().any(|name| required_names.contains(name));
-
-    // The controller owns these accounts' refresh chains: bring every declared
-    // source current here before any of it is read or delivered.
-    let mut unrefreshed: Vec<String> = Vec::new();
-    for refresh in crate::lab::secrets::agent_task_controller_credential_refreshes(source_args)? {
-        let Err(reason) = run_provider_controller_refresh(&refresh.provider, &refresh.invocation)
-        else {
-            continue;
-        };
-        if is_required(&refresh.secret_env) {
-            return Err(Error::validation_invalid_argument(
+        let source = secret_env.get(&name).ok_or_else(|| {
+            Error::validation_invalid_argument(
                 "secret_env",
-                format!(
-                    "controller could not refresh provider credentials before provisioning runner `{}`: {reason}",
-                    runner.id
-                ),
-                Some(runner.id.clone()),
-                Some(vec![
-                    "Refresh the provider credentials on the controller (for Pi routes, the Roadie credential pool client key), then rerun.".to_string(),
-                ]),
-            ));
-        }
-        homeboy_core::log_status!(
-            "lab",
-            "Skipping fallback credentials for runner `{}`: {reason}",
-            runner.id
-        );
-        unrefreshed.extend(refresh.secret_env);
+                format!("missing runner secret env ref for {name}"),
+                Some(name.clone()),
+                Some(vec!["Configure the selected runner secret_env reference or pass the secret in the exec request environment.".to_string()]),
+            )
+        })?;
+        refs.insert(name, source.clone());
     }
-
-    let server_id = runner.server_id.as_deref().ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "runner",
-            "SSH runner requires server_id before provider secret source provisioning",
-            Some(runner.id.clone()),
-            None,
-        )
-    })?;
-    let server = server::load(server_id)?;
-    let client = SshClient::from_server(&server, server_id)?;
-    for provision in pending {
-        let required = is_required(&provision.env_names);
-        if !required
-            && provision
-                .env_names
-                .iter()
-                .any(|name| unrefreshed.contains(name))
-        {
-            continue;
-        }
-        let resolved = agent_task_secrets::resolve_secret_env_with_fallbacks(
-            &provision.env_names,
-            &fallback_sources,
-        );
-        if let Err(err) = resolved {
-            if !required {
-                continue;
-            }
-            return Err(provider_file_secret_source_error(
-                &runner.id,
-                &provision,
-                format!(
-                    "controller credential source does not satisfy provider env names: {}",
-                    err.message
-                ),
-            ));
-        }
-        provision_provider_file_secret_source(&client, &runner.id, &provision)?;
-    }
-    Ok(())
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct ProviderFileSecretSourceProvision {
-    pub(super) path: String,
-    pub(super) env_names: Vec<String>,
-    /// Dotted JSON paths the declared sources read (for example
-    /// `anthropic.access`). Only the entries they name cross to the runner.
-    pub(super) fields: Vec<String>,
-}
-
-pub(super) fn provider_file_secret_source_provisions(
-    required_names: &[String],
-    fallback_sources: &HashMap<String, homeboy_core::defaults::AgentTaskSecretSource>,
-) -> Vec<ProviderFileSecretSourceProvision> {
-    let mut by_path: HashMap<String, (Vec<String>, Vec<String>)> = HashMap::new();
-    for name in required_names {
-        let Some(source) = fallback_sources.get(name) else {
-            continue;
-        };
-        if source.source != "json-file" && source.source != "json-file-jwt-expiration" {
-            continue;
-        }
-        let Some(path) = source
-            .path
-            .as_deref()
-            .filter(|path| !path.trim().is_empty())
-        else {
-            continue;
-        };
-        let entry = by_path.entry(path.to_string()).or_default();
-        entry.0.push(name.clone());
-        entry.1.extend(source.field.iter().cloned());
-        entry.1.extend(source.fallback_fields.iter().cloned());
-    }
-
-    let mut provisions = by_path
-        .into_iter()
-        .map(|(path, (mut env_names, mut fields))| {
-            env_names.sort();
-            env_names.dedup();
-            fields.retain(|field| !field.trim().is_empty());
-            fields.sort();
-            fields.dedup();
-            ProviderFileSecretSourceProvision {
-                path,
-                env_names,
-                fields,
-            }
-        })
-        .collect::<Vec<_>>();
-    provisions.sort_by(|left, right| left.path.cmp(&right.path));
-    provisions
-}
-
-pub(super) fn provision_provider_file_secret_source(
-    client: &SshClient,
-    runner_id: &str,
-    provision: &ProviderFileSecretSourceProvision,
-) -> Result<()> {
-    let local_path = expanded_home_path(&provision.path);
-    let local_raw = std::fs::read_to_string(&local_path).map_err(|err| {
-        provider_file_secret_source_error(
-            runner_id,
-            provision,
-            format!("controller credential source is not readable: {err}"),
-        )
-    })?;
-    let remote_path = remote_secret_source_path(client, &provision.path)?;
-    let Some(parent) = Path::new(&remote_path).parent().and_then(Path::to_str) else {
-        return Err(provider_file_secret_source_error(
-            runner_id,
-            provision,
-            "runner credential source path has no parent directory".to_string(),
-        ));
-    };
-
-    let prepare = client.execute(&format!(
-        "mkdir -p {} && chmod 700 {}",
-        shell::quote_arg(parent),
-        shell::quote_arg(parent)
-    ));
-    if !prepare.success {
-        return Err(provider_file_secret_source_error(
-            runner_id,
-            provision,
-            "failed to prepare runner credential directory".to_string(),
-        ));
-    }
-
-    let temp = tempfile::NamedTempFile::new().map_err(|err| {
-        Error::internal_io(
-            err.to_string(),
-            Some("create provider credential temp file".to_string()),
-        )
-    })?;
-    let existing = client.execute(&format!(
-        "if [ -f {path} ]; then cat {path}; fi",
-        path = shell::quote_arg(&remote_path)
-    ));
-    if !existing.success {
-        return Err(provider_file_secret_source_error(
-            runner_id,
-            provision,
-            "failed to read the runner credential source before merging".to_string(),
-        ));
-    }
-    let projected =
-        project_provider_file_secret_source(&local_raw, &existing.stdout, &provision.fields)
-            .map_err(|reason| provider_file_secret_source_error(runner_id, provision, reason))?;
-    std::fs::write(temp.path(), projected).map_err(|err| {
-        Error::internal_io(
-            err.to_string(),
-            Some("write provider credential temp file".to_string()),
-        )
-    })?;
-    let upload = client.upload_file(&temp.path().to_string_lossy(), &remote_path);
-    if !upload.success {
-        return Err(provider_file_secret_source_error(
-            runner_id,
-            provision,
-            "failed to upload credential source to runner".to_string(),
-        ));
-    }
-    let chmod = client.execute(&format!("chmod 600 {}", shell::quote_arg(&remote_path)));
-    if !chmod.success {
-        return Err(provider_file_secret_source_error(
-            runner_id,
-            provision,
-            "failed to lock down runner credential source permissions".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-/// Keys that mint new credentials. Sharing one between controller and runner
-/// shares a single-use refresh chain: whichever host refreshes second loses the
-/// account (#15783). They cross only when an account explicitly declares them.
-const REFRESH_CREDENTIAL_KEYS: &[&str] = &["refresh", "refresh_token", "refreshToken"];
-
-/// Build the runner's credential file from the controller's (#15783).
-///
-/// Only the top-level entries the declared fields live in are delivered, and
-/// they replace the runner's entries of the same name; every other runner entry
-/// (a login the runner owns) is kept. Inside a delivered entry, an undeclared
-/// refresh credential is blanked rather than removed, so consumers that expect
-/// the key still parse the entry but cannot rotate the controller's chain.
-pub(super) fn project_provider_file_secret_source(
-    controller_raw: &str,
-    runner_raw: &str,
-    declared_fields: &[String],
-) -> std::result::Result<String, String> {
-    let controller: serde_json::Value = serde_json::from_str(controller_raw)
-        .map_err(|err| format!("controller credential source is not valid JSON: {err}"))?;
-    let controller = controller
-        .as_object()
-        .ok_or_else(|| "controller credential source is not a JSON object".to_string())?;
-    let mut runner = if runner_raw.trim().is_empty() {
-        serde_json::Map::new()
-    } else {
-        match serde_json::from_str::<serde_json::Value>(runner_raw) {
-            Ok(serde_json::Value::Object(entries)) => entries,
-            _ => {
-                return Err(
-                    "runner credential source exists but is not a JSON object; repair or remove it so Homeboy can merge into it"
-                        .to_string(),
-                )
-            }
-        }
-    };
-    let mut entries = declared_fields
-        .iter()
-        .filter_map(|field| field.split('.').next())
-        .filter(|key| !key.is_empty())
-        .collect::<Vec<_>>();
-    entries.sort();
-    entries.dedup();
-    for key in entries {
-        let Some(value) = controller.get(key) else {
-            continue;
-        };
-        let mut value = value.clone();
-        if let serde_json::Value::Object(fields) = &mut value {
-            for refresh_key in REFRESH_CREDENTIAL_KEYS {
-                let declared = declared_fields
-                    .iter()
-                    .any(|field| field == &format!("{key}.{refresh_key}"));
-                if declared {
-                    continue;
-                }
-                if let Some(slot) = fields.get_mut(*refresh_key) {
-                    *slot = serde_json::Value::String(String::new());
-                }
-            }
-        }
-        runner.insert(key.to_string(), value);
-    }
-    serde_json::to_string_pretty(&serde_json::Value::Object(runner))
-        .map_err(|err| format!("failed to encode runner credential source: {err}"))
-}
-
-pub(super) fn provider_file_secret_source_error(
-    runner_id: &str,
-    provision: &ProviderFileSecretSourceProvision,
-    reason: String,
-) -> Error {
-    Error::validation_invalid_argument(
-        "secret_env",
-        format!(
-            "provider runner credential source for {} cannot be provisioned on runner `{}`: {}",
-            provision.env_names.join(", "),
-            runner_id,
-            reason
-        ),
-        Some(runner_id.to_string()),
-        Some(vec![
-            "Refresh the provider credentials on the controller, then rerun the Lab offload so Homeboy can provision the runner-side credential source before dispatch.".to_string(),
-            "Credential values are not printed; inspect provider auth with the provider's own auth status command if refresh continues to fail.".to_string(),
-        ]),
-    )
-}
-
-pub(super) fn remote_secret_source_path(client: &SshClient, path: &str) -> Result<String> {
-    if path == "~" || path.starts_with("~/") {
-        let home = client.execute("printf %s \"$HOME\"");
-        if !home.success || home.stdout.trim().is_empty() {
-            return Err(Error::internal_unexpected(
-                "failed to resolve runner home directory for provider credential source",
-            ));
-        }
-        let suffix = path.strip_prefix('~').unwrap_or_default();
-        return Ok(format!("{}{}", home.stdout.trim_end_matches('/'), suffix));
-    }
-    Ok(path.to_string())
-}
-
-pub(super) fn expanded_home_path(path: &str) -> PathBuf {
-    PathBuf::from(shellexpand::tilde(path).to_string())
-}
-
-pub(super) fn is_agent_task_run_plan_command(command: &[String]) -> bool {
-    command
-        .windows(2)
-        .any(|items| items[0] == "agent-task" && items[1] == "run-plan")
+    resolve_runner_secret_env(&refs)
 }
 
 pub(super) fn resolve_controller_secret_env_for_command(
@@ -454,32 +37,10 @@ pub(super) fn resolve_controller_secret_env_for_command(
     plan: &SecretEnvPlan,
     env: &HashMap<String, String>,
 ) -> Result<HashMap<String, String>> {
-    resolve_controller_secret_env_for_plan_with_fallbacks(secret_env, plan, env, &HashMap::new())
-}
-
-#[cfg(test)]
-pub(super) fn resolve_controller_secret_env_for_command_with_fallbacks(
-    secret_env: &HashMap<String, server::RunnerSecretEnvRef>,
-    required_names: &[String],
-    env: &HashMap<String, String>,
-    fallback_sources: &HashMap<String, homeboy_core::defaults::AgentTaskSecretSource>,
-) -> Result<HashMap<String, String>> {
-    let plan = SecretEnvPlan::from_secret_env_names(required_names.to_vec());
-    resolve_controller_secret_env_for_plan_with_fallbacks(secret_env, &plan, env, fallback_sources)
-}
-
-pub(super) fn resolve_controller_secret_env_for_plan_with_fallbacks(
-    secret_env: &HashMap<String, server::RunnerSecretEnvRef>,
-    plan: &SecretEnvPlan,
-    env: &HashMap<String, String>,
-    fallback_sources: &HashMap<String, homeboy_core::defaults::AgentTaskSecretSource>,
-) -> Result<HashMap<String, String>> {
-    let mut fallback_sources = fallback_sources.clone();
-    fallback_sources.extend(provider_secret_sources_from_plan(plan));
     let mut controller_secret_env = HashMap::new();
     let mut controller_required_names = Vec::new();
     for name in plan.secret_env_names() {
-        if env.contains_key(name.as_str()) {
+        if env.contains_key(&name) {
             continue;
         }
         if plan
@@ -487,61 +48,27 @@ pub(super) fn resolve_controller_secret_env_for_plan_with_fallbacks(
             .as_ref()
             .is_some_and(|materialization| {
                 materialization.secret_refs.iter().any(|reference| {
-                    reference.name == *name && reference.owner.as_deref() == Some("runner")
+                    reference.name == name && reference.owner.as_deref() == Some("runner")
                 })
             })
         {
             continue;
         }
-        let Some(source) = secret_env.get(name.as_str()) else {
-            controller_required_names.push(name.clone());
+        let Some(source) = secret_env.get(&name) else {
+            controller_required_names.push(name);
             continue;
         };
         if is_runner_deferred_secret_env_ref(source) {
             continue;
         }
         controller_required_names.push(name.clone());
-        controller_secret_env.insert(name.clone(), source.clone());
+        controller_secret_env.insert(name, source.clone());
     }
-
-    resolve_runner_secret_env_for_command_with_fallbacks(
+    resolve_runner_secret_env_for_plan(
         &controller_secret_env,
-        &controller_required_names,
+        &SecretEnvPlan::from_secret_env_names(controller_required_names),
         env,
-        &fallback_sources,
     )
-}
-
-fn provider_secret_sources_from_plan(
-    plan: &SecretEnvPlan,
-) -> HashMap<String, homeboy_core::defaults::AgentTaskSecretSource> {
-    plan.provider_credentials
-        .values()
-        .flat_map(|mapping| mapping.sources.iter())
-        .map(|(name, source)| {
-            let path = source.path.clone().or_else(|| {
-                matches!(
-                    source.source.as_str(),
-                    "json-file" | "json-file-jwt-expiration"
-                )
-                .then(|| source.name.clone())
-                .flatten()
-            });
-            (
-                name.clone(),
-                homeboy_core::defaults::AgentTaskSecretSource {
-                    source: source.source.clone(),
-                    env_var: source.env_var.clone(),
-                    path,
-                    scope: source.scope.clone(),
-                    name: source.name.clone(),
-                    field: source.field.clone(),
-                    fallback_fields: source.fallback_fields.clone(),
-                    value: source.fallback_value.map(|value| value.to_string()),
-                },
-            )
-        })
-        .collect()
 }
 
 fn is_runner_deferred_secret_env_ref(source: &server::RunnerSecretEnvRef) -> bool {
@@ -557,7 +84,6 @@ fn is_runner_deferred_secret_env_ref(source: &server::RunnerSecretEnvRef) -> boo
         .secret
         .as_ref()
         .is_some_and(|value| !value.trim().is_empty());
-
     (has_env || has_file) && !has_secret && has_env != has_file
 }
 
@@ -605,14 +131,6 @@ pub(crate) fn runner_exec_secret_env_plan(
 }
 
 /// Runtime/extension-declared secret env names for a hosted agent run.
-///
-/// The provider runtime (or extension) is the only authority on which secret
-/// env names its agent process needs, so it declares them explicitly via the
-/// generic `HOMEBOY_AGENT_RUNTIME_SECRET_ENV` allowlist (a comma-separated list
-/// of variable names). Homeboy core stays provider-agnostic and carries no
-/// literal provider token names: a `codex`/`claude-code`/`openai` runtime keeps
-/// working by exporting the same allowlist it already owns, and any new provider
-/// is supported without a core change (generic-core rule, #6676).
 fn declared_runtime_provider_secret_env(env: &HashMap<String, String>) -> Vec<String> {
     env.get(RUNTIME_SECRET_ENV_ALLOWLIST_ENV)
         .into_iter()

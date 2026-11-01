@@ -65,33 +65,11 @@ pub(super) fn effective_provider_for_request(
     .cloned())
 }
 
-fn request_with_effective_provider_contract(
-    request: &AgentTaskRequest,
-    providers: &[AgentTaskExecutorProvider],
-) -> AgentTaskRequest {
-    let mut request = request.clone();
-    let base_secret_env = request
-        .metadata
-        .get("provider_admission")
-        .and_then(|value| value.get("base_secret_env"))
-        .and_then(|value| serde_json::from_value::<Vec<String>>(value.clone()).ok())
-        .unwrap_or_else(|| request.executor.secret_env.clone());
-    if let Ok(Some(provider)) = effective_provider_for_request(&request, providers) {
-        super::secrets::apply_provider_runner_secret_env_contract_for_request(
-            &mut request,
-            &provider,
-            &base_secret_env,
-        );
-    }
-    request
-}
-
 fn provider_capacity_key(
     request: &AgentTaskRequest,
     provider: &AgentTaskExecutorProvider,
 ) -> homeboy_core::Result<String> {
-    let credential_env =
-        super::secrets::provider_request_credential_env(request, provider).unwrap_or_default();
+    let credential_env = Vec::new();
     provider_capacity_key_with_credentials(request, provider, &credential_env)
 }
 
@@ -230,7 +208,7 @@ fn production_execution_preflight(
 
 impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
     fn provider_route_capacity_key(&self, request: &AgentTaskRequest) -> String {
-        let request = request_with_effective_provider_contract(request, self.providers());
+        let request = request.clone();
         effective_provider_for_request(&request, self.providers())
             .ok()
             .flatten()
@@ -242,7 +220,7 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
         if is_fixture_backend(&request.executor.backend) {
             return ProviderRouteReadiness::dispatchable();
         }
-        let request = request_with_effective_provider_contract(request, self.providers());
+        let request = request.clone();
         let provider = match effective_provider_for_request(&request, self.providers()) {
             Ok(Some(provider)) => provider,
             Ok(None) => {
@@ -349,27 +327,7 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
                 }
             }
         };
-        let credential_env =
-            match super::secrets::provider_request_credential_env(&request, &provider) {
-                Ok(env) => env,
-                Err(error) => {
-                    return ProviderRouteReadiness {
-                        ready: false,
-                        state: "provider_credentials_unavailable".to_string(),
-                        reason: error.message,
-                        reset_at: None,
-                        classification: Some("auth_failure".to_string()),
-                        retryable: false,
-                        remediation: Some(
-                            "repair the selected provider credential source".to_string(),
-                        ),
-                        cache_identity: None,
-                        provider_identity: Some(provider.id.clone()),
-                        capacity_key: None,
-                        diagnostic_data: None,
-                    };
-                }
-            };
+        let credential_env = Vec::new();
         let request_capacity_key =
             match provider_capacity_key_with_credentials(&request, &provider, &credential_env) {
                 Ok(key) => key,
@@ -545,20 +503,16 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
             && request.metadata["provider_readiness_generated_fanout_context"] == true
         {
             if let Ok(Some(provider)) = effective_provider_for_request(request, self.providers()) {
-                if let Ok(credential_env) =
-                    super::secrets::provider_request_credential_env(request, &provider)
-                {
-                    let config = super::runtime_readiness::effective_provider_config(
-                        &request.executor.config,
-                        request.executor.model(),
-                    );
-                    super::runtime_readiness::invalidate_fanout_readiness(
-                        &provider,
-                        &config,
-                        &credential_env,
-                        &evidence.readiness,
-                    );
-                }
+                let config = super::runtime_readiness::effective_provider_config(
+                    &request.executor.config,
+                    request.executor.model(),
+                );
+                super::runtime_readiness::invalidate_fanout_readiness(
+                    &provider,
+                    &config,
+                    &[],
+                    &evidence.readiness,
+                );
             }
         }
         let capacity_key = capacity_key.to_string();
@@ -600,7 +554,7 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
         context: AgentTaskExecutionContext,
     ) -> AgentTaskOutcome {
         let _timing = crate::agent_task_schedule::for_execution_timing(&context);
-        let request = request_with_effective_provider_contract(&request, self.providers());
+        let request = request.clone();
         let materialized = match context.lifecycle_store.as_ref() {
             Some(store) => {
                 materialize_executor_request_at_root(request, &context, store.artifact_root())
@@ -665,13 +619,7 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
             };
             Some(bound.env)
         } else {
-            effective_provider_for_request(&request.request, self.providers())
-                .ok()
-                .flatten()
-                .and_then(|provider| {
-                    super::secrets::provider_request_credential_env(&request.request, &provider)
-                        .ok()
-                })
+            None
         };
         if let Some(outcome) = production_execution_preflight(
             &request.request,
@@ -1636,111 +1584,6 @@ mod tests {
                 .account_blocks
                 .len(),
             65
-        );
-    }
-
-    #[test]
-    fn provider_capacity_identity_changes_when_the_reported_account_credential_changes() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let credential = root.path().join("account.json");
-        std::fs::write(&credential, r#"{"token":"account-one"}"#).expect("first credential");
-        let provider: AgentTaskExecutorProvider = serde_json::from_value(json!({
-            "id": "test.provider",
-            "backend": "test",
-            "provider_defaults": {
-                "conditional-account": {
-                    "secret_env": ["TEST_ACCOUNT_TOKEN"],
-                    "secret_env_sources": {
-                        "TEST_ACCOUNT_TOKEN": {
-                            "source": "json-file",
-                            "path": credential,
-                            "field": "token"
-                        }
-                    }
-                }
-            }
-        }))
-        .expect("provider");
-        let mut request = readiness_request("model");
-        request.executor.config = json!({"provider":"conditional-account"});
-        let first = provider_capacity_key(&request, &provider).expect("first capacity key");
-        std::fs::write(&credential, r#"{"token":"account-two"}"#).expect("rotated credential");
-        let second = provider_capacity_key(&request, &provider).expect("second capacity key");
-        assert_ne!(first, second);
-        assert!(!first.contains("account-one"));
-        assert!(!second.contains("account-two"));
-    }
-
-    #[test]
-    fn pi_account_credential_switch_does_not_inherit_capacity_evidence() {
-        let _home = crate::agent_task_provider::runtime_readiness::stable_identity_home();
-        let root = tempfile::tempdir().expect("tempdir");
-        let account = root.path().join("account");
-        std::fs::write(&account, r#"{"token":"account-a"}"#).expect("account A");
-        let fake = FakePi::success();
-        let mut provider = fake.provider();
-        provider.provider_defaults.insert(
-            "account".into(),
-            json!({
-                "secret_env": ["TEST_ACCOUNT_TOKEN"],
-                "secret_env_sources": {
-                    "TEST_ACCOUNT_TOKEN": {"source":"json-file", "path":account, "field":"token"}
-                }
-            }),
-        );
-        let mut executor = ExtensionProviderAgentTaskExecutor::with_providers(vec![provider]);
-        // This fixture expires readiness to simulate account rotation. Keep that
-        // invalidation local rather than expiring other tests' process cache.
-        executor.evidence = Arc::new(Mutex::new(ProviderEvidenceStore::default()));
-        let mut request = fake.request("account-switch");
-        request.executor.config["provider"] = json!("account");
-        let readiness = executor.provider_route_readiness(&request);
-        assert!(readiness.ready);
-        let capacity_key = readiness.capacity_key.expect("reported capacity binding");
-
-        let reset_at = chrono::Utc::now() + chrono::Duration::hours(1);
-        executor.record_provider_outcome(
-            &request,
-            &capacity_key,
-            &AgentTaskOutcome {
-                task_id: request.task_id.clone(),
-                status: AgentTaskOutcomeStatus::ProviderError,
-                failure_classification: Some(AgentTaskFailureClassification::RateLimited),
-                diagnostics: vec![AgentTaskDiagnostic {
-                    class: AGENT_TASK_PROVIDER_USAGE_CAP_DIAGNOSTIC_CLASS.to_string(),
-                    message: "usage cap".to_string(),
-                    data: json!({"reset_at": reset_at.to_rfc3339()}),
-                }],
-                ..Default::default()
-            },
-        );
-        assert_eq!(
-            executor.provider_route_readiness(&request).state,
-            "usage_capped"
-        );
-
-        std::fs::write(&account, r#"{"token":"account-b"}"#).expect("account B");
-        executor
-            .evidence
-            .lock()
-            .expect("evidence")
-            .readiness
-            .expire_all();
-        assert!(
-            executor.provider_route_readiness(&request).ready,
-            "Pi credential B must not inherit credential A's cap"
-        );
-
-        std::fs::write(&account, r#"{"token":"account-a"}"#).expect("restore account A");
-        executor
-            .evidence
-            .lock()
-            .expect("evidence")
-            .readiness
-            .expire_all();
-        assert_eq!(
-            executor.provider_route_readiness(&request).state,
-            "usage_capped"
         );
     }
 

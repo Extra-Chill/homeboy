@@ -25,15 +25,12 @@ use crate::agent_task_scheduler::{
     AgentTaskExecutionContext, AgentTaskExecutorAdapter, AgentTaskPlan,
     ProviderRouteDiagnosticData, ProviderRouteReadiness,
 };
-use crate::agent_task_secrets::{
-    resolve_secret_env_with_fallbacks, secret_env_status_with_fallbacks,
-    AgentTaskSecretResolutionError,
-};
+use crate::agent_task_secrets::AgentTaskSecretResolutionError;
 use crate::agent_task_timeout::timeout_with_grace;
 
 pub(crate) use homeboy_core::command_invocation::CommandInvocation;
 use homeboy_core::engine::shell;
-pub(crate) use homeboy_core::secret_env_plan::{SecretEnvPlan, SecretEnvStatus};
+pub(crate) use homeboy_core::secret_env_plan::SecretEnvPlan;
 use homeboy_core::{component, defaults, Error};
 
 mod admission;
@@ -56,8 +53,6 @@ mod runner_readiness;
 mod runtime_preflight_checks;
 mod runtime_readiness;
 mod runtime_types;
-mod secrets;
-pub(crate) use secrets::{ambient_only_provider_secret_env, provider_secret_env_plan};
 pub mod structured_error;
 mod types;
 mod usage_cap;
@@ -78,7 +73,7 @@ pub use capacity_readiness::{
 };
 pub use catalog::*;
 pub use command_runner::{
-    provider_command_parts, run_provider_controller_refresh, run_provider_readiness_probe,
+    provider_command_parts, run_provider_readiness_probe,
     validate_provider_immediate_failure_patterns, ProviderReadinessInvocationCapacity,
     ProviderReadinessInvocationResult, PROVIDER_READINESS_RESULT_SCHEMA,
 };
@@ -119,14 +114,6 @@ pub use runtime_readiness::{
     preflight_plan_provider_runtime_readiness_with_providers, ProviderRuntimeReadinessCache,
 };
 pub use runtime_types::*;
-pub use secrets::{
-    provider_controller_refreshes_for_plan_with_providers,
-    provider_route_secret_env_for_plan_with_providers,
-    provider_route_secret_sources_for_plan_with_providers,
-    provider_runner_secret_env_for_plan_with_providers,
-    provider_secret_credential_mappings_for_plan_with_providers,
-    provider_secret_sources_for_plan_with_providers, ProviderControllerRefresh,
-};
 pub use structured_error::{
     normalize_provider_error, normalize_runtime_stream_error,
     normalized_error_failure_classification, normalized_structured_error,
@@ -168,5 +155,3 @@ use outcome_normalization::{
 };
 #[cfg(test)]
 use resolution::{provider_requires_cwd_git_checkout_with_providers, select_provider_by_backend};
-#[cfg(test)]
-use secrets::provider_secret_sources;

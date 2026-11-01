@@ -10,10 +10,8 @@
 //! The admitted environment is the declared process mechanics every provider
 //! launch already inherits, the variables each provider declares it inherits,
 //! Homeboy's own `HOMEBOY_*` configuration, and the caller's explicit
-//! overrides. Provider secrets are resolved by the Cook child from configured
-//! agent-task sources exactly as in the foreground. A provider secret that
-//! exists only in the launcher's shell environment cannot be reproduced and is
-//! refused at admission with the names to declare.
+//! overrides. Task secrets are resolved by the Cook child from configured
+//! agent-task sources exactly as in the foreground.
 //!
 //! When the step terminates, the durable consumer registered here reconciles
 //! the linked Cook record the way the child would have had it survived: a handoff that
@@ -98,46 +96,15 @@ pub fn admitted_cook_environment(
 ) -> Result<EnvMaterializationPlan> {
     let catalog = crate::agent_task_provider::AgentTaskProviderCatalog::discover();
     let mut names = Vec::new();
-    let mut ambient_only_secrets = Vec::new();
     for provider in &catalog.providers {
-        let secret_names = crate::agent_task_provider::provider_secret_env_plan(
-            provider,
-            &serde_json::from_value(json!({
-                "task_id": "step-environment-admission",
-                "executor": { "backend": provider.backend },
-                "instructions": "",
-            }))
-            .map_err(|error| Error::internal_json(error.to_string(), None))?,
-        )
-        .secret_env_names();
         for env in &provider.invocation.env {
             if env.value.is_none()
                 && !env.redacted.unwrap_or(false)
-                && !secret_names.contains(&env.name)
                 && matches!(env.source.as_deref(), Some("env" | "inherit"))
             {
                 names.push(env.name.clone());
             }
         }
-        ambient_only_secrets
-            .extend(crate::agent_task_provider::ambient_only_provider_secret_env(provider));
-    }
-    ambient_only_secrets.sort();
-    ambient_only_secrets.dedup();
-    if !ambient_only_secrets.is_empty() {
-        let mut error = Error::validation_invalid_argument(
-            "environment",
-            format!(
-                "provider secret(s) exist only in this shell's environment and cannot reach a daemon-supervised Cook: {}",
-                ambient_only_secrets.join(", ")
-            ),
-            None,
-            Some(vec![
-                "Declare each one as an agent-task secret (`homeboy agent-task secrets --help`) so the Cook resolves it without inheriting this shell.".to_string(),
-            ]),
-        );
-        error.details["ambient_only_secret_env"] = json!(ambient_only_secrets);
-        return Err(error);
     }
     Ok(admitted_homeboy_step_environment(names, overrides))
 }

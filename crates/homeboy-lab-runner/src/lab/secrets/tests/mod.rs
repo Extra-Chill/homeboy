@@ -5,7 +5,6 @@ mod part_b;
 
 use super::*;
 use crate::RunnerKind;
-use homeboy_core::command_invocation::CommandInvocation;
 use homeboy_core::server::{RunnerPolicy, RunnerSecretEnvRef, RunnerSettings};
 
 pub(super) fn run_plan_args(plan_path: &std::path::Path) -> Vec<String> {
@@ -56,56 +55,5 @@ impl Drop for RemovedEnvVar {
         } else {
             std::env::remove_var(self.name);
         }
-    }
-}
-
-pub(super) fn fixture_provider_with_example_defaults() -> AgentTaskExecutorProvider {
-    fixture_provider_with_example_defaults_at("~/.example-provider/auth.json")
-}
-
-pub(super) fn fixture_provider_with_example_defaults_at(path: &str) -> AgentTaskExecutorProvider {
-    let mut provider_defaults = std::collections::BTreeMap::new();
-    provider_defaults.insert(
-        "example-oauth".to_string(),
-        serde_json::json!({
-            "secret_env": ["EXAMPLE_PROVIDER_ACCESS_TOKEN"],
-            "secret_env_sources": {
-                "EXAMPLE_PROVIDER_ACCESS_TOKEN": {
-                    "source": "json-file",
-                    "path": path,
-                    "field": "tokens.access_token"
-                }
-            }
-        }),
-    );
-
-    AgentTaskExecutorProvider {
-        schema: "homeboy/agent-task-executor-provider/v1".to_string(),
-        id: "sample-runtime.example-oauth".to_string(),
-        label: None,
-        backend: "sample-runtime".to_string(),
-        default_backend: true,
-        command: "sample-runtime agent".to_string(),
-        command_argv: Vec::new(),
-        invocation: CommandInvocation::default(),
-        request_schema: "homeboy/agent-task-request/v1".to_string(),
-        outcome_schema: "homeboy/agent-task-outcome/v1".to_string(),
-        capabilities: Vec::new(),
-        workspace_materialization: None,
-        provider_defaults,
-        pi_readiness: Default::default(),
-        dependency_failure_patterns: Vec::new(),
-        immediate_failure_patterns: Vec::new(),
-        timeout_artifact_discovery: Default::default(),
-        role_aliases: Default::default(),
-        cli: Default::default(),
-        result_contract: Default::default(),
-        runtime_contract: Default::default(),
-        extension_id: None,
-        extension_path: None,
-        runtime_package_source: None,
-        runtime_id: None,
-        runtime_path: None,
-        extra: std::collections::BTreeMap::new(),
     }
 }

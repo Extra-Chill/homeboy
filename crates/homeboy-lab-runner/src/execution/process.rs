@@ -184,20 +184,6 @@ pub(crate) fn prepare_runner_process(
             &request.command,
             &runner.id,
         )?;
-        let secret_env_plan = runner_exec_secret_env_plan(
-            &request.command,
-            None,
-            &request.secret_env_names,
-            &request.env,
-            request.secret_env_plan.clone(),
-        );
-        provision_provider_file_secret_sources_for_runner(
-            &runner,
-            &request.command,
-            &request.command,
-            &secret_env_plan.secret_env_names(),
-            &request.env,
-        )?;
     }
     validate_runner_policy(
         &runner,

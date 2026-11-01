@@ -668,15 +668,7 @@ pub fn preflight_plan_provider_runtime_readiness_with_providers(
             )
         })?;
         let config = effective_provider_config(&task.executor.config, task.executor.model());
-        let credential_env = super::secrets::provider_request_credential_env(task, provider)
-            .map_err(|error| {
-                Error::validation_invalid_argument(
-                    "provider_runtime_readiness",
-                    error.message,
-                    Some(provider.backend.clone()),
-                    None,
-                )
-            })?;
+        let credential_env = Vec::new();
         let verdict =
             readiness_verdict_with_credentials(provider, &config, &credential_env, cache)?;
         if !verdict.ready {
