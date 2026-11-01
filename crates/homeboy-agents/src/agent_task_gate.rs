@@ -744,6 +744,24 @@ pub struct AgentTaskGateReport {
     /// evidence at the promotion level instead (#16262).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub setup: Vec<AgentTaskGateSetupEvidence>,
+    /// Tracked candidate content a Lab gate rewrote while it ran. A gate that
+    /// leaves the admitted tree changed is failed, whatever its exit code
+    /// (#16920).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_mutation: Option<AgentTaskGateWorkspaceMutation>,
+}
+
+/// Difference between the admitted candidate tree and the gate workspace
+/// observed after the gate command ran.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AgentTaskGateWorkspaceMutation {
+    pub differing_paths: Vec<String>,
+    pub expected_tree: String,
+    pub actual_tree: String,
+    /// Why the tree diff could not name the paths, when it failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path_comparison_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1515,6 +1533,7 @@ impl AgentTaskGateReport {
             candidate_checkout: None,
             environment,
             setup: Vec::new(),
+            workspace_mutation: None,
         }
     }
 
@@ -1574,6 +1593,7 @@ impl AgentTaskGateReport {
             candidate_checkout: None,
             environment: AgentTaskGateEnvironment::default(),
             setup: Vec::new(),
+            workspace_mutation: None,
         }
     }
 

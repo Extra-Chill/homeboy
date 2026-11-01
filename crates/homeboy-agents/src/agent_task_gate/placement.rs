@@ -125,6 +125,13 @@ pub struct LabGateReceipt {
     pub setup: Vec<AgentTaskGateSetupEvidence>,
 }
 
+/// A materialized gate workspace that is not the admitted candidate. Git
+/// workspaces also carry the typed tree difference.
+struct CandidateMismatch {
+    error: Error,
+    mutation: Option<AgentTaskGateWorkspaceMutation>,
+}
+
 impl LabGateRequest {
     pub fn identity(&self) -> Result<String> {
         serde_json::to_vec(self)
@@ -145,8 +152,15 @@ impl LabGateRequest {
     /// Snapshot materialization may change the index projection and absolute
     /// path, but must retain the recorded HEAD and exact candidate tree.
     pub fn verify_materialized_candidate(&self, cwd: &Path) -> Result<()> {
+        match self.materialized_candidate_mismatch(cwd)? {
+            Some(mismatch) => Err(mismatch.error),
+            None => Ok(()),
+        }
+    }
+
+    fn materialized_candidate_mismatch(&self, cwd: &Path) -> Result<Option<CandidateMismatch>> {
         let actual = candidate_fingerprint(&cwd.display().to_string())?;
-        match (&self.candidate, &actual) {
+        let (expected, actual) = match (&self.candidate, &actual) {
             (
                 AgentTaskPromotionCandidate::Git {
                     fingerprint: expected,
@@ -154,67 +168,78 @@ impl LabGateRequest {
                 AgentTaskPromotionCandidate::Git {
                     fingerprint: actual,
                 },
-            ) if expected.head == actual.head
-                && !expected.tree.is_empty()
-                && expected.tree == actual.tree =>
-            {
-                Ok(())
+            ) => {
+                if expected.head == actual.head
+                    && !expected.tree.is_empty()
+                    && expected.tree == actual.tree
+                {
+                    return Ok(None);
+                }
+                (expected, actual)
             }
             _ => {
-                let mut error = Error::invalid_argument(
-                    "gate.candidate",
-                    "Lab gate workspace differs from the controller candidate",
-                );
-                if let (
-                    AgentTaskPromotionCandidate::Git {
-                        fingerprint: expected,
-                    },
-                    AgentTaskPromotionCandidate::Git {
-                        fingerprint: actual,
-                    },
-                ) = (&self.candidate, &actual)
-                {
-                    error.details["expected_head"] = serde_json::json!(expected.head);
-                    error.details["actual_head"] = serde_json::json!(actual.head);
-                    error.details["expected_tree"] = serde_json::json!(expected.tree);
-                    error.details["actual_tree"] = serde_json::json!(actual.tree);
-                    // Canonical candidate commits travel in the Git closure. Do not
-                    // substitute changed_files: those are relative to HEAD, not to
-                    // the admitted tree, and can hide missing tracked content.
-                    match homeboy_core::git::run_git_bytes_with_env(
-                        cwd,
-                        &[
-                            "diff",
-                            "--name-only",
-                            "--no-renames",
-                            "-z",
-                            &expected.tree,
-                            &actual.tree,
-                            "--",
-                        ],
-                        "compare admitted and materialized gate trees",
-                        &[],
-                    ) {
-                        Ok(bytes) => {
-                            let paths: Vec<_> = bytes
-                                .split(|byte| *byte == 0)
-                                .filter(|path| !path.is_empty())
-                                .map(|path| String::from_utf8_lossy(path).into_owned())
-                                .collect();
-                            if !paths.is_empty() {
-                                error.message.push_str(&format!(": {}", paths.join(", ")));
-                            }
-                            error.details["differing_paths"] = serde_json::json!(paths);
-                        }
-                        Err(cause) => {
-                            error.details["path_comparison_error"] =
-                                serde_json::json!(cause.message);
-                        }
-                    }
-                }
-                Err(error)
+                return Ok(Some(CandidateMismatch {
+                    error: Error::invalid_argument(
+                        "gate.candidate",
+                        "Lab gate workspace differs from the controller candidate",
+                    ),
+                    mutation: None,
+                }))
             }
+        };
+        let mut mutation = AgentTaskGateWorkspaceMutation {
+            differing_paths: Vec::new(),
+            expected_tree: expected.tree.clone(),
+            actual_tree: actual.tree.clone(),
+            path_comparison_error: None,
+        };
+        // Canonical candidate commits travel in the Git closure. Do not
+        // substitute changed_files: those are relative to HEAD, not to the
+        // admitted tree, and can hide missing tracked content.
+        match homeboy_core::git::run_git_bytes_with_env(
+            cwd,
+            &[
+                "diff",
+                "--name-only",
+                "--no-renames",
+                "-z",
+                &expected.tree,
+                &actual.tree,
+                "--",
+            ],
+            "compare admitted and materialized gate trees",
+            &[],
+        ) {
+            Ok(bytes) => {
+                mutation.differing_paths = bytes
+                    .split(|byte| *byte == 0)
+                    .filter(|path| !path.is_empty())
+                    .map(|path| String::from_utf8_lossy(path).into_owned())
+                    .collect();
+            }
+            Err(cause) => mutation.path_comparison_error = Some(cause.message),
         }
+        let mut error = Error::invalid_argument(
+            "gate.candidate",
+            "Lab gate workspace differs from the controller candidate",
+        );
+        if !mutation.differing_paths.is_empty() {
+            error
+                .message
+                .push_str(&format!(": {}", mutation.differing_paths.join(", ")));
+        }
+        error.details["expected_head"] = serde_json::json!(expected.head);
+        error.details["actual_head"] = serde_json::json!(actual.head);
+        error.details["expected_tree"] = serde_json::json!(mutation.expected_tree);
+        error.details["actual_tree"] = serde_json::json!(mutation.actual_tree);
+        match &mutation.path_comparison_error {
+            Some(cause) => error.details["path_comparison_error"] = serde_json::json!(cause),
+            None => error.details["differing_paths"] = serde_json::json!(mutation.differing_paths),
+        }
+        Ok(Some(CandidateMismatch {
+            error,
+            mutation: Some(mutation),
+        }))
     }
 
     pub fn verify_receipt(&self, receipt: &LabGateReceipt) -> Result<()> {
@@ -336,6 +361,19 @@ pub(super) fn dispatch(
     let mut report = receipt.report;
     // The step is an in-memory compatibility view and is not on the wire.
     // Rebuild it from the verified terminal result, never its serde skip default.
+    rebuild_terminal_step(&mut report);
+    report.lab_receipt = Some(serde_json::json!({
+        "schema": receipt.schema,
+        "request_sha256": receipt.request_sha256,
+        "candidate": receipt.candidate,
+        "execution_context": receipt.execution_context,
+        "artifact_ref": receipt.artifact_ref,
+        "materialization": receipt.materialization,
+    }));
+    Ok(report)
+}
+
+fn rebuild_terminal_step(report: &mut AgentTaskGateReport) {
     report.step = PlanStep::builder(
         report.id.clone(),
         "agent_task.gate",
@@ -351,15 +389,67 @@ pub(super) fn dispatch(
     )
     .gate_result(HomeboyGateResult::from(report.clone()))
     .build();
-    report.lab_receipt = Some(serde_json::json!({
-        "schema": receipt.schema,
-        "request_sha256": receipt.request_sha256,
-        "candidate": receipt.candidate,
-        "execution_context": receipt.execution_context,
-        "artifact_ref": receipt.artifact_ref,
-        "materialization": receipt.materialization,
-    }));
-    Ok(report)
+}
+
+/// A gate that ran but left tracked candidate content changed is a failed
+/// gate, never a pass and never a transport failure: the receipt keeps the
+/// real exit code, termination and output tails, names the rewritten paths
+/// first in stderr and carries the typed mutation record (#16920).
+fn fail_for_workspace_mutation(
+    report: &mut AgentTaskGateReport,
+    command: &str,
+    mutation: AgentTaskGateWorkspaceMutation,
+) {
+    let paths = if mutation.differing_paths.is_empty() {
+        match &mutation.path_comparison_error {
+            Some(cause) => format!("unnamed paths ({cause})"),
+            None => format!(
+                "tree {} became {}",
+                mutation.expected_tree, mutation.actual_tree
+            ),
+        }
+    } else {
+        mutation.differing_paths.join(", ")
+    };
+    let explanation = format!(
+        "the gate modified tracked files: {paths}; Lab gates must leave the candidate tree unchanged"
+    );
+    report.stderr = if report.stderr.is_empty() {
+        explanation.clone()
+    } else {
+        format!("{explanation}\n{}", report.stderr)
+    };
+    report.status = AgentTaskGateStatus::Failed;
+    if report.test_execution_outcome
+        == Some(homeboy_engine_primitives::test_execution::TestExecutionOutcome::Passed)
+    {
+        report.test_execution_outcome =
+            Some(homeboy_engine_primitives::test_execution::TestExecutionOutcome::Failed);
+    }
+    let feedback = format!(
+        "The gate `{command}` rewrote tracked candidate files ({paths}). Lab gates must leave the candidate tree unchanged: commit the regenerated output in the candidate (for example a rebuilt `dist/`) or change the gate so it does not write tracked files."
+    );
+    match report.failure_evidence.as_mut() {
+        Some(evidence) => {
+            evidence.summary = format!("{explanation}; {}", evidence.summary);
+            evidence.stderr_tail = text_tail(&report.stderr, 20);
+            evidence.agent_feedback = format!("{feedback} {}", evidence.agent_feedback);
+        }
+        None => {
+            report.failure_evidence = Some(AgentTaskGateFailureEvidence {
+                classification: AgentTaskGateFailureClassification::CandidateCode,
+                summary: format!("deterministic gate failed: {explanation}: {command}"),
+                command: command.to_string(),
+                exit_code: report.exit_code,
+                stdout_tail: text_tail(&report.stdout, 20),
+                stderr_tail: text_tail(&report.stderr, 20),
+                agent_feedback: feedback,
+                diagnostics: Vec::new(),
+            });
+        }
+    }
+    report.workspace_mutation = Some(mutation);
+    rebuild_terminal_step(report);
 }
 
 fn non_execution_report(request: &LabGateRequest, error: &Error) -> AgentTaskGateReport {
@@ -741,7 +831,16 @@ fn execute_with_context_and_resources(
     if let Some((name, source)) = playwright_provenance {
         report.environment.preserved.insert(name, source);
     }
-    request.verify_materialized_candidate(cwd)?;
+    // The gate already ran: a changed tree fails it with its evidence intact.
+    // Without an executed gate (or a typed tree diff) the mismatch stays fatal.
+    if let Some(mismatch) = request.materialized_candidate_mismatch(cwd)? {
+        match mismatch.mutation {
+            Some(mutation) if readiness.is_none() => {
+                fail_for_workspace_mutation(&mut report, &request.label, mutation)
+            }
+            _ => return Err(mismatch.error),
+        }
+    }
     Ok(LabGateReceipt {
         readiness,
         materialization: None,
@@ -1526,6 +1625,210 @@ mod tests {
             assert_eq!(
                 error.details["cause"]["outcome"]["cwd"], "/runner/workspaces/candidate",
                 "the failure names the runner-side workspace it ran in"
+            );
+        });
+    }
+
+    fn mutating_gate(root: &Path, runner_id: &str, script: &str) -> LabGateRequest {
+        let mut request = request(root);
+        request.runner_id = runner_id.to_string();
+        request.argv = vec!["sh".to_string(), "-c".to_string(), script.to_string()];
+        request
+    }
+
+    fn runner_context(
+        runner_id: &str,
+    ) -> homeboy_core::runner_job_execution_context::RunnerJobExecutionContext {
+        homeboy_core::runner_job_execution_context::RunnerJobExecutionContext::direct_daemon(
+            Some("controller-run"),
+            runner_id,
+            "job",
+            "homeboy",
+            "reservation",
+        )
+        .unwrap()
+    }
+
+    /// #16920: a gate that exits 0 but rewrites a tracked file still returns
+    /// the bound receipt, failed, with its real output and the typed record.
+    #[test]
+    fn passing_gate_that_rewrites_tracked_files_returns_a_failed_bound_receipt() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let temp = tempfile::tempdir().unwrap();
+            repository(temp.path());
+            let request = mutating_gate(
+                temp.path(),
+                "lab",
+                "printf executed; printf 'gate log\\n' >&2; printf rebuilt > candidate.txt",
+            );
+
+            let receipt =
+                execute_with_context(request.clone(), temp.path(), &lab_context()).unwrap();
+
+            request.verify_receipt(&receipt).unwrap();
+            assert_eq!(receipt.candidate, request.candidate);
+            let report = &receipt.report;
+            assert_eq!(report.status, AgentTaskGateStatus::Failed);
+            assert_eq!(report.exit_code, 0);
+            assert_eq!(report.termination, AgentTaskGateTermination::Completed);
+            assert_eq!(report.stdout, "executed");
+            assert!(
+                report.stderr.starts_with(
+                    "the gate modified tracked files: candidate.txt; Lab gates must leave the candidate tree unchanged"
+                ),
+                "{}",
+                report.stderr
+            );
+            assert!(report.stderr.contains("gate log"));
+            let mutation = report.workspace_mutation.as_ref().unwrap();
+            assert_eq!(mutation.differing_paths, vec!["candidate.txt".to_string()]);
+            assert_ne!(mutation.expected_tree, mutation.actual_tree);
+            assert_eq!(mutation.path_comparison_error, None);
+            let evidence = report.failure_evidence.as_ref().unwrap();
+            assert_eq!(
+                evidence.classification,
+                AgentTaskGateFailureClassification::CandidateCode
+            );
+            assert!(evidence.agent_feedback.contains("candidate.txt"));
+            assert!(evidence.stderr_tail.contains("modified tracked files"));
+            let wire = serde_json::to_value(&receipt).unwrap();
+            assert_eq!(
+                wire["report"]["workspace_mutation"]["differing_paths"],
+                serde_json::json!(["candidate.txt"])
+            );
+            serde_json::from_value::<LabGateReceipt>(wire).unwrap();
+        });
+    }
+
+    #[test]
+    fn failing_gate_that_rewrites_tracked_files_keeps_its_exit_code() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let temp = tempfile::tempdir().unwrap();
+            repository(temp.path());
+            let request = mutating_gate(
+                temp.path(),
+                "lab",
+                "printf rebuilt > candidate.txt; printf boom >&2; exit 3",
+            );
+
+            let receipt = execute_with_context(request, temp.path(), &lab_context()).unwrap();
+
+            assert_eq!(receipt.report.status, AgentTaskGateStatus::Failed);
+            assert_eq!(receipt.report.exit_code, 3);
+            assert!(receipt
+                .report
+                .stderr
+                .starts_with("the gate modified tracked files: candidate.txt"));
+            assert!(receipt.report.stderr.ends_with("boom"));
+            assert_eq!(
+                receipt.report.failure_evidence.as_ref().unwrap().exit_code,
+                3
+            );
+            assert_eq!(
+                receipt
+                    .report
+                    .workspace_mutation
+                    .as_ref()
+                    .unwrap()
+                    .differing_paths,
+                vec!["candidate.txt".to_string()]
+            );
+        });
+    }
+
+    #[test]
+    fn pre_run_candidate_mismatch_is_still_refused() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let temp = tempfile::tempdir().unwrap();
+            repository(temp.path());
+            let marker = temp.path().join("gate-ran");
+            let request =
+                mutating_gate(temp.path(), "lab", &format!("touch '{}'", marker.display()));
+            fs::write(temp.path().join("candidate.txt"), "altered before run\n").unwrap();
+
+            let error = execute_with_context(request, temp.path(), &lab_context()).unwrap_err();
+
+            assert_eq!(
+                error.details["differing_paths"],
+                serde_json::json!(["candidate.txt"])
+            );
+            assert!(error
+                .message
+                .contains("differs from the controller candidate"));
+            assert!(
+                !marker.exists(),
+                "a mismatched workspace never runs the gate"
+            );
+        });
+    }
+
+    /// The controller accepts the bound mutation receipt as an executed,
+    /// failed gate rather than a transport/non-execution report.
+    #[test]
+    fn controller_dispatch_reports_workspace_mutation_as_a_failed_gate() {
+        struct MutatingRunnerTransport {
+            previous: Arc<dyn LabGateTransport>,
+        }
+        impl LabGateTransport for MutatingRunnerTransport {
+            fn declared_runner(&self, command: &str) -> Result<Option<String>> {
+                self.previous.declared_runner(command)
+            }
+            fn execute(
+                &self,
+                cwd: &Path,
+                request: &LabGateRequest,
+                supervision: Option<&GateSupervision>,
+            ) -> Result<LabGateReceipt> {
+                if request.runner_id != "mutating-runner" {
+                    return self.previous.execute(cwd, request, supervision);
+                }
+                // The runner materializes its own copy of the candidate.
+                let runner = tempfile::tempdir().unwrap();
+                assert!(Command::new("git")
+                    .args(["clone", "-q"])
+                    .arg(cwd)
+                    .arg(runner.path())
+                    .status()
+                    .unwrap()
+                    .success());
+                execute_with_context(
+                    request.clone(),
+                    runner.path(),
+                    &runner_context("mutating-runner"),
+                )
+            }
+        }
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let previous = active_transport();
+            register_lab_gate_transport(Arc::new(MutatingRunnerTransport { previous }));
+            let temp = tempfile::tempdir().unwrap();
+            repository(temp.path());
+            let request = mutating_gate(
+                temp.path(),
+                "mutating-runner",
+                "printf executed; printf rebuilt > candidate.txt",
+            );
+
+            let report = dispatch(temp.path(), &request, None).unwrap();
+
+            assert_eq!(report.status, AgentTaskGateStatus::Failed);
+            assert_eq!(report.exit_code, 0);
+            assert_eq!(report.stdout, "executed");
+            assert!(!report
+                .stderr
+                .contains("did not produce verified execution evidence"));
+            assert!(report.stderr.starts_with("the gate modified tracked files"));
+            assert_eq!(
+                report.workspace_mutation.as_ref().unwrap().differing_paths,
+                vec!["candidate.txt".to_string()]
+            );
+            let lab_receipt = report.lab_receipt.as_ref().unwrap();
+            assert_eq!(lab_receipt["schema"], LAB_GATE_RECEIPT_SCHEMA);
+            assert!(lab_receipt.get("executed").is_none());
+            assert_eq!(report.step.status, PlanStepStatus::Failed);
+            assert_eq!(
+                HomeboyGateResult::from(report.clone()).status,
+                HomeboyGateStatus::Failed
             );
         });
     }
