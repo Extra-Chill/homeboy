@@ -4,11 +4,13 @@ use homeboy_core::artifact_inputs;
 use homeboy_core::component::Component;
 use homeboy_core::context::RemoteProjectContext;
 use homeboy_core::error::Result;
+use homeboy_core::phase_timing::PhaseTimer;
 use homeboy_core::project::Project;
 
 use super::super::effect::{remote_version_after_deploy_effect, PostDeployVerification};
 use super::super::generated_artifacts::GeneratedBuildArtifactCleanupGuard;
 use super::super::lifecycle::DeployObservation;
+use super::super::phase_clock;
 use super::super::planning::{calculate_directory_size, format_bytes};
 use super::super::safety_and_artifact::{deploy_artifact, deploy_via_git};
 use super::super::types::{ComponentDeployResult, DeployConfig, DeployResult};
@@ -56,18 +58,27 @@ pub(super) fn execute_git_deploy(input: GitDeployInput<'_>) -> ComponentDeployRe
         Ok(DeployResult {
             success: true,
             exit_code,
+            mut phase_timings,
             ..
         }) => {
             if let Ok(Some(summary)) = cleanup_build_dependencies(component, config) {
                 homeboy_core::log_status!("deploy", "Cleanup: {}", summary);
             }
-            run_post_deploy_hooks(&ctx.client, component, project, install_dir, base_path);
+            run_component_hooks(
+                &mut phase_timings,
+                ctx,
+                component,
+                project,
+                install_dir,
+                base_path,
+            );
 
             ComponentDeployResult::new(component, base_path)
                 .with_status("deployed")
                 .with_versions(local_version.clone(), local_version)
                 .with_remote_path(install_dir.to_string())
                 .with_deploy_exit_code(Some(exit_code))
+                .with_phase_timings(phase_timings.into_report())
         }
         Ok(DeployResult {
             error, exit_code, ..
@@ -170,6 +181,8 @@ pub(super) fn execute_file_deploy(input: FileDeployInput<'_>) -> ComponentDeploy
             );
         }
     }
+    let mut timer = PhaseTimer::new();
+    let started = std::time::Instant::now();
     homeboy_core::log_status!("deploy", "Ensuring remote directory: {}", remote_parent);
     let mkdir_output = ctx.client.execute(&mkdir_cmd);
     if !mkdir_output.success {
@@ -198,7 +211,10 @@ pub(super) fn execute_file_deploy(input: FileDeployInput<'_>) -> ComponentDeploy
             exit_code,
             ..
         }) => {
+            let subject = phase_clock::component_subject(&component.id);
+            phase_clock::record(&mut timer, &subject, "transfer", started);
             // Fix ownership if configured
+            let started = std::time::Instant::now();
             if let Some(owner) = component.remote_owner.as_deref() {
                 let chown_cmd = format!(
                     "chown {} {}",
@@ -216,19 +232,15 @@ pub(super) fn execute_file_deploy(input: FileDeployInput<'_>) -> ComponentDeploy
                 }
             }
 
-            super::super::version_overrides::run_post_deploy_hooks(
-                &ctx.client,
-                component,
-                project,
-                install_dir,
-                base_path,
-            );
+            phase_clock::record(&mut timer, &subject, "permissions", started);
+            run_component_hooks(&mut timer, ctx, component, project, install_dir, base_path);
 
             ComponentDeployResult::new(component, base_path)
                 .with_status("deployed")
                 .with_versions(local_version.clone(), local_version)
                 .with_remote_path(install_dir.to_string())
                 .with_deploy_exit_code(Some(exit_code))
+                .with_phase_timings(timer.into_report())
         }
         Ok(super::super::types::DeployResult {
             error, exit_code, ..
@@ -391,16 +403,22 @@ pub(super) fn execute_artifact_deploy(
             success: true,
             exit_code,
             effect,
+            mut phase_timings,
             ..
         }) => {
-            let reported_remote_version = match remote_version_after_deploy_effect(
-                component,
-                project,
-                base_path,
-                &ctx.client,
-                effect.as_ref(),
-                post_deploy_expected_version(prepared),
-            ) {
+            let subject = phase_clock::component_subject(&component.id);
+            let verification =
+                phase_clock::time(&mut phase_timings, &subject, "verify.version", || {
+                    remote_version_after_deploy_effect(
+                        component,
+                        project,
+                        base_path,
+                        &ctx.client,
+                        effect.as_ref(),
+                        post_deploy_expected_version(prepared),
+                    )
+                });
+            let reported_remote_version = match verification {
                 Ok(PostDeployVerification::Verified(version)) => version,
                 Ok(PostDeployVerification::AppliedUnverified(error)) => {
                     let result = ComponentDeployResult::applied_unverified(
@@ -413,7 +431,8 @@ pub(super) fn execute_artifact_deploy(
                     .with_remote_path(install_dir.to_string())
                     .with_artifact_inputs(artifact_input_metadata)
                     .with_build_exit_code(prepared.build_exit_code)
-                    .with_deploy_exit_code(Some(exit_code));
+                    .with_deploy_exit_code(Some(exit_code))
+                    .with_phase_timings(phase_timings.into_report());
                     return with_prepared_artifact_source(result, prepared);
                 }
                 Err(error) => {
@@ -427,7 +446,8 @@ pub(super) fn execute_artifact_deploy(
                     .with_remote_path(install_dir.to_string())
                     .with_artifact_inputs(artifact_input_metadata)
                     .with_build_exit_code(prepared.build_exit_code)
-                    .with_deploy_exit_code(Some(exit_code));
+                    .with_deploy_exit_code(Some(exit_code))
+                    .with_phase_timings(phase_timings.into_report());
                     return with_prepared_artifact_source(result, prepared);
                 }
             };
@@ -446,7 +466,14 @@ pub(super) fn execute_artifact_deploy(
                     component.id
                 );
             }
-            run_post_deploy_hooks(&ctx.client, component, project, install_dir, base_path);
+            run_component_hooks(
+                &mut phase_timings,
+                ctx,
+                component,
+                project,
+                install_dir,
+                base_path,
+            );
 
             let result = ComponentDeployResult::new(component, base_path)
                 .with_status("deployed")
@@ -454,7 +481,8 @@ pub(super) fn execute_artifact_deploy(
                 .with_remote_path(install_dir.to_string())
                 .with_artifact_inputs(artifact_input_metadata)
                 .with_build_exit_code(prepared.build_exit_code)
-                .with_deploy_exit_code(Some(exit_code));
+                .with_deploy_exit_code(Some(exit_code))
+                .with_phase_timings(phase_timings.into_report());
             with_prepared_artifact_source(result, prepared)
         }
         Ok(DeployResult {
@@ -488,6 +516,22 @@ pub(super) fn execute_artifact_deploy(
             with_prepared_artifact_source(result, prepared)
         }
     }
+}
+
+/// Run the component's `post:deploy` hooks (extension, project, and component
+/// scope) as the timed `hooks` phase.
+fn run_component_hooks(
+    timer: &mut PhaseTimer,
+    ctx: &RemoteProjectContext,
+    component: &Component,
+    project: &Project,
+    install_dir: &str,
+    base_path: &str,
+) {
+    let subject = phase_clock::component_subject(&component.id);
+    phase_clock::time(timer, &subject, "hooks", || {
+        run_post_deploy_hooks(&ctx.client, component, project, install_dir, base_path)
+    });
 }
 
 pub(super) fn post_deploy_expected_version(prepared: &PreparedComponentDeploy) -> Option<&String> {

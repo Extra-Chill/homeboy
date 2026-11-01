@@ -93,7 +93,12 @@ If no component IDs are provided and none of `--all`, `--outdated`, `--behind-up
       "requested_ref": "<operator-provided-ref>",
       "resolved_sha": "<full-commit-sha>",
       "source": "<declared-git-repository-or-configured-remote>",
-      "resolution_mode": "local|remote_sha|remote_named_ref"
+      "resolution_mode": "local|remote_sha|remote_named_ref",
+      "phase_timings": {
+        "spans": [
+          { "id": "build", "status": "ok", "duration_ms": 1234.5, "started_at": "<rfc3339>", "homeboy_version": "<v>" }
+        ]
+      }
     }
   ],
   "summary": { "total": 1, "succeeded": 0, "failed": 0, "skipped": 0 }
@@ -129,6 +134,25 @@ Notes:
 - `requested_ref`, `resolved_sha`, `source`, and `resolution_mode` are persisted for `--ref` deploy evidence and omitted for other source modes. `build_provenance.built_from_ref` and `build_provenance.built_from_commit` carry the same identity.
 
 Note: `build_exit_code`/`deploy_exit_code` are numbers when present (not strings).
+
+### Phase timings
+
+Real deploys record `results[].phase_timings.spans` (also under
+`projects[].results[]` for multi-project deploys): one span per step the
+component ran, in execution order, with `duration_ms`. Steps that did not run
+are omitted. Span ids:
+
+- `source.materialize`, `source.verify`, `source.dependencies`, `source.package_inputs` — exact-ref (`--ref`) or isolated tag checkout, verification, dependency hydration, declared package inputs
+- `build`, `package` — local build/payload preparation and archive manifest/hash
+- `preflight.manifest` — remote content-manifest re-probe before the first write
+- `transfer`, `install`, `permissions`, `verify` — upload, remote extract/install command, permission fix, extension verify command
+- `verify.version` — post-deploy remote version read
+- `hooks` — component `post:deploy` hooks
+- `project.hooks`, `project.smoke` — project-scoped `post:deploy:project` hooks and smoke check; they run once per deploy and are attributed to every applied component
+
+Each step also prints a `[deploy] phase=<id> … duration_ms=<n>` status line on
+stderr. Status lines are shown when stderr is a terminal; set `HOMEBOY_STATUS=1`
+to show them in CI or when stderr is redirected.
 
 ### Component status values
 

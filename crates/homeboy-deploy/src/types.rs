@@ -10,7 +10,7 @@ use homeboy_core::config;
 use homeboy_core::error::Result;
 use homeboy_core::git::output_optional;
 use homeboy_core::paths as base_path;
-use homeboy_core::phase_timing::PhaseTimingReport;
+use homeboy_core::phase_timing::{PhaseTimer, PhaseTimingReport};
 use homeboy_core::project::Project;
 
 use super::path_roots::resolve_effective_remote_path;
@@ -45,6 +45,8 @@ pub(crate) struct DeployResult {
     pub(crate) exit_code: i32,
     pub(crate) error: Option<String>,
     pub(crate) effect: Option<DeployEffect>,
+    /// Remote steps (transfer, install, permissions, verify) timed by the strategy.
+    pub(crate) phase_timings: PhaseTimer,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,6 +63,7 @@ impl DeployResult {
             exit_code,
             error: None,
             effect: None,
+            phase_timings: PhaseTimer::new(),
         }
     }
 
@@ -70,11 +73,17 @@ impl DeployResult {
             exit_code,
             error: Some(error),
             effect: None,
+            phase_timings: PhaseTimer::new(),
         }
     }
 
     pub(super) fn with_effect(mut self, effect: DeployEffect) -> Self {
         self.effect = Some(effect);
+        self
+    }
+
+    pub(super) fn with_phase_timings(mut self, timer: PhaseTimer) -> Self {
+        self.phase_timings = timer;
         self
     }
 }
@@ -626,6 +635,10 @@ pub struct ComponentDeployResult {
     /// and remediation evidence). Core preserves it without interpreting it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) deployment_provider: Option<serde_json::Value>,
+    /// Ordered per-phase durations for this component (source, build, package,
+    /// transfer, install, permissions, verify, hooks).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) phase_timings: Option<PhaseTimingReport>,
 }
 
 impl ComponentDeployResult {
@@ -684,6 +697,7 @@ impl ComponentDeployResult {
             prepared_artifact: None,
             deployment_provenance: None,
             deployment_provider: None,
+            phase_timings: None,
         }
     }
 
@@ -737,6 +751,12 @@ impl ComponentDeployResult {
 
     pub(super) fn with_error(mut self, error: String) -> Self {
         self.error = Some(error);
+        self
+    }
+
+    /// Set the component's phase timings; an empty report is omitted.
+    pub(super) fn with_phase_timings(mut self, report: PhaseTimingReport) -> Self {
+        self.phase_timings = (!report.is_empty()).then_some(report);
         self
     }
 

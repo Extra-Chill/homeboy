@@ -3,11 +3,13 @@ use std::path::{Path, PathBuf};
 use homeboy_core::component::Component;
 use homeboy_core::context::RemoteProjectContext;
 use homeboy_core::extension::build;
+use homeboy_core::phase_timing::{PhaseTimer, PhaseTimingReport};
 use homeboy_core::project::Project;
 
 use super::super::generated_artifacts::GeneratedBuildArtifactCleanupGuard;
 use super::super::lifecycle::DeployObservation;
 use super::super::path_roots::{component_remote_path, resolve_effective_remote_path};
+use super::super::phase_clock;
 use super::super::policy::{owner_hint_for_path, protected_path_suffixes, validate_deploy_target};
 use super::super::provenance::capture_build_provenance;
 use super::super::types::{
@@ -36,6 +38,8 @@ pub(crate) struct PreparedComponentDeploy {
     pub(crate) payload_sha256: Option<String>,
     pub(crate) build_provenance: BuildProvenance,
     pub(crate) cleanup_local_artifact: bool,
+    /// Local preparation phases (build, package) for this component.
+    pub(crate) phase_timings: PhaseTimingReport,
 }
 
 #[allow(clippy::result_large_err)]
@@ -133,12 +137,17 @@ pub(crate) fn prepare_component_deploy(
     let mut generated_cleanup_guard =
         GeneratedBuildArtifactCleanupGuard::new(local_path, cleanup_generated_artifacts);
 
+    let mut timer = PhaseTimer::new();
+    let subject = phase_clock::component_subject(&component.id);
+
     // Build (git-deploy, file-deploy, skip-build, and release-download skip this step)
     let (build_exit_code, build_error) =
         if is_git_deploy || is_file_deploy || config.skip_build || release_artifact.is_some() {
             (Some(0), None)
         } else {
-            build::build_component(component)
+            phase_clock::time(&mut timer, &subject, "build", || {
+                build::build_component(component)
+            })
         };
 
     if let Some(ref error) = build_error {
@@ -280,10 +289,12 @@ pub(crate) fn prepare_component_deploy(
         path.extension()
             .is_some_and(|extension| extension.eq_ignore_ascii_case("zip"))
     }) {
-        Some(path) => match (
-            super::super::content_manifest::package_manifest(path, &exclusions),
-            crate::sha256_file(path),
-        ) {
+        Some(path) => match phase_clock::time(&mut timer, &subject, "package", || {
+            (
+                super::super::content_manifest::package_manifest(path, &exclusions),
+                crate::sha256_file(path),
+            )
+        }) {
             (Ok(manifest), Ok(sha256)) => (Some(manifest), Some(sha256)),
             (Err(error), _) => {
                 return Err(failed_component_deploy_result(
@@ -326,6 +337,7 @@ pub(crate) fn prepare_component_deploy(
         payload_sha256,
         build_provenance,
         cleanup_local_artifact,
+        phase_timings: timer.into_report(),
     })
 }
 

@@ -2,10 +2,12 @@ use std::collections::HashMap;
 
 use homeboy_core::component::Component;
 use homeboy_core::error::Error;
+use homeboy_core::phase_timing::PhaseTimer;
 use homeboy_core::project::Project;
 
 use super::super::binding::bind_project_payloads;
 use super::super::execution::{prepare_component_deploy, PreparedComponentDeploy};
+use super::super::phase_clock;
 use super::super::preparation::{ComponentPayloadPreparationRequest, DeploymentArtifactStore};
 use super::super::provenance::record_payload_preparation_build;
 use super::super::types::{ComponentDeployResult, DeployConfig};
@@ -63,6 +65,7 @@ pub(super) fn prepare_component_deployments_with_payloads(
             component.local_path = source_path;
         }
         let effective_config = config.clone();
+        let mut timer = PhaseTimer::new();
         let is_artifact_deploy =
             !component.deploy_config().is_git_deploy() && !component.is_file_component();
         let effective_config = if is_artifact_deploy
@@ -78,10 +81,12 @@ pub(super) fn prepare_component_deployments_with_payloads(
                 ComponentPayloadPreparationRequest::new(&component, &preparation_config);
             request.config.exact_ref_materialized =
                 config.requested_ref_for(&component.id).is_some();
-            match artifacts
-                .payloads
-                .prepare(request, &mut artifacts.release_artifacts)
-            {
+            let subject = phase_clock::component_subject(&component.id);
+            match phase_clock::time(&mut timer, &subject, "build", || {
+                artifacts
+                    .payloads
+                    .prepare(request, &mut artifacts.release_artifacts)
+            }) {
                 Ok(payload) => {
                     binding_payloads.insert(component.id.clone(), payload.artifact.clone());
                     let payload_build_ran = payload.build_ran;
@@ -123,6 +128,10 @@ pub(super) fn prepare_component_deployments_with_payloads(
                 if effective_config.1 {
                     record_payload_preparation_build(&mut prepared.build_provenance);
                 }
+                prepared
+                    .phase_timings
+                    .spans
+                    .splice(0..0, timer.into_report().spans);
                 prepared_deployments.push(prepared);
             }
             Err(result) => failures.push(result),
