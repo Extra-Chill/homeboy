@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.25.5] - 2026-11-01
+
+### Fixed
+- keep observation bundles outside the checkout
+
 ## [2.25.4] - 2026-11-01
 
 ### Fixed
