@@ -164,6 +164,10 @@ enum ExtensionCommand {
         /// Component path containing homeboy.json (defaults to current directory)
         #[arg(long)]
         path: Option<String>,
+        /// Git ref to check out for URL installs (branch, tag, or commit), so
+        /// every extension comes from the same release
+        #[arg(long = "ref")]
+        revision: Option<String>,
     },
     /// Update an installed extension (git pull)
     Update {
@@ -280,9 +284,11 @@ pub fn run(args: ExtensionArgs) -> CmdResult<ExtensionOutput> {
             runner,
             command,
         } => dev_run_extension(&extension_id, &source, &runner, &command),
-        ExtensionCommand::InstallForComponent { source, path } => {
-            install_for_component(&source, path.as_deref())
-        }
+        ExtensionCommand::InstallForComponent {
+            source,
+            path,
+            revision,
+        } => install_for_component(&source, path.as_deref(), revision.as_deref()),
         ExtensionCommand::Update {
             extension_id,
             all,
@@ -1509,9 +1515,14 @@ fn dev_run_extension(
     Ok((ExtensionOutput::DevRun(output), exit_code))
 }
 
-fn install_for_component(source: &str, path: Option<&str>) -> CmdResult<ExtensionOutput> {
+fn install_for_component(
+    source: &str,
+    path: Option<&str>,
+    revision: Option<&str>,
+) -> CmdResult<ExtensionOutput> {
     let component = resolve_install_component(path)?;
-    let result = homeboy_core::extension::lifecycle::install_for_component(&component, source)?;
+    let result =
+        homeboy_core::extension::lifecycle::install_for_component(&component, source, revision)?;
 
     let installed = result
         .installed

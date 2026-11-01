@@ -97,12 +97,14 @@ pub fn install_with_revision(
     }
 }
 
-/// Install every extension declared by a component from the same source.
+/// Install every extension declared by a component from the same source,
+/// optionally at one git ref so every extension comes from the same release.
 ///
 /// Already-installed extensions are skipped so CI setup can be re-run safely.
 pub fn install_for_component(
     component: &homeboy_core::component::Component,
     source: &str,
+    revision: Option<&str>,
 ) -> Result<InstallForComponentResult> {
     let extensions = component.extensions.as_ref().ok_or_else(|| {
         Error::validation_invalid_argument(
@@ -134,7 +136,11 @@ pub fn install_for_component(
             continue;
         }
 
-        installed.push(install_configured_extension(source, &extension_id)?);
+        installed.push(install_configured_extension(
+            source,
+            &extension_id,
+            revision,
+        )?);
     }
 
     Ok(InstallForComponentResult {
@@ -698,7 +704,7 @@ exec '{}' "$@"
             write_component_fixture(&component_dir, &["alpha", "beta"]);
             let component = component::discover_from_portable(&component_dir).expect("component");
 
-            let result = install_for_component(&component, &source.to_string_lossy())
+            let result = install_for_component(&component, &source.to_string_lossy(), None)
                 .expect("install should succeed");
 
             let installed_ids = result
@@ -767,7 +773,7 @@ exec '{}' "$@"
             install(&source.join("alpha").to_string_lossy(), Some("alpha"))
                 .expect("pre-install alpha");
 
-            let result = install_for_component(&component, &source.to_string_lossy())
+            let result = install_for_component(&component, &source.to_string_lossy(), None)
                 .expect("install should succeed");
 
             let installed_ids = result
@@ -794,7 +800,7 @@ exec '{}' "$@"
 
             let component = component::discover_from_portable(&component_dir)
                 .expect("component should resolve from portable path");
-            let result = install_for_component(&component, &source.to_string_lossy())
+            let result = install_for_component(&component, &source.to_string_lossy(), None)
                 .expect("install should succeed");
 
             assert_eq!(result.component_id, "multi-extension-component");
@@ -2356,7 +2362,7 @@ impl homeboy_core::component_install_provider::ComponentInstallRunner
         source: &str,
     ) -> homeboy_core::Result<homeboy_core::component_install_provider::ComponentInstallResult>
     {
-        let result = install_for_component(component, source)?;
+        let result = install_for_component(component, source, None)?;
         Ok(
             homeboy_core::component_install_provider::ComponentInstallResult {
                 source: result.source,

@@ -118,13 +118,14 @@ Installs an extension into Homeboy's extensions directory.
 ### `install-for-component`
 
 ```sh
-homeboy extension install-for-component --source <source> [--path <component_path>]
+homeboy extension install-for-component --source <source> [--path <component_path>] [--ref <ref>]
 ```
 
 Installs every extension configured by a component.
 
 - `--source <source>`: git URL or local path to the extension repository or directory.
 - `--path <component_path>`: component path containing `homeboy.json` (defaults to the current directory).
+- `--ref <ref>`: branch, tag, or commit to check out for git URL sources. Pin it to the release your CLI runs (for example `v0.439.9`) so every extension shares that release's layout; without it, URL installs use the default branch.
 
 ### `relink`
 
