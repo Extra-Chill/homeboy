@@ -627,6 +627,7 @@ Quality command inputs `lint`, `test`, and `build` are action-level shorthand. H
 |--------|-------------|
 | `results` | JSON object with pass/fail for each command (e.g. `{"lint":"pass","test":"fail"}`) |
 | `binary-source` | How the binary was obtained: `source`, `fallback`, or `release` |
+| `provisioning-reused` | Whether this invocation reused provisioning from an earlier invocation in the same job (`true`/`false`) |
 | `released` | Whether a release was created (`true`/`false`) |
 | `release-version` | The released version number (e.g. `1.2.3`) |
 | `release-tag` | The release git tag (e.g. `v1.2.3`) |
@@ -1109,6 +1110,16 @@ When multiple jobs invoke Homeboy Action on the same PR, they **merge into one s
 3. **Validates Portable Config** — Requires `homeboy.json` at repo root
 4. **Runs Commands** — Executes each command with `--path` pointing at your workspace
 5. **Release** — If `commands` includes `release`, checks for releasable commits, bumps version, generates changelog, tags, pushes, and creates a GitHub Release
+
+When a job invokes the action more than once (for example gate, deploy, then
+verify), later invocations with the same provisioning inputs (`version`,
+`source`, `binary-path`, `extension`, `extension-source`, `extension-ref`,
+`php-version`, `node-version`, `auto-setup`, `prepare-only`, component and
+`homeboy.json`) skip Homeboy/extension install, runtime detection, PHP/Node
+setup and dependency setup. A marker under `RUNNER_TEMP` records the first
+invocation's provisioning and is checked against the installed binary and
+extension before reuse; any changed input or replaced install provisions
+again.
 
 ## Process Containment
 

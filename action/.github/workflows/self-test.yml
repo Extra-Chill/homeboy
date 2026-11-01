@@ -39,6 +39,61 @@ jobs:
       - name: Run action shell tests
         run: bash scripts/run-tests.sh
 
+  # A job that invokes the action several times reuses the first invocation's
+  # provisioning (#563). The second invocation must skip setup and still run
+  # its command; changing a provisioning input must provision again.
+  provisioning-reuse:
+    name: Provisioning reuse across invocations
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: First invocation
+        id: first
+        uses: ./
+        with:
+          commands: git status
+          pr-comment: 'false'
+
+      - name: Second invocation (same inputs)
+        id: second
+        uses: ./
+        with:
+          commands: git status
+          pr-comment: 'false'
+
+      - name: Third invocation (changed extension-source)
+        id: third
+        uses: ./
+        with:
+          commands: git status
+          pr-comment: 'false'
+          extension-source: https://github.com/Extra-Chill/homeboy.git
+
+      - name: Assert provisioning reuse
+        env:
+          FIRST_REUSED: ${{ steps.first.outputs.provisioning-reused }}
+          SECOND_REUSED: ${{ steps.second.outputs.provisioning-reused }}
+          THIRD_REUSED: ${{ steps.third.outputs.provisioning-reused }}
+          FIRST_VERSION: ${{ steps.first.outputs.homeboy-version }}
+          SECOND_VERSION: ${{ steps.second.outputs.homeboy-version }}
+          SECOND_BINARY_SOURCE: ${{ steps.second.outputs.binary-source }}
+          SECOND_RESULTS: ${{ steps.second.outputs.operations-results }}
+        run: |
+          set -euo pipefail
+          [ "${FIRST_REUSED}" = false ] || { echo "::error::first invocation reused provisioning"; exit 1; }
+          [ "${SECOND_REUSED}" = true ] || { echo "::error::second invocation did not reuse provisioning"; exit 1; }
+          [ "${THIRD_REUSED}" = false ] || { echo "::error::changed extension-source did not re-provision"; exit 1; }
+          [ -n "${SECOND_VERSION}" ] && [ "${SECOND_VERSION}" = "${FIRST_VERSION}" ] || { echo "::error::reused homeboy-version '${SECOND_VERSION}' != '${FIRST_VERSION}'"; exit 1; }
+          [ "${SECOND_BINARY_SOURCE}" = release ] || { echo "::error::reused binary-source is '${SECOND_BINARY_SOURCE}'"; exit 1; }
+          jq -e 'to_entries | length > 0 and all(.value == "pass")' <<< "${SECOND_RESULTS}" >/dev/null || { echo "::error::second invocation command did not pass: ${SECOND_RESULTS}"; exit 1; }
+
+          progress="${RUNNER_TEMP}/homeboy-action-phase-progress-${GITHUB_RUN_ID}-${GITHUB_JOB}.jsonl"
+          setup_seconds="$(jq -s '[.[] | select(.phase == "dependency_build_setup" and .event == "completed")] | .[1].elapsed_seconds' "${progress}")"
+          echo "Second invocation dependency/build setup: ${setup_seconds}s"
+          [ "${setup_seconds}" -lt 10 ] || { echo "::error::second invocation setup took ${setup_seconds}s"; exit 1; }
+
   # The strict containment backend the action uses off Linux has no Linux kernel
   # primitives to fall back on, so it cannot be proven by the Linux job selecting
   # it explicitly. Extra-Chill/homeboy#12584 was exactly this gap: `review build`

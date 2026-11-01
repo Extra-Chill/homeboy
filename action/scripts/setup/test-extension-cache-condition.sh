@@ -10,7 +10,7 @@ INSTALL_BLOCK="$(awk '
   in_block && /^    - name: Capture tooling metadata$/ { exit }
 ' "${ACTION_FILE}")"
 
-if ! grep -q "if: inputs.prepare-only != 'true' && steps.read-config.outputs.portable-extension != ''" <<<"${INSTALL_BLOCK}"; then
+if ! grep -q "if: steps.provisioning.outputs.reuse != 'true' && inputs.prepare-only != 'true' && steps.read-config.outputs.portable-extension != ''" <<<"${INSTALL_BLOCK}"; then
   echo "FAIL: configured extensions install for execution, while binary-only preparation skips them" >&2
   exit 1
 fi

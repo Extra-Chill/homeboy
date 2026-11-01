@@ -247,9 +247,12 @@ outputs:
   pr-state:
     description: 'Final pre-execution PR lifecycle state: open, closed, merged, or unknown.'
     value: ${{ steps.check-pr-state.outputs.state }}
+  provisioning-reused:
+    description: 'Whether this invocation reused provisioning from an earlier invocation in the same job (true/false).'
+    value: ${{ steps.provisioning.outputs.reuse }}
   binary-source:
     description: 'How the binary was obtained: "prebuilt", "source", "fallback", or "release"'
-    value: ${{ steps.resolve-binary.outputs.binary-source }}
+    value: ${{ steps.resolve-binary.outputs.binary-source || steps.provisioning.outputs.binary-source }}
   scope-context:
     description: 'Execution context: "pr", "push", "cron", or "manual"'
     value: ${{ steps.resolve-scope.outputs.scope-context }}
@@ -279,10 +282,10 @@ outputs:
     value: ${{ steps.release.outputs.skipped-reason }}
   homeboy-version:
     description: 'Resolved Homeboy CLI version string that actually ran (e.g. "homeboy 0.74.1")'
-    value: ${{ steps.tooling-metadata.outputs.homeboy-version }}
+    value: ${{ steps.tooling-metadata.outputs.homeboy-version || steps.provisioning.outputs.homeboy-version }}
   tooling-identity:
     description: 'Cache-key-safe token identifying the resolved release tooling (homeboy CLI version + extension revision). Use to key per-SHA CI state so a tooling fix self-heals.'
-    value: ${{ steps.tooling-metadata.outputs.tooling-identity }}
+    value: ${{ steps.tooling-metadata.outputs.tooling-identity || steps.provisioning.outputs.tooling-identity }}
   pr-policy-safe:
     description: 'Whether the PR policy marked this pull request safe for auto-merge (true/false)'
     value: ${{ steps.pr-policy.outputs.safe }}
@@ -347,9 +350,35 @@ runs:
       shell: bash
       run: bash ${{ github.action_path }}/scripts/core/phase-progress.sh start dependency_build_setup
 
+    # A job may invoke this action several times (gate, deploy, verify). The
+    # binary, extensions, PHP/Node and GITHUB_ENV/GITHUB_PATH entries from the
+    # first invocation persist for the whole job, so a later invocation with
+    # the same provisioning inputs skips every step below up to SSH setup.
+    # Only step outputs are invocation-scoped; this step republishes them.
+    - name: Check provisioning reuse
+      id: provisioning
+      shell: bash
+      env:
+        COMPONENT_DIR: ${{ steps.read-config.outputs.component-dir }}
+        PROVISIONING_INPUTS: |
+          version=${{ inputs.version }}
+          source=${{ inputs.source }}
+          binary-path=${{ inputs.binary-path }}
+          rust-toolchain=${{ inputs.rust-toolchain }}
+          source-build-profile=${{ inputs.source-build-profile }}
+          prepare-only=${{ inputs.prepare-only }}
+          extension=${{ steps.read-config.outputs.portable-extension }}
+          extension-source=${{ inputs.extension-source }}
+          extension-ref=${{ inputs.extension-ref }}
+          component-dir=${{ steps.read-config.outputs.component-dir }}
+          php-version=${{ inputs.php-version }}
+          node-version=${{ inputs.node-version }}
+          auto-setup=${{ inputs.auto-setup }}
+      run: bash ${{ github.action_path }}/scripts/setup/provisioning-reuse.sh check
+
     - name: Install pre-built binary
       id: install-prebuilt
-      if: inputs.binary-path != ''
+      if: steps.provisioning.outputs.reuse != 'true' && inputs.binary-path != ''
       shell: bash
       run: |
         BINARY="${{ inputs.binary-path }}"
@@ -362,14 +391,14 @@ runs:
         echo "Installed pre-built binary: $(homeboy --version)"
 
     - name: Install Rust toolchain (source build)
-      if: inputs.binary-path == '' && inputs.source != ''
+      if: steps.provisioning.outputs.reuse != 'true' && inputs.binary-path == '' && inputs.source != ''
       uses: dtolnay/rust-toolchain@master
       with:
         toolchain: ${{ inputs.rust-toolchain }}
 
     - name: Resolve source Cargo cache
       id: source-cargo-cache
-      if: inputs.binary-path == '' && inputs.source != ''
+      if: steps.provisioning.outputs.reuse != 'true' && inputs.binary-path == '' && inputs.source != ''
       shell: bash
       env:
         SOURCE_PATH: ${{ inputs.source }}
@@ -378,7 +407,7 @@ runs:
 
     - name: Cache cargo (source build)
       id: restore-source-cargo
-      if: steps.source-cargo-cache.outputs.enabled == 'true'
+      if: steps.provisioning.outputs.reuse != 'true' && steps.source-cargo-cache.outputs.enabled == 'true'
       uses: actions/cache/restore@v5
       with:
         path: ${{ steps.source-cargo-cache.outputs.paths }}
@@ -387,7 +416,7 @@ runs:
 
     - name: Build from source
       id: source-build
-      if: inputs.binary-path == '' && inputs.source != ''
+      if: steps.provisioning.outputs.reuse != 'true' && inputs.binary-path == '' && inputs.source != ''
       shell: bash
       env:
         SOURCE_PATH: ${{ inputs.source }}
@@ -398,7 +427,7 @@ runs:
     # Skip the redundant save after an exact hit. PR saves are kept: a PR's
     # later pushes restore its own merge-ref cache (#545).
     - name: Save cargo (source build)
-      if: steps.source-build.outputs.built == 'true' && steps.source-cargo-cache.outputs.enabled == 'true' && steps.restore-source-cargo.outputs.cache-hit != 'true'
+      if: steps.provisioning.outputs.reuse != 'true' && steps.source-build.outputs.built == 'true' && steps.source-cargo-cache.outputs.enabled == 'true' && steps.restore-source-cargo.outputs.cache-hit != 'true'
       uses: actions/cache/save@v5
       with:
         path: ${{ steps.source-cargo-cache.outputs.paths }}
@@ -406,7 +435,7 @@ runs:
 
     - name: Resolve Homeboy version
       id: resolve-version
-      if: inputs.binary-path == '' && (inputs.source == '' || steps.source-build.outputs.built != 'true')
+      if: steps.provisioning.outputs.reuse != 'true' && inputs.binary-path == '' && (inputs.source == '' || steps.source-build.outputs.built != 'true')
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
@@ -415,7 +444,7 @@ runs:
 
     - name: Cache Homeboy
       id: cache-homeboy
-      if: inputs.binary-path == '' && (inputs.source == '' || steps.source-build.outputs.built != 'true')
+      if: steps.provisioning.outputs.reuse != 'true' && inputs.binary-path == '' && (inputs.source == '' || steps.source-build.outputs.built != 'true')
       uses: actions/cache@v5
       with:
         path: |
@@ -424,7 +453,7 @@ runs:
         key: homeboy-${{ steps.resolve-version.outputs.resolved-version }}-${{ steps.read-config.outputs.portable-extension }}-${{ runner.os }}-${{ runner.arch }}
 
     - name: Install Homeboy
-      if: inputs.binary-path == '' && (inputs.source == '' || steps.source-build.outputs.built != 'true') && steps.cache-homeboy.outputs.cache-hit != 'true'
+      if: steps.provisioning.outputs.reuse != 'true' && inputs.binary-path == '' && (inputs.source == '' || steps.source-build.outputs.built != 'true') && steps.cache-homeboy.outputs.cache-hit != 'true'
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
@@ -433,6 +462,7 @@ runs:
 
     - name: Resolve binary source
       id: resolve-binary
+      if: steps.provisioning.outputs.reuse != 'true'
       shell: bash
       env:
         HAS_BINARY_PATH_INPUT: ${{ inputs.binary-path }}
@@ -441,11 +471,12 @@ runs:
       run: bash ${{ github.action_path }}/scripts/setup/resolve-binary-source.sh
 
     - name: Detect Homeboy placement support
+      if: steps.provisioning.outputs.reuse != 'true'
       shell: bash
       run: HOMEBOY_ACTION_SETUP_TIMEOUT_SECONDS="${{ inputs.setup-timeout-seconds }}" bash ${{ github.action_path }}/scripts/core/run-setup-with-timeout.sh 'detect Homeboy placement support' -- bash ${{ github.action_path }}/scripts/setup/detect-homeboy-placement.sh
 
     - name: Install extension
-      if: inputs.prepare-only != 'true' && steps.read-config.outputs.portable-extension != ''
+      if: steps.provisioning.outputs.reuse != 'true' && inputs.prepare-only != 'true' && steps.read-config.outputs.portable-extension != ''
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
@@ -458,6 +489,7 @@ runs:
 
     - name: Capture tooling metadata
       id: tooling-metadata
+      if: steps.provisioning.outputs.reuse != 'true'
       shell: bash
       env:
         EXTENSION_SOURCE: ${{ inputs.extension-source }}
@@ -472,7 +504,7 @@ runs:
 
     - name: Detect runtime environment
       id: detect-env
-      if: inputs.prepare-only != 'true'
+      if: steps.provisioning.outputs.reuse != 'true' && inputs.prepare-only != 'true'
       shell: bash
       env:
         PHP_INPUT: ${{ inputs.php-version }}
@@ -483,7 +515,7 @@ runs:
 
     - name: Resolve extension CI cache
       id: extension-cache
-      if: inputs.prepare-only != 'true'
+      if: steps.provisioning.outputs.reuse != 'true' && inputs.prepare-only != 'true'
       shell: bash
       env:
         COMPONENT_DIR: ${{ steps.read-config.outputs.component-dir }}
@@ -491,7 +523,7 @@ runs:
       run: HOMEBOY_ACTION_SETUP_TIMEOUT_SECONDS="${{ inputs.setup-timeout-seconds }}" bash ${{ github.action_path }}/scripts/core/run-setup-with-timeout.sh 'resolve extension CI cache' -- bash ${{ github.action_path }}/scripts/setup/resolve-extension-cache.sh
 
     - name: Restore extension CI cache
-      if: steps.extension-cache.outputs.enabled == 'true'
+      if: steps.provisioning.outputs.reuse != 'true' && steps.extension-cache.outputs.enabled == 'true'
       uses: actions/cache@v5
       with:
         path: ${{ steps.extension-cache.outputs.paths }}
@@ -499,7 +531,7 @@ runs:
         restore-keys: ${{ runner.os }}-${{ steps.extension-cache.outputs.namespace }}-quality-
 
     - name: Setup PHP
-      if: steps.detect-env.outputs.portable-php != ''
+      if: steps.provisioning.outputs.reuse != 'true' && steps.detect-env.outputs.portable-php != ''
       uses: shivammathur/setup-php@v2
       with:
         php-version: ${{ steps.detect-env.outputs.portable-php }}
@@ -508,7 +540,7 @@ runs:
         coverage: none
 
     - name: Setup Node.js
-      if: steps.detect-env.outputs.portable-node != ''
+      if: steps.provisioning.outputs.reuse != 'true' && steps.detect-env.outputs.portable-node != ''
       uses: actions/setup-node@v6
       with:
         node-version: ${{ steps.detect-env.outputs.portable-node }}
@@ -517,7 +549,7 @@ runs:
     # packageManager needs that binary on PATH for every step that invokes it
     # directly, including Homeboy's dependency preflight.
     - name: Enable declared package manager
-      if: steps.detect-env.outputs.portable-node != ''
+      if: steps.provisioning.outputs.reuse != 'true' && steps.detect-env.outputs.portable-node != ''
       shell: bash
       env:
         COMPONENT_DIR: ${{ steps.read-config.outputs.component-dir }}
@@ -538,9 +570,22 @@ runs:
       uses: taiki-e/install-action@nextest
 
     - name: Auto-setup environment
-      if: inputs.prepare-only != 'true' && inputs.auto-setup == 'true'
+      if: steps.provisioning.outputs.reuse != 'true' && inputs.prepare-only != 'true' && inputs.auto-setup == 'true'
       shell: bash
       run: HOMEBOY_ACTION_SETUP_TIMEOUT_SECONDS="${{ inputs.setup-timeout-seconds }}" bash ${{ github.action_path }}/scripts/core/run-setup-with-timeout.sh 'auto-setup environment' -- bash ${{ github.action_path }}/scripts/setup/auto-setup-environment.sh
+
+    - name: Record provisioning for reuse
+      if: success() && steps.provisioning.outputs.reuse != 'true'
+      shell: bash
+      env:
+        PROVISIONING_KEY: ${{ steps.provisioning.outputs.key }}
+        BINARY_SOURCE: ${{ steps.resolve-binary.outputs.binary-source }}
+        HOMEBOY_VERSION_OUTPUT: ${{ steps.tooling-metadata.outputs.homeboy-version }}
+        TOOLING_IDENTITY: ${{ steps.tooling-metadata.outputs.tooling-identity }}
+        PORTABLE_PHP_OUTPUT: ${{ steps.detect-env.outputs.portable-php }}
+        PORTABLE_NODE_OUTPUT: ${{ steps.detect-env.outputs.portable-node }}
+        INSTALLED_EXTENSION: ${{ inputs.prepare-only != 'true' && steps.read-config.outputs.portable-extension || '' }}
+      run: bash ${{ github.action_path }}/scripts/setup/provisioning-reuse.sh record
 
     - name: Finish dependency/build setup timing
       if: always()
@@ -625,8 +670,8 @@ runs:
         PORTABLE_ID_VALUE: ${{ steps.read-config.outputs.portable-id }}
         COMMANDS_VALUE: ${{ steps.resolve-commands.outputs.resolved-commands }}
         OPERATIONS_COMMANDS_VALUE: ${{ steps.resolve-commands.outputs.operations-commands }}
-        PHP_VALUE: ${{ steps.detect-env.outputs.portable-php }}
-        NODE_VALUE: ${{ steps.detect-env.outputs.portable-node }}
+        PHP_VALUE: ${{ steps.detect-env.outputs.portable-php || steps.provisioning.outputs.portable-php }}
+        NODE_VALUE: ${{ steps.detect-env.outputs.portable-node || steps.provisioning.outputs.portable-node }}
         JOB_VALUE: ${{ github.job }}
         RUNNER_OS_VALUE: ${{ runner.os }}
         ACTION_INSTANCE_VALUE: ${{ github.action }}
@@ -893,7 +938,7 @@ runs:
         COMPONENT_NAME: ${{ steps.read-config.outputs.portable-id }}
         RESULTS: ${{ steps.select-results.outputs.results }}
         PR_NUMBER: ${{ github.event.pull_request.number }}
-        BINARY_SOURCE: ${{ steps.resolve-binary.outputs.binary-source }}
+        BINARY_SOURCE: ${{ steps.resolve-binary.outputs.binary-source || steps.provisioning.outputs.binary-source }}
         COMMENT_KEY_INPUT: ${{ inputs.comment-key }}
         COMMENT_SECTION_KEY_INPUT: ${{ inputs.comment-section-key }}
         COMMENT_SECTION_TITLE_INPUT: ${{ inputs.comment-section-title }}
