@@ -99,14 +99,28 @@ jobs:
           owner: Extra-Chill
           repositories: homeboy-action
 
+      # Pushes go over SSH with a write deploy key scoped to homeboy-action: a
+      # release can change files under .github/workflows/, which GitHub refuses
+      # from an app token without the `workflows` permission. The key is on the
+      # homeboy-action freeze ruleset's bypass list.
+      - name: Configure the homeboy-action deploy key
+        env:
+          DEPLOY_KEY: ${{ secrets.HOMEBOY_ACTION_DEPLOY_KEY }}
+        run: |
+          set -euo pipefail
+          key="${RUNNER_TEMP}/homeboy-action-deploy-key"
+          install -m 600 /dev/null "${key}"
+          printf '%s\n' "${DEPLOY_KEY}" > "${key}"
+          ssh-keyscan -t ed25519 github.com > "${RUNNER_TEMP}/known_hosts" 2>/dev/null
+          echo "GIT_SSH_COMMAND=ssh -i ${key} -o IdentitiesOnly=yes -o UserKnownHostsFile=${RUNNER_TEMP}/known_hosts" >> "${GITHUB_ENV}"
+
       - name: Append the release to homeboy-action
         id: publish
         env:
-          TOKEN: ${{ steps.mirror-token.outputs.token }}
+          MIRROR_URL: git@github.com:Extra-Chill/homeboy-action.git
         run: |
           set -euo pipefail
           git fetch --quiet --tags origin
-          export MIRROR_URL="https://x-access-token:${TOKEN}@github.com/Extra-Chill/homeboy-action.git"
           bash scripts/publish-action-mirror.sh "${VERSION}"
 
       - name: Create the homeboy-action GitHub release
@@ -157,16 +171,9 @@ jobs:
 
       - name: Move the floating major tag
         env:
-          GH_TOKEN: ${{ steps.mirror-token.outputs.token }}
           COMMIT: ${{ steps.publish.outputs.commit }}
         run: |
           set -euo pipefail
           major="v${VERSION%%.*}"
-          if gh api "repos/Extra-Chill/homeboy-action/git/ref/tags/${major}" >/dev/null 2>&1; then
-            gh api "repos/Extra-Chill/homeboy-action/git/refs/tags/${major}" --method PATCH \
-              -f sha="${COMMIT}" -F force=true >/dev/null
-          else
-            gh api repos/Extra-Chill/homeboy-action/git/refs --method POST \
-              -f ref="refs/tags/${major}" -f sha="${COMMIT}" >/dev/null
-          fi
+          git push --force git@github.com:Extra-Chill/homeboy-action.git "${COMMIT}:refs/tags/${major}"
           echo "::notice::${major} now points at ${COMMIT} (v${VERSION})."

@@ -53,4 +53,6 @@ published repository keeps working.
 GitHub release there, waits for that repository's consumer contract on the new
 tag, and only then moves `v2`. Re-publish an existing version with
 `gh workflow run action-release.yml -f publish_version=X.Y.Z`. The published
-repository is frozen except for the `homeboy-ci` app.
+repository is frozen; the publish job pushes with the `HOMEBOY_ACTION_DEPLOY_KEY`
+write deploy key (on the freeze bypass list), because releases can change
+`.github/workflows/` files and the `homeboy-ci` app has no `workflows` permission.
