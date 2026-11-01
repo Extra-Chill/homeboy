@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.442.0] - 2026-11-01
+
+### Added
+- name the component in release commits when components share a repo
+
+### Changed
+- Reuse persisted runner transport for daemon requests and cancellation
+
 ## [0.441.1] - 2026-11-01
 
 ### Changed
