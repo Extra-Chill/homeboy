@@ -24,6 +24,8 @@ pub struct UpdateEntry {
     pub source_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub git_root: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_url: Option<String>,
     #[serde(flatten)]
     pub source_update: ExtensionSourceUpdate,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -72,6 +74,7 @@ mod tests {
             linked: true,
             source_path: Some("/tmp/homeboy-extensions/wordpress".to_string()),
             git_root: Some("/tmp/homeboy-extensions".to_string()),
+            source_url: None,
             source_update: ExtensionSourceUpdate {
                 old_source_revision: Some("abc1234".to_string()),
                 new_source_revision: Some("def5678".to_string()),

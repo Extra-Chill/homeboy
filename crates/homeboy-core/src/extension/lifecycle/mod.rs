@@ -1734,7 +1734,7 @@ exec '{}' "$@"
             )
             .expect("install linked extension");
 
-            let result = update_all(false);
+            let result = update_all(false, |_, _, _| Ok(())).unwrap();
 
             assert_eq!(result.updated.len(), 1);
             assert_eq!(result.updated[0].extension_id, "wordpress");
@@ -1812,7 +1812,7 @@ exec '{}' "$@"
             let old_path = std::env::var("PATH").unwrap_or_default();
             std::env::set_var("PATH", format!("{}:{}", bin_dir.display(), old_path));
 
-            let result = update_all(false);
+            let result = update_all(false, |_, _, _| Ok(())).unwrap();
 
             std::env::set_var("PATH", old_path);
 
@@ -1868,7 +1868,7 @@ exec '{}' "$@"
             }
 
             update("fixture-a", false, None).expect("single linked update");
-            let result = update_all(false);
+            let result = update_all(false, |_, _, _| Ok(())).unwrap();
             assert_eq!(result.updated.len(), 2, "{:?}", result.skipped_details);
             for id in ["fixture-a", "fixture-b"] {
                 assert!(
@@ -2279,7 +2279,7 @@ exec '{}' "$@"
             let extensions_dir = home.path().join(".config/homeboy/extensions");
             write_extension_fixture(&extensions_dir, "custom");
 
-            let result = update_all(false);
+            let result = update_all(false, |_, _, _| Ok(())).unwrap();
 
             assert_eq!(result.skipped, vec!["custom"]);
             assert_eq!(result.skipped_details.len(), 1);
