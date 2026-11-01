@@ -706,7 +706,7 @@ fn process_baseline(
 
 /// Run the same changed-file scope from the resolved merge base in an isolated
 /// checkout. A persisted baseline cannot represent arbitrary PR ancestry.
-fn process_changed_since_baseline(
+pub(super) fn process_changed_since_baseline(
     component: &Component,
     source_path: &Path,
     args: &LintRunWorkflowArgs,
@@ -755,21 +755,35 @@ fn process_changed_since_baseline(
     }
 
     let baseline_component_path = checkout.join(component_suffix);
-    let mut baseline_component = component.clone();
-    baseline_component.local_path = baseline_component_path.to_string_lossy().to_string();
-    let mut baseline_args = args.clone();
-    baseline_args.path_override = Some(baseline_component.local_path.clone());
-    baseline_args.changed_only = true;
-    baseline_args.changed_since = None;
-    baseline_args.precomputed_changed_files = Some(changed_files);
-    baseline_args.baseline_flags.ignore_baseline = true;
-    let baseline_run_dir = RunDir::create()?;
-    let baseline_result = run_main_lint_workflow(
-        &baseline_component,
-        &baseline_component_path,
-        baseline_args,
-        &baseline_run_dir,
-    );
+    let baseline_result = (|| {
+        // A component introduced or moved after the merge base has no findings
+        // at its current path in that ref. Do not invoke extensions with a
+        // nonexistent working directory (including their environment provider).
+        if !baseline_component_path.try_exists().map_err(|error| {
+            homeboy_core::Error::internal_io(
+                format!("inspect changed-since baseline component: {error}"),
+                Some("lint.changed_since_baseline".to_string()),
+            )
+        })? {
+            return Ok(Vec::new());
+        }
+        let mut baseline_component = component.clone();
+        baseline_component.local_path = baseline_component_path.to_string_lossy().to_string();
+        let mut baseline_args = args.clone();
+        baseline_args.path_override = Some(baseline_component.local_path.clone());
+        baseline_args.changed_only = true;
+        baseline_args.changed_since = None;
+        baseline_args.precomputed_changed_files = Some(changed_files);
+        baseline_args.baseline_flags.ignore_baseline = true;
+        let baseline_run_dir = RunDir::create()?;
+        run_main_lint_workflow(
+            &baseline_component,
+            &baseline_component_path,
+            baseline_args,
+            &baseline_run_dir,
+        )
+        .map(|result| result.findings.unwrap_or_default())
+    })();
     let remove = Command::new("git")
         .current_dir(&repo_root)
         .args(["worktree", "remove", "--force"])
@@ -783,7 +797,7 @@ fn process_changed_since_baseline(
             );
         }
     }
-    let baseline_findings = baseline_result?.findings.unwrap_or_default();
+    let baseline_findings = baseline_result?;
 
     let mut provenance = provenance.clone();
     provenance.compared = true;

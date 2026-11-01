@@ -294,6 +294,80 @@ exit 1
 }
 
 #[test]
+fn changed_since_missing_component_path_uses_empty_baseline() {
+    homeboy_core::test_support::with_isolated_home(|home| {
+        let source = tempfile::tempdir().expect("source dir");
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(source.path())
+                .output()
+                .expect("git command");
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout).unwrap().trim().to_string()
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "homeboy@example.com"]);
+        git(&["config", "user.name", "Homeboy Test"]);
+        std::fs::write(source.path().join("plugin.php"), "<?php // warning\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", "plugin at repository root"]);
+        let base = git(&["rev-parse", "HEAD"]);
+        let path = source.path().join("plugins/data-machine");
+        std::fs::create_dir_all(&path).unwrap();
+        git(&["mv", "plugin.php", "plugins/data-machine/plugin.php"]);
+        std::fs::write(path.join("plugin.php"), "<?php // new warning after move\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", "move plugin"]);
+        let component = routed_lint_component(
+            home.path(),
+            &path,
+            r#"#!/bin/sh
+printf '[{"tool":"phpcs","message":"warning","fingerprint":"new","file":"plugin.php"}]' > "$HOMEBOY_LINT_FINDINGS_FILE"
+printf '[{"tool":"phpcs","status":"passed","finding_count":1}]' > "$HOMEBOY_LINT_PRODUCERS_FILE"
+exit 1
+"#,
+        );
+        let mut args = lint_args();
+        args.changed_since = Some(base.clone());
+        args.precomputed_changed_files = Some(vec!["plugins/data-machine/plugin.php".to_string()]);
+        let result =
+            run_main_lint_workflow(&component, &path, args.clone(), &RunDir::create().unwrap())
+                .expect("normal lint result for moved component");
+        assert_eq!(result.exit_code, 1);
+        // Call the baseline materializer directly too: the outer workflow's
+        // fallback must not hide an extension invocation failure here.
+        let (comparison, exit, provenance) =
+            super::super::workflow::process_changed_since_baseline(
+                &component,
+                &path,
+                &args,
+                result.baseline_provenance.as_ref().unwrap(),
+                result.findings.as_ref().unwrap(),
+            )
+            .expect("missing path is an empty baseline, not an extension error");
+        assert!(comparison.unwrap().drift_increased);
+        assert_eq!(exit, Some(1));
+        assert!(provenance.compared);
+        assert_eq!(provenance.base_ref, Some(base));
+        assert_eq!(
+            provenance.resolution,
+            crate::extension::lint::baseline::LintBaselineResolution::GitBase
+        );
+        assert_eq!(
+            git(&["worktree", "list", "--porcelain"])
+                .matches("worktree ")
+                .count(),
+            1
+        );
+    });
+}
+
+#[test]
 fn accepted_pr_finding_stays_accepted_on_full_default_branch_run() {
     homeboy_core::test_support::with_isolated_home(|home| {
         let source = tempfile::tempdir().expect("source dir");
