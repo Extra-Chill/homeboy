@@ -11,7 +11,6 @@ pub(crate) fn discover_agent_task_executor_providers() -> Vec<AgentTaskExecutorP
         "backend": "pi",
         "runtime": "pi",
         "invocation": { "argv": ["pi"] },
-        "readiness_invocation": { "argv": ["pi", "--version"] },
         "capabilities": ["cli_runtime", "workspace_materialization", "structured_outcome", "provider_owned_auth", "provider_owned_session"],
         "workspace_materialization": { "cwd": "request_workspace", "requires_git": false, "write_scope": "workspace" },
         "provider_defaults": { "pi": { "command": "pi", "command_args": ["--mode", "json"] } },

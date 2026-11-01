@@ -5551,10 +5551,18 @@ fn compile_cook_with_injected_catalog_rejects_each_unavailable_dimension_before_
 #[test]
 fn compile_cook_with_injected_catalog_proceeds_only_when_every_check_is_ready() {
     homeboy_core::test_support::with_isolated_home(|_| {
-        let provider = compile_provider("ready.provider", "ready");
+        let fake = crate::agent_task_provider::test_pi::FakePi::new("exit 1");
+        let mut provider = compile_provider("ready.provider", "ready");
+        provider
+            .provider_defaults
+            .insert("pi".into(), fake.config());
         let options = compile_cook_attempt_with_catalog_and_readiness_cache(
             compile_options("ready-cook"),
-            compile_command("ready", None, None),
+            {
+                let mut command = compile_command("ready", Some("test/model"), None);
+                command.core.provider_config = Some(fake.config().to_string());
+                command
+            },
             &crate::agent_task_provider::AgentTaskProviderCatalog {
                 providers: vec![provider],
                 ..Default::default()
@@ -5568,6 +5576,30 @@ fn compile_cook_with_injected_catalog_proceeds_only_when_every_check_is_ready() 
             options.identity.initial_plan.tasks[0].executor.backend,
             "ready"
         );
+        let fake = crate::agent_task_provider::test_pi::FakePi::with_probes(
+            "exit 1",
+            "echo test-pi",
+            "echo 'no models available'",
+        );
+        let mut provider = compile_provider("ready.provider", "ready");
+        provider
+            .provider_defaults
+            .insert("pi".into(), fake.config());
+        let error = compile_cook_attempt_with_catalog_and_readiness_cache(
+            compile_options("not-ready-cook"),
+            {
+                let mut command = compile_command("ready", Some("test/model"), None);
+                command.core.provider_config = Some(fake.config().to_string());
+                command
+            },
+            &crate::agent_task_provider::AgentTaskProviderCatalog {
+                providers: vec![provider],
+                ..Default::default()
+            },
+            &mut crate::agent_task_provider::ProviderRuntimeReadinessCache::isolated(),
+        )
+        .expect_err("a model-less Pi must reject admission");
+        assert!(error.to_string().contains("auth_failure"), "{error}");
     });
 }
 
@@ -5576,16 +5608,18 @@ fn compile_cook_admits_provider_owned_auth_only_after_live_verification() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let mut provider = compile_provider("verified.provider", "verified");
         provider.capabilities = vec!["cli_runtime".to_string(), "provider_owned_auth".to_string()];
-        provider.readiness_invocation = Some(
-            serde_json::from_value(serde_json::json!({
-                "argv": ["sh", "-c", "cat >/dev/null; printf '%s' '{\"schema\":\"homeboy/agent-task-provider-readiness-result/v1\",\"ready\":true,\"classification\":\"ready\",\"retryable\":false,\"remediation\":\"\",\"reason\":\"\",\"cache_key\":\"verified\",\"identity\":{}}'"]
-            }))
-            .expect("readiness invocation"),
-        );
+        let fake = crate::agent_task_provider::test_pi::FakePi::new("exit 1");
+        provider
+            .provider_defaults
+            .insert("pi".into(), fake.config());
 
         let options = compile_cook_attempt_with_catalog_and_readiness_cache(
             compile_options("verified-cook"),
-            compile_command("verified", None, None),
+            {
+                let mut command = compile_command("verified", Some("test/model"), None);
+                command.core.provider_config = Some(fake.config().to_string());
+                command
+            },
             &crate::agent_task_provider::AgentTaskProviderCatalog {
                 providers: vec![provider],
                 ..Default::default()
@@ -5595,48 +5629,33 @@ fn compile_cook_admits_provider_owned_auth_only_after_live_verification() {
         .expect("verified provider-owned auth is admitted before scheduler reservation");
 
         assert_eq!(options.identity.initial_plan.tasks.len(), 1);
-    });
-}
-
-#[test]
-fn cook_preflight_exposes_missing_readiness_invocation_diagnosis_without_provider_switching() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let mut provider = compile_provider("owned-auth.provider", "owned-auth");
-        provider.capabilities = vec!["provider_owned_auth".to_string()];
-        provider.runtime_id = Some("owned-runtime".to_string());
-        provider.extension_id = Some("owned-extension".to_string());
-
+        let fake = crate::agent_task_provider::test_pi::FakePi::with_probes(
+            "exit 1",
+            "echo test-pi",
+            "echo 'no models available'",
+        );
+        let mut provider = compile_provider("verified.provider", "verified");
+        provider.capabilities = vec!["provider_owned_auth".into()];
+        provider
+            .provider_defaults
+            .insert("pi".into(), fake.config());
         let error = compile_cook_attempt_with_catalog_and_readiness_cache(
-            compile_options("missing-readiness-cook"),
-            compile_command("owned-auth", None, None),
+            compile_options("unverified-cook"),
+            {
+                let mut command = compile_command("verified", Some("test/model"), None);
+                command.core.provider_config = Some(fake.config().to_string());
+                command
+            },
             &crate::agent_task_provider::AgentTaskProviderCatalog {
                 providers: vec![provider],
                 ..Default::default()
             },
-            &mut crate::agent_task_provider::ProviderRuntimeReadinessCache::default(),
+            &mut crate::agent_task_provider::ProviderRuntimeReadinessCache::isolated(),
         )
-        .expect_err("a provider-owned auth contract without a probe cannot start Cook");
-
-        assert_eq!(error.details["field"], "provider_dispatchability");
-        assert!(error.message.contains("configuration"), "{error}");
-        assert!(error.message.contains("readiness_invocation"), "{error}");
+        .expect_err("provider-owned auth needs a successful live Pi probe");
         assert!(
-            !error.message.contains("select a verified backend"),
-            "Cook must diagnose the owning provider contract, not suggest switching: {error}"
-        );
-        let verdict = &error.details["dispatchability"];
-        assert!(verdict.is_object());
-        assert_eq!(
-            verdict["configuration_diagnosis"]["kind"],
-            "missing_readiness_invocation"
-        );
-        assert_eq!(
-            verdict["configuration_diagnosis"]["owner"]["runtime_id"],
-            "owned-runtime"
-        );
-        assert_eq!(
-            verdict["configuration_diagnosis"]["owner"]["extension_id"],
-            "owned-extension"
+            error.details.to_string().contains("auth_failure"),
+            "{error:?}"
         );
     });
 }

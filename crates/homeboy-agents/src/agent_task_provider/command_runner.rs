@@ -50,7 +50,6 @@ pub const PROVIDER_READINESS_RESULT_SCHEMA: &str =
 /// evidence. Existing callers send no mode and keep the unchanged request
 /// shape.
 pub const PROVIDER_READINESS_CAPACITY_MODE: &str = "capacity";
-const PROVIDER_READINESS_TIMEOUT: Duration = Duration::from_secs(20);
 const PROVIDER_READINESS_IO_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2911,36 +2910,43 @@ pub struct ProviderReadinessInvocationAccountCapacity {
     pub reset_at: Option<String>,
 }
 
-pub fn run_provider_readiness_invocation(
+pub fn run_provider_readiness_probe(
     provider: &AgentTaskExecutorProvider,
     effective_config: &Value,
 ) -> Result<ProviderReadinessInvocationResult, String> {
-    run_provider_readiness_invocation_with_env(provider, effective_config, &[])
+    run_provider_readiness_probe_with_env(provider, effective_config, &[])
 }
 
-pub(crate) fn run_provider_readiness_invocation_with_env(
+pub(crate) fn run_provider_readiness_probe_with_env(
     provider: &AgentTaskExecutorProvider,
     effective_config: &Value,
     credential_env: &[(String, String)],
 ) -> Result<ProviderReadinessInvocationResult, String> {
-    run_provider_readiness_invocation_with_env_and_timeout(
+    run_provider_readiness_probe_with_env_and_timeout(
         provider,
         effective_config,
         credential_env,
-        PROVIDER_READINESS_TIMEOUT,
+        Duration::from_millis(provider.pi_readiness.timeout_ms),
         None,
     )
 }
 
-pub(super) fn run_provider_readiness_invocation_with_env_and_timeout(
+pub(super) fn run_provider_readiness_probe_with_env_and_timeout(
     provider: &AgentTaskExecutorProvider,
     effective_config: &Value,
     credential_env: &[(String, String)],
     timeout: Duration,
     mode: Option<&str>,
 ) -> Result<ProviderReadinessInvocationResult, String> {
-    let _ = provider;
-    super::pi::readiness(effective_config, credential_env, timeout, mode)
+    let mut env = credential_env.to_vec();
+    for name in &provider.pi_readiness.env_allowlist {
+        if !env.iter().any(|(key, _)| key == name) {
+            if let Ok(value) = std::env::var(name) {
+                env.push((name.clone(), value));
+            }
+        }
+    }
+    super::pi::readiness(effective_config, &env, timeout, mode)
 }
 
 struct ReadinessOutputCapture {

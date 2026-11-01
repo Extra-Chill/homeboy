@@ -28,8 +28,6 @@ pub struct AgentTaskProviderDispatchability {
     /// both scopes in the shared verdict so inventory and Cook cannot claim a
     /// provider-native account check that never ran.
     pub readiness: AgentTaskProviderReadiness,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub configuration_diagnosis: Option<AgentTaskProviderConfigurationDiagnosis>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -52,31 +50,6 @@ pub struct AgentTaskProviderLiveInferenceReadiness {
     pub reason: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub evidence: Option<AgentTaskProviderRuntimeEvidence>,
-}
-
-/// A static provider contract defect that prevents dispatch. This keeps the
-/// provider owner attached to every consumer of the shared verdict.
-#[derive(Debug, Clone, Serialize)]
-pub struct AgentTaskProviderConfigurationDiagnosis {
-    pub kind: &'static str,
-    pub message: String,
-    pub remediation: String,
-    pub owner: AgentTaskProviderOwner,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct AgentTaskProviderOwner {
-    pub provider_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub runtime_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub extension_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub runtime_package_source: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub runtime_path: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub extension_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -119,7 +92,7 @@ pub struct AgentTaskProviderDispatchabilityCredentialCheck {
     pub ready: bool,
     pub missing: Vec<String>,
     /// `true` only when a provider-declared live readiness probe
-    /// (`readiness_invocation`) actually ran and confirmed the credential
+    /// (the built-in Pi probe) actually ran and confirmed the credential
     /// works. `false` means `ready` reflects presence only: the declared
     /// credential material was found somewhere Homeboy can read it, which is
     /// not proof it is still valid — a revoked or expired token is still
@@ -257,19 +230,9 @@ pub fn evaluate_provider_capacity_with_config(
             "required provider credentials are not configured, so capacity was not probed",
         );
     }
-    if provider_requires_live_auth_validation(provider) && provider.readiness_invocation.is_none() {
-        return capacity_readiness_unknown(
-            "provider-owned authentication has no declared readiness invocation",
-        );
-    }
     if validate_provider_immediate_failure_patterns(provider).is_err() {
         return capacity_readiness_unknown(
             "provider immediate-failure configuration is invalid, so capacity was not probed",
-        );
-    }
-    if provider.readiness_invocation.is_none() {
-        return capacity_readiness_unknown(
-            "the provider declares no readiness invocation, so capacity cannot be observed",
         );
     }
     let effective_config = effective_provider_config(config, model);
@@ -414,9 +377,8 @@ fn evaluate_provider_dispatchability_with_config_credentials_and_deadline(
             state,
             ready: false,
             reason: reason.to_string(),
-            readiness: readiness_scopes(&checks, false, false, None),
+            readiness: readiness_scopes(&checks, false, None),
             checks,
-            configuration_diagnosis: None,
         }
     };
     let provider = match resolve_provider_for_backend(catalog.providers(), backend, selector) {
@@ -455,15 +417,10 @@ fn evaluate_provider_dispatchability_with_config_credentials_and_deadline(
     } else {
         credential_env
     };
-    let configuration_diagnosis = (provider_requires_live_auth_validation(provider)
-        && provider.readiness_invocation.is_none())
-    .then(|| missing_readiness_invocation_diagnosis(provider));
     let configuration = match validate_provider_immediate_failure_patterns(provider) {
         Ok(()) => AgentTaskProviderDispatchabilityCheck {
-            ready: configuration_diagnosis.is_none(),
-            reason: configuration_diagnosis
-                .as_ref()
-                .map(|diagnosis| diagnosis.message.clone()),
+            ready: true,
+            reason: None,
         },
         Err(reason) => AgentTaskProviderDispatchabilityCheck {
             ready: false,
@@ -580,15 +537,8 @@ fn evaluate_provider_dispatchability_with_config_credentials_and_deadline(
             None,
         )
     };
-    // `runtime.ready` alone conflates two very different situations: a
-    // provider-declared probe actually ran and passed, versus no probe being
-    // declared at all (in which case `run_provider_readiness_invocation`
-    // trivially returns ready). Only the former is a live verification of the
-    // provider's credentials; the latter is still presence-only, and reporting
-    // it as "ready" without qualification is exactly how a revoked-but-present
-    // credential gets reported dispatchable (#13628).
-    let credentials_verified =
-        probe_runtime && provider.readiness_invocation.is_some() && runtime.ready;
+    // Only a successful live Pi probe verifies credentials.
+    let credentials_verified = probe_runtime && runtime.ready;
     let provider_owned_auth = provider_requires_live_auth_validation(provider);
     let credentials_rejected = runtime_evidence
         .as_ref()
@@ -610,7 +560,6 @@ fn evaluate_provider_dispatchability_with_config_credentials_and_deadline(
     } else if credentials_verified {
         (AgentTaskProviderCredentialStatus::Verified, None)
     } else if probe_runtime
-        && provider.readiness_invocation.is_some()
         && !runtime.ready
         && credentials_rejected
         && (!credentials.requirements.is_empty() || provider_owned_auth)
@@ -642,14 +591,6 @@ fn evaluate_provider_dispatchability_with_config_credentials_and_deadline(
                     .to_string(),
             ),
         )
-    } else if provider.readiness_invocation.is_none() {
-        (
-            AgentTaskProviderCredentialStatus::Unverified,
-            Some(
-                "the provider declares provider-owned authentication but no live readiness invocation"
-                    .to_string(),
-            ),
-        )
     } else {
         (AgentTaskProviderCredentialStatus::Unverified, None)
     };
@@ -663,11 +604,7 @@ fn evaluate_provider_dispatchability_with_config_credentials_and_deadline(
         (
             "configuration_invalid",
             false,
-            if configuration_diagnosis.is_some() {
-                "provider-owned authentication has no declared readiness invocation"
-            } else {
-                "provider immediate-failure configuration is invalid"
-            },
+            "provider immediate-failure configuration is invalid",
         )
     } else if !credentials.dispatchable {
         (
@@ -684,12 +621,6 @@ fn evaluate_provider_dispatchability_with_config_credentials_and_deadline(
             },
             false,
             "provider-owned authentication must be live-validated before dispatch",
-        )
-    } else if provider_owned_auth && provider.readiness_invocation.is_none() {
-        (
-            "credentials_unverified",
-            false,
-            "provider-owned authentication has no live validation route",
         )
     } else if account_blocked {
         (
@@ -715,7 +646,7 @@ fn evaluate_provider_dispatchability_with_config_credentials_and_deadline(
             false,
             "provider runtime readiness validation failed",
         )
-    } else if !probe_runtime || provider.readiness_invocation.is_none() {
+    } else if !probe_runtime {
         (
             "structurally_dispatchable",
             true,
@@ -771,27 +702,12 @@ fn evaluate_provider_dispatchability_with_config_credentials_and_deadline(
             missing: credentials.missing,
             verified: credentials_verified,
             reason: credential_reason,
-            remediation: if provider_owned_auth
-                && probe_runtime
-                && provider.readiness_invocation.is_none()
-            {
-                configuration_diagnosis
-                    .as_ref()
-                    .map(|diagnosis| vec![diagnosis.remediation.clone()])
-                    .unwrap_or_default()
-            } else {
-                runtime_remediation
-            },
+            remediation: runtime_remediation,
         },
         configuration,
         runtime,
     };
-    let readiness = readiness_scopes(
-        &checks,
-        probe_runtime,
-        provider.readiness_invocation.is_some(),
-        runtime_evidence.clone(),
-    );
+    let readiness = readiness_scopes(&checks, probe_runtime, runtime_evidence.clone());
     *runtime_evidence_out = runtime_evidence;
     AgentTaskProviderDispatchability {
         state,
@@ -799,14 +715,12 @@ fn evaluate_provider_dispatchability_with_config_credentials_and_deadline(
         reason,
         readiness,
         checks,
-        configuration_diagnosis,
     }
 }
 
 fn readiness_scopes(
     checks: &AgentTaskProviderDispatchabilityChecks,
     probe_requested: bool,
-    probe_declared: bool,
     evidence: Option<AgentTaskProviderRuntimeEvidence>,
 ) -> AgentTaskProviderReadiness {
     let structural_ready = checks.route.ready
@@ -830,13 +744,6 @@ fn readiness_scopes(
             state: "structurally_dispatchable",
             ready: false,
             reason: "live inference probe was not requested".to_string(),
-            evidence: None,
-        }
-    } else if !probe_declared {
-        AgentTaskProviderLiveInferenceReadiness {
-            state: "inference_unverified",
-            ready: false,
-            reason: "the provider declares no bounded live inference probe".to_string(),
             evidence: None,
         }
     } else if checks.runtime.ready {
@@ -867,27 +774,6 @@ fn readiness_scopes(
             reason: structural_reason,
         },
         live_inference,
-    }
-}
-
-fn missing_readiness_invocation_diagnosis(
-    provider: &super::AgentTaskExecutorProvider,
-) -> AgentTaskProviderConfigurationDiagnosis {
-    AgentTaskProviderConfigurationDiagnosis {
-        kind: "missing_readiness_invocation",
-        message: "provider-owned authentication requires a bounded readiness_invocation".to_string(),
-        remediation: format!(
-            "Update provider '{}' to declare a bounded readiness_invocation that validates its provider-owned authentication.",
-            provider.id
-        ),
-        owner: AgentTaskProviderOwner {
-            provider_id: provider.id.clone(),
-            runtime_id: provider.runtime_id.clone(),
-            extension_id: provider.extension_id.clone(),
-            runtime_package_source: provider.runtime_package_source.clone(),
-            runtime_path: provider.runtime_path.clone(),
-            extension_path: provider.extension_path.clone(),
-        },
     }
 }
 
@@ -1178,7 +1064,6 @@ fn unavailable_request_dispatchability(
             state,
             ready: false,
             reason: reason.to_string(),
-            configuration_diagnosis: None,
             readiness: AgentTaskProviderReadiness {
                 structural_dispatchability: AgentTaskProviderReadinessScope {
                     state: "unavailable",
@@ -1601,7 +1486,6 @@ mod tests {
     use crate::agent_task_scheduler::{
         AgentTaskProviderRotationEntry, AgentTaskProviderRotationPolicy,
     };
-    use homeboy_core::command_invocation::CommandInvocation;
     use serde_json::json;
 
     fn route_pi(models: &str) -> FakePi {
@@ -1614,27 +1498,12 @@ mod tests {
         task
     }
 
-    fn provider(
-        script: &std::path::Path,
-        count: &std::path::Path,
-    ) -> super::super::AgentTaskExecutorProvider {
-        let mut provider: super::super::AgentTaskExecutorProvider = serde_json::from_value(json!({
+    fn provider() -> super::super::AgentTaskExecutorProvider {
+        serde_json::from_value(json!({
             "id": "test.provider",
             "backend": "test"
         }))
-        .expect("provider fixture");
-        provider.readiness_invocation = Some(
-            CommandInvocation {
-                argv: vec![
-                    "node".to_string(),
-                    script.display().to_string(),
-                    count.display().to_string(),
-                ],
-                ..CommandInvocation::default()
-            }
-            .into(),
-        );
-        provider
+        .expect("provider fixture")
     }
 
     fn catalog(provider: super::super::AgentTaskExecutorProvider) -> AgentTaskProviderCatalog {
@@ -1676,15 +1545,7 @@ mod tests {
 
     #[test]
     fn mixed_static_route_failure_and_expired_probe_returns_typed_deadline() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let count = root.path().join("count");
-        let script = root.path().join("slow-readiness.js");
-        std::fs::write(
-            &script,
-            "setTimeout(()=>process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:true,classification:'ready',retryable:false,remediation:'',reason:'',cache_key:'ready',identity:{}})),200);",
-        )
-        .expect("readiness script");
-        let catalog = catalog(provider(&script, &count));
+        let catalog = catalog(provider());
         let mut task = request("model");
         task.executor.backend = "missing".to_string();
         let deadline = crate::agent_task_timeout::now_unix_ms() + 30;
@@ -1724,15 +1585,7 @@ mod tests {
 
     #[test]
     fn expired_plan_deadline_stops_admission_before_probe() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let count = root.path().join("count");
-        let script = root.path().join("readiness.js");
-        std::fs::write(
-            &script,
-            "require('fs').appendFileSync(process.argv[2],'probe\\n');process.stdout.write('{}');",
-        )
-        .expect("readiness script");
-        let catalog = catalog(provider(&script, &count));
+        let catalog = catalog(provider());
         let mut plan = AgentTaskPlan::new("plan-deadline", vec![request("model")]);
         let deadline = crate::agent_task_timeout::now_unix_ms().saturating_sub(1);
         plan.options.execution_budget.deadline_unix_ms = Some(deadline);
@@ -1746,7 +1599,7 @@ mod tests {
 
         assert_eq!(error.details["classification"], "timeout");
         assert_eq!(error.details["deadline_unix_ms"], deadline);
-        assert!(!count.exists());
+        assert_eq!(error.details["zero_provider_executions"], true);
     }
 
     /// The exact shape of #13628: a provider whose declared credential is
@@ -1779,46 +1632,6 @@ mod tests {
     }
 
     #[test]
-    fn present_credentials_are_not_admitted_when_live_validation_is_unavailable() {
-        let auth = tempfile::NamedTempFile::new().expect("auth file");
-        // The credential material is present, exactly like a revoked-but-still-
-        // on-disk refresh token (#13628): Homeboy can read it, but reading it
-        // is not proof the issuing account still honors it.
-        std::fs::write(auth.path(), r#"{"token":"revoked-but-present-token"}"#)
-            .expect("write auth");
-        let provider = provider_with_present_but_unverifiable_credential(auth.path());
-        let catalog = catalog(provider);
-
-        let verdict = evaluate_provider_dispatchability(&catalog, "revocable", None, None, true);
-
-        assert_eq!(verdict.state, "configuration_invalid");
-        assert!(
-            !verdict.ready,
-            "unverified provider-owned auth must fail closed"
-        );
-        assert!(
-            verdict.checks.credentials.ready,
-            "the declared credential is present"
-        );
-        assert_eq!(
-            verdict.checks.credentials.status,
-            AgentTaskProviderCredentialStatus::Unverified
-        );
-        assert!(
-            !verdict.checks.credentials.verified,
-            "no provider-declared readiness probe ran, so this is presence only, not a live \
-             verification — reporting it as verified is exactly the #13628 defect"
-        );
-        assert!(verdict.checks.credentials.remediation[0].contains("readiness_invocation"));
-        let diagnosis = verdict
-            .configuration_diagnosis
-            .expect("missing invocation has a typed diagnosis");
-        assert_eq!(diagnosis.kind, "missing_readiness_invocation");
-        assert_eq!(diagnosis.owner.provider_id, "revocable.agent-task-executor");
-        assert!(!diagnosis.remediation.contains("select a verified backend"));
-    }
-
-    #[test]
     fn static_status_distinguishes_present_provider_owned_credentials() {
         let auth = tempfile::NamedTempFile::new().expect("auth file");
         std::fs::write(auth.path(), r#"{"token":"present-token"}"#).expect("write auth");
@@ -1828,7 +1641,7 @@ mod tests {
 
         let verdict = evaluate_provider_dispatchability(&catalog, "revocable", None, None, false);
 
-        assert_eq!(verdict.state, "configuration_invalid");
+        assert_eq!(verdict.state, "credentials_present");
         assert!(!verdict.ready);
         assert_eq!(
             verdict.checks.credentials.status,
@@ -1875,25 +1688,8 @@ mod tests {
     ) -> (AgentTaskProviderCatalog, std::path::PathBuf) {
         let auth = root.join("auth.json");
         let count = root.join("count");
-        let script = root.join("readiness.js");
         std::fs::write(&auth, r#"{"token":"controller-token-rejected"}"#).expect("write auth");
-        std::fs::write(
-            &script,
-            "require('fs').appendFileSync(process.argv[2],'probe\\n');process.stdout.write(JSON.stringify({schema:'homeboy/agent-task-provider-readiness-result/v1',ready:false,classification:'auth_failure',retryable:false,remediation:'Sign in again.',reason:'Token refresh failed: 401',cache_key:'k',identity:{}}));",
-        )
-        .expect("readiness script");
-        let mut provider = provider_with_present_but_unverifiable_credential(&auth);
-        provider.readiness_invocation = Some(
-            CommandInvocation {
-                argv: vec![
-                    "node".to_string(),
-                    script.display().to_string(),
-                    count.display().to_string(),
-                ],
-                ..CommandInvocation::default()
-            }
-            .into(),
-        );
+        let provider = provider_with_present_but_unverifiable_credential(&auth);
         (catalog(provider), count)
     }
 

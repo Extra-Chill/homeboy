@@ -82,7 +82,7 @@ pub use capacity_readiness::{
 };
 pub use catalog::*;
 pub use command_runner::{
-    provider_command_parts, run_provider_controller_refresh, run_provider_readiness_invocation,
+    provider_command_parts, run_provider_controller_refresh, run_provider_readiness_probe,
     validate_provider_immediate_failure_patterns, ProviderReadinessInvocationCapacity,
     ProviderReadinessInvocationResult, PROVIDER_READINESS_RESULT_SCHEMA,
 };
@@ -104,11 +104,10 @@ pub use dispatchability::{
     preflight_provider_dispatchability, preflight_provider_dispatchability_with_config,
     preflight_provider_dispatchability_without_runtime_with_config,
     provider_readiness_is_runner_owned, provider_runtime_readiness_cache_identity_for_plan,
-    AgentTaskProviderConfigurationDiagnosis, AgentTaskProviderCredentialStatus,
-    AgentTaskProviderDispatchability, AgentTaskProviderDispatchabilityCheck,
-    AgentTaskProviderDispatchabilityChecks, AgentTaskProviderDispatchabilityCredentialCheck,
-    AgentTaskProviderLiveInferenceReadiness, AgentTaskProviderOwner, AgentTaskProviderReadiness,
-    AgentTaskProviderReadinessScope, AgentTaskProviderRuntimeEvidence,
+    AgentTaskProviderCredentialStatus, AgentTaskProviderDispatchability,
+    AgentTaskProviderDispatchabilityCheck, AgentTaskProviderDispatchabilityChecks,
+    AgentTaskProviderDispatchabilityCredentialCheck, AgentTaskProviderLiveInferenceReadiness,
+    AgentTaskProviderReadiness, AgentTaskProviderReadinessScope, AgentTaskProviderRuntimeEvidence,
 };
 pub(crate) use fixture_gate::fixture_provider_outcome;
 pub use fixture_gate::is_fixture_backend;

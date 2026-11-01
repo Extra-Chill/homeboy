@@ -153,37 +153,30 @@ fn provider_command_parts_uses_argv() {
 }
 
 #[test]
-fn provider_readiness_invocation_defaults_and_validates_its_total_timeout() {
+fn pi_readiness_defaults_and_validates_its_total_timeout() {
     let provider: AgentTaskExecutorProvider = serde_json::from_value(json!({
         "id": "ready.provider",
         "backend": "ready",
-        "readiness_invocation": { "argv": ["ready-provider"] }
+        "pi_readiness": {}
     }))
     .expect("provider manifest");
 
     assert_eq!(
-        provider
-            .readiness_invocation
-            .as_ref()
-            .expect("readiness invocation")
-            .timeout_ms,
-        DEFAULT_PROVIDER_READINESS_INVOCATION_TIMEOUT_MS
+        provider.pi_readiness.timeout_ms,
+        DEFAULT_PI_READINESS_TIMEOUT_MS
     );
     assert_eq!(
-        serde_json::to_value(&provider).expect("provider export")["readiness_invocation"]
-            ["timeout_ms"],
+        serde_json::to_value(&provider).expect("provider export")["pi_readiness"]["timeout_ms"],
         json!(20_000)
     );
 
     let error = serde_json::from_value::<AgentTaskExecutorProvider>(json!({
         "id": "invalid.provider",
         "backend": "invalid",
-        "readiness_invocation": { "argv": ["invalid-provider"], "timeout_ms": 120001 }
+        "pi_readiness": { "timeout_ms": 120001 }
     }))
     .expect_err("timeout above the core maximum must fail");
-    assert!(error
-        .to_string()
-        .contains("readiness_invocation.timeout_ms"));
+    assert!(error.to_string().contains("pi_readiness.timeout_ms"));
 }
 
 #[test]

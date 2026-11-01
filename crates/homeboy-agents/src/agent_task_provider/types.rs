@@ -1,5 +1,4 @@
 use super::*;
-use std::ops::Deref;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentRuntimeDiscoveryDiagnostic {
@@ -14,17 +13,15 @@ pub struct AgentRuntimeDiscoveryDiagnostic {
 }
 
 pub const AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA: &str = "homeboy/agent-task-executor-provider/v1";
-pub const DEFAULT_PROVIDER_READINESS_INVOCATION_TIMEOUT_MS: u64 = 20_000;
-const MAX_PROVIDER_READINESS_INVOCATION_TIMEOUT_MS: u64 = 120_000;
+pub const DEFAULT_PI_READINESS_TIMEOUT_MS: u64 = 20_000;
+const MAX_PI_READINESS_TIMEOUT_MS: u64 = 120_000;
 
-fn validate_provider_readiness_invocation_timeout_ms(
-    timeout_ms: u64,
-) -> std::result::Result<(), String> {
-    if (1..=MAX_PROVIDER_READINESS_INVOCATION_TIMEOUT_MS).contains(&timeout_ms) {
+fn validate_pi_readiness_timeout_ms(timeout_ms: u64) -> std::result::Result<(), String> {
+    if (1..=MAX_PI_READINESS_TIMEOUT_MS).contains(&timeout_ms) {
         Ok(())
     } else {
         Err(format!(
-            "readiness_invocation.timeout_ms must be between 1 and {MAX_PROVIDER_READINESS_INVOCATION_TIMEOUT_MS} milliseconds"
+            "pi_readiness.timeout_ms must be between 1 and {MAX_PI_READINESS_TIMEOUT_MS} milliseconds"
         ))
     }
 }
@@ -106,8 +103,8 @@ pub struct AgentTaskExecutorProvider {
     pub provider_defaults: BTreeMap<String, Value>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub runner_readiness: Vec<AgentTaskProviderRunnerReadiness>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub readiness_invocation: Option<AgentTaskProviderReadinessInvocation>,
+    #[serde(default)]
+    pub pi_readiness: PiReadinessConfig,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub runner_sources: Vec<AgentTaskProviderRunnerSource>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -156,48 +153,39 @@ pub struct AgentTaskExecutorProvider {
     pub extra: BTreeMap<String, Value>,
 }
 
-/// A provider-owned readiness command and its total, core-enforced deadline.
+/// Configuration for the built-in Pi readiness probe.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct AgentTaskProviderReadinessInvocation {
-    #[serde(flatten)]
-    pub command: CommandInvocation,
+pub struct PiReadinessConfig {
+    #[serde(default)]
+    pub env_allowlist: Vec<String>,
     #[serde(
-        default = "default_provider_readiness_invocation_timeout_ms",
-        deserialize_with = "deserialize_provider_readiness_invocation_timeout_ms"
+        default = "default_pi_readiness_timeout_ms",
+        deserialize_with = "deserialize_pi_readiness_timeout_ms"
     )]
     pub timeout_ms: u64,
 }
 
-impl Deref for AgentTaskProviderReadinessInvocation {
-    type Target = CommandInvocation;
-
-    fn deref(&self) -> &Self::Target {
-        &self.command
-    }
-}
-
-impl From<CommandInvocation> for AgentTaskProviderReadinessInvocation {
-    fn from(command: CommandInvocation) -> Self {
+impl Default for PiReadinessConfig {
+    fn default() -> Self {
         Self {
-            command,
-            timeout_ms: DEFAULT_PROVIDER_READINESS_INVOCATION_TIMEOUT_MS,
+            env_allowlist: Vec::new(),
+            timeout_ms: DEFAULT_PI_READINESS_TIMEOUT_MS,
         }
     }
 }
 
-fn default_provider_readiness_invocation_timeout_ms() -> u64 {
-    DEFAULT_PROVIDER_READINESS_INVOCATION_TIMEOUT_MS
+fn default_pi_readiness_timeout_ms() -> u64 {
+    DEFAULT_PI_READINESS_TIMEOUT_MS
 }
 
-fn deserialize_provider_readiness_invocation_timeout_ms<'de, D>(
+fn deserialize_pi_readiness_timeout_ms<'de, D>(
     deserializer: D,
 ) -> std::result::Result<u64, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
     let timeout_ms = u64::deserialize(deserializer)?;
-    validate_provider_readiness_invocation_timeout_ms(timeout_ms)
-        .map_err(serde::de::Error::custom)?;
+    validate_pi_readiness_timeout_ms(timeout_ms).map_err(serde::de::Error::custom)?;
     Ok(timeout_ms)
 }
 

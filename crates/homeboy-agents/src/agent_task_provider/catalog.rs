@@ -485,7 +485,7 @@ fn validate_provider_runner_readiness_for_backend_with_diagnostics(
             None,
         )
     })?;
-    let verdict = super::command_runner::run_provider_readiness_invocation_with_env(provider, &effective_config, &credential_env).map_err(
+    let verdict = super::command_runner::run_provider_readiness_probe_with_env(provider, &effective_config, &credential_env).map_err(
         |message| {
             Error::validation_invalid_argument(
                 "backend",
@@ -494,11 +494,7 @@ fn validate_provider_runner_readiness_for_backend_with_diagnostics(
                     provider.id
                 ),
                 Some(backend.to_string()),
-                provider
-                    .readiness_invocation
-                    .as_ref()
-                    .and_then(|invocation| invocation.display.clone())
-                    .map(|display| vec![format!("Provider readiness invocation: {display}")]),
+                None,
             )
         },
     )?;
