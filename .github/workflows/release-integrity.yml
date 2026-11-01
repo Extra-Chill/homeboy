@@ -85,6 +85,17 @@ jobs:
             exit 1
           fi
 
+          # Only core CLI releases (`vX.Y.Z`) carry the cargo-dist asset contract.
+          # Extensions and the desktop app release from this repository as
+          # `<component-id>-vX.Y.Z` with no binaries; auditing them against
+          # core's asset set re-drafted every one of them.
+          if ! printf '%s' "${TAG}" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+'; then
+            echo "audit=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Skipping ${TAG}: not a core CLI release, so it has no cargo-dist asset contract."
+            exit 0
+          fi
+
+          echo "audit=true" >> "$GITHUB_OUTPUT"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "::notice::Auditing release ${TAG}"
 
@@ -101,6 +112,7 @@ jobs:
       # is paid only by releases that actually look incomplete.
       - name: Check the declared asset set
         id: contract
+        if: steps.target.outputs.audit == 'true'
         continue-on-error: true
         env:
           RELEASE_TAG: ${{ steps.target.outputs.tag }}

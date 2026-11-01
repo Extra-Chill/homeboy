@@ -5,5 +5,8 @@
       "file": "managed-preview.json",
       "pattern": "\"version\":\\s*\"([0-9.]+)\""
     }
-  ]
+  ],
+  "github": {
+    "release_latest": false
+  }
 }

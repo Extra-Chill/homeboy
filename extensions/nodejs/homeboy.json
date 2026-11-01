@@ -48,5 +48,8 @@
       "bash scripts/fuzz/nodejs-fuzz-runner-smoke.sh",
       "bash scripts/workload/nodejs-fuzz-workload-smoke.sh"
     ]
+  },
+  "github": {
+    "release_latest": false
   }
 }
