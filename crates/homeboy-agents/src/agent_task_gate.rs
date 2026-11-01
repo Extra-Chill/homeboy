@@ -659,10 +659,14 @@ fn git_ignored_children(checkout: &Path, children: &[PathBuf]) -> Vec<PathBuf> {
     else {
         return Vec::new();
     };
+    // Ask about each child by its path from the checkout root, not its bare
+    // name: a nested `.gitignore` (`extensions/.gitignore: **/node_modules/`)
+    // only applies to paths beneath it, and a root-anchored pattern (`/build/`)
+    // must not prune a same-named directory deeper in the tree (#16857).
     let mut input = Vec::new();
     for path in children {
-        if let Some(name) = path.file_name() {
-            input.extend_from_slice(name.as_encoded_bytes());
+        if let Ok(relative) = path.strip_prefix(checkout) {
+            input.extend_from_slice(relative.as_os_str().as_encoded_bytes());
             // A trailing slash makes directory-only patterns (`dist/`) match.
             input.extend_from_slice(b"/\0");
         }
@@ -8174,6 +8178,50 @@ mod tests {
             assert_eq!(roots, vec!["package"], "{evidence:?}");
             assert!(!root.join("dist/hydration-count").exists());
             assert!(!root.join("build/hydration-count").exists());
+        });
+    }
+
+    /// Ignore rules are matched against each child's checkout-relative path
+    /// (#16857): a nested `.gitignore` prunes the directories beneath it, and a
+    /// root-anchored pattern does not prune a same-named nested directory.
+    #[test]
+    fn nested_gitignore_rules_apply_to_their_own_subtree() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let checkout = tempfile::tempdir().expect("checkout");
+            let root = checkout.path();
+            let status = std::process::Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(["init", "-q"])
+                .status()
+                .expect("git");
+            assert!(status.success());
+            fs::write(root.join(".gitignore"), "/build/\n").expect("root gitignore");
+            fs::create_dir_all(root.join("extensions")).expect("extensions");
+            fs::write(root.join("extensions/.gitignore"), "**/node_modules/\n")
+                .expect("nested gitignore");
+            let provider = r#"{"id":"fixture-deps","deps":{"provider":"fixture","commands":{"install":{"argv":["sh","-c","printf hydrated >> hydration-count"]}}}}"#;
+            for directory in [
+                "build",
+                "extensions/tool/build",
+                "extensions/tool/node_modules/dep",
+            ] {
+                fs::create_dir_all(root.join(directory)).expect("child");
+                fs::write(root.join(directory).join("homeboy.json"), provider)
+                    .expect("child provider");
+            }
+
+            let evidence =
+                hydrate_gate_dependency_roots(root, true, "fixture").expect("dependency hydration");
+            let roots = evidence
+                .iter()
+                .map(|setup| setup.package_root.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(roots, vec!["extensions/tool/build"], "{evidence:?}");
+            assert!(!root.join("build/hydration-count").exists());
+            assert!(!root
+                .join("extensions/tool/node_modules/dep/hydration-count")
+                .exists());
         });
     }
 
