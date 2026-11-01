@@ -2,6 +2,11 @@
 
 All notable changes to the **nodejs** extension will be documented in this file.
 
+## [3.8.5] - 2026-11-01
+
+### Fixed
+- apply local_workspace_dependencies after dependency installs
+
 ## [3.8.4] - 2026-10-31
 
 ### Fixed
