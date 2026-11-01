@@ -17,5 +17,8 @@
       "bash tests/lint-runner-smoke.sh",
       "bash tests/script-runner-smoke.sh"
     ]
+  },
+  "github": {
+    "release_latest": false
   }
 }

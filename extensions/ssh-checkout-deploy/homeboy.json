@@ -15,5 +15,8 @@
     "test": [
       "node tests/ssh-checkout-deploy.test.mjs"
     ]
+  },
+  "github": {
+    "release_latest": false
   }
 }

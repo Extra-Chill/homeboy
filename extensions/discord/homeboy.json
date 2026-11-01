@@ -16,5 +16,8 @@
       "node tests/notify.test.mjs",
       "node tests/resolve-route.test.mjs"
     ]
+  },
+  "github": {
+    "release_latest": false
   }
 }

@@ -12,5 +12,8 @@
       "jq empty go.json",
       "find . -name '*.sh' -print0 | xargs -0 -r -n1 bash -n"
     ]
+  },
+  "github": {
+    "release_latest": false
   }
 }

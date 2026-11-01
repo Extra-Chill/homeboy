@@ -18,5 +18,8 @@
       "bash tests/nextest-shard-real-smoke.sh",
       "bash ../tests/lint-findings-clean-pass-contract-smoke.sh"
     ]
+  },
+  "github": {
+    "release_latest": false
   }
 }

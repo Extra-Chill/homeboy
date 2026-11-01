@@ -213,5 +213,8 @@
       "node tests/wp-codebox-resolver-smoke.js",
       "node tests/wp-codebox-visual-compare-smoke.js"
     ]
+  },
+  "github": {
+    "release_latest": false
   }
 }

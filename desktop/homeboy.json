@@ -15,5 +15,8 @@
       "file": "Homeboy.xcodeproj/project.pbxproj",
       "pattern": "MARKETING_VERSION = ([0-9.]+);"
     }
-  ]
+  ],
+  "github": {
+    "release_latest": false
+  }
 }
