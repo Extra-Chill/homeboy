@@ -51,6 +51,11 @@ pub fn run_main_lint_workflow(
     run_dir: &RunDir,
 ) -> homeboy_core::Result<LintRunWorkflowResult> {
     let scoped_plan = resolve_scoped_lint_runs(component, &args)?;
+    let run_component_checks = component.has_script(ExtensionCapability::Lint)
+        && extension::resolve::has_linked_extension_for_capability(
+            component,
+            ExtensionCapability::Lint,
+        )?;
 
     // Early exit if changed-file mode produced no runnable scope.
     //
@@ -79,7 +84,7 @@ pub fn run_main_lint_workflow(
     // changed" and "0 files linted because 47 changed files matched no route"
     // read differently to an operator and to the PR comment.
     if let Some(ref plan) = scoped_plan {
-        if plan.runs.is_empty() {
+        if plan.runs.is_empty() && !run_component_checks {
             let hints = (plan.changed_files_considered > 0).then(|| {
                 vec![format!(
                     "Lint ran no scopes: {} changed file(s) were considered and none matched any \
@@ -231,7 +236,55 @@ pub fn run_main_lint_workflow(
         &lint_findings,
         &producer_summaries,
     );
-    let lint_exit_code = normalize_producer_exit_code(runner_exit_code, &producer_summaries);
+    let mut lint_exit_code = normalize_producer_exit_code(runner_exit_code, &producer_summaries);
+
+    // Component checks complement the extension, including in scoped/CI runs.
+    // Add their failures before baseline comparison so existing failures remain
+    // baseline-red rather than becoming unconditional regression gates.
+    let mut self_check_capture = None;
+    if run_component_checks {
+        // Keep progress/artifacts separate from the extension's command indices.
+        let checks_run_dir = RunDir::create()?;
+        let checks = extension::self_check::run_self_checks_with_passthrough_and_progress(
+            component,
+            ExtensionCapability::Lint,
+            source_path,
+            !args.json_summary,
+            None,
+            Some(&checks_run_dir),
+            None,
+        )?;
+        checks_run_dir.finish(checks.success);
+        let count = usize::from(!checks.success);
+        if let Some(command) = checks.failed_command {
+            lint_findings.push(
+                HomeboyFinding::builder(
+                    "self-check",
+                    format!(
+                        "Self-check `{command}` exited with code {}",
+                        checks.exit_code
+                    ),
+                )
+                .category("self-check")
+                .fingerprint(format!("self-check:lint:{command}"))
+                .build(),
+            );
+            // A command's exit code describes a finding, not an extension
+            // infrastructure error (even for exit codes greater than one).
+            if lint_exit_code == 0 {
+                lint_exit_code = 1;
+            }
+        }
+        producer_summaries.push(
+            homeboy_core::finding::FindingProducerSummary::new(
+                "self-check",
+                if checks.success { "passed" } else { "failed" },
+            )
+            .finding_count(count)
+            .metadata("exit_code", checks.exit_code),
+        );
+        self_check_capture = Some(checks.capture);
+    }
 
     // Baseline lifecycle
     let baseline_context = baseline_provenance(&args, scoped_plan.as_ref(), &producer_summaries);
@@ -351,7 +404,7 @@ pub fn run_main_lint_workflow(
         },
         findings: Some(lint_findings),
         producer_summaries,
-        self_check_capture: None,
+        self_check_capture,
         extension_phase_timings: output.extension_phase_timings,
         cargo_target: output.cargo_target,
     })
