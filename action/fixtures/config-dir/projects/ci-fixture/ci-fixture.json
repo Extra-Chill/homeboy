@@ -1,0 +1,9 @@
+{
+  "domain": "ci-fixture.test",
+  "server_id": "ci-fixture",
+  "base_path": "/srv/ci-fixture",
+  "path_roots": {
+    "wp_content": "wp-content"
+  },
+  "components": []
+}

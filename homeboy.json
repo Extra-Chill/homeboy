@@ -54,7 +54,8 @@
     "defaults": {
       "exclude": [
         "extensions",
-        "desktop"
+        "desktop",
+        "action"
       ]
     }
   }
