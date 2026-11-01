@@ -4,7 +4,7 @@ set -euo pipefail
 
 source "${GITHUB_ACTION_PATH}/scripts/core/lib.sh"
 
-IMPORT_ROOT="${HOMEBOY_OBSERVATION_IMPORT_DIR:-${GITHUB_WORKSPACE:-$(pwd)}/homeboy-observations-import}"
+IMPORT_ROOT="${HOMEBOY_OBSERVATION_IMPORT_DIR:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}/homeboy-observations-import}"
 
 echo ""
 echo "--------------------------------------------------"

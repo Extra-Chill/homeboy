@@ -5,7 +5,8 @@ set -euo pipefail
 source "${GITHUB_ACTION_PATH}/scripts/core/lib.sh"
 
 OBSERVATION_WINDOW="${HOMEBOY_OBSERVATION_WINDOW:-24h}"
-OBSERVATION_DIR="${GITHUB_WORKSPACE:-$(pwd)}/homeboy-observations"
+# Outside the checkout: baseline reruns and review tests require a clean tree.
+OBSERVATION_DIR="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/homeboy-observations"
 EXPORT_CMD="$(build_observation_export_command "${OBSERVATION_WINDOW}" "${OBSERVATION_DIR}")"
 
 echo "HOMEBOY_OBSERVATIONS_DIR=${OBSERVATION_DIR}" >> "${GITHUB_ENV}"

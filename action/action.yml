@@ -625,13 +625,13 @@ runs:
       uses: actions/download-artifact@v7
       with:
         pattern: homeboy-observations-*
-        path: homeboy-observations-import
+        path: ${{ runner.temp }}/homeboy-observations-import
 
     - name: Import Homeboy observations
       if: steps.check-pr-state.outputs.active != 'false' && steps.resolve-commands.outputs.resolved-commands != '' && inputs.import-observations == 'true'
       shell: bash
       env:
-        HOMEBOY_OBSERVATION_IMPORT_DIR: ${{ github.workspace }}/homeboy-observations-import
+        HOMEBOY_OBSERVATION_IMPORT_DIR: ${{ runner.temp }}/homeboy-observations-import
       run: bash ${{ github.action_path }}/scripts/core/import-observations.sh
 
     - name: Run Homeboy commands
@@ -758,7 +758,7 @@ runs:
       uses: actions/upload-artifact@v7
       with:
         name: ${{ steps.artifact-names.outputs.homeboy-observations }}
-        path: homeboy-observations/**
+        path: ${{ runner.temp }}/homeboy-observations/**
         if-no-files-found: ignore
 
     - name: Finish artifact publication timing

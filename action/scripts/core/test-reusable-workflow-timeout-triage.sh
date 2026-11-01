@@ -14,7 +14,7 @@ assert_contains() {
   printf 'PASS: %s\n' "${label}"
 }
 
-assert_contains 'cp -R homeboy-observations differential-phase/candidate/homeboy-observations' 'candidate provenance retains observation evidence'
+assert_contains 'cp -R "${RUNNER_TEMP}/homeboy-observations" differential-phase/candidate/homeboy-observations' 'candidate provenance retains observation evidence'
 assert_contains 'HOMEBOY_CI_RESULTS_ARTIFACT: homeboy-differential-candidate-${{ matrix.artifact_key }}-${{ github.run_attempt }}' 'reconciled comment identifies the result artifact'
 assert_contains 'HOMEBOY_OBSERVATIONS_ARTIFACT: homeboy-differential-candidate-${{ matrix.artifact_key }}-${{ github.run_attempt }}' 'reconciled comment identifies the observation artifact'
 assert_contains 'GITHUB_PR_URL: ${{ github.event.pull_request.html_url }}' 'reconciled comment receives a resolvable PR URL'
