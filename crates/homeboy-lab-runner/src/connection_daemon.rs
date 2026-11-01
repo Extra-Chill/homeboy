@@ -518,17 +518,9 @@ pub(super) fn daemon_http_version_body_with_timeout(
 pub(super) fn daemon_http_freshness_with_timeout(
     runner_id: &str,
     local_url: &str,
-    expected_version: &str,
-    expected_identity: &str,
     timeout: Duration,
 ) -> std::result::Result<DaemonFreshnessReport, String> {
-    daemon_freshness_report(
-        runner_id,
-        local_url,
-        expected_version,
-        expected_identity,
-        timeout,
-    )
+    daemon_freshness_report(runner_id, local_url, timeout)
 }
 
 /// A direct-SSH session is live only when its loopback endpoint still serves
@@ -720,8 +712,6 @@ fn into_controller_frame(
 fn daemon_freshness_report(
     runner_id: &str,
     local_url: &str,
-    expected_version: &str,
-    expected_identity: &str,
     timeout: Duration,
 ) -> std::result::Result<DaemonFreshnessReport, String> {
     // Freshness, including the immutable executable hash, is a daemon health
@@ -738,15 +728,7 @@ fn daemon_freshness_report(
             report.fresh = true;
             report.stale_reason_code = None;
         }
-        if report.fresh
-            && daemon_version_identity_mismatch(
-                &body,
-                &raw_body,
-                expected_version,
-                expected_identity,
-            )?
-            .is_none()
-        {
+        if report.fresh && daemon_version_identity_mismatch(&body, &raw_body)?.is_none() {
             return Ok(into_controller_frame(report, runner_id));
         }
         if report.fresh {
@@ -758,8 +740,7 @@ fn daemon_freshness_report(
         }
         return Ok(into_controller_frame(report, runner_id));
     }
-    let mismatch =
-        daemon_version_identity_mismatch(&body, &raw_body, expected_version, expected_identity)?;
+    let mismatch = daemon_version_identity_mismatch(&body, &raw_body)?;
     Ok(into_controller_frame(
         DaemonFreshnessReport {
             fresh: mismatch.is_none(),
@@ -787,15 +768,13 @@ fn daemon_freshness_report(
 fn daemon_version_identity_mismatch(
     body: &Value,
     raw_body: &str,
-    _expected_version: &str,
-    _expected_identity: &str,
 ) -> std::result::Result<Option<String>, String> {
     if daemon_lease_id_from_body(body).is_none() {
         return Ok(Some(
             "remote daemon version response did not include a session lease".to_string(),
         ));
     }
-    let _running_version = daemon_version_from_body(body)
+    daemon_version_from_body(body)
         .filter(|version| !version.trim().is_empty())
         .map(|version| version.trim().to_string())
         .ok_or_else(|| {
@@ -805,7 +784,7 @@ fn daemon_version_identity_mismatch(
             )
         })?;
 
-    let _running_identity = daemon_identity_from_body(body)
+    daemon_identity_from_body(body)
         .filter(|identity| !identity.trim().is_empty())
         .map(|identity| identity.trim().to_string())
         .ok_or_else(|| {
@@ -922,8 +901,6 @@ mod tests {
         let report = daemon_http_freshness_with_timeout(
             "homeboy-lab",
             &format!("http://{address}"),
-            "",
-            "homeboy test+candidate",
             Duration::from_secs(2),
         )
         .expect("freshness report");
@@ -940,13 +917,8 @@ mod tests {
             "lease": { "lease_id": "lease-candidate" },
         });
 
-        let mismatch = daemon_version_identity_mismatch(
-            &body,
-            "fixture body",
-            "wrong-version",
-            "homeboy test+candidate",
-        )
-        .expect("version mismatch result");
+        let mismatch = daemon_version_identity_mismatch(&body, "fixture body")
+            .expect("version mismatch result");
 
         assert_eq!(mismatch, None);
     }
@@ -960,7 +932,7 @@ mod tests {
             "lab_contract_version": homeboy_lab_contract::LAB_CONTRACT_VERSION + 1,
         });
         assert_eq!(
-            daemon_version_identity_mismatch(&body, "fixture", "new", "homeboy new+controller")
+            daemon_version_identity_mismatch(&body, "fixture")
                 .unwrap()
                 .as_deref(),
             Some("lab_contract_version_mismatch")

@@ -1802,7 +1802,6 @@ pub(crate) fn run_lab_offload_inner(
         .unwrap_or_else(|| {
             lab_runner_homeboy_has_blocking_drift_against_configured_identity(
                 &runner_status,
-                configured_build_identity.as_deref(),
                 require_exact_runner_version,
             )
         });

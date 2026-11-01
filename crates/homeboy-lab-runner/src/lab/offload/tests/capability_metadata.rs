@@ -914,13 +914,7 @@ fn direct_runner_admission_compares_daemon_with_configured_runner_identity() {
 
     // Direct SSH admission compares the daemon with the runner-side executable
     // that will execute jobs, never with the controller's target-specific binary.
-    assert!(
-        !lab_runner_homeboy_has_blocking_drift_against_configured_identity(
-            &status,
-            Some(identity),
-            false,
-        )
-    );
+    assert!(!lab_runner_homeboy_has_blocking_drift_against_configured_identity(&status, false,));
 }
 
 #[test]
@@ -930,16 +924,8 @@ fn direct_runner_admission_does_not_gate_on_configured_build_identity() {
     session.mode = RunnerTunnelMode::DirectSsh;
     session.homeboy_build_identity = Some("homeboy 0.295.0+b03d659866d1".to_string());
 
-    assert!(
-        !lab_runner_homeboy_has_blocking_drift_against_configured_identity(
-            &status,
-            Some("homeboy 0.295.0+different"),
-            false,
-        )
-    );
-    assert!(
-        !lab_runner_homeboy_has_blocking_drift_against_configured_identity(&status, None, false,)
-    );
+    assert!(!lab_runner_homeboy_has_blocking_drift_against_configured_identity(&status, false,));
+    assert!(!lab_runner_homeboy_has_blocking_drift_against_configured_identity(&status, false,));
 }
 
 #[test]
@@ -954,9 +940,7 @@ fn daemon_build_identity_drift_does_not_block_admission() {
         Some("homeboy 0.229.11+new".to_string()),
     ));
 
-    assert!(
-        !lab_runner_homeboy_has_blocking_drift_against_configured_identity(&status, None, false)
-    );
+    assert!(!lab_runner_homeboy_has_blocking_drift_against_configured_identity(&status, false));
 }
 
 #[test]
@@ -1023,7 +1007,7 @@ fn stale_runner_homeboy_error_blocks_offload_with_reconnect_guidance() {
     assert_eq!(err.details["id"], "homeboy lab");
     assert_eq!(
         err.message,
-        "Invalid argument 'runner': Lab offload refused runner `homeboy lab` because its active daemon control plane differs from the configured job command binary `/home/user/Developer/_lab_workspaces/homeboy-post-4583-proof/target/debug/homeboy`. Active daemon control plane: homeboy 0.0.0+test; job command binary: homeboy 0.229.11+new. connected runner daemon control plane version `homeboy 0.228.0` differs from configured job command binary version `homeboy 0.229.11`; run recovery_commands in order when runner active jobs are drained Stale runner runtimes can return malformed or misleading provider output; follow the first remediation hint before retrying."
+        "Invalid argument 'runner': Lab offload refused runner `homeboy lab` because its active daemon control plane differs from the configured job command binary `/home/user/Developer/_lab_workspaces/homeboy-post-4583-proof/target/debug/homeboy`. Active daemon control plane: homeboy 0.0.0+test; job command binary: homeboy 0.229.11+new. connected runner daemon control plane version `homeboy 0.228.0` differs from configured job command binary version `homeboy 0.229.11` on runner `homeboy lab`; build drift is informational Stale runner runtimes can return malformed or misleading provider output; follow the first remediation hint before retrying."
     );
     assert!(err
         .message
@@ -1076,7 +1060,7 @@ fn runner_homeboy_metadata_carries_stale_daemon_details() {
         metadata["stale_daemon"]["current_homeboy_build_identity"],
         "homeboy 0.229.11+new"
     );
-    assert_eq!(metadata["stale_daemon"]["severity"], "warning");
+    assert_eq!(metadata["stale_daemon"]["severity"], "info");
     assert_eq!(
         metadata["stale_daemon"]["active_daemon_control_plane_version"],
         "homeboy 0.228.0"
@@ -1094,7 +1078,7 @@ fn runner_homeboy_metadata_carries_stale_daemon_details() {
         "homeboy 0.229.11+new"
     );
     assert!(metadata["stale_daemon"].get("refresh_command").is_none());
-    assert_eq!(metadata["stale_daemon_severity"], "warning");
+    assert_eq!(metadata["stale_daemon_severity"], "info");
     assert_eq!(
         metadata["stale_daemon_refresh_command"],
         serde_json::Value::Null
@@ -1119,6 +1103,17 @@ fn exact_active_daemon_target_remains_available_in_metadata_and_offload_error() 
     ));
     let refresh = "homeboy runner refresh-homeboy lab --ref aaaaaaaa --reconnect";
 
+    status.stale_daemon = status.stale_daemon.take().map(|warning| {
+        warning.with_runtime_paths(
+            "lab",
+            Vec::new(),
+            vec![crate::RunnerChangedRuntimePath {
+                env: "HOMEBOY_PLUGIN_PATH".into(),
+                loaded_path: Some("/old".into()),
+                configured_path: Some("/new".into()),
+            }],
+        )
+    });
     let metadata = lab_runner_homeboy_metadata("lab", "homeboy", &status);
     assert_eq!(metadata["stale_daemon_refresh_command"], refresh);
     assert_eq!(metadata["stale_daemon"]["refresh_command"], refresh);

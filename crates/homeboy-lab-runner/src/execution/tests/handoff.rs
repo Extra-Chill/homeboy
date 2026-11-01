@@ -569,38 +569,6 @@ fn daemon_identity_transition_reports_a_restarted_control_plane() {
 }
 
 #[test]
-fn polling_accepts_the_daemon_restarted_in_place_but_not_an_unrelated_replacement() {
-    let accepted = "homeboy 0.436.8+before-refresh";
-    let restarted = "homeboy 0.436.9+after-refresh";
-    let mut restarted_session = crate::test_support::direct_ssh_session("lease-b");
-    restarted_session.homeboy_build_identity = Some(restarted.to_string());
-
-    assert!(super::super::daemon::daemon_identity_is_accepted(
-        accepted, accepted, None
-    ));
-    assert!(
-        super::super::daemon::daemon_identity_is_accepted(
-            restarted,
-            accepted,
-            Some(&restarted_session)
-        ),
-        "the current session names the restarted lease, so its new identity is accepted"
-    );
-    assert!(
-        !super::super::daemon::daemon_identity_is_accepted(restarted, accepted, None),
-        "without a current session a changed identity is still refused"
-    );
-    assert!(
-        !super::super::daemon::daemon_identity_is_accepted(
-            "homeboy 9.9.9+unrelated",
-            accepted,
-            Some(&restarted_session)
-        ),
-        "a daemon matching neither the admission nor the current session is refused"
-    );
-}
-
-#[test]
 fn direct_daemon_preserves_declared_provider_source_through_execution() {
     crate::test_support::with_isolated_home(|_| {
         crate::register_runner_daemon_exec_driver();
@@ -1963,6 +1931,44 @@ fn daemon_polling_rejects_a_response_for_a_different_job() {
         requested_job_id.to_string()
     );
     assert_eq!(err.details["returned_job_id"], returned_job_id.to_string());
+}
+
+#[test]
+fn older_build_live_job_completion_is_accepted_after_controller_upgrade() {
+    use homeboy_lab_contract::*;
+    let runtime = |build: &str| LabRuntimeIdentity {
+        build_identity: build.into(),
+        lab_contract_version: Some(LAB_CONTRACT_VERSION),
+        source_revision: build.into(),
+        clean: true,
+    };
+    let admission = negotiate_lab_capability_handshake(&LabCapabilityHandshake {
+        controller: runtime("homeboy new+controller"),
+        runner_command: runtime("homeboy new+command"),
+        daemon: runtime("homeboy old+admitting-daemon"),
+        required_capabilities: required_lab_handoff_capabilities(),
+        runner_command_capabilities: required_lab_handoff_capabilities(),
+        daemon_capabilities: required_lab_handoff_capabilities(),
+        ancestry: LabRuntimeAncestry::Unknown,
+    });
+    assert!(admission.compatible, "{admission:?}");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let mut job = running_job();
+    job.status = JobStatus::Succeeded;
+    let server = serve_one_job_poll(listener, job.clone());
+    let client = Client::builder().no_proxy().build().unwrap();
+    let (completed, observed_endpoint) = fetch_daemon_job_resilient_with_endpoint_reload(
+        &client,
+        &endpoint,
+        &job.id.to_string(),
+        || panic!("an admitted job must stay on its original daemon"),
+    )
+    .expect("accept older daemon completion");
+    assert_eq!(completed.status, JobStatus::Succeeded);
+    assert_eq!(completed.id, job.id);
+    assert_eq!(observed_endpoint, endpoint);
+    server.join().unwrap();
 }
 
 #[test]

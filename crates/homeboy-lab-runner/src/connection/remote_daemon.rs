@@ -1267,9 +1267,10 @@ pub(super) fn remote_daemon_connect_action_for_runner(
             .as_deref()
             .is_none_or(|identity| identity.trim().is_empty())
         {
-            return Err(
-                "remote daemon did not provide a build identity; refusing reattachment".to_string(),
-            );
+            return Err(format!(
+                "remote daemon under lease `{}` reachable endpoint did not provide a build identity; refusing reattachment",
+                daemon.lease_id.as_deref().unwrap_or("unavailable"),
+            ));
         }
         if let Some(session) = previous_session.filter(|session| {
             session.mode == RunnerTunnelMode::DirectSsh

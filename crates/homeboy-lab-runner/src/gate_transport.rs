@@ -421,7 +421,6 @@ fn execute_owned(
     let terminal = crate::execution::observe_daemon_job_until_terminal(
         &request.runner_id,
         job_id,
-        status.session.as_ref(),
         std::time::Duration::from_secs(request.timeout_seconds.saturating_add(120)),
         &cancelled,
     );
@@ -438,7 +437,6 @@ fn execute_owned(
             let cancelled_terminal = crate::execution::observe_daemon_job_until_terminal(
                 &request.runner_id,
                 job_id,
-                None,
                 std::time::Duration::from_secs(60),
                 &|| false,
             )?;

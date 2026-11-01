@@ -1630,6 +1630,15 @@ mod daemon_repair_step_tests {
             "homeboy 0.219.0".to_string(),
             Some("homeboy 0.218.0+abcdef12".to_string()),
             Some("homeboy 0.219.0+abcdef12".to_string()),
+        )
+        .with_runtime_paths(
+            "homeboy-lab",
+            Vec::new(),
+            vec![crate::RunnerChangedRuntimePath {
+                env: "HOMEBOY_PLUGIN_PATH".into(),
+                loaded_path: Some("/old".into()),
+                configured_path: Some("/new".into()),
+            }],
         );
         let report = status_report("homeboy-lab", None, Some(warning));
 

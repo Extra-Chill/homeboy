@@ -648,7 +648,7 @@ pub(super) fn operator_summary(report: &RunnerStatusReport) -> RunnerOperatorSum
     // "unverified" is its own risk, distinct from a proven mismatch. Rendering
     // both as `stale_daemon` would make "I could not check" indistinguishable
     // from "it is stale" (#11106).
-    if let Some(warning) = report.stale_daemon.as_ref() {
+    if let Some(warning) = report.admission_blocking_stale_daemon() {
         risk.push(if warning.is_unverified() {
             "unverified_daemon".to_string()
         } else {
@@ -849,7 +849,7 @@ fn lab_runner_homeboy_output_with_recovery_guidance(
         // controller commit, rotates the daemon, verifies both identities, and
         // proves admission. Do not present the known-weaker fleet upgrade beside it.
         upgrade_command: (!recovery_blocked
-            && !(status.stale_daemon.is_some()
+            && !(status.admission_blocking_stale_daemon().is_some()
                 && refresh_safe
                 && recovery_refresh_command(
                     &shell_arg(runner_id),
@@ -1331,7 +1331,7 @@ pub(super) fn runner_artifact_feature_diagnostics(
         && (version_drift || status.stale_daemon.is_some())
     {
         hints.push(format!(
-            "Runner `{runner_id}` reports Homeboy version/build drift. If artifact commands are missing on runner jobs, restart the active daemon with `homeboy runner disconnect {runner_arg}` then `homeboy runner connect {runner_arg}`."
+            "Runner `{runner_id}` reports informational Homeboy version/build drift; compatibility is determined by the Lab contract and capabilities."
         ));
     }
     if status.connected
@@ -1410,7 +1410,7 @@ pub(super) fn runner_followups(
     }
     let has_exact_stale_daemon_refresh = status.is_some_and(|status| {
         authoritative_idle_active_job_projection(status)
-            && status.stale_daemon.is_some()
+            && status.admission_blocking_stale_daemon().is_some()
             && recovery_refresh_command(&runner_arg, recovery_refresh_guidance(status)).is_some()
     });
     followups.extend([
@@ -1722,7 +1722,7 @@ pub(super) fn runner_status_operator_hints(report: &RunnerStatusReport) -> Vec<S
             report.runner_id, report.stale_runner_job_count
         ));
     }
-    if report.stale_daemon.is_some() {
+    if report.admission_blocking_stale_daemon().is_some() {
         let mut materialization =
             RuntimeMaterializationStatus::for_homeboy_runner(&report.runner_id, "homeboy", report);
         materialization.stale_daemon_refresh_command =
@@ -1742,7 +1742,7 @@ pub(super) fn runner_status_operator_hints(report: &RunnerStatusReport) -> Vec<S
             recovery_refresh_guidance(report)
         {
             hints.push(format!(
-                "Runner `{}` reports exact Homeboy build drift: controller={} runner={runner}. Recovery will not recommend refresh-homeboy until ancestry is verified; use `--allow-downgrade` only for an intentional rollback.",
+                "Runner `{}` reports exact Homeboy build drift: controller={} runner={runner}. This is informational; compatibility is determined by the Lab contract and capabilities.",
                 report.runner_id,
                 controller.as_deref().unwrap_or("unavailable"),
             ));
@@ -1774,7 +1774,9 @@ fn runner_status_operator_commands_with_recovery_guidance(
         return Vec::new();
     }
 
-    if authoritative_idle_active_job_projection(report) && report.stale_daemon.is_some() {
+    if authoritative_idle_active_job_projection(report)
+        && report.admission_blocking_stale_daemon().is_some()
+    {
         if let Some(command) =
             recovery_refresh_command(&shell_arg(&report.runner_id), guidance.clone())
         {
@@ -1891,7 +1893,9 @@ fn runner_status_operator_commands_with_recovery_guidance(
         });
     }
 
-    if authoritative_idle_active_job_projection(report) && report.stale_daemon.is_some() {
+    if authoritative_idle_active_job_projection(report)
+        && report.admission_blocking_stale_daemon().is_some()
+    {
         if let Some(refresh_command) =
             recovery_refresh_command(&shell_arg(&report.runner_id), guidance)
         {
@@ -1966,7 +1970,7 @@ mod tests {
     use homeboy::runner::{RunnerActiveJobState, RunnerSessionRole, RunnerStaleDaemonWarning};
 
     #[test]
-    fn stale_daemon_status_hint_labels_control_plane_and_job_binary() {
+    fn stale_daemon_status_hint_recommends_job_binary_refresh() {
         let report = stale_daemon_report();
 
         let hints = runner_status_operator_hints(&report);
@@ -1976,16 +1980,6 @@ mod tests {
             .iter()
             .find(|hint| hint.contains("stale daemon"))
             .expect("stale daemon hint");
-        assert!(hint.contains("severity=warning"));
-        assert!(hint.contains("active daemon control plane"));
-        assert!(hint.contains(&format!(
-            "homeboy 0.259.0+{}",
-            homeboy_product_identity::build_identity()
-                .git_commit
-                .expect("test build has an immutable controller commit")
-        )));
-        assert!(hint.contains("job command binary"));
-        assert!(hint.contains("homeboy 0.262.0+binary"));
         let job_binary_refresh = format!(
             "homeboy runner refresh-homeboy homeboy-lab --ref v{} --reconnect",
             homeboy_product_identity::product_version()
@@ -1997,6 +1991,21 @@ mod tests {
             .find(|command| command.scope == "daemon_refresh")
             .expect("daemon refresh command");
         assert!(refresh.command.starts_with(&job_binary_refresh));
+    }
+
+    #[test]
+    fn build_drift_alone_is_not_a_stale_daemon_with_refresh_guidance() {
+        let mut report = stale_daemon_report();
+        let warning = report.stale_daemon.as_mut().expect("warning");
+        warning.stale_runtime_paths.clear();
+        warning.changed_runtime_paths.clear();
+
+        assert!(!runner_status_operator_hints(&report)
+            .iter()
+            .any(|hint| hint.contains("stale daemon")));
+        assert!(!runner_status_operator_commands(&report)
+            .iter()
+            .any(|command| command.scope == "daemon_refresh"));
     }
 
     #[test]
@@ -2149,13 +2158,24 @@ mod tests {
             .as_mut()
             .expect("session")
             .homeboy_build_identity = Some("homeboy 0.259.0+7e29bde24e00".to_string());
-        report.stale_daemon = Some(RunnerStaleDaemonWarning::new(
-            "homeboy-lab",
-            "homeboy 0.259.0".to_string(),
-            "homeboy 0.262.0".to_string(),
-            Some("homeboy 0.259.0+7e29bde24e00".to_string()),
-            Some("homeboy 0.262.0+7e29bde24e00".to_string()),
-        ));
+        report.stale_daemon = Some(
+            RunnerStaleDaemonWarning::new(
+                "homeboy-lab",
+                "homeboy 0.259.0".to_string(),
+                "homeboy 0.262.0".to_string(),
+                Some("homeboy 0.259.0+7e29bde24e00".to_string()),
+                Some("homeboy 0.262.0+7e29bde24e00".to_string()),
+            )
+            .with_runtime_paths(
+                "homeboy-lab",
+                Vec::new(),
+                vec![homeboy::runner::RunnerChangedRuntimePath {
+                    env: "HOMEBOY_PLUGIN_PATH".to_string(),
+                    loaded_path: Some("/old".to_string()),
+                    configured_path: Some("/new".to_string()),
+                }],
+            ),
+        );
         let refresh = "homeboy runner refresh-homeboy homeboy-lab --ref 7e29bde24e00 --reconnect";
         let commands = runner_status_operator_commands_with_recovery_guidance(
             &report,
@@ -2211,13 +2231,24 @@ mod tests {
                 last_seen_at: None,
                 leaseless_recovery_evidence: None,
             }),
-            stale_daemon: Some(RunnerStaleDaemonWarning::new(
-                "homeboy-lab",
-                "homeboy 0.259.0".to_string(),
-                "homeboy 0.262.0".to_string(),
-                Some(format!("homeboy 0.259.0+{controller_commit}")),
-                Some("homeboy 0.262.0+binary".to_string()),
-            )),
+            stale_daemon: Some(
+                RunnerStaleDaemonWarning::new(
+                    "homeboy-lab",
+                    "homeboy 0.259.0".to_string(),
+                    "homeboy 0.262.0".to_string(),
+                    Some(format!("homeboy 0.259.0+{controller_commit}")),
+                    Some("homeboy 0.262.0+binary".to_string()),
+                )
+                .with_runtime_paths(
+                    "homeboy-lab",
+                    Vec::new(),
+                    vec![homeboy::runner::RunnerChangedRuntimePath {
+                        env: "HOMEBOY_PLUGIN_PATH".to_string(),
+                        loaded_path: Some("/old".to_string()),
+                        configured_path: Some("/new".to_string()),
+                    }],
+                ),
+            ),
             configured_job_binary_build_identity: None,
             daemon_freshness: None,
             active_jobs: Vec::new(),

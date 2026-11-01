@@ -119,7 +119,7 @@ fn compact_live_lease_without_binary_identity_remains_unadoptable() {
     .expect_err("an unknown live binary cannot be adopted from a stale session");
 
     assert!(error.contains("lease-live"));
-    assert!(error.contains("--adopt-live-lease lease-live --expected-live-pid 4646"));
+    assert!(error.contains("did not provide a build identity"));
 }
 
 #[test]
@@ -295,7 +295,8 @@ fn explicit_live_lease_adoption_with_endpoint_timeout_reports_the_probe_blocker(
 #[test]
 fn explicit_live_lease_adoption_with_unavailable_identity_reports_the_identity_blocker() {
     let session = direct_ssh_session("lease-recorded");
-    let status = remote_daemon_status_for_test(true, true, 0, "lease-live", 4646);
+    let mut status = remote_daemon_status_for_test(true, true, 0, "lease-live", 4646);
+    status.daemon.as_mut().unwrap().build_identity = None;
 
     let error = remote_daemon::remote_daemon_connect_action_for_runner(
         Some(&session),
@@ -327,7 +328,6 @@ fn stale_active_mismatched_daemon_never_reattaches_or_adopts() {
     .expect_err("stale active daemon must preserve the persisted session");
 
     assert!(error.contains("endpoint identity/jobs probe failed: identity probe failed"));
-    assert!(error.contains("homeboy runner status runner-a --json"));
     assert!(!error.contains("--adopt-live-lease lease-live --expected-live-pid 4646"));
 }
 
@@ -771,14 +771,16 @@ fn aligned_runner_identity_protocol_with_shell_preamble_accepts_jobs() {
         "build_identity": { "display": "homeboy 0.298.0+9682bf1ad0b2" },
         "runtime_paths": { "loaded": [], "current": [], "stale": [] },
     });
-    let daemon_version = daemon_version_from_body(&daemon).expect("daemon version");
-    let daemon_identity = daemon_identity_from_body(&daemon).expect("daemon build identity");
+    assert_eq!(
+        daemon_version_from_body(&daemon),
+        Some(configured.version.as_str())
+    );
+    assert_eq!(
+        daemon_identity_from_body(&daemon),
+        configured.build_identity.as_deref()
+    );
 
     assert!(daemon_runtime_is_current(
-        daemon_version,
-        "0.298.0",
-        &configured.version,
-        compare_identities(Some(daemon_identity), configured.build_identity.as_deref()),
         &daemon_runtime_stale_paths_from_body(&daemon),
         &changed_runtime_paths(
             &HashMap::new(),
@@ -827,14 +829,7 @@ fn identity_comparison_distinguishes_match_unverifiable_and_mismatch() {
 
 #[test]
 fn equal_version_build_identity_and_runtime_paths_are_current() {
-    assert!(daemon_runtime_is_current(
-        "0.296.3",
-        "homeboy 0.296.3",
-        "0.296.3",
-        IdentityComparison::Match,
-        &[],
-        &[],
-    ));
+    assert!(daemon_runtime_is_current(&[], &[],));
     assert!(
         RunnerAvailability::from_status_parts(
             "homeboy-lab",
@@ -859,14 +854,7 @@ fn identical_rendered_runtime_identities_are_current_without_refresh() {
         Some(identity.to_string()),
     );
 
-    assert!(daemon_runtime_is_current(
-        "0.328.0",
-        "0.328.0",
-        "0.328.0",
-        IdentityComparison::Match,
-        &[],
-        &[],
-    ));
+    assert!(daemon_runtime_is_current(&[], &[],));
     assert_eq!(
         warning.mismatch_predicate,
         "daemon_configured_identity == equal"
@@ -933,14 +921,7 @@ fn observed_matching_daemon_identity_reconciles_stale_session_metadata() {
         session.homeboy_build_identity.as_deref(),
         Some("homeboy 0.298.1+7d7b8e656466")
     );
-    assert!(daemon_runtime_is_current(
-        "0.298.1",
-        &session.homeboy_version,
-        &configured.version,
-        IdentityComparison::Match,
-        &[],
-        &[],
-    ));
+    assert!(daemon_runtime_is_current(&[], &[],));
 }
 
 #[test]
@@ -953,14 +934,7 @@ fn different_build_identities_are_evidence_not_runtime_incompatibility() {
         Some("homeboy 0.296.3+job-build".to_string()),
     );
 
-    assert!(daemon_runtime_is_current(
-        "0.296.3",
-        "0.296.3",
-        "0.296.3",
-        IdentityComparison::Mismatch,
-        &[],
-        &[],
-    ));
+    assert!(daemon_runtime_is_current(&[], &[],));
     assert!(warning.message.contains("build identity"));
     assert!(warning.message.contains("homeboy 0.296.3+daemon-build"));
     assert!(warning.message.contains("homeboy 0.296.3+job-build"));
@@ -1005,10 +979,6 @@ fn runtime_path_drift_is_stale_and_names_the_changed_generation() {
     );
 
     assert!(!daemon_runtime_is_current(
-        "0.296.3",
-        "0.296.3",
-        "0.296.3",
-        IdentityComparison::Match,
         &warning.stale_runtime_paths,
         &warning.changed_runtime_paths,
     ));
@@ -1059,14 +1029,7 @@ fn differing_versions_do_not_make_runtime_paths_stale() {
         Some("homeboy 0.296.3+new".to_string()),
     );
 
-    assert!(daemon_runtime_is_current(
-        "0.296.2",
-        "0.296.2",
-        "0.296.3",
-        IdentityComparison::Mismatch,
-        &[],
-        &[],
-    ));
+    assert!(daemon_runtime_is_current(&[], &[],));
     assert!(warning.message.contains("version `0.296.2`"));
     assert!(warning.message.contains("version `0.296.3`"));
 }
@@ -1117,7 +1080,7 @@ fn stale_daemon_warning_with_unverified_ref_withholds_refresh_recovery_command()
 
     assert_eq!(warning.session_homeboy_version, "homeboy 0.201.3");
     assert_eq!(warning.current_homeboy_version, "homeboy 0.204.0");
-    assert_eq!(warning.severity, "warning");
+    assert_eq!(warning.severity, "info");
     assert_eq!(
         warning.active_daemon_control_plane_version,
         "homeboy 0.201.3"
@@ -1139,7 +1102,7 @@ fn stale_daemon_warning_with_unverified_ref_withholds_refresh_recovery_command()
     );
     assert!(warning.message.contains("daemon control plane"));
     assert!(warning.message.contains("job command binary"));
-    assert!(warning.message.contains("active jobs are drained"));
+    assert!(warning.message.contains("informational"));
     assert!(warning.safe_recovery_commands().is_empty());
     let diagnostics =
         serde_json::to_value(warning.sanitized_for_output()).expect("serialize stale warning");
@@ -2159,7 +2122,8 @@ fn sessionless_active_daemon_requires_lease_ownership_not_a_pinned_controller() 
 
 #[test]
 fn sessionless_active_daemon_fails_closed_when_endpoint_identity_is_ambiguous() {
-    let status = remote_daemon_status_for_test(true, true, 2, "lease-live", 1183765);
+    let mut status = remote_daemon_status_for_test(true, true, 2, "lease-live", 1183765);
+    status.daemon.as_mut().unwrap().build_identity = None;
 
     let error = remote_daemon_connect_action_for_runner(
         None,

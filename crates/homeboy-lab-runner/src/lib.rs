@@ -307,7 +307,6 @@ pub use capabilities::{
 pub(crate) use command_path::normalize_runner_command_env_for_homeboy_path;
 pub use command_path::preflight_remote_argv_path_translation;
 pub(crate) use command_path::set_homeboy_command_selection;
-pub(crate) use connection::daemon_endpoint_identity;
 pub use connection::{
     close_transport, connect, connect_converging_binary, connect_with_live_lease_adoption,
     connect_with_orphan_adoption, connect_with_unleased_candidate_reconciliation,

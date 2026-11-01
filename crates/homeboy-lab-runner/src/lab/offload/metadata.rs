@@ -538,7 +538,6 @@ pub(crate) fn lab_runner_daemon_fresh_for_admission(
 /// daemon. An unavailable identity fails closed.
 pub(crate) fn lab_runner_homeboy_has_blocking_drift_against_configured_identity(
     status: &RunnerStatusReport,
-    configured_build_identity: Option<&str>,
     require_exact: bool,
 ) -> bool {
     lab_runner_homeboy_has_blocking_status_drift(status, require_exact)
