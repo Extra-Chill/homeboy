@@ -11,7 +11,9 @@ use super::execution::{
     ReleaseArtifactPlan,
 };
 use super::lifecycle::DeployObservation;
-use super::orchestration_ref_checkout::{ExactRefCheckout, ExactRefIdentity};
+use super::orchestration_ref_checkout::{
+    ExactRefCheckout, ExactRefIdentity, ExactRefRequest, InPlace,
+};
 use super::orchestration_tag_checkout::{
     checkout_resolved_deploy_tags, partition_shared_root_conflicts, resolve_deploy_tags,
     restore_branches,
@@ -240,26 +242,22 @@ pub(super) fn prepare_components(
 
     // Resolve first, then materialize immutable detached worktrees for real deploys.
     // Dry-run resolves in `run_dry_run_mode` and never creates a worktree.
-    let exact_ref_checkouts = if !config.dry_run && !config.check {
-        if config.has_requested_refs() {
-            components
-                .iter()
-                .filter_map(|component| {
-                    config
-                        .requested_ref_for(&component.id)
-                        .map(|requested_ref| {
-                            ExactRefCheckout::materialize(
-                                component,
-                                requested_ref,
-                                config.resolved_ref_for(&component.id),
-                                Some(&project),
-                            )
-                        })
-                })
-                .collect::<Result<Vec<_>>>()?
-        } else {
-            Vec::new()
-        }
+    // A clean checkout already at the resolved commit builds in place; every
+    // other (repository, commit) pair is materialized once as a sparse tree.
+    let exact_ref_checkouts = if !config.dry_run && !config.check && config.has_requested_refs() {
+        let requests: Vec<ExactRefRequest<'_>> = components
+            .iter()
+            .filter_map(|component| {
+                config
+                    .requested_ref_for(&component.id)
+                    .map(|requested_ref| ExactRefRequest {
+                        component,
+                        requested_ref,
+                        accepted_sha: config.resolved_ref_for(&component.id),
+                    })
+            })
+            .collect();
+        ExactRefCheckout::materialize_all(&requests, Some(&project), InPlace::Allow)?
     } else {
         Vec::new()
     };
@@ -415,19 +413,17 @@ pub(super) fn prepare_components(
             materialized_tag_refs.insert(entry.component.id.clone(), entry.provenance_ref());
         }
 
-        let materialized = shared_root
-            .into_iter()
-            .map(|entry| {
-                let requested_ref = entry.tag.clone();
-                let resolved_sha = entry.tag_commit_sha.clone();
-                ExactRefCheckout::materialize(
-                    &entry.component,
-                    &requested_ref,
-                    resolved_sha.as_deref(),
-                    Some(&project),
-                )
+        // In-place tag checkouts below move HEAD, so these always materialize.
+        let requests: Vec<ExactRefRequest<'_>> = shared_root
+            .iter()
+            .map(|entry| ExactRefRequest {
+                component: &entry.component,
+                requested_ref: &entry.tag,
+                accepted_sha: entry.tag_commit_sha.as_deref(),
             })
-            .collect::<Result<Vec<_>>>()?;
+            .collect();
+        let materialized =
+            ExactRefCheckout::materialize_all(&requests, Some(&project), InPlace::Never)?;
         for checkout in &materialized {
             checkout.verify()?;
             checkout.hydrate_dependencies(config.skip_deps_hydration)?;

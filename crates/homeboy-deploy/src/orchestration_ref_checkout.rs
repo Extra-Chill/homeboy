@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use homeboy_core::component::Component;
@@ -65,7 +66,66 @@ pub(crate) struct ExactRefIdentity {
 pub(super) struct ExactRefCheckout {
     pub(crate) component: Component,
     pub(crate) identity: ExactRefIdentity,
-    worktree_path: PathBuf,
+    tree: SourceTree,
+}
+
+/// Where an exact-ref component's source lives.
+#[derive(Clone)]
+enum SourceTree {
+    /// The configured checkout, proven to sit at the resolved commit with no
+    /// modified, untracked, or ignored paths under the component prefixes.
+    InPlace(PathBuf),
+    /// A disposable sparse checkout shared by every component that resolved to
+    /// the same (repository, commit) pair in one invocation.
+    Materialized(Arc<MaterializedTree>),
+}
+
+impl SourceTree {
+    fn root(&self) -> &Path {
+        match self {
+            Self::InPlace(root) => root,
+            Self::Materialized(tree) => &tree.0,
+        }
+    }
+}
+
+/// Whether `path` lives inside a disposable exact-ref checkout, which is removed
+/// wholesale after the deploy and so needs no per-path cleanup.
+pub(crate) fn is_disposable_source(path: &Path) -> bool {
+    homeboy_core::artifacts::root()
+        .is_ok_and(|root| path.starts_with(materialized_trees_root(&root)))
+}
+
+/// Tells component builds their source tree is disposable.
+const BUILD_SOURCE_DISPOSABLE_ENV: &str = "HOMEBOY_BUILD_SOURCE_DISPOSABLE";
+
+fn materialized_trees_root(artifacts_root: &Path) -> PathBuf {
+    artifacts_root.join("deploy-ref")
+}
+
+/// Removes the disposable checkout once the last component referencing it drops.
+struct MaterializedTree(PathBuf);
+
+impl Drop for MaterializedTree {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// One component deployed at one requested ref.
+pub(crate) struct ExactRefRequest<'a> {
+    pub(crate) component: &'a Component,
+    pub(crate) requested_ref: &'a str,
+    /// A commit already accepted by a batch preflight; skips re-resolution.
+    pub(crate) accepted_sha: Option<&'a str>,
+}
+
+/// Whether a clean configured checkout already at the resolved commit may be
+/// used directly instead of materializing a disposable tree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InPlace {
+    Allow,
+    Never,
 }
 
 pub(crate) fn resolve_exact_ref(
@@ -83,135 +143,89 @@ pub(crate) fn resolve_exact_ref(
     })
 }
 
+struct ResolvedRequest<'a> {
+    component: &'a Component,
+    identity: ExactRefIdentity,
+    source_root: PathBuf,
+    prefix: Option<String>,
+}
+
 impl ExactRefCheckout {
+    /// Materialize one component at `requested_ref` in an isolated tree.
     pub(crate) fn materialize(
         component: &Component,
         requested_ref: &str,
         accepted_sha: Option<&str>,
         project: Option<&homeboy_core::project::Project>,
     ) -> Result<Self> {
-        let source_root = source_root(component)?;
-        let identity = match accepted_sha {
-            Some(resolved_sha) => ExactRefIdentity {
-                requested_ref: requested_ref.to_string(),
-                resolved_sha: resolved_sha.to_string(),
-                source: source_root.to_string_lossy().to_string(),
-                resolution_mode: "release-set-preflight".to_string(),
-            },
-            None => resolve_exact_ref(component, requested_ref)?,
-        };
-        ensure_resolved_commit_is_available(&source_root, component, &identity)?;
-        let component_prefix = git::get_component_path_prefix(&component.local_path);
-        // The exact-ref worktree is a full source checkout. It used to land in
-        // `std::env::temp_dir()`, which put it outside every cleanup surface --
-        // no owner record, no pin, no run binding, invisible to
-        // `cleanup --include runtime-tmp` and to the retained-storage report --
-        // and broke outright on a `noexec` `/tmp` (#11128). The artifact root
-        // is the volume the operator already sized for run bytes, so it is
-        // where a checkout this large belongs.
-        let parent = homeboy_core::artifacts::root()?.join("deploy-ref");
-        std::fs::create_dir_all(&parent).map_err(|err| {
-            Error::internal_io(
-                format!("Failed to create exact-ref deploy checkout directory: {err}"),
-                Some("deploy.ref.temp".to_string()),
-            )
-        })?;
-        let worktree_path = parent.join(uuid::Uuid::new_v4().to_string());
-        let worktree_arg = worktree_path.to_string_lossy().to_string();
-        clone_exact_ref_source(
-            &source_root,
-            source_root.to_str().unwrap_or_default(),
-            &worktree_arg,
+        let mut checkouts = Self::materialize_all(
+            &[ExactRefRequest {
+                component,
+                requested_ref,
+                accepted_sha,
+            }],
+            project,
+            InPlace::Never,
         )?;
-        git::run_git(
-            &worktree_path,
-            &["checkout", "--detach", &identity.resolved_sha],
-            "materialize exact deploy ref",
-        )?;
+        Ok(checkouts.remove(0))
+    }
 
-        let materialized_path = component_prefix
-            .as_deref()
-            .map(|prefix| worktree_path.join(prefix))
-            .unwrap_or_else(|| worktree_path.clone());
-        if !materialized_path.exists() {
-            let mut checkout = Self {
-                component: component.clone(),
-                identity,
-                worktree_path,
-            };
-            checkout.cleanup();
-            return Err(Error::validation_invalid_argument(
-                "ref",
-                format!(
-                    "Resolved ref does not contain the declared component path for '{}'",
-                    component.id
-                ),
-                None,
-                None,
-            ));
+    /// Resolve every request once, then provide one source tree per
+    /// (repository, commit): the configured checkout itself when `in_place`
+    /// allows it and the checkout is provably that commit, otherwise a single
+    /// sparse checkout containing only the requested component prefixes.
+    pub(crate) fn materialize_all(
+        requests: &[ExactRefRequest<'_>],
+        project: Option<&homeboy_core::project::Project>,
+        in_place: InPlace,
+    ) -> Result<Vec<Self>> {
+        let resolved = requests
+            .iter()
+            .map(resolve_request)
+            .collect::<Result<Vec<_>>>()?;
+
+        // Group by (repository, commit), preserving request order.
+        let mut groups: Vec<Vec<usize>> = Vec::new();
+        for (index, request) in resolved.iter().enumerate() {
+            match groups.iter_mut().find(|members| {
+                let first = &resolved[members[0]];
+                first.source_root == request.source_root
+                    && first.identity.resolved_sha == request.identity.resolved_sha
+            }) {
+                Some(members) => members.push(index),
+                None => groups.push(vec![index]),
+            }
         }
 
-        let mut materialized = component.clone();
-        materialized.local_path = materialized_path.to_string_lossy().to_string();
-        materialized.build_artifact = component.build_artifact.as_deref().map(|artifact| {
-            rebase_source_path(
-                artifact,
-                Path::new(&component.local_path),
-                &materialized_path,
-            )
-        });
-        if let Some(mut source_config) =
-            homeboy_core::component::try_discover_from_portable(&materialized_path)?
-        {
-            // Source-owned configuration must match the selected commit.
-            source_config.id = materialized.id.clone();
-            source_config.local_path = materialized.local_path.clone();
-            source_config.build_artifact =
-                source_config.build_artifact.as_deref().map(|artifact| {
-                    rebase_source_path(
-                        artifact,
-                        Path::new(&component.local_path),
-                        &materialized_path,
-                    )
-                });
-            materialized = match project {
-                Some(project) => {
-                    let attachment = project
-                        .components
-                        .iter()
-                        .find(|attachment| attachment.id == component.id)
-                        .ok_or_else(|| {
-                            Error::validation_invalid_argument(
-                                "components",
-                                format!(
-                                    "Project '{}' has no attached component '{}'",
-                                    project.id, component.id
-                                ),
-                                Some(project.id.clone()),
-                                None,
-                            )
-                        })?;
-                    homeboy_core::project::bind_materialized_component_to_project(
-                        source_config,
-                        project,
-                        None,
-                        attachment.remote_path.clone(),
-                        attachment.deployment_provider.clone(),
-                    )
-                }
-                None => source_config,
+        let mut checkouts: Vec<Option<Self>> = resolved.iter().map(|_| None).collect();
+        for members in groups {
+            let first = &resolved[members[0]];
+            let sha = first.identity.resolved_sha.as_str();
+            let prefixes: Vec<Option<&str>> = members
+                .iter()
+                .map(|&index| resolved[index].prefix.as_deref())
+                .collect();
+            let tree = if in_place == InPlace::Allow
+                && checkout_is_exact_commit(&first.source_root, sha, &prefixes)
+            {
+                SourceTree::InPlace(first.source_root.clone())
+            } else {
+                SourceTree::Materialized(Arc::new(materialize_tree(
+                    &first.source_root,
+                    sha,
+                    &prefixes,
+                )?))
             };
+            for &index in &members {
+                checkouts[index] = Some(bind_source(&resolved[index], &tree, project)?);
+            }
         }
-        Ok(Self {
-            component: materialized,
-            identity,
-            worktree_path,
-        })
+        Ok(checkouts.into_iter().flatten().collect())
     }
 
     pub(crate) fn verify(&self) -> Result<()> {
         let actual_sha = git::run_git(
-            &self.worktree_path,
+            self.tree.root(),
             &["rev-parse", "--verify", "HEAD^{commit}"],
             "verify exact deploy ref worktree",
         )?
@@ -231,8 +245,9 @@ impl ExactRefCheckout {
         Ok(())
     }
 
-    /// Hydrate dependencies in the detached source tree, never the configured
-    /// checkout. This makes an exact-ref build self-contained.
+    /// Hydrate dependencies in the selected source tree so an exact-ref build is
+    /// self-contained. An in-place tree is the configured checkout, already
+    /// proven to be the resolved commit, so this matches an ordinary local build.
     pub(crate) fn hydrate_dependencies(
         &self,
         skip: bool,
@@ -360,10 +375,225 @@ impl ExactRefCheckout {
         }
         Ok(())
     }
+}
 
-    fn cleanup(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.worktree_path);
+fn resolve_request<'a>(request: &ExactRefRequest<'a>) -> Result<ResolvedRequest<'a>> {
+    let component = request.component;
+    let source_root = source_root(component)?;
+    let identity = match request.accepted_sha {
+        Some(resolved_sha) => ExactRefIdentity {
+            requested_ref: request.requested_ref.to_string(),
+            resolved_sha: resolved_sha.to_string(),
+            source: source_root.to_string_lossy().to_string(),
+            resolution_mode: "release-set-preflight".to_string(),
+        },
+        None => resolve_exact_ref(component, request.requested_ref)?,
+    };
+    // A local resolution already proved the commit exists in the source object
+    // store; only remote or preflighted SHAs may still need fetching.
+    if identity.resolution_mode != "local" {
+        ensure_resolved_commit_is_available(&source_root, component, &identity)?;
     }
+    Ok(ResolvedRequest {
+        component,
+        identity,
+        prefix: git::get_component_path_prefix(&component.local_path),
+        source_root,
+    })
+}
+
+/// Whether the configured checkout is provably `sha` for every prefix: HEAD is
+/// exactly that commit and no tracked change, untracked file, or ignored file
+/// exists under any prefix. Ignored files count because stale build outputs or
+/// dependency trees would otherwise leak local bytes into the artifact.
+fn checkout_is_exact_commit(source_root: &Path, sha: &str, prefixes: &[Option<&str>]) -> bool {
+    let head = git::run_git(
+        source_root,
+        &["rev-parse", "--verify", "HEAD^{commit}"],
+        "read exact deploy ref checkout head",
+    );
+    if !head.is_ok_and(|head| head.trim() == sha) {
+        return false;
+    }
+    let mut args = vec![
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=all",
+        "--ignored=matching",
+        "--",
+    ];
+    if prefixes.iter().any(Option::is_none) {
+        args.push(".");
+    } else {
+        args.extend(prefixes.iter().flatten().copied());
+    }
+    git::run_git(
+        source_root,
+        &args,
+        "check exact deploy ref checkout cleanliness",
+    )
+    .is_ok_and(|status| status.trim().is_empty())
+}
+
+/// Create one disposable checkout of `sha`. When every component lives below
+/// the repository root, a cone-mode sparse checkout limits the working tree to
+/// those prefixes plus repository-root files.
+fn materialize_tree(
+    source_root: &Path,
+    sha: &str,
+    prefixes: &[Option<&str>],
+) -> Result<MaterializedTree> {
+    // The exact-ref worktree used to land in `std::env::temp_dir()`, which put
+    // it outside every cleanup surface -- no owner record, no pin, no run
+    // binding, invisible to `cleanup --include runtime-tmp` and to the
+    // retained-storage report -- and broke outright on a `noexec` `/tmp`
+    // (#11128). The artifact root is the volume the operator already sized for
+    // run bytes, so it is where a checkout belongs.
+    let parent = materialized_trees_root(&homeboy_core::artifacts::root()?);
+    std::fs::create_dir_all(&parent).map_err(|err| {
+        Error::internal_io(
+            format!("Failed to create exact-ref deploy checkout directory: {err}"),
+            Some("deploy.ref.temp".to_string()),
+        )
+    })?;
+    let tree = MaterializedTree(parent.join(uuid::Uuid::new_v4().to_string()));
+    let tree_arg = tree.0.to_string_lossy().to_string();
+    clone_exact_ref_source(
+        source_root,
+        source_root.to_str().unwrap_or_default(),
+        &tree_arg,
+    )?;
+    if prefixes.iter().all(Option::is_some) {
+        git::run_git(
+            &tree.0,
+            &["sparse-checkout", "init", "--cone"],
+            "enable sparse exact deploy ref checkout",
+        )?;
+        let mut args = vec!["sparse-checkout", "set"];
+        args.extend(prefixes.iter().flatten().copied());
+        git::run_git(
+            &tree.0,
+            &args,
+            "limit exact deploy ref checkout to components",
+        )?;
+    }
+    homeboy_core::log_status!(
+        "deploy",
+        "phase=exact_ref_materialize commit={} cwd={} prefixes={}",
+        sha,
+        tree.0.display(),
+        prefixes
+            .iter()
+            .map(|prefix| prefix.unwrap_or("."))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    git::run_git(
+        &tree.0,
+        &["checkout", "--detach", sha],
+        "materialize exact deploy ref",
+    )?;
+    Ok(tree)
+}
+
+/// Point one resolved component at its source tree. Materialized components
+/// reload source-owned configuration from the selected commit.
+fn bind_source(
+    request: &ResolvedRequest<'_>,
+    tree: &SourceTree,
+    project: Option<&homeboy_core::project::Project>,
+) -> Result<ExactRefCheckout> {
+    let component = request.component;
+    let checkout = |component: Component| ExactRefCheckout {
+        component,
+        identity: request.identity.clone(),
+        tree: tree.clone(),
+    };
+    let SourceTree::Materialized(materialized_tree) = tree else {
+        homeboy_core::log_status!(
+            "deploy",
+            "phase=exact_ref_in_place component={} ref={} commit={} cwd={}",
+            component.id,
+            request.identity.requested_ref,
+            request.identity.resolved_sha,
+            component.local_path
+        );
+        return Ok(checkout(component.clone()));
+    };
+
+    let materialized_path = request
+        .prefix
+        .as_deref()
+        .map(|prefix| materialized_tree.0.join(prefix))
+        .unwrap_or_else(|| materialized_tree.0.clone());
+    if !materialized_path.exists() {
+        return Err(Error::validation_invalid_argument(
+            "ref",
+            format!(
+                "Resolved ref does not contain the declared component path for '{}'",
+                component.id
+            ),
+            None,
+            None,
+        ));
+    }
+
+    let mut materialized = component.clone();
+    materialized.local_path = materialized_path.to_string_lossy().to_string();
+    materialized.build_artifact = component.build_artifact.as_deref().map(|artifact| {
+        rebase_source_path(
+            artifact,
+            Path::new(&component.local_path),
+            &materialized_path,
+        )
+    });
+    if let Some(mut source_config) =
+        homeboy_core::component::try_discover_from_portable(&materialized_path)?
+    {
+        // Source-owned configuration must match the selected commit.
+        source_config.id = materialized.id.clone();
+        source_config.local_path = materialized.local_path.clone();
+        source_config.build_artifact = source_config.build_artifact.as_deref().map(|artifact| {
+            rebase_source_path(
+                artifact,
+                Path::new(&component.local_path),
+                &materialized_path,
+            )
+        });
+        materialized = match project {
+            Some(project) => {
+                let attachment = project
+                    .components
+                    .iter()
+                    .find(|attachment| attachment.id == component.id)
+                    .ok_or_else(|| {
+                        Error::validation_invalid_argument(
+                            "components",
+                            format!(
+                                "Project '{}' has no attached component '{}'",
+                                project.id, component.id
+                            ),
+                            Some(project.id.clone()),
+                            None,
+                        )
+                    })?;
+                homeboy_core::project::bind_materialized_component_to_project(
+                    source_config,
+                    project,
+                    None,
+                    attachment.remote_path.clone(),
+                    attachment.deployment_provider.clone(),
+                )
+            }
+            None => source_config,
+        };
+    }
+    // The tree is deleted after the deploy, so builds can skip restoring the
+    // development state they would otherwise leave behind for an operator.
+    materialized
+        .env
+        .insert(BUILD_SOURCE_DISPOSABLE_ENV.to_string(), "1".to_string());
+    Ok(checkout(materialized))
 }
 
 fn ensure_resolved_commit_is_available(
@@ -441,12 +671,6 @@ fn rebase_source_path(value: &str, original_root: &Path, materialized_root: &Pat
                 .to_string()
         })
         .unwrap_or_else(|_| value.to_string())
-}
-
-impl Drop for ExactRefCheckout {
-    fn drop(&mut self) {
-        self.cleanup();
-    }
 }
 
 fn validate_component_source(component: &Component) -> Result<()> {
@@ -1156,6 +1380,185 @@ mod tests {
         )
         .expect("same-filesystem clone succeeds");
         assert!(worktree.join(".git").exists());
+    }
+
+    /// Two components under one repository: `a/` and `b/`, plus an unrelated
+    /// `c/` and a root file. Returns the repo and the commit before `HEAD`.
+    fn monorepo_fixture() -> (tempfile::TempDir, String) {
+        let repo = tempfile::tempdir().expect("repo");
+        git(repo.path(), &["init", "-q"]);
+        for dir in ["a", "b", "c"] {
+            std::fs::create_dir_all(repo.path().join(dir)).expect("component dir");
+            std::fs::write(repo.path().join(dir).join("payload.txt"), "old\n").expect("payload");
+        }
+        std::fs::write(repo.path().join("root.txt"), "root\n").expect("root file");
+        std::fs::write(repo.path().join(".gitignore"), "*.log\n").expect("gitignore");
+        git(repo.path(), &["add", "."]);
+        commit(repo.path(), "old");
+        let old_sha = git_output(repo.path(), &["rev-parse", "HEAD"]);
+        for dir in ["a", "b"] {
+            std::fs::write(repo.path().join(dir).join("payload.txt"), "new\n").expect("payload");
+        }
+        git(repo.path(), &["add", "."]);
+        commit(repo.path(), "new");
+        (repo, old_sha)
+    }
+
+    fn monorepo_components(root: &Path) -> Vec<Component> {
+        ["a", "b"]
+            .into_iter()
+            .map(|dir| Component {
+                id: dir.to_string(),
+                local_path: root.join(dir).to_string_lossy().to_string(),
+                ..Component::default()
+            })
+            .collect()
+    }
+
+    fn materialize_monorepo(
+        components: &[Component],
+        requested_ref: &str,
+    ) -> Vec<ExactRefCheckout> {
+        let requests: Vec<_> = components
+            .iter()
+            .map(|component| ExactRefRequest {
+                component,
+                requested_ref,
+                accepted_sha: None,
+            })
+            .collect();
+        ExactRefCheckout::materialize_all(&requests, None, InPlace::Allow).expect("materialize")
+    }
+
+    #[test]
+    fn head_ref_builds_in_place_only_when_the_checkout_is_provably_that_commit() {
+        type Mutation = fn(&Path);
+        let cases: [(&str, Mutation, bool); 5] = [
+            ("clean", |_| {}, true),
+            (
+                "modified tracked file",
+                |root| {
+                    std::fs::write(root.join("a/payload.txt"), "local\n").expect("modify");
+                },
+                false,
+            ),
+            (
+                "untracked file",
+                |root| {
+                    std::fs::write(root.join("b/extra.txt"), "local\n").expect("untracked");
+                },
+                false,
+            ),
+            (
+                "ignored file",
+                |root| {
+                    std::fs::write(root.join("a/stale.log"), "local\n").expect("ignored");
+                },
+                false,
+            ),
+            (
+                "change outside component prefixes",
+                |root| {
+                    std::fs::write(root.join("c/payload.txt"), "local\n").expect("other");
+                },
+                true,
+            ),
+        ];
+        for (name, mutate, expect_in_place) in cases {
+            let (repo, _) = monorepo_fixture();
+            let head = git_output(repo.path(), &["rev-parse", "HEAD"]);
+            let components = monorepo_components(repo.path());
+            mutate(repo.path());
+
+            let checkouts = materialize_monorepo(&components, &head);
+
+            assert_eq!(checkouts.len(), 2, "{name}");
+            for (checkout, component) in checkouts.iter().zip(&components) {
+                checkout.verify().expect("verify");
+                assert_eq!(checkout.identity.resolved_sha, head, "{name}");
+                assert_eq!(
+                    matches!(checkout.tree, SourceTree::InPlace(_)),
+                    expect_in_place,
+                    "{name}"
+                );
+                assert_eq!(
+                    checkout.component.local_path == component.local_path,
+                    expect_in_place,
+                    "{name}"
+                );
+                // Only a disposable tree lets builds skip restoring dev state.
+                assert_eq!(
+                    checkout
+                        .component
+                        .env
+                        .get(BUILD_SOURCE_DISPOSABLE_ENV)
+                        .is_some(),
+                    !expect_in_place,
+                    "{name}"
+                );
+                // Either source yields the committed bytes, never local edits.
+                assert_eq!(
+                    std::fs::read_to_string(
+                        Path::new(&checkout.component.local_path).join("payload.txt")
+                    )
+                    .expect("payload"),
+                    "new\n",
+                    "{name}"
+                );
+                assert!(
+                    !Path::new(&checkout.component.local_path)
+                        .join("extra.txt")
+                        .exists()
+                        || expect_in_place,
+                    "{name}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn older_ref_materializes_one_sparse_tree_shared_by_every_component() {
+        let (repo, old_sha) = monorepo_fixture();
+        let components = monorepo_components(repo.path());
+
+        let checkouts = materialize_monorepo(&components, &old_sha);
+
+        let roots: Vec<&Path> = checkouts
+            .iter()
+            .map(|checkout| checkout.tree.root())
+            .collect();
+        assert_eq!(
+            roots[0], roots[1],
+            "one materialization per repository + commit"
+        );
+        let root = roots[0].to_path_buf();
+        assert_ne!(root, repo.path());
+        for checkout in &checkouts {
+            checkout.verify().expect("verify");
+            assert_eq!(checkout.identity.resolved_sha, old_sha);
+            assert_eq!(
+                std::fs::read_to_string(
+                    Path::new(&checkout.component.local_path).join("payload.txt")
+                )
+                .expect("payload"),
+                "old\n"
+            );
+        }
+        assert!(
+            root.join("root.txt").exists(),
+            "repository-root files are kept"
+        );
+        assert!(
+            !root.join("c").exists(),
+            "unrequested prefixes are not checked out"
+        );
+
+        drop(checkouts);
+        assert!(
+            !root.exists(),
+            "the shared tree is removed with its last component"
+        );
+        assert_eq!(git_output(repo.path(), &["status", "--porcelain"]), "");
     }
 
     fn fixture_repo() -> tempfile::TempDir {
