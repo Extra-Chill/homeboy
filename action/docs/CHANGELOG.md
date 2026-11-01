@@ -2,6 +2,12 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.25.4] - 2026-11-01
+
+### Fixed
+- keep a missing servers/ dir quiet when listing config-dir ids
+- list config projects without GNU find -printf
+
 ## [2.25.3] - 2026-11-01
 
 ### Fixed
