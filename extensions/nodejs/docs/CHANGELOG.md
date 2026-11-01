@@ -2,6 +2,11 @@
 
 All notable changes to the **nodejs** extension will be documented in this file.
 
+## [3.8.8] - 2026-11-01
+
+### Changed
+- build each package once per clean commit and skip installed tarballs
+
 ## [3.8.7] - 2026-11-01
 
 ### Fixed
