@@ -1519,6 +1519,9 @@ fn with_isolated_home_guard<R>(home: HomeGuard, body: impl FnOnce(&TempDir) -> R
     // Nor do they belong to the local Cook supervisor whose gate runs them.
     let _cook_supervisor =
         EnvVarGuard::unset(crate::daemon::step_job::LOCAL_COOK_SUPERVISOR_JOB_ID_ENV);
+    // Nor to the chat session or requester whose shell launched the gate.
+    let _caller_context = EnvVarGuard::unset("HOMEBOY_CALLER_CONTEXT");
+    let _requester = EnvVarGuard::unset("HOMEBOY_REQUESTER");
     body(&home.context.root)
 }
 
