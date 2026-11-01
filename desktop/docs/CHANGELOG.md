@@ -6,6 +6,62 @@ The desktop app currently shells out to the standalone Rust CLI (`homeboy`) for 
 
 For current behavior, prefer the code and other documentation (for example `docs/CLI.md`).
 
+## [0.12.0] - 2026-11-01
+
+### Added
+- Cook composer with preview-gated submit and capacity-aware model choice
+- orchestration control-plane shell with Missions, Capacity, and Runners
+- add Homeboy Lab cockpit
+- add CLI command browser
+- add run history workspace
+- add run history cli models
+- add component quality workspace
+- add API auth workspace
+- add Git operations workspace
+- add stack manager surface
+- add rig management workflow
+- add release planning workflow
+- add benchmark workspace
+- add fleet management support (Closes #12)
+- add config gaps UI with fix functionality (Closes #7)
+- add InitOutput parsing with extensions and config gaps
+
+### Changed
+- root the reusable workflows, pin CI to the monorepo, add desktop CI and releases
+- remove surfaces for deleted Homeboy CLI commands and gate command drift
+- remove deleted Homeboy CLI commands (db, stack, fleet, api, triage, logs)
+- Add Homeboy agent-task mission control
+- centralize file editor path handling
+- centralize file pin CLI contracts
+- centralize log viewer CLI contracts
+- split command browser contracts
+- split desktop contract tests
+- remove legacy CLI CRUD wrappers
+- split homeboy cli helpers
+- add support for new CLI commands (audit, refactor, supports, undo)
+- update Component model with extensions HashMap field
+- rename module → extension throughout codebase
+
+### Fixed
+- keep extension and desktop releases published and off GitHub latest
+- discover the control-plane daemon with daemon ensure-running
+- source selected run actions from the single-run read
+- preserve pinned tabs when unpin fails
+- reconcile pinned tab reloads
+- discard stale remote file browser results
+- protect unsaved file refresh
+- scope sidebar to active project
+- use homeboy upgrade for CLI updates
+- decode current config model fields
+- use status full for workspace discovery
+- update audit and capability CLI probes
+- modernize mutation CLI arguments
+- modernize extension manager CLI commands
+- modernize CLI helper command shapes
+- update read-only CLI JSON calls
+- update remote log pin command
+- update ExtensionManifest for grouped capability structure (Closes #2)
+
 ## [0.11.3] - 2026-02-13
 
 - fix: show platform extensions with actions in sidebar
