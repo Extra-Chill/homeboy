@@ -12,7 +12,8 @@ use super::super::daemon_http_get::{
     classify_reqwest_error, daemon_get, daemon_transport_error, parse_daemon_response_json,
     DaemonHttpErrorKind,
 };
-use super::super::{load, status, RunnerSession};
+use super::super::{load, RunnerSession};
+use crate::connection::{ensure_transport, TransportLifetime};
 
 #[allow(unused_imports)]
 use super::*;
@@ -158,18 +159,18 @@ pub fn daemon_api_post(runner_id: &str, path: &str) -> Result<Value> {
 
 pub(super) fn daemon_api_request(runner_id: &str, path: &str, method: &str) -> Result<Value> {
     let runner = load(runner_id)?;
-    let connected = status(runner_id)?;
     // Every job, run and artifact routes through the runner's one current session.
-    let Some(session) = connected.session.filter(|_| connected.connected) else {
-        return Err(Error::validation_invalid_argument(
+    // Transport health, not the full diagnostic report, decides whether to reattach.
+    let session = ensure_transport(runner_id, TransportLifetime::Persisted).map_err(|_| {
+        Error::validation_invalid_argument(
             "runner",
             "runner is not connected to a daemon; run `homeboy runner connect <runner-id>` first",
-            Some(runner.id),
+            Some(runner.id.clone()),
             Some(vec![
                 "Read/query integrations use the connected daemon so results come from the runner machine.".to_string(),
             ]),
-        ));
-    };
+        )
+    })?;
     let client = Client::builder()
         .no_proxy()
         .timeout(Duration::from_secs(10))

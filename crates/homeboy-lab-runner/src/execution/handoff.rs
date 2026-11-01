@@ -12,7 +12,8 @@ use homeboy_core::error::{Error, Result};
 use crate::daemon_http_get::parse_daemon_response_json;
 
 use super::super::evidence::{mirror_daemon_job_progress_with_ownership, MirrorRunOwnership};
-use super::super::{load, status, Runner};
+use super::super::{load, Runner};
+use crate::connection::{ensure_transport, TransportLifetime};
 
 #[allow(unused_imports)]
 use super::*;
@@ -168,18 +169,17 @@ pub fn runner_job_cancel(
     cause: &str,
 ) -> Result<(Job, Vec<JobEvent>)> {
     let runner = load(runner_id)?;
-    let connected = status(runner_id)?;
     // The runner's one current session owns every job it runs.
-    let Some(session) = connected.session.filter(|_| connected.connected) else {
-        return Err(Error::validation_invalid_argument(
+    let session = ensure_transport(runner_id, TransportLifetime::Persisted).map_err(|_| {
+        Error::validation_invalid_argument(
             "runner",
             "runner is not connected; run `homeboy runner connect <runner-id>` first",
-            Some(runner.id),
+            Some(runner.id.clone()),
             Some(vec![
                 "Runner job cancellation requires an active direct daemon transport.".to_string(),
             ]),
-        ));
-    };
+        )
+    })?;
     let client = Client::builder()
         .timeout(Duration::from_secs(10))
         .build()
@@ -246,14 +246,9 @@ pub fn runner_job_cancel_projection(
     durable_run_id: &str,
 ) -> Result<(Job, Vec<JobEvent>)> {
     let runner = load(runner_id)?;
-    let connected = status(runner_id)?;
     // The runner's one current session owns every job it runs.
-    let Some(session) = connected.session.filter(|_| connected.connected) else {
-        return Err(runner_job_cancel_unsupported(
-            &runner.id,
-            "runner is not connected",
-        ));
-    };
+    let session = ensure_transport(runner_id, TransportLifetime::Persisted)
+        .map_err(|_| runner_job_cancel_unsupported(&runner.id, "runner is not connected"))?;
     let client = Client::builder()
         .timeout(Duration::from_secs(10))
         .build()
