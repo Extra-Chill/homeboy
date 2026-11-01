@@ -229,9 +229,12 @@ pub fn hydrate_declared_dependencies_for_component(
 /// The directories where the dependency providers resolved at `path` would run
 /// their install commands. Adapter selections that search upward report the
 /// matched selection root, so callers can hydrate each selection root once at
-/// that root instead of once per directory that resolves to it.
-pub fn dependency_selection_roots(path: &Path) -> Result<Vec<PathBuf>> {
-    provider::dependency_selection_roots(path)
+/// that root instead of once per directory that resolves to it. Set
+/// `allow_default` only for the walk's own root: installed adapters selected
+/// solely by default do not declare descendant roots. Local provider
+/// declarations remain explicit roots regardless of this flag.
+pub fn dependency_selection_roots(path: &Path, allow_default: bool) -> Result<Vec<PathBuf>> {
+    provider::dependency_selection_roots(path, allow_default)
 }
 
 fn hydrate_declared_dependencies_unlocked(

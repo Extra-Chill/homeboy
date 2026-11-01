@@ -593,7 +593,17 @@ pub(crate) fn hydrate_gate_dependency_roots_for_component(
             .display()
             .to_string();
         let relative = if relative.is_empty() { "." } else { &relative };
-        let selections = homeboy_core::deps::dependency_selection_roots(&candidate)?;
+        let selections = homeboy_core::deps::dependency_selection_roots(&candidate, true)?;
+        // An installed adapter's default fallback declares the walk's own root
+        // only. A descendant that only a default selects (a fixture's bare
+        // package.json, a workspace member) is not a dependency root (#16670);
+        // descendants no adapter selects still reach their other providers.
+        if candidate != checkout
+            && !selections.is_empty()
+            && homeboy_core::deps::dependency_selection_roots(&candidate, false)?.is_empty()
+        {
+            continue;
+        }
         if !selections.is_empty()
             && selections
                 .iter()
@@ -8042,6 +8052,121 @@ mod tests {
             assert!(!root.join("dist/hydration-count").exists());
             assert!(!root.join("build/hydration-count").exists());
         });
+    }
+
+    /// Built-in npm defaults apply only at the checkout, not to fixture inputs
+    /// or workspace members without their own selection files (#16670).
+    #[test]
+    fn builtin_adapter_defaults_do_not_declare_descendant_roots() {
+        let cases = [
+            (
+                "fixture",
+                Some("package-lock.json"),
+                Some("fixtures/websites/46-mdx-design-system"),
+                false,
+                false,
+            ),
+            (
+                "workspace",
+                Some("npm-shrinkwrap.json"),
+                Some("packages/cli"),
+                false,
+                true,
+            ),
+            ("root default", None, None, false, false),
+            (
+                "nested lockfile",
+                Some("package-lock.json"),
+                Some("packages/independent"),
+                true,
+                false,
+            ),
+        ];
+        for (description, root_lock, descendant, nested_lock, workspace) in cases {
+            homeboy_core::test_support::with_isolated_home(|home| {
+                let checkout = tempfile::tempdir().expect("checkout");
+                let root = checkout.path();
+                let manifest = serde_json::json!({
+                    "name": "fixture",
+                    "dependencies": {"example": "1.0.0"},
+                    "workspaces": if workspace { vec!["packages/*"] } else { vec![] },
+                });
+                fs::write(root.join("package.json"), manifest.to_string()).unwrap();
+                if let Some(lock) = root_lock {
+                    fs::write(root.join(lock), "{}").unwrap();
+                }
+                if let Some(directory) = descendant {
+                    let child = root.join(directory);
+                    fs::create_dir_all(&child).unwrap();
+                    fs::write(child.join("package.json"), manifest.to_string()).unwrap();
+                    if nested_lock {
+                        fs::write(child.join("package-lock.json"), "{}").unwrap();
+                    }
+                }
+                // The built-in Node adapter contract from deps.rs. Stub its
+                // install commands, not its selection, so no real npm runs.
+                let adapters = home
+                    .path()
+                    .join(".config/homeboy/extensions/dependency-adapters");
+                fs::create_dir_all(&adapters).unwrap();
+                fs::write(adapters.join("index.json"), r#"{"schema":"homeboy-extension/dependency-adapter-index/v1","manifests":[{"id":"nodejs-package-managers","ecosystem":"nodejs","path":"nodejs.json"}]}"#).unwrap();
+                let managers = [
+                    ("pnpm", "pnpm-lock.yaml", false),
+                    ("yarn", "yarn.lock", false),
+                    ("npm", "package-lock.json", true),
+                ].into_iter().enumerate().map(|(priority, (id, lock, default))| serde_json::json!({
+                    "id": id,
+                    "selection": {"priority": priority + 1, "files": [lock], "default": default},
+                    "commands": {"install": {"command": "mkdir -p node_modules; printf installed > node_modules/installed; printf installed >> hydration-count"}},
+                    "package_identity": {"manifest": "package.json", "name": "name", "dependencies": ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"]},
+                    "outputs": [{"path": "node_modules", "kind": "directory"}],
+                })).collect::<Vec<_>>();
+                fs::write(
+                    adapters.join("nodejs.json"),
+                    serde_json::json!({
+                        "schema": "homeboy-extension/dependency-adapter-manifest/v1",
+                        "id": "nodejs-package-managers", "version": 1, "ecosystem": "nodejs",
+                        "project_signals": {"root_files": ["package.json"]},
+                        "package_managers": managers,
+                    })
+                    .to_string(),
+                )
+                .unwrap();
+
+                let evidence = hydrate_gate_dependency_roots(root, true, "fixture").unwrap();
+                let mut expected = vec!["."];
+                if nested_lock {
+                    expected.push(descendant.unwrap());
+                }
+                assert_eq!(
+                    evidence
+                        .iter()
+                        .map(|step| step.package_root.as_str())
+                        .collect::<Vec<_>>(),
+                    expected,
+                    "{description}: {evidence:?}"
+                );
+                for step in &evidence {
+                    assert_eq!(
+                        step.status,
+                        homeboy_core::deps::DependencyHydrationStatus::Succeeded,
+                        "{description}: {step:?}"
+                    );
+                    assert_eq!(
+                        fs::read_to_string(root.join(&step.package_root).join("hydration-count"))
+                            .unwrap(),
+                        "installed"
+                    );
+                }
+                if let Some(directory) = descendant {
+                    assert_eq!(
+                        root.join(directory).join("hydration-count").exists(),
+                        nested_lock,
+                        "{description}"
+                    );
+                }
+            });
+        }
     }
 
     /// A dependency adapter whose selection searches upward binds a workspace
