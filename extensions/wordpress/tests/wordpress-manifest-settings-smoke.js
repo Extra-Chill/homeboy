@@ -8,6 +8,15 @@ const manifest = JSON.parse(
 	fs.readFileSync(path.resolve(__dirname, '..', 'wordpress.json'), 'utf8')
 );
 
+const deployHooks = manifest.hooks['post:deploy'];
+assert.equal(deployHooks.length, 1, 'component deploy only runs the ownership warning');
+assert.ok(deployHooks[0].includes('DEPLOY_OWNER='), 'deploy preserves the ownership check');
+assert.ok(deployHooks[0].includes('root:root'), 'deploy preserves the root:root warning');
+assert.ok(
+	deployHooks.every((hook) => !/\bwp\s+cache\s+flush\b/.test(hook)),
+	'component deploy must not flush the object cache'
+);
+
 const settingIds = new Set(manifest.settings.map((setting) => setting.id));
 
 assert.ok(

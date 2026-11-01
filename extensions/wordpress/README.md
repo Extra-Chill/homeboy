@@ -51,9 +51,10 @@ homeboy trace <component-id> --scenario <name>
 
 ## Deploy hooks
 
-After each WordPress component deploys, the extension's `post:deploy` hooks run
-a vendor-neutral object-cache flush (`wp cache flush`) and warn when the install
-directory is owned by `root:root`.
+After each WordPress component deploys, the extension's `post:deploy` hook warns
+when the install directory is owned by `root:root`. It no longer flushes the
+object cache: persistent caches should survive code deploys, and plugins that
+change cached data shapes should version their own cache keys.
 
 The extension does not purge any particular page-cache plugin. A page cache is
 a property of the site, not of WordPress, and Homeboy deploys copy files
@@ -73,6 +74,11 @@ invocation, after the last component, and only the project can declare it:
 
 Use whatever command your cache plugin provides (for example
 `wp w3-total-cache flush all`, or a site's own purge command).
+
+A project that genuinely needs a full object-cache flush can declare
+`wp cache flush --path={{base_path}}` in its own `post:deploy:project` hook.
+This is opt-in because a persistent object-cache flush can clear the entire
+shared cache database, including other sites' cached data and transients.
 
 ## Bench Helpers
 
