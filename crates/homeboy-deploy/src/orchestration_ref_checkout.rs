@@ -96,6 +96,9 @@ pub(crate) fn is_disposable_source(path: &Path) -> bool {
         .is_ok_and(|root| path.starts_with(materialized_trees_root(&root)))
 }
 
+/// Tells component builds their source tree is disposable.
+const BUILD_SOURCE_DISPOSABLE_ENV: &str = "HOMEBOY_BUILD_SOURCE_DISPOSABLE";
+
 fn materialized_trees_root(artifacts_root: &Path) -> PathBuf {
     artifacts_root.join("deploy-ref")
 }
@@ -585,6 +588,11 @@ fn bind_source(
             None => source_config,
         };
     }
+    // The tree is deleted after the deploy, so builds can skip restoring the
+    // development state they would otherwise leave behind for an operator.
+    materialized
+        .env
+        .insert(BUILD_SOURCE_DISPOSABLE_ENV.to_string(), "1".to_string());
     Ok(checkout(materialized))
 }
 
@@ -1476,6 +1484,16 @@ mod tests {
                 assert_eq!(
                     checkout.component.local_path == component.local_path,
                     expect_in_place,
+                    "{name}"
+                );
+                // Only a disposable tree lets builds skip restoring dev state.
+                assert_eq!(
+                    checkout
+                        .component
+                        .env
+                        .get(BUILD_SOURCE_DISPOSABLE_ENV)
+                        .is_some(),
+                    !expect_in_place,
                     "{name}"
                 );
                 // Either source yields the committed bytes, never local edits.
