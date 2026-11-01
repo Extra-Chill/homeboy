@@ -172,14 +172,6 @@ pub(super) fn run_materialized_provider_command(
             if retry_attempt > 1 {
                 annotate_transient_retry(&mut outcome, retry_attempt, retryable);
             }
-            if let Some(evidence) = request.request.metadata.get("capability_evidence") {
-                if outcome.metadata.is_null() {
-                    outcome.metadata = json!({});
-                }
-                if let Some(metadata) = outcome.metadata.as_object_mut() {
-                    metadata.insert("capability_evidence".to_string(), evidence.clone());
-                }
-            }
             // Preserve and link the latest raw executor input/result as
             // first-class run evidence before returning the final outcome.
             link_latest_executor_evidence(request, &mut outcome, execution.run_id.as_deref());
