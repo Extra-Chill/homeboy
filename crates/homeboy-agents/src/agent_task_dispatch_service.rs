@@ -15,9 +15,8 @@ use crate::agent_task_dispatch_plan::{
 };
 use crate::agent_task_lifecycle::{AgentTaskRunRecord, AgentTaskRunState};
 use crate::agent_task_provider::{
-    default_backend_for_component, preflight_plan_provider_config_with_providers,
-    preflight_provider_credentials_for_backend, resolve_provider_for_backend,
-    AgentTaskProviderCatalog, ProviderResolution,
+    default_backend_for_component, resolve_provider_for_backend, AgentTaskProviderCatalog,
+    ProviderResolution,
 };
 use crate::agent_task_scheduler::{
     AgentTaskAggregate, AgentTaskPlan, AgentTaskProviderRotationPolicy, AgentTaskRetryPolicy,
@@ -225,12 +224,12 @@ fn dispatch_with_provider_catalog(
                 return Err(record_retryable_dispatch_admission_failure(
                     &plan,
                     request.run_id.as_deref(),
-                    with_declared_credential_hints(error, &plan, catalog),
+                    error,
                 ));
             }
             Err(error) => {
                 preflight_dispatch_provider_secrets(&plan)?;
-                return Err(with_declared_credential_hints(error, &plan, catalog));
+                return Err(error);
             }
         };
     // The admitted plan retains the complete route chain while binding execution
@@ -391,15 +390,9 @@ pub fn preflight_dispatch_provider_admission(
                 request.selector.as_deref(),
             )?;
             }
-            preflight_provider_credentials_for_backend(
-                catalog.providers(),
-                &request.backend,
-                request.selector.as_deref(),
-            )?;
             catalog.apply_provider_runner_secret_env_contracts(&mut plan);
             catalog.validate_selected_models(&plan)?;
             preflight_dispatch_provider_secrets(&plan)?;
-            preflight_plan_provider_config_with_providers(&plan, catalog.providers())?;
             crate::agent_task_provider::preflight_plan_provider_dispatchability_without_runtime_with_providers(
             &plan,
             catalog,
@@ -412,8 +405,7 @@ pub fn preflight_dispatch_provider_admission(
     // already applied). Re-deriving dispatchability from scratch here would
     // drop that bypass and hard-fail a route admission just approved (#13974).
     catalog.validate_selected_models(&plan)?;
-    preflight_dispatch_provider_secrets(&plan)?;
-    preflight_plan_provider_config_with_providers(&plan, catalog.providers())
+    preflight_dispatch_provider_secrets(&plan)
 }
 
 fn validate_selected_execution_plan(
@@ -426,32 +418,10 @@ fn validate_selected_execution_plan(
     // from scratch would re-run that evaluation without the bypass and hard-fail
     // a plan admission just approved (#13974). Only run the checks admission
     // does not already cover: declared model support, provider-declared runtime
-    // preflight checks, secret material, and provider config preflight rules.
+    // preflight checks and task secret material.
     catalog.validate_selected_models(plan)?;
     catalog.enforce_runtime_preflight_checks_for_plan(plan)?;
-    preflight_dispatch_provider_secrets(plan)?;
-    preflight_plan_provider_config_with_providers(plan, catalog.providers())
-}
-
-fn with_declared_credential_hints(
-    mut error: Error,
-    plan: &AgentTaskPlan,
-    catalog: &AgentTaskProviderCatalog,
-) -> Error {
-    for provider in catalog.providers().iter().filter(|provider| {
-        plan.tasks
-            .iter()
-            .any(|task| task.executor.backend == provider.backend)
-    }) {
-        for name in crate::agent_task_provider::provider_required_secret_env_names(provider) {
-            if !error.hints.iter().any(|hint| hint.message.contains(&name)) {
-                error.hints.push(homeboy_core::error::Hint {
-                    message: format!("Required provider credential: {name}"),
-                });
-            }
-        }
-    }
-    error
+    preflight_dispatch_provider_secrets(plan)
 }
 
 /// A retryable admission denial is still a denied execution. Materialize the
@@ -988,57 +958,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn dispatch_rejects_a_backend_whose_declared_credential_is_missing_without_executing() {
-        let required = format!("HOMEBOY_TEST_CREDENTIAL_{}", uuid::Uuid::new_v4());
-        let catalog = AgentTaskProviderCatalog {
-            providers: vec![serde_json::from_value(serde_json::json!({
-                "id": "claude-code.agent-task-executor",
-                "backend": "claude-code",
-                "capabilities": ["cli_runtime", "provider_owned_auth"],
-                "invocation": { "argv": ["claude-code"] },
-                "secret_env_requirements": [{
-                    "env": [required.clone()]
-                }]
-            }))
-            .expect("provider fixture")],
-            ..Default::default()
-        };
-        let request = AgentTaskDispatchRequest {
-            prompt: Some("Cook the task.".to_string()),
-            prompt_is_literal: false,
-            tasks: Vec::new(),
-            cwd: None,
-            workspace: None,
-            repo: None,
-            component: None,
-            task_url: None,
-            backend: "claude-code".to_string(),
-            selector: None,
-            model: None,
-            required_capabilities: Vec::new(),
-            secret_env: Vec::new(),
-            concurrency: 1,
-            run_id: None,
-            task_id: None,
-            core: DispatchCoreInputs::default(),
-            backend_selection: None,
-        };
-
-        let error = dispatch_with_provider_catalog(request, Arc::new(NeverRunExecutor), &catalog)
-            .expect_err("a missing declared credential must fail dispatch");
-
-        assert_eq!(error.details["field"], "provider_dispatchability");
-        assert!(
-            error
-                .hints
-                .iter()
-                .any(|hint| hint.message.contains(&required)),
-            "the failure must name the credential: {}",
-            error.message,
-        );
-    }
-
     fn model_override_request(model: &str, acknowledged: bool) -> AgentTaskDispatchRequest {
         AgentTaskDispatchRequest {
             prompt: Some("run".to_string()),
@@ -1345,23 +1264,6 @@ mod tests {
         .expect_err("unacknowledged override must stop before execution");
 
         assert_eq!(error.details["confirmation_required"], true);
-    }
-
-    #[test]
-    fn dispatch_does_not_credential_gate_a_provider_that_declares_nothing() {
-        let providers = vec![serde_json::from_value(serde_json::json!({
-            "id": "local-shell.agent-task-executor",
-            "backend": "local-shell",
-            "invocation": { "argv": ["local-shell"] }
-        }))
-        .expect("provider fixture")];
-
-        crate::agent_task_provider::preflight_provider_credentials_for_backend(
-            &providers,
-            "local-shell",
-            None,
-        )
-        .expect("a provider that declares no credential is dispatchable");
     }
 
     fn configure_fake_pi(fake: &crate::agent_task_provider::test_pi::FakePi) {

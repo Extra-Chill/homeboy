@@ -799,11 +799,6 @@ pub(crate) fn preview_cook(
             .cloned(),
     )?;
     record_preview_phase(&mut progress, "provider_preflight");
-    preflight_cook_provider_credentials(
-        dispatch_command_for_cook(&args, dispatch_args_for_cook(&args)),
-        &provider::AgentTaskProviderCatalog::discover(),
-        component,
-    )?;
 
     // Preview binds evidence to the same resolved workspace, but only projects
     // its read-only paths. Cook alone performs the later secure copy.
@@ -1285,16 +1280,9 @@ fn ready_cook_backends(
         .backends()
         .into_iter()
         .filter(|backend| {
-            homeboy::agents::agent_tasks::provider::preflight_provider_credentials_for_backend(
-                catalog.providers(),
-                backend,
-                None,
+            homeboy::agents::agent_tasks::provider::validate_provider_runner_readiness_for_backend_with_catalog(
+                &catalog, backend, None,
             )
-            .and_then(|_| {
-                homeboy::agents::agent_tasks::provider::validate_provider_runner_readiness_for_backend_with_catalog(
-                    &catalog, backend, None,
-                )
-            })
             .is_ok()
         })
         .collect()
@@ -2301,65 +2289,6 @@ mod preview_tests {
         };
 
         assert_eq!(ready_cook_backends(&catalog), vec!["pi"]);
-    }
-
-    #[test]
-    fn backend_preview_readiness_injects_unconditional_declared_credentials() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let credential = root.path().join("credential.json");
-        let fake = FakePi::with_probes(
-            "exit 99",
-            "test \"$PREVIEW_REQUIRED_TOKEN\" = required-token || exit 1; printf 'test model\\n'",
-        );
-        std::fs::write(&credential, r#"{"token":"required-token"}"#).expect("credential");
-
-        let catalog = provider::AgentTaskProviderCatalog {
-            providers: vec![serde_json::from_value(serde_json::json!({
-                "id": "pi.agent-task-executor",
-                "backend": "pi",
-                "provider_defaults": {"pi": fake.config()},
-                "cli": {"profiles":[{"name":"test", "model":"test/model"}]},
-                "secret_env_requirements": [{
-                    "env": ["PREVIEW_REQUIRED_TOKEN"],
-                    "secret_env_sources": {
-                        "PREVIEW_REQUIRED_TOKEN": {
-                            "source": "json-file",
-                            "path": credential,
-                            "field": "token"
-                        }
-                    }
-                }]
-            }))
-            .expect("provider")],
-            ..Default::default()
-        };
-
-        let verdict =
-            homeboy::agents::agent_task_provider::evaluate_provider_dispatchability_with_config(
-                &catalog,
-                "pi",
-                Some("pi.agent-task-executor"),
-                Some("test/model"),
-                &fake.config(),
-                true,
-                &mut Default::default(),
-            );
-        assert!(verdict.ready, "{verdict:?}");
-        std::fs::write(&credential, r#"{"token":"wrong-token"}"#).unwrap();
-        let verdict =
-            homeboy::agents::agent_task_provider::evaluate_provider_dispatchability_with_config(
-                &catalog,
-                "pi",
-                Some("pi.agent-task-executor"),
-                Some("test/model"),
-                &fake.config(),
-                true,
-                &mut Default::default(),
-            );
-        assert!(
-            !verdict.ready,
-            "the Pi probe must actually receive the declared token"
-        );
     }
 
     #[test]
@@ -7372,33 +7301,6 @@ pub(crate) fn record_cook_provision(plan: &mut AgentTaskPlan, provision: Value) 
         }
         task.metadata["worktree_provision"] = provision;
     }
-}
-
-/// Reject a Cook whose selected backend cannot execute, before the destination
-/// worktree is provisioned.
-///
-/// `agent-task providers` reporting `available` used to mean only "declared",
-/// so a Cook could be dispatched to a backend with no credential, materialize a
-/// workspace, and burn its whole execution budget discovering the gap inside
-/// the provider — while other configured backends were sitting there usable
-/// (#11479). The backend's declared credentials are knowable here, so the
-/// remediation is reported instead of a spent budget.
-///
-/// A backend that cannot be resolved at all is left to the resolution
-/// validators; this only speaks about credentials.
-pub(crate) fn preflight_cook_provider_credentials(
-    dispatch: dispatch_service::AgentTaskDispatchCommand,
-    catalog: &provider::AgentTaskProviderCatalog,
-    component: Option<&homeboy::core::component::Component>,
-) -> homeboy::core::Result<()> {
-    let route = dispatch_service::resolve_cook_initial_provider_route_with_catalog(
-        dispatch, catalog, component,
-    )?;
-    provider::preflight_provider_credentials_for_backend(
-        catalog.providers(),
-        &route.backend,
-        route.selector.as_deref(),
-    )
 }
 
 /// Validates Cook input authority before destination provisioning, provider

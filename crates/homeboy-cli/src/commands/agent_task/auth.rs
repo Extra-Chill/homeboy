@@ -5,7 +5,6 @@ use std::io::Read;
 use serde_json::Value;
 
 use homeboy::agents::agent_tasks::provider as agent_task_provider;
-use homeboy::agents::agent_tasks::provider::ExtensionProviderAgentTaskExecutor;
 use homeboy::agents::agent_tasks::secrets as agent_task_secrets;
 
 use super::super::CmdResult;
@@ -83,20 +82,8 @@ fn configured_output(status: agent_task_secrets::AgentTaskSecretEnvStatus) -> Va
     })
 }
 
-/// Report redacted secret-env readiness for the selected/default backend.
-///
-/// Resolves the same backend cook/dispatch would use (explicit `--backend`,
-/// else the extension/policy default), scopes the provider secret sources to
-/// that backend, and reports readiness for its required secrets. When the
-/// operator passes explicit `--secret-env` names those are used verbatim.
-/// Raw secret values are never emitted — only configured/source/value-present
-/// states. This replaces the previous behavior that returned an empty list
-/// whenever no `--secret-env` was passed, which made configured auth look
-/// absent.
+/// Report redacted readiness for operator-supplied task secret names.
 fn auth_status(status_args: AgentTaskAuthStatusArgs) -> Value {
-    let executor = ExtensionProviderAgentTaskExecutor::discover();
-    let providers = executor.providers();
-
     // Backend the cook would use: explicit flag, else the policy/default backend.
     let default_backend = agent_task_provider::default_backend().ok().flatten();
     let selected_backend = status_args
@@ -104,30 +91,7 @@ fn auth_status(status_args: AgentTaskAuthStatusArgs) -> Value {
         .clone()
         .or_else(|| default_backend.clone());
 
-    // Scope each provider independently so a required name cannot read as
-    // configured from a different provider's json-file (#13629).
-    let scoped_providers: Vec<_> = match selected_backend.as_deref() {
-        Some(backend) => providers
-            .iter()
-            .filter(|provider| provider.backend == backend)
-            .filter(|provider| {
-                status_args
-                    .selector
-                    .as_deref()
-                    .is_none_or(|selector| provider.id == selector)
-            })
-            .cloned()
-            .collect(),
-        None => providers.to_vec(),
-    };
-
-    // Explicit operator-supplied names win; otherwise report every secret the
-    // selected backend declares. Shared with `agent-task providers
-    // --secret-env` so the two commands agree about the same secrets (#13629).
-    let secret_env = agent_task_secrets::secret_env_status_for_scopes(
-        &status_args.secret_env,
-        &agent_task_provider::provider_secret_env_scopes(&scoped_providers),
-    );
+    let secret_env = agent_task_secrets::secret_env_status(&status_args.secret_env);
 
     serde_json::json!({
         "schema": "homeboy/agent-task-auth-status/v1",

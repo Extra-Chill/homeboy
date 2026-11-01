@@ -26,36 +26,6 @@ fn provider_preflight_reports_missing_command_before_spawn() {
 }
 
 #[test]
-fn provider_preflight_reports_missing_secret_readiness() {
-    let fake = super::super::test_pi::FakePi::success();
-    let request = fake.request("missing-secret");
-    let mut provider = fake.provider();
-    provider.secret_requirements = vec![AgentTaskProviderSecretRequirement {
-        name: None,
-        env: vec!["HOMEBOY_TEST_PROVIDER_SECRET_THAT_SHOULD_NOT_EXIST".to_string()],
-        required: Some(true),
-        purpose: Some("test".to_string()),
-        extra: BTreeMap::new(),
-    }];
-
-    let outcome = run_provider_command_once(&request, &provider);
-
-    assert_eq!(outcome.status, AgentTaskOutcomeStatus::ProviderError);
-    assert_eq!(
-        outcome.diagnostics[0].class,
-        "agent_task.secret_env_missing"
-    );
-    assert_eq!(
-        outcome.diagnostics[0].data["secret_env_status"][0]["name"],
-        "HOMEBOY_TEST_PROVIDER_SECRET_THAT_SHOULD_NOT_EXIST"
-    );
-    assert_eq!(
-        outcome.diagnostics[0].data["secret_env_status"][0]["configured"],
-        false
-    );
-}
-
-#[test]
 fn provider_nonzero_exit_preserves_bounded_redacted_process_diagnostics() {
     let secret_value = "super-secret-provider-token";
     std::env::set_var("HOMEBOY_TEST_PROVIDER_SECRET", secret_value);

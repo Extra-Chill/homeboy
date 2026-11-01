@@ -92,9 +92,7 @@ pub use homeboy_core::secret_env_plan::{
 };
 
 // Provider helpers used directly from the facade root for common callers.
-pub use super::agent_task_provider::{
-    provider_secret_sources_for_discovered_providers, required_extension_ids_for_plan,
-};
+pub use super::agent_task_provider::required_extension_ids_for_plan;
 
 // ----------------------------------------------------------------------------
 // Explicit API groups
@@ -242,8 +240,7 @@ pub mod provider {
         default_backend, default_backend_for_component, dependency_failure_patterns,
         provider_capability_contract, provider_requires_cwd_git_checkout,
         provider_runner_readiness_contracts, provider_runner_source_contracts,
-        provider_runtime_readiness_cache_identity_for_plan, provider_secret_env_scopes,
-        provider_secret_sources_for_providers, required_extension_ids_for_plan,
+        provider_runtime_readiness_cache_identity_for_plan, required_extension_ids_for_plan,
         resolve_provider_for_backend, validate_provider_runner_readiness_for_backend_with_catalog,
         AgentTaskExecutorProvider, AgentTaskProviderCatalog,
         AgentTaskProviderDependencyFailurePattern, AgentTaskProviderEnvPathReadiness,
@@ -258,9 +255,8 @@ pub mod provider {
     /// before a workspace or a provider execution is spent (#11479).
     pub use crate::agent_task_provider::{
         evaluate_provider_capacity_with_config, evaluate_provider_dispatchability,
-        evaluate_provider_dispatchability_with_config, preflight_provider_credentials_for_backend,
-        preflight_provider_dispatchability_with_config, provider_credential_readiness,
-        AgentTaskProviderDispatchability,
+        evaluate_provider_dispatchability_with_config,
+        preflight_provider_dispatchability_with_config, AgentTaskProviderDispatchability,
     };
     /// Controller-owned credential refresh before Lab delivery (#15783).
     pub use crate::agent_task_provider::{

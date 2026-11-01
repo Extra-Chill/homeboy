@@ -58,12 +58,7 @@ struct ProviderStage {
 fn provider_stage(args: &AgentTaskDoctorArgs) -> ProviderStage {
     let executor = ExtensionProviderAgentTaskExecutor::discover();
     let providers = executor.providers();
-    let fallback_sources =
-        homeboy::agents::agent_tasks::provider::provider_secret_sources_for_providers(providers);
-    let secret_env = homeboy::agents::agent_tasks::secrets::secret_env_status_with_fallbacks(
-        &args.secret_env,
-        &fallback_sources,
-    );
+    let secret_env = homeboy::agents::agent_tasks::secrets::secret_env_status(&args.secret_env);
 
     // Resolve the backend the cook would use: explicit --backend, else the
     // extension/policy-declared default. Selector is operator-supplied only.

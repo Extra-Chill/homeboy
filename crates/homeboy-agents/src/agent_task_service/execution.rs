@@ -162,13 +162,6 @@ pub fn validate_plan_spec(spec: &str) -> AgentTaskPlanValidationReport {
             AgentTaskPlanValidationKind::MissingReadiness,
             preflight_plan_secret_env(&plan),
         ),
-        (
-            AgentTaskPlanValidationKind::MissingReadiness,
-            crate::agent_task_provider::preflight_plan_provider_config_with_providers(
-                &plan,
-                catalog.providers(),
-            ),
-        ),
     ] {
         if let Err(error) = result {
             return invalid_plan_report(plan_id, kind, error);
@@ -3096,10 +3089,6 @@ fn preflight_plan_provider_eligibility_with_catalog(
     catalog.validate_selected_models(&admitted)?;
     catalog.enforce_runtime_preflight_checks_for_plan(&admitted)?;
     preflight_plan_secret_env(&admitted)?;
-    crate::agent_task_provider::preflight_plan_provider_config_with_providers(
-        &admitted,
-        catalog.providers(),
-    )?;
     *plan = admitted;
     Ok(())
 }

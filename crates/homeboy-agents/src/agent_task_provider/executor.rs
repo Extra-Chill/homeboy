@@ -152,10 +152,6 @@ fn production_execution_preflight(
     for preflight in [
         catalog.validate_selected_models(&execution_plan),
         catalog.enforce_runtime_preflight_checks_for_plan(&execution_plan),
-        super::config_preflight::preflight_plan_provider_config_with_providers(
-            &execution_plan,
-            catalog.providers(),
-        ),
     ] {
         if let Err(error) = preflight {
             return Some(AgentTaskOutcome {
@@ -786,17 +782,6 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
             &provider,
         );
 
-        if let Err(error) = resolve_runtime_tools(&mut request, &provider) {
-            return failure_outcome(
-                &request,
-                AgentTaskOutcomeStatus::Failed,
-                error.failure_classification,
-                error.class,
-                error.message,
-                error.data,
-            );
-        }
-
         let missing_capabilities: Vec<String> = requirements
             .provider
             .iter()
@@ -1151,8 +1136,10 @@ mod tests {
             .and_then(|value| value.parse::<u64>().ok())
             .unwrap_or(20_000);
         let mut provider = super::discovery::discover_agent_task_executor_providers().remove(0);
-        provider.secret_env_requirements =
-            serde_json::from_value(json!([{ "env": ["HOMEBOY_TEST_READINESS_TOKEN"] }])).unwrap();
+        provider
+            .pi_readiness
+            .env_allowlist
+            .push("HOMEBOY_TEST_READINESS_TOKEN".into());
         provider.pi_readiness.timeout_ms = timeout_ms;
         let executor = ExtensionProviderAgentTaskExecutor::with_providers(vec![provider]);
         let mut request = readiness_request(
@@ -1163,6 +1150,7 @@ mod tests {
         request.executor.model = request.executor.model.map(|model| format!("test/{model}"));
         request.executor.config = json!({
             "command": readiness_script,
+            "provider": "test-account",
             "client_context": {
                 "account": account,
                 "fanout": {

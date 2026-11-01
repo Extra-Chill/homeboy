@@ -41,8 +41,6 @@ pub(crate) mod artifact_finalization;
 mod capacity_readiness;
 mod catalog;
 pub(crate) mod command_runner;
-mod config_preflight;
-mod credential_readiness;
 pub mod discovery;
 mod dispatchability;
 mod executor;
@@ -57,9 +55,7 @@ mod resolution;
 mod runner_readiness;
 mod runtime_preflight_checks;
 mod runtime_readiness;
-mod runtime_tool_resolution;
 mod runtime_types;
-mod secret_types;
 mod secrets;
 pub(crate) use secrets::{ambient_only_provider_secret_env, provider_secret_env_plan};
 pub mod structured_error;
@@ -85,13 +81,6 @@ pub use command_runner::{
     provider_command_parts, run_provider_controller_refresh, run_provider_readiness_probe,
     validate_provider_immediate_failure_patterns, ProviderReadinessInvocationCapacity,
     ProviderReadinessInvocationResult, PROVIDER_READINESS_RESULT_SCHEMA,
-};
-pub(crate) use config_preflight::preflight_plan_provider_config_with_providers;
-pub use credential_readiness::{
-    preflight_discovered_provider_credentials_for_backend, preflight_provider_credentials,
-    preflight_provider_credentials_for_backend, provider_credential_readiness,
-    provider_required_secret_env_names, AgentTaskProviderCredentialReadiness,
-    AgentTaskProviderCredentialRequirement, AGENT_TASK_PROVIDER_CREDENTIAL_READINESS_SCHEMA,
 };
 pub use dispatchability::{
     admit_plan_provider_dispatchability_for_placement,
@@ -129,9 +118,7 @@ pub(crate) use runtime_readiness::{effective_provider_config, readiness_request_
 pub use runtime_readiness::{
     preflight_plan_provider_runtime_readiness_with_providers, ProviderRuntimeReadinessCache,
 };
-pub(crate) use runtime_tool_resolution::resolve_runtime_tools;
 pub use runtime_types::*;
-pub use secret_types::*;
 pub use secrets::{
     provider_controller_refreshes_for_plan_with_providers,
     provider_route_secret_env_for_plan_with_providers,

@@ -2848,10 +2848,6 @@ pub fn compile_cook_attempt_with_catalog_and_readiness_cache(
         Ok(selected_plan) => {
             catalog.validate_selected_models(&selected_plan)?;
             catalog.enforce_runtime_preflight_checks_for_plan(&selected_plan)?;
-            crate::agent_task_provider::preflight_plan_provider_config_with_providers(
-                &selected_plan,
-                catalog.providers(),
-            )?;
             super::execution::preflight_plan_secret_env(&selected_plan)?;
             options.identity.initial_plan = selected_plan;
             options.ai_disclosure.ai_model = options
@@ -2918,10 +2914,6 @@ pub fn compile_cook_attempt_static_with_catalog_and_readiness_cache(
             |backend, selector| catalog.provider_requires_cwd_git_checkout(backend, selector),
         )?;
     catalog.validate_selected_models(&options.identity.initial_plan)?;
-    crate::agent_task_provider::preflight_plan_provider_config_with_providers(
-        &options.identity.initial_plan,
-        catalog.providers(),
-    )?;
     super::execution::preflight_plan_secret_env(&options.identity.initial_plan)?;
     // Static compilation preserves the resolved provider identity. Live
     // admission later selects a rotation and proves runtime readiness.

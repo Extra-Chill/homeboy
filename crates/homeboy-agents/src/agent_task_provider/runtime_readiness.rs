@@ -1065,7 +1065,6 @@ fn readiness_request_key_for_generated_fanout_context(
         .env_allowlist
         .iter()
         .cloned()
-        .chain(super::credential_readiness::provider_required_secret_env_names(provider))
         .chain(["PATH".to_string(), "HOME".to_string()])
         .collect::<Vec<_>>();
     let mut environment = environment;
