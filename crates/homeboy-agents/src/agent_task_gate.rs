@@ -80,6 +80,10 @@ struct GateExecution<'a> {
     timeout: Option<Duration>,
     supervision: Option<&'a GateSupervision>,
     baseline_timeout_diagnostic: bool,
+    /// Absolute end of the whole gate. A Lab gate's dependency setup and its
+    /// command share one budget, so the command's wall-clock limit (even a
+    /// declared plan's own suite timeout) never runs past it (#16938).
+    deadline: Option<Instant>,
 }
 
 /// Shared deterministic-gate verification fields used by every agent-task
@@ -2404,6 +2408,7 @@ fn run_gate_argv_with_supervision(
                     timeout: supervision.map(|supervision| supervision.timeout),
                     supervision,
                     baseline_timeout_diagnostic: false,
+                    deadline: None,
                 },
                 gate_environment,
                 package_artifacts,
@@ -2580,6 +2585,13 @@ fn run_gate_argv_local(
     let timeout = declared_plan
         .map(|plan| plan.suite_timeout())
         .or(execution.timeout);
+    let timeout = match execution.deadline {
+        Some(deadline) => {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            Some(timeout.map_or(remaining, |timeout| timeout.min(remaining)))
+        }
+        None => timeout,
+    };
     let (mut output, termination, progress_instrumented) = if let Some(timeout) = timeout {
         let supervision = execution.supervision;
         if let Some(supervision) = supervision {
@@ -2812,6 +2824,7 @@ pub(crate) fn run_gate_command_with_timeout(
             timeout: Some(timeout),
             supervision: None,
             baseline_timeout_diagnostic: true,
+            deadline: None,
         },
         gate_environment,
         package_artifacts,
@@ -2853,6 +2866,7 @@ pub(crate) fn run_declared_test_with_timeout(
             timeout: Some(plan.suite_timeout()),
             supervision: None,
             baseline_timeout_diagnostic: true,
+            deadline: None,
         },
         gate_environment,
         package_artifacts,

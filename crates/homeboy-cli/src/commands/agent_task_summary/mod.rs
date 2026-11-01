@@ -518,6 +518,22 @@ fn render_cook_preview_summary(payload: &Value) -> Option<String> {
             homeboy::core::engine::shell::quote_args(&replay)
         ),
     ];
+    if let Some(limit) = resolved
+        .pointer("/gates/timeout_seconds")
+        .and_then(Value::as_u64)
+    {
+        let no_progress = resolved
+            .pointer("/gates/no_progress_timeout_seconds")
+            .and_then(Value::as_u64)
+            .map(|seconds| format!(", no-progress limit {seconds}s"))
+            .unwrap_or_default();
+        lines.insert(
+            6,
+            format!(
+                "Gate limits: {limit}s per gate{no_progress} (on Lab, dependency setup counts toward the gate limit)"
+            ),
+        );
+    }
     if let Some(deferred) = resolved
         .pointer("/gate_contract_validation/deferred_public")
         .and_then(Value::as_array)
@@ -1197,6 +1213,32 @@ mod tests {
         assert_eq!(
             render_agent_task_summary(AgentTaskSummaryKind::Cook, &payload),
             Some("Cook preview\nPlacement: local\nProvider: fixture\nModel: test-model\nDestination: /tmp/worktree\nGates: 1 public, 2 private\nReplay: homeboy agent-task cook --backend fixture\n".to_string())
+        );
+    }
+
+    #[test]
+    fn cook_preview_summary_names_the_effective_gate_limits() {
+        let payload = json!({
+            "schema": "homeboy/agent-task-cook-preview/v1",
+            "resolved": {
+                "placement": { "requested": "lab" },
+                "provider": { "backend": "fixture", "model": "test-model" },
+                "workspace": { "path": "/tmp/worktree" },
+                "gates": {
+                    "public": 1,
+                    "private": 0,
+                    "timeout_seconds": 900,
+                    "no_progress_timeout_seconds": 300,
+                },
+            },
+            "replay_argv": ["homeboy", "agent-task", "cook"],
+        });
+
+        let summary = render_agent_task_summary(AgentTaskSummaryKind::Cook, &payload).unwrap();
+
+        assert!(
+            summary.contains("Gates: 1 public, 0 private\nGate limits: 900s per gate, no-progress limit 300s (on Lab, dependency setup counts toward the gate limit)\nReplay:"),
+            "{summary}"
         );
     }
 
