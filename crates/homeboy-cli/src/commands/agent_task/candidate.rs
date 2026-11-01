@@ -59,8 +59,6 @@ pub(crate) struct CandidateResult {
     pub(crate) provider_executions: Option<usize>,
     pub(crate) finalized: bool,
     pub(crate) retained: bool,
-    pub(crate) target_applied: bool,
-    pub(crate) verified: bool,
     pub(crate) attempts_omitted: usize,
     pub(crate) outcomes_omitted: usize,
     pub(crate) artifacts_omitted: usize,
@@ -172,25 +170,8 @@ fn candidate_result_from_projection(value: &Value) -> Option<CandidateResult> {
             .get("provider_executions")
             .and_then(Value::as_u64)
             .and_then(|count| usize::try_from(count).ok()),
-        finalized: value
-            .pointer("/lifecycle/finalized")
-            .or_else(|| value.get("finalized"))
-            .and_then(Value::as_bool)
-            .unwrap_or(state == CandidateState::Finalized),
-        retained: value
-            .pointer("/lifecycle/retained")
-            .and_then(Value::as_bool)
-            .unwrap_or(state == CandidateState::ApplyReady),
-        target_applied: value
-            .pointer("/lifecycle/target_applied")
-            .or_else(|| value.get("target_applied"))
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-        verified: value
-            .pointer("/lifecycle/verified")
-            .or_else(|| value.get("verified"))
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
+        finalized: state == CandidateState::Finalized,
+        retained: state == CandidateState::ApplyReady,
         attempts_omitted: omitted("attempts_omitted"),
         outcomes_omitted: omitted("outcomes_omitted"),
         artifacts_omitted: omitted("artifacts_omitted"),
@@ -235,20 +216,6 @@ mod tests {
                 classify_candidates(&payload).state(),
                 CandidateState::Unknown
             );
-        }
-    }
-
-    #[test]
-    fn lifecycle_facts_follow_the_agents_projection() {
-        for (target_applied, verified) in [(false, false), (true, false), (true, true)] {
-            let result = classify_candidates(&json!({ "canonical_candidate": {
-                "schema": "homeboy/agent-task-candidate/v1", "state": "apply_ready",
-                "target_applied": target_applied, "verified": verified, "finalized": false,
-            }}));
-            assert!(result.retained);
-            assert!(!result.finalized);
-            assert_eq!(result.target_applied, target_applied);
-            assert_eq!(result.verified, verified);
         }
     }
 
