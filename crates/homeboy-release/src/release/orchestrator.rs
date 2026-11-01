@@ -183,7 +183,7 @@ fn run_with_plan_inner(
             let release_scope =
                 super::scope::ReleaseScope::resolve(&preflight_component, component_id)?;
             let refreshed_bump_type =
-                super::workflow::refresh_auto_bump_type(component_id, &release_scope)?;
+                super::workflow::refresh_auto_bump_type(&preflight_component, &release_scope)?;
             let mut refreshed = options.clone();
             refreshed.bump_type = refreshed_bump_type;
             refreshed
