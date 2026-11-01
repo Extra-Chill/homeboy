@@ -133,11 +133,14 @@ with tempfile.TemporaryDirectory() as temporary:
         assert all(not changed['key'].startswith(prefix)
                    for prefix in isolated['restore-keys'].splitlines()), 'fallbacks retain configuration isolation'
     toolchains = run('rustup', 'toolchain', 'list').stdout.splitlines()
-    current = run('rustc', '-vV').stdout
+    # Read compilers from the resolver's working directory: a rust-toolchain
+    # file above the test's own cwd (e.g. a monorepo root) must not make the
+    # "current" compiler differ from the one the resolver actually sees.
+    current = run('rustc', '-vV', cwd=root).stdout
     for line in toolchains:
         toolchain = line.split()[0]
         env = dict(os.environ, RUSTUP_TOOLCHAIN=toolchain)
-        if run('rustc', '-vV', env=env).stdout != current:
+        if run('rustc', '-vV', cwd=root, env=env).stdout != current:
             other_compiler = resolve(RUSTUP_TOOLCHAIN=toolchain)
             assert other_compiler['restore-keys'] != changed['restore-keys']
             break
