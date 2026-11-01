@@ -29,33 +29,39 @@ fail=0
 pass() { echo "PASS: $1"; }
 bad() { echo "FAIL: $1"; fail=1; }
 
-# The permissions block ends at the first blank line after it.
-requested="$(awk '
-  /^permissions:/ { inblock = 1; next }
-  inblock && /^[^ #]/ { exit }
-  inblock && /^  [a-z-]+: / { sub(/:.*/, "", $1); print $1 }
-' "${WORKFLOW}" | sort)"
-
-expected="$(printf '%s\n' contents issues pull-requests | sort)"
-
-if [ "${requested}" = "${expected}" ]; then
-  pass "release.yml requests exactly the documented caller scopes"
+# release.yml must not declare workflow-level permissions. Requesting a scope
+# forces it on every caller (#494); listing any scope also downgrades every
+# unlisted one, which silently dropped callers' id-token: write and broke npm
+# trusted publishing (ENEEDAUTH). Jobs inherit the caller's grants instead.
+if grep -qE '^permissions:' "${WORKFLOW}"; then
+  bad "release.yml declares workflow-level permissions (forces scopes on callers and drops id-token)"
 else
-  bad "release.yml caller scopes changed"
-  echo "  expected: $(echo "${expected}" | tr '\n' ' ')"
-  echo "  found:    $(echo "${requested}" | tr '\n' ' ')"
-  echo "  Adding a scope forces every consumer to grant it and fails existing"
-  echo "  callers at startup. Ship it behind a major version, or require it"
-  echo "  only in the consumers that need it (see #494)."
+  pass "release.yml inherits caller permissions"
 fi
 
-# id-token is the specific scope that caused #494. It belongs only to consumers
-# publishing to npm, never to the shared contract.
-if grep -qE '^  id-token:' "${WORKFLOW}"; then
+# No job may request id-token: it belongs only to npm-publishing callers.
+if grep -qE '^ +id-token:' "${WORKFLOW}"; then
   bad "release.yml requests id-token, forcing it on every caller (#494)"
 else
   pass "release.yml does not force id-token on callers"
 fi
+
+# Job-level permissions also downgrade unlisted scopes, so the jobs that run
+# release/publish must not declare them.
+for job in monorepo release; do
+  if awk -v job="${job}" '
+    $0 ~ "^  " job ":$" { injob = 1; next }
+    injob && /^  [a-z-]+:$/ { exit }
+    injob && /^    permissions:/ { found = 1; exit }
+    END { exit found ? 0 : 1 }
+  ' "${WORKFLOW}"; then
+    bad "job ${job} declares permissions, dropping the caller's id-token"
+  else
+    pass "job ${job} inherits caller permissions"
+  fi
+done
+
+expected="$(printf '%s\n' contents issues pull-requests | sort)"
 
 # The minimal consumer documents the contract, so it must match it exactly.
 minimal_perms="$(awk '

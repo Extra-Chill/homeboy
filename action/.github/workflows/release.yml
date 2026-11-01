@@ -175,27 +175,20 @@ on:
         description: 'Immutable source SHA revalidated and used by the release job.'
         value: ${{ jobs.release.outputs.released-source-sha }}
 
-# A called workflow cannot request a permission the CALLER has not granted —
-# GitHub fails the whole run at startup, before any job, with no usable error
-# in the API. Callers must grant exactly these scopes; see
-# fixtures/reusable-release-minimal-consumer.yml for the canonical minimal
-# caller.
-permissions:
-  contents: write
-  issues: write
-  pull-requests: write
-  # id-token is deliberately NOT requested here. A called reusable workflow
-  # cannot hold more permissions than its caller grants, so every scope listed
-  # at this level is a scope every caller is forced to grant. Adding one is a
-  # breaking change that callers cannot absorb by doing nothing: the run is
-  # rejected before any job exists, with no log, no annotation, and a bare
-  # startup_failure (#494).
-  #
-  # npm trusted publishing needs id-token: write, but only consumers that
-  # actually publish to npm need it. Those consumers grant it in their own
-  # caller workflow; see fixtures/reusable-release-npm-consumer.yml. Requiring
-  # it from everyone took ~30 WordPress repositories offline that will never
-  # publish an npm package.
+# No workflow-level `permissions:` block, on purpose. Jobs here inherit exactly
+# what the caller grants, which keeps both halves of the contract:
+#
+# - Nothing is forced on callers. A called workflow that lists a scope its
+#   caller did not grant fails at startup with a bare startup_failure (#494),
+#   so this file requests nothing beyond what callers already give.
+# - Optional scopes reach the jobs that need them. Listing permissions here
+#   would also DOWNGRADE every unlisted scope to none, so a caller's
+#   `id-token: write` never reached the release job and npm trusted publishing
+#   failed with ENEEDAUTH. npm-publishing callers grant id-token in their own
+#   workflow; see fixtures/reusable-release-npm-consumer.yml.
+#
+# Callers grant contents/issues/pull-requests: write; see
+# fixtures/reusable-release-minimal-consumer.yml.
 
 jobs:
   monorepo:
