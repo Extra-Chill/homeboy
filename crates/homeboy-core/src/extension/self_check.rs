@@ -15,6 +15,8 @@ const SELF_CHECK_CAPTURE_LIMIT_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct SelfCheckOutput {
+    /// The first failing command; self-check suites stop at the first failure.
+    pub failed_command: Option<String>,
     pub exit_code: i32,
     pub success: bool,
     pub stdout: String,
@@ -182,13 +184,15 @@ pub(crate) fn run_self_checks_with_passthrough_and_progress(
         stderr.push_capture(output.stderr);
 
         if !output.success {
-            return Ok(self_check_output(
+            let mut result = self_check_output(
                 output.exit_code,
                 false,
                 &stdout,
                 &stderr,
                 cargo_target.as_ref().map(|target| target.evidence()),
-            ));
+            );
+            result.failed_command = Some(command.clone());
+            return Ok(result);
         }
     }
 
@@ -209,6 +213,7 @@ fn self_check_output(
     cargo_target: Option<homeboy_core::CargoTargetEvidence>,
 ) -> SelfCheckOutput {
     SelfCheckOutput {
+        failed_command: None,
         exit_code,
         success,
         stdout: stdout.to_string_lossy(),

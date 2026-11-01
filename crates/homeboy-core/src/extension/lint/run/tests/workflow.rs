@@ -98,6 +98,85 @@ fn routed_lint_component(home: &Path, source: &Path, script: &str) -> Component 
     }
 }
 
+#[test]
+fn extension_and_self_check_lint_run_together_and_report_failure() {
+    homeboy_core::test_support::with_isolated_home(|home| {
+        let source = tempfile::tempdir().unwrap();
+        let mut component = routed_lint_component(
+            home.path(),
+            source.path(),
+            "#!/bin/sh\nprintf '[]' > \"$HOMEBOY_LINT_FINDINGS_FILE\"\nprintf extension > \"$HOMEBOY_COMPONENT_PATH/extension-ran\"\n",
+        );
+        component.scripts = Some(ComponentScriptsConfig {
+            lint: vec!["test -f extension-ran && printf checked > self-check-ran".into()],
+            ..Default::default()
+        });
+        let run = || {
+            let mut args = lint_args();
+            args.json_summary = true;
+            run_main_lint_workflow(&component, source.path(), args, &RunDir::create().unwrap())
+                .unwrap()
+        };
+        let passed = run();
+        assert_eq!(passed.exit_code, 0);
+        assert!(source.path().join("self-check-ran").exists());
+
+        component.scripts.as_mut().unwrap().lint = vec!["exit 7".into()];
+        let mut args = lint_args();
+        args.json_summary = true;
+        let failed =
+            run_main_lint_workflow(&component, source.path(), args, &RunDir::create().unwrap())
+                .unwrap();
+        assert_eq!(failed.status, "failed");
+        assert_eq!(failed.exit_code, 1);
+        let findings = failed.findings.unwrap();
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].category.as_deref(), Some("self-check"));
+        assert!(findings[0].message.contains("exit 7"));
+        assert!(findings[0].message.contains("code 7"));
+        assert!(failed.summary.is_some());
+        assert!(!failed.harness_error);
+
+        // The same command failure is baseline debt, including exit codes >1.
+        let mut save = lint_args();
+        save.baseline_flags.baseline = true;
+        run_main_lint_workflow(&component, source.path(), save, &RunDir::create().unwrap())
+            .unwrap();
+        let known = run_main_lint_workflow(
+            &component,
+            source.path(),
+            lint_args(),
+            &RunDir::create().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(known.exit_code, 0);
+        assert!(known.baseline_comparison.is_some());
+    });
+}
+
+#[test]
+fn scoped_empty_extension_still_runs_component_self_check() {
+    homeboy_core::test_support::with_isolated_home(|home| {
+        let source = tempfile::tempdir().unwrap();
+        let mut component =
+            routed_lint_component(home.path(), source.path(), "#!/bin/sh\nexit 99\n");
+        component.scripts = Some(ComponentScriptsConfig {
+            lint: vec!["exit 3".into()],
+            ..Default::default()
+        });
+        let mut args = routed_lint_args();
+        args.precomputed_changed_files = Some(Vec::new());
+        let result =
+            run_main_lint_workflow(&component, source.path(), args, &RunDir::create().unwrap())
+                .unwrap();
+        assert_eq!(result.exit_code, 1);
+        assert_eq!(
+            result.findings.unwrap()[0].category.as_deref(),
+            Some("self-check")
+        );
+    });
+}
+
 fn routed_lint_args() -> super::super::types::LintRunWorkflowArgs {
     let mut args = lint_args();
     args.changed_since = Some("v1.0.0".to_string());
