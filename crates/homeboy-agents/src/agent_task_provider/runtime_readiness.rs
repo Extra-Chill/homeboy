@@ -13,9 +13,11 @@ use serde_json::{json, Value};
 use crate::agent_task_scheduler::AgentTaskPlan;
 use homeboy_core::{Error, Result};
 
+#[cfg(test)]
+use super::command_runner::PROVIDER_READINESS_CAPACITY_MODE;
 use super::command_runner::{
     run_provider_readiness_probe_with_env_and_timeout, DurableProviderReadinessIdentity,
-    ProviderReadinessInvocationResult, PROVIDER_READINESS_CAPACITY_MODE,
+    ProviderReadinessInvocationResult,
 };
 use super::resolution::select_provider;
 use super::AgentTaskExecutorProvider;
@@ -658,7 +660,7 @@ pub fn preflight_plan_provider_runtime_readiness_with_providers(
         let config = effective_provider_config(&task.executor.config, task.executor.model());
         let credential_env = Vec::new();
         let verdict =
-            readiness_verdict_with_credentials(provider, &config, &credential_env, cache)?;
+            readiness_verdict(provider, &config, &credential_env, cache, None, false, None)?;
         if !verdict.ready {
             return Err(readiness_error(provider, &config, &verdict));
         }
@@ -673,43 +675,7 @@ pub(crate) fn provider_requires_live_auth_validation(provider: &AgentTaskExecuto
         .any(|capability| capability == "provider_owned_auth")
 }
 
-#[cfg(test)]
 pub(crate) fn readiness_verdict(
-    provider: &AgentTaskExecutorProvider,
-    config: &Value,
-    cache: &mut ProviderRuntimeReadinessCache,
-) -> Result<ProviderReadinessInvocationResult> {
-    readiness_verdict_with_credentials(provider, config, &[], cache)
-}
-
-pub(crate) fn readiness_verdict_with_credentials(
-    provider: &AgentTaskExecutorProvider,
-    config: &Value,
-    credential_env: &[(String, String)],
-    cache: &mut ProviderRuntimeReadinessCache,
-) -> Result<ProviderReadinessInvocationResult> {
-    readiness_verdict_with_credentials_and_deadline(provider, config, credential_env, cache, None)
-}
-
-pub(crate) fn readiness_verdict_with_credentials_and_deadline(
-    provider: &AgentTaskExecutorProvider,
-    config: &Value,
-    credential_env: &[(String, String)],
-    cache: &mut ProviderRuntimeReadinessCache,
-    deadline_unix_ms: Option<u64>,
-) -> Result<ProviderReadinessInvocationResult> {
-    readiness_verdict_with_credentials_and_deadline_for_generated_fanout_context(
-        provider,
-        config,
-        credential_env,
-        cache,
-        deadline_unix_ms,
-        false,
-        None,
-    )
-}
-
-pub(crate) fn readiness_verdict_with_credentials_and_deadline_for_generated_fanout_context(
     provider: &AgentTaskExecutorProvider,
     config: &Value,
     credential_env: &[(String, String)],
@@ -933,31 +899,6 @@ pub(crate) fn readiness_verdict_with_credentials_and_deadline_for_generated_fano
             }
         },
         |verdict| !verdict.ready,
-    )
-}
-
-/// Run one route's readiness invocation in capacity-only mode (#15024): the
-/// request carries `mode: "capacity"` so a runtime that supports it returns
-/// capacity evidence without spending its bounded inference probe, and the
-/// cache identity is mode-specific so the answer can never satisfy — or be
-/// satisfied by — live-inference readiness. Failure is a normal outcome for
-/// callers: a route whose runtime lookup fails reports `unknown` capacity and
-/// must not block the other routes.
-pub(crate) fn capacity_mode_readiness_verdict_with_deadline(
-    provider: &AgentTaskExecutorProvider,
-    config: &Value,
-    credential_env: &[(String, String)],
-    cache: &mut ProviderRuntimeReadinessCache,
-    deadline_unix_ms: Option<u64>,
-) -> Result<ProviderReadinessInvocationResult> {
-    readiness_verdict_with_credentials_and_deadline_for_generated_fanout_context(
-        provider,
-        config,
-        credential_env,
-        cache,
-        deadline_unix_ms,
-        false,
-        Some(PROVIDER_READINESS_CAPACITY_MODE),
     )
 }
 
@@ -1207,7 +1148,16 @@ mod tests {
             ("test/missing", "deterministic_incompatibility", false),
         ] {
             config["model"] = json!(model);
-            let verdict = readiness_verdict(&provider, &config, &mut test_cache()).unwrap();
+            let verdict = readiness_verdict(
+                &provider,
+                &config,
+                &[],
+                &mut test_cache(),
+                None,
+                false,
+                None,
+            )
+            .unwrap();
             assert_eq!(verdict.classification, classification);
             assert_eq!(verdict.ready, ready);
             assert!(!verdict.retryable);
@@ -1231,7 +1181,16 @@ mod tests {
             ),
         ] {
             let (_fake, provider, config, _) = pi_fixture(models);
-            let verdict = readiness_verdict(&provider, &config, &mut test_cache()).unwrap();
+            let verdict = readiness_verdict(
+                &provider,
+                &config,
+                &[],
+                &mut test_cache(),
+                None,
+                false,
+                None,
+            )
+            .unwrap();
             assert!(!verdict.ready);
             assert_eq!(verdict.classification, classification);
             assert_eq!(verdict.retryable, retryable);
@@ -1263,7 +1222,11 @@ mod tests {
                     config["model"] = json!("test/model");
                     config
                 },
-                &mut test_cache()
+                &[],
+                &mut test_cache(),
+                None,
+                false,
+                None
             )
             .unwrap()
             .ready
@@ -1277,8 +1240,10 @@ mod tests {
             pi_fixture("printf 'probe\\n' >> \"$COUNT\"; printf 'test model\\n'");
         let mut cache = test_cache();
 
-        let first = readiness_verdict(&provider, &config, &mut cache).expect("first verdict");
-        let second = readiness_verdict(&provider, &config, &mut cache).expect("cached verdict");
+        let first = readiness_verdict(&provider, &config, &[], &mut cache, None, false, None)
+            .expect("first verdict");
+        let second = readiness_verdict(&provider, &config, &[], &mut cache, None, false, None)
+            .expect("cached verdict");
 
         assert_eq!(first.cache_key, second.cache_key);
         assert_eq!(probe_count(&count), 1);
@@ -1300,25 +1265,34 @@ mod tests {
         let mut compile_cache = ProviderRuntimeReadinessCache::process_local();
         let mut admission_cache = ProviderRuntimeReadinessCache::process_local();
 
-        readiness_verdict_with_credentials(
+        readiness_verdict(
             &provider,
             &config,
             &[("TOKEN".to_string(), "first".to_string())],
             &mut compile_cache,
+            None,
+            false,
+            None,
         )
         .expect("first phase verdict");
-        readiness_verdict_with_credentials(
+        readiness_verdict(
             &provider,
             &config,
             &[("TOKEN".to_string(), "first".to_string())],
             &mut admission_cache,
+            None,
+            false,
+            None,
         )
         .expect("same-credential phase verdict");
-        readiness_verdict_with_credentials(
+        readiness_verdict(
             &provider,
             &config,
             &[("TOKEN".to_string(), "rotated".to_string())],
             &mut admission_cache,
+            None,
+            false,
+            None,
         )
         .expect("rotated-credential phase verdict");
 
@@ -1394,7 +1368,7 @@ mod tests {
         for account in ["first", "second"] {
             config["client_context"] = json!({"account": account});
             assert!(
-                readiness_verdict(&provider, &config, &mut cache,)
+                readiness_verdict(&provider, &config, &[], &mut cache, None, false, None)
                     .expect("readiness verdict")
                     .ready
             );
@@ -1418,17 +1392,9 @@ mod tests {
                 "workspace_materialization": [{"child": cook_id}],
             }});
             assert!(
-                readiness_verdict_with_credentials_and_deadline_for_generated_fanout_context(
-                    &provider,
-                    &config,
-                    &[],
-                    &mut cache,
-                    None,
-                    true,
-                    None,
-                )
-                .expect("readiness verdict")
-                .ready
+                readiness_verdict(&provider, &config, &[], &mut cache, None, true, None)
+                    .expect("readiness verdict")
+                    .ready
             );
         }
 
@@ -1447,7 +1413,7 @@ mod tests {
                 "id": "shared-fanout", "semantics": "batch_cook", "cook_id": cook_id,
             }});
             assert!(
-                readiness_verdict(&provider, &config, &mut cache,)
+                readiness_verdict(&provider, &config, &[], &mut cache, None, false, None)
                     .expect("readiness verdict")
                     .ready
             );
@@ -1469,13 +1435,13 @@ mod tests {
         let _keep_alive = fake;
 
         assert!(
-            !readiness_verdict(&provider, &config, &mut cache)
+            !readiness_verdict(&provider, &config, &[], &mut cache, None, false, None)
                 .expect("initial verdict")
                 .ready
         );
         std::fs::write(&recovered, "ready").expect("recover credentials");
         assert!(
-            !readiness_verdict(&provider, &config, &mut cache)
+            !readiness_verdict(&provider, &config, &[], &mut cache, None, false, None)
                 .expect("bounded cached verdict")
                 .ready
         );
@@ -1494,7 +1460,7 @@ mod tests {
             }
         }
         assert!(
-            readiness_verdict(&provider, &config, &mut cache)
+            readiness_verdict(&provider, &config, &[], &mut cache, None, false, None)
                 .expect("recovered verdict")
                 .ready
         );
@@ -1522,7 +1488,7 @@ mod tests {
                 let config = config.clone();
                 scope.spawn(move || {
                     assert!(
-                        readiness_verdict(&provider, &config, &mut cache)
+                        readiness_verdict(&provider, &config, &[], &mut cache, None, false, None)
                             .expect("readiness")
                             .ready
                     );
@@ -1555,12 +1521,14 @@ mod tests {
         // The long deadline only has to outlive the handshake; it bounds a
         // hung probe, not the code under test.
         let long = std::thread::spawn(move || {
-            readiness_verdict_with_credentials_and_deadline(
+            readiness_verdict(
                 &long_provider,
                 &long_config,
                 &[],
                 &mut long_cache,
                 Some(crate::agent_task_timeout::now_unix_ms() + 60_000),
+                false,
+                None,
             )
         });
         let started = Instant::now() + Duration::from_secs(5);
@@ -1585,12 +1553,14 @@ mod tests {
         }
 
         let short_deadline = crate::agent_task_timeout::now_unix_ms() + 25;
-        let error = readiness_verdict_with_credentials_and_deadline(
+        let error = readiness_verdict(
             &provider,
             &config,
             &[],
             &mut cache.clone(),
             Some(short_deadline),
+            false,
+            None,
         )
         .expect_err("short waiter must time out locally");
         assert_eq!(error.details["classification"], "timeout");
@@ -1605,7 +1575,7 @@ mod tests {
 
         let mut cache = cache;
         assert!(
-            readiness_verdict(&provider, &config, &mut cache)
+            readiness_verdict(&provider, &config, &[], &mut cache, None, false, None)
                 .expect("published long result")
                 .ready
         );
@@ -1637,12 +1607,14 @@ mod tests {
         let mut short_cache = cache.clone();
         let short_config = config.clone();
         let short = std::thread::spawn(move || {
-            readiness_verdict_with_credentials_and_deadline(
+            readiness_verdict(
                 &short_provider,
                 &short_config,
                 &[],
                 &mut short_cache,
                 Some(short_deadline),
+                false,
+                None,
             )
         });
         while !count.exists() {
@@ -1660,12 +1632,14 @@ mod tests {
         assert_eq!(error.details["deadline_unix_ms"], short_deadline);
 
         std::fs::write(&release, "release").expect("release probe");
-        let verdict = readiness_verdict_with_credentials_and_deadline(
+        let verdict = readiness_verdict(
             &provider,
             &config,
             &[],
             &mut cache,
             Some(crate::agent_task_timeout::now_unix_ms() + 60_000),
+            false,
+            None,
         )
         .expect("long waiter starts a fresh readiness probe");
         assert!(verdict.ready);
@@ -1693,7 +1667,7 @@ mod tests {
                 config["runtime_env"] = json!({"ROOT": root.path(), "KEY": key, "OTHER": other});
                 scope.spawn(move || {
                     assert!(
-                        readiness_verdict(&provider, &config, &mut cache)
+                        readiness_verdict(&provider, &config, &[], &mut cache, None, false, None)
                             .expect("readiness")
                             .ready
                     );
@@ -1723,7 +1697,7 @@ mod tests {
                 config["runtime_env"]["KEY"] = json!(format!("model-{index}"));
                 scope.spawn(move || {
                     assert!(
-                        readiness_verdict(&provider, &config, &mut cache,)
+                        readiness_verdict(&provider, &config, &[], &mut cache, None, false, None)
                             .expect("readiness")
                             .ready
                     );
@@ -1783,12 +1757,14 @@ mod tests {
             pi_fixture("printf 'probe\\n' >> \"$COUNT\"; printf 'test model\\n'");
         let mut cache = test_cache();
 
-        let capacity = capacity_mode_readiness_verdict_with_deadline(
+        let capacity = readiness_verdict(
             &provider,
             &config,
             &[],
             &mut cache,
             None,
+            false,
+            Some(PROVIDER_READINESS_CAPACITY_MODE),
         )
         .expect("capacity verdict");
         assert!(capacity.ready);
@@ -1796,7 +1772,8 @@ mod tests {
         assert_eq!(capacity.reason, "capacity_not_published");
         assert!(!count.exists(), "capacity mode does not run a live probe");
 
-        let live = readiness_verdict(&provider, &config, &mut cache).expect("live verdict");
+        let live = readiness_verdict(&provider, &config, &[], &mut cache, None, false, None)
+            .expect("live verdict");
         assert!(live.ready);
         assert_ne!(live.cache_key, capacity.cache_key);
         assert!(live.reason.is_empty());
@@ -1805,9 +1782,18 @@ mod tests {
             "a live-inference answer must never be served from capacity-mode cache"
         );
 
-        capacity_mode_readiness_verdict_with_deadline(&provider, &config, &[], &mut cache, None)
-            .expect("capacity answer is cached under its own identity");
-        readiness_verdict(&provider, &config, &mut cache).expect("live answer is cached");
+        readiness_verdict(
+            &provider,
+            &config,
+            &[],
+            &mut cache,
+            None,
+            false,
+            Some(PROVIDER_READINESS_CAPACITY_MODE),
+        )
+        .expect("capacity answer is cached under its own identity");
+        readiness_verdict(&provider, &config, &[], &mut cache, None, false, None)
+            .expect("live answer is cached");
 
         assert_eq!(
             probe_count(&count),
@@ -1826,7 +1812,8 @@ mod tests {
         config["runtime_env"]["RECOVERED"] = json!(recovered);
         let mut cache = test_cache();
         for _ in 0..2 {
-            let verdict = readiness_verdict(&provider, &config, &mut cache).unwrap();
+            let verdict =
+                readiness_verdict(&provider, &config, &[], &mut cache, None, false, None).unwrap();
             assert!(!verdict.ready);
             assert_eq!(verdict.classification, "transient_failure");
             assert!(verdict.retryable);
@@ -1841,7 +1828,7 @@ mod tests {
         std::fs::write(&recovered, "ready").expect("recover probe");
         cache.expire_all();
         assert!(
-            readiness_verdict(&provider, &config, &mut cache)
+            readiness_verdict(&provider, &config, &[], &mut cache, None, false, None)
                 .expect("recovered probe")
                 .ready
         );
@@ -1918,12 +1905,14 @@ mod tests {
     fn expired_execution_deadline_returns_typed_timeout_without_a_probe() {
         let provider = provider();
 
-        let error = readiness_verdict_with_credentials_and_deadline(
+        let error = readiness_verdict(
             &provider,
             &json!({"model":"ready"}),
             &[],
             &mut test_cache(),
             Some(crate::agent_task_timeout::now_unix_ms().saturating_sub(1)),
+            false,
+            None,
         )
         .expect_err("expired deadline stops before probing");
 
@@ -1949,12 +1938,14 @@ mod tests {
         // has to let the probe start and record its pid on a loaded host.
         let started = Instant::now();
 
-        let error = readiness_verdict_with_credentials_and_deadline(
+        let error = readiness_verdict(
             &provider,
             &config,
             &[],
             &mut test_cache(),
             Some(crate::agent_task_timeout::now_unix_ms() + 5_000),
+            false,
+            None,
         )
         .expect_err("absolute deadline interrupts readiness");
 
@@ -1984,27 +1975,15 @@ mod tests {
         let started = Instant::now();
 
         assert!(
-            readiness_verdict_with_credentials_and_deadline(
-                &provider,
-                &config,
-                &[],
-                &mut cache,
-                None,
-            )
-            .expect("delayed readiness")
-            .ready
+            readiness_verdict(&provider, &config, &[], &mut cache, None, false, None)
+                .expect("delayed readiness")
+                .ready
         );
         assert!(started.elapsed() >= Duration::from_secs(3));
         assert!(
-            readiness_verdict_with_credentials_and_deadline(
-                &provider,
-                &config,
-                &[],
-                &mut cache,
-                None,
-            )
-            .expect("cached readiness")
-            .ready
+            readiness_verdict(&provider, &config, &[], &mut cache, None, false, None)
+                .expect("cached readiness")
+                .ready
         );
         assert_eq!(
             std::fs::read_to_string(count)

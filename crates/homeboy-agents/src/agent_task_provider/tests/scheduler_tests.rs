@@ -310,10 +310,11 @@ fn cook_admission_and_production_provider_execute_the_first_ready_fallback() {
     });
     plan.options.execution_budget = AgentTaskExecutionBudget::new(1, 0, 0);
 
-    preflight_plan_provider_dispatchability_with_providers(
+    admit_plan_provider_dispatchability(
         &mut plan,
         &catalog,
         &mut ProviderRuntimeReadinessCache::default(),
+        None,
     )
     .expect("Cook admits the first ready production route");
     assert_eq!(plan.tasks[0].executor.model(), Some("test/blocked-model"));

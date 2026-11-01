@@ -1680,13 +1680,13 @@ mod provider_rotation_tests {
             },
         ]));
         enable_rotation(&mut plan);
-        let admitted =
-            crate::agent_task_provider::admit_plan_provider_dispatchability_with_providers(
-                &plan,
-                &catalog,
-                &mut crate::agent_task_provider::ProviderRuntimeReadinessCache::default(),
-            )
-            .expect("fallback admission");
+        let admitted = crate::agent_task_provider::admit_plan_provider_dispatchability(
+            &plan,
+            &catalog,
+            &mut crate::agent_task_provider::ProviderRuntimeReadinessCache::default(),
+            None,
+        )
+        .expect("fallback admission");
         assert_eq!(admitted.tasks[0].executor.model(), Some("test/fallback"));
         assert_eq!(
             admitted.tasks[0].metadata["provider_readiness_routing"]["next_rotation_index"],

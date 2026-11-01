@@ -209,28 +209,28 @@ fn dispatch_with_provider_catalog(
     let plan = build_dispatch_plan_with_provider_requirements(&request, |backend, selector| {
         catalog.provider_requires_cwd_git_checkout(backend, selector)
     })?;
-    let execution_plan =
-        match crate::agent_task_provider::admit_plan_provider_dispatchability_with_providers(
-            &plan,
-            catalog,
-            &mut readiness_cache,
-        ) {
-            Ok(plan) => {
-                validate_selected_execution_plan(&plan)?;
-                plan
-            }
-            Err(error) if error.retryable == Some(true) => {
-                return Err(record_retryable_dispatch_admission_failure(
-                    &plan,
-                    request.run_id.as_deref(),
-                    error,
-                ));
-            }
-            Err(error) => {
-                preflight_dispatch_provider_secrets(&plan)?;
-                return Err(error);
-            }
-        };
+    let execution_plan = match crate::agent_task_provider::admit_plan_provider_dispatchability(
+        &plan,
+        catalog,
+        &mut readiness_cache,
+        None,
+    ) {
+        Ok(plan) => {
+            validate_selected_execution_plan(&plan)?;
+            plan
+        }
+        Err(error) if error.retryable == Some(true) => {
+            return Err(record_retryable_dispatch_admission_failure(
+                &plan,
+                request.run_id.as_deref(),
+                error,
+            ));
+        }
+        Err(error) => {
+            preflight_dispatch_provider_secrets(&plan)?;
+            return Err(error);
+        }
+    };
     // The admitted plan retains the complete route chain while binding execution
     // to the selected route and its forward-only rotation cursor.
     run_dispatch_plan(
@@ -368,19 +368,20 @@ pub fn preflight_dispatch_provider_admission(
     let plan = build_dispatch_plan_with_provider_requirements(request, |backend, selector| {
         catalog.provider_requires_cwd_git_checkout(backend, selector)
     })?;
-    let plan = match crate::agent_task_provider::admit_plan_provider_dispatchability_with_providers(
+    let plan = match crate::agent_task_provider::admit_plan_provider_dispatchability(
         &plan,
         catalog,
         &mut readiness_cache,
+        None,
     ) {
         Ok(plan) => plan,
         Err(error) => {
             preflight_dispatch_provider_secrets(&plan)?;
-            crate::agent_task_provider::preflight_plan_provider_dispatchability_without_runtime_with_providers(
-            &plan,
-            catalog,
-            &mut crate::agent_task_provider::ProviderRuntimeReadinessCache::default(),
-        )?;
+            crate::agent_task_provider::preflight_plan_provider_dispatchability_without_runtime(
+                &plan,
+                catalog,
+                &mut crate::agent_task_provider::ProviderRuntimeReadinessCache::default(),
+            )?;
             return Err(error);
         }
     };
