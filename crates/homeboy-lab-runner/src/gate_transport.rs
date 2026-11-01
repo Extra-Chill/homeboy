@@ -233,10 +233,11 @@ fn execute_owned(
     run_id: &str,
 ) -> Result<LabGateReceipt> {
     if supervision.is_some_and(|policy| (policy.is_cancelled)()) {
-        return Err(Error::invalid_argument(
-            "gate.placement",
-            "Lab gate was cancelled before admission",
-        ));
+        let mut error =
+            Error::invalid_argument("gate.placement", "Lab gate was cancelled before admission");
+        error.details["gate_disposition"] = serde_json::json!("cancelled");
+        error.details["stage"] = serde_json::json!("admission");
+        return Err(error);
     }
     // Admission is observed before materializing any source or selecting
     // private HOME. Native exec rechecks the live daemon at submission.

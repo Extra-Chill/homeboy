@@ -462,32 +462,37 @@ fn non_execution_report(request: &LabGateRequest, error: &Error) -> AgentTaskGat
     )
 }
 
-fn gate_non_execution_report(
+/// A Lab gate that never executed has no verdict on the candidate: it is
+/// `Unavailable` (promotion `GateDeferred`), carries no exit code and no
+/// candidate-code failure evidence, and names its typed cause (#16932).
+pub(crate) fn gate_non_execution_report(
     index: usize,
     argv: Vec<String>,
     visibility: AgentTaskGateVisibility,
     reveal_policy: AgentTaskGateRevealPolicy,
     error: &Error,
 ) -> AgentTaskGateReport {
-    let unavailable = error
+    let disposition = error
         .details
         .get("gate_disposition")
         .and_then(serde_json::Value::as_str)
-        == Some("unavailable");
+        .unwrap_or("unavailable");
     let diagnostic = homeboy_core::redaction::redact_json(&serde_json::json!({
         "code": error.code.as_str(),
         "message": error.message,
         "details": error.details,
     }));
     let message = format!(
-        "Lab gate did not produce verified execution evidence: [{}] {}",
+        "Lab gate did not execute: [{}] {}",
         error.code.as_str(),
         diagnostic["message"].as_str().unwrap_or("unknown cause"),
     );
+    // Exit code 0 is the not-executed representation `Skipped` uses; the
+    // status, never the exit code, carries the outcome.
     let mut report = AgentTaskGateReport::new(
         format!("gate-{index}"),
         argv,
-        1,
+        0,
         "",
         &message,
         None,
@@ -495,36 +500,22 @@ fn gate_non_execution_report(
         reveal_policy,
         AgentTaskGateEnvironment::default(),
     );
-    if unavailable {
-        report.status = AgentTaskGateStatus::Unavailable;
-    }
-    if error
-        .details
-        .get("gate_disposition")
-        .and_then(serde_json::Value::as_str)
-        == Some("cancelled")
-    {
+    report.status = AgentTaskGateStatus::Unavailable;
+    if disposition == "cancelled" {
         report.termination = AgentTaskGateTermination::Cancelled;
     }
-    report.lab_receipt = Some(
-        serde_json::json!({"schema":LAB_GATE_DISPOSITION_SCHEMA, "disposition": error.details.get("gate_disposition").and_then(serde_json::Value::as_str).unwrap_or("failed"), "executed":false, "error_code":error.code.as_str(), "stage":error.details.get("stage"), "job_id":error.details.get("job_id"), "artifact_ref":error.details.get("artifact_ref")}),
-    );
-    report
-        .lab_receipt
-        .as_mut()
-        .expect("non-execution disposition")["diagnostic"] = diagnostic;
-    report.step = PlanStep::builder(report.id.clone(), "agent_task.gate", PlanStepStatus::Failed)
-        .gate_result(HomeboyGateResult::new(
-            report.id.clone(),
-            report.id.clone(),
-            HomeboyGateKind::Command,
-            if unavailable {
-                HomeboyGateStatus::Blocked
-            } else {
-                HomeboyGateStatus::Failed
-            },
-        ))
-        .build();
+    report.lab_receipt = Some(serde_json::json!({
+        "schema": LAB_GATE_DISPOSITION_SCHEMA,
+        "disposition": disposition,
+        "executed": false,
+        "error_code": error.code.as_str(),
+        "stage": error.details.get("stage"),
+        "job_id": error.details.get("job_id"),
+        "retryable": error.retryable,
+        "artifact_ref": error.details.get("artifact_ref"),
+        "diagnostic": diagnostic,
+    }));
+    rebuild_terminal_step(&mut report);
     report
 }
 
@@ -958,6 +949,65 @@ mod tests {
         assert_eq!(receipt["diagnostic"]["details"]["stdout_bytes"], 9000000);
         assert!(!receipt.to_string().contains("do-not-publish"));
         assert_eq!(report.status, AgentTaskGateStatus::Unavailable);
+    }
+
+    /// Transport, terminal-projection, lost-observation and wait-timeout
+    /// failures never executed the gate: they are `Unavailable` with no exit
+    /// code and no candidate-code evidence, never `Failed` (#16932).
+    #[test]
+    fn every_non_execution_is_unavailable_with_its_typed_cause() {
+        for (disposition, private) in [(None, false), (Some("cancelled"), true)] {
+            let mut details = serde_json::json!({"stage":"terminal_projection",
+                "job_id":"job-7", "artifact_ref":"homeboy://run/r/artifact/a"});
+            if let Some(disposition) = disposition {
+                details["gate_disposition"] = serde_json::json!(disposition);
+            }
+            let mut error = Error::new(
+                homeboy_core::ErrorCode::RunnerLabTransportFailure,
+                "runner gate did not return terminal artifact evidence",
+                details,
+            );
+            error.retryable = Some(true);
+            let (visibility, reveal_policy) = if private {
+                (
+                    AgentTaskGateVisibility::Private,
+                    AgentTaskGateRevealPolicy::SummaryOnly,
+                )
+            } else {
+                (
+                    AgentTaskGateVisibility::Visible,
+                    AgentTaskGateRevealPolicy::FullEvidence,
+                )
+            };
+            let report = gate_non_execution_report(
+                2,
+                vec!["sh".into(), "-c".into(), "secret-check".into()],
+                visibility,
+                reveal_policy,
+                &error,
+            );
+
+            assert_eq!(report.status, AgentTaskGateStatus::Unavailable);
+            assert_eq!(report.exit_code, 0, "a gate that never ran has no exit");
+            assert!(report.failure_evidence.is_none());
+            assert_eq!(report.step.status, PlanStepStatus::Skipped);
+            assert_eq!(
+                report.termination == AgentTaskGateTermination::Cancelled,
+                disposition == Some("cancelled")
+            );
+            let result = HomeboyGateResult::from(report.clone());
+            assert_eq!(result.status, HomeboyGateStatus::Blocked);
+            assert!(!result.summary.contains("passed"), "{}", result.summary);
+            assert!(result.summary.contains(
+                "Lab gate did not execute: [runner.lab_transport_failure] stage terminal_projection, job job-7; retryable; diagnostic homeboy://run/r/artifact/a"
+            ), "{}", result.summary);
+            assert!(result.summary.contains("homeboy agent-task recover"));
+            assert!(
+                !result.summary.contains("secret-check"),
+                "the summary names the cause, never the gate command or output"
+            );
+            assert_eq!(report.lab_receipt.as_ref().unwrap()["retryable"], true);
+        }
     }
 
     #[test]
@@ -1814,9 +1864,7 @@ mod tests {
             assert_eq!(report.status, AgentTaskGateStatus::Failed);
             assert_eq!(report.exit_code, 0);
             assert_eq!(report.stdout, "executed");
-            assert!(!report
-                .stderr
-                .contains("did not produce verified execution evidence"));
+            assert!(!report.stderr.contains("Lab gate did not execute"));
             assert!(report.stderr.starts_with("the gate modified tracked files"));
             assert_eq!(
                 report.workspace_mutation.as_ref().unwrap().differing_paths,

@@ -2066,7 +2066,19 @@ mod lab_gate_binding_tests {
             let unavailable = &report.deterministic_gates[0];
             assert_eq!(unavailable.status, AgentTaskGateStatus::Unavailable);
             assert!(unavailable.stdout.is_empty());
+            assert_eq!(
+                unavailable.exit_code, 0,
+                "a gate that never ran has no exit"
+            );
+            assert!(unavailable.failure_evidence.is_none());
             assert_eq!(unavailable.lab_receipt.as_ref().unwrap()["executed"], false);
+            assert!(
+                report.gate_results[0]
+                    .summary
+                    .starts_with("Lab gate did not execute: ["),
+                "{}",
+                report.gate_results[0].summary
+            );
             assert!(unavailable.candidate_checkout.is_some());
             assert_eq!(
                 report.gate_results[0].status,
@@ -3792,9 +3804,9 @@ fn promotion_notification(
         },
         AgentTaskPromotionStatus::GateDeferred => AgentTaskPromotionNotification {
             status: "blocked".to_string(),
-            message: "patch promoted, but at least one deterministic gate could not execute under the resolved placement and deferred; the candidate is unverified, not rejected".to_string(),
+            message: "patch promoted, but at least one deterministic gate did not execute (deferred, runner unavailable or Lab transport failure; see each gate result for its cause); the candidate is unverified, not rejected".to_string(),
             resumable_blocker: Some(
-                "retry verification once the required environment (e.g. a ready Lab runner) is available; the existing candidate does not need to be regenerated".to_string(),
+                "re-run verification once the required environment (e.g. a ready Lab runner) is available, or re-verify with `homeboy agent-task recover <cook-id>`; the existing candidate does not need to be regenerated".to_string(),
             ),
             next_command: None,
         },

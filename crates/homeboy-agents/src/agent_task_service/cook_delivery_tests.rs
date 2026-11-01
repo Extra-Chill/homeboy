@@ -199,6 +199,42 @@ fn every_gate_failure_spelling_names_the_failing_gate() {
     }
 }
 
+/// #16932: a Lab gate that never executed is a deferral naming its typed
+/// cause and next step, never a failure.
+#[test]
+fn a_non_executed_lab_gate_blocker_names_its_typed_cause() {
+    let gate = json!([{
+        "id": "gate-1",
+        "status": "unavailable",
+        "command": ["sh", "-c", "npm test"],
+        "exit_code": 0,
+        "lab_receipt": {
+            "schema": crate::agent_task_gate::placement::LAB_GATE_DISPOSITION_SCHEMA,
+            "disposition": "unavailable",
+            "executed": false,
+            "error_code": "runner.lab_transport_failure",
+            "stage": "terminal_projection",
+            "job_id": "job-9",
+            "retryable": true,
+        }
+    }]);
+    let delivery = CookDelivery::from_run_metadata(&delivery_metadata(
+        json!({ "promotion": promotion("gates_deferred", gate) }),
+    ))
+    .expect("gates deferred delivery");
+    let blocker = delivery.blocker.expect("deferred blocker");
+    assert_eq!(blocker.code, CookDeliveryBlockerCode::GatesDeferred);
+    assert!(
+        blocker.message.starts_with(
+            "deterministic gate `gate-1` deferred: Lab gate did not execute: [runner.lab_transport_failure] stage terminal_projection, job job-9; retryable"
+        ),
+        "{}",
+        blocker.message
+    );
+    assert!(blocker.message.contains("homeboy agent-task recover"));
+    assert_eq!(delivery.gates[0].state, AgentTaskGateStatus::Unavailable);
+}
+
 /// The pre-#16049 spelling stopped parsing when its serde alias was retired
 /// (#16390); a delivery carrying it is not a delivery this binary understands.
 #[test]

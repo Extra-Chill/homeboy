@@ -26299,3 +26299,44 @@ fn recover_retries_a_runner_cancelled_cook_but_not_an_operator_cancelled_one() {
         });
     }
 }
+
+/// #16932: the `gates_deferred` stop reason names the typed cause of a Lab
+/// gate that never executed and the concrete recover command.
+#[test]
+fn gates_deferred_stop_reason_names_the_non_execution_cause_and_next_step() {
+    let mut deferred = promotion("run-lab-transport");
+    deferred.status = AgentTaskPromotionStatus::GateDeferred;
+    let mut error = homeboy_core::Error::new(
+        homeboy_core::ErrorCode::RunnerLabTransportFailure,
+        "runner gate did not return terminal artifact evidence",
+        serde_json::json!({"stage": "terminal_projection", "job_id": "job-3"}),
+    );
+    error.retryable = Some(true);
+    deferred.deterministic_gates = vec![
+        crate::agent_task_gate::placement::gate_non_execution_report(
+            1,
+            crate::agent_task_gate::legacy_gate_argv("npm test"),
+            crate::agent_task_gate::AgentTaskGateVisibility::Private,
+            crate::agent_task_gate::AgentTaskGateRevealPolicy::SummaryOnly,
+            &error,
+        ),
+    ];
+
+    let reason = super::gates_deferred_stop_reason(&deferred, "cook-16932");
+
+    assert!(
+        reason.starts_with(
+            "gate `gate-1`: Lab gate did not execute: [runner.lab_transport_failure] stage terminal_projection, job job-3; retryable"
+        ),
+        "{reason}"
+    );
+    assert!(
+        reason.contains("`homeboy agent-task recover cook-16932`"),
+        "{reason}"
+    );
+    assert!(
+        !reason.contains("npm test"),
+        "private gate commands stay withheld"
+    );
+    assert!(!reason.contains("stayed red"));
+}
