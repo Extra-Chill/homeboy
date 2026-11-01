@@ -2,6 +2,11 @@
 
 All notable changes to the **swift** extension will be documented in this file.
 
+## [2.8.6] - 2026-11-01
+
+### Fixed
+- keep extension and desktop releases published and off GitHub latest
+
 ## [2.8.5] - 2026-10-11
 
 ### Changed
