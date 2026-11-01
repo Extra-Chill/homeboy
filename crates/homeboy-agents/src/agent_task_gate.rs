@@ -845,6 +845,8 @@ pub struct AgentTaskGateRustCacheEvidence {
     pub state: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wait_ms: Option<u128>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hydrate_ms: Option<u128>,
 }
 
 /// Generic provenance for caller-declared package resources.
@@ -2998,6 +3000,15 @@ impl SelectedGateEnvironment {
         }
 
         let identity = rust_cache_identity(cwd)?;
+        let lockfile_hash = format!(
+            "{:x}",
+            Sha256::digest(fs::read(cwd.join("Cargo.lock")).map_err(
+                |error| Error::internal_io(
+                    error.to_string(),
+                    Some("read Rust cache lockfile".to_string())
+                ),
+            )?)
+        );
         let root = homeboy_core::paths::homeboy_data()
             .map_err(|error| error.with_hint(rust_cache_repair_command()))?
             .join("controller-state/gate-rust-cache");
@@ -3015,8 +3026,12 @@ impl SelectedGateEnvironment {
         let marker = cache.join("ready.json");
         let mut state = "hit";
         let mut wait_ms = None;
+        let mut hydrate_ms = None;
         let toolchain_cargo_relative;
-        if let Some(relative) = valid_marker_toolchain_cargo(&marker, &identity, &cache)? {
+        let ready = valid_marker_toolchain_cargo(&marker, &identity, &cache)?;
+        if let Some((relative, _)) =
+            ready.filter(|(_, hash)| hash.as_deref() == Some(&lockfile_hash))
+        {
             toolchain_cargo_relative = relative;
         } else {
             let lock_path = cache.join("hydrate.lock");
@@ -3057,17 +3072,29 @@ impl SelectedGateEnvironment {
                 std::thread::sleep(Duration::from_millis(25));
             }
             let waited = started.elapsed().as_millis();
-            if let Some(relative) = valid_marker_toolchain_cargo(&marker, &identity, &cache)? {
+            let ready = valid_marker_toolchain_cargo(&marker, &identity, &cache)?;
+            if let Some((relative, _)) = ready
+                .as_ref()
+                .filter(|(_, hash)| hash.as_deref() == Some(&lockfile_hash))
+            {
                 state = if waited > 0 { "wait" } else { "hit" };
                 wait_ms = (waited > 0).then_some(waited);
-                toolchain_cargo_relative = relative;
+                toolchain_cargo_relative = relative.clone();
             } else {
-                let relative = hydrate_rust_cache(cwd, &cache)?;
+                let started = Instant::now();
+                let relative = hydrate_rust_cache_with_timeout(
+                    cwd,
+                    &cache,
+                    RUST_CACHE_HYDRATION_TIMEOUT,
+                    ready.as_ref().map(|(relative, _)| relative.as_path()),
+                )?;
+                hydrate_ms = Some(started.elapsed().as_millis());
                 fs::write(
                     &marker,
                     serde_json::to_vec(&json!({
                         "schema": RUST_CACHE_SCHEMA,
                         "identity": identity,
+                        "lockfile_hash": lockfile_hash,
                         "toolchain_cargo_relative": relative,
                     }))
                     .expect("serialize Rust cache marker"),
@@ -3079,7 +3106,11 @@ impl SelectedGateEnvironment {
                     )
                     .with_hint(rust_cache_repair_command())
                 })?;
-                state = "hydrated";
+                state = if ready.is_some() {
+                    "fetched"
+                } else {
+                    "hydrated"
+                };
                 wait_ms = (waited > 0).then_some(waited);
                 toolchain_cargo_relative = relative;
                 // A new identity just landed; bound the cache to the most
@@ -3146,6 +3177,7 @@ impl SelectedGateEnvironment {
             identity,
             state: state.to_string(),
             wait_ms,
+            hydrate_ms,
         });
         Ok(())
     }
@@ -3217,7 +3249,6 @@ fn rust_cache_identity(cwd: &Path) -> Result<String> {
     let mut hasher = Sha256::new();
     for path in [
         cwd.join("rust-toolchain.toml"),
-        cwd.join("Cargo.lock"),
         cwd.join(".cargo/config.toml"),
         cwd.join(".cargo/config"),
     ] {
@@ -3227,7 +3258,7 @@ fn rust_cache_identity(cwd: &Path) -> Result<String> {
         }
         if path
             .file_name()
-            .is_some_and(|name| name == "Cargo.lock" || name == "rust-toolchain.toml")
+            .is_some_and(|name| name == "rust-toolchain.toml")
             && bytes.is_empty()
         {
             return Err(Error::internal_io(
@@ -3250,7 +3281,7 @@ fn valid_marker_toolchain_cargo(
     marker: &Path,
     identity: &str,
     cache: &Path,
-) -> Result<Option<PathBuf>> {
+) -> Result<Option<(PathBuf, Option<String>)>> {
     let Ok(bytes) = fs::read(marker) else {
         return Ok(None);
     };
@@ -3278,15 +3309,19 @@ fn valid_marker_toolchain_cargo(
         {
             return Ok(None);
         }
-        Ok(Some(relative))
+        Ok(Some((
+            relative,
+            marker["lockfile_hash"].as_str().map(str::to_owned),
+        )))
     }
 }
 
-fn hydrate_rust_cache(cwd: &Path, cache: &Path) -> Result<PathBuf> {
-    hydrate_rust_cache_with_timeout(cwd, cache, RUST_CACHE_HYDRATION_TIMEOUT)
-}
-
-fn hydrate_rust_cache_with_timeout(cwd: &Path, cache: &Path, timeout: Duration) -> Result<PathBuf> {
+fn hydrate_rust_cache_with_timeout(
+    cwd: &Path,
+    cache: &Path,
+    timeout: Duration,
+    cached_toolchain_cargo: Option<&Path>,
+) -> Result<PathBuf> {
     let environment = BTreeMap::from([
         ("HOME".to_string(), cache.join("home").display().to_string()),
         (
@@ -3298,30 +3333,34 @@ fn hydrate_rust_cache_with_timeout(cwd: &Path, cache: &Path, timeout: Duration) 
             cache.join("rustup").display().to_string(),
         ),
     ]);
-    // The host rustup proxy refuses to run after CARGO_HOME is isolated unless
-    // the proxy itself lives under that new home. Seed the cache with a real
-    // file rather than inheriting the host home into controller-owned state.
-    let rustup_proxy = prepare_rustup_proxy(cache)?;
-    let rustup = run_rust_cache_command(
-        cwd,
-        cache,
-        &environment,
-        "install_toolchain",
-        &rustup_proxy,
-        &["toolchain", "install"],
-        timeout,
-    )?;
-    drop(rustup);
-    let resolved = run_rust_cache_command(
-        cwd,
-        cache,
-        &environment,
-        "resolve_toolchain_cargo",
-        &rustup_proxy,
-        &["which", "cargo"],
-        timeout,
-    )?;
-    let cargo = PathBuf::from(String::from_utf8_lossy(&resolved.stdout).trim());
+    let cargo = if let Some(relative) = cached_toolchain_cargo {
+        cache.join("rustup").join(relative)
+    } else {
+        // The host rustup proxy refuses to run after CARGO_HOME is isolated unless
+        // the proxy itself lives under that new home. Seed the cache with a real
+        // file rather than inheriting the host home into controller-owned state.
+        let rustup_proxy = prepare_rustup_proxy(cache)?;
+        let rustup = run_rust_cache_command(
+            cwd,
+            cache,
+            &environment,
+            "install_toolchain",
+            &rustup_proxy,
+            &["toolchain", "install"],
+            timeout,
+        )?;
+        drop(rustup);
+        let resolved = run_rust_cache_command(
+            cwd,
+            cache,
+            &environment,
+            "resolve_toolchain_cargo",
+            &rustup_proxy,
+            &["which", "cargo"],
+            timeout,
+        )?;
+        PathBuf::from(String::from_utf8_lossy(&resolved.stdout).trim())
+    };
     let rustup_home = cache.join("rustup");
     let relative = cargo.strip_prefix(&rustup_home).map_err(|_| {
         Error::internal_io(
@@ -9834,6 +9873,7 @@ mod tests {
             workspace.path(),
             cache.path(),
             Duration::from_secs(10),
+            None,
         )
         .expect("fetch_locked resolves rustc from the toolchain bin");
         assert_eq!(
@@ -9906,7 +9946,11 @@ mod tests {
                 environment
                     .configure_rust_cache(workspace.path())
                     .expect("first hydration");
-                environment.report.rust_cache.expect("first evidence").state
+                let evidence = environment.report.rust_cache.expect("first evidence");
+                if evidence.state == "hydrated" {
+                    assert!(evidence.hydrate_ms.is_some());
+                }
+                evidence.state
             });
             let second = scope.spawn(|| {
                 let mut environment = selected_gate_environment(&policy, Some(runtime.path()))
@@ -9976,9 +10020,33 @@ mod tests {
         let first_identity = rust_cache_identity(workspace.path()).expect("first identity");
         fs::write(workspace.path().join("Cargo.lock"), "version = 5\n")
             .expect("different lockfile");
-        assert_ne!(
+        assert_eq!(
             first_identity,
             rust_cache_identity(workspace.path()).expect("second identity")
+        );
+        let mut incremental =
+            selected_gate_environment(&policy, Some(runtime.path())).expect("fetch environment");
+        incremental
+            .configure_rust_cache(workspace.path())
+            .expect("incremental fetch");
+        let evidence = incremental.report.rust_cache.expect("fetch evidence");
+        assert_eq!(evidence.state, "fetched");
+        assert!(evidence.hydrate_ms.is_some());
+        assert_eq!(
+            fs::read_to_string(&hydration_log).expect("fetch log"),
+            "rustup\ncargo\ncargo\n",
+            "a lockfile change must only run the fetch phase"
+        );
+        let mut hit =
+            selected_gate_environment(&policy, Some(runtime.path())).expect("hit environment");
+        hit.configure_rust_cache(workspace.path())
+            .expect("updated cache hit");
+        let evidence = hit.report.rust_cache.expect("updated hit evidence");
+        assert_eq!(evidence.state, "hit");
+        assert_eq!(evidence.hydrate_ms, None);
+        assert_eq!(
+            fs::read_to_string(&hydration_log).expect("hit log"),
+            "rustup\ncargo\ncargo\n"
         );
         fs::write(
             workspace.path().join("rust-toolchain.toml"),
@@ -9989,6 +10057,7 @@ mod tests {
             first_identity,
             rust_cache_identity(workspace.path()).expect("third identity")
         );
+        let toolchain_identity = rust_cache_identity(workspace.path()).expect("toolchain identity");
         fs::create_dir_all(workspace.path().join(".cargo")).expect("cargo config directory");
         fs::write(
             workspace.path().join(".cargo/config.toml"),
@@ -9996,7 +10065,7 @@ mod tests {
         )
         .expect("cargo config");
         assert_ne!(
-            first_identity,
+            toolchain_identity,
             rust_cache_identity(workspace.path()).expect("config identity")
         );
     }
@@ -10099,6 +10168,7 @@ mod tests {
             workspace.path(),
             cache.path(),
             Duration::from_millis(50),
+            None,
         )
         .is_err());
         assert!(started.elapsed() < Duration::from_secs(1));
