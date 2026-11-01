@@ -867,7 +867,8 @@ fn git_with_env(
 }
 
 /// Find nested `.git` metadata under `workspace`, skipping any path the snapshot
-/// contract excludes (e.g. `vendor`, `vendor/**`).
+/// contract excludes (e.g. `vendor`, `vendor/**`) or the runner Git checkout
+/// ignores after dependency hydration.
 ///
 /// A reused Lab workspace can retain previously materialized excluded content
 /// (Composer `vendor/` with its own nested `.git`) even though the current
@@ -887,7 +888,8 @@ fn nested_git_metadata(
     // nested `.git` under a non-excluded source path would be missed, #9395
     // criterion 4). Detect `.git` unconditionally; only skip descending into a
     // directory the snapshot excludes as *content* (e.g. `vendor`, `vendor/**`).
-    let content_excludes: Vec<String> = excludes
+    let verification_excludes = runner_verification_excludes(workspace, excludes);
+    let content_excludes: Vec<String> = verification_excludes
         .iter()
         .filter(|pattern| {
             let normalized = pattern
@@ -2536,6 +2538,61 @@ mod tests {
         )
         .expect("baseline succeeds despite nested git under excluded vendor");
         assert!(!baseline.is_empty());
+    }
+
+    #[test]
+    fn harvest_ignores_gitignored_dependencies_at_any_depth() {
+        let workspace = tempfile::tempdir().expect("runner workspace");
+        std::fs::write(
+            workspace.path().join(".gitignore"),
+            "vendor/\nnode_modules/\n",
+        )
+        .expect("dependency ignore rules");
+        std::fs::write(workspace.path().join("file.txt"), "baseline\n").unwrap();
+        let snapshot = snapshot(workspace.path());
+        let lab = lab(workspace.path(), &snapshot);
+        materialize_verified_lab_snapshot_git_baseline(
+            &workspace.path().display().to_string(),
+            workspace.path(),
+            snapshot.clone(),
+            lab.clone(),
+        )
+        .expect("materialize clean baseline before hydration");
+
+        // Composer source-only packages are real clones, not dist archives.
+        for dependency in [
+            "plugins/data-machine/vendor/automattic/blocks-engine-php-transformer",
+            "a/node_modules/pkg",
+            "vendor/root-package",
+        ] {
+            let dependency = workspace.path().join(dependency);
+            std::fs::create_dir_all(&dependency).unwrap();
+            git(&dependency, &["init", "--quiet"]).expect("source-installed dependency");
+        }
+        assert!(
+            nested_git_metadata(workspace.path(), &snapshot.sync_excludes)
+                .expect("inspect hydrated checkout")
+                .is_none()
+        );
+        verify_lab_workspace(
+            &workspace.path().display().to_string(),
+            workspace.path(),
+            snapshot.clone(),
+            lab.clone(),
+        )
+        .expect("hydrated dependencies must not invalidate harvest provenance");
+
+        // Ignoring dependencies must not mask a real embedded source checkout,
+        // even when the snapshot excludes metadata from its content hash.
+        let source = workspace.path().join("packages/embedded");
+        std::fs::create_dir_all(&source).unwrap();
+        git(&source, &["init", "--quiet"]).unwrap();
+        assert_eq!(
+            nested_git_metadata(workspace.path(), &snapshot.sync_excludes)
+                .expect("inspect source checkout"),
+            Some(source.join(".git")),
+            "non-ignored source metadata must still be detected after hydration"
+        );
     }
 
     #[test]
