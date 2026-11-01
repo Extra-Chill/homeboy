@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.25.3] - 2026-11-01
+
+### Fixed
+- bind test inventories to subdirectory components
+
 ## [2.25.2] - 2026-11-01
 
 ### Fixed
