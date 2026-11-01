@@ -778,6 +778,115 @@ fn zero_wait_direct_daemon_cancels_unset_agent_task_workload() {
     });
 }
 
+#[test]
+fn request_paths_reuse_live_transport_without_diagnostic_status() {
+    crate::test_support::with_isolated_home(|_| {
+        use std::io::{Read, Write};
+        let _controller = EnvVarGuard::set("HOMEBOY_CONTROLLER_ID", "handoff-cancel-test");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+        listener.set_nonblocking(true).unwrap();
+        let daemon_url = format!("http://{}", listener.local_addr().unwrap());
+        persist_direct_daemon_cancel_session(&daemon_url);
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let server_stop = stop.clone();
+        let server = std::thread::spawn(move || {
+            let mut requests = Vec::new();
+            let deadline = std::time::Instant::now() + Duration::from_secs(30);
+            while !server_stop.load(std::sync::atomic::Ordering::Acquire)
+                && std::time::Instant::now() < deadline
+            {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    std::thread::sleep(Duration::from_millis(1));
+                    continue;
+                };
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let mut buffer = [0; 8192];
+                let count = stream.read(&mut buffer).unwrap_or(0);
+                // Transport liveness first probes TCP without sending HTTP.
+                if count == 0 {
+                    continue;
+                }
+                let request = String::from_utf8_lossy(&buffer[..count]);
+                let route = request.lines().next().unwrap().to_string();
+                requests.push(route.clone());
+                let (status, body) = if route == "GET /health HTTP/1.1" {
+                    (
+                        200,
+                        serde_json::json!({
+                            "pid": std::process::id(),
+                            "freshness": {"fresh": true, "restartable": true, "active_jobs": 0}
+                        }),
+                    )
+                } else if route == "GET /jobs/known HTTP/1.1" {
+                    (
+                        200,
+                        serde_json::json!({"success": true, "data": {"known": true}}),
+                    )
+                } else if route == "POST /jobs/known/cancel HTTP/1.1"
+                    || route == "POST /jobs/known/cancel-projection HTTP/1.1"
+                {
+                    // A recognizable daemon refusal proves cancellation reached
+                    // the endpoint rather than failing a diagnostic admission gate.
+                    (
+                        409,
+                        serde_json::json!({"success": false, "error": {
+                            "message": "fixture cancellation reached daemon"
+                        }}),
+                    )
+                } else {
+                    // Describe, freshness and job-list diagnostics are unavailable.
+                    (
+                        503,
+                        serde_json::json!({"success": false, "error": {
+                            "message": "diagnostic status must not be requested"
+                        }}),
+                    )
+                };
+                let body = body.to_string();
+                let _ = write!(stream,
+                    "HTTP/1.1 {status} Fixture\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len());
+            }
+            requests
+        });
+
+        let result = daemon_api_get("lab", "/jobs/known");
+        let cancel = runner_job_cancel("lab", "known", "regression");
+        let projection = runner_job_cancel_projection("lab", "known", "run-known");
+        stop.store(true, std::sync::atomic::Ordering::Release);
+        let requests = server.join().expect("fixture server");
+
+        assert_eq!(result.expect("live session GET")["known"], true);
+        assert!(cancel
+            .unwrap_err()
+            .message
+            .contains("fixture cancellation reached daemon"));
+        assert!(projection
+            .unwrap_err()
+            .message
+            .contains("fixture cancellation reached daemon"));
+        assert!(requests
+            .iter()
+            .any(|route| route.starts_with("GET /health ")));
+        let endpoint_requests: Vec<_> = requests
+            .iter()
+            .filter(|route| !route.starts_with("GET /health "))
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            endpoint_requests,
+            vec![
+                "GET /jobs/known HTTP/1.1",
+                "POST /jobs/known/cancel HTTP/1.1",
+                "POST /jobs/known/cancel-projection HTTP/1.1",
+            ],
+            "no diagnostic requests: {requests:?}"
+        );
+    });
+}
+
 fn persist_direct_daemon_cancel_session(daemon_url: &str) {
     let local_port = daemon_url
         .rsplit_once(':')
