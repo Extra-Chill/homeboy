@@ -618,20 +618,13 @@ pub(crate) fn evaluate_request_dispatchability(
                         required_capabilities: request.executor.required_capabilities.clone(),
                     },
                 ),
-                ProviderResolution::NotFound => {
-                    let diagnostics = super::runtime_discovery_diagnostics_for_backend(
-                        &catalog.diagnostics,
-                        &request.executor.backend,
-                    );
-                    (
-                        "provider_missing",
-                        "capability",
-                        ProviderRouteDiagnosticData::ProviderMissing {
-                            backend: request.executor.backend.clone(),
-                            runtime_discovery_diagnostics: diagnostics,
-                        },
-                    )
-                }
+                ProviderResolution::NotFound => (
+                    "provider_missing",
+                    "capability",
+                    ProviderRouteDiagnosticData::ProviderMissing {
+                        backend: request.executor.backend.clone(),
+                    },
+                ),
                 ProviderResolution::SelectorMismatch {
                     available_ids,
                     selector_hint,
@@ -670,7 +663,6 @@ pub(crate) fn evaluate_request_dispatchability(
     let dispatchability = evaluate_provider_dispatchability(
         &AgentTaskProviderCatalog {
             providers: vec![provider],
-            diagnostics: Vec::new(),
             version: catalog.version.clone(),
         },
         &request.executor.backend,

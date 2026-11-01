@@ -63,46 +63,6 @@ fn provider_manifest_accepts_command_invocation_contract() {
 }
 
 #[test]
-fn provider_missing_chains_matching_runtime_discovery_diagnostics() {
-    let _home = artifact_home();
-    let (mut request, _provider) = request("missing-pi", "unused".to_string());
-    request.executor.backend = "pi".to_string();
-    let executor = ExtensionProviderAgentTaskExecutor::from_catalog(AgentTaskProviderCatalog {
-        providers: Vec::new(),
-        diagnostics: vec![AgentRuntimeDiscoveryDiagnostic {
-            class: "provider.invalid".to_string(),
-            message: "invalid type: map, expected string at line 12 column 18".to_string(),
-            runtime_id: Some("pi".to_string()),
-            extension_id: None,
-            path: Some("/tmp/pi/pi.json".to_string()),
-        }],
-        version: None,
-    });
-
-    let outcome = executor.execute(
-        request,
-        AgentTaskExecutionContext {
-            plan_id: "test-plan".to_string(),
-            run_id: None,
-            attempt: 1,
-            cancellation: AgentTaskCancellationToken::default(),
-            lifecycle_store: None,
-            provider_capacity_key: None,
-        },
-    );
-
-    let summary = outcome.summary.as_deref().expect("summary");
-    assert!(summary.contains("no extension agent-task provider found for backend 'pi'"));
-    assert!(summary.contains("provider.invalid"));
-    assert!(summary.contains("invalid type: map, expected string at line 12 column 18"));
-    assert_eq!(outcome.diagnostics[0].class, "agent_task.provider_missing");
-    assert_eq!(
-        outcome.diagnostics[0].data["runtime_discovery_diagnostics"][0]["class"],
-        "provider.invalid"
-    );
-}
-
-#[test]
 fn pi_readiness_defaults_and_validates_its_total_timeout() {
     let provider: AgentTaskExecutorProvider = serde_json::from_value(json!({
         "id": "ready.provider",

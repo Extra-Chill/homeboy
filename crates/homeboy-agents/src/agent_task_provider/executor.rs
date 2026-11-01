@@ -111,7 +111,6 @@ fn reported_capacity_key(request_key: &str, evidence: &AgentTaskProviderRuntimeE
 fn production_execution_preflight(
     request: &AgentTaskRequest,
     providers: &[AgentTaskExecutorProvider],
-    diagnostics: &[AgentRuntimeDiscoveryDiagnostic],
     evidence: &Arc<Mutex<ProviderEvidenceStore>>,
     credential_env: Option<&[(String, String)]>,
 ) -> Option<AgentTaskOutcome> {
@@ -120,7 +119,6 @@ fn production_execution_preflight(
     };
     let catalog = AgentTaskProviderCatalog {
         providers: providers.to_vec(),
-        diagnostics: diagnostics.to_vec(),
         version: None,
     };
     let mut readiness_cache = evidence
@@ -222,20 +220,13 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
                     };
                 }
                 let (state, reason, diagnostic_data) = match resolution {
-                    ProviderResolution::NotFound => {
-                        let diagnostics = runtime_discovery_diagnostics_for_backend(
-                            self.diagnostics(),
-                            &request.executor.backend,
-                        );
-                        (
-                            "provider_missing",
-                            provider_not_found_message(&request.executor.backend, &diagnostics),
-                            ProviderRouteDiagnosticData::ProviderMissing {
-                                backend: request.executor.backend.clone(),
-                                runtime_discovery_diagnostics: diagnostics,
-                            },
-                        )
-                    }
+                    ProviderResolution::NotFound => (
+                        "provider_missing",
+                        provider_not_found_message(&request.executor.backend),
+                        ProviderRouteDiagnosticData::ProviderMissing {
+                            backend: request.executor.backend.clone(),
+                        },
+                    ),
                     ProviderResolution::SelectorMismatch {
                         available_ids,
                         selector_hint,
@@ -313,7 +304,6 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
             };
         let catalog = AgentTaskProviderCatalog {
             providers: vec![provider.clone()],
-            diagnostics: Vec::new(),
             version: None,
         };
         let mut readiness_cache = match self.evidence.lock() {
@@ -587,7 +577,6 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
         if let Some(outcome) = production_execution_preflight(
             &request.request,
             self.providers(),
-            self.diagnostics(),
             &self.evidence,
             launch_credentials.as_deref(),
         ) {
@@ -655,11 +644,7 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
                             }),
                         );
                     }
-                    return provider_resolution_failure_outcome(
-                        &request,
-                        resolution,
-                        self.diagnostics(),
-                    );
+                    return provider_resolution_failure_outcome(&request, resolution);
                 }
             },
             Err(message) => {
@@ -885,25 +870,19 @@ fn ensure_writable_directory(path: &Path) -> std::io::Result<()> {
 fn provider_resolution_failure_outcome(
     request: &AgentTaskRequest,
     resolution: ProviderResolution<'_>,
-    diagnostics: &[AgentRuntimeDiscoveryDiagnostic],
 ) -> AgentTaskOutcome {
     match resolution {
         ProviderResolution::Resolved(_) => unreachable!("resolved provider handled before failure"),
-        ProviderResolution::NotFound => {
-            let matching_diagnostics =
-                runtime_discovery_diagnostics_for_backend(diagnostics, &request.executor.backend);
-            failure_outcome(
-                request,
-                AgentTaskOutcomeStatus::Failed,
-                AgentTaskFailureClassification::CapabilityMissing,
-                "agent_task.provider_missing",
-                provider_not_found_message(&request.executor.backend, &matching_diagnostics),
-                json!({
-                    "backend": request.executor.backend,
-                    "runtime_discovery_diagnostics": matching_diagnostics,
-                }),
-            )
-        }
+        ProviderResolution::NotFound => failure_outcome(
+            request,
+            AgentTaskOutcomeStatus::Failed,
+            AgentTaskFailureClassification::CapabilityMissing,
+            "agent_task.provider_missing",
+            provider_not_found_message(&request.executor.backend),
+            json!({
+                "backend": request.executor.backend,
+            }),
+        ),
         ProviderResolution::SelectorMismatch {
             available_ids,
             selector_hint,

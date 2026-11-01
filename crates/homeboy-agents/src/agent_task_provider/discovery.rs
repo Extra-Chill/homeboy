@@ -1,8 +1,6 @@
 //! The Pi executor is built in; provider discovery never reads extensions.
 
-use super::AgentRuntimeDiscoveryDiagnostic;
 use super::AgentTaskExecutorProvider;
-use serde::{Deserialize, Serialize};
 
 pub(crate) fn discover_agent_task_executor_providers() -> Vec<AgentTaskExecutorProvider> {
     vec![serde_json::from_value(serde_json::json!({
@@ -24,31 +22,15 @@ pub(crate) fn discover_agent_task_executor_providers() -> Vec<AgentTaskExecutorP
     })).expect("built-in Pi provider is valid")]
 }
 
-pub(crate) fn discover_agent_task_executor_provider_catalog(
-) -> AgentTaskExecutorProviderDiscoveryCatalog {
-    AgentTaskExecutorProviderDiscoveryCatalog {
-        providers: discover_agent_task_executor_providers(),
-        diagnostics: Vec::new(),
-    }
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct AgentTaskExecutorProviderDiscoveryCatalog {
-    pub providers: Vec<AgentTaskExecutorProvider>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub diagnostics: Vec<AgentRuntimeDiscoveryDiagnostic>,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn pi_is_available_without_runtime_manifests() {
-        let catalog = discover_agent_task_executor_provider_catalog();
-        assert!(catalog.diagnostics.is_empty());
-        assert_eq!(catalog.providers.len(), 1);
-        let provider = &catalog.providers[0];
+        let providers = discover_agent_task_executor_providers();
+        assert_eq!(providers.len(), 1);
+        let provider = &providers[0];
         assert_eq!(provider.id, "pi.agent-task-executor");
         assert_eq!(provider.backend, "pi");
         assert!(!provider.extra.contains_key("runtime_materialization_plan"));

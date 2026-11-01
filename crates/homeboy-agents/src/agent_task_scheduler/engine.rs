@@ -73,8 +73,6 @@ pub struct ProviderRouteEvidence {
 pub enum ProviderRouteDiagnosticData {
     ProviderMissing {
         backend: String,
-        runtime_discovery_diagnostics:
-            Vec<crate::agent_task_provider::AgentRuntimeDiscoveryDiagnostic>,
     },
     ProviderSelectorMismatch {
         backend: String,

@@ -1769,7 +1769,6 @@ fn scope_providers(
 }
 
 const DEFAULT_PROVIDER_LIMIT: usize = 10;
-const DEFAULT_DIAGNOSTIC_LIMIT: usize = 10;
 const DEFAULT_TEXT_LIMIT: usize = 256;
 pub(crate) const AGENT_TASK_PROVIDER_SCOPE_SCHEMA: &str = "homeboy/agent-task-provider-scope/v1";
 
@@ -2038,20 +2037,6 @@ fn providers_with_catalog(
             .cloned()
             .collect()
     };
-    let diagnostics = catalog.diagnostics();
-    let shown_diagnostics = if args.full {
-        diagnostics
-            .iter()
-            .cloned()
-            .map(|diagnostic| serde_json::to_value(diagnostic).unwrap_or(Value::Null))
-            .collect::<Vec<_>>()
-    } else {
-        diagnostics
-            .iter()
-            .take(DEFAULT_DIAGNOSTIC_LIMIT)
-            .map(compact_diagnostic)
-            .collect::<Vec<_>>()
-    };
 
     Ok((
         serde_json::json!({
@@ -2078,14 +2063,12 @@ fn providers_with_catalog(
             "operator_summary": {
                 "identity": "agent-task providers",
                 "state": provider_report_state(route.as_ref(), all_providers, Some(&dispatchability)),
-                "risk": if diagnostics.is_empty() { Vec::new() } else { vec![format!("{} discovery diagnostic(s)", diagnostics.len())] },
                 "next_action": readiness_next_action.primary.clone().or_else(|| route.is_none().then(|| full_command.clone())),
                 "refresh_action": readiness_next_action.refresh,
                 "selection_choices": selection_choices(route.as_ref()),
             },
             "truncation": {
                 "providers": { "shown": shown_providers.len(), "omitted": providers.len().saturating_sub(shown_providers.len()), "evidence_ref": "agent-task:provider-catalog", "full_command": full_command.clone() },
-                "diagnostics": { "shown": shown_diagnostics.len(), "omitted": diagnostics.len().saturating_sub(shown_diagnostics.len()), "evidence_ref": "agent-task:provider-discovery-diagnostics", "full_command": full_command },
             },
             "dispatch_config_layers": if args.full { dispatch_config_layers(providers) } else { Value::Null },
             // The compact provider list and identity catalog describe the same
@@ -2103,7 +2086,6 @@ fn providers_with_catalog(
                 args.validate_readiness,
                 declared_backends,
             ),
-            "diagnostics": shown_diagnostics,
             // Task secret names are explicit, not provider declarations.
             "secret_env": homeboy::agents::agent_tasks::secrets::secret_env_status(&args.secret_env),
         }),
@@ -2416,7 +2398,7 @@ fn resolve_provider_route_for(
         ..Default::default()
     };
     let route = match agent_task_dispatch_service::resolve_cook_initial_provider_route_with_catalog(
-        command, catalog, None,
+        command, catalog,
     ) {
         Ok(route) => route,
         Err(error) => {
@@ -2755,28 +2737,6 @@ fn readiness_validation_projection(
         "backends": declared_backends,
         "ready_backends": ready_backends,
     })
-}
-
-fn compact_diagnostic(diagnostic: &impl serde::Serialize) -> Value {
-    let mut value = serde_json::to_value(diagnostic).unwrap_or(Value::Null);
-    if let Some(Value::String(message)) = value.get_mut("message") {
-        *message = bounded_text(message, DEFAULT_TEXT_LIMIT);
-    }
-    if let Some(object) = value.as_object_mut() {
-        for key in ["response_body", "body", "stdout", "stderr"] {
-            if let Some(bytes) = object.get(key).and_then(Value::as_str).map(str::len) {
-                object.insert(
-                    key.to_string(),
-                    serde_json::json!({
-                        "summarized": true,
-                        "omitted_bytes": bytes,
-                        "evidence_ref": "agent-task:provider-discovery-diagnostics",
-                    }),
-                );
-            }
-        }
-    }
-    value
 }
 
 fn bounded_text(value: &str, limit: usize) -> String {
@@ -3142,7 +3102,7 @@ mod tests {
     }
 
     #[test]
-    fn compact_provider_bounds_extensions_and_large_diagnostics() {
+    fn compact_provider_bounds_provider_output() {
         let provider: AgentTaskExecutorProvider = serde_json::from_value(serde_json::json!({
             "id": "provider-".to_string() + &"x".repeat(10_000),
             "backend": "backend-".to_string() + &"x".repeat(10_000),
@@ -3169,17 +3129,10 @@ mod tests {
             })
             .take(DEFAULT_PROVIDER_LIMIT)
             .collect::<Vec<_>>();
-        let diagnostic = compact_diagnostic(&serde_json::json!({
-            "class": "provider.error",
-            "message": "x".repeat(100_000),
-            "response_body": "x".repeat(100_000),
-        }));
 
         assert_eq!(providers.len(), DEFAULT_PROVIDER_LIMIT);
         let provider_bytes = serde_json::to_vec(&providers).expect("provider JSON").len();
         assert!(provider_bytes < 20_000, "{provider_bytes}");
-        assert!(diagnostic["message"].as_str().expect("message").len() <= DEFAULT_TEXT_LIMIT + 3);
-        assert_eq!(diagnostic["response_body"]["omitted_bytes"], 100_000);
     }
 
     #[test]

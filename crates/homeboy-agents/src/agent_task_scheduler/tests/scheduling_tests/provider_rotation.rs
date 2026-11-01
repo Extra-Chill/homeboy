@@ -1462,7 +1462,6 @@ mod provider_rotation_tests {
                     capacity_key: None,
                     diagnostic_data: Some(ProviderRouteDiagnosticData::ProviderMissing {
                         backend: "missing".to_string(),
-                        runtime_discovery_diagnostics: Vec::new(),
                     }),
                 }
             }
@@ -1660,7 +1659,6 @@ mod provider_rotation_tests {
         let provider = fake.provider();
         let catalog = crate::agent_task_provider::AgentTaskProviderCatalog {
             providers: vec![provider],
-            diagnostics: Vec::new(),
             version: None,
         };
         let mut plan = plan_with_tasks(1);

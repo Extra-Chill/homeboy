@@ -590,9 +590,6 @@ pub struct ProviderCatalogEvidence {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
     pub provider_ids: Vec<String>,
-    pub diagnostics: usize,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub diagnostic_messages: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -1687,20 +1684,9 @@ fn provider_catalog_evidence(catalog: AgentTaskProviderCatalog) -> ProviderCatal
         .map(|provider| provider.id.clone())
         .collect::<Vec<_>>();
     provider_ids.sort();
-    let diagnostics = catalog.diagnostics().len();
-    let diagnostic_messages = catalog
-        .diagnostics()
-        .iter()
-        .take(8)
-        .map(|diagnostic| {
-            bounded_diagnostic(&format!("{}: {}", diagnostic.class, diagnostic.message))
-        })
-        .collect();
     ProviderCatalogEvidence {
         version: catalog.version,
         provider_ids,
-        diagnostics,
-        diagnostic_messages,
     }
 }
 
@@ -1733,18 +1719,6 @@ fn revision_status(entry: &UpdateEntry) -> &'static str {
         (Some(_), Some(_)) => "unchanged",
         _ => "unknown",
     }
-}
-
-fn bounded_diagnostic(message: &str) -> String {
-    const LIMIT: usize = 512;
-    if message.len() <= LIMIT {
-        return message.to_string();
-    }
-    let mut end = LIMIT;
-    while !message.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}... [truncated]", &message[..end])
 }
 
 fn uninstall_extension(extension_id: &str) -> CmdResult<ExtensionOutput> {
@@ -1985,14 +1959,6 @@ mod tests {
             .expect("install --replace with demo installed");
             assert!(matches!(output, ExtensionOutput::Replace { .. }));
         });
-    }
-
-    #[test]
-    fn provider_diagnostics_are_bounded() {
-        let diagnostic = bounded_diagnostic(&"x".repeat(600));
-
-        assert!(diagnostic.len() < 540);
-        assert!(diagnostic.ends_with("... [truncated]"));
     }
 
     #[cfg(unix)]

@@ -336,51 +336,11 @@ mod tests {
                 },
             }
             .into(),
-            |_| Ok(Some("fake-default".to_string())),
+            || Some("fake-default".to_string()),
         )
         .expect("default backend request");
 
         assert_eq!(request.backend, "fake-default");
-    }
-
-    #[test]
-    fn dispatch_request_errors_when_backend_and_default_are_absent() {
-        // Pi is selected automatically when installed. Exercise the missing-route
-        // case without depending on the developer/CI host's provider catalog.
-        let catalog = homeboy::agents::agent_task_provider::AgentTaskProviderCatalog::default();
-        let error = dispatch_service::resolve_dispatch_request_with_default_and_catalog(
-            DispatchArgs {
-                prompt: Some("run without default".to_string()),
-                prompt_is_literal: false,
-                tasks: Vec::new(),
-                cwd: None,
-                workspace: None,
-                repo: None,
-                task_url: None,
-                cook: Default::default(),
-                required_capabilities: Vec::new(),
-                concurrency: 1,
-                run_id: None,
-                core: DispatchCoreArgs {
-                    tasks_json: None,
-                    client_context: None,
-                    attempts: Some(1),
-                    same_provider_retries: Some(0),
-                    queue_only: false,
-                    timeout_ms: None,
-                    resolved_provider_policy: None,
-                    deny_command: Vec::new(),
-                    allow_command: Vec::new(),
-                    command_policy_reason: None,
-                },
-            }
-            .into(),
-            |_| Ok(None),
-            &catalog,
-        )
-        .expect_err("missing backend should fail");
-
-        assert!(error.message.contains("requires --backend"));
     }
 
     #[test]
@@ -401,8 +361,8 @@ mod tests {
             runtime_identity: None,
         });
 
-        let request = dispatch_service::resolve_dispatch_request_with_default(args.into(), |_| {
-            Ok(Some("runner-backend".to_string()))
+        let request = dispatch_service::resolve_dispatch_request_with_default(args.into(), || {
+            Some("runner-backend".to_string())
         })
         .expect("submitted policy request");
 

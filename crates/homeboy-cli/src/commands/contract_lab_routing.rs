@@ -317,7 +317,7 @@ pub(crate) fn agent_task_provider_requires_cwd_git_checkout(
 ) -> bool {
     agent_task_provider_requires_cwd_git_checkout_with(
         command,
-        || default_backend().ok().flatten(),
+        || default_backend(),
         provider_requires_cwd_git_checkout,
     )
 }

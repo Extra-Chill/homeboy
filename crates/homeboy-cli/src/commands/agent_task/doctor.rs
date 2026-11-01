@@ -62,8 +62,7 @@ fn provider_stage(args: &AgentTaskDoctorArgs) -> ProviderStage {
 
     // Resolve the backend the cook would use: explicit --backend, else the
     // extension/policy-declared default. Selector is operator-supplied only.
-    let default_backend =
-        homeboy::agents::agent_tasks::provider::default_backend().unwrap_or_default();
+    let default_backend = homeboy::agents::agent_tasks::provider::default_backend();
     let selected_backend = args.backend.clone().or_else(|| default_backend.clone());
 
     let (provider_ready, blocker, mapping_value) = match selected_backend.as_deref() {
@@ -134,7 +133,6 @@ fn provider_stage(args: &AgentTaskDoctorArgs) -> ProviderStage {
         "ready": provider_ready,
         "capability_contract": homeboy::agents::agent_tasks::provider::provider_capability_contract(),
         "providers": providers,
-        "diagnostics": executor.diagnostics(),
         "backend_mapping": mapping_value,
         "secret_env": secret_env,
     });

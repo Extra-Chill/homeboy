@@ -85,7 +85,7 @@ fn configured_output(status: agent_task_secrets::AgentTaskSecretEnvStatus) -> Va
 /// Report redacted readiness for operator-supplied task secret names.
 fn auth_status(status_args: AgentTaskAuthStatusArgs) -> Value {
     // Backend the cook would use: explicit flag, else the policy/default backend.
-    let default_backend = agent_task_provider::default_backend().ok().flatten();
+    let default_backend = agent_task_provider::default_backend();
     let selected_backend = status_args
         .backend
         .clone()
