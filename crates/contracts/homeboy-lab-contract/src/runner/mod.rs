@@ -37,7 +37,7 @@ use homeboy_runner_contract::{
 use serde::{Deserialize, Serialize};
 
 /// Bump only on a breaking controller↔runner wire change.
-pub const LAB_CONTRACT_VERSION: u32 = 1;
+pub const LAB_CONTRACT_VERSION: u32 = 2;
 
 /// Options controlling how a runner workspace is synced before a job runs.
 #[derive(Debug, Clone, Default)]

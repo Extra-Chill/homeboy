@@ -1,12 +1,13 @@
 //! Stage-wide, two-call source materialization. No runner effects occur while
 //! preparing the controller's immutable transfer.
 use super::*;
+pub(super) use homeboy_lab_contract::LAB_CONTRACT_VERSION as CONTRACT;
 use serde::{Deserialize, Serialize};
 use std::process::Command;
 
 #[derive(Serialize, Deserialize)]
 pub(super) struct PlanRequest {
-    pub(super) identity: String,
+    pub(super) lab_contract_version: u32,
     pub(super) roots: Vec<RootSummary>,
 }
 
@@ -20,7 +21,7 @@ pub(super) struct RootSummary {
 
 #[derive(Serialize, Deserialize)]
 pub(super) struct PlanResponse {
-    pub(super) identity: String,
+    pub(super) lab_contract_version: u32,
     pub(super) available_bytes: u64,
     pub(super) available_inodes: u64,
     pub(super) total_bytes: u64,
@@ -30,7 +31,7 @@ pub(super) struct PlanResponse {
 
 #[derive(Serialize, Deserialize)]
 pub(super) struct CommitRequest {
-    pub(super) identity: String,
+    pub(super) lab_contract_version: u32,
     pub(super) roots: Vec<CommitRoot>,
 }
 
@@ -80,8 +81,9 @@ pub(super) fn materialization_plan_controlled(
 ) -> Result<serde_json::Value> {
     control.checkpoint()?;
     let request: PlanRequest = json(&fs::read(input).map_err(io)?)?;
-    if request.identity != homeboy_product_identity::build_identity().display {
-        return Err(io("runner build identity mismatch"));
+    let version = request.lab_contract_version;
+    if version != CONTRACT {
+        return Err(io(format!("Lab contract {version} != {CONTRACT}")));
     }
     let first = request
         .roots
@@ -147,7 +149,7 @@ pub(super) fn materialization_plan_controlled(
     }
     control.checkpoint()?;
     serde_json::to_value(PlanResponse {
-        identity: homeboy_product_identity::build_identity().display,
+        lab_contract_version: CONTRACT,
         available_bytes: probe.available_bytes,
         available_inodes: probe.available_inodes,
         total_bytes: disk.total_bytes,
@@ -169,10 +171,9 @@ pub(super) fn materialization_commit_controlled(
 ) -> Result<serde_json::Value> {
     control.checkpoint()?;
     let request: CommitRequest = json(&fs::read(input.join("commit.json")).map_err(io)?)?;
-    if request.identity != homeboy_product_identity::build_identity().display {
-        return Err(io(
-            "runner build identity changed since materialization plan",
-        ));
+    let version = request.lab_contract_version;
+    if version != CONTRACT {
+        return Err(io(format!("Lab contract {version} != {CONTRACT}")));
     }
     let first = request.roots.first().ok_or_else(|| io("empty commit"))?;
     let store = super::blobs::store(&first.summary.remote_path);
