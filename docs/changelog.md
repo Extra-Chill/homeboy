@@ -4,6 +4,16 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.439.2] - 2026-11-01
+
+### Changed
+- record per-phase timings in deploy results and allow status lines in non-TTY CI
+- build --ref in place at HEAD; one sparse checkout per repo+sha
+
+### Fixed
+- prefer applicable extension runners during hydration
+- keep extension and desktop releases published and off GitHub latest
+
 ## [0.439.1] - 2026-11-01
 
 ### Changed
