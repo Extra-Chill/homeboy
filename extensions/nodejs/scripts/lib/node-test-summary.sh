@@ -39,10 +39,9 @@ homeboy_node_test_summary_sum() {
 homeboy_node_test_parse_summary() {
     local output="$1" summary
 
-    # Strip ANSI colour codes, then normalize both reporter prefixes to bare
-    # "<key> <count>" lines.
+    # The caller strips ANSI colour codes. Normalize both reporter prefixes to
+    # bare "<key> <count>" lines.
     summary="$(printf '%s\n' "$output" \
-        | sed -E $'s/\x1b\\[[0-9;]*[A-Za-z]//g' \
         | sed -nE 's/^(# |ℹ )(tests|pass|fail|cancelled|skipped|todo)[[:space:]]+([0-9]+)[[:space:]]*$/\2 \3/p')"
 
     if ! printf '%s\n' "$summary" | grep -qE '^tests [0-9]+$'; then

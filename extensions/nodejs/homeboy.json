@@ -41,7 +41,7 @@
       "bash scripts/lint/nodejs-lint-findings-sidecar-smoke.sh",
       "bash scripts/lint/typecheck-ci-command-smoke.sh",
       "bash scripts/test/nodejs-changed-scope-smoke.sh",
-      "bash scripts/test/nodejs-nx-vitest-timeout-smoke.sh",
+      "bash scripts/test/nodejs-runner-summary-smoke.sh",
       "bash scripts/test/nodejs-targeted-script-smoke.sh",
       "bash scripts/test/typescript-test-loader-smoke.sh",
       "bash scripts/trace/nodejs-trace-runner-smoke.sh",

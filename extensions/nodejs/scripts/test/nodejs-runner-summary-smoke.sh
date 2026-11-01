@@ -30,30 +30,6 @@ if [ ! -f "$COMMAND_CAPTURE_HELPER" ]; then
     exit 1
 fi
 
-PROJECT_DIR="${TMPDIR}/project"
-mkdir -p "$PROJECT_DIR"
-
-cat > "${PROJECT_DIR}/package.json" <<'JSON'
-{
-  "scripts": {
-    "test": "node fake-nx-vitest-timeout.mjs"
-  }
-}
-JSON
-
-cat > "${PROJECT_DIR}/fake-nx-vitest-timeout.mjs" <<'JS'
-console.log(`
- NX   Running target test:vite for project playground-wordpress
-
- FAIL src/test/version-detect.spec.ts > Test WP version detection > detects WP trunk at runtime
-Error: Test timed out in 30000ms.
-
-Failed tasks:
-- playground-wordpress:test:vite
-`);
-process.exit(1);
-JS
-
 cat > "${TMPDIR}/write-results.sh" <<'SH'
 homeboy_write_test_results() {
     local total="$1"
@@ -79,36 +55,55 @@ JS
 }
 SH
 
-set +e
-HOMEBOY_EXTENSION_PATH="$EXTENSION_DIR" \
-HOMEBOY_COMPONENT_PATH="$PROJECT_DIR" \
-HOMEBOY_COMPONENT_ID="node-nx-vitest-smoke" \
-HOMEBOY_RUNTIME_WRITE_TEST_RESULTS="${TMPDIR}/write-results.sh" \
-HOMEBOY_RUNTIME_SIDECAR_WRITER="$SIDECAR_WRITER_HELPER" \
-HOMEBOY_RUNTIME_RUNNER_PRELUDE="$RUNNER_PRELUDE_HELPER" \
-HOMEBOY_RUNTIME_COMMAND_CAPTURE="$COMMAND_CAPTURE_HELPER" \
-HOMEBOY_TEST_RESULTS_FILE="${TMPDIR}/test-results.json" \
-HOMEBOY_TEST_FAILURES_FILE="${TMPDIR}/test-failures.json" \
-bash "${SCRIPT_DIR}/test-runner.sh" > "${TMPDIR}/runner.out" 2>&1
-RUNNER_EXIT=$?
-set -e
+# Run test-runner.sh against a fake project whose test script prints $2 and
+# exits $3. Results land in ${TMPDIR}/<case>/.
+run_case() {
+    local name="$1" output="$2" exit_code="$3" case_dir="${TMPDIR}/$1"
+    mkdir -p "${case_dir}/project"
+    printf '{"scripts":{"test":"node fake-runner.cjs"}}\n' > "${case_dir}/project/package.json"
+    printf '%s' "$output" > "${case_dir}/project/output.txt"
+    printf "process.stdout.write(require('node:fs').readFileSync('output.txt'), () => process.exit(%s));\n" "$exit_code" \
+        > "${case_dir}/project/fake-runner.cjs"
 
-if [ "$RUNNER_EXIT" -eq 0 ]; then
-    echo "Expected runner to fail for fake Vitest timeout" >&2
-    cat "${TMPDIR}/runner.out" >&2
-    exit 1
-fi
+    set +e
+    HOMEBOY_EXTENSION_PATH="$EXTENSION_DIR" \
+    HOMEBOY_COMPONENT_PATH="${case_dir}/project" \
+    HOMEBOY_COMPONENT_ID="node-runner-summary-smoke" \
+    HOMEBOY_RUNTIME_WRITE_TEST_RESULTS="${TMPDIR}/write-results.sh" \
+    HOMEBOY_RUNTIME_SIDECAR_WRITER="$SIDECAR_WRITER_HELPER" \
+    HOMEBOY_RUNTIME_RUNNER_PRELUDE="$RUNNER_PRELUDE_HELPER" \
+    HOMEBOY_RUNTIME_COMMAND_CAPTURE="$COMMAND_CAPTURE_HELPER" \
+    HOMEBOY_TEST_RESULTS_FILE="${case_dir}/test-results.json" \
+    HOMEBOY_TEST_FAILURES_FILE="${case_dir}/test-failures.json" \
+    bash "${SCRIPT_DIR}/test-runner.sh" > "${case_dir}/runner.out" 2>&1
+    local runner_exit=$?
+    set -e
 
-node - "${TMPDIR}/test-results.json" "${TMPDIR}/test-failures.json" <<'JS'
+    if [ "$runner_exit" -ne "$exit_code" ]; then
+        echo "${name}: expected runner exit ${exit_code}, got ${runner_exit}" >&2
+        cat "${case_dir}/runner.out" >&2
+        exit 1
+    fi
+}
+
+# An Nx-wrapped Vitest timeout that never printed a summary keeps the failed
+# test instead of becoming an opaque `unknown-runner` failure.
+run_case nx-vitest-timeout '
+ NX   Running target test:vite for project playground-wordpress
+
+ FAIL src/test/version-detect.spec.ts > Test WP version detection > detects WP trunk at runtime
+Error: Test timed out in 30000ms.
+
+Failed tasks:
+- playground-wordpress:test:vite
+' 1
+
+node - "${TMPDIR}/nx-vitest-timeout/test-results.json" "${TMPDIR}/nx-vitest-timeout/test-failures.json" <<'JS'
 const fs = require('node:fs');
 const assert = require('node:assert/strict');
 
 const results = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
-assert.equal(results.total, 1);
-assert.equal(results.passed, 0);
-assert.equal(results.failed, 1);
-assert.equal(results.skipped, 0);
-assert.equal(results.partial, 'vitest-timeout');
+assert.deepEqual(results, { total: 1, passed: 0, failed: 1, skipped: 0, partial: 'vitest-timeout' });
 
 const failures = JSON.parse(fs.readFileSync(process.argv[3], 'utf8'));
 assert.equal(failures.length, 1);
@@ -129,10 +124,17 @@ assert.match(failures[0].message, /Test timed out in 30000ms/);
 assert.match(failures[0].message, /Nx task: playground-wordpress:test:vite/);
 JS
 
-if grep -q 'unknown-runner' "${TMPDIR}/test-results.json"; then
-    echo "Nx/Vitest timeout should not be labelled unknown-runner" >&2
-    cat "${TMPDIR}/test-results.json" >&2
-    exit 1
-fi
+# A coloured Vitest 4 summary (FORCE_COLOR or a TTY), byte for byte as a
+# passing suite printed it, yields its real counts. Unstripped, no parser
+# matched and the run was reported as zero executed tests (Extra-Chill/homeboy#16955).
+run_case coloured-vitest-summary $'\e[32m\xe2\x9c\x93\e[39m src/a.test.ts \e[2m(\e[22m\e[2m3 tests\e[22m\e[2m)\e[22m\n\n\e[2m Test Files \e[22m \e[1m\e[32m274 passed\e[39m\e[22m\e[2m | \e[22m\e[33m1 skipped\e[39m\e[90m (275)\e[39m\n\e[2m      Tests \e[22m \e[1m\e[32m2636 passed\e[39m\e[22m\e[2m | \e[22m\e[33m4 skipped\e[39m\e[90m (2640)\e[39m\n' 0
 
-echo "nodejs Nx/Vitest timeout smoke passed"
+node - "${TMPDIR}/coloured-vitest-summary/test-results.json" <<'JS'
+const assert = require('node:assert/strict');
+assert.deepEqual(
+  JSON.parse(require('node:fs').readFileSync(process.argv[2], 'utf8')),
+  { total: 2640, passed: 2636, failed: 0, skipped: 4 }
+);
+JS
+
+echo "nodejs runner summary smoke passed"

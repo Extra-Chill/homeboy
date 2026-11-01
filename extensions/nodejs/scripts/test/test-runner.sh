@@ -162,7 +162,11 @@ cd "$PROJECT_PATH"
 
 homeboy_run_step_capture OUTPUT_FILE TEST_EXIT "Tests failed" -- bash -c "$TEST_CMD \"\$@\"" _ "${RUNNER_ARGS[@]}" || true
 
-OUTPUT="$(cat "$OUTPUT_FILE")"
+# Runners colour their summaries when stdout is a TTY or FORCE_COLOR is set
+# (vitest prints `\e[2m      Tests \e[22m \e[1m\e[32m2636 passed`). Strip ANSI
+# escapes once so every parser below reads the same plain text; a coloured
+# summary that no parser recognized was reported as zero executed tests.
+OUTPUT="$(sed -E $'s/\x1b\\[[0-9;]*[A-Za-z]//g' "$OUTPUT_FILE")"
 
 # ── Parse result counts by runner detection ──
 # Runners we recognize, in priority order. Each match block sets
