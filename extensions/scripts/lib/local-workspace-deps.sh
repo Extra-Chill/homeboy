@@ -240,11 +240,93 @@ _homeboy_local_workspace_dep_one() {
         return 1
     fi
 
-    # Build the dependency from source.
     local build_cmd=""
     if [ -n "$build_b64" ]; then
         build_cmd="$(printf '%s' "$build_b64" | base64 --decode 2>/dev/null || printf '%s' "$build_b64" | base64 -d)"
     fi
+
+    # A clean repository at one commit builds the same tarball every time, so
+    # every consumer and pass at that commit reuses the first build.
+    local pack_dest cached="" cache_dir=""
+    pack_dest="$(mktemp -d "${TMPDIR:-/tmp}/homeboy-lwd.XXXXXX")"
+    if cache_dir="$(_homeboy_local_workspace_dep_cache_dir "$source_abs")"; then
+        cached="${cache_dir}/$(printf '%s\n' "$name" "$pack_abs" "$pm" "$build_cmd" "$(node --version)" | _homeboy_local_workspace_dep_sha256)"
+    fi
+    if [ -n "$cached" ] && [ -d "$cached" ]; then
+        echo "[local-workspace-deps] '$name': reusing tarball built at this commit"
+        cp "$cached"/*.tgz "$pack_dest/"
+    elif ! _homeboy_local_workspace_dep_build_and_pack \
+        "$name" "$source_abs" "$pack_abs" "$pm" "$build_cmd" "$pack_dest"; then
+        rm -rf "$pack_dest"
+        return 1
+    fi
+
+    local tarball
+    tarball="$(find "$pack_dest" -maxdepth 1 -name '*.tgz' -type f 2>/dev/null | head -1)"
+    if [ -z "$tarball" ] || [ ! -f "$tarball" ]; then
+        echo "[local-workspace-deps] '$name': no tarball produced in $pack_dest" >&2
+        rm -rf "$pack_dest"
+        return 1
+    fi
+    if [ -n "$cached" ] && [ ! -d "$cached" ]; then
+        mkdir -p "${cached}.tmp.$$" && cp "$tarball" "${cached}.tmp.$$/" \
+            && mv "${cached}.tmp.$$" "$cached" 2>/dev/null || rm -rf "${cached}.tmp.$$"
+    fi
+
+    local sha256
+    sha256="$(_homeboy_local_workspace_dep_sha256 < "$tarball")"
+    local marker
+    marker="${consumer_abs}/node_modules/.homeboy-local-workspace-deps/$(printf '%s' "$name" | _homeboy_local_workspace_dep_sha256)"
+    if [ "$(cat "$marker" 2>/dev/null)" = "$sha256" ] \
+        && [ "$(tar -xOzf "$tarball" package/package.json | _homeboy_local_workspace_dep_sha256)" \
+            = "$(_homeboy_local_workspace_dep_sha256 < "${consumer_abs}/node_modules/${name}/package.json" 2>/dev/null)" ]; then
+        echo "[local-workspace-deps] '$name': consumer already has this tarball installed"
+    else
+        # Install the built tarball into the consumer as a real package. Peer deps
+        # (React, etc.) dedupe against the consumer's already-installed copy, which
+        # is the whole point — a live symlink would not dedupe.
+        local install_flags="--no-save ${HOMEBOY_LOCAL_WORKSPACE_DEP_NPM_FLAGS:---no-audit --no-fund}"
+        echo "[local-workspace-deps] '$name': installing built tarball into consumer (npm install $install_flags)"
+        if ! ( cd "$consumer_abs" && npm install "$tarball" $install_flags ); then
+            echo "[local-workspace-deps] '$name': consumer install of built tarball failed" >&2
+            rm -rf "$pack_dest"
+            return 1
+        fi
+        mkdir -p "$(dirname "$marker")" && printf '%s' "$sha256" > "$marker"
+    fi
+
+    # Structured evidence line (mirrors the package_artifacts manifest style).
+    printf '{"type":"nodejs.local_workspace_dependency","name":"%s","source":"%s","pack_dir":"%s","tarball":"%s","sha256":"%s"}\n' \
+        "$name" "$source_abs" "$pack_abs" "$(basename "$tarball")" "$sha256"
+
+    rm -rf "$pack_dest"
+    return 0
+}
+
+# Per-worktree tarball cache for the current commit, or failure when the
+# repository has uncommitted or untracked inputs. Older commits are pruned.
+_homeboy_local_workspace_dep_cache_dir() {
+    local source_abs="$1" commit status root
+    commit="$(git -C "$source_abs" rev-parse --verify -q HEAD 2>/dev/null)" || return 1
+    status="$(git -C "$source_abs" status --porcelain --untracked-files=all 2>/dev/null)" || return 1
+    [ -z "$status" ] || return 1
+    root="$(git -C "$source_abs" rev-parse --path-format=absolute --git-path homeboy-local-workspace-deps 2>/dev/null)" || return 1
+    mkdir -p "${root}/${commit}" || return 1
+    find "$root" -mindepth 1 -maxdepth 1 ! -name "$commit" -exec rm -rf {} + 2>/dev/null || true
+    printf '%s' "${root}/${commit}"
+}
+
+_homeboy_local_workspace_dep_sha256() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum | awk '{print $1}'
+    else
+        shasum -a 256 | awk '{print $1}'
+    fi
+}
+
+# Build the dependency from source and pack it into pack_dest. Internal helper.
+_homeboy_local_workspace_dep_build_and_pack() {
+    local name="$1" source_abs="$2" pack_abs="$3" pm="$4" build_cmd="$5" pack_dest="$6"
 
     if [ -n "$build_cmd" ]; then
         echo "[local-workspace-deps] '$name': building via declared command"
@@ -282,46 +364,11 @@ _homeboy_local_workspace_dep_one() {
     fi
 
     # Pack the built package into a self-contained tarball.
-    local pack_dest
-    pack_dest="$(mktemp -d "${TMPDIR:-/tmp}/homeboy-lwd.XXXXXX")"
     echo "[local-workspace-deps] '$name': packing built artifact"
     if ! ( cd "$pack_abs" && _homeboy_local_workspace_dep_pack "$pm" "$pack_dest" ); then
         echo "[local-workspace-deps] '$name': pack failed" >&2
-        rm -rf "$pack_dest"
         return 1
     fi
-
-    local tarball
-    tarball="$(find "$pack_dest" -maxdepth 1 -name '*.tgz' -type f 2>/dev/null | head -1)"
-    if [ -z "$tarball" ] || [ ! -f "$tarball" ]; then
-        echo "[local-workspace-deps] '$name': no tarball produced in $pack_dest" >&2
-        rm -rf "$pack_dest"
-        return 1
-    fi
-
-    # Install the built tarball into the consumer as a real package. Peer deps
-    # (React, etc.) dedupe against the consumer's already-installed copy, which
-    # is the whole point — a live symlink would not dedupe.
-    local install_flags="--no-save ${HOMEBOY_LOCAL_WORKSPACE_DEP_NPM_FLAGS:---no-audit --no-fund}"
-    echo "[local-workspace-deps] '$name': installing built tarball into consumer (npm install $install_flags)"
-    if ! ( cd "$consumer_abs" && npm install "$tarball" $install_flags ); then
-        echo "[local-workspace-deps] '$name': consumer install of built tarball failed" >&2
-        rm -rf "$pack_dest"
-        return 1
-    fi
-
-    # Structured evidence line (mirrors the package_artifacts manifest style).
-    local sha256=""
-    if command -v shasum >/dev/null 2>&1; then
-        sha256="$(shasum -a 256 "$tarball" | awk '{print $1}')"
-    elif command -v sha256sum >/dev/null 2>&1; then
-        sha256="$(sha256sum "$tarball" | awk '{print $1}')"
-    fi
-    printf '{"type":"nodejs.local_workspace_dependency","name":"%s","source":"%s","pack_dir":"%s","tarball":"%s","sha256":"%s"}\n' \
-        "$name" "$source_abs" "$pack_abs" "$(basename "$tarball")" "$sha256"
-
-    rm -rf "$pack_dest"
-    return 0
 }
 
 _homeboy_local_workspace_dep_install() {
