@@ -559,24 +559,13 @@ fn refresh_homeboy_binary_inner_in_roots(
     let runner = load(&plan.runner_id)?;
     let previous_homeboy_path = runner.settings.homeboy_path.clone();
     let service_managed = runner.settings.service_managed;
-    let fresh_ssh_bootstrap = fresh_ssh_bootstrap_eligible_in_roots(&runner)?;
-    // Reconciliation settles the session's active jobs from the daemon's typed
-    // job view. Consume that postcondition rather than immediately replacing it
-    // with a new observation that can include this recovery operation's records.
-    let admission = (!fresh_ssh_bootstrap)
-        .then(|| reconciled_refresh_admission_in_roots(&plan.runner_id))
-        .transpose()?;
-    let connection_status = admission.as_ref().map(|admission| admission.status.clone());
-    let diagnostic_ssh_bootstrap = fresh_ssh_bootstrap
-        || refresh_execution_route(
-            &runner,
-            admission
-                .as_ref()
-                .expect("non-bootstrap refresh has admission"),
-        )?
-        .uses_diagnostic_ssh();
+    let RefreshTransport {
+        fresh_ssh_bootstrap,
+        diagnostic_ssh_bootstrap,
+        connection_status,
+    } = refresh_transport_in_roots(&runner)?;
     let exec_options =
-        refresh_execution_options(&plan, required_commands, diagnostic_ssh_bootstrap);
+        refresh_execution_options(&plan.script, required_commands, diagnostic_ssh_bootstrap);
     set_refresh_live_sub_phase(if plan.mode == "materialize" {
         "materialize"
     } else {
@@ -1657,8 +1646,39 @@ fn admission_readiness_timeout_error(expected_lease_id: &str, source: Error) -> 
     )
 }
 
+struct RefreshTransport {
+    fresh_ssh_bootstrap: bool,
+    diagnostic_ssh_bootstrap: bool,
+    connection_status: Option<super::RunnerStatusReport>,
+}
+
+/// Choose the refresh transport: daemon exec for a fresh connected daemon,
+/// diagnostic SSH only for a fresh bootstrap or a disconnected runner.
+fn refresh_transport_in_roots(runner: &super::Runner) -> Result<RefreshTransport> {
+    let fresh_ssh_bootstrap = fresh_ssh_bootstrap_eligible_in_roots(runner)?;
+    // Reconciliation settles the session's active jobs from the daemon's typed
+    // job view. Consume that postcondition rather than immediately replacing it
+    // with a new observation that can include this recovery operation's records.
+    let admission = (!fresh_ssh_bootstrap)
+        .then(|| reconciled_refresh_admission_in_roots(&runner.id))
+        .transpose()?;
+    let diagnostic_ssh_bootstrap = fresh_ssh_bootstrap
+        || refresh_execution_route(
+            runner,
+            admission
+                .as_ref()
+                .expect("non-bootstrap refresh has admission"),
+        )?
+        .uses_diagnostic_ssh();
+    Ok(RefreshTransport {
+        fresh_ssh_bootstrap,
+        diagnostic_ssh_bootstrap,
+        connection_status: admission.map(|admission| admission.status),
+    })
+}
+
 fn refresh_execution_options(
-    plan: &HomeboyBinaryRefreshPlan,
+    script: &str,
     required_commands: Vec<String>,
     disconnected_ssh: bool,
 ) -> RunnerExecOptions {
@@ -1666,7 +1686,7 @@ fn refresh_execution_options(
         // A fresh SSH runner has no configured Homeboy path yet. This refresh
         // materializes that path, so its script is the bootstrap capability
         // check rather than the normal configured-binary preflight.
-        return RunnerExecOptions::diagnostic_raw_shell(plan.script.clone())
+        return RunnerExecOptions::diagnostic_raw_shell(script.to_string())
             .with_diagnostic_ssh_timeout(DISCONNECTED_SSH_REFRESH_TIMEOUT)
             .with_capability_preflight(RunnerCapabilityPreflight {
                 command: "runner.refresh-homeboy bootstrap".to_string(),
@@ -1678,7 +1698,7 @@ fn refresh_execution_options(
     RunnerExecOptions::raw_command(vec![
         "bash".to_string(),
         "-lc".to_string(),
-        plan.script.clone(),
+        script.to_string(),
     ])
     .with_capability_preflight(RunnerCapabilityPreflight {
         command: "runner.refresh-homeboy".to_string(),
@@ -2519,7 +2539,14 @@ pub(crate) fn acquire_release_slot(runner_id: &str, tag: &str) -> Result<()> {
         Error::internal_unexpected(format!("runner {runner_id} has no workspace_root"))
     })?;
     let script = materialize_script(tag, &release_binaries_dir(root));
-    let (output, code) = super::exec(runner_id, RunnerExecOptions::diagnostic_raw_shell(script))?;
+    let transport = refresh_transport_in_roots(&runner)?;
+    let options = refresh_execution_options(
+        &script,
+        vec!["bash".to_string()],
+        transport.diagnostic_ssh_bootstrap,
+    );
+    let (output, code) =
+        exec_with_status_snapshot(runner_id, options, transport.connection_status)?;
     if code != 0 {
         return Err(Error::internal_unexpected(format!(
             "runner {runner_id} release acquisition exited {code}: {}",

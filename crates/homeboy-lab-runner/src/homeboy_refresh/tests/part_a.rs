@@ -858,7 +858,7 @@ fn disconnected_ssh_refresh_dispatches_the_existing_script_with_bounded_transpor
     };
 
     let options = refresh_execution_options(
-        &plan,
+        &plan.script,
         vec!["bash".to_string(), "git".to_string(), "cargo".to_string()],
         true,
     );
@@ -943,7 +943,7 @@ fn refresh_routing_preserves_disconnected_ssh_execution_and_fences_unsafe_stale_
     let route = refresh_execution_route(&runner, &disconnected)
         .expect("disconnected SSH refresh retains diagnostic execution");
     let options = refresh_execution_options(
-        &ssh_bootstrap_plan(),
+        &ssh_bootstrap_plan().script,
         vec!["bash".to_string()],
         route.uses_diagnostic_ssh(),
     );
@@ -1046,7 +1046,7 @@ fn connected_refresh_keeps_daemon_execution_options() {
         followup_commands: Vec::new(),
     };
 
-    let options = refresh_execution_options(&plan, vec!["bash".to_string()], false);
+    let options = refresh_execution_options(&plan.script, vec!["bash".to_string()], false);
 
     assert!(!options.allow_diagnostic_ssh);
     assert_eq!(options.diagnostic_ssh_timeout, None);
