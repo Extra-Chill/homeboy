@@ -1,17 +1,5 @@
 use super::*;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct AgentRuntimeDiscoveryDiagnostic {
-    pub class: String,
-    pub message: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub runtime_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub extension_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub path: Option<String>,
-}
-
 pub const AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA: &str = "homeboy/agent-task-executor-provider/v1";
 pub const DEFAULT_PI_READINESS_TIMEOUT_MS: u64 = 20_000;
 const MAX_PI_READINESS_TIMEOUT_MS: u64 = 120_000;

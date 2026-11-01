@@ -15,7 +15,6 @@ use homeboy::agents::agent_task_service::cook_registered_component_by_id;
 use homeboy::agents::agent_task_timeout::effective_provider_timeout_ms;
 use homeboy::agents::agent_tasks::dispatch_service;
 use homeboy::agents::agent_tasks::lifecycle as agent_task_lifecycle;
-use homeboy::agents::agent_tasks::provider;
 use homeboy::agents::agent_tasks::provider::ExtensionProviderAgentTaskExecutor;
 use homeboy::agents::agent_tasks::scheduler::{
     AgentTaskAggregate, AgentTaskPlan, SharedAgentTaskExecutor,
@@ -660,31 +659,13 @@ pub(crate) fn preview_cook(
         .and_then(|repo| repo.as_ref())
         .map(|repo| &repo.component);
     apply_component_verify_gates(&mut args, retained_gate_contract, component)?;
-    if let Some((provider, replay)) = unresolved_cook_backend_preview(&args, component)? {
-        return Ok((
-            cook_preview_result(
-                cook_preview_resolved_request(
-                    &args,
-                    preview_placement_policy_with_admission(&replay.argv),
-                ),
-                progress,
-                replay,
-                Some(provider),
-                None,
-            ),
-            0,
-        ));
-    }
     // Source policy is a static validation and must apply to preview exactly as
     // it applies before an execution route can inspect the destination.
-    validate_cook_request_with_provenance(&args, provenance, component)?;
-    let preview_request = dispatch_service::resolve_dispatch_request(
-        resolved_dispatch_args_for_cook(&args)?.into(),
-        component,
-    )?;
+    validate_cook_request_with_provenance(&args, provenance)?;
+    let preview_request =
+        dispatch_service::resolve_dispatch_request(resolved_dispatch_args_for_cook(&args)?.into())?;
     dispatch_service::require_model_override_acknowledgement(&preview_request)?;
     let repository = repository_result?;
-    let component = repository.as_ref().map(|repo| &repo.component);
     record_preview_phase(&mut progress, "destination_resolution");
     let (mut args, mut provision) =
         with_preview_heartbeat(&mut progress, "destination_resolution", || {
@@ -835,12 +816,7 @@ pub(crate) fn preview_cook(
         (None, None)
     };
     record_preview_phase(&mut progress, "plan_compilation");
-    let mut plan = compile_cook_plan(
-        &compile_args,
-        provision.clone(),
-        evidence.as_deref(),
-        component,
-    )?;
+    let mut plan = compile_cook_plan(&compile_args, provision.clone(), evidence.as_deref())?;
     if let Some(evidence) = evidence {
         for task in &mut plan.tasks {
             if !task.executor.config.is_object() {
@@ -1244,105 +1220,6 @@ fn with_preview_heartbeat<T>(
     });
     progress.extend(events.lock().expect("preview heartbeat events").drain(..));
     result
-}
-
-/// Resolve missing backend policy before validating task content. This keeps the
-/// task-first preview useful when the command cannot execute regardless of its
-/// prompt, evidence, or gates.
-fn unresolved_cook_backend_preview(
-    args: &AgentTaskCookArgs,
-    component: Option<&homeboy::core::component::Component>,
-) -> homeboy::core::Result<Option<(Value, PreviewReplayArgv)>> {
-    let resolution = dispatch_service::resolve_dispatch_request_with_default(
-        dispatch_args_for_cook(args).into(),
-        |id| {
-            let fallback = id
-                .filter(|_| component.is_none())
-                .and_then(|id| homeboy::core::component::load(id).ok());
-            provider::default_backend_for_component(component.or(fallback.as_ref()))
-        },
-    );
-    let Err(error) = resolution else {
-        return Ok(None);
-    };
-    if !is_missing_default_backend_policy_error(&error) {
-        return Err(error);
-    }
-
-    let catalog = homeboy::agents::agent_tasks::provider::AgentTaskProviderCatalog::discover();
-    Ok(Some(missing_backend_preview_resolution(
-        args,
-        catalog.backends(),
-    )))
-}
-
-fn is_missing_default_backend_policy_error(error: &homeboy::core::Error) -> bool {
-    error.code == homeboy::core::ErrorCode::ValidationInvalidArgument
-        && error.details["field"] == "backend"
-        && error.details["selection_required"] == true
-}
-
-const MAX_READY_BACKEND_CHOICES: usize = 10;
-
-fn missing_backend_preview_resolution(
-    args: &AgentTaskCookArgs,
-    mut ready_backends: Vec<String>,
-) -> (Value, PreviewReplayArgv) {
-    ready_backends.sort_unstable();
-    ready_backends.dedup();
-    let ready_backend_count = ready_backends.len();
-    let ready_backends_omitted = ready_backend_count.saturating_sub(MAX_READY_BACKEND_CHOICES);
-    let replay_backend = (ready_backend_count == 1).then(|| ready_backends[0].clone());
-    let mut replay = cook_preview_replay_argv(args);
-    if let Some(backend) = &replay_backend {
-        replay
-            .argv
-            .extend(["--backend".to_string(), backend.clone()]);
-    }
-    let ready_choices = ready_backends
-        .iter()
-        .take(MAX_READY_BACKEND_CHOICES)
-        .map(|backend| {
-            let mut argv = replay.argv.clone();
-            if replay_backend.is_none() {
-                argv.extend(["--backend".to_string(), backend.clone()]);
-            }
-            serde_json::json!({
-                "backend": backend,
-                "command": homeboy::core::engine::shell::quote_args(&argv),
-                "replay_argv": argv,
-            })
-        })
-        .collect::<Vec<_>>();
-    let state = if replay_backend.is_some() {
-        "ready_backend_unambiguous"
-    } else if ready_backend_count == 0 {
-        "backend_required_no_ready_route"
-    } else {
-        "backend_required_multiple_ready_routes"
-    };
-    if replay_backend.is_none() {
-        replay.requires.push(
-            "pass --backend with one ready backend before replaying; multiple eligible routes are never selected implicitly"
-                .to_string(),
-        );
-    }
-
-    (
-        serde_json::json!({
-            "backend": {
-                "state": state,
-                "default_policy": "missing",
-                "ready_backends": ready_backends.into_iter().take(MAX_READY_BACKEND_CHOICES).collect::<Vec<_>>(),
-                "ready_backend_count": ready_backend_count,
-                "ready_backends_omitted": ready_backends_omitted,
-                "ready_choices": ready_choices,
-                "replay_backend": replay_backend,
-                "readiness_command": "homeboy agent-task providers --validate-readiness",
-            },
-        }),
-        replay,
-    )
 }
 
 const MAX_PREVIEW_REPLAY_ARGS: usize = 128;
@@ -2239,27 +2116,6 @@ mod preview_tests {
     }
 
     #[test]
-    fn missing_backend_preview_requires_policy_when_no_ready_backend_exists() {
-        let (provider, replay) = missing_backend_preview_resolution(
-            &cook(&[
-                "homeboy",
-                "agent-task",
-                "cook",
-                "--preview",
-                "--prompt",
-                "implement the issue",
-            ]),
-            Vec::new(),
-        );
-
-        assert_eq!(
-            provider["backend"]["state"],
-            "backend_required_no_ready_route"
-        );
-        assert!(replay.argv.iter().all(|arg| arg != "--backend"));
-    }
-
-    #[test]
     fn cook_validation_uses_valid_fallback_without_mutating_durable_primary() {
         use homeboy::agents::agent_task_scheduler::{
             AgentTaskProviderRotationEntry, AgentTaskProviderRotationPolicy,
@@ -2271,7 +2127,7 @@ mod preview_tests {
 
         let fake = FakePi::with_probes("exit 99", "printf 'test fallback\\n'");
         let provider = fake.provider();
-        let catalog = provider::AgentTaskProviderCatalog {
+        let catalog = homeboy::agents::agent_tasks::provider::AgentTaskProviderCatalog {
             providers: vec![provider],
             ..Default::default()
         };
@@ -2323,118 +2179,6 @@ mod preview_tests {
             "invalid-primary"
         );
         assert_eq!(plan.tasks[0].executor.model(), Some("invalid-primary"));
-    }
-
-    #[test]
-    fn missing_backend_preview_replays_the_one_ready_backend() {
-        let (provider, replay) = missing_backend_preview_resolution(
-            &cook(&[
-                "homeboy",
-                "agent-task",
-                "cook",
-                "--preview",
-                "--prompt",
-                "implement the issue",
-            ]),
-            vec!["fixture".to_string()],
-        );
-
-        assert_eq!(provider["backend"]["state"], "ready_backend_unambiguous");
-        assert_eq!(provider["backend"]["replay_backend"], "fixture");
-        let replay = replay.argv;
-        assert!(replay
-            .windows(2)
-            .any(|pair| pair == ["--backend", "fixture"]));
-        Cli::try_parse_from(replay.iter().map(String::as_str))
-            .expect("ready-backend replay parses as Cook");
-    }
-
-    #[test]
-    fn missing_backend_preview_keeps_multiple_ready_backends_explicit() {
-        let (provider, replay) = missing_backend_preview_resolution(
-            &cook(&[
-                "homeboy",
-                "agent-task",
-                "cook",
-                "--preview",
-                "--prompt",
-                "implement the issue",
-            ]),
-            vec!["alpha".to_string(), "beta".to_string()],
-        );
-
-        assert_eq!(
-            provider["backend"]["state"],
-            "backend_required_multiple_ready_routes"
-        );
-        assert!(provider["backend"]["replay_backend"].is_null());
-        let choices = provider["backend"]["ready_choices"]
-            .as_array()
-            .expect("ready choices");
-        assert_eq!(
-            choices
-                .iter()
-                .map(|choice| choice["backend"].as_str().expect("backend choice"))
-                .collect::<Vec<_>>(),
-            vec!["alpha", "beta"]
-        );
-        for choice in choices {
-            let argv = choice["replay_argv"]
-                .as_array()
-                .expect("choice replay argv")
-                .iter()
-                .map(|value| value.as_str().expect("argv string"))
-                .collect::<Vec<_>>();
-            assert!(argv
-                .windows(2)
-                .any(|pair| pair == ["--backend", choice["backend"].as_str().unwrap()]));
-            Cli::try_parse_from(&argv).expect("choice replay parses as Cook");
-            assert_eq!(
-                shlex::split(choice["command"].as_str().expect("choice command"))
-                    .expect("choice command parses"),
-                argv
-            );
-        }
-        assert!(replay
-            .requires
-            .iter()
-            .any(|value| value.contains("multiple eligible routes")));
-    }
-
-    #[test]
-    fn missing_backend_preview_bounds_and_sorts_ready_choices() {
-        let ready_backends = (0..=MAX_READY_BACKEND_CHOICES)
-            .rev()
-            .map(|index| format!("backend-{index:02}"))
-            .chain(std::iter::once("backend-00".to_string()))
-            .collect();
-        let (provider, _) = missing_backend_preview_resolution(
-            &cook(&[
-                "homeboy",
-                "agent-task",
-                "cook",
-                "--preview",
-                "--prompt",
-                "implement the issue",
-            ]),
-            ready_backends,
-        );
-        let backend = &provider["backend"];
-
-        assert_eq!(
-            backend["ready_backend_count"],
-            MAX_READY_BACKEND_CHOICES + 1
-        );
-        assert_eq!(backend["ready_backends_omitted"], 1);
-        assert_eq!(
-            backend["ready_backends"].as_array().map(Vec::len),
-            Some(MAX_READY_BACKEND_CHOICES)
-        );
-        assert_eq!(backend["ready_backends"][0], "backend-00");
-        assert_eq!(
-            backend["ready_choices"].as_array().map(Vec::len),
-            Some(MAX_READY_BACKEND_CHOICES)
-        );
     }
 
     #[test]
@@ -3199,7 +2943,7 @@ mod preview_tests {
                 "--no-finalize",
             ]);
 
-            let live = validate_cook_request_with_provenance(&args, None, None)
+            let live = validate_cook_request_with_provenance(&args, None)
                 .expect_err("live preflight rejects undeclared path");
             let preview = preview_cook(args, None).expect_err("preview rejects the same path");
             assert_eq!(preview.code, live.code);
@@ -3367,7 +3111,6 @@ mod preview_tests {
                     "path": workspace,
                 }),
                 None,
-                None,
             )
             .expect("compile live Cook");
             assert_eq!(
@@ -3449,7 +3192,6 @@ process.stdout.write(JSON.stringify({type:'message_end',message:{role:'assistant
                 let mut plan = compile_cook_plan(
                     &args,
                     serde_json::json!({"action":"existing","path":workspace}),
-                    None,
                     None,
                 )
                 .unwrap();
@@ -3996,8 +3738,8 @@ process.stdout.write(JSON.stringify({type:'message_end',message:{role:'assistant
             )
             .expect("execution admits planned create");
             assert_eq!(provision["action"], "lookup_pending");
-            let plan = compile_cook_plan(&args, provision.clone(), None, None)
-                .expect("compile deferred Cook");
+            let plan =
+                compile_cook_plan(&args, provision.clone(), None).expect("compile deferred Cook");
             let projected_path = plan.tasks[0].executor.config["evidence_inputs"][0]["path"]
                 .as_str()
                 .expect("deferred projected evidence path");
@@ -4156,7 +3898,6 @@ process.stdout.write(JSON.stringify({type:'message_end',message:{role:'assistant
             let plan = compile_cook_plan(
                 &args,
                 serde_json::json!({ "action": "lookup_pending" }),
-                None,
                 None,
             )
             .expect("deferred evidence is admitted before workspace binding");
@@ -7300,7 +7041,6 @@ fn validate_cook_source_authority(
 pub(crate) fn validate_cook_request_with_provenance(
     args: &AgentTaskCookArgs,
     provenance: Option<&crate::cli_surface::CommandArgumentProvenance>,
-    component: Option<&homeboy::core::component::Component>,
 ) -> homeboy::core::Result<()> {
     validate_cook_source_authority(args, provenance)?;
     if args.dispatch.core.queue_only {
@@ -7315,10 +7055,10 @@ pub(crate) fn validate_cook_request_with_provenance(
     // unrelated prompt, evidence, and gate inputs so Cook reports the blocker
     // an operator must fix first.
     let mut dispatch = dispatch_args_for_cook(args);
-    let request = dispatch_service::resolve_dispatch_request(
-        dispatch_command_for_cook(args, dispatch.clone()),
-        component,
-    )?;
+    let request = dispatch_service::resolve_dispatch_request(dispatch_command_for_cook(
+        args,
+        dispatch.clone(),
+    ))?;
     if args.goal.is_some() && !args.dispatch.tasks.is_empty() {
         return Err(homeboy::core::Error::validation_invalid_argument(
             "task",
@@ -7480,7 +7220,7 @@ pub(crate) fn run_cook_with_executor_and_dispatcher_with_progress(
     snapshot_cook_prompt(&mut args)?;
     args.gates.snapshot_file_inputs()?;
     apply_component_verify_gates(&mut args, retained_gate_contract, component)?;
-    validate_cook_request_with_provenance(&args, provenance, component)?;
+    validate_cook_request_with_provenance(&args, provenance)?;
     confirm_model_override(&mut args)?;
     let repository = repository_result?;
     if !args.no_progress {
@@ -7549,7 +7289,6 @@ pub(crate) fn run_cook_with_executor_and_dispatcher_with_progress(
         provision,
         no_progress,
         provenance,
-        repository.as_ref().map(|repo| &repo.component),
     )
 }
 
@@ -7561,7 +7300,7 @@ pub(crate) fn preflight_cook_execution_request(
 ) -> homeboy::core::Result<()> {
     snapshot_cook_prompt(&mut *args)?;
     args.gates.snapshot_file_inputs()?;
-    validate_cook_request_with_provenance(args, provenance, None)?;
+    validate_cook_request_with_provenance(args, provenance)?;
     confirm_model_override(args)?;
     Ok(())
 }
@@ -7579,8 +7318,7 @@ pub(crate) fn require_model_override_acknowledgement_for_cook(
     }
     let dispatch: dispatch_service::AgentTaskDispatchCommand =
         resolved_dispatch_args_for_cook(args)?.into();
-    let component = dispatch.declared_component();
-    let request = dispatch_service::resolve_dispatch_request(dispatch, component.as_ref())?;
+    let request = dispatch_service::resolve_dispatch_request(dispatch)?;
     dispatch_service::require_model_override_acknowledgement(&request)
 }
 
@@ -7818,7 +7556,6 @@ fn run_preflight_cook_execution(
     provision: Value,
     no_progress: bool,
     provenance: Option<&crate::cli_surface::CommandArgumentProvenance>,
-    component: Option<&homeboy::core::component::Component>,
 ) -> CmdResult<Value> {
     let mut dispatch_args = resolved_dispatch_args_for_cook(&args)?;
     let requested_cook_id = dispatch_args.run_id.clone();
@@ -7854,7 +7591,7 @@ fn run_preflight_cook_execution(
         })?;
         (run_id, agent_task_service::read_plan(attempt_plan)?)
     } else {
-        let plan = compile_cook_plan(&args, provision.clone(), None, component)?;
+        let plan = compile_cook_plan(&args, provision.clone(), None)?;
         (run_id, plan)
     };
     if args.attempt_plan.is_some() {
@@ -8548,7 +8285,6 @@ pub(crate) fn compile_cook_plan(
     args: &AgentTaskCookArgs,
     provision: Value,
     projected_evidence: Option<&[Value]>,
-    component: Option<&homeboy::core::component::Component>,
 ) -> homeboy::core::Result<AgentTaskPlan> {
     let pending_lookup = matches!(
         provision.get("action").and_then(Value::as_str),
@@ -8598,10 +8334,8 @@ pub(crate) fn compile_cook_plan(
         &evidence,
         &projected_paths,
     )?;
-    let mut request = dispatch_service::resolve_dispatch_request(
-        dispatch_command_for_cook(args, dispatch),
-        component,
-    )?;
+    let mut request =
+        dispatch_service::resolve_dispatch_request(dispatch_command_for_cook(args, dispatch))?;
     let mut plan = match dispatch_service::build_controller_dispatch_plan(&mut request) {
         Ok(plan) => plan,
         // A managed promotion handle may be intentionally unavailable until

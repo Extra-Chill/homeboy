@@ -3090,7 +3090,7 @@ fn classification_next_actions(
             let mut actions = vec![
                 failure_evidence,
                 CommandNextAction::new(
-                    "show provider declarations and discovery diagnostics",
+                    "show provider declarations",
                     "homeboy agent-task providers --full".to_string(),
                 )
                 .with_kind(CommandNextActionKind::Show),

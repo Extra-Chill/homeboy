@@ -29,9 +29,9 @@ use crate::agent_task_secrets::AgentTaskSecretResolutionError;
 use crate::agent_task_timeout::timeout_with_grace;
 
 pub(crate) use homeboy_core::command_invocation::CommandInvocation;
+use homeboy_core::defaults;
 use homeboy_core::engine::shell;
 pub(crate) use homeboy_core::secret_env_plan::SecretEnvPlan;
-use homeboy_core::{component, defaults, Error};
 
 mod admission;
 pub(crate) mod artifact_finalization;
@@ -113,8 +113,6 @@ pub use usage_cap::{
 };
 pub use workspace_types::*;
 
-#[cfg(test)]
-use catalog::component_default_backend;
 /// Empty-change classification shared with the scheduler's review-form deferral
 /// guard (#15880), so both entry points reach one verdict.
 pub(crate) use outcome_normalization::{

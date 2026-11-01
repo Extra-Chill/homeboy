@@ -15,7 +15,7 @@ use crate::agent_task_dispatch_plan::{
 };
 use crate::agent_task_lifecycle::{AgentTaskRunRecord, AgentTaskRunState};
 use crate::agent_task_provider::{
-    default_backend_for_component, resolve_provider_for_backend, AgentTaskProviderCatalog,
+    default_backend, resolve_provider_for_backend, AgentTaskProviderCatalog,
 };
 use crate::agent_task_scheduler::{
     AgentTaskAggregate, AgentTaskPlan, AgentTaskProviderRotationPolicy, AgentTaskRetryPolicy,
@@ -45,9 +45,6 @@ pub use crate::agent_task_schedule::ResolvedAgentTaskProviderPolicy;
 pub enum BackendSelectionSource {
     /// Explicit `--backend` flag on the command line.
     Cli,
-    /// Resolved from a component- or extension-scoped `agent_task.default_backend`
-    /// policy (higher priority than the Homeboy config default).
-    Policy,
     /// Resolved from the Homeboy config `agent_task.default_backend`.
     Config,
     /// No policy names a backend, so Cook selected its built-in coding backend
@@ -508,14 +505,11 @@ impl AgentTaskDispatchCommand {
     }
 }
 
-/// Resolve a typed dispatch request from command-surface inputs, applying the
-/// declared default-backend policy from the caller-resolved component when
-/// `--backend` is absent. `None` uses extension and global policy only.
+/// Resolve a dispatch request using CLI, Homeboy config, then built-in Pi.
 pub fn resolve_dispatch_request(
     command: AgentTaskDispatchCommand,
-    component: Option<&homeboy_core::component::Component>,
 ) -> Result<AgentTaskDispatchRequest> {
-    resolve_dispatch_request_with_default(command, |_| default_backend_for_component(component))
+    resolve_dispatch_request_with_default(command, default_backend)
 }
 
 /// Resolve the provider policy the controller passes to an execution boundary.
@@ -537,9 +531,8 @@ pub fn controller_resolved_execution_policy(
 pub fn resolve_cook_initial_provider_route_with_catalog(
     command: AgentTaskDispatchCommand,
     catalog: &AgentTaskProviderCatalog,
-    component: Option<&homeboy_core::component::Component>,
 ) -> Result<AgentTaskInitialProviderRoute> {
-    let request = resolve_dispatch_request(command, component)?;
+    let request = resolve_dispatch_request(command)?;
     let policy = request
         .core
         .resolved_provider_policy
@@ -677,116 +670,12 @@ pub fn build_controller_dispatch_plan(
     build_dispatch_plan(request)
 }
 
-/// Resolve a typed dispatch request, using the supplied default-backend resolver
-/// so tests can inject a deterministic policy.
+/// Resolve a request with an injectable Homeboy config default for tests.
 pub fn resolve_dispatch_request_with_default(
     command: AgentTaskDispatchCommand,
-    default_backend: impl FnOnce(Option<&str>) -> Result<Option<String>>,
-) -> Result<AgentTaskDispatchRequest> {
-    resolve_dispatch_request_with_sources(command, default_backend, config_default_backend, || {
-        AgentTaskProviderCatalog::discover().backends()
-    })
-}
-
-/// Resolve a dispatch request against one observed provider catalog.
-///
-/// Admission callers use this when the selected route and the remediation
-/// choices must come from the same catalog snapshot.
-pub fn resolve_dispatch_request_with_default_and_catalog(
-    command: AgentTaskDispatchCommand,
-    default_backend: impl FnOnce(Option<&str>) -> Result<Option<String>>,
-    catalog: &AgentTaskProviderCatalog,
-) -> Result<AgentTaskDispatchRequest> {
-    resolve_dispatch_request_with_sources(command, default_backend, config_default_backend, || {
-        catalog.backends()
-    })
-}
-
-/// The configured Homeboy-config `agent_task.default_backend`, when set. Read via
-/// the public `defaults` surface so the dispatch service can name the selection
-/// source without touching fleet-owned provider policy code (#5685).
-fn config_default_backend() -> Option<String> {
-    homeboy_core::defaults::load_config()
-        .agent_task
-        .default_backend
-        .filter(|backend| !backend.trim().is_empty())
-}
-
-/// The validation error raised when `agent-task cook` was given no `--backend`
-/// and no policy layer supplies a default.
-///
-/// The error enumerates the backends the discovered provider catalog declares
-/// so the operator gets a usable value from the failing command itself (#11478).
-/// Enumeration is *declaration*, not readiness — a listed backend can still fail
-/// its runner/config preflight at dispatch — so the message points at
-/// `agent-task providers --validate-readiness` rather than promising usability.
-///
-/// That hint deliberately omits `--backend`: the unscoped form validates every
-/// declared backend and reports each verdict, so the operator is sent to one
-/// command that answers "which backend is usable here?" instead of guessing a
-/// backend per invocation (#12569).
-///
-/// A fresh or reset `agent_task` config (`{}`) hits this same path with no
-/// discoverable way back to a working default short of reading source or an
-/// old backup, so the remediation also names `providers --set-default`, which
-/// derives and writes a live-verified `default_backend`/`rotation` in one
-/// step (#13634).
-fn missing_default_backend_error(available_backends: &[String]) -> Error {
-    const PROBLEM: &str =
-        "agent-task cook requires --backend because no default backend policy is configured";
-
-    let mut tried = vec![
-        "Set agent_task.default_backend in component, extension, or Homeboy config policy, or pass --backend explicitly.".to_string(),
-        "Run `homeboy agent-task providers --set-default` to derive and persist a working default_backend (and rotation) from live backend readiness.".to_string(),
-    ];
-
-    let problem = if available_backends.is_empty() {
-        tried.push(
-            "No agent-task executor providers were discovered here; run `homeboy agent-task providers` to diagnose runtime discovery."
-                .to_string(),
-        );
-        PROBLEM.to_string()
-    } else {
-        tried.push(
-            "Listed backends are declared, not verified: run `homeboy agent-task providers --validate-readiness` to see every listed backend's readiness and pick one that is usable."
-                .to_string(),
-        );
-        format!(
-            "{PROBLEM}; available backends: {}",
-            available_backends.join(", ")
-        )
-    };
-
-    tried.push(format!(
-        "Install the built-in `{BUILTIN_DEFAULT_BACKEND}` coding backend: Cook selects it automatically when no policy names a backend."
-    ));
-
-    let mut error = Error::validation_invalid_argument("backend", problem, None, Some(tried));
-    // Consumers distinguish an omitted route selection from an executor outage
-    // without coupling to the rendered validation message.
-    error.details["selection_required"] = Value::Bool(true);
-    error
-}
-
-/// Inject configuration defaults for deterministic source-classification tests.
-#[cfg(test)]
-fn resolve_dispatch_request_with_default_and_config(
-    command: AgentTaskDispatchCommand,
-    default_backend: impl FnOnce(Option<&str>) -> Result<Option<String>>,
     config_default: impl FnOnce() -> Option<String>,
 ) -> Result<AgentTaskDispatchRequest> {
-    resolve_dispatch_request_with_sources(command, default_backend, config_default, || {
-        AgentTaskProviderCatalog::discover().backends()
-    })
-}
-
-fn resolve_dispatch_request_with_sources(
-    command: AgentTaskDispatchCommand,
-    default_backend: impl FnOnce(Option<&str>) -> Result<Option<String>>,
-    config_default: impl FnOnce() -> Option<String>,
-    available_backends: impl FnOnce() -> Vec<String>,
-) -> Result<AgentTaskDispatchRequest> {
-    let config_default = config_default();
+    let config_default = config_default().filter(|backend| !backend.trim().is_empty());
     if command
         .model
         .as_deref()
@@ -800,46 +689,16 @@ fn resolve_dispatch_request_with_sources(
         ));
     }
     let submitted_policy = command.core.resolved_provider_policy.clone();
-    let (backend, source) = match submitted_policy.as_ref() {
-        Some(policy) => (policy.backend.clone(), BackendSelectionSource::Policy),
-        None => match command.backend.clone() {
-            Some(backend) => (backend, BackendSelectionSource::Cli),
-            None => {
-                match default_backend(command.component.as_deref().or(command.repo.as_deref()))? {
-                    Some(resolved) => {
-                        // The policy resolver prefers component/extension defaults over the
-                        // Homeboy config default; if the resolved value matches the config
-                        // default we attribute it to config, otherwise to higher-priority
-                        // component/extension policy.
-                        let source = if config_default.as_deref() == Some(resolved.as_str()) {
-                            BackendSelectionSource::Config
-                        } else {
-                            BackendSelectionSource::Policy
-                        };
-                        (resolved, source)
-                    }
-                    None => {
-                        // The provider catalog already knows every dispatchable
-                        // backend at this point, so discover it rather than making
-                        // the operator run `agent-task providers` and parse JSON to
-                        // answer a question this command can answer (#11478).
-                        // Discovery only happens when no policy names a backend.
-                        let available = available_backends();
-                        if available
-                            .iter()
-                            .any(|backend| backend == BUILTIN_DEFAULT_BACKEND)
-                        {
-                            // Pi is the built-in coding backend (#15932).
-                            (
-                                BUILTIN_DEFAULT_BACKEND.to_string(),
-                                BackendSelectionSource::Builtin,
-                            )
-                        } else {
-                            return Err(missing_default_backend_error(&available));
-                        }
-                    }
-                }
-            }
+    let (backend, source) = match command.backend.clone() {
+        Some(backend) => (backend, BackendSelectionSource::Cli),
+        None => match config_default.clone() {
+            Some(backend) => (backend, BackendSelectionSource::Config),
+            // Discovery always declares Pi. Injected catalogs without Pi use
+            // the normal unknown-backend resolution error later.
+            None => (
+                BUILTIN_DEFAULT_BACKEND.to_string(),
+                BackendSelectionSource::Builtin,
+            ),
         },
     };
 
@@ -865,7 +724,12 @@ fn resolve_dispatch_request_with_sources(
         repo: command.repo,
         component: command.component,
         task_url: command.task_url,
-        backend,
+        // A controller-bound execution route is already resolved, not another
+        // default-backend policy source.
+        backend: submitted_policy
+            .as_ref()
+            .map(|policy| policy.backend.clone())
+            .unwrap_or(backend),
         selector: submitted_policy
             .as_ref()
             .and_then(|policy| policy.selector.clone())
@@ -879,7 +743,11 @@ fn resolve_dispatch_request_with_sources(
         run_id: command.run_id,
         task_id: command.task_id,
         core: command.core,
-        backend_selection,
+        backend_selection: if submitted_policy.is_some() {
+            None
+        } else {
+            backend_selection
+        },
     })
 }
 
@@ -898,8 +766,7 @@ pub fn run_dispatch_command_with_provider_catalog(
     executor: SharedAgentTaskExecutor,
     catalog: &AgentTaskProviderCatalog,
 ) -> Result<(Value, i32)> {
-    let component = command.declared_component();
-    let request = resolve_dispatch_request(command, component.as_ref())?;
+    let request = resolve_dispatch_request(command)?;
     let result = dispatch_with_provider_catalog(request, executor, catalog)?;
     Ok((command_json_value(result.value)?, result.exit_code))
 }
@@ -1016,14 +883,11 @@ mod tests {
             core.resolved_provider_policy.as_mut().unwrap().model =
                 Some("configured-model".to_string());
             core.acknowledge_model_override = true;
-            let mut request = resolve_dispatch_request(
-                AgentTaskDispatchCommand {
-                    prompt: Some("use the configured policy".to_string()),
-                    core,
-                    ..Default::default()
-                },
-                None,
-            )
+            let mut request = resolve_dispatch_request(AgentTaskDispatchCommand {
+                prompt: Some("use the configured policy".to_string()),
+                core,
+                ..Default::default()
+            })
             .expect("resolve inherited model");
             assert!(
                 request.model.is_none(),
@@ -1508,87 +1372,9 @@ mod tests {
     }
 
     #[test]
-    fn missing_default_backend_error_enumerates_available_backends() {
-        let error = missing_default_backend_error(&[
-            "claude-code".to_string(),
-            "codex".to_string(),
-            "pi".to_string(),
-        ]);
-
-        assert!(
-            error
-                .message
-                .contains("requires --backend because no default backend policy is configured"),
-            "{}",
-            error.message
-        );
-        assert!(
-            error
-                .message
-                .contains("available backends: claude-code, codex, pi"),
-            "the failing command must name the values it will accept: {}",
-            error.message
-        );
-        // The configuration fix stays first; readiness is a caveat, not a promise.
-        assert_eq!(
-            error.details["tried"][0].as_str(),
-            Some("Set agent_task.default_backend in component, extension, or Homeboy config policy, or pass --backend explicitly.")
-        );
-        // A lost or empty `agent_task` config must recover without archaeology:
-        // point at the command that derives and writes a working default from
-        // live readiness (#13634).
-        assert!(error.details["tried"][1]
-            .as_str()
-            .expect("set-default remediation")
-            .contains("--set-default"));
-        assert!(error.details["tried"][2]
-            .as_str()
-            .expect("readiness caveat")
-            .contains("--validate-readiness"));
-        assert_eq!(error.details["selection_required"], true);
-    }
-
-    #[test]
-    fn missing_default_backend_error_without_providers_points_at_discovery() {
-        let error = missing_default_backend_error(&[]);
-
-        assert!(
-            !error.message.contains("available backends"),
-            "an empty catalog must not advertise an empty list: {}",
-            error.message
-        );
-        assert!(error.details["tried"][2]
-            .as_str()
-            .expect("discovery hint")
-            .contains("homeboy agent-task providers"));
-    }
-
-    #[test]
-    fn missing_default_backend_is_raised_when_no_policy_resolves_a_backend() {
-        let error = resolve_dispatch_request_with_sources(
-            command_with_backend(None),
-            |_| Ok(None),
-            || None,
-            Vec::new,
-        )
-        .expect_err("no backend and no default policy");
-
-        assert_eq!(
-            error.code,
-            homeboy_core::ErrorCode::ValidationInvalidArgument
-        );
-        assert_eq!(error.details["field"].as_str(), Some("backend"));
-    }
-
-    #[test]
     fn builtin_pi_backend_is_selected_when_no_policy_names_one() {
-        let request = resolve_dispatch_request_with_sources(
-            command_with_backend(None),
-            |_| Ok(None),
-            || None,
-            || vec!["codex".to_string(), "pi".to_string()],
-        )
-        .expect("pi is declared");
+        let request = resolve_dispatch_request_with_default(command_with_backend(None), || None)
+            .expect("pi is declared");
 
         assert_eq!(request.backend, "pi");
         let selection = request.backend_selection.expect("selection");
@@ -1598,9 +1384,8 @@ mod tests {
 
     #[test]
     fn explicit_backend_is_attributed_to_cli_source() {
-        let request = resolve_dispatch_request_with_default_and_config(
+        let request = resolve_dispatch_request_with_default(
             command_with_backend(Some("claude-code")),
-            |_| Ok(Some("pi".to_string())),
             || Some("pi".to_string()),
         )
         .expect("request");
@@ -1614,12 +1399,11 @@ mod tests {
 
     #[test]
     fn explicit_backend_matching_default_does_not_warn() {
-        let request = resolve_dispatch_request_with_default_and_config(
-            command_with_backend(Some("pi")),
-            |_| Ok(Some("pi".to_string())),
-            || Some("pi".to_string()),
-        )
-        .expect("request");
+        let request =
+            resolve_dispatch_request_with_default(command_with_backend(Some("pi")), || {
+                Some("pi".to_string())
+            })
+            .expect("request");
 
         let selection = request.backend_selection.expect("selection");
         assert_eq!(selection.source, BackendSelectionSource::Cli);
@@ -1628,11 +1412,9 @@ mod tests {
 
     #[test]
     fn config_default_backend_is_attributed_to_config_source() {
-        let request = resolve_dispatch_request_with_default_and_config(
-            command_with_backend(None),
-            |_| Ok(Some("pi".to_string())),
-            || Some("pi".to_string()),
-        )
+        let request = resolve_dispatch_request_with_default(command_with_backend(None), || {
+            Some("pi".to_string())
+        })
         .expect("request");
 
         let selection = request.backend_selection.expect("selection");
@@ -1642,72 +1424,10 @@ mod tests {
     }
 
     #[test]
-    fn cook_route_uses_the_supplied_component_without_reloading_by_id() {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let component = homeboy_core::component::Component {
-                id: "unregistered-cook-component".to_string(),
-                extensions: Some(std::collections::HashMap::from([(
-                    "policy".to_string(),
-                    homeboy_core::component::ScopedExtensionConfig {
-                        settings: std::collections::HashMap::from([(
-                            "agent_task".to_string(),
-                            serde_json::json!({"default_backend": "supplied-component-backend"}),
-                        )]),
-                        ..Default::default()
-                    },
-                )])),
-                ..Default::default()
-            };
-            assert!(homeboy_core::component::load(&component.id).is_err());
-            let command = AgentTaskDispatchCommand {
-                repo: Some("owning-repository".to_string()),
-                component: Some(component.id.clone()),
-                model: Some("fixed-model".to_string()),
-                ..Default::default()
-            };
-            let request = resolve_dispatch_request(command.clone(), Some(&component))
-                .expect("resolve the supplied component policy");
-            assert_eq!(request.backend, "supplied-component-backend");
-            assert_eq!(request.repo.as_deref(), Some("owning-repository"));
-            assert_eq!(request.component.as_deref(), Some(component.id.as_str()));
-            let route = resolve_cook_initial_provider_route_with_catalog(
-                command,
-                &AgentTaskProviderCatalog::discover(),
-                Some(&component),
-            )
-            .expect("resolve Cook route without a registered component");
-            assert_eq!(route.backend, "supplied-component-backend");
-        });
-    }
-
-    #[test]
-    fn component_policy_resolution_does_not_replace_repository_identity() {
-        let mut command = command_with_backend(None);
-        command.repo = Some("blocks-engine".to_string());
-        command.component = Some("php-transformer".to_string());
-
-        let request = resolve_dispatch_request_with_default_and_config(
-            command,
-            |component| {
-                assert_eq!(component, Some("php-transformer"));
-                Ok(Some("pi".to_string()))
-            },
-            || None,
-        )
-        .expect("component-scoped request");
-
-        assert_eq!(request.repo.as_deref(), Some("blocks-engine"));
-        assert_eq!(request.component.as_deref(), Some("php-transformer"));
-        assert_eq!(request.backend, "pi");
-    }
-
-    #[test]
     fn configured_default_projects_the_same_initial_cook_route() {
-        let request = resolve_dispatch_request_with_default_and_config(
-            command_with_backend(None),
-            |_| Ok(Some("pi".to_string())),
-            || Some("pi".to_string()),
-        )
+        let request = resolve_dispatch_request_with_default(command_with_backend(None), || {
+            Some("pi".to_string())
+        })
         .expect("configured default request");
         let route =
             initial_provider_route_from_policy(controller_resolved_execution_policy_with_sources(
@@ -1724,11 +1444,9 @@ mod tests {
 
     #[test]
     fn unavailable_default_with_rotation_projects_the_first_rotation_route() {
-        let request = resolve_dispatch_request_with_default_and_config(
-            command_with_backend(None),
-            |_| Ok(Some("unavailable-default".to_string())),
-            || Some("unavailable-default".to_string()),
-        )
+        let request = resolve_dispatch_request_with_default(command_with_backend(None), || {
+            Some("unavailable-default".to_string())
+        })
         .expect("configured default request");
         let route =
             initial_provider_route_from_policy(controller_resolved_execution_policy_with_sources(
@@ -1754,29 +1472,12 @@ mod tests {
     }
 
     #[test]
-    fn component_or_extension_default_is_attributed_to_policy_source() {
-        let request = resolve_dispatch_request_with_default_and_config(
-            command_with_backend(None),
-            |_| Ok(Some("component-backend".to_string())),
-            || Some("pi".to_string()),
-        )
-        .expect("request");
-
-        let selection = request.backend_selection.expect("selection");
-        assert_eq!(selection.backend, "component-backend");
-        assert_eq!(selection.source, BackendSelectionSource::Policy);
-        // Default-policy selections never count as an explicit override.
-        assert!(!selection.overrides_default);
-    }
-
-    #[test]
     fn explicit_backend_without_model_takes_the_model_of_its_first_rotation_entry() {
-        let request = resolve_dispatch_request_with_default_and_config(
-            command_with_backend(Some("pi")),
-            |_| Ok(Some("codex".to_string())),
-            || Some("codex".to_string()),
-        )
-        .expect("explicit Pi request");
+        let request =
+            resolve_dispatch_request_with_default(command_with_backend(Some("pi")), || {
+                Some("codex".to_string())
+            })
+            .expect("explicit Pi request");
         let route =
             initial_provider_route_from_policy(controller_resolved_execution_policy_with_sources(
                 &request,
@@ -1813,13 +1514,12 @@ mod tests {
 
     #[test]
     fn explicit_model_prevents_default_rotation_from_replacing_the_initial_invocation() {
-        let request = resolve_dispatch_request_with_default_and_config(
+        let request = resolve_dispatch_request_with_default(
             AgentTaskDispatchCommand {
                 prompt: Some("Cook with Sol.".to_string()),
                 model: Some("openai/gpt-5.6-sol".to_string()),
                 ..AgentTaskDispatchCommand::default()
             },
-            |_| Ok(Some("pi".to_string())),
             || Some("pi".to_string()),
         )
         .expect("request");

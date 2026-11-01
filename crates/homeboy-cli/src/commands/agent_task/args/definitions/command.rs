@@ -575,7 +575,7 @@ pub struct ProvidersArgs {
     /// stays within caller display limits (#9654).
     #[arg(long = "catalog", visible_alias = "all")]
     pub catalog: bool,
-    /// Return the complete provider declarations and discovery diagnostics.
+    /// Return the complete provider declarations.
     #[arg(long)]
     pub full: bool,
     /// Emit the unfiltered provider DTO catalog for machine admission clients.

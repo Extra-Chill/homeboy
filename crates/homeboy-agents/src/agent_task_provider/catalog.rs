@@ -30,15 +30,12 @@ fn shared_provider_evidence() -> Arc<Mutex<ProviderEvidenceStore>> {
 #[derive(Debug, Clone, Default)]
 pub struct ExtensionProviderAgentTaskExecutor {
     providers: Vec<AgentTaskExecutorProvider>,
-    diagnostics: Vec<AgentRuntimeDiscoveryDiagnostic>,
     pub(super) evidence: Arc<Mutex<ProviderEvidenceStore>>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentTaskProviderCatalog {
     pub providers: Vec<AgentTaskExecutorProvider>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub diagnostics: Vec<AgentRuntimeDiscoveryDiagnostic>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
 }
@@ -54,10 +51,6 @@ impl AgentTaskProviderCatalog {
 
     pub fn providers(&self) -> &[AgentTaskExecutorProvider] {
         &self.providers
-    }
-
-    pub fn diagnostics(&self) -> &[AgentRuntimeDiscoveryDiagnostic] {
-        &self.diagnostics
     }
 
     /// The distinct backends this catalog declares, sorted and deduped.
@@ -92,24 +85,20 @@ impl AgentTaskProviderCatalog {
 }
 
 fn discover_provider_catalog() -> AgentTaskProviderCatalog {
-    let catalog = super::discovery::discover_agent_task_executor_provider_catalog();
-    let version = provider_catalog_version(&catalog.providers, &catalog.diagnostics);
+    let providers = super::discovery::discover_agent_task_executor_providers();
+    let version = provider_catalog_version(&providers);
     AgentTaskProviderCatalog {
-        providers: catalog.providers,
-        diagnostics: catalog.diagnostics,
+        providers,
         version: Some(version),
     }
 }
 
-fn provider_catalog_version(
-    providers: &[AgentTaskExecutorProvider],
-    diagnostics: &[AgentRuntimeDiscoveryDiagnostic],
-) -> String {
+fn provider_catalog_version(providers: &[AgentTaskExecutorProvider]) -> String {
     // The handoff version represents the selected catalog content, not the
     // instant discovery happened. That makes stale controller/Lab catalogs
     // detectable without treating an unchanged rediscovery as drift.
-    let content = serde_json::to_vec(&(providers, diagnostics))
-        .expect("agent-task provider catalog must serialize");
+    let content =
+        serde_json::to_vec(providers).expect("agent-task provider catalog must serialize");
     format!("resolved:{}", content_hash::sha256_hex(&content))
 }
 
@@ -121,7 +110,6 @@ impl ExtensionProviderAgentTaskExecutor {
     pub fn from_catalog(catalog: AgentTaskProviderCatalog) -> Self {
         Self {
             providers: catalog.providers,
-            diagnostics: catalog.diagnostics,
             evidence: shared_provider_evidence(),
         }
     }
@@ -135,7 +123,6 @@ impl ExtensionProviderAgentTaskExecutor {
     pub(super) fn with_providers(providers: Vec<AgentTaskExecutorProvider>) -> Self {
         Self {
             providers,
-            diagnostics: Vec::new(),
             evidence: Arc::new(Mutex::new(ProviderEvidenceStore {
                 readiness: ProviderRuntimeReadinessCache::isolated(),
                 ..Default::default()
@@ -149,7 +136,6 @@ impl ExtensionProviderAgentTaskExecutor {
     pub(super) fn sharing_evidence_with(&self, providers: Vec<AgentTaskExecutorProvider>) -> Self {
         Self {
             providers,
-            diagnostics: Vec::new(),
             evidence: Arc::clone(&self.evidence),
         }
     }
@@ -157,56 +143,16 @@ impl ExtensionProviderAgentTaskExecutor {
     pub fn providers(&self) -> &[AgentTaskExecutorProvider] {
         &self.providers
     }
-
-    pub fn diagnostics(&self) -> &[AgentRuntimeDiscoveryDiagnostic] {
-        &self.diagnostics
-    }
-
-    pub fn default_backend(&self) -> homeboy_core::Result<Option<String>> {
-        default_backend_for_component(None)
-    }
-
-    #[cfg(test)]
-    pub(super) fn default_backend_with_policy(
-        &self,
-        extensions: Vec<homeboy_extension_contract::ExtensionManifest>,
-        config: &defaults::HomeboyConfig,
-    ) -> homeboy_core::Result<Option<String>> {
-        default_backend_from_policy_sources(None, extensions, || {
-            config.agent_task.default_backend.clone()
-        })
-    }
 }
 
-pub fn default_backend() -> homeboy_core::Result<Option<String>> {
-    default_backend_for_component(None)
+pub fn default_backend() -> Option<String> {
+    defaults::load_config()
+        .agent_task
+        .default_backend
+        .filter(|backend| !backend.trim().is_empty())
 }
 
-pub fn default_backend_for_component(
-    component: Option<&component::Component>,
-) -> homeboy_core::Result<Option<String>> {
-    default_backend_from_policy_sources(
-        component,
-        homeboy_core::extension::catalog::load_all_extensions().unwrap_or_default(),
-        || defaults::load_config().agent_task.default_backend,
-    )
-}
-
-pub(super) fn runtime_discovery_diagnostics_for_backend(
-    diagnostics: &[AgentRuntimeDiscoveryDiagnostic],
-    backend: &str,
-) -> Vec<AgentRuntimeDiscoveryDiagnostic> {
-    diagnostics
-        .iter()
-        .filter(|diagnostic| diagnostic.runtime_id.as_deref() == Some(backend))
-        .cloned()
-        .collect()
-}
-
-pub(super) fn provider_not_found_message(
-    backend: &str,
-    diagnostics: &[AgentRuntimeDiscoveryDiagnostic],
-) -> String {
+pub(super) fn provider_not_found_message(backend: &str) -> String {
     let mut base = format!(
         "no extension agent-task provider found for backend '{backend}' (no installed provider can serve this backend)"
     );
@@ -214,91 +160,11 @@ pub(super) fn provider_not_found_message(
         base.push_str("; ");
         base.push_str(&crate::agent_task_builtin_backend::builtin_backend_remediation(backend));
     }
-    if diagnostics.is_empty() {
-        return base;
-    }
-    let details = diagnostics
-        .iter()
-        .map(format_runtime_discovery_diagnostic)
-        .collect::<Vec<_>>()
-        .join("; ");
-    format!("{base}; runtime discovery diagnostics: {details}")
-}
-
-pub(super) fn format_runtime_discovery_diagnostic(
-    diagnostic: &AgentRuntimeDiscoveryDiagnostic,
-) -> String {
-    match diagnostic.path.as_deref() {
-        Some(path) => format!("{} at {}: {}", diagnostic.class, path, diagnostic.message),
-        None => format!("{}: {}", diagnostic.class, diagnostic.message),
-    }
+    base
 }
 
 pub fn provider_requires_cwd_git_checkout(backend: &str, selector: Option<&str>) -> bool {
     AgentTaskProviderCatalog::discover().provider_requires_cwd_git_checkout(backend, selector)
-}
-
-pub(super) fn default_backend_from_policy_sources<F>(
-    component: Option<&component::Component>,
-    extensions: Vec<homeboy_extension_contract::ExtensionManifest>,
-    config_default: F,
-) -> homeboy_core::Result<Option<String>>
-where
-    F: FnOnce() -> Option<String>,
-{
-    if let Some(component) = component {
-        if let Some(default_backend) = component_default_backend(component) {
-            return Ok(Some(default_backend));
-        }
-    }
-
-    let extension_defaults: Vec<String> = extensions
-        .into_iter()
-        .filter_map(|manifest| {
-            manifest
-                .agent_task
-                .and_then(|agent_task| agent_task.default_backend)
-        })
-        .filter(|backend| !backend.trim().is_empty())
-        .collect();
-
-    if extension_defaults.len() > 1 {
-        return Err(Error::validation_invalid_argument(
-            "backend",
-            "agent-task default backend is ambiguous because multiple extension policies declare agent_task.default_backend",
-            None,
-            Some(vec![
-                "Set /agent_task/default_backend in Homeboy config or pass --backend explicitly.".to_string(),
-            ]),
-        ));
-    }
-    if let Some(default_backend) = extension_defaults.into_iter().next() {
-        return Ok(Some(default_backend));
-    }
-
-    Ok(config_default().filter(|backend| !backend.trim().is_empty()))
-}
-
-pub(super) fn component_default_backend(component: &component::Component) -> Option<String> {
-    component
-        .extensions
-        .as_ref()?
-        .values()
-        .find_map(|extension| {
-            extension
-                .settings
-                .get("agent_task")
-                .and_then(|value| value.get("default_backend"))
-                .and_then(Value::as_str)
-                .or_else(|| {
-                    extension
-                        .settings
-                        .get("agent_task_default_backend")
-                        .and_then(Value::as_str)
-                })
-                .filter(|backend| !backend.trim().is_empty())
-                .map(String::from)
-        })
 }
 
 #[cfg(test)]
@@ -307,19 +173,10 @@ mod tests {
 
     #[test]
     fn catalog_version_is_deterministic_and_detects_stale_content() {
-        let empty = provider_catalog_version(&[], &[]);
-        assert_eq!(empty, provider_catalog_version(&[], &[]));
+        let empty = provider_catalog_version(&[]);
+        assert_eq!(empty, provider_catalog_version(&[]));
 
-        let changed = provider_catalog_version(
-            &[],
-            &[AgentRuntimeDiscoveryDiagnostic {
-                class: "agent_runtime_catalog.conflict".to_string(),
-                message: "runtime collision".to_string(),
-                runtime_id: Some("example".to_string()),
-                extension_id: None,
-                path: None,
-            }],
-        );
+        let changed = provider_catalog_version(&[provider_with_backend("pi", "pi")]);
 
         assert_ne!(empty, changed);
         assert!(empty.starts_with("resolved:"));

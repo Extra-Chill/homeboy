@@ -116,8 +116,7 @@ pub mod dispatch_service {
         build_controller_dispatch_plan, configured_rotation_policy,
         controller_resolved_execution_policy, dispatch, preflight_dispatch_provider_admission,
         require_model_override_acknowledgement, resolve_cook_initial_provider_route_with_catalog,
-        resolve_dispatch_request, resolve_dispatch_request_with_default,
-        resolve_dispatch_request_with_default_and_catalog, run_dispatch_command,
+        resolve_dispatch_request, resolve_dispatch_request_with_default, run_dispatch_command,
         AgentTaskDispatchCommand, AgentTaskDispatchRequest, DispatchCoreInputs,
         DISPATCH_RESULT_SCHEMA,
     };
@@ -235,12 +234,12 @@ pub mod provider {
         capacity_readiness_from_outcome, AgentTaskProviderCapacityReadiness,
     };
     pub use crate::agent_task_provider::{
-        default_backend, default_backend_for_component, provider_capability_contract,
-        provider_requires_cwd_git_checkout, provider_runtime_readiness_cache_identity_for_plan,
-        resolve_provider_for_backend, AgentTaskExecutorProvider, AgentTaskProviderCatalog,
-        ExtensionProviderAgentTaskExecutor, ProviderReadinessInvocationResult, ProviderResolution,
-        ProviderRuntimeReadinessCache, AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA,
-        AGENT_TASK_PROVIDER_CAPABILITY_CONTRACT_SCHEMA, PROVIDER_READINESS_RESULT_SCHEMA,
+        default_backend, provider_capability_contract, provider_requires_cwd_git_checkout,
+        provider_runtime_readiness_cache_identity_for_plan, resolve_provider_for_backend,
+        AgentTaskExecutorProvider, AgentTaskProviderCatalog, ExtensionProviderAgentTaskExecutor,
+        ProviderReadinessInvocationResult, ProviderResolution, ProviderRuntimeReadinessCache,
+        AGENT_TASK_EXECUTOR_PROVIDER_SCHEMA, AGENT_TASK_PROVIDER_CAPABILITY_CONTRACT_SCHEMA,
+        PROVIDER_READINESS_RESULT_SCHEMA,
     };
     /// Credential readiness: whether a *declared* provider is actually
     /// *dispatchable* here, and the pre-dispatch preflight that enforces it

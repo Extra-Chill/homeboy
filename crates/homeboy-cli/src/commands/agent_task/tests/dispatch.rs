@@ -614,7 +614,7 @@ fn cook_infers_repo_from_an_explicit_linked_worktree_cwd_and_persists_its_proven
         );
 
         let plan =
-            super::super::run::compile_cook_plan(&args, json!({ "path": destination }), None, None)
+            super::super::run::compile_cook_plan(&args, json!({ "path": destination }), None)
                 .expect("compile Cook plan");
         assert_eq!(
             plan.metadata["cook_repository_identity"],
@@ -957,7 +957,6 @@ fn cook_preserves_repository_and_component_identity_for_every_destination_form()
         let plan = super::super::run::compile_cook_plan(
             &worktree,
             json!({ "action": "existing", "path": destination }),
-            None,
             None,
         )
         .expect("compile normalized durable plan");
@@ -2238,9 +2237,8 @@ fn cook_rejects_non_cli_no_finalize_authorization_before_provisioning() {
     let mut provenance = compiled.provenance;
     provenance.set("no_finalize", ArgumentSource::Configuration);
 
-    let error =
-        super::super::run::validate_cook_request_with_provenance(&cook, Some(&provenance), None)
-            .expect_err("configuration cannot authorize finalization suppression");
+    let error = super::super::run::validate_cook_request_with_provenance(&cook, Some(&provenance))
+        .expect_err("configuration cannot authorize finalization suppression");
 
     assert!(error.message.contains("explicitly authorized"));
 }

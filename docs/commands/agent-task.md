@@ -703,10 +703,10 @@ processes start. Compact `agent-task status` includes `execution_location` as
 
 #### Coding backend: Pi
 
-Pi is Cook's coding backend. When no `--backend` is passed and no component,
-extension, or Homeboy config policy names `agent_task.default_backend`, Cook
-selects the built-in `pi` backend if the provider catalog declares it; the
-backend selection reports `source: builtin`. Pi routes bill through the Roadie
+Pi is Cook's coding backend. Backend selection uses `--backend`, then Homeboy
+config `agent_task.default_backend`, then the built-in `pi` backend. Built-in
+selection reports `source: builtin`; component settings and extension manifests
+do not select the default backend. Pi routes bill through the Roadie
 credential pool with a per-runner client key, so the reference rotation uses
 pool-backed `roadie/<rotation>` models:
 

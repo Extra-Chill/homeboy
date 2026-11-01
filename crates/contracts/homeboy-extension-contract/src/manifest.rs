@@ -171,11 +171,6 @@ pub struct ExtensionManifest {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub release_preflights: Vec<ReleasePreflightConfig>,
 
-    /// Extension-owned agent task policy. Runtime/provider manifests declare
-    /// capabilities only; they do not select global defaults.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_task: Option<AgentTaskPolicyConfig>,
-
     // Actions (cross-cutting: used by both platform and executable extensions)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub actions: Vec<ActionConfig>,

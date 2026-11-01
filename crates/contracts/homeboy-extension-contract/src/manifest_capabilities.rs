@@ -59,9 +59,3 @@ pub struct PlatformCapability {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub commands: Vec<String>,
 }
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
-pub struct AgentTaskPolicyConfig {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub default_backend: Option<String>,
-}

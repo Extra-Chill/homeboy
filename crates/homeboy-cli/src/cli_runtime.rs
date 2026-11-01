@@ -1499,7 +1499,6 @@ impl CliRuntime {
                         crate::commands::agent_task::run::validate_cook_request_with_provenance(
                             cook,
                             Some(&command_provenance),
-                            None,
                         )
                     {
                         output_runtime::emit_json_result_for_identity(

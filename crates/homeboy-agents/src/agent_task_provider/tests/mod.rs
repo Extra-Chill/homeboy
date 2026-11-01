@@ -3,9 +3,7 @@ use crate::agent_task::{
     AgentTaskExecutor, AgentTaskLimits, AgentTaskPolicy, AgentTaskWorkspace,
     AgentToolExecutionLocation, AgentToolPolicyRule,
 };
-use crate::agent_task_scheduler::{
-    AgentTaskCancellationToken, AgentTaskExecutionContext, AgentTaskPlan, AgentTaskScheduler,
-};
+use crate::agent_task_scheduler::{AgentTaskExecutionContext, AgentTaskPlan, AgentTaskScheduler};
 use std::fs;
 
 mod common;
