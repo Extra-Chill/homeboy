@@ -761,7 +761,7 @@ jobs:
           jq --arg scope '${{ steps.phase.outputs.scope-effective }}' '. + {scope:$scope}' differential-phase/candidate/manifest.json > differential-phase/candidate/manifest.tmp
           mv differential-phase/candidate/manifest.tmp differential-phase/candidate/manifest.json
           cp -R "${RUNNER_TEMP}/homeboy-ci-results" differential-phase/candidate/homeboy-ci-results 2>/dev/null || mkdir -p differential-phase/candidate/homeboy-ci-results
-          cp -R homeboy-observations differential-phase/candidate/homeboy-observations 2>/dev/null || mkdir -p differential-phase/candidate/homeboy-observations
+          cp -R "${RUNNER_TEMP}/homeboy-observations" differential-phase/candidate/homeboy-observations 2>/dev/null || mkdir -p differential-phase/candidate/homeboy-observations
 
       - name: Upload candidate phase evidence
         if: always() && steps.provenance.outcome == 'success'
