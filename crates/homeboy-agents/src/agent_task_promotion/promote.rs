@@ -1208,7 +1208,9 @@ mod declared_base_tests {
             Some("main"),
             git_bin.to_str().expect("utf8 fixture path"),
             &[],
-            Duration::from_millis(1_000),
+            // Generous enough for three forked fixtures under a loaded parallel
+            // suite; `declared_base_configured_deadline_still_fires` owns expiry.
+            Duration::from_secs(10),
         )
         .expect("healthy resolve within configured budget")
         .expect("declared base");
