@@ -306,13 +306,6 @@ pub fn admit_lab_runner(
             })
         });
 
-    if rejection_reason.is_none()
-        && handshake.runner_command.build_identity != handshake.daemon.build_identity
-    {
-        rejection_reason =
-            Some("runner command and active daemon build identities differ".to_string());
-    }
-
     let required = capability_versions(&handshake.required_capabilities);
     if rejection_reason.is_none()
         && (handshake
@@ -550,7 +543,7 @@ mod capability_handshake_tests {
     }
 
     #[test]
-    fn rejects_capability_removal_schema_incompatibility_and_command_daemon_divergence() {
+    fn rejects_missing_capabilities_but_accepts_command_daemon_build_divergence() {
         let mut removed = handshake(LabRuntimeAncestry::VerifiedNewerDescendant);
         removed.daemon_capabilities.pop();
         assert!(!negotiate_lab_capability_handshake(&removed).compatible);
@@ -561,7 +554,7 @@ mod capability_handshake_tests {
 
         let mut divergent = handshake(LabRuntimeAncestry::VerifiedNewerDescendant);
         divergent.daemon.build_identity = "different".to_string();
-        assert!(!negotiate_lab_capability_handshake(&divergent).compatible);
+        assert!(negotiate_lab_capability_handshake(&divergent).compatible);
     }
 
     #[test]

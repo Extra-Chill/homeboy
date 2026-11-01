@@ -1262,24 +1262,15 @@ pub(super) fn remote_daemon_connect_action_for_runner(
     let healthy = status.fresh && status.reachable;
 
     if healthy {
-        if previous_session.is_none() && status.active_jobs > 0 {
-            let daemon = status.daemon.as_ref().expect("healthy daemon exists");
-            let daemon_identity = daemon.build_identity.as_deref().ok_or_else(|| format!(
-                "remote daemon has {} active job(s) but its reachable endpoint did not provide a build identity; refusing reattachment or replacement",
-                status.active_jobs
-            ))?;
-            let daemon_version = daemon.version.as_deref().ok_or_else(|| format!(
-                "remote daemon has {} active job(s) but its reachable endpoint did not provide a version; refusing reattachment or replacement",
-                status.active_jobs
-            ))?;
-            if daemon_identity.trim() != expected_identity.trim() {
-                return Err(format!(
-                    "remote daemon has {} active job(s) under reachable lease `{}` (PID {}) but build identity `{daemon_identity}` / version `{daemon_version}` does not match this configured runner binary `{expected_identity}`; refusing replacement. Run a controller pinned to `{daemon_identity}` and retry `homeboy runner connect <runner-id>` to reattach this exact lease.",
-                    status.active_jobs,
-                    daemon.lease_id.as_deref().unwrap_or("unavailable"),
-                    daemon.pid.map(|pid| pid.to_string()).as_deref().unwrap_or("unavailable"),
-                ));
-            }
+        if daemon
+            .build_identity
+            .as_deref()
+            .is_none_or(|identity| identity.trim().is_empty())
+        {
+            return Err(format!(
+                "remote daemon under lease `{}` reachable endpoint did not provide a build identity; refusing reattachment. Run `homeboy runner status {runner_id} --json` to inspect it.",
+                daemon.lease_id.as_deref().unwrap_or("unavailable"),
+            ));
         }
         if let Some(session) = previous_session.filter(|session| {
             session.mode == RunnerTunnelMode::DirectSsh
@@ -1300,8 +1291,6 @@ pub(super) fn remote_daemon_connect_action_for_runner(
             if expected_lease != actual_lease {
                 if live_lease_expectation
                     == Some((actual_lease, daemon.pid.expect("checked above")))
-                    && daemon.build_identity.as_deref().map(str::trim)
-                        == Some(expected_identity.trim())
                     && status.endpoint_probe_error.is_none()
                 {
                     return Ok(RemoteDaemonConnectAction::Reattach);
@@ -1321,7 +1310,6 @@ pub(super) fn remote_daemon_connect_action_for_runner(
                 daemon.lease_id.as_deref().expect("checked above"),
                 daemon.pid.expect("checked above"),
             ))
-            || daemon.build_identity.as_deref().map(str::trim) != Some(expected_identity.trim())
             || status.endpoint_probe_error.is_some()
         {
             return Err(lease_reconciliation_failure(

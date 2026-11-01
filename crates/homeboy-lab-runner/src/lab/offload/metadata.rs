@@ -538,40 +538,9 @@ pub(crate) fn lab_runner_daemon_fresh_for_admission(
 /// daemon. An unavailable identity fails closed.
 pub(crate) fn lab_runner_homeboy_has_blocking_drift_against_configured_identity(
     status: &RunnerStatusReport,
-    configured_build_identity: Option<&str>,
     require_exact: bool,
 ) -> bool {
-    if status
-        .session
-        .as_ref()
-        .is_some_and(|session| session.mode == RunnerTunnelMode::DirectSsh)
-    {
-        let Some(configured_build_identity) = configured_build_identity else {
-            return true;
-        };
-        let Some(active_daemon_identity) = status
-            .session
-            .as_ref()
-            .and_then(|session| session.homeboy_build_identity.as_deref())
-        else {
-            return true;
-        };
-        return canonical_build_identity(active_daemon_identity)
-            != canonical_build_identity(configured_build_identity)
-            || (require_exact && lab_runner_homeboy_version_drift(status));
-    }
-
-    // Build-identity drift within the runner (active daemon control plane vs the
-    // configured job command binary) is an internal-inconsistency signal that is
-    // always blocking regardless of the controller↔runner version policy.
-    //
-    // Drift is an *observed* inconsistency. A report that compared nothing
-    // observed no drift (#11106), so blocking on it would block on a gap
-    // rather than a mismatch.
-    if lab_runner_homeboy_has_blocking_status_drift(status, require_exact) {
-        return true;
-    }
-    false
+    lab_runner_homeboy_has_blocking_status_drift(status, require_exact)
 }
 
 /// Recover the controller runtime when an independent handoff-stage check

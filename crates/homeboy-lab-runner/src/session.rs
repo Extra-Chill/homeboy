@@ -693,7 +693,11 @@ impl RunnerStatusReport {
 
     /// The stale-daemon report that fences admission, if any.
     pub fn admission_blocking_stale_daemon(&self) -> Option<&RunnerStaleDaemonWarning> {
-        self.stale_daemon.as_ref()
+        self.stale_daemon.as_ref().filter(|warning| {
+            warning.verification != RunnerDaemonVerification::Compared
+                || !warning.stale_runtime_paths.is_empty()
+                || !warning.changed_runtime_paths.is_empty()
+        })
     }
 
     /// Whether an observed fresh daemon has a lease identity for admission.
@@ -1235,7 +1239,7 @@ mod status_serialization_tests {
     }
 
     #[test]
-    fn admission_summary_stale_daemon_refuses_and_points_to_refresh() {
+    fn admission_summary_build_drift_still_requires_lease_evidence() {
         let mut report = base_report();
         report.active_job_state = RunnerActiveJobState::Available;
         report.stale_daemon = Some(RunnerStaleDaemonWarning {
@@ -1268,7 +1272,7 @@ mod status_serialization_tests {
             !summary.daemon_fresh,
             "missing lease evidence cannot be reported as fresh"
         );
-        assert!(!summary.daemon_compatible);
+        assert!(summary.daemon_compatible);
         assert!(
             !summary.accepting_jobs,
             "an incompatible daemon must not admit work"
@@ -1578,7 +1582,7 @@ mod status_serialization_tests {
 
         let summary = report.admission_summary();
 
-        assert!(!summary.daemon_compatible);
+        assert!(summary.daemon_compatible);
         assert!(
             !summary.safe_to_rotate,
             "ambiguous lease ownership must still fence rotation"
@@ -1815,23 +1819,15 @@ impl RunnerStaleDaemonWarning {
         } else {
             "daemon_configured_identity == equal"
         };
-        let recovery_actions = if !version_matches || !identity_matches {
-            recovery_action(
-                runner_id,
-                current_homeboy_build_identity.as_deref(),
-                &crate::controller_identity::compatibility_controller_identity(),
-            )
-        } else {
-            Vec::new()
-        };
+        let recovery_actions = Vec::new();
         let recovery_commands = rendered_commands(&recovery_actions);
         let message = if !version_matches {
             format!(
-                "connected runner daemon control plane version `{session_homeboy_version}` differs from configured job command binary version `{current_homeboy_version}`; run recovery_commands in order when runner active jobs are drained"
+                "connected runner daemon control plane version `{session_homeboy_version}` differs from configured job command binary version `{current_homeboy_version}` on runner `{runner_id}`; build drift is informational"
             )
         } else if !identity_matches {
             format!(
-                "connected runner daemon control plane build identity `{:?}` differs from configured job command binary build identity `{:?}`; run recovery_commands in order when runner active jobs are drained",
+                "connected runner daemon control plane build identity `{:?}` differs from configured job command binary build identity `{:?}` on runner `{runner_id}`; build drift is informational",
                 session_homeboy_build_identity,
                 current_homeboy_build_identity,
             )
@@ -1839,7 +1835,7 @@ impl RunnerStaleDaemonWarning {
             "connected runner daemon and configured job command binary have equal immutable identities; a separate admission predicate must identify any rejection".to_string()
         };
         Self {
-            severity: "warning",
+            severity: "info",
             verification: RunnerDaemonVerification::Compared,
             probe_error: None,
             mismatch_predicate,

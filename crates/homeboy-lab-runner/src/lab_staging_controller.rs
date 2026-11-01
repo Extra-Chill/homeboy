@@ -410,7 +410,6 @@ enum RuntimeSetCompatibility {
     UnknownLegacy,
     Exact,
     ContractCompatible,
-    WireOrLifecycleIncompatible,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -458,7 +457,7 @@ fn runtime_set_compatibility(requested: &str, daemon: Option<&str>) -> RuntimeSe
     if canonical_homeboy_identity(requested) == canonical_homeboy_identity(daemon) {
         return RuntimeSetCompatibility::Exact;
     }
-    RuntimeSetCompatibility::WireOrLifecycleIncompatible
+    RuntimeSetCompatibility::ContractCompatible
 }
 
 fn runtime_set_admission(
@@ -486,17 +485,9 @@ fn runtime_set_admission(
     }
     let compatibility = runtime_set_compatibility(requested, daemon);
     let command_matches = configured.is_some_and(|identity| {
-        matches!(
-            runtime_set_compatibility(requested, Some(identity)),
-            RuntimeSetCompatibility::Exact
-        )
+        canonical_homeboy_identity(requested) == canonical_homeboy_identity(identity)
     });
-    if command_matches
-        && !matches!(
-            compatibility,
-            RuntimeSetCompatibility::WireOrLifecycleIncompatible
-        )
-    {
+    if command_matches {
         return RuntimeSetAdmission::Ready(compatibility);
     }
     if policy.allow_convergence {
@@ -3057,7 +3048,6 @@ impl ProductionLabStagingOperations {
         let observed = crate::execution::observe_daemon_job_until_terminal(
             &request.recipe.runner_id,
             runner_job_id,
-            None,
             staging_poll_budget(request),
             &cancelled,
         )?;
@@ -6457,7 +6447,7 @@ mod tests {
     }
 
     #[test]
-    fn incompatible_daemon_refuses_even_when_controller_and_command_match() {
+    fn different_daemon_build_is_contract_compatible() {
         let admission = runtime_set_admission(
             "homeboy 1.2.3+controller",
             None,
@@ -6471,7 +6461,10 @@ mod tests {
             },
         );
 
-        assert!(matches!(admission, RuntimeSetAdmission::RefuseRuntime));
+        assert!(matches!(
+            admission,
+            RuntimeSetAdmission::Ready(RuntimeSetCompatibility::ContractCompatible)
+        ));
     }
 
     #[test]
@@ -6595,10 +6588,9 @@ mod tests {
     }
 
     #[test]
-    fn stale_daemon_converges_before_provider_work() {
+    fn different_daemon_build_needs_no_convergence() {
         let runner = convergence_runner(true);
         let status = convergence_status("homeboy 1.2.2+stale");
-
         assert!(matches!(
             handoff_convergence_action(
                 &runner,
@@ -6608,7 +6600,7 @@ mod tests {
                 Some("homeboy 1.2.2+stale"),
                 "/runner/homeboy",
             ),
-            HandoffConvergenceAction::Refresh(crate::HomeboyBinaryRefreshMode::Select { .. })
+            HandoffConvergenceAction::Ready
         ));
     }
 
@@ -6630,12 +6622,12 @@ mod tests {
                 Some("homeboy 1.2.2+stale"),
                 "/runner/homeboy",
             ),
-            HandoffConvergenceAction::Refuse
+            HandoffConvergenceAction::Ready
         ));
     }
 
     #[test]
-    fn busy_stale_daemon_rotates_to_a_draining_generation_before_provider_work() {
+    fn busy_older_daemon_keeps_its_generation_before_provider_work() {
         let runner = convergence_runner(true);
         let mut status = convergence_status("homeboy 1.2.2+stale");
         status.active_jobs.push(
@@ -6664,7 +6656,7 @@ mod tests {
                 Some("homeboy 1.2.2+stale"),
                 "/runner/homeboy",
             ),
-            HandoffConvergenceAction::Refresh(crate::HomeboyBinaryRefreshMode::Select { .. })
+            HandoffConvergenceAction::Ready
         ));
     }
 
@@ -6737,7 +6729,7 @@ mod tests {
                 Some("homeboy 1.2.2+stale"),
                 "/runner/homeboy",
             ),
-            HandoffConvergenceAction::Refresh(_)
+            HandoffConvergenceAction::Ready
         ));
         assert!(matches!(
             handoff_convergence_action(
@@ -6851,10 +6843,8 @@ mod tests {
     }
 
     #[test]
-    fn handoff_refused_when_daemon_positively_disagrees() {
-        // A daemon that is present AND reports a different build indicates a
-        // stale runtime worth refusing, even if the command binary matches.
-        assert!(!handoff_identities_match(
+    fn handoff_accepts_an_older_daemon_build() {
+        assert!(handoff_identities_match(
             "homeboy 1.2.3+required",
             Some("homeboy 1.2.3+required"),
             Some("homeboy 1.2.2+stale"),

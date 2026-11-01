@@ -271,8 +271,7 @@ pub(super) fn exec_via_daemon(
                     .renew_running_runner_exec_source_lease(run_id, token)?;
             }
             let job_id = current.id.to_string();
-            let reload =
-                || refreshed_daemon_endpoint(&runner.id, accepted_daemon_identity.as_deref());
+            let reload = || refreshed_daemon_endpoint(&runner.id);
             let poll_failure = |err| {
                 terminal_runner_poll_failure(
                     runner,
@@ -326,7 +325,7 @@ pub(super) fn exec_via_daemon(
                 let endpoint = daemon_endpoint.borrow().clone();
                 let refreshed_endpoint = follow
                     .drain_to_end(&client, &endpoint, &job.id.to_string(), || {
-                        refreshed_daemon_endpoint(&runner.id, accepted_daemon_identity.as_deref())
+                        refreshed_daemon_endpoint(&runner.id)
                     })
                     .map_err(|error| {
                         lab_terminal_result_transport_error(runner, &cwd, &command, job, error)
@@ -1729,15 +1728,9 @@ pub(crate) struct DaemonTerminalObservation {
 pub(crate) fn observe_daemon_job_until_terminal(
     runner_id: &str,
     runner_job_id: &str,
-    accepted_session: Option<&RunnerSession>,
     budget: Duration,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<DaemonTerminalObservation> {
-    // A refreshed endpoint is verified against the admitting daemon's build
-    // identity. The session's lease id names a daemon generation, not a build,
-    // so passing it here made every refreshed endpoint mismatch (#16699).
-    let accepted_daemon_identity =
-        accepted_session.and_then(|session| session.homeboy_build_identity.as_deref());
     let client = Client::builder()
         .no_proxy()
         .timeout(Duration::from_secs(10))
@@ -1756,7 +1749,7 @@ pub(crate) fn observe_daemon_job_until_terminal(
                 .filter(|_| status.connected)
                 .and_then(|session| session.local_url))
         },
-        || refreshed_daemon_endpoint(runner_id, accepted_daemon_identity),
+        || refreshed_daemon_endpoint(runner_id),
     )?;
     let started = Instant::now();
     let deadline = started + budget;
@@ -1769,7 +1762,7 @@ pub(crate) fn observe_daemon_job_until_terminal(
             &client,
             &endpoint,
             runner_job_id,
-            || refreshed_daemon_endpoint(runner_id, accepted_daemon_identity),
+            || refreshed_daemon_endpoint(runner_id),
         )?;
         endpoint = refreshed_endpoint;
         if job.status.is_terminal() {
@@ -1938,10 +1931,7 @@ fn reattach_failure_is_transient(error: &Error) -> bool {
     daemon_poll_transport_was_lost(error) || error.retryable == Some(true)
 }
 
-pub(super) fn refreshed_daemon_endpoint(
-    runner_id: &str,
-    expected_identity: Option<&str>,
-) -> Result<Option<String>> {
+pub(super) fn refreshed_daemon_endpoint(runner_id: &str) -> Result<Option<String>> {
     let session = super::super::connection::ensure_transport(
         runner_id,
         super::super::connection::TransportLifetime::Persisted,
@@ -1952,46 +1942,7 @@ pub(super) fn refreshed_daemon_endpoint(
     let Some(local_url) = session.local_url else {
         return Ok(None);
     };
-    if let Some(expected_identity) = expected_identity.filter(|identity| !identity.is_empty()) {
-        let actual_identity =
-            super::super::daemon_endpoint_identity(&local_url).map_err(|error| {
-                Error::internal_unexpected(format!(
-                    "verify refreshed runner daemon identity: {error}"
-                ))
-            })?;
-        if !daemon_identity_is_accepted(
-            &actual_identity,
-            expected_identity,
-            super::super::connection::read_session(runner_id)?.as_ref(),
-        ) {
-            return Err(Error::validation_invalid_argument(
-                "runner",
-                format!(
-                    "refreshed runner `{runner_id}` daemon identity `{actual_identity}` does not match the accepted daemon `{expected_identity}`"
-                ),
-                Some(runner_id.to_string()),
-                None,
-            ));
-        }
-    }
     Ok(Some(local_url))
-}
-
-/// The daemon serving a polled job is accepted when it is the daemon the job
-/// was admitted to, or the daemon the runner's current session names. The
-/// current session only moves to a different lease when a refresh restarted
-/// the daemon in place on the same state directory, so the restarted daemon
-/// re-adopted the job rather than replacing the daemon that ran it.
-pub(super) fn daemon_identity_is_accepted(
-    actual_identity: &str,
-    accepted_identity: &str,
-    current_session: Option<&crate::RunnerSession>,
-) -> bool {
-    let actual_identity = actual_identity.trim();
-    actual_identity == accepted_identity.trim()
-        || current_session
-            .and_then(|owner| owner.homeboy_build_identity.as_deref())
-            .is_some_and(|owner_identity| owner_identity.trim() == actual_identity)
 }
 
 pub(super) fn fetch_daemon_events(

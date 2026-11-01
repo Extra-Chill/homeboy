@@ -2460,14 +2460,7 @@ fn runner_daemon_freshness_until(
     let Some(timeout) = remaining_observation_budget(deadline) else {
         return Ok(None);
     };
-    Ok(daemon_http_freshness_with_timeout(
-        &runner.id,
-        local_url,
-        &session.homeboy_version,
-        session.homeboy_build_identity.as_deref().unwrap_or(""),
-        timeout,
-    )
-    .ok())
+    Ok(daemon_http_freshness_with_timeout(&runner.id, local_url, timeout).ok())
 }
 
 /// Preserve remote lease evidence when the controller-side daemon HTTP tunnel is unavailable.
@@ -3175,10 +3168,6 @@ fn direct_daemon_job_artifact_content(
     }))
 }
 
-pub(crate) fn daemon_endpoint_identity(local_url: &str) -> std::result::Result<String, String> {
-    daemon_http_identity(local_url)
-}
-
 fn stale_daemon_warning_until(
     runner: &Runner,
     session: Option<&RunnerSession>,
@@ -3252,15 +3241,9 @@ fn stale_daemon_warning_until(
         .map(daemon_runtime_loaded_paths_from_body)
         .map(|loaded| changed_runtime_paths(&runner.env, &loaded))
         .unwrap_or_default();
-    let daemon_matches_configured = daemon_runtime_is_current(
-        &observed_session_version,
-        &session.homeboy_version,
-        &current_version,
-        identity_comparison,
-        &stale_runtime_paths,
-        &changed_runtime_paths,
-    );
-    if daemon_matches_configured {
+    let daemon_matches_configured =
+        daemon_runtime_is_current(&stale_runtime_paths, &changed_runtime_paths);
+    if daemon_matches_configured && identity_comparison != IdentityComparison::Unverifiable {
         return Ok((None, configured_job_binary_build_identity));
     }
     Ok((
@@ -3348,18 +3331,10 @@ fn reconcile_session_metadata(
 }
 
 fn daemon_runtime_is_current(
-    observed_daemon_version: &str,
-    session_version: &str,
-    command_version: &str,
-    identity_comparison: IdentityComparison,
     stale_runtime_paths: &[RunnerStaleRuntimePath],
     changed_runtime_paths: &[RunnerChangedRuntimePath],
 ) -> bool {
-    versions_match(observed_daemon_version, command_version)
-        && versions_match(session_version, command_version)
-        && identity_comparison == IdentityComparison::Match
-        && stale_runtime_paths.is_empty()
-        && changed_runtime_paths.is_empty()
+    stale_runtime_paths.is_empty() && changed_runtime_paths.is_empty()
 }
 
 fn unverifiable_configured_identity_message(homeboy: &str) -> String {

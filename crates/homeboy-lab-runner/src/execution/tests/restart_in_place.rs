@@ -489,7 +489,7 @@ fn assert_observer_follows_job_to_terminal(fixture: &RestartFixture) {
             &client,
             &endpoint,
             &fixture.job_id,
-            || super::super::daemon::refreshed_daemon_endpoint(RUNNER, Some(OLD_IDENTITY)),
+            || super::super::daemon::refreshed_daemon_endpoint(RUNNER),
         )
         .expect("the re-adopted job stays observable across the restart");
         assert_eq!(job.id.to_string(), fixture.job_id);

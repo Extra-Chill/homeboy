@@ -518,17 +518,9 @@ pub(super) fn daemon_http_version_body_with_timeout(
 pub(super) fn daemon_http_freshness_with_timeout(
     runner_id: &str,
     local_url: &str,
-    expected_version: &str,
-    expected_identity: &str,
     timeout: Duration,
 ) -> std::result::Result<DaemonFreshnessReport, String> {
-    daemon_freshness_report(
-        runner_id,
-        local_url,
-        expected_version,
-        expected_identity,
-        timeout,
-    )
+    daemon_freshness_report(runner_id, local_url, timeout)
 }
 
 /// A direct-SSH session is live only when its loopback endpoint still serves
@@ -720,24 +712,23 @@ fn into_controller_frame(
 fn daemon_freshness_report(
     runner_id: &str,
     local_url: &str,
-    expected_version: &str,
-    expected_identity: &str,
     timeout: Duration,
 ) -> std::result::Result<DaemonFreshnessReport, String> {
     // Freshness, including the immutable executable hash, is a daemon health
     // contract. A version response is only an identity compatibility fallback.
     let DaemonVersionResponse { body, raw_body } =
         daemon_http_body_at_with_timeout(local_url, "health", timeout)?;
-    if let Some(report) = daemon_freshness_from_body(&body) {
-        if report.fresh
-            && daemon_version_identity_mismatch(
-                &body,
-                &raw_body,
-                expected_version,
-                expected_identity,
-            )?
-            .is_none()
-        {
+    if let Some(mut report) = daemon_freshness_from_body(&body) {
+        if matches!(
+            report.stale_reason_code,
+            Some(
+                DaemonStaleReasonCode::VersionMismatch | DaemonStaleReasonCode::BinaryHashMismatch
+            )
+        ) {
+            report.fresh = true;
+            report.stale_reason_code = None;
+        }
+        if report.fresh && daemon_version_identity_mismatch(&body, &raw_body)?.is_none() {
             return Ok(into_controller_frame(report, runner_id));
         }
         if report.fresh {
@@ -749,8 +740,7 @@ fn daemon_freshness_report(
         }
         return Ok(into_controller_frame(report, runner_id));
     }
-    let mismatch =
-        daemon_version_identity_mismatch(&body, &raw_body, expected_version, expected_identity)?;
+    let mismatch = daemon_version_identity_mismatch(&body, &raw_body)?;
     Ok(into_controller_frame(
         DaemonFreshnessReport {
             fresh: mismatch.is_none(),
@@ -778,15 +768,13 @@ fn daemon_freshness_report(
 fn daemon_version_identity_mismatch(
     body: &Value,
     raw_body: &str,
-    expected_version: &str,
-    expected_identity: &str,
 ) -> std::result::Result<Option<String>, String> {
     if daemon_lease_id_from_body(body).is_none() {
         return Ok(Some(
             "remote daemon version response did not include a session lease".to_string(),
         ));
     }
-    let running_version = daemon_version_from_body(body)
+    daemon_version_from_body(body)
         .filter(|version| !version.trim().is_empty())
         .map(|version| version.trim().to_string())
         .ok_or_else(|| {
@@ -795,13 +783,8 @@ fn daemon_version_identity_mismatch(
                 response_body_excerpt(raw_body)
             )
         })?;
-    if !expected_version.trim().is_empty() && !versions_match(&running_version, expected_version) {
-        return Ok(Some(format!(
-            "version {running_version} != configured runner version {expected_version}"
-        )));
-    }
 
-    let running_identity = daemon_identity_from_body(body)
+    daemon_identity_from_body(body)
         .filter(|identity| !identity.trim().is_empty())
         .map(|identity| identity.trim().to_string())
         .ok_or_else(|| {
@@ -810,12 +793,14 @@ fn daemon_version_identity_mismatch(
                 response_body_excerpt(raw_body)
             )
         })?;
-    if !versions_match(&running_identity, expected_identity) {
-        return Ok(Some(format!(
-            "identity {running_identity} != configured runner identity {expected_identity}"
-        )));
-    }
 
+    let data = body.get("data").unwrap_or(body);
+    if data["lab_contract_version"]
+        .as_u64()
+        .is_some_and(|version| version != u64::from(homeboy_lab_contract::LAB_CONTRACT_VERSION))
+    {
+        return Ok(Some("lab_contract_version_mismatch".to_string()));
+    }
     Ok(None)
 }
 
@@ -916,8 +901,6 @@ mod tests {
         let report = daemon_http_freshness_with_timeout(
             "homeboy-lab",
             &format!("http://{address}"),
-            "",
-            "homeboy test+candidate",
             Duration::from_secs(2),
         )
         .expect("freshness report");
@@ -927,24 +910,32 @@ mod tests {
     }
 
     #[test]
-    fn freshness_rejects_a_nonempty_wrong_expected_version() {
+    fn freshness_accepts_a_different_build_version() {
         let body = serde_json::json!({
             "version": "test",
             "build_identity": { "display": "homeboy test+candidate" },
             "lease": { "lease_id": "lease-candidate" },
         });
 
-        let mismatch = daemon_version_identity_mismatch(
-            &body,
-            "fixture body",
-            "wrong-version",
-            "homeboy test+candidate",
-        )
-        .expect("version mismatch result");
+        let mismatch = daemon_version_identity_mismatch(&body, "fixture body")
+            .expect("version mismatch result");
 
+        assert_eq!(mismatch, None);
+    }
+
+    #[test]
+    fn freshness_refuses_incompatible_lab_contract_after_build_change() {
+        let body = serde_json::json!({
+            "version": "old",
+            "build_identity": { "display": "homeboy old+daemon" },
+            "lease": { "lease_id": "lease-old" },
+            "lab_contract_version": homeboy_lab_contract::LAB_CONTRACT_VERSION + 1,
+        });
         assert_eq!(
-            mismatch.as_deref(),
-            Some("version test != configured runner version wrong-version")
+            daemon_version_identity_mismatch(&body, "fixture")
+                .unwrap()
+                .as_deref(),
+            Some("lab_contract_version_mismatch")
         );
     }
 
