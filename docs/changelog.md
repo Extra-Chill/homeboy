@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.439.9] - 2026-11-01
+
+### Changed
+- Remove unused provider-account secrets and dependency-failure patterns
+- Remove provider-declared runner readiness and source contracts
+
+### Fixed
+- ignore the submitting caller context when matching Cook retry plans
+
 ## [0.439.8] - 2026-11-01
 
 ### Changed
