@@ -4,6 +4,16 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.440.1] - 2026-11-01
+
+### Changed
+- Reuse gate Rust toolchains across lockfile changes
+- Delete the provider extension/runtime identity fields for built-in Pi
+
+### Fixed
+- Fix default-only dependency hydration in descendant directories
+- a Lab gate that rewrites tracked files returns a typed failed receipt
+
 ## [0.440.0] - 2026-11-01
 
 ### Added
