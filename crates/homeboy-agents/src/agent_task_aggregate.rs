@@ -259,8 +259,6 @@ pub struct AgentTaskDecisionRef {
     pub task_id: String,
     pub decision: AgentTaskReconciliationDecision,
     pub reason: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub artifact_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -299,12 +297,11 @@ fn aggregate_agent_task_outcomes(outcomes: &[AgentTaskOutcome]) -> AgentTaskAggr
             .collect();
         report.artifact_inventory.extend(artifacts.clone());
 
-        let (decision, reason, artifact_ids) = reconcile_outcome(outcome);
+        let (decision, reason) = reconcile_outcome(outcome);
         let decision_ref = AgentTaskDecisionRef {
             task_id: outcome.task_id.clone(),
             decision,
             reason: reason.clone(),
-            artifact_ids,
         };
 
         match decision {
@@ -466,29 +463,19 @@ fn count_status(summary: &mut AgentTaskAggregateSummary, status: AgentTaskOutcom
     }
 }
 
-fn reconcile_outcome(
-    outcome: &AgentTaskOutcome,
-) -> (AgentTaskReconciliationDecision, String, Vec<String>) {
+fn reconcile_outcome(outcome: &AgentTaskOutcome) -> (AgentTaskReconciliationDecision, String) {
     if outcome.status == AgentTaskOutcomeStatus::NoOp && outcome.outcome_candidate().is_none() {
         return (
             AgentTaskReconciliationDecision::NoOp,
             "known empty change artifact; provider produced no file changes".to_string(),
-            Vec::new(),
         );
     }
-    let rejected_artifact_ids = outcome
-        .artifacts
-        .iter()
-        .filter(|artifact| {
-            artifact_flag(artifact, "rejected") || artifact_flag(artifact, "false_positive")
-        })
-        .map(|artifact| artifact.id.clone())
-        .collect::<Vec<_>>();
-    if !rejected_artifact_ids.is_empty() {
+    if outcome.artifacts.iter().any(|artifact| {
+        artifact_flag(artifact, "rejected") || artifact_flag(artifact, "false_positive")
+    }) {
         return (
             AgentTaskReconciliationDecision::IssueReportCandidate,
             "artifact marked rejected or false-positive".to_string(),
-            rejected_artifact_ids,
         );
     }
 
@@ -498,7 +485,6 @@ fn reconcile_outcome(
         return (
             AgentTaskReconciliationDecision::ApplyCandidate,
             "harvested recoverable candidate".to_string(),
-            Vec::new(),
         );
     }
 
@@ -522,7 +508,6 @@ fn reconcile_outcome(
         return (
             AgentTaskReconciliationDecision::RetryCandidate,
             "provider error or timeout is retryable".to_string(),
-            artifact_ids(outcome),
         );
     }
 
@@ -535,7 +520,6 @@ fn reconcile_outcome(
         return (
             AgentTaskReconciliationDecision::IssueReportCandidate,
             "outcome requested a follow-up issue report".to_string(),
-            artifact_ids(outcome),
         );
     }
 
@@ -545,7 +529,6 @@ fn reconcile_outcome(
         return (
             AgentTaskReconciliationDecision::ApplyCandidate,
             "succeeded with reviewable patch/artifact output".to_string(),
-            Vec::new(),
         );
     }
 
@@ -568,16 +551,7 @@ fn reconcile_outcome(
             | AgentTaskOutcomeStatus::Timeout
             | AgentTaskOutcomeStatus::FollowUpIssue => unreachable!("handled above"),
         },
-        artifact_ids(outcome),
     )
-}
-
-fn artifact_ids(outcome: &AgentTaskOutcome) -> Vec<String> {
-    outcome
-        .artifacts
-        .iter()
-        .map(|artifact| artifact.id.clone())
-        .collect()
 }
 
 fn inventory_item(task_id: &str, artifact: &AgentTaskArtifact) -> AgentTaskArtifactInventoryItem {
@@ -684,7 +658,10 @@ mod tests {
         assert_eq!(report.summary.issue_report_candidates, 1);
         assert_eq!(report.summary.review_candidates, 1);
         assert_eq!(report.apply_candidates[0].task_id, "apply");
-        assert!(report.apply_candidates[0].artifact_ids.is_empty());
+        assert!(serde_json::to_value(&report.apply_candidates[0])
+            .unwrap()
+            .get("artifact_ids")
+            .is_none());
         assert_eq!(report.retry_plan[0].task_id, "retry");
         assert_eq!(report.issue_report_candidates[0].task_id, "issue");
         assert_eq!(report.review_candidates[0].task_id, "review");
@@ -752,8 +729,8 @@ mod tests {
         assert_eq!(report.summary.apply_candidates, 1);
         assert_eq!(report.summary.retry_candidates, 0);
         assert_eq!(
-            report.apply_candidates[0].artifact_ids,
-            Vec::<String>::new()
+            report.artifact_inventory[0].task_id,
+            report.apply_candidates[0].task_id
         );
     }
 
@@ -890,8 +867,8 @@ mod tests {
         assert_eq!(report.summary.apply_candidates, 1);
         assert_eq!(report.apply_candidates[0].task_id, "non-empty-patch");
         assert_eq!(
-            report.apply_candidates[0].artifact_ids,
-            Vec::<String>::new()
+            report.artifact_inventory[0].task_id,
+            report.apply_candidates[0].task_id
         );
     }
 

@@ -216,12 +216,11 @@ fn a_deferred_then_executed_gate_never_stays_gates_deferred() {
             })
             .expect("provider succeeded");
 
-        // `gate_deferred` is the spelling promotions were written with before
-        // #16049; the writer persists the canonical `gates_deferred`.
+        // Promotions and delivery use the canonical `gates_deferred` spelling.
         let deferred = record_promotion_in_store(
             &lifecycle_store,
             run_id,
-            promotion(run_id, "gate_deferred", gate("deferred")),
+            promotion(run_id, "gates_deferred", gate("deferred")),
         )
         .expect("deferred promotion recorded");
         let delivery = persisted_delivery(&deferred);

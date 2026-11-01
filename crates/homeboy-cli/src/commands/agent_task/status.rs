@@ -34,7 +34,7 @@ use super::args::{
     ActiveArgs, CancelArgs, DiagnoseArgs, EvidenceArgs, LifecycleReadArgs, ListArgs, LogsArgs,
     QuarantineArgs, RearmArgs, ReconcileArgs, ReplayProviderBoundaryArgs, StatusArgs,
 };
-use super::candidate::{canonical_candidate_projection, classify_candidates};
+use super::candidate::classify_candidates;
 use crate::commands::utils::response::{
     CommandActionableMetadata, CommandAgentTaskRef, CommandArtifactRef, CommandNextAction,
     CommandNextActionKind, CommandResultRefs, CommandRunRef, ACTIONABLE_METADATA_KEY,
@@ -841,14 +841,16 @@ fn compact_cook_candidate_projection(run_id: &str) -> Value {
                     "status": "unavailable",
                     "run_id": snapshot.record.run_id,
                     "reason": bounded_value(&Value::String(snapshot.unavailable_sources.first().map(|source| source.detail.as_str()).unwrap_or("the authoritative observation has no aggregate").to_string())),
+                    "canonical_candidate": homeboy::agents::orchestration::canonical_candidate_from_durable_record(&snapshot.record, None).ok(),
                 });
             };
-            let record = serde_json::to_value(&snapshot.record).unwrap_or(Value::Null);
-            let aggregate_value = serde_json::to_value(&aggregate).unwrap_or(Value::Null);
-            let candidate = classify_candidates(&json!({
-                "record": record,
-                "aggregate": aggregate_value,
-            }));
+            let projection =
+                homeboy::agents::orchestration::canonical_candidate_from_durable_record(
+                    &snapshot.record,
+                    Some(&aggregate),
+                )
+                .unwrap_or(Value::Null);
+            let candidate = classify_candidates(&json!({ "canonical_candidate": projection }));
             let artifact_count = aggregate
                 .outcomes
                 .iter()
@@ -868,7 +870,7 @@ fn compact_cook_candidate_projection(run_id: &str) -> Value {
                 "outcome_count": outcome_count,
                 "provider_execution_count": provider_execution_count,
                 "artifact_count": artifact_count,
-                "canonical_candidate": canonical_candidate_projection(candidate),
+                "canonical_candidate": projection,
             })
         }
         Err(error) => json!({
@@ -5301,22 +5303,17 @@ fn serialized_len(value: &Value) -> usize {
 /// whenever `exit_code == 0`.
 pub(crate) fn compact_cook_report(value: Value, full: bool) -> Value {
     let mut value = value;
-    let recoverable = matches!(
-        value.get("status").and_then(Value::as_str),
-        Some("candidate_recoverable")
-    );
-    let candidate_run_id = recoverable
-        .then(|| {
-            value
-                .pointer("/selected_candidate/run_id")
-                .and_then(Value::as_str)
-                .or_else(|| value.get("latest_run_id").and_then(Value::as_str))
-                .map(str::to_string)
-        })
-        .flatten();
+    let candidate_run_id = value
+        .pointer("/selected_candidate/run_id")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("latest_run_id").and_then(Value::as_str))
+        .map(str::to_string);
     let candidate_projection = candidate_run_id
         .as_deref()
-        .map(compact_cook_candidate_projection);
+        .map(compact_cook_candidate_projection)
+        .filter(|projection| {
+            projection["status"] == "available" || value["status"] == "candidate_recoverable"
+        });
     if full {
         if let Some(candidate) = candidate_projection.as_ref() {
             value["durable_candidate"] = candidate.clone();
@@ -5805,11 +5802,15 @@ fn bounded_value(value: &Value) -> Value {
 /// An absent or unparseable state is non-terminal: a record this build does not
 /// understand keeps its prior reading rather than being asserted as finished.
 fn candidate_result_payload(record: &Value, aggregate: Option<&AgentTaskAggregate>) -> Value {
-    let mut payload = record.clone();
-    if let Some(aggregate) = aggregate {
-        payload["aggregate"] = serde_json::to_value(aggregate).unwrap_or(Value::Null);
-    }
-    payload
+    let projection = serde_json::from_value::<AgentTaskRunRecord>(record.clone())
+        .ok()
+        .and_then(|record| {
+            homeboy::agents::orchestration::canonical_candidate_from_durable_record(
+                &record, aggregate,
+            )
+            .ok()
+        });
+    json!({ "canonical_candidate": projection })
 }
 
 fn collected_diagnostic_value(item: CollectedDiagnostic) -> Value {
