@@ -23,6 +23,7 @@ const LEGACY_STEP_TIMEOUT: Duration = Duration::from_secs(120);
 pub(super) struct LegacyDaemonBusy {
     pub state_dir: String,
     pub active_jobs: usize,
+    pub blockers: Vec<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,9 +36,10 @@ impl LegacyLayoutError {
     pub(super) fn message(&self, runner_id: &str) -> String {
         match self {
             Self::Busy(busy) => format!(
-                "runner `{runner_id}` has a daemon in legacy state dir `{}` with {} active job(s). Those jobs cannot move to the new runner-daemons state dir; wait for them to finish (or cancel them), then run `homeboy runner connect {}` again.",
+                "runner `{runner_id}` has a daemon in legacy state dir `{}` with {} active job(s). Blocking jobs: {}. Those jobs cannot move to the new runner-daemons state dir; wait for them to finish (or cancel them), then run `homeboy runner connect {}` again.",
                 busy.state_dir,
                 busy.active_jobs,
+                serde_json::to_string(&busy.blockers).unwrap_or_default(),
                 shell::quote_arg(runner_id),
             ),
             Self::Other(message) => format!(
@@ -59,6 +61,7 @@ impl LegacyLayoutError {
                 "classification": "legacy_daemon_busy",
                 "legacy_state_dir": busy.state_dir,
                 "active_jobs": busy.active_jobs,
+                "blockers": busy.blockers,
             });
         }
         error
@@ -113,6 +116,92 @@ fn legacy_data(
     Ok(envelope.data.unwrap_or(Value::Null))
 }
 
+fn status_blockers(data: &Value) -> Vec<Value> {
+    data.get("active_jobs")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// Read-only evidence shared by migration and controller status. Counts remain
+/// authoritative even when an older daemon omits or truncates job details.
+fn legacy_busy_daemons(
+    mut run: impl FnMut(&str) -> std::result::Result<String, String>,
+    runner_id: &str,
+    controller_id: &str,
+    homeboy: &str,
+) -> std::result::Result<Vec<LegacyDaemonBusy>, LegacyLayoutError> {
+    let output = run(&legacy_daemon_script(
+        runner_id,
+        controller_id,
+        homeboy,
+        "status",
+    ))
+    .map_err(LegacyLayoutError::Other)?;
+    legacy_outputs(&output)
+        .into_iter()
+        .filter_map(|(dir, output)| match legacy_data(&dir, "status", &output) {
+            Ok(data) => {
+                let active_jobs = remote_daemon_active_jobs(&data);
+                (active_jobs > 0).then(|| {
+                    Ok(LegacyDaemonBusy {
+                        state_dir: dir,
+                        active_jobs,
+                        blockers: status_blockers(&data),
+                    })
+                })
+            }
+            Err(error) => Some(Err(error)),
+        })
+        .collect()
+}
+
+pub(super) fn blocker_status_error(
+    observation: std::result::Result<Vec<LegacyDaemonBusy>, LegacyLayoutError>,
+    runner_id: &str,
+) -> Option<RunnerActiveJobError> {
+    match observation {
+        Ok(blockers) if !blockers.is_empty() => Some(RunnerActiveJobError {
+            code: "legacy_daemon_busy".to_string(),
+            message: blockers
+                .into_iter()
+                .map(|busy| LegacyLayoutError::Busy(busy).message(runner_id))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        }),
+        Err(error) => Some(RunnerActiveJobError {
+            code: "legacy_daemon_observation_failed".to_string(),
+            message: error.message(runner_id),
+        }),
+        _ => None,
+    }
+}
+
+pub(super) fn observe_legacy_blockers(
+    runner: &Runner,
+    deadline: Instant,
+) -> Option<std::result::Result<Vec<LegacyDaemonBusy>, LegacyLayoutError>> {
+    if runner.kind != RunnerKind::Ssh {
+        return None;
+    }
+    let homeboy = remote_runner_homeboy_path(runner, "runner status").ok()?;
+    let (_, _, client) = resolve_ssh_runner(runner).ok()??;
+    let timeout = remaining_observation_budget(deadline)?;
+    Some(legacy_busy_daemons(
+        |script| {
+            let output = client.execute_with_timeout(script, timeout);
+            if output.success {
+                Ok(output.stdout)
+            } else {
+                Err(command_failure_message("legacy daemon status", &output))
+            }
+        },
+        &runner.id,
+        &controller_id(),
+        homeboy,
+    ))
+}
+
 /// Stop every idle legacy daemon of this (runner, controller) with the normal
 /// `daemon stop`, after proving none has active jobs. Returns the lease ids of
 /// the legacy daemons found, so the caller can drop a session pointing at one.
@@ -143,6 +232,7 @@ pub(super) fn stop_legacy_daemons(
             return Err(LegacyLayoutError::Busy(LegacyDaemonBusy {
                 state_dir: dir.clone(),
                 active_jobs,
+                blockers: status_blockers(&data),
             }));
         }
         leases.extend(
@@ -167,10 +257,17 @@ pub(super) fn stop_legacy_daemons(
             .and_then(Value::as_u64)
             .unwrap_or(0) as usize;
         if active_jobs > 0 {
-            return Err(LegacyLayoutError::Busy(LegacyDaemonBusy {
-                state_dir: dir,
-                active_jobs,
-            }));
+            // Stop evidence contains only a count. Re-read status to identify
+            // jobs admitted between the initial observation and stop.
+            let busy = legacy_busy_daemons(&mut run, runner_id, controller_id, homeboy)?
+                .into_iter()
+                .find(|busy| busy.state_dir == dir)
+                .unwrap_or(LegacyDaemonBusy {
+                    state_dir: dir,
+                    active_jobs,
+                    blockers: status_blockers(&data),
+                });
+            return Err(LegacyLayoutError::Busy(busy));
         }
     }
     Ok(leases)
@@ -357,12 +454,104 @@ esac
             LegacyLayoutError::Busy(LegacyDaemonBusy {
                 state_dir: busy_dir.clone(),
                 active_jobs: 1,
+                blockers: Vec::new(),
             })
         );
         let message = error.message("homeboy-lab");
         assert!(message.contains(&busy_dir));
         assert!(message.contains("1 active job(s)"));
         assert!(!home.path().join("stopped.log").exists());
+    }
+
+    #[test]
+    fn blocker_evidence_is_shared_by_status_and_migration() {
+        let job = serde_json::json!({
+            "job_id": "job-peer", "linked_durable_run_id": "run-peer", "child_pid": 4242
+        });
+        let output = format!(
+            "{LEGACY_DIR_MARKER}\t/legacy/primary\n{}\n",
+            serde_json::json!({"success": true, "data": {
+                "active_jobs": [job], "freshness": {"active_jobs": 3},
+                "truncation": {"active_jobs": {"omitted": 2}}
+            }})
+        );
+        let blockers = legacy_busy_daemons(
+            |script| {
+                assert!(script.contains("daemon status"));
+                assert!(!script.contains("daemon stop"));
+                Ok(output.clone())
+            },
+            "lab",
+            "controller-a",
+            "homeboy",
+        )
+        .unwrap();
+        assert_eq!(blockers.len(), 1);
+        assert_eq!(blockers[0].active_jobs, 3);
+        let status_error = blocker_status_error(Ok(blockers.clone()), "lab").unwrap();
+        assert_eq!(status_error.code, "legacy_daemon_busy");
+        assert!(status_error.message.contains("job-peer"));
+        assert!(status_error.message.contains("run-peer"));
+        assert!(blocker_status_error(Ok(Vec::new()), "lab").is_none());
+        let error = stop_legacy_daemons(|_| Ok(output.clone()), "lab", "controller-a", "homeboy")
+            .unwrap_err();
+        assert_eq!(error, LegacyLayoutError::Busy(blockers[0].clone()));
+        let message = error.message("lab");
+        for evidence in ["job-peer", "run-peer", "4242", "/legacy/primary"] {
+            assert!(message.contains(evidence));
+        }
+        let details = error.into_error("lab").details;
+        assert_eq!(details["active_jobs"], 3);
+        assert_eq!(details["blockers"][0], job);
+    }
+
+    #[test]
+    fn admission_after_migration_uses_new_store_even_if_legacy_dirs_remain() {
+        let home = tempfile::tempdir().unwrap();
+        let legacy = legacy_root(home.path()).join("primary");
+        std::fs::create_dir_all(&legacy).unwrap();
+        let fake = fake_homeboy(home.path());
+        stop_legacy_daemons(
+            run_local(home.path()),
+            "homeboy-lab",
+            "controller-a",
+            &fake.display().to_string(),
+        )
+        .unwrap();
+        // The installed service is the admission endpoint for new runner.exec
+        // jobs. Resolve its environment exactly as systemd does for %h.
+        let unit =
+            super::super::service::render_service_unit_for("homeboy-lab", "controller-a", "token");
+        let state_dir = unit
+            .lines()
+            .find_map(|line| line.strip_prefix("Environment=HOMEBOY_DAEMON_STATE_DIR=%h/"))
+            .unwrap();
+        assert_eq!(
+            state_dir,
+            super::super::daemon_state_dir("homeboy-lab", "controller-a")
+        );
+        let target = home.path().join(state_dir);
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("admitted-job"), "runner.exec").unwrap();
+        assert!(target.join("admitted-job").exists());
+        assert!(!legacy.join("admitted-job").exists());
+        assert!(legacy.is_dir());
+    }
+
+    #[test]
+    fn stop_race_rereads_job_evidence() {
+        let mut calls = 0;
+        let error = stop_legacy_daemons(|_| {
+            calls += 1;
+            let data = match calls {
+                1 => serde_json::json!({"freshness": {"active_jobs": 0}}),
+                2 => serde_json::json!({"termination_evidence": {"active_jobs": 1}}),
+                _ => serde_json::json!({"active_jobs": [{"job_id": "racing-job", "child_pid": 12}]}),
+            };
+            Ok(format!("{LEGACY_DIR_MARKER}\t/legacy/primary\n{}", serde_json::json!({"success": true, "data": data})))
+        }, "lab", "controller", "homeboy").unwrap_err();
+        assert_eq!(calls, 3);
+        assert!(error.message("lab").contains("racing-job"));
     }
 
     #[test]
