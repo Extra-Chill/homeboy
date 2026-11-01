@@ -355,17 +355,9 @@ pub(super) enum RunnerCommand {
         #[arg(long)]
         select: Option<String>,
 
-        /// Git remote URL to clone/fetch when materializing a managed Homeboy binary
-        #[arg(long)]
-        source: Option<String>,
-
-        /// Git ref to materialize from the source remote
+        /// Official Homeboy release tag to install (defaults to this controller's release)
         #[arg(long = "ref")]
         git_ref: Option<String>,
-
-        /// Runner-side checkout directory for the managed Homeboy source
-        #[arg(long)]
-        target_dir: Option<String>,
 
         /// Disconnect and reconnect the runner daemon after updating homeboy_path
         #[arg(long)]

@@ -666,9 +666,7 @@ fn handoff_refresh_options(
     crate::HomeboyBinaryRefreshOptions {
         runner_id,
         mode,
-        source: None,
         git_ref: Some(handoff_build_reference(requested)),
-        target_dir: None,
         reconnect: true,
         force: false,
         // Automatic recovery must preserve #9088's monotonic upgrade contract.

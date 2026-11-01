@@ -1413,7 +1413,7 @@ mod tests {
     #[test]
     fn refresh_homeboy_error_projection_is_bounded_and_keeps_durable_artifacts() {
         let mut error = homeboy::core::Error::validation_invalid_argument(
-            "target_dir",
+            "workspace_root",
             "x".repeat(512 * 1024),
             None,
             None,

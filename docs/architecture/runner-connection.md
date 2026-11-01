@@ -75,8 +75,13 @@ running (pre-upgrade) process's build (#16845). See
 [`homeboy upgrade`](../commands/upgrade.md#runner-convergence) for how each
 status maps onto the runner upgrade entry.
 
-`homeboy runner refresh-homeboy` remains for explicit refs (`--ref`), dev
-builds (`runner dev-sync`), and selecting an existing binary (`--select`).
+A plain `runner connect` is therefore the normal way to update a runner, and
+operator advice for a runner binary older than the controller names
+`homeboy runner connect <runner-id>`. `homeboy runner refresh-homeboy` remains
+for explicit refs (`--ref`), selecting an existing binary (`--select`),
+downgrades (`--allow-downgrade`), dev builds (`runner dev-sync`), rotating a
+daemon that drifted from its configured binary, and as the manual fallback when
+convergence `failed`.
 
 ## Daemon State Directory
 

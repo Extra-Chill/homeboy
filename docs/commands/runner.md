@@ -217,18 +217,23 @@ homeboy runner refresh-homeboy <runner-id> --ref v0.434.30 --dry-run
 homeboy runner refresh-homeboy <runner-id> --select /path/to/homeboy --reconnect
 ```
 
-`runner connect` already brings a runner's binary to the controller's release
+`homeboy runner connect <runner-id>` is the normal way to update a runner: it
+brings the runner's binary to the controller's release
 (see [Binary Convergence](../architecture/runner-connection.md#binary-convergence)),
-so `refresh-homeboy` is for explicit refs (`--ref`), selecting an existing
-binary (`--select`), forced reconnects, and rollbacks; unreleased builds use
+and stale-runner diagnostics recommend it. `refresh-homeboy` is for explicit
+refs (`--ref`), selecting an existing binary (`--select`), downgrades and
+rollbacks (`--allow-downgrade`), and forced reconnects; unreleased builds use
 `runner dev-sync`.
 
 Installs the controller's release tag by default. Materialize mode uses the
 existing verified release installer in stage-only mode, then publishes the
-binary into a content-addressed slot and updates `homeboy_path`. An explicit
-`--ref` must be a release tag (`vMAJOR.MINOR.PATCH`); branches, commits, and
-alternate source repositories are not supported. Select mode probes the exact
-binary passed to `--select` before updating `homeboy_path`.
+binary into the content-addressed slot
+`<workspace_root>/_homeboy_binaries/homeboy-<sha256>/homeboy` and updates
+`homeboy_path`. The runner must have a `workspace_root`. An explicit `--ref`
+must be a release tag (`vMAJOR.MINOR.PATCH`); branches, commits, alternate
+source repositories, and alternate target directories are not supported. Select
+mode probes the exact binary passed to `--select` before updating
+`homeboy_path`.
 
 The downgrade guard compares semantic versions with the controller, active
 daemon, and configured binary. An intentional rollback requires
@@ -1076,7 +1081,7 @@ Recognized slot layouts:
 
 - `homeboy-<64-hex sha256>/homeboy` — content-addressed slot published by
   `refresh-homeboy` (with its `provenance` file).
-- `homeboy-<ref>/target/release/homeboy` — the source checkout refresh builds in.
+- `homeboy-<ref>/target/release/homeboy` — a source checkout left by older refreshes.
 - `dev/<16-hex>/homeboy` — a dev-sync native build slot.
 
 A slot is `selected` (never removed) when any of these resolve into it:

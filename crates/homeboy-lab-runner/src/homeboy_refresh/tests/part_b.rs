@@ -1121,9 +1121,7 @@ fn refresh_reobserves_a_replaced_binary_inside_staging() {
             mode: HomeboyBinaryRefreshMode::Select {
                 binary_path: binary.display().to_string(),
             },
-            source: None,
             git_ref: None,
-            target_dir: None,
             reconnect: false,
             force: false,
             allow_downgrade: true,
@@ -1179,9 +1177,7 @@ fn verified_selection_persists_on_controller_and_reports_reconnect_required() {
             mode: HomeboyBinaryRefreshMode::Select {
                 binary_path: binary.display().to_string(),
             },
-            source: None,
             git_ref: None,
-            target_dir: None,
             reconnect: false,
             force: false,
             allow_downgrade: true,
@@ -1255,9 +1251,7 @@ fn blocked_connect_preserves_successful_promotion_with_one_continuation() {
             mode: HomeboyBinaryRefreshMode::Select {
                 binary_path: binary.display().to_string(),
             },
-            source: None,
             git_ref: None,
-            target_dir: None,
             reconnect: true,
             force: false,
             allow_downgrade: true,
@@ -1269,9 +1263,7 @@ fn blocked_connect_preserves_successful_promotion_with_one_continuation() {
         assert_eq!(output.updated_fields, ["env", "homeboy_path"]);
         assert_eq!(output.selected_binary_path, binary.display().to_string());
         assert_eq!(output.plan.mode, "select");
-        assert_eq!(output.plan.source, None);
         assert_eq!(output.plan.git_ref, None);
-        assert_eq!(output.plan.target_dir, None);
         assert!(!output.daemon_refreshed);
         assert!(output.reconnect_required);
         assert_eq!(
@@ -1354,9 +1346,7 @@ fn stale_session_refresh_blocker_starts_the_newly_selected_binary() {
                 mode: HomeboyBinaryRefreshMode::Select {
                     binary_path: binary.display().to_string(),
                 },
-                source: None,
                 git_ref: None,
-                target_dir: None,
                 reconnect: true,
                 force: false,
                 allow_downgrade: true,
@@ -1455,9 +1445,7 @@ fn ssh_bootstrap_select_promotes_without_materialized_source_sha() {
         .expect("runner");
         let mut plan = ssh_bootstrap_plan();
         plan.mode = "select".to_string();
-        plan.source = None;
         plan.git_ref = None;
-        plan.target_dir = None;
         let result = ssh_bootstrap_promote_with(
             &plan,
             || Ok(r#"{"data":{"git_commit":"abc123","git_dirty":false}}"#.to_string()),

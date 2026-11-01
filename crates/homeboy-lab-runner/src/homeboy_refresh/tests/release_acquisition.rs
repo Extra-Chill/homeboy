@@ -45,8 +45,7 @@ fn slot_provenance_matches_content_not_acquisition_metadata() {
     let fixture = release_fixture();
     publish_release_archive(&fixture, triple, ReleaseArchive::Valid);
     let root = binaries_root(&fixture);
-    let dir = root.join("acquisition");
-    let first = materialize(&fixture, CANONICAL_SOURCE, RELEASE_TAG, &dir);
+    let first = materialize(&fixture, RELEASE_TAG, &root);
     assert!(
         first.status.success(),
         "{}",
@@ -59,13 +58,14 @@ fn slot_provenance_matches_content_not_acquisition_metadata() {
     .unwrap();
     let provenance = Path::new(&binary).parent().unwrap().join("provenance");
     let original = fs::read_to_string(&provenance).unwrap();
+    assert_eq!(original.lines().next(), Some(CANONICAL_SOURCE));
     let mut fields: Vec<_> = original.lines().map(str::to_string).collect();
     fields[0] = "different source".into();
     fields[1] = "different cache".into();
     fields[2] = "different ref".into();
     fields[3] = fixture.commit.clone();
     fs::write(&provenance, format!("{}\n", fields.join("\n"))).unwrap();
-    let reused = materialize(&fixture, CANONICAL_SOURCE, RELEASE_TAG, &dir);
+    let reused = materialize(&fixture, RELEASE_TAG, &root);
     assert!(
         reused.status.success(),
         "{}",
@@ -83,7 +83,7 @@ fn slot_provenance_matches_content_not_acquisition_metadata() {
         let mut mismatched = fields.clone();
         mismatched[index] = "different content".into();
         fs::write(&provenance, format!("{}\n", mismatched.join("\n"))).unwrap();
-        let refused = materialize(&fixture, CANONICAL_SOURCE, RELEASE_TAG, &dir);
+        let refused = materialize(&fixture, RELEASE_TAG, &root);
         assert!(!refused.status.success());
         assert!(String::from_utf8_lossy(&refused.stderr)
             .contains("immutable Homeboy slot provenance mismatch"));
@@ -268,15 +268,8 @@ fn fixture_shell(fixture: &ReleaseFixture, script: &str) -> Command {
     command
 }
 
-fn materialize(fixture: &ReleaseFixture, source: &str, git_ref: &str, dir: &Path) -> Output {
-    let script = materialize_script(
-        source,
-        git_ref,
-        dir.to_str().expect("target dir"),
-        dir.join("target/release/homeboy")
-            .to_str()
-            .expect("binary path"),
-    );
+fn materialize(fixture: &ReleaseFixture, git_ref: &str, binaries: &Path) -> Output {
+    let script = materialize_script(git_ref, binaries.to_str().expect("binaries dir"));
     fixture_shell(fixture, &script)
         .output()
         .expect("run materialization")
@@ -320,7 +313,7 @@ fn release_acquisition_publishes_a_verified_slot_without_a_git_checkout() {
     let root = binaries_root(&fixture);
     let dir = root.join(format!("homeboy-{RELEASE_TAG}"));
 
-    let output = materialize(&fixture, CANONICAL_SOURCE, RELEASE_TAG, &dir);
+    let output = materialize(&fixture, RELEASE_TAG, &root);
     assert!(
         output.status.success(),
         "{}",
@@ -351,10 +344,8 @@ fn release_acquisition_publishes_a_verified_slot_without_a_git_checkout() {
     let materialize_plan = HomeboyBinaryRefreshPlan {
         runner_id: "lab".to_string(),
         mode: "materialize".to_string(),
-        source: Some(CANONICAL_SOURCE.to_string()),
         git_ref: Some(RELEASE_TAG.to_string()),
-        target_dir: Some(dir.display().to_string()),
-        binary_path: dir.join("target/release/homeboy").display().to_string(),
+        binary_path: root.display().to_string(),
         script: String::new(),
         reconnect: false,
         followup_commands: Vec::new(),
@@ -373,7 +364,6 @@ fn acquired_release_tag_reuses_its_verified_slot_without_downloading() {
     let fixture = release_fixture();
     publish_release_archive(&fixture, triple, ReleaseArchive::Valid);
     let root = binaries_root(&fixture);
-    let dir = root.join(format!("homeboy-{RELEASE_TAG}"));
     // A marker naming a slot that does not verify is ignored.
     fs::write(
         root.join(format!(".release-{RELEASE_TAG}.sha256")),
@@ -381,7 +371,7 @@ fn acquired_release_tag_reuses_its_verified_slot_without_downloading() {
     )
     .unwrap();
 
-    let first = materialize(&fixture, CANONICAL_SOURCE, RELEASE_TAG, &dir);
+    let first = materialize(&fixture, RELEASE_TAG, &root);
     assert!(
         first.status.success(),
         "{}",
@@ -397,7 +387,7 @@ fn acquired_release_tag_reuses_its_verified_slot_without_downloading() {
 
     // The release asset is gone: only the recorded, re-verified slot can satisfy this.
     fs::remove_dir_all(fixture.releases.join(RELEASE_TAG)).unwrap();
-    let second = materialize(&fixture, CANONICAL_SOURCE, RELEASE_TAG, &dir);
+    let second = materialize(&fixture, RELEASE_TAG, &root);
     assert!(
         second.status.success(),
         "{}",
@@ -423,9 +413,8 @@ fn assert_release_archive_rejected(kind: ReleaseArchive, expected: &str) {
     let fixture = release_fixture();
     publish_release_archive(&fixture, triple, kind);
     let root = binaries_root(&fixture);
-    let dir = root.join(format!("homeboy-{RELEASE_TAG}"));
 
-    let output = materialize(&fixture, CANONICAL_SOURCE, RELEASE_TAG, &dir);
+    let output = materialize(&fixture, RELEASE_TAG, &root);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         !output.status.success(),

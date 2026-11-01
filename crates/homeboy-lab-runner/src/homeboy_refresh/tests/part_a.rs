@@ -823,20 +823,16 @@ fn successful_rollback_does_not_publish_partial_state() {
 }
 
 #[test]
-fn default_target_dir_is_ref_scoped() {
-    assert_eq!(
-        default_target_dir("/runner/ws/", "origin/main"),
-        "/runner/ws/_homeboy_binaries/homeboy-origin-main"
+fn release_slots_live_under_the_workspace_binaries_dir() {
+    let binaries = release_binaries_dir("/runner/ws/");
+    assert_eq!(binaries, "/runner/ws/_homeboy_binaries");
+    let script = materialize_script("v1.2.3", &binaries);
+    assert!(script.contains(&format!("binaries={}\n", quote_path(&binaries))));
+    assert!(script.contains("slot_dir=\"$binaries/homeboy-$binary_sha\""));
+    assert!(script.contains("release_marker=\"$binaries/.release-$release_tag.sha256\""));
+    assert!(
+        !script.contains("@SOURCE@") && !script.contains("@DIR@") && !script.contains("@BINARY@")
     );
-    let target_dir = default_target_dir("/home/chubes/Developer", "main");
-    let script = materialize_script(
-        "https://example.test/homeboy.git",
-        "main",
-        &target_dir,
-        &format!("{target_dir}/target/release/homeboy"),
-    );
-    assert!(script.contains("slot_dir=\"$(dirname \"$dir\")/homeboy-$binary_sha\""));
-    assert!(!script.contains("_homeboy_binaries/$binary_sha"));
 }
 
 #[test]
@@ -854,10 +850,8 @@ fn disconnected_ssh_refresh_dispatches_the_existing_script_with_bounded_transpor
     let plan = HomeboyBinaryRefreshPlan {
         runner_id: "lab".to_string(),
         mode: "materialize".to_string(),
-        source: Some("https://example.test/homeboy.git".to_string()),
         git_ref: Some("accepted-sha".to_string()),
-        target_dir: Some("/runner/homeboy".to_string()),
-        binary_path: "/runner/homeboy/target/release/homeboy".to_string(),
+        binary_path: "/runner/_homeboy_binaries".to_string(),
         script: "managed clone fetch build select".to_string(),
         reconnect: true,
         followup_commands: Vec::new(),
@@ -1045,9 +1039,7 @@ fn connected_refresh_keeps_daemon_execution_options() {
     let plan = HomeboyBinaryRefreshPlan {
         runner_id: "lab".to_string(),
         mode: "select".to_string(),
-        source: None,
         git_ref: None,
-        target_dir: None,
         binary_path: "/runner/homeboy".to_string(),
         script: "probe".to_string(),
         reconnect: false,

@@ -20,9 +20,7 @@ pub(super) fn ssh_bootstrap_plan() -> HomeboyBinaryRefreshPlan {
     HomeboyBinaryRefreshPlan {
         runner_id: "lab-local".to_string(),
         mode: "materialize".to_string(),
-        source: Some("source".to_string()),
         git_ref: Some("v1.2.3".to_string()),
-        target_dir: Some("/runner/homeboy".to_string()),
         binary_path: "/verified/homeboy".to_string(),
         script: String::new(),
         reconnect: false,

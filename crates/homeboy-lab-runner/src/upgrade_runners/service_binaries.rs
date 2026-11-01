@@ -301,9 +301,7 @@ pub(crate) fn refresh_runner_service(runner: &Runner, homeboy_path: &str) -> Ser
         mode: crate::HomeboyBinaryRefreshMode::Select {
             binary_path: homeboy_path.to_string(),
         },
-        source: None,
         git_ref: None,
-        target_dir: None,
         reconnect: true,
         force: false,
         allow_downgrade: false,
