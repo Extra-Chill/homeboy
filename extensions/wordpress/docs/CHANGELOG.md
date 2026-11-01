@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.53.17] - 2026-11-01
+
+### Fixed
+- keep extension and desktop releases published and off GitHub latest
+
 ## [3.53.16] - 2026-11-01
 
 ### Changed
