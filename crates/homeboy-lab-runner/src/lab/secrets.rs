@@ -13,8 +13,8 @@ use homeboy_agents::agent_tasks::provider::{
     provider_route_secret_env_for_plan_with_providers,
     provider_route_secret_sources_for_plan_with_providers,
     provider_runner_secret_env_for_plan_with_providers,
-    provider_secret_sources_for_plan_with_providers, provider_secret_sources_for_providers,
-    AgentTaskExecutorProvider, ExtensionProviderAgentTaskExecutor, ProviderControllerRefresh,
+    provider_secret_sources_for_plan_with_providers, AgentTaskExecutorProvider,
+    ExtensionProviderAgentTaskExecutor, ProviderControllerRefresh,
 };
 use homeboy_agents::agent_tasks::scheduler::AgentTaskPlan;
 use homeboy_agents::agent_tasks::secrets as agent_task_secrets;
@@ -896,7 +896,7 @@ pub(crate) fn agent_task_controller_credential_sources_with_providers(
     args: &[String],
     providers: &[AgentTaskExecutorProvider],
 ) -> Result<HashMap<String, homeboy_core::defaults::AgentTaskSecretSource>> {
-    let mut sources = provider_secret_sources_for_providers(providers);
+    let mut sources = HashMap::new();
     if let Some(agent_task_index) = subcommand_index(args, "agent-task") {
         sources.extend(
             declared_agent_task_controller_secret_sources_with_providers(
@@ -976,7 +976,7 @@ fn declared_agent_task_controller_secret_sources_with_providers(
             .unwrap_or_default());
     }
 
-    Ok(provider_secret_sources_for_providers(providers))
+    Ok(HashMap::new())
 }
 
 fn agent_task_dispatch_provider_plan_from_args(args: &[String]) -> Result<Option<AgentTaskPlan>> {

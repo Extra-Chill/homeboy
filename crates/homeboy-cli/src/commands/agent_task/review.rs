@@ -18,9 +18,9 @@ use homeboy::agents::agent_tasks::gate::VerifyGateOptions;
 use homeboy::agents::agent_tasks::lifecycle as agent_task_lifecycle;
 use homeboy::agents::agent_tasks::promotion::{AgentTaskPromotionReport, AgentTaskPromotionStatus};
 use homeboy::agents::agent_tasks::provider::{
-    evaluate_provider_dispatchability_with_config, provider_credential_readiness,
-    resolve_provider_for_backend, AgentTaskExecutorProvider, AgentTaskProviderCatalog,
-    ExtensionProviderAgentTaskExecutor, ProviderResolution, ProviderRuntimeReadinessCache,
+    evaluate_provider_dispatchability_with_config, resolve_provider_for_backend,
+    AgentTaskExecutorProvider, AgentTaskProviderCatalog, ExtensionProviderAgentTaskExecutor,
+    ProviderResolution, ProviderRuntimeReadinessCache,
 };
 use homeboy::agents::agent_tasks::review_dossier::{
     homeboy_tool_disclosure, resolve_review_profile, validate_issue_reference,
@@ -2057,8 +2057,6 @@ fn providers_with_catalog(
                 _ => None,
             })
         });
-    let secret_env_scopes =
-        homeboy::agents::agent_tasks::provider::provider_secret_env_scopes(providers);
 
     let full_command = provider_full_command(&args);
     let readiness_next_action =
@@ -2129,10 +2127,6 @@ fn providers_with_catalog(
             "provider_identity_catalog": provider_identity_catalog(&shown_providers),
             "capability_contract": homeboy::agents::agent_tasks::provider::provider_capability_contract(),
             "providers": if args.full { serde_json::to_value(shown_providers.clone()).unwrap_or(Value::Null) } else { Value::Array(shown_providers.iter().map(|provider| compact_provider(provider, &provider_dispatchability(&catalog, provider, &route, &dispatchability, &provider_config, args.validate_readiness))).collect()) },
-            // Availability means dispatchable. Anything that is declared but
-            // not dispatchable reports the credential it is missing here so the
-            // remediation survives the `--full` serde presentation too (#11479).
-            "credential_readiness": credential_readiness_report(&shown_providers),
             "dispatchability": serde_json::to_value(&dispatchability).unwrap_or(Value::Null),
             "readiness_validation": readiness_validation_projection(
                 validated_provider_identity,
@@ -2143,10 +2137,8 @@ fn providers_with_catalog(
                 declared_backends,
             ),
             "diagnostics": shown_diagnostics,
-            // Explicit `--secret-env` names win; otherwise report every secret
-            // the shown providers declare, resolved per provider so this agrees
-            // with credential readiness about the same secrets (#13629).
-            "secret_env": homeboy::agents::agent_tasks::secrets::secret_env_status_for_scopes(&args.secret_env, &secret_env_scopes),
+            // Task secret names are explicit, not provider declarations.
+            "secret_env": homeboy::agents::agent_tasks::secrets::secret_env_status(&args.secret_env),
         }),
         0,
     ))
@@ -2154,14 +2146,7 @@ fn providers_with_catalog(
 
 /// A provider's catalog status.
 ///
-/// `available` used to mean only "discovery parsed this provider", which made
-/// the catalog claim something Homeboy could not honor: a backend with no
-/// credential still advertised itself (and its `provider_owned_auth`
-/// capability), so a Cook dispatched to it and spent its whole execution budget
-/// discovering the gap inside the provider (#11479). Availability now means
-/// *dispatchable*: a provider whose declared credentials do not resolve here
-/// reports `unavailable`, and the compact presentation's `reason` names the
-/// credential.
+/// Availability follows the dispatchability verdict, including live readiness.
 fn provider_status(
     provider: &AgentTaskExecutorProvider,
     dispatchability: &homeboy::agents::agent_tasks::provider::AgentTaskProviderDispatchability,
@@ -2198,37 +2183,10 @@ fn provider_matches_status(
     provider_status(provider, dispatchability).eq_ignore_ascii_case(status)
 }
 
-/// Per-provider credential readiness for every provider that is not
-/// dispatchable. Emitted in both compact and `--full` presentations so an
-/// operator reading either one gets the remediation, not just a status word.
-fn credential_readiness_report(providers: &[AgentTaskExecutorProvider]) -> Vec<Value> {
-    providers
-        .iter()
-        .map(provider_credential_readiness)
-        .filter(|readiness| !readiness.dispatchable)
-        .map(|readiness| {
-            let remediation = readiness.remediation();
-            let mut value = serde_json::to_value(&readiness).unwrap_or(Value::Null);
-            if let Some(object) = value.as_object_mut() {
-                object.insert(
-                    "reason".to_string(),
-                    Value::String(readiness.reason().unwrap_or_default()),
-                );
-                object.insert(
-                    "remediation".to_string(),
-                    Value::Array(remediation.into_iter().map(Value::String).collect()),
-                );
-            }
-            value
-        })
-        .collect()
-}
-
 fn compact_provider(
     provider: &AgentTaskExecutorProvider,
     dispatchability: &homeboy::agents::agent_tasks::provider::AgentTaskProviderDispatchability,
 ) -> Value {
-    let readiness = provider_credential_readiness(provider);
     let compact_check = |ready: bool, reason: Option<&str>| {
         serde_json::json!({
             "ready": ready,
@@ -2245,8 +2203,7 @@ fn compact_provider(
         // Keep the row's state in the same vocabulary as the top-level
         // dispatchability verdict; `status` remains the filterable availability tier.
         "state": dispatchability.state,
-        "reason": readiness.reason().map(|value| bounded_text(&value, 128))
-            .or_else(|| dispatchability.checks.credentials.reason.as_deref().map(|value| bounded_text(value, 128)))
+        "reason": dispatchability.checks.credentials.reason.as_deref().map(|value| bounded_text(value, 128))
             .or_else(|| (!dispatchability.ready).then(|| bounded_text(&dispatchability.reason, 128))),
         "dispatchability": {
             "state": dispatchability.state,
@@ -2622,10 +2579,7 @@ fn provider_report_state(
     if let Some(verdict) = dispatchability {
         return verdict.state;
     }
-    if !providers
-        .iter()
-        .any(|provider| provider_credential_readiness(provider).dispatchable)
-    {
+    if providers.is_empty() {
         return "blocked";
     }
     route.map(ProviderRoute::state).unwrap_or("available")
@@ -3357,20 +3311,6 @@ mod tests {
         );
     }
 
-    /// The claude-code shape from #11479: it advertises `provider_owned_auth`
-    /// and declares its own required credential.
-    fn credential_declaring_provider() -> AgentTaskExecutorProvider {
-        serde_json::from_value(serde_json::json!({
-            "id": "claude-code.agent-task-executor",
-            "backend": "claude-code",
-            "capabilities": ["cli_runtime", "provider_owned_auth"],
-            "secret_env_requirements": [{
-                "env": ["AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN"]
-            }]
-        }))
-        .expect("provider fixture")
-    }
-
     fn providers_args() -> ProvidersArgs {
         ProvidersArgs {
             backend: None,
@@ -3615,168 +3555,6 @@ mod tests {
     }
 
     #[test]
-    fn providers_set_default_fails_closed_and_writes_nothing_when_no_backend_is_ready() {
-        crate::test_support::with_isolated_home(|_| {
-            let fake = FakePi::with_probes("exit 99", "exit 1");
-            let mut dead = fake.provider();
-            dead.secret_env_requirements = credential_declaring_provider().secret_env_requirements;
-            let catalog = provider_catalog(vec![dead]);
-            let before = homeboy::core::defaults::load_config();
-
-            let error = write_default_backend_from_readiness(&catalog)
-                .expect_err("no declared backend passes a live readiness probe");
-            assert!(
-                error.message.contains("no declared backend"),
-                "{}",
-                error.message
-            );
-
-            // A written default that cannot dispatch is worse than the
-            // explicit `selection_required` failure it would replace.
-            let after = homeboy::core::defaults::load_config();
-            assert_eq!(
-                after.agent_task.default_backend,
-                before.agent_task.default_backend
-            );
-            assert_eq!(after.agent_task.rotation, before.agent_task.rotation);
-        });
-    }
-
-    /// #13629: `agent-task providers --secret-env` used to return an empty
-    /// list whenever the operator passed no explicit `--secret-env` names,
-    /// even though `agent-task auth status` defaults to reporting every
-    /// secret the scope declares. The two commands answer the same question
-    /// about the same backend and must agree.
-    #[test]
-    fn providers_secret_env_defaults_to_every_declared_secret_like_auth_status() {
-        crate::test_support::with_isolated_home(|_| {
-            save_provider_policy(None, None);
-            let provider: AgentTaskExecutorProvider = serde_json::from_value(serde_json::json!({
-                "id": "claude-code.agent-task-executor",
-                "backend": "claude-code",
-                "capabilities": ["cli_runtime", "provider_owned_auth"],
-                "secret_env_requirements": [{
-                    "env": ["AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN"],
-                    "secret_env_sources": {
-                        "AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN": {
-                            "source": "env",
-                            "env_var": "AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN"
-                        }
-                    }
-                }]
-            }))
-            .expect("provider fixture");
-            let mut args = providers_args();
-            args.backend = Some("claude-code".to_string());
-            let output = providers_with_catalog(args, provider_catalog(vec![provider]))
-                .expect("provider report")
-                .0;
-
-            let secret_env = output["secret_env"]
-                .as_array()
-                .expect("secret_env is an array");
-            assert!(
-                !secret_env.is_empty(),
-                "no explicit --secret-env was passed, so the shown backend's declared secret \
-                 must still be reported by default, not silently omitted"
-            );
-            assert!(
-                secret_env
-                    .iter()
-                    .any(|entry| entry["name"] == "AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN"),
-                "the declared credential must be named: {secret_env:?}"
-            );
-            assert_eq!(
-                secret_env
-                    .iter()
-                    .find(|entry| entry["name"] == "AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN")
-                    .expect("declared credential entry")["configured"],
-                false,
-                "unconfigured in this hermetic test environment, matching auth status"
-            );
-        });
-    }
-
-    /// #13629: a second provider's json-file source for the same env name must
-    /// not make catalog `secret_env` say configured while the requiring
-    /// provider's credential readiness reports it missing.
-    #[test]
-    fn providers_secret_env_does_not_mark_a_required_credential_configured_from_another_provider() {
-        crate::test_support::with_isolated_home(|_| {
-            save_provider_policy(None, None);
-            let auth = tempfile::NamedTempFile::new().expect("auth file");
-            std::fs::write(auth.path(), r#"{"refresh":"present-refresh-token"}"#)
-                .expect("write auth");
-            let auth_path = auth.path().to_string_lossy().to_string();
-            let requiring: AgentTaskExecutorProvider = serde_json::from_value(serde_json::json!({
-                "id": "claude-code.agent-task-executor",
-                "backend": "claude-code",
-                "secret_env_requirements": [{
-                    "env": ["AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN"]
-                }]
-            }))
-            .expect("requiring provider");
-            let sourced: AgentTaskExecutorProvider = serde_json::from_value(serde_json::json!({
-                "id": "wordpress.codebox-agent-task-executor",
-                "backend": "wp-codebox",
-                "provider_defaults": {
-                    "openai": { "required_secret_env": ["OPENAI_API_KEY"] },
-                    "claude-code": {
-                        "secret_env": ["AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN"],
-                        "secret_env_sources": {
-                            "AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN": {
-                                "source": "json-file",
-                                "path": auth_path,
-                                "field": "refresh"
-                            }
-                        }
-                    }
-                }
-            }))
-            .expect("sourced provider");
-            let mut args = providers_args();
-            args.secret_env = vec!["AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN".to_string()];
-            let output = providers_with_catalog(args, provider_catalog(vec![requiring, sourced]))
-                .expect("provider report")
-                .0;
-
-            let secret_env = output["secret_env"]
-                .as_array()
-                .expect("secret_env is an array");
-            let claude = secret_env
-                .iter()
-                .find(|entry| entry["name"] == "AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN")
-                .expect("declared credential entry");
-            assert_eq!(
-                claude["configured"], false,
-                "another provider's json-file must not mark the requiring backend configured: {claude}"
-            );
-            assert_eq!(claude["source"], "missing");
-
-            let readiness = output["credential_readiness"]
-                .as_array()
-                .expect("credential_readiness is an array");
-            assert!(
-                readiness.iter().any(|entry| {
-                    entry["provider_id"] == "claude-code.agent-task-executor"
-                        && entry["missing"].as_array().is_some_and(|missing| {
-                            missing
-                                .iter()
-                                .any(|name| name == "AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN")
-                        })
-                }),
-                "credential readiness still names the missing required token: {readiness:?}"
-            );
-            assert!(
-                !serde_json::to_string(&output)
-                    .expect("json")
-                    .contains("present-refresh-token"),
-                "secret values must stay out of the report"
-            );
-        });
-    }
-
-    #[test]
     fn providers_end_to_end_reports_missing_default_route() {
         crate::test_support::with_isolated_home(|_| {
             save_provider_policy(None, None);
@@ -3784,115 +3562,6 @@ mod tests {
                 .expect("missing-default output")
                 .0;
             assert_eq!(output["operator_summary"]["state"], "route_unavailable");
-        });
-    }
-
-    #[test]
-    fn providers_report_blocked_when_missing_default_has_no_dispatchable_executor() {
-        crate::test_support::with_isolated_home(|_| {
-            save_provider_policy(None, None);
-            let output = providers_with_catalog(
-                providers_args(),
-                provider_catalog(vec![credential_declaring_provider()]),
-            )
-            .expect("provider report")
-            .0;
-
-            assert_eq!(output["operator_summary"]["state"], "route_unavailable");
-            assert_eq!(
-                output["readiness_validation"]["route_state"],
-                "configuration_unavailable"
-            );
-            assert_eq!(
-                output["operator_summary"]["selection_choices"],
-                serde_json::json!([])
-            );
-        });
-    }
-
-    #[test]
-    fn cook_credential_preflight_uses_the_same_rotated_provider_route() {
-        crate::test_support::with_isolated_home(|_| {
-            save_provider_policy(
-                Some("unavailable"),
-                Some(
-                    homeboy::agents::agent_task_scheduler::AgentTaskProviderRotationPolicy {
-                        entries: vec![
-                            homeboy::agents::agent_task_scheduler::AgentTaskProviderRotationEntry {
-                                backend: Some("fallback".to_string()),
-                                selector: Some("fallback.provider".to_string()),
-                                model: Some("fallback-model".to_string()),
-                                ..Default::default()
-                            },
-                        ],
-                        ..Default::default()
-                    },
-                ),
-            );
-            let mut unavailable = credential_declaring_provider();
-            unavailable.backend = "unavailable".to_string();
-            let credential = format!("HOMEBOY_ROTATED_FALLBACK_{}", uuid::Uuid::new_v4());
-            let mut fallback = provider("fallback.provider", "fallback");
-            fallback.secret_env_requirements = serde_json::from_value(serde_json::json!([{
-                "env": [credential.clone()]
-            }]))
-            .expect("secret env requirements");
-            let catalog = provider_catalog(vec![unavailable, fallback]);
-            let route =
-                agent_task_dispatch_service::resolve_cook_initial_provider_route_with_catalog(
-                    agent_task_dispatch_service::AgentTaskDispatchCommand::default(),
-                    &catalog,
-                    None,
-                )
-                .expect("resolve rotated Cook route");
-            assert_eq!(route.backend, "fallback");
-            assert_eq!(route.selector.as_deref(), Some("fallback.provider"));
-            assert_eq!(route.model.as_deref(), Some("fallback-model"));
-            let error = super::super::run::preflight_cook_provider_credentials(
-                agent_task_dispatch_service::AgentTaskDispatchCommand::default(),
-                &catalog,
-                None,
-            )
-            .expect_err("injected fallback credential must be preflighted without rediscovery");
-            assert!(error.message.contains(&credential), "{error}");
-        });
-    }
-
-    #[test]
-    fn a_provider_missing_its_declared_credential_is_not_reported_available() {
-        crate::test_support::with_isolated_home(|_| {
-            let provider = credential_declaring_provider();
-
-            assert_eq!(
-                provider_status(
-                    &provider,
-                    &evaluate_provider_dispatchability(
-                        &provider_catalog(vec![provider.clone()]),
-                        &provider.backend,
-                        Some(&provider.id),
-                        None,
-                        false,
-                    ),
-                ),
-                "unavailable",
-                "availability must mean dispatchable, not merely declared (#11479)"
-            );
-
-            let compact = compact_provider(
-                &provider,
-                &evaluate_provider_dispatchability(
-                    &provider_catalog(vec![provider.clone()]),
-                    &provider.backend,
-                    Some(&provider.id),
-                    None,
-                    false,
-                ),
-            );
-            assert_eq!(compact["status"], "unavailable");
-            assert_eq!(
-                compact["reason"], "missing credential AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN",
-                "the reason must name the credential an operator has to set"
-            );
         });
     }
 
@@ -3916,49 +3585,6 @@ mod tests {
             assert_eq!(provider_status(&provider, &dispatchability), "available");
             assert!(compact_provider(&provider, &dispatchability)["reason"].is_null());
         });
-    }
-
-    #[test]
-    fn provider_status_distinguishes_present_and_unverified_provider_owned_auth() {
-        let auth = tempfile::NamedTempFile::new().expect("auth file");
-        std::fs::write(auth.path(), r#"{"token":"present-token"}"#).expect("write auth");
-        let provider: AgentTaskExecutorProvider = serde_json::from_value(serde_json::json!({
-            "id": "owned-auth.provider",
-            "backend": "owned-auth",
-            "capabilities": ["cli_runtime", "provider_owned_auth"],
-            "secret_env_requirements": [{
-                "env": ["HOMEBOY_TEST_OWNED_AUTH_TOKEN"],
-                "secret_env_sources": {
-                    "HOMEBOY_TEST_OWNED_AUTH_TOKEN": {
-                        "source": "json-file",
-                        "path": auth.path(),
-                        "field": "token"
-                    }
-                }
-            }]
-        }))
-        .expect("provider fixture");
-        let catalog = provider_catalog(vec![provider.clone()]);
-
-        let present = evaluate_provider_dispatchability(
-            &catalog,
-            &provider.backend,
-            Some(&provider.id),
-            None,
-            false,
-        );
-        assert_eq!(provider_status(&provider, &present), "present");
-        assert!(provider_matches_status(&provider, &present, "present"));
-        assert_eq!(compact_provider(&provider, &present)["status"], "present");
-        assert_eq!(
-            compact_provider(&provider, &present)["state"],
-            "credentials_present"
-        );
-        assert_eq!(
-            compact_provider(&provider, &present)["dispatchability"]["checks"]["credentials"]
-                ["status"],
-            "present"
-        );
     }
 
     #[test]
@@ -4024,33 +3650,6 @@ mod tests {
     }
 
     #[test]
-    fn providers_public_dispatchability_envelope_drives_operator_summary() {
-        crate::test_support::with_isolated_home(|_| {
-            let provider = credential_declaring_provider();
-            let mut args = providers_args();
-            args.backend = Some(provider.backend.clone());
-            let output = providers_with_catalog(args, provider_catalog(vec![provider]))
-                .expect("provider envelope")
-                .0;
-
-            assert_eq!(output["dispatchability"]["state"], "credentials_missing");
-            assert_eq!(output["operator_summary"]["state"], "credentials_missing");
-            assert_eq!(output["dispatchability"]["checks"]["route"]["ready"], true);
-            assert_eq!(
-                output["dispatchability"]["checks"]["credentials"]["ready"],
-                false
-            );
-            assert_eq!(
-                output["dispatchability"]["checks"]["credentials"]["missing"][0],
-                "AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN"
-            );
-            assert!(output["readiness_validation"]
-                .get("dispatchability")
-                .is_none());
-        });
-    }
-
-    #[test]
     fn providers_public_dispatchability_envelope_reports_all_ready() {
         let provider = provider("ready.provider", "ready");
         let mut args = providers_args();
@@ -4067,46 +3666,6 @@ mod tests {
             output["readiness_validation"]["live_dispatch"],
             "structurally_dispatchable"
         );
-    }
-
-    #[test]
-    fn credential_readiness_report_carries_the_remediation() {
-        crate::test_support::with_isolated_home(|_| {
-            let report = credential_readiness_report(&[credential_declaring_provider()]);
-
-            assert_eq!(report.len(), 1, "one undispatchable provider is reported");
-            assert_eq!(report[0]["provider_id"], "claude-code.agent-task-executor");
-            assert_eq!(report[0]["dispatchable"], false);
-            assert_eq!(
-                report[0]["missing"][0],
-                "AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN"
-            );
-            assert!(
-                report[0]["remediation"]
-                    .as_array()
-                    .expect("remediation lines")
-                    .iter()
-                    .any(|line| {
-                        line.as_str().is_some_and(|line| {
-                            line.contains("AI_PROVIDER_CLAUDE_CODE_REFRESH_TOKEN")
-                        })
-                    }),
-                "an undispatchable provider must report how to fix it"
-            );
-        });
-    }
-
-    #[test]
-    fn dispatchable_providers_are_absent_from_the_credential_readiness_report() {
-        crate::test_support::with_isolated_home(|_| {
-            let provider: AgentTaskExecutorProvider = serde_json::from_value(serde_json::json!({
-                "id": "local-shell.agent-task-executor",
-                "backend": "local-shell",
-            }))
-            .expect("provider fixture");
-
-            assert!(credential_readiness_report(&[provider]).is_empty());
-        });
     }
 
     #[test]

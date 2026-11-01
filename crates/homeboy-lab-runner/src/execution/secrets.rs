@@ -2,9 +2,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use homeboy_agents::agent_tasks::provider::run_provider_controller_refresh;
-use homeboy_agents::agent_tasks::{
-    provider_secret_sources_for_discovered_providers, secrets as agent_task_secrets,
-};
+use homeboy_agents::agent_tasks::secrets as agent_task_secrets;
 use homeboy_core::engine::shell;
 use homeboy_core::error::{Error, Result};
 use homeboy_core::secret_env_plan::SecretEnvPlan;
@@ -23,12 +21,7 @@ pub(super) fn resolve_runner_secret_env_for_plan(
     plan: &SecretEnvPlan,
     env: &HashMap<String, String>,
 ) -> Result<HashMap<String, String>> {
-    resolve_runner_secret_env_for_plan_with_sources(
-        secret_env,
-        plan,
-        env,
-        &provider_secret_sources_for_discovered_providers(),
-    )
+    resolve_runner_secret_env_for_plan_with_sources(secret_env, plan, env, &HashMap::new())
 }
 
 pub(super) fn resolve_runner_secret_env_for_plan_with_sources(
@@ -461,12 +454,7 @@ pub(super) fn resolve_controller_secret_env_for_command(
     plan: &SecretEnvPlan,
     env: &HashMap<String, String>,
 ) -> Result<HashMap<String, String>> {
-    resolve_controller_secret_env_for_plan_with_fallbacks(
-        secret_env,
-        plan,
-        env,
-        &provider_secret_sources_for_discovered_providers(),
-    )
+    resolve_controller_secret_env_for_plan_with_fallbacks(secret_env, plan, env, &HashMap::new())
 }
 
 #[cfg(test)]

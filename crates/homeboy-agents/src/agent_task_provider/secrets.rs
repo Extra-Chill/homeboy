@@ -49,13 +49,6 @@ pub(super) fn provider_request_credential_env(
     resolve_secret_env_with_fallbacks(&names, &sources)
 }
 
-pub(super) fn provider_declared_credential_env(
-    provider: &AgentTaskExecutorProvider,
-) -> std::result::Result<Vec<(String, String)>, AgentTaskSecretResolutionError> {
-    let names = super::credential_readiness::provider_required_secret_env_names(provider);
-    resolve_secret_env_with_fallbacks(&names, &provider_declared_secret_sources(provider))
-}
-
 pub fn provider_runner_secret_env_for_plan_with_providers(
     plan: &AgentTaskPlan,
     providers: &[AgentTaskExecutorProvider],
@@ -272,20 +265,6 @@ fn provider_secret_env(
     for readiness in &provider.runner_readiness {
         names.extend(readiness.secret_env.iter().cloned());
     }
-    for requirement in &provider.secret_requirements {
-        if requirement.required == Some(false) {
-            continue;
-        }
-        if let Some(name) = &requirement.name {
-            names.push(name.clone());
-        }
-        names.extend(requirement.env.iter().cloned());
-    }
-    for requirement in &provider.secret_env_requirements {
-        if requirement_matches_request(requirement.when.as_ref(), request) {
-            names.extend(requirement.env.iter().cloned());
-        }
-    }
     if let Some(defaults) =
         request.and_then(|request| effective_provider_default(provider, request))
     {
@@ -368,54 +347,12 @@ pub(super) fn provider_secret_sources(
     request: Option<&AgentTaskRequest>,
 ) -> HashMap<String, defaults::AgentTaskSecretSource> {
     let mut sources = HashMap::new();
-    for requirement in &provider.secret_env_requirements {
-        if requirement_matches_request(requirement.when.as_ref(), request) {
-            sources.extend(secret_source_map_from_extra(&requirement.extra));
-        }
-    }
     if let Some(defaults) =
         request.and_then(|request| effective_provider_default(provider, request))
     {
         sources.extend(provider_config_secret_sources(defaults));
     }
     sources
-}
-
-/// Every secret source a provider declares independently of any dispatch
-/// request: unconditional `secret_env_requirements` sources only.
-/// Account-scoped `provider_defaults` stay request-scoped through
-/// `provider_secret_sources(provider, Some(request))`. Overlaying a sole unused
-/// account here would let an unselected source replace an unconditional one.
-///
-/// This is the single source-resolution path behind `agent-task auth status`,
-/// `agent-task providers --secret-env`, and provider credential readiness
-/// (`--validate-readiness`). Those three surfaces used to assemble this same
-/// merge independently; a provider whose declared source resolved differently
-/// under one assembly than another could report a secret as configured in one
-/// place and missing in another for no reason a caller could see (#13629).
-/// Routing all three through this one function makes that divergence
-/// structurally impossible rather than something each call site has to keep
-/// in sync by hand.
-pub(super) fn provider_declared_secret_sources(
-    provider: &AgentTaskExecutorProvider,
-) -> HashMap<String, defaults::AgentTaskSecretSource> {
-    provider_secret_sources(provider, None)
-}
-
-fn secret_source_map_from_extra(
-    extra: &BTreeMap<String, Value>,
-) -> HashMap<String, defaults::AgentTaskSecretSource> {
-    for key in [
-        "secret_env_sources",
-        "secretEnvSources",
-        "credential_sources",
-        "credentialSources",
-    ] {
-        if let Some(value) = extra.get(key) {
-            return secret_source_map(value);
-        }
-    }
-    HashMap::new()
 }
 
 pub(super) fn provider_config_secret_sources(
@@ -551,47 +488,6 @@ fn provider_default_credentials_available(config: &Value) -> bool {
             .all(|status| status.configured)
 }
 
-fn requirement_matches_request(when: Option<&Value>, request: Option<&AgentTaskRequest>) -> bool {
-    let Some(when) = when else {
-        return true;
-    };
-    let Some(request) = request else {
-        return false;
-    };
-    let Ok(request_value) = serde_json::to_value(request) else {
-        return false;
-    };
-    condition_matches(when, &request_value)
-}
-
-fn condition_matches(condition: &Value, request: &Value) -> bool {
-    if let Some(any) = condition.get("any").and_then(Value::as_array) {
-        return any.iter().any(|item| condition_matches(item, request));
-    }
-    if let Some(all) = condition.get("all").and_then(Value::as_array) {
-        return all.iter().all(|item| condition_matches(item, request));
-    }
-    let Some(path) = condition.get("path").and_then(Value::as_str) else {
-        return false;
-    };
-    let actual = value_at_contract_path(request, path);
-    match condition.get("equals") {
-        Some(expected) => actual == Some(expected),
-        None => actual.is_some(),
-    }
-}
-
-fn value_at_contract_path<'a>(value: &'a Value, path: &str) -> Option<&'a Value> {
-    if path == "provider" {
-        return value_at_contract_path(value, "executor.config.provider");
-    }
-    let mut current = value;
-    for part in path.split('.') {
-        current = current.get(part)?;
-    }
-    Some(current)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -631,45 +527,6 @@ mod tests {
             runtime_tools: Vec::new(),
             metadata: Value::Null,
         }
-    }
-
-    #[test]
-    fn unused_account_source_does_not_override_unconditional_source() {
-        let provider: AgentTaskExecutorProvider = serde_json::from_value(serde_json::json!({
-            "id": "test.provider",
-            "backend": "test",
-            "secret_env_requirements": [{
-                "env": ["SHARED_TOKEN"],
-                "secret_env_sources": {
-                    "SHARED_TOKEN": {"source": "env", "env_var": "UNCONDITIONAL_SOURCE"}
-                }
-            }],
-            "provider_defaults": {
-                "unused-account": {
-                    "required_secret_env": ["SHARED_TOKEN"],
-                    "secret_env_sources": {
-                        "SHARED_TOKEN": {"source": "env", "env_var": "UNUSED_ACCOUNT_SOURCE"}
-                    }
-                }
-            }
-        }))
-        .expect("provider");
-
-        assert_eq!(
-            provider_declared_secret_sources(&provider)["SHARED_TOKEN"]
-                .env_var
-                .as_deref(),
-            Some("UNCONDITIONAL_SOURCE")
-        );
-        assert_eq!(
-            provider_secret_sources(
-                &provider,
-                Some(&request(serde_json::json!({"provider": "unused-account"})))
-            )["SHARED_TOKEN"]
-                .env_var
-                .as_deref(),
-            Some("UNUSED_ACCOUNT_SOURCE")
-        );
     }
 
     #[test]
@@ -853,27 +710,6 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_secret_plan_enforces_unconditional_secret_requirements() {
-        let provider: AgentTaskExecutorProvider = serde_json::from_value(serde_json::json!({
-            "id": "test.provider",
-            "backend": "test",
-            "secret_requirements": [{ "name": "REQUIRED_TOKEN" }],
-            "provider_defaults": {
-                "unused-account": { "required_secret_env": ["UNUSED_ACCOUNT_TOKEN"] }
-            }
-        }))
-        .expect("provider");
-        let mut task = request(Value::Null);
-        task.executor.selector = Some("test.provider".to_string());
-        let plan = AgentTaskPlan::new("secret-selection-required", vec![task]);
-
-        assert_eq!(
-            provider_runner_secret_env_for_plan_with_providers(&plan, &[provider]),
-            vec!["REQUIRED_TOKEN".to_string()]
-        );
-    }
-
-    #[test]
     fn selected_model_route_does_not_inherit_an_unrelated_sole_default() {
         let provider: AgentTaskExecutorProvider = serde_json::from_value(serde_json::json!({
             "id": "test.provider",
@@ -931,164 +767,21 @@ mod tests {
         );
     }
 
-    #[test]
-    fn multiple_defaults_with_the_same_env_keep_sources_account_scoped() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let first = root.path().join("first.json");
-        let second = root.path().join("second.json");
-        std::fs::write(&first, r#"{"token":"first-value"}"#).expect("first credential");
-        std::fs::write(&second, r#"{"token":"second-value"}"#).expect("second credential");
-        let provider: AgentTaskExecutorProvider = serde_json::from_value(serde_json::json!({
-            "id": "test.provider",
-            "backend": "test",
-            "provider_defaults": {
-                "first": {
-                    "required_secret_env": "ACCOUNT_TOKEN",
-                    "secret_env_sources": {"ACCOUNT_TOKEN": {"source":"json-file", "path":first, "field":"token"}}
-                },
-                "second": {
-                    "required_secret_env": "ACCOUNT_TOKEN",
-                    "secret_env_sources": {"ACCOUNT_TOKEN": {"source":"json-file", "path":second, "field":"token"}}
-                }
-            }
-        }))
-        .expect("provider");
-
-        assert!(provider_declared_credential_env(&provider)
-            .expect("unscoped credentials")
-            .is_empty());
-        assert_eq!(
-            provider_request_credential_env(
-                &request(serde_json::json!({"provider":"first"})),
-                &provider,
-            )
-            .expect("first account"),
-            vec![("ACCOUNT_TOKEN".to_string(), "first-value".to_string())]
-        );
-        assert_eq!(
-            provider_request_credential_env(
-                &request(serde_json::json!({"provider":"second"})),
-                &provider,
-            )
-            .expect("second account"),
-            vec![("ACCOUNT_TOKEN".to_string(), "second-value".to_string())]
-        );
-    }
-
-    #[test]
-    fn unbound_plan_secret_sources_use_only_each_current_route() {
-        let providers: Vec<AgentTaskExecutorProvider> = [
-            serde_json::json!({
-                "id": "test.primary",
-                "backend": "test",
-                "secret_env_requirements": [{
-                    "env": ["PRIMARY_TOKEN"],
-                    "secret_env_sources": {
-                        "PRIMARY_TOKEN": {"source": "env", "env_var": "PRIMARY_SOURCE"}
-                    }
-                }]
-            }),
-            serde_json::json!({
-                "id": "test.plan-fallback",
-                "backend": "test",
-                "provider_defaults": {
-                    "plan-account": {
-                        "required_secret_env": ["PLAN_FALLBACK_TOKEN"],
-                        "secret_env_sources": {
-                            "PLAN_FALLBACK_TOKEN": {"source": "env", "env_var": "PLAN_FALLBACK_SOURCE"}
-                        }
-                    }
-                }
-            }),
-            serde_json::json!({
-                "id": "test.task-fallback",
-                "backend": "test",
-                "secret_env_requirements": [{
-                    "env": ["TASK_FALLBACK_TOKEN"],
-                    "when": {"path": "executor.config.provider", "equals": "task-account"},
-                    "secret_env_sources": {
-                        "TASK_FALLBACK_TOKEN": {"source": "env", "env_var": "TASK_FALLBACK_SOURCE"}
-                    }
-                }]
-            }),
-        ]
-        .into_iter()
-        .map(|value| serde_json::from_value(value).expect("provider"))
-        .collect();
-
-        let mut plan_task = request(Value::Null);
-        plan_task.executor.selector = Some("test.primary".to_string());
-        let mut task_local = request(Value::Null);
-        task_local.task_id = "task-local".to_string();
-        task_local.executor.selector = Some("test.primary".to_string());
-        task_local.metadata = serde_json::json!({
-            "provider_rotation": {
-                "entries": [
-                    {"selector": "test.primary"},
-                    {
-                        "selector": "test.task-fallback",
-                        "provider_config": {"provider": "task-account"}
-                    }
-                ]
-            }
-        });
-        let mut plan = AgentTaskPlan::new("secret-source-rotation", vec![plan_task, task_local]);
-        plan.options.rotation = Some(AgentTaskProviderRotationPolicy {
-            entries: vec![
-                AgentTaskProviderRotationEntry {
-                    selector: Some("test.primary".to_string()),
-                    ..Default::default()
-                },
-                AgentTaskProviderRotationEntry {
-                    selector: Some("test.plan-fallback".to_string()),
-                    provider_config: serde_json::json!({"provider": "plan-account"}),
-                    ..Default::default()
-                },
-            ],
-            ..Default::default()
-        });
-
-        let sources = provider_secret_sources_for_plan_with_providers(&plan, &providers);
-
-        assert_eq!(sources.len(), 1);
-        assert_eq!(
-            sources["PRIMARY_TOKEN"].env_var.as_deref(),
-            Some("PRIMARY_SOURCE")
-        );
-        assert!(!sources.contains_key("PLAN_FALLBACK_TOKEN"));
-        assert!(!sources.contains_key("TASK_FALLBACK_TOKEN"));
-    }
-
     fn controller_refresh_rotation_fixture() -> (Vec<AgentTaskExecutorProvider>, AgentTaskPlan) {
-        let providers: Vec<AgentTaskExecutorProvider> = [
+        let providers = [
+            serde_json::json!({"id":"test.primary", "backend":"test"}),
             serde_json::json!({
-                "id": "test.primary",
-                "backend": "test",
-                "secret_env_requirements": [{
-                    "env": ["PRIMARY_TOKEN"],
+                "id":"test.fallback", "backend":"test",
+                "provider_defaults": {"refreshed-account": {
+                    "secret_env": ["REFRESHED_ACCESS", "REFRESHED_EXPIRES"],
                     "secret_env_sources": {
-                        "PRIMARY_TOKEN": {"source": "env", "env_var": "PRIMARY_SOURCE"}
-                    }
-                }]
-            }),
-            serde_json::json!({
-                "id": "test.fallback",
-                "backend": "test",
-                "provider_defaults": {
-                    "refreshed-account": {
-                        "secret_env": ["REFRESHED_ACCESS", "REFRESHED_EXPIRES"],
-                        "secret_env_sources": {
-                            "REFRESHED_ACCESS": {"source": "json-file", "path": "~/.auth.json", "field": "acct.access"},
-                            "REFRESHED_EXPIRES": {"source": "json-file", "path": "~/.auth.json", "field": "acct.expires"}
-                        },
-                        "controller_refresh": {"argv": ["node", "{{runtime_path}}/refresh.cjs"]}
-                    }
-                }
-            }),
-        ]
-        .into_iter()
-        .map(|value| serde_json::from_value(value).expect("provider"))
-        .collect();
+                        "REFRESHED_ACCESS": {"source":"json-file", "path":"~/.auth.json", "field":"acct.access"},
+                        "REFRESHED_EXPIRES": {"source":"json-file", "path":"~/.auth.json", "field":"acct.expires"}
+                    },
+                    "controller_refresh": {"argv":["node", "{{runtime_path}}/refresh.cjs"]}
+                }}
+            })
+        ].into_iter().map(|value| serde_json::from_value(value).unwrap()).collect();
         let mut task = request(Value::Null);
         task.executor.selector = Some("test.primary".to_string());
         let mut plan = AgentTaskPlan::new("controller-refresh-rotation", vec![task]);
@@ -1100,7 +793,7 @@ mod tests {
                 },
                 AgentTaskProviderRotationEntry {
                     selector: Some("test.fallback".to_string()),
-                    provider_config: serde_json::json!({"provider": "refreshed-account"}),
+                    provider_config: serde_json::json!({"provider":"refreshed-account"}),
                     ..Default::default()
                 },
             ],
@@ -1124,9 +817,7 @@ mod tests {
             routes["REFRESHED_ACCESS"].field.as_deref(),
             Some("acct.access")
         );
-        assert!(routes.contains_key("PRIMARY_TOKEN"));
         assert!(route_names.contains(&"REFRESHED_ACCESS".to_string()));
-        assert!(route_names.contains(&"PRIMARY_TOKEN".to_string()));
     }
 
     #[test]
@@ -1150,61 +841,6 @@ mod tests {
                 "REFRESHED_ACCESS".to_string(),
                 "REFRESHED_EXPIRES".to_string()
             ]
-        );
-    }
-
-    #[test]
-    fn admitted_fallback_keeps_its_conflicting_secret_source() {
-        let providers: Vec<AgentTaskExecutorProvider> = [
-            ("test.primary", "SHARED_SOURCE"),
-            ("test.identical", "SHARED_SOURCE"),
-            ("test.conflicting", "OTHER_SOURCE"),
-        ]
-        .into_iter()
-        .map(|(id, env_var)| {
-            serde_json::from_value(serde_json::json!({
-                "id": id,
-                "backend": "test",
-                "secret_env_requirements": [{
-                    "env": ["SHARED_TOKEN"],
-                    "secret_env_sources": {
-                        "SHARED_TOKEN": {"source": "env", "env_var": env_var}
-                    }
-                }]
-            }))
-            .expect("provider")
-        })
-        .collect();
-        let mut task = request(Value::Null);
-        task.executor.selector = Some("test.primary".to_string());
-        let mut plan = AgentTaskPlan::new("secret-source-conflict", vec![task]);
-        plan.options.rotation = Some(AgentTaskProviderRotationPolicy {
-            entries: vec![
-                AgentTaskProviderRotationEntry {
-                    selector: Some("test.primary".to_string()),
-                    ..Default::default()
-                },
-                AgentTaskProviderRotationEntry {
-                    selector: Some("test.identical".to_string()),
-                    ..Default::default()
-                },
-                AgentTaskProviderRotationEntry {
-                    selector: Some("test.conflicting".to_string()),
-                    ..Default::default()
-                },
-            ],
-            ..Default::default()
-        });
-        plan.tasks[0].executor.selector = Some("test.conflicting".to_string());
-        plan.tasks[0].metadata = serde_json::json!({
-            "provider_readiness_routing": { "next_rotation_index": 3 }
-        });
-
-        assert_eq!(
-            provider_secret_sources_for_plan_with_providers(&plan, &providers)["SHARED_TOKEN"]
-                .env_var
-                .as_deref(),
-            Some("OTHER_SOURCE")
         );
     }
 }

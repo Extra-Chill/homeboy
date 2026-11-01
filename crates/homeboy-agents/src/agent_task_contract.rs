@@ -213,8 +213,6 @@ pub fn agent_task_core_contract() -> AgentTaskCoreContract {
                 "failure_classifications",
                 "redacted_metadata_keys",
                 "capabilities",
-                "secret_requirements",
-                "secret_env_requirements",
                 "workspace_materialization",
                 "provider_defaults",
                 "provider_preflight",

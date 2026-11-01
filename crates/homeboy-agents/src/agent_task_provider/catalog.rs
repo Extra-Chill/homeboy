@@ -4,7 +4,7 @@ use super::resolution::{
     required_extension_ids_for_plan_with_providers, select_provider,
 };
 use super::secrets::{
-    apply_provider_runner_secret_env_contracts_with_providers, provider_declared_secret_sources,
+    apply_provider_runner_secret_env_contracts_with_providers,
     provider_secret_sources_for_plan_with_providers,
 };
 use super::*;
@@ -210,12 +210,6 @@ impl AgentTaskProviderCatalog {
         plan: &AgentTaskPlan,
     ) -> homeboy_core::Result<()> {
         enforce_runtime_preflight_checks_for_plan_with_providers(plan, &self.providers)
-    }
-
-    pub fn provider_secret_sources_for_providers(
-        &self,
-    ) -> HashMap<String, defaults::AgentTaskSecretSource> {
-        provider_secret_sources_for_providers(&self.providers)
     }
 }
 
@@ -474,18 +468,7 @@ fn validate_provider_runner_readiness_for_backend_with_diagnostics(
         crate::agent_task_config_materialization::materialize_provider_config_refs(Value::Object(
             defaults::load_config().settings.into_iter().collect(),
         ))?;
-    let credential_env = super::secrets::provider_declared_credential_env(provider).map_err(|error| {
-        Error::validation_invalid_argument(
-            "backend",
-            format!(
-                "agent-task backend '{backend}' could not resolve declared provider credentials: {}",
-                error.message
-            ),
-            Some(backend.to_string()),
-            None,
-        )
-    })?;
-    let verdict = super::command_runner::run_provider_readiness_probe_with_env(provider, &effective_config, &credential_env).map_err(
+    let verdict = super::command_runner::run_provider_readiness_probe_with_env(provider, &effective_config, &[]).map_err(
         |message| {
             Error::validation_invalid_argument(
                 "backend",
@@ -603,39 +586,6 @@ pub fn provider_secret_sources_for_plan(
 ) -> HashMap<String, defaults::AgentTaskSecretSource> {
     let catalog = AgentTaskProviderCatalog::discover();
     provider_secret_sources_for_plan_with_providers(plan, catalog.providers())
-}
-
-pub fn provider_secret_sources_for_discovered_providers(
-) -> HashMap<String, defaults::AgentTaskSecretSource> {
-    AgentTaskProviderCatalog::discover().provider_secret_sources_for_providers()
-}
-
-pub fn provider_secret_sources_for_providers(
-    providers: &[AgentTaskExecutorProvider],
-) -> HashMap<String, defaults::AgentTaskSecretSource> {
-    let mut sources = HashMap::new();
-    for provider in providers {
-        sources.extend(provider_declared_secret_sources(provider));
-    }
-    sources
-}
-
-/// One secret-env scope per provider so catalog `secret_env` resolves each
-/// required name against the provider that requires it (#13629).
-pub fn provider_secret_env_scopes(
-    providers: &[AgentTaskExecutorProvider],
-) -> Vec<crate::agent_task_secrets::AgentTaskSecretEnvScope> {
-    providers
-        .iter()
-        .map(
-            |provider| crate::agent_task_secrets::AgentTaskSecretEnvScope {
-                fallback_sources: provider_declared_secret_sources(provider),
-                required_names: super::credential_readiness::provider_required_secret_env_names(
-                    provider,
-                ),
-            },
-        )
-        .collect()
 }
 
 pub(super) fn default_backend_from_policy_sources<F>(

@@ -4,7 +4,7 @@ use super::{
     capacity_readiness::{capacity_readiness_from_probe_result, capacity_readiness_unknown},
     effective_provider_config,
     executor::effective_provider_for_request,
-    provider_credential_readiness, resolve_provider_for_backend,
+    resolve_provider_for_backend,
     runtime_readiness::provider_requires_live_auth_validation,
     validate_provider_immediate_failure_patterns, AgentTaskProviderCapacityReadiness,
     AgentTaskProviderCatalog, ProviderResolution, ProviderRuntimeReadinessCache,
@@ -224,31 +224,16 @@ pub fn evaluate_provider_capacity_with_config(
             "the selected model is not declared by the routed provider",
         );
     }
-    let credentials = provider_credential_readiness(provider);
-    if !credentials.dispatchable {
-        return capacity_readiness_unknown(
-            "required provider credentials are not configured, so capacity was not probed",
-        );
-    }
     if validate_provider_immediate_failure_patterns(provider).is_err() {
         return capacity_readiness_unknown(
             "provider immediate-failure configuration is invalid, so capacity was not probed",
         );
     }
     let effective_config = effective_provider_config(config, model);
-    let declared_credential_env = match super::secrets::provider_declared_credential_env(provider) {
-        Ok(credential_env) => credential_env,
-        Err(error) => {
-            return capacity_readiness_unknown(format!(
-                "provider credentials did not resolve, so capacity was not probed: {}",
-                error.message
-            ));
-        }
-    };
     match super::runtime_readiness::capacity_mode_readiness_verdict_with_deadline(
         provider,
         &effective_config,
-        &declared_credential_env,
+        &[],
         cache,
         deadline_unix_ms,
     ) {
@@ -408,15 +393,6 @@ fn evaluate_provider_dispatchability_with_config_credentials_and_deadline(
         .filter_map(|profile| profile.model.as_deref())
         .collect::<Vec<_>>();
     let model_ready = model.is_none_or(|model| supported.is_empty() || supported.contains(&model));
-    let credentials = provider_credential_readiness(provider);
-    let declared_credential_env;
-    let credential_env = if credential_env.is_empty() {
-        declared_credential_env =
-            super::secrets::provider_declared_credential_env(provider).unwrap_or_default();
-        declared_credential_env.as_slice()
-    } else {
-        credential_env
-    };
     let configuration = match validate_provider_immediate_failure_patterns(provider) {
         Ok(()) => AgentTaskProviderDispatchabilityCheck {
             ready: true,
@@ -428,11 +404,7 @@ fn evaluate_provider_dispatchability_with_config_credentials_and_deadline(
         },
     };
     let mut runtime_remediation = Vec::new();
-    let (runtime, runtime_evidence) = if probe_runtime
-        && model_ready
-        && credentials.dispatchable
-        && configuration.ready
-    {
+    let (runtime, runtime_evidence) = if probe_runtime && model_ready && configuration.ready {
         let config = effective_provider_config(config, model);
         match super::runtime_readiness::readiness_verdict_with_credentials_and_deadline_for_generated_fanout_context(
                 provider,
@@ -555,41 +527,19 @@ fn evaluate_provider_dispatchability_with_config_credentials_and_deadline(
         && runtime_evidence
             .as_ref()
             .is_some_and(|evidence| evidence.capacity.is_exhausted());
-    let (credential_status, credential_reason) = if !credentials.dispatchable {
-        (AgentTaskProviderCredentialStatus::Missing, None)
-    } else if credentials_verified {
+    let (credential_status, credential_reason) = if credentials_verified {
         (AgentTaskProviderCredentialStatus::Verified, None)
-    } else if probe_runtime
-        && !runtime.ready
-        && credentials_rejected
-        && (!credentials.requirements.is_empty() || provider_owned_auth)
-    {
+    } else if probe_runtime && !runtime.ready && credentials_rejected && provider_owned_auth {
         (
             AgentTaskProviderCredentialStatus::Unusable,
             runtime.reason.clone(),
         )
-    } else if !provider_owned_auth && credentials.requirements.is_empty() {
-        (AgentTaskProviderCredentialStatus::NotRequired, None)
     } else if !provider_owned_auth {
-        (
-            AgentTaskProviderCredentialStatus::Present,
-            Some("declared credential material is present".to_string()),
-        )
-    } else if !probe_runtime && credentials.requirements.is_empty() {
-        (
-            AgentTaskProviderCredentialStatus::Unverified,
-            Some(
-                "the provider owns authentication but declares no credential presence contract; live validation was not requested"
-                    .to_string(),
-            ),
-        )
+        (AgentTaskProviderCredentialStatus::NotRequired, None)
     } else if !probe_runtime {
         (
-            AgentTaskProviderCredentialStatus::Present,
-            Some(
-                "provider-owned credential material is present; live validation was not requested"
-                    .to_string(),
-            ),
+            AgentTaskProviderCredentialStatus::Unverified,
+            Some("live validation of provider-owned authentication was not requested".to_string()),
         )
     } else {
         (AgentTaskProviderCredentialStatus::Unverified, None)
@@ -606,19 +556,9 @@ fn evaluate_provider_dispatchability_with_config_credentials_and_deadline(
             false,
             "provider immediate-failure configuration is invalid",
         )
-    } else if !credentials.dispatchable {
-        (
-            "credentials_missing",
-            false,
-            "required provider credentials are not configured",
-        )
     } else if provider_owned_auth && !probe_runtime {
         (
-            if credentials.requirements.is_empty() {
-                "credentials_unverified"
-            } else {
-                "credentials_present"
-            },
+            "credentials_unverified",
             false,
             "provider-owned authentication must be live-validated before dispatch",
         )
@@ -698,8 +638,8 @@ fn evaluate_provider_dispatchability_with_config_credentials_and_deadline(
         },
         credentials: AgentTaskProviderDispatchabilityCredentialCheck {
             status: credential_status,
-            ready: credentials.dispatchable,
-            missing: credentials.missing,
+            ready: true,
+            missing: Vec::new(),
             verified: credentials_verified,
             reason: credential_reason,
             remediation: runtime_remediation,
@@ -1602,84 +1542,6 @@ mod tests {
         assert_eq!(error.details["zero_provider_executions"], true);
     }
 
-    /// The exact shape of #13628: a provider whose declared credential is
-    /// physically present (a `json-file` source Homeboy can read) but that
-    /// declares no live readiness probe of its own. `--validate-readiness`
-    /// used to report this as fully "ready" with no way to tell presence
-    /// apart from a genuine live check — indistinguishable from a provider
-    /// whose token had actually been confirmed to still work. A revoked
-    /// refresh token is still present on disk, so presence-only readiness
-    /// must not be reported the same way as a live-verified one.
-    fn provider_with_present_but_unverifiable_credential(
-        auth_path: &std::path::Path,
-    ) -> super::super::AgentTaskExecutorProvider {
-        serde_json::from_value(json!({
-            "id": "revocable.agent-task-executor",
-            "backend": "revocable",
-            "capabilities": ["cli_runtime", "provider_owned_auth"],
-            "secret_env_requirements": [{
-                "env": ["HOMEBOY_TEST_REVOCABLE_REFRESH_TOKEN"],
-                "secret_env_sources": {
-                    "HOMEBOY_TEST_REVOCABLE_REFRESH_TOKEN": {
-                        "source": "json-file",
-                        "path": auth_path,
-                        "field": "token"
-                    }
-                }
-            }]
-        }))
-        .expect("provider fixture")
-    }
-
-    #[test]
-    fn static_status_distinguishes_present_provider_owned_credentials() {
-        let auth = tempfile::NamedTempFile::new().expect("auth file");
-        std::fs::write(auth.path(), r#"{"token":"present-token"}"#).expect("write auth");
-        let catalog = catalog(provider_with_present_but_unverifiable_credential(
-            auth.path(),
-        ));
-
-        let verdict = evaluate_provider_dispatchability(&catalog, "revocable", None, None, false);
-
-        assert_eq!(verdict.state, "credentials_present");
-        assert!(!verdict.ready);
-        assert_eq!(
-            verdict.checks.credentials.status,
-            AgentTaskProviderCredentialStatus::Present
-        );
-        assert!(!verdict.checks.credentials.verified);
-    }
-
-    #[test]
-    fn a_live_readiness_probe_that_passes_reports_verified_credentials() {
-        let fake = route_pi(
-            "if [ \"$HOMEBOY_TEST_REVOCABLE_REFRESH_TOKEN\" = present-and-live-checked ]; then printf 'test model\\n'; else printf 'No models available\\n'; fi",
-        );
-        let auth = fake.root.path().join("auth.json");
-        std::fs::write(&auth, r#"{"token":"present-and-live-checked"}"#).unwrap();
-        let mut live_provider = fake.provider();
-        live_provider.secret_env_requirements =
-            provider_with_present_but_unverifiable_credential(&auth).secret_env_requirements;
-        let catalog = catalog(live_provider);
-
-        let verdict = evaluate_provider_dispatchability_with_config(
-            &catalog,
-            "pi",
-            None,
-            Some("test/model"),
-            &fake.config(),
-            true,
-            &mut ProviderRuntimeReadinessCache::default(),
-        );
-
-        assert!(verdict.ready);
-        assert!(
-            verdict.checks.credentials.verified,
-            "the Pi probe received the resolved credential and passed live verification"
-        );
-        assert_eq!(verdict.reason, "all dispatchability checks passed");
-    }
-
     /// Controller whose provider-owned credential is present but whose live
     /// readiness probe rejects it (the #15198 shape: a controller-local OAuth
     /// token returning 401). The probe appends to `count` on every run.
@@ -1689,7 +1551,13 @@ mod tests {
         let auth = root.join("auth.json");
         let count = root.join("count");
         std::fs::write(&auth, r#"{"token":"controller-token-rejected"}"#).expect("write auth");
-        let provider = provider_with_present_but_unverifiable_credential(&auth);
+        let provider: super::super::AgentTaskExecutorProvider =
+            serde_json::from_value(serde_json::json!({
+                "id": "revocable.agent-task-executor",
+                "backend": "revocable",
+                "capabilities": ["cli_runtime", "provider_owned_auth"]
+            }))
+            .expect("provider fixture");
         (catalog(provider), count)
     }
 
@@ -1866,71 +1734,6 @@ mod tests {
         );
         assert!(!verdict.checks.credentials.ready);
         assert!(verdict.checks.credentials.missing.is_empty());
-    }
-
-    #[test]
-    fn aggregate_precedence_keeps_each_failed_dimension_unavailable() {
-        let credential_provider: super::super::AgentTaskExecutorProvider =
-            serde_json::from_value(json!({
-                "id": "credential.provider",
-                "backend": "credential",
-                "secret_env_requirements": [{
-                    "env": ["HOMEBOY_TEST_DISPATCHABILITY_MISSING_CREDENTIAL"]
-                }]
-            }))
-            .expect("credential provider");
-        let model_provider: super::super::AgentTaskExecutorProvider =
-            serde_json::from_value(json!({
-                "id": "model.provider",
-                "backend": "model",
-                "cli": { "profiles": [{ "name": "supported", "model": "supported" }] }
-            }))
-            .expect("model provider");
-        let ready_provider: super::super::AgentTaskExecutorProvider =
-            serde_json::from_value(json!({ "id": "ready.provider", "backend": "ready" }))
-                .expect("ready provider");
-        let catalog = AgentTaskProviderCatalog {
-            providers: vec![credential_provider, model_provider, ready_provider],
-            ..Default::default()
-        };
-
-        let credentials_missing =
-            evaluate_provider_dispatchability(&catalog, "credential", None, None, false);
-        assert_eq!(credentials_missing.state, "credentials_missing");
-        assert!(!credentials_missing.ready);
-        assert!(credentials_missing.checks.route.ready);
-        assert!(!credentials_missing.checks.credentials.ready);
-
-        let route_failed = evaluate_provider_dispatchability(
-            &catalog,
-            "ready",
-            Some("missing.provider"),
-            None,
-            false,
-        );
-        assert_eq!(route_failed.state, "route_unavailable");
-        assert!(!route_failed.ready);
-        assert!(!route_failed.checks.route.ready);
-        // An unresolved route was never probed: credentials are unverified,
-        // not ready, and never reported as missing.
-        assert!(!route_failed.checks.credentials.ready);
-        assert_eq!(
-            route_failed.checks.credentials.status,
-            AgentTaskProviderCredentialStatus::Unverified
-        );
-        assert!(route_failed.checks.credentials.missing.is_empty());
-
-        let model_unavailable =
-            evaluate_provider_dispatchability(&catalog, "model", None, Some("unsupported"), false);
-        assert_eq!(model_unavailable.state, "model_unavailable");
-        assert!(!model_unavailable.ready);
-        assert!(!model_unavailable.checks.model.ready);
-
-        // Without a live probe, a route whose every static check passes is
-        // structurally dispatchable rather than live-verified ready.
-        let all_ready = evaluate_provider_dispatchability(&catalog, "ready", None, None, false);
-        assert_eq!(all_ready.state, "structurally_dispatchable");
-        assert!(all_ready.ready);
     }
 
     #[test]
@@ -2229,56 +2032,6 @@ mod tests {
             .metadata
             .get("provider_readiness_routing")
             .is_none());
-    }
-
-    #[test]
-    fn conditional_credentials_are_recomputed_for_each_rotation_route() {
-        let fake = route_pi("printf 'test conditional\\ntest fallback\\n'");
-        let mut provider = fake.provider();
-        provider.secret_env_requirements =
-            vec![super::super::AgentTaskProviderSecretEnvRequirement {
-                env: vec![format!("HOMEBOY_MISSING_{}", uuid::Uuid::new_v4())],
-                when: Some(json!({"path":"executor.config.provider","equals":"conditional"})),
-                ..Default::default()
-            }];
-        let catalog = catalog(provider);
-        let task = pi_task(&fake, "test/primary");
-        let mut plan = AgentTaskPlan::new("conditional-credentials", vec![task]);
-        plan.options.rotation = Some(AgentTaskProviderRotationPolicy {
-            entries: vec![
-                AgentTaskProviderRotationEntry {
-                    model: Some("test/primary".to_string()),
-                    ..Default::default()
-                },
-                AgentTaskProviderRotationEntry {
-                    model: Some("test/conditional".to_string()),
-                    provider_config: json!({"provider":"conditional"}),
-                    ..Default::default()
-                },
-                AgentTaskProviderRotationEntry {
-                    model: Some("test/fallback".to_string()),
-                    provider_config: json!({"provider":"fallback"}),
-                    ..Default::default()
-                },
-            ],
-            ..Default::default()
-        });
-        let admitted = admit_plan_provider_dispatchability_with_providers(
-            &plan,
-            &catalog,
-            &mut ProviderRuntimeReadinessCache::default(),
-        )
-        .expect("route after missing conditional credential is selected");
-        assert_eq!(admitted.tasks[0].executor.model(), Some("test/fallback"));
-        assert_eq!(
-            admitted.tasks[0].metadata["provider_readiness_routing"]["skipped"][1]["state"],
-            "credentials_missing"
-        );
-        assert!(admitted.tasks[0].executor.secret_env.is_empty());
-        assert_eq!(
-            admitted.tasks[0].metadata["provider_readiness_routing"]["provider_rotations_used"],
-            0
-        );
     }
 
     #[test]

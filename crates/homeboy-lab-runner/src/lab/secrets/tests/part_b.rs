@@ -339,38 +339,6 @@ fn lab_dispatch_selected_route_keeps_declared_credentials_runner_owned() {
 }
 
 #[test]
-fn declared_agent_task_providers_include_unconditional_sources() {
-    let mut provider = fixture_provider_with_example_defaults();
-    provider.secret_env_requirements = serde_json::from_value(serde_json::json!([{
-        "env": ["EXAMPLE_PROVIDER_ACCESS_TOKEN"],
-        "secret_env_sources": {
-            "EXAMPLE_PROVIDER_ACCESS_TOKEN": {
-                "source": "json-file",
-                "path": "~/.example-provider/auth.json",
-                "field": "tokens.access_token"
-            }
-        }
-    }]))
-    .expect("unconditional secret sources");
-    let args = vec![
-        "homeboy".to_string(),
-        "agent-task".to_string(),
-        "providers".to_string(),
-        "--secret-env".to_string(),
-        "EXAMPLE_PROVIDER_ACCESS_TOKEN".to_string(),
-    ];
-
-    let sources = declared_agent_task_controller_secret_sources_with_providers(
-        &args,
-        1,
-        std::slice::from_ref(&provider),
-    )
-    .expect("provider default sources should parse");
-
-    assert!(sources.contains_key("EXAMPLE_PROVIDER_ACCESS_TOKEN"));
-}
-
-#[test]
 fn declared_agent_task_secret_env_includes_run_plan_task_secrets() {
     let temp = tempfile::tempdir().expect("tempdir");
     let plan_path = temp.path().join("plan.json");

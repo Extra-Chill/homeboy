@@ -2629,19 +2629,12 @@ fn provider_output_redactions(
             names.insert(env_ref.name.clone());
         }
     }
-    for requirement in &provider.secret_requirements {
-        names.extend(requirement.env.iter().cloned());
-    }
-    for requirement in &provider.secret_env_requirements {
-        names.extend(requirement.env.iter().cloned());
-    }
     for readiness in &provider.runner_readiness {
         names.extend(readiness.secret_env.iter().cloned());
         if let Some(executable) = &readiness.executable {
             names.extend(executable.env.iter().cloned());
         }
     }
-
     names
         .into_iter()
         .filter_map(|name| std::env::var(name).ok())
