@@ -3826,22 +3826,8 @@ mod tests {
     }
 
     #[test]
-    fn providers_end_to_end_reports_ambiguous_and_missing_default_routes() {
+    fn providers_end_to_end_reports_missing_default_route() {
         crate::test_support::with_isolated_home(|_| {
-            save_provider_policy(Some("extension"), None);
-            let mut first = provider("first.provider", "first");
-            first.extension_id = Some("extension".to_string());
-            let mut second = provider("second.provider", "second");
-            second.extension_id = Some("extension".to_string());
-            let output =
-                providers_with_catalog(providers_args(), provider_catalog(vec![first, second]))
-                    .expect("ambiguous output")
-                    .0;
-            assert_eq!(
-                output["operator_summary"]["state"],
-                "configuration_ambiguous"
-            );
-
             save_provider_policy(None, None);
             let output = providers_with_catalog(providers_args(), provider_catalog(Vec::new()))
                 .expect("missing-default output")

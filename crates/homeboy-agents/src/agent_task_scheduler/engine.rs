@@ -82,10 +82,6 @@ pub enum ProviderRouteDiagnosticData {
         available_provider_ids: Vec<String>,
         hint: Option<String>,
     },
-    ProviderAmbiguous {
-        backend: String,
-        available_provider_ids: Vec<String>,
-    },
     ProviderCapabilityUnavailable {
         layer: String,
         required_capabilities: Vec<String>,
@@ -2398,9 +2394,6 @@ fn provider_readiness_exhausted_outcome(
             ProviderRouteDiagnosticData::ProviderMissing { .. } => "agent_task.provider_missing",
             ProviderRouteDiagnosticData::ProviderSelectorMismatch { .. } => {
                 "agent_task.provider_selector_mismatch"
-            }
-            ProviderRouteDiagnosticData::ProviderAmbiguous { .. } => {
-                "agent_task.provider_ambiguous"
             }
             ProviderRouteDiagnosticData::ProviderCapabilityUnavailable { .. } => return None,
         };
