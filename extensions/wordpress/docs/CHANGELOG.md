@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.53.16] - 2026-11-01
+
+### Changed
+- Delete the dead agent-runtimes, runtime-agent-ci and agent-task-contracts extension trees
+
 ## [3.53.15] - 2026-11-01
 
 ### Changed
