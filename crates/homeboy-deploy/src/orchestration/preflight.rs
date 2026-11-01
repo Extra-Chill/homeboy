@@ -264,7 +264,8 @@ pub(super) fn guard_local_build_source_freshness(
     components: &[Component],
     config: &DeployConfig,
 ) -> Result<()> {
-    if config.allow_stale_source {
+    // An exact ref names an immutable commit; upstream drift is irrelevant.
+    if config.allow_stale_source || config.has_requested_refs() {
         return Ok(());
     }
 

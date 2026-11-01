@@ -575,6 +575,12 @@ fn cleanup_build_dependencies(
         return Ok(Some("skipped (--keep-deps flag)".to_string()));
     }
 
+    if super::super::orchestration_ref_checkout::is_disposable_source(Path::new(
+        &component.local_path,
+    )) {
+        return Ok(Some("skipped (disposable exact-ref checkout)".to_string()));
+    }
+
     let mut cleanup_paths = Vec::new();
     if let Some(ref extensions) = component.extensions {
         for extension_id in extensions.keys() {
