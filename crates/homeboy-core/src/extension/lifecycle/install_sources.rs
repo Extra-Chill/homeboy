@@ -82,9 +82,10 @@ pub(crate) fn shared_assets_for_extension_source(source: &Path) -> Vec<(String, 
 pub(super) fn install_configured_extension(
     source: &str,
     extension_id: &str,
+    revision: Option<&str>,
 ) -> Result<InstallResult> {
     if super::is_git_url(source) {
-        return super::install(source, Some(extension_id));
+        return super::install_with_revision(source, Some(extension_id), revision);
     }
 
     let source_path = Path::new(source);
@@ -98,11 +99,11 @@ pub(super) fn install_configured_extension(
             &extension_path.to_string_lossy(),
             Some(extension_id),
             Some(source_path),
-            None,
+            revision,
         );
     }
 
-    super::install(source, Some(extension_id))
+    super::install_with_revision(source, Some(extension_id), revision)
 }
 
 /// Install a extension by cloning from a git repository URL.
