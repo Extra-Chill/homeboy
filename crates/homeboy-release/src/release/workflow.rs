@@ -323,7 +323,7 @@ fn run_command_with_workspace_inner(
         let mut bump_type = auto_bump_type;
 
         // Pre-1.0 semver: breaking changes bump minor, not major.
-        bump_type = downgrade_major_pre_1_0(&input.component_id, bump_type);
+        bump_type = downgrade_major_pre_1_0(&component, bump_type);
 
         if bump_type != "none" {
             homeboy_core::log_status!(
@@ -948,16 +948,27 @@ fn resolve_bump(release_scope: &ReleaseScope) -> Result<Option<(String, usize)>>
 /// stable. Breaking changes are expected and land as minor bumps. A major
 /// bump to 1.0.0 should only happen when the author explicitly decides the
 /// API is stable (via `--bump major`).
-fn downgrade_major_pre_1_0(component_id: &str, bump_type: String) -> String {
+fn downgrade_major_pre_1_0(
+    component: &homeboy_core::component::Component,
+    bump_type: String,
+) -> String {
     if bump_type != "major" {
         return bump_type;
     }
 
-    let current_version = super::version::read_version(Some(component_id))
-        .ok()
-        .and_then(|v| v.version.split('.').next().map(String::from))
-        .unwrap_or_default();
-    if current_version != "0" {
+    let version = match super::version::read_component_version(component) {
+        Ok(version) => version,
+        Err(error) => {
+            homeboy_core::log_status!(
+                "release",
+                "Warning: could not read version for component '{}': {}; keeping major bump",
+                component.id,
+                error
+            );
+            return bump_type;
+        }
+    };
+    if version.version.split('.').next() != Some("0") {
         return bump_type;
     }
 
@@ -985,12 +996,12 @@ fn downgrade_major_pre_1_0(component_id: &str, bump_type: String) -> String {
 /// must refresh the requested bump type from the same (possibly advanced)
 /// HEAD that `preflight.bump_policy`'s "recommended" side will observe.
 pub(super) fn refresh_auto_bump_type(
-    component_id: &str,
+    component: &homeboy_core::component::Component,
     release_scope: &ReleaseScope,
 ) -> Result<String> {
     let (bump_type, _releasable_count) =
         resolve_bump(release_scope)?.unwrap_or_else(|| ("none".to_string(), 0));
-    Ok(downgrade_major_pre_1_0(component_id, bump_type))
+    Ok(downgrade_major_pre_1_0(component, bump_type))
 }
 
 pub(super) fn short_sha(commit: &str) -> &str {
@@ -1404,6 +1415,51 @@ pub fn run_batch(
 mod tests {
     use super::*;
     use crate::release::types::ReleasePhase;
+
+    fn local_version_component(
+        version: &str,
+    ) -> (tempfile::TempDir, homeboy_core::component::Component) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("VERSION"), version).expect("write version");
+        let component = homeboy_core::component::Component {
+            id: format!("unregistered-{}", uuid::Uuid::new_v4()),
+            local_path: dir.path().to_string_lossy().into_owned(),
+            version_targets: Some(vec![homeboy_core::component::VersionTarget {
+                file: "VERSION".to_string(),
+                pattern: Some(r"^([0-9]+\.[0-9]+\.[0-9]+)$".to_string()),
+                artifact_path: None,
+            }]),
+            ..Default::default()
+        };
+        (dir, component)
+    }
+
+    #[test]
+    fn pre_1_0_major_becomes_minor_for_local_component() {
+        let (_dir, component) = local_version_component("0.7.3");
+        assert_eq!(downgrade_major_pre_1_0(&component, "major".into()), "minor");
+    }
+
+    #[test]
+    fn pre_1_0_stable_major_stays_major() {
+        let (_dir, component) = local_version_component("1.7.3");
+        assert_eq!(downgrade_major_pre_1_0(&component, "major".into()), "major");
+    }
+
+    #[test]
+    fn pre_1_0_non_major_passes_through() {
+        let (_dir, component) = local_version_component("0.7.3");
+        for bump in ["minor", "patch", "none"] {
+            assert_eq!(downgrade_major_pre_1_0(&component, bump.into()), bump);
+        }
+    }
+
+    #[test]
+    fn pre_1_0_unreadable_version_keeps_major() {
+        let (dir, component) = local_version_component("0.7.3");
+        std::fs::remove_file(dir.path().join("VERSION")).expect("remove version");
+        assert_eq!(downgrade_major_pre_1_0(&component, "major".into()), "major");
+    }
 
     /// The record store for the isolated home each test below installs.
     ///
