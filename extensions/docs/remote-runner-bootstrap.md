@@ -36,7 +36,7 @@ scripts/bootstrap-standard-extensions.sh --target operator@example-runner
 The script runs this idempotent install-and-verify loop on the target:
 
 ```bash
-homeboy extension install https://github.com/Extra-Chill/homeboy-extensions --id <extension-id>
+homeboy extension install https://github.com/Extra-Chill/homeboy --id <extension-id>
 homeboy extension show <extension-id>
 ```
 
@@ -90,7 +90,7 @@ scripts/bootstrap-standard-extensions.sh --target example-runner --extensions "n
 Use the GitHub monorepo URL for normal runner bootstrap:
 
 ```bash
-homeboy extension install https://github.com/Extra-Chill/homeboy-extensions --id rust
+homeboy extension install https://github.com/Extra-Chill/homeboy --id rust
 ```
 
 GitHub installs give the runner a managed extracted copy under Homeboy's

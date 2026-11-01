@@ -127,6 +127,8 @@ run_install() {
         command="$(npm_install_command)"
         echo "Installing WordPress JavaScript dependencies: ${command}" >&2
         (cd "$PROJECT_PATH" && $command)
+        source "${SCRIPT_DIR}/../../../scripts/lib/local-workspace-install.sh"
+        homeboy_apply_local_workspace_install "$PROJECT_PATH" "${SCRIPT_DIR}/../../.."
         ran=1
     fi
     if [ "$ran" -eq 0 ]; then

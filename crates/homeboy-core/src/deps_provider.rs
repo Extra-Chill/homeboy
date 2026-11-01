@@ -190,6 +190,37 @@ impl DependencyProvider {
         }
     }
 
+    pub(crate) fn hydration_environment(
+        &self,
+        component: &Component,
+        path: &Path,
+    ) -> Result<Vec<(String, String)>> {
+        let Self::Extension(provider) = self else {
+            return Ok(Vec::new());
+        };
+        // Reuse build's capability preparation, including manifest defaults and
+        // resolved component settings, rather than serializing a second settings view.
+        let prepared = crate::extension::invoke::prepare_capability_run(
+            &provider.context,
+            Some(component),
+            Some(&path.display().to_string()),
+            &[],
+            &[],
+            true,
+        )?;
+        use homeboy_extension_contract::exec_context;
+        Ok(vec![
+            (
+                exec_context::SETTINGS_JSON.to_string(),
+                prepared.settings_json,
+            ),
+            (
+                exec_context::COMPONENT_PATH.to_string(),
+                prepared.execution.component.local_path,
+            ),
+        ])
+    }
+
     pub(crate) fn hydration_plan(
         &self,
         component: &Component,

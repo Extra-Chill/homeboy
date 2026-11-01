@@ -2,9 +2,9 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEPS_RUNNER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=../lib/node-helpers.sh
-source "${SCRIPT_DIR}/../lib/node-helpers.sh"
+source "${DEPS_RUNNER_DIR}/../lib/node-helpers.sh"
 
 PROJECT_PATH="${HOMEBOY_COMPONENT_PATH:-${PROJECT_PATH:-$(pwd)}}"
 ACTION="${1:-status}"
@@ -108,8 +108,9 @@ NODE
         exit 64
     fi
 
-    HOMEBOY_NODE_DEPS_COMMAND="$(dependency_command)" node <<'NODE'
-const command = (process.env.HOMEBOY_NODE_DEPS_COMMAND || '').split(/\s+/).filter(Boolean);
+    # Hydration (review/test) must use the same post-install hook as deps install.
+    HOMEBOY_NODE_DEPS_RUNNER="${DEPS_RUNNER_DIR}/deps-runner.sh" node <<'NODE'
+const command = ['bash', process.env.HOMEBOY_NODE_DEPS_RUNNER, 'install'];
 process.stdout.write(JSON.stringify({ command }) + '\n');
 NODE
 }
@@ -129,6 +130,9 @@ run_install() {
     # Command strings are extension-owned package-manager argv selected from a
     # fixed allowlist above; run through the shell so flags stay readable.
     $command
+    # Resolve overrides against the component, not a hoisted dependency root.
+    source "${DEPS_RUNNER_DIR}/../../../scripts/lib/local-workspace-install.sh"
+    homeboy_apply_local_workspace_install "$HOMEBOY_PROJECT_ROOT" "${DEPS_RUNNER_DIR}/../../.."
 }
 
 case "$ACTION" in

@@ -217,6 +217,12 @@ homeboy runner refresh-homeboy <runner-id> --ref v0.434.30 --dry-run
 homeboy runner refresh-homeboy <runner-id> --select /path/to/homeboy --reconnect
 ```
 
+`runner connect` already brings a runner's binary to the controller's release
+(see [Binary Convergence](../architecture/runner-connection.md#binary-convergence)),
+so `refresh-homeboy` is for explicit refs (`--ref`), selecting an existing
+binary (`--select`), forced reconnects, and rollbacks; unreleased builds use
+`runner dev-sync`.
+
 Installs the controller's release tag by default. Materialize mode uses the
 existing verified release installer in stage-only mode, then publishes the
 binary into a content-addressed slot and updates `homeboy_path`. An explicit
@@ -443,7 +449,15 @@ not have.
 Starts a loopback-only Homeboy daemon on the runner and opens an SSH tunnel to
 it. Connect dials the configured server host and does not discover a new LAN
 address. SSH exit 255 with `Host is down` is `transport_unreachable` for that
-recorded host, not a missing Homeboy install. A numeric DHCP address is not
+recorded host, not a missing Homeboy install.
+
+A plain `runner connect` (no recovery flags) first converges the runner's
+configured Homeboy binary on the controller's release and reports the outcome in
+`binary_convergence` (`converged`, `already_current`, `pending_active_jobs` with
+`blocking_job_ids`, `skipped_dev_build`, `skipped_remote_newer`,
+`skipped_unverifiable`, or `failed` with `detail`). It never downgrades, never
+interrupts active jobs, and a failed install still connects with the existing
+binary. See [Binary Convergence](../architecture/runner-connection.md#binary-convergence). A numeric DHCP address is not
 stable: set a stable hostname or a DHCP reservation with `homeboy server set`,
 then reconnect. Host key verification stays on. See
 [Unreachable recorded host](../architecture/runner-connection.md#unreachable-recorded-host).

@@ -1,4 +1,4 @@
-# Homeboy Extensions reusable workflows
+# Reusable workflows
 
 `actions-run-once.yml` is a reusable idempotency gate for workflows that consume an evidence packet exactly once. Call it in `check` mode before the expensive job and in `mark` mode after consuming the evidence.
 

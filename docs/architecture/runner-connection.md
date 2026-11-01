@@ -40,6 +40,38 @@ failure evidence may add `durability_stage`; existing health attempt fields are
 preserved. `health_attempt_count` and `health_attempts` contain failed initial
 health probes and failed durability observations, not successful observations.
 
+## Binary Convergence
+
+A plain `homeboy runner connect <runner-id>` first brings the runner's
+configured Homeboy binary to the controller's release (#16825), then attaches
+on the direct or service-managed path. Explicit recovery flags
+(`--adopt-orphan-lease`, `--adopt-live-lease`, `--reconcile-*`,
+`--recover-missing-lease-state`) skip convergence, as do placement reconnects.
+
+Convergence compares the configured binary's `self identity` version with the
+controller's build:
+
+| Situation | `binary_convergence.status` |
+| --- | --- |
+| Controller is not a clean release build (dirty, no commit, pre-release) | `skipped_dev_build` (the runner is not probed) |
+| Runner identity unreadable | `skipped_unverifiable` |
+| Runner already at the controller's version | `already_current` |
+| Runner newer than the controller | `skipped_remote_newer` (never downgraded) |
+| Runner older, daemon has active jobs | `pending_active_jobs` with `blocking_job_ids`; connect attaches to the current daemon and a later connect converges |
+| Runner older, install succeeded | `converged` |
+| Runner older, install failed (network, checksum, target) | `failed` with `detail`; connect proceeds with the existing binary |
+
+Installing reuses `refresh-homeboy`'s verified release path pinned to the
+controller's exact tag `v<version>` (never `latest`, never a source build) into
+`_homeboy_binaries/homeboy-<sha256>/homeboy`, selects it, and replaces the daemon
+with `refresh-homeboy --reconnect`'s mechanism: an in-place restart, or the
+service unit repoint and restart. That refresh holds its own runtime promotion
+lease and finishes before connect takes its lease; its reconnect attaches
+through the non-converging connect, so convergence never recurses.
+
+`homeboy runner refresh-homeboy` remains for explicit refs (`--ref`), dev
+builds (`runner dev-sync`), and selecting an existing binary (`--select`).
+
 ## Daemon State Directory
 
 Each (runner, controller) pair has exactly one daemon state directory on the

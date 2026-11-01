@@ -14,7 +14,7 @@ Extensions teach Homeboy how to operate a technology stack while keeping core ge
 Install from a git source:
 
 ```bash
-homeboy extension install https://github.com/Extra-Chill/homeboy-extensions --id rust
+homeboy extension install https://github.com/Extra-Chill/homeboy --id rust
 ```
 
 Install from a local source during development:
