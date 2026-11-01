@@ -458,11 +458,17 @@ homeboy build <component>
     ├─ Copy files                (rsync, or an exact package profile)
     ├─ Validate build structure  (php -l, PSR-4)
     ├─ ZIP → build/<component-id>.zip
-    └─ Restore dev dependencies
+    └─ Restore dev dependencies  (skipped for disposable sources)
 ```
 
-Pre-build validation runs `scripts/build/validate-build.sh`. PHP syntax
-errors and PSR-4 violations block the build; lint findings do not.
+PHP syntax is checked once, in parallel, over the staged files that ship
+(production `vendor/` included). PHP syntax errors and PSR-4 violations block
+the build; lint findings do not.
+
+Composer runs once with `--no-dev` for the artifact. In a persistent checkout
+the build then restores dev dependencies exactly once, on success or failure.
+When `HOMEBOY_BUILD_SOURCE_DISPOSABLE=1` marks the source as a throwaway
+checkout, the restore is skipped.
 
 Production builds exclude arbitrary nested `*.zip` files by default to avoid
 shipping stale release artifacts. Components that intentionally need ZIP package
@@ -1124,7 +1130,7 @@ wordpress/
 ├── lib/                      # Node helpers: request profiler, Playground HTTP readiness
 ├── scripts/
 │   ├── bench/                # WP Codebox bench runner + result artifact helpers
-│   ├── build/                # build.sh, validate-build.sh, validate-psr4.sh
+│   ├── build/                # build.sh, validate-psr4.sh
 │   ├── env/detect.sh         # component_env detector
 │   ├── lib/                  # Shared runner helpers
 │   ├── lint/                 # lint-runner.sh, eslint-runner.sh, phpstan-runner.sh
