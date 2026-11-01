@@ -320,20 +320,6 @@ pub(crate) fn resolve_dependency_providers_optional_with_control(
         return Ok(providers);
     }
 
-    let adapter_providers = AdapterDependencyProvider::load(path)?;
-    if !adapter_providers.is_empty() {
-        return Ok(adapter_providers
-            .into_iter()
-            .map(DependencyProvider::Adapter)
-            .collect());
-    }
-
-    if component.has_script(ExtensionCapability::Deps) {
-        providers.push(DependencyProvider::ComponentScript(
-            ComponentScriptDependencyProvider,
-        ));
-    }
-
     if component
         .extensions
         .as_ref()
@@ -355,11 +341,34 @@ pub(crate) fn resolve_dependency_providers_optional_with_control(
                 .map(|manifest| crate::context::extension_applies_to(&manifest, path))
                 .unwrap_or(true);
             if applies {
+                // Extension setup may include work beyond a generic package-manager
+                // install. Keep that setup extension-owned rather than bypassing it
+                // when an installed adapter also recognizes this project.
+                if component.has_script(ExtensionCapability::Deps) {
+                    providers.push(DependencyProvider::ComponentScript(
+                        ComponentScriptDependencyProvider,
+                    ));
+                }
                 providers.push(DependencyProvider::Extension(Box::new(
                     ExtensionDependencyProvider { context },
                 )));
+                return Ok(providers);
             }
         }
+    }
+
+    let adapter_providers = AdapterDependencyProvider::load(path)?;
+    if !adapter_providers.is_empty() {
+        return Ok(adapter_providers
+            .into_iter()
+            .map(DependencyProvider::Adapter)
+            .collect());
+    }
+
+    if component.has_script(ExtensionCapability::Deps) {
+        providers.push(DependencyProvider::ComponentScript(
+            ComponentScriptDependencyProvider,
+        ));
     }
 
     Ok(providers)

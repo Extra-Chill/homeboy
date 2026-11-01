@@ -1450,17 +1450,36 @@ mod tests {
 
     #[test]
     fn extension_hydration_receives_effective_settings_and_consumer_path() {
+        check_extension_hydration_settings(false);
+    }
+
+    #[test]
+    fn extension_hydration_with_package_lock_receives_effective_settings_and_consumer_path() {
+        check_extension_hydration_settings(true);
+    }
+
+    fn check_extension_hydration_settings(with_package_lock: bool) {
         crate::test_support::with_isolated_home(|home| {
             crate::extension::component_script::register_component_script_runner();
             let root = tempfile::tempdir().unwrap();
             let consumer = root.path().join("packages/consumer");
             std::fs::create_dir_all(&consumer).unwrap();
+            if with_package_lock {
+                write_builtin_dependency_adapters(home.path());
+                std::fs::write(
+                    consumer.join("package.json"),
+                    r#"{"name":"consumer","dependencies":{"fixture":"1.0.0"}}"#,
+                )
+                .unwrap();
+                std::fs::write(consumer.join("package-lock.json"), "{}").unwrap();
+            }
             let extension = home.path().join(".config/homeboy/extensions/fixture-deps");
             std::fs::create_dir_all(&extension).unwrap();
             std::fs::write(
                 extension.join("fixture-deps.json"),
                 r#"{
                 "name":"Fixture Deps", "version":"1.0.0",
+                "provides":{"discovery_markers":[{"all":["homeboy.json"]}]},
                 "settings":[
                     {"id":"default_only","type":"string","label":"Default","default":"manifest"},
                     {"id":"overridden","type":"string","label":"Override","default":"default"}
@@ -1489,6 +1508,7 @@ esac
             let outcomes =
                 hydrate_declared_dependencies(&consumer, "fixture", ".", &policy).unwrap();
             assert_eq!(outcomes.len(), 1);
+            assert_eq!(outcomes[0].provider_id, "fixture");
             assert_eq!(
                 outcomes[0].status,
                 DependencyHydrationStatus::Succeeded,
@@ -1743,9 +1763,8 @@ esac
         });
     }
 
-    /// An installed dependency adapter outranks an extension's deps script, so
-    /// in CI — where adapters are installed — locked versions have to come
-    /// from the adapter. An adapter that declares its lockfile reports them
+    /// Components without an applicable extension deps runner use installed
+    /// adapters, including in CI. An adapter that declares its lockfile reports
     /// without installing anything; one that does not, reports none.
     #[test]
     fn adapter_status_reports_locked_versions_from_its_declared_lockfile() {
