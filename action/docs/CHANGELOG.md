@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.25.2] - 2026-11-01
+
+### Fixed
+- inherit caller permissions in release.yml so npm trusted publishing gets id-token
+
 ## [2.25.1] - 2026-11-01
 
 ### Changed
