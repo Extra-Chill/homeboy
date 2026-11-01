@@ -47,7 +47,7 @@ fn fixture(transport: &Path, destination: &Path) -> CommitRequest {
     .unwrap();
     fs::remove_dir(&source).unwrap();
     CommitRequest {
-        identity: homeboy_product_identity::build_identity().display,
+        lab_contract_version: homeboy_lab_contract::LAB_CONTRACT_VERSION,
         roots: vec![CommitRoot {
             summary: RootSummary {
                 remote_path: remote,
@@ -164,17 +164,19 @@ fn two_root_commit_reuses_review_dependency_without_lease_metadata() {
 }
 
 #[test]
-fn commit_refuses_identity_drift_since_plan() {
+fn commit_refuses_contract_drift_since_plan() {
     let root = tempfile::tempdir().unwrap();
     let incoming = tempfile::tempdir_in(root.path()).unwrap();
     let destination = root.path().join("workspace");
     let mut request = fixture(incoming.path(), &destination);
-    request.identity = "homeboy 0.0.0+stale".into();
+    request.lab_contract_version += 1;
     write_json(&incoming.path().join("commit.json"), &request).unwrap();
-    assert!(
-        format!("{:?}", materialization_commit(incoming.path()).unwrap_err())
-            .contains("identity changed")
-    );
+    let error = format!("{:?}", materialization_commit(incoming.path()).unwrap_err());
+    assert!(error.contains(&format!(
+        "Lab contract version mismatch: received {}, expected {}",
+        request.lab_contract_version,
+        homeboy_lab_contract::LAB_CONTRACT_VERSION
+    )));
     assert!(!destination.exists());
 }
 
@@ -184,7 +186,7 @@ fn plan_capacity_response_includes_aggregate_requirements() {
     let incoming = tempfile::tempdir_in(root.path()).unwrap();
     let commit = fixture(incoming.path(), &root.path().join("workspace"));
     let request = PlanRequest {
-        identity: commit.identity,
+        lab_contract_version: commit.lab_contract_version,
         roots: commit.roots.into_iter().map(|root| root.summary).collect(),
     };
     write_json(&incoming.path().join("plan.json"), &request).unwrap();
@@ -224,36 +226,32 @@ fn plan_capacity_response_includes_aggregate_requirements() {
 }
 
 #[test]
-fn plan_identity_mismatch_stops_before_commit() {
-    crate::test_support::with_isolated_home(|_| {
-        let source = tempfile::tempdir().unwrap();
-        let runner_root = tempfile::tempdir().unwrap();
-        fs::write(source.path().join("input"), b"source").unwrap();
-        crate::create(&serde_json::json!({"id":"protocol-identity", "kind":"local", "workspace_root":runner_root.path()}).to_string(), false).unwrap();
-        let options = RunnerWorkspaceSyncOptions {
-            path: source.path().display().to_string(),
-            mode: RunnerWorkspaceSyncMode::Snapshot,
-            controller_routed_git: false,
-            changed_since_base: None,
-            git_fetch_refs: Vec::new(),
-            snapshot_includes: Vec::new(),
-            allow_dirty_lab_workspace: false,
-            validation_dependency_ids: None,
-            run_isolation_token: None,
-        };
-        for identity in ["homeboy 0.0.0+abcdef1", "homeboy 99.0.0+abcdef1"] {
-            INVOCATIONS.with(|counter| counter.set(0));
-            let result =
-                crate::controller_identity::with_converging_controller(Some(identity), || {
-                    sync_workspace_batch_controlled(
-                        "protocol-identity",
-                        vec![(options.clone(), Vec::new())],
-                        &WorkspaceControl::default(),
-                    )
-                });
-            assert!(format!("{:?}", result.unwrap_err()).contains("identity mismatch"));
-            INVOCATIONS.with(|counter| assert_eq!(counter.get(), 1));
-        }
-        assert!(!runner_root.path().join("_lab_workspaces").exists());
+fn plan_accepts_different_build_with_same_contract_and_refuses_contract_mismatch() {
+    let root = tempfile::tempdir().unwrap();
+    let incoming = tempfile::tempdir_in(root.path()).unwrap();
+    let destination = root.path().join("workspace");
+    let commit = fixture(incoming.path(), &destination);
+    let version = homeboy_lab_contract::LAB_CONTRACT_VERSION;
+    // Keep the old identity field in this wire fixture: before contract-based
+    // compatibility this request failed with "runner build identity mismatch".
+    let mut request = serde_json::json!({
+        "identity": "homeboy 0.0.0+different-build",
+        "lab_contract_version": version,
+        "roots": commit.roots.into_iter().map(|root| root.summary).collect::<Vec<_>>(),
     });
+    let input = incoming.path().join("plan.json");
+    write_json(&input, &request).unwrap();
+    let response = materialization_plan_controlled(&input, &WorkspaceControl::default()).unwrap();
+    assert_eq!(response["lab_contract_version"], version);
+    assert!(response.get("identity").is_none());
+    assert!(!destination.exists());
+
+    request["lab_contract_version"] = (version + 1).into();
+    write_json(&input, &request).unwrap();
+    let error = materialization_plan_controlled(&input, &WorkspaceControl::default()).unwrap_err();
+    assert!(format!("{error:?}").contains(&format!(
+        "Lab contract version mismatch: received {}, expected {version}",
+        version + 1
+    )));
+    assert!(!destination.exists());
 }

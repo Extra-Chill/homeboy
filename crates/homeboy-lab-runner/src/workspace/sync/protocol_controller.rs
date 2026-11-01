@@ -246,7 +246,7 @@ pub(super) fn sync_workspace_batch_in_roots(
         commit_roots[*index].source_evidence = Some(dependency.source_evidence.clone());
     }
     let plan = PlanRequest {
-        identity: crate::controller_identity::compatibility_controller_identity().display,
+        lab_contract_version: CONTRACT,
         roots: summaries,
     };
     write_json(&transfer.path().join("plan.json"), &plan)?;
@@ -255,10 +255,10 @@ pub(super) fn sync_workspace_batch_in_roots(
         || invoke(runner, transfer.path(), None, control),
     )?;
     let response: PlanResponse = serde_json::from_value(response).map_err(io)?;
-    if response.identity != plan.identity {
+    let version = response.lab_contract_version;
+    if version != CONTRACT {
         return Err(io(format!(
-            "runner build identity mismatch: requested {}, received {}",
-            plan.identity, response.identity
+            "Lab contract version mismatch: received {version}, expected {CONTRACT}"
         )));
     }
     let inventory = super::blobs::inventory(&plan.roots)?;
@@ -406,7 +406,7 @@ pub(super) fn sync_workspace_batch_in_roots(
     write_json(
         &transfer.path().join("commit.json"),
         &CommitRequest {
-            identity: response.identity,
+            lab_contract_version: response.lab_contract_version,
             roots: commit_roots,
         },
     )?;
