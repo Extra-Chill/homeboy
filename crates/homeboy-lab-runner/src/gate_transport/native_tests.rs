@@ -312,7 +312,9 @@ fn full_native_transport() {
         "shared-mutation-during-transport.json",
         &rejected,
     );
-    assert_eq!(rejected.status, AgentTaskGateStatus::Failed);
+    // The controller refused the closure, so the gate has no verdict (#16932).
+    assert_eq!(rejected.status, AgentTaskGateStatus::Unavailable);
+    assert!(rejected.failure_evidence.is_none());
     assert_eq!(
         rejected.lab_receipt.as_ref().unwrap()["stage"],
         "controller_closure_revalidation"
@@ -362,6 +364,7 @@ fn full_native_transport() {
     .unwrap();
     save(&evidence, "cancelled.json", &cancelled);
     assert_eq!(cancelled.termination, AgentTaskGateTermination::Cancelled);
+    assert_eq!(cancelled.status, AgentTaskGateStatus::Unavailable);
     let pid = fs::read_to_string(&pid_file)
         .expect("actual runner child PID")
         .trim()

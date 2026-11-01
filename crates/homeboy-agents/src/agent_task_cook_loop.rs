@@ -2924,6 +2924,48 @@ mod tests {
         );
     }
 
+    /// #16932: a Lab gate that never executed (transport or terminal
+    /// projection failure) is not a red gate. Even on the last attempt it
+    /// ends `GatesDeferred`, never `RetriesExhausted`, and spends no budget.
+    #[test]
+    fn a_non_executed_lab_gate_is_gates_deferred_and_spends_no_retry_budget() {
+        let mut error = homeboy_core::Error::new(
+            homeboy_core::ErrorCode::RunnerLabTransportFailure,
+            "runner gate did not return terminal artifact evidence",
+            serde_json::json!({"stage":"terminal_projection", "job_id":"job-1"}),
+        );
+        error.retryable = Some(true);
+        let gate = crate::agent_task_gate::placement::gate_non_execution_report(
+            1,
+            vec!["sh".to_string(), "-c".to_string(), "npm test".to_string()],
+            AgentTaskGateVisibility::Visible,
+            AgentTaskGateRevealPolicy::FullEvidence,
+            &error,
+        );
+        for (attempt, max_attempts) in [(1, 3), (3, 3)] {
+            let report = evaluate_cook_loop(AgentTaskCookLoopOptions {
+                source_request: source_request(),
+                promotion_report: promotion_report(
+                    AgentTaskPromotionStatus::GateDeferred,
+                    vec![green_gate(), gate.clone()],
+                ),
+                attempt,
+                max_attempts,
+                source_run_id: Some("run-lab-transport".to_string()),
+                current_diff: String::new(),
+                require_review_form: false,
+                review_form: None,
+                metadata: Value::Null,
+            });
+
+            assert_eq!(report.status, AgentTaskCookLoopStatus::GatesDeferred);
+            assert!(report.follow_up_request.is_none());
+            assert!(report.failed_gates.is_empty());
+            assert!(report.failed_gate_results.is_empty());
+            assert_eq!(report.retry_budget_remaining, max_attempts - attempt);
+        }
+    }
+
     fn source_request() -> AgentTaskRequest {
         AgentTaskRequest {
             schema: AGENT_TASK_REQUEST_SCHEMA.to_string(),

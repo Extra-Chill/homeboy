@@ -1970,7 +1970,9 @@ fn verify_replacement_gates_owned(
             .deterministic_gates
             .iter()
             .filter(|gate| {
-                gate.exit_code == 0
+                // Exit 0 alone is not proof: unexecuted gates also carry it.
+                (gate.status == crate::agent_task_gate::AgentTaskGateStatus::Succeeded
+                    && gate.exit_code == 0)
                     || (accept_inherited_failures
                         && gate.status
                             == crate::agent_task_gate::AgentTaskGateStatus::AcceptedInheritedFailure)

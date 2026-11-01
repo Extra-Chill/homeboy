@@ -7880,18 +7880,14 @@ fn run_cook_spine(
             // compare). Retry re-verifies from the existing candidate rather
             // than spending another provider execution.
             AgentTaskCookLoopStatus::GatesDeferred => {
+                let stop_reason = gates_deferred_stop_reason(&promotion, &cook_id);
                 return Ok(cook_report(CookReportInput {
                     cook_id,
                     status: "gates_deferred",
                     disposition: CookDisposition::Terminal,
                     attempts,
                     finalization: None,
-                    stop_reason: Some(
-                        "at least one deterministic gate could not execute under the resolved \
-     placement and deferred; the candidate patch is promoted and unverified, not rejected. \
-     Retry once the required environment (e.g. a ready Lab runner) is available"
-                            .to_string(),
-                    ),
+                    stop_reason: Some(stop_reason),
                     exit_code: 1,
                     invocation_latest_run_id: Some(&run_id),
                 }));
@@ -8051,6 +8047,39 @@ fn run_cook_spine(
         exit_code: 1,
         invocation_latest_run_id: Some(&run_id),
     }))
+}
+
+/// A deferred gate never executed, so the stop reason names each typed cause
+/// and the concrete next step instead of a candidate verdict (#16932).
+fn gates_deferred_stop_reason(promotion: &AgentTaskPromotionReport, cook_id: &str) -> String {
+    let causes = promotion
+        .deterministic_gates
+        .iter()
+        .filter(|gate| {
+            matches!(
+                gate.status,
+                crate::agent_task_gate::AgentTaskGateStatus::Deferred
+                    | crate::agent_task_gate::AgentTaskGateStatus::Unavailable
+            )
+        })
+        .map(|gate| match gate.non_execution_cause() {
+            Some(cause) => format!("gate `{}`: {cause}", gate.id),
+            None => format!(
+                "gate `{}` could not execute under the resolved placement",
+                gate.id
+            ),
+        })
+        .collect::<Vec<_>>();
+    let causes = if causes.is_empty() {
+        "at least one deterministic gate did not execute".to_string()
+    } else {
+        causes.join("; ")
+    };
+    format!(
+        "{causes}. The candidate patch is promoted and unverified, not rejected. Next: re-run once \
+         the required environment (e.g. a ready Lab runner) is available, or re-verify with \
+         `homeboy agent-task recover {cook_id}`"
+    )
 }
 
 fn resumable_cook_run_id_in_store(

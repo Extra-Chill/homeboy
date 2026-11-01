@@ -633,7 +633,17 @@ fn read_gates(promotion: &Value) -> Vec<CookDeliveryGate> {
                 state,
                 summary: string_at(gate, "/failure_evidence/summary")
                     .or_else(|| string_at(gate, "/summary"))
-                    .or_else(|| string_at(gate, "/message")),
+                    .or_else(|| string_at(gate, "/message"))
+                    .or_else(|| {
+                        gate.get("lab_receipt")
+                            .and_then(crate::agent_task_gate::lab_non_execution_cause)
+                            .map(|cause| {
+                                format!(
+                                    "{cause}; {}",
+                                    crate::agent_task_gate::NON_EXECUTION_NEXT_STEP
+                                )
+                            })
+                    }),
                 proof_refs,
                 output: gate_failure_excerpt_from_value(gate),
             })
@@ -678,7 +688,12 @@ fn gate_blocker(code: CookDeliveryBlockerCode, gates: &[CookDeliveryGate]) -> Co
         CookDeliveryBlockerCode::GatesDeferred => (AgentTaskGateStatus::Deferred, "deferred"),
         _ => (AgentTaskGateStatus::Failed, "failed"),
     };
-    let gate = gates.iter().find(|gate| gate.state == gate_state);
+    // A gate that never executed reads `unavailable`; it is deferred too.
+    let gate = gates.iter().find(|gate| {
+        gate.state == gate_state
+            || (gate_state == AgentTaskGateStatus::Deferred
+                && gate.state == AgentTaskGateStatus::Unavailable)
+    });
     let named = gate.and_then(|gate| gate.id.as_deref());
     let summary = gate.and_then(|gate| gate.summary.as_deref());
     let message = match (named, summary, code) {

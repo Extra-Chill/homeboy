@@ -26,13 +26,16 @@ remain preserved as historical evidence below and in Homeboy's native records.
 - The real SSH heartbeat test changes **only** controller
   `shared/declared.txt` during a sleeping gate. Extension bytes and directory
   membership remain unchanged; the shared hash changes; the result is retained
-  as failed at `controller_closure_revalidation`, with a custodied diagnostic.
+  as unavailable (never executed, #16932) at `controller_closure_revalidation`,
+  with a custodied diagnostic.
   Fixture shared data is restored before subsequent checks.
 - Promotion candidate binding distinguishes `admitted-lab-gate-receipt/v1` from
   `lab-gate-disposition/v1`. Admitted receipts must match the canonical checkout
-  tree. Recognized `executed=false` non-passing dispositions retain unavailable/
-  cancelled/failed outcome and remediation rather than a fabricated candidate
-  mismatch. A passing result cannot use a disposition to bypass binding.
+  tree. Recognized `executed=false` dispositions are always `Unavailable`
+  (cancelled ones keep `termination: cancelled`) with their typed cause
+  (`error_code`, `stage`, `job_id`, `retryable`, `artifact_ref`), never a
+  failed gate or a fabricated candidate mismatch (#16932). A passing result
+  cannot use a disposition to bypass binding.
 - Tagged unavailable Lab readiness is retained as a gate report by the promotion
   owner. Ordered gates stop on failed, unavailable or deferred prerequisites;
   successors are explicitly skipped. `Unavailable` remains blocked/deferred in
