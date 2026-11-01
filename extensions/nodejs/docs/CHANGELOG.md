@@ -2,6 +2,11 @@
 
 All notable changes to the **nodejs** extension will be documented in this file.
 
+## [3.9.0] - 2026-11-01
+
+### Added
+- content-keyed package cache shared by build, deploy and release
+
 ## [3.8.8] - 2026-11-01
 
 ### Changed
