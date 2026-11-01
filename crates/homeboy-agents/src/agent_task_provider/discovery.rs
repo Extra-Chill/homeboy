@@ -51,8 +51,6 @@ mod tests {
         let provider = &catalog.providers[0];
         assert_eq!(provider.id, "pi.agent-task-executor");
         assert_eq!(provider.backend, "pi");
-        assert!(provider.extension_id.is_none());
-        assert!(provider.runtime_path.is_none());
         assert!(!provider.extra.contains_key("runtime_materialization_plan"));
     }
 }

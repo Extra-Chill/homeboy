@@ -76,32 +76,13 @@ fn provider_nonzero_exit_preserves_bounded_redacted_process_diagnostics() {
 }
 
 #[test]
-fn required_extension_ids_follow_selected_agent_task_providers() {
-    let (request_a, mut provider_a) = request("task-a", "node provider-a.js".to_string());
-    provider_a.id = "provider-a".to_string();
-    provider_a.extension_id = Some("extension-a".to_string());
-    let (mut request_b, mut provider_b) = request("task-b", "node provider-b.js".to_string());
-    request_b.executor.selector = Some("provider-b".to_string());
-    provider_b.id = "provider-b".to_string();
-    provider_b.extension_id = Some("extension-b".to_string());
-    let executor = ExtensionProviderAgentTaskExecutor::with_providers(vec![provider_a, provider_b]);
-
-    let extension_ids = executor
-        .required_extension_ids_for_plan(&AgentTaskPlan::new("plan-a", vec![request_a, request_b]));
-
-    assert_eq!(extension_ids, vec!["extension-a", "extension-b"]);
-}
-
-#[test]
 fn provider_selection_matches_exact_backend_first() {
     let (_, mut exact_provider) = request("task-a", "node exact-provider.js".to_string());
     exact_provider.id = "exact-provider".to_string();
     exact_provider.backend = "requested-backend".to_string();
-    exact_provider.extension_id = Some("other-extension".to_string());
     let (_, mut extension_provider) = request("task-b", "node extension-provider.js".to_string());
     extension_provider.id = "extension-provider".to_string();
     extension_provider.backend = "renamed-backend".to_string();
-    extension_provider.extension_id = Some("requested-backend".to_string());
 
     let providers = [extension_provider, exact_provider];
     let selected = select_provider_by_backend(&providers, "requested-backend", None)

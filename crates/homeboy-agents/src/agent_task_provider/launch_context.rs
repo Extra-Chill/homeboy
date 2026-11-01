@@ -53,8 +53,6 @@ pub struct AgentTaskProviderLaunchContext {
     pub provider_id: String,
     pub backend: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub runtime_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_root: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_cwd: Option<String>,
@@ -180,7 +178,6 @@ impl AgentTaskProviderLaunchContext {
             attempt: execution.attempt,
             provider_id: provider.id.clone(),
             backend: provider.backend.clone(),
-            runtime_id: provider.runtime_id.clone(),
             workspace_root: request.workspace.root.clone(),
             execution_cwd: cwd.map(|path| path.display().to_string()),
             inherited_env_names: inherited_env.keys().cloned().collect(),

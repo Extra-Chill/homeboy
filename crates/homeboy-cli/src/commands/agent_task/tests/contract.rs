@@ -9,7 +9,6 @@ fn providers_output_includes_core_capability_contract() {
             backend: None,
             selector: None,
             model: None,
-            runtime: None,
             status: None,
             secret_env: Vec::new(),
             validate_readiness: false,
@@ -59,7 +58,6 @@ fn providers_output_declares_the_scope_it_observed() {
             backend: None,
             selector: None,
             model: None,
-            runtime: None,
             status: None,
             secret_env: Vec::new(),
             validate_readiness: false,
@@ -83,8 +81,6 @@ fn providers_output_declares_the_scope_it_observed() {
         assert_eq!(scope["label"], "controller");
         assert!(scope["homeboy_identity"]["version"].is_string());
         assert!(scope["observed_at"].is_string());
-        assert!(scope["extension_source"]["total"].is_number());
-        assert!(scope["runtime_source"]["total"].is_number());
         assert_eq!(
             scope["runner_scoped_command"],
             "homeboy runner exec <runner-id> -- homeboy agent-task providers"
@@ -109,7 +105,6 @@ fn providers_output_labels_runner_scope_without_exposing_secret_values() {
             backend: Some("pi".to_string()),
             selector: Some("pi.agent-task-executor".to_string()),
             model: Some("openai/gpt-5.6-luna".to_string()),
-            runtime: None,
             status: None,
             secret_env: vec!["PI_TOKEN".to_string()],
             validate_readiness: false,

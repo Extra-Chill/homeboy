@@ -43,7 +43,6 @@ pub(super) fn request(
         backend: "test".to_string(),
         default_backend: false,
         command: String::new(),
-        command_argv: command.split_whitespace().map(str::to_string).collect(),
         invocation: CommandInvocation::default(),
         request_schema: AGENT_TASK_REQUEST_SCHEMA.to_string(),
         outcome_schema: AGENT_TASK_OUTCOME_SCHEMA.to_string(),
@@ -51,11 +50,6 @@ pub(super) fn request(
         workspace_materialization: None,
         provider_defaults: BTreeMap::new(),
         pi_readiness: Default::default(),
-        extension_id: None,
-        extension_path: None,
-        runtime_package_source: None,
-        runtime_id: None,
-        runtime_path: None,
         extra: BTreeMap::new(),
     };
     let mut command_parts = command.split_whitespace();

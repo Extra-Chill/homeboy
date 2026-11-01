@@ -285,7 +285,6 @@ impl Commands {
                 extension_ids.extend(args.effective_extension_override_ids().iter().cloned());
                 extension_ids.extend(review_lab_extension_ids(args)?);
             }
-            Commands::AgentTask(args) => extension_ids.extend(agent_task_lab_extension_ids(args)?),
             _ => {}
         }
 
@@ -353,22 +352,6 @@ fn provider_requires_cwd_git_checkout_for_dispatch(
         .as_ref()
         .is_some_and(|backend| provider_requires_cwd_git_checkout(backend, selector))
         || configured_backend.is_some_and(|backend| !backend.trim().is_empty())
-}
-
-pub(crate) fn agent_task_lab_extension_ids(
-    args: &agent_task::AgentTaskArgs,
-) -> crate::core::Result<Vec<String>> {
-    let agent_task::AgentTaskCommand::RunPlan(run_plan) = &args.command else {
-        return Ok(Vec::new());
-    };
-    if run_plan.plan.trim() == "-" {
-        return Ok(Vec::new());
-    }
-
-    let plan = crate::agents::agent_tasks::service::read_plan(&run_plan.plan)?;
-    Ok(crate::agents::agent_tasks::required_extension_ids_for_plan(
-        &plan,
-    ))
 }
 
 pub(crate) fn review_lab_extension_ids(

@@ -1,7 +1,4 @@
-use super::resolution::{
-    provider_requires_cwd_git_checkout_with_providers,
-    required_extension_ids_for_plan_with_providers,
-};
+use super::resolution::provider_requires_cwd_git_checkout_with_providers;
 use super::*;
 use homeboy_engine_primitives::content_hash;
 use std::sync::OnceLock;
@@ -179,10 +176,6 @@ impl ExtensionProviderAgentTaskExecutor {
             config.agent_task.default_backend.clone()
         })
     }
-
-    pub fn required_extension_ids_for_plan(&self, plan: &AgentTaskPlan) -> Vec<String> {
-        required_extension_ids_for_plan_with_providers(plan, &self.providers)
-    }
 }
 
 pub fn default_backend() -> homeboy_core::Result<Option<String>> {
@@ -239,10 +232,6 @@ pub(super) fn format_runtime_discovery_diagnostic(
         Some(path) => format!("{} at {}: {}", diagnostic.class, path, diagnostic.message),
         None => format!("{}: {}", diagnostic.class, diagnostic.message),
     }
-}
-
-pub fn required_extension_ids_for_plan(plan: &AgentTaskPlan) -> Vec<String> {
-    ExtensionProviderAgentTaskExecutor::discover().required_extension_ids_for_plan(plan)
 }
 
 pub fn provider_requires_cwd_git_checkout(backend: &str, selector: Option<&str>) -> bool {

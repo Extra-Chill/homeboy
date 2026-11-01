@@ -22,8 +22,8 @@ pub(crate) use crate::agent_task::{
     AGENT_TOOL_REQUEST_SCHEMA, AGENT_TOOL_RESULT_SCHEMA,
 };
 use crate::agent_task_scheduler::{
-    AgentTaskExecutionContext, AgentTaskExecutorAdapter, AgentTaskPlan,
-    ProviderRouteDiagnosticData, ProviderRouteReadiness,
+    AgentTaskExecutionContext, AgentTaskExecutorAdapter, ProviderRouteDiagnosticData,
+    ProviderRouteReadiness,
 };
 use crate::agent_task_secrets::AgentTaskSecretResolutionError;
 use crate::agent_task_timeout::timeout_with_grace;

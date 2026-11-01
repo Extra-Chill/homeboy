@@ -1066,7 +1066,6 @@ fn readiness_request_key_for_generated_fanout_context(
     // byte-identical with pre-#15024 identities.
     let mut value = json!({
         "provider_id": provider.id,
-        "runtime_path": provider.runtime_path,
         "pi_readiness": provider.pi_readiness,
         "effective_config": provider_config,
         "environment": environment,

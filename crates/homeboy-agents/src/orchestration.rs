@@ -5493,31 +5493,6 @@ fn generic_observation_run_summary(
     Ok(resource)
 }
 
-fn bind_extension_owners(
-    plan: &mut crate::agent_task_scheduler::AgentTaskPlan,
-    providers: &[crate::agent_task_provider::AgentTaskExecutorProvider],
-) {
-    let owners = plan
-        .tasks
-        .iter()
-        .filter_map(|request| {
-            crate::agent_task_provider::resolve_provider_for_backend(
-                providers,
-                &request.executor.backend,
-                request.executor.selector.as_deref(),
-            )
-            .resolved()
-            .and_then(|provider| provider.extension_id.as_ref())
-            .map(|extension_id| (request.task_id.clone(), Value::String(extension_id.clone())))
-        })
-        .collect::<serde_json::Map<_, _>>();
-    if !plan.metadata.is_object() {
-        plan.metadata = serde_json::json!({});
-    }
-    plan.metadata["control_plane"]["extension_owners"] = Value::Object(owners);
-    plan.rebuild_homeboy_plan();
-}
-
 fn generic_observation_state(status: &str) -> ControlPlaneRunState {
     homeboy_core::observation::RunStatus::from_label(status)
         .map(homeboy_core::observation::RunStatus::control_plane_state)
@@ -6091,7 +6066,7 @@ impl ControlPlaneProvider for RegisteredProvider {
             }
             Err(error) => return Err(ControlPlaneError::unavailable(error.to_string())),
         }
-        let mut plan = store
+        let plan = store
             .read_controller_plan(request.run.as_str())
             .map_err(map_lifecycle_error)?;
         let executor = crate::agent_task_provider::ExtensionProviderAgentTaskExecutor::discover();
@@ -6101,7 +6076,6 @@ impl ControlPlaneProvider for RegisteredProvider {
             .map_err(map_lifecycle_error)?
             .is_some();
         if !already_admitted {
-            bind_extension_owners(&mut plan, executor.providers());
             store
                 .write_controller_plan(request.run.as_str(), &plan)
                 .map_err(map_lifecycle_error)?;

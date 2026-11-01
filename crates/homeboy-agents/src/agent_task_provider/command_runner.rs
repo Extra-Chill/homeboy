@@ -14,8 +14,6 @@ use crate::agent_task_executor_evidence::{
 use crate::agent_task_process_containment::{
     contained_group_recovery_commands, AgentTaskProcessContainment, AgentTaskProcessSupervisor,
 };
-use homeboy_control_plane_contract::{AttemptId, ExecutionId, TaskId};
-use homeboy_extension_contract::api::v1::ExtensionApiControlPlaneIdentity;
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -849,26 +847,6 @@ fn run_materialized_provider_command_once_contained(
     env.retain(|(key, _)| key != "PI_CODING_AGENT_DIR");
     env.push(("PI_CODING_AGENT_DIR".into(), dir));
 
-    if provider.extension_id.is_some() {
-        match reserved_control_plane_identity(&request.request.task_id, execution) {
-            Ok(Some(identity)) => {
-                env.extend(homeboy_core::extension::invoke::control_plane_identity_env(
-                    &identity,
-                ));
-            }
-            Ok(None) => {}
-            Err(error) => {
-                return failure_outcome(
-                    request,
-                    AgentTaskOutcomeStatus::ProviderError,
-                    AgentTaskFailureClassification::Provider,
-                    "agent_task.control_plane_identity_invalid",
-                    error.message,
-                    json!({ "provider": provider.id, "run_id": run_id }),
-                );
-            }
-        }
-    }
     // The lease remains alive through the provider process. This lets provider
     // attempts and controller gates share only the same compatibility-keyed
     // Cargo output directory while preserving their isolated HOME/XDG roots.
@@ -2591,7 +2569,6 @@ fn provider_preflight_digest(
         "command": command,
         "program": program,
         "path": std::env::var_os("PATH").map(|value| value.to_string_lossy().to_string()).unwrap_or_default(),
-        "runtime_path_provenance": runtime_path_provenance(provider),
         "missing_secret_env": missing_secret_env,
         "secret_env_status": secret_status,
         "failures": failures,
@@ -2618,22 +2595,6 @@ fn provider_command_program_available(program: &str) -> bool {
     resolve_executable_candidate(program).is_some()
 }
 
-fn runtime_path_provenance(provider: &AgentTaskExecutorProvider) -> Value {
-    let (path, source) = if let Some(runtime_path) = provider.runtime_path.as_deref() {
-        (runtime_path, "runtime_path")
-    } else if let Some(extension_path) = provider.extension_path.as_deref() {
-        (extension_path, "extension_path_fallback")
-    } else {
-        ("", "missing")
-    };
-    json!({
-        "runtime_id": provider.runtime_id.as_deref(),
-        "runtime_path": path,
-        "source": source,
-        "extension_id": provider.extension_id.as_deref(),
-        "extension_path": provider.extension_path.as_deref(),
-    })
-}
 #[derive(Debug, Clone, Deserialize)]
 pub struct ProviderReadinessInvocationResult {
     pub ready: bool,
@@ -2855,48 +2816,13 @@ fn receive_readiness_output(
         .map_err(|error| format!("failed to read provider readiness output: {error}"))
 }
 
-fn render_provider_command_template(value: &str, provider: &AgentTaskExecutorProvider) -> String {
-    let extension_path = provider.extension_path.as_deref().unwrap_or_default();
-    let runtime_path = provider.runtime_path.as_deref().unwrap_or(extension_path);
-    value
-        .replace("{{extension_path}}", extension_path)
-        .replace("{{runtime_path}}", runtime_path)
-}
-
-fn invocation_command_parts(
-    provider: &AgentTaskExecutorProvider,
-    invocation: &CommandInvocation,
-) -> Option<(String, Vec<String>, Option<PathBuf>)> {
-    let mut argv = invocation
-        .argv
-        .iter()
-        .map(|arg| render_provider_command_template(arg, provider));
-    let program = argv.next()?;
-    let cwd = invocation
-        .cwd
-        .as_deref()
-        .map(|cwd| PathBuf::from(render_provider_command_template(cwd, provider)));
-    Some((program, argv.collect(), cwd))
-}
-
-fn render_provider_command_argv(provider: &AgentTaskExecutorProvider) -> Vec<String> {
-    provider
-        .command_argv
-        .iter()
-        .map(|arg| render_provider_command_template(arg, provider))
-        .collect()
-}
-
 pub fn provider_command_parts(
     provider: &AgentTaskExecutorProvider,
 ) -> Option<(String, Vec<String>, Option<PathBuf>)> {
-    if !provider.invocation.argv.is_empty() {
-        invocation_command_parts(provider, &provider.invocation)
-    } else {
-        let mut argv = render_provider_command_argv(provider).into_iter();
-        let program = argv.next()?;
-        Some((program, argv.collect(), None))
-    }
+    let mut argv = provider.invocation.argv.iter().cloned();
+    let program = argv.next()?;
+    let cwd = provider.invocation.cwd.as_ref().map(PathBuf::from);
+    Some((program, argv.collect(), cwd))
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -2912,13 +2838,6 @@ fn provider_command_env_with_credentials(
     provider: &AgentTaskExecutorProvider,
     credential_env: Option<&[(String, String)]>,
 ) -> Result<Vec<(String, String)>, ProviderCommandEnvError> {
-    // Both runtime path env vars resolve to the provider runtime_path, falling
-    // back to the extension_path when the runtime is not separately declared.
-    let runtime_path = provider
-        .runtime_path
-        .clone()
-        .or_else(|| provider.extension_path.clone())
-        .unwrap_or_default();
     let mut secret_env_plan =
         SecretEnvPlan::from_secret_env_names(request.executor.secret_env.clone());
     secret_env_plan.extend_secret_env_names(
@@ -2957,20 +2876,6 @@ fn provider_command_env_with_credentials(
             "HOMEBOY_AGENT_TOOL_DISPATCH_COMMAND".to_string(),
             agent_tool_dispatch_command(),
         ),
-        (
-            "HOMEBOY_EXTENSION_ID".to_string(),
-            provider.extension_id.clone().unwrap_or_default(),
-        ),
-        (
-            "HOMEBOY_EXTENSION_PATH".to_string(),
-            provider.extension_path.clone().unwrap_or_default(),
-        ),
-        ("HOMEBOY_RUNTIME_PATH".to_string(), runtime_path.clone()),
-        (
-            "HOMEBOY_AGENT_RUNTIME_ID".to_string(),
-            provider.runtime_id.clone().unwrap_or_default(),
-        ),
-        ("HOMEBOY_AGENT_RUNTIME_PATH".to_string(), runtime_path),
     ];
 
     if let Some(runtime_env) = request.executor.config["runtime_env"].as_object() {
@@ -3010,143 +2915,6 @@ fn provider_command_env_with_credentials(
     // git. Appended last so these override any inherited auth env. (#8486)
     env.extend(git_mutation_boundary_env());
     Ok(env)
-}
-
-fn reserved_control_plane_identity(
-    task_id: &str,
-    execution: &AgentTaskExecutionContext,
-) -> homeboy_core::Result<Option<ExtensionApiControlPlaneIdentity>> {
-    let (Some(store), Some(run_id)) = (execution.lifecycle_store(), execution.run_id.as_deref())
-    else {
-        return Ok(None);
-    };
-    let record = store.read_record(run_id)?;
-    let Some(identities) =
-        crate::agent_task_lifecycle::canonical_control_plane_identities(&record)?
-    else {
-        return Ok(None);
-    };
-    let task = TaskId::new(task_id).map_err(|error| {
-        Error::validation_invalid_argument("task_id", error.to_string(), None, None)
-    })?;
-    let reservation = record
-        .metadata
-        .get("provider_executions")
-        .and_then(Value::as_array)
-        .and_then(|executions| {
-            executions.iter().find(|reservation| {
-                reservation["task_id"].as_str() == Some(task.as_str())
-                    && reservation["attempt"].as_u64() == Some(u64::from(execution.attempt))
-            })
-        })
-        .ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "provider_execution",
-                "canonical provider execution reservation is missing",
-                None,
-                None,
-            )
-        })?;
-    let attempt = reservation["owner_identity"].as_str().ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "provider_execution.owner_identity",
-            "canonical provider attempt identity is missing",
-            None,
-            None,
-        )
-    })?;
-    let execution_id = reservation["execution_identity"].as_str().ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "provider_execution.execution_identity",
-            "canonical provider execution identity is missing",
-            None,
-            None,
-        )
-    })?;
-    let expected_attempt = format!("{}:{}:{}", identities.run, task, execution.attempt);
-    if attempt != expected_attempt || execution_id != format!("{attempt}:execution") {
-        return Err(Error::validation_invalid_argument(
-            "provider_execution",
-            "canonical provider execution reservation identity is incoherent",
-            None,
-            None,
-        ));
-    }
-    Ok(Some(ExtensionApiControlPlaneIdentity {
-        mission: identities.mission,
-        run: identities.run,
-        task,
-        attempt: AttemptId::new(attempt).map_err(|error| {
-            Error::validation_invalid_argument("provider_execution", error.to_string(), None, None)
-        })?,
-        attempt_number: execution.attempt,
-        execution: ExecutionId::new(execution_id).map_err(|error| {
-            Error::validation_invalid_argument("provider_execution", error.to_string(), None, None)
-        })?,
-    }))
-}
-
-#[cfg(test)]
-mod control_plane_identity_tests {
-    use super::*;
-
-    #[test]
-    fn extension_process_identity_comes_from_the_durable_execution_reservation() {
-        let root = tempfile::tempdir().expect("data root");
-        let store = crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_data_root(
-            root.path().to_path_buf(),
-        );
-        let run_id = "agent-task-301a2b9a-a63d-446b-a918-e21b2ff6421e-attempt-1-ea6a6751";
-        let task_id = "task-extension";
-        let attempt = 2;
-        let record: crate::agent_task_lifecycle::AgentTaskRunRecord =
-            serde_json::from_value(json!({
-                "schema": "homeboy/agent-task-run/v1",
-                "run_id": run_id,
-                "plan_id": "plan-extension",
-                "state": "running",
-                "submitted_at": "2026-01-01T00:00:00Z",
-                "plan_path": "/plan",
-                "metadata": {
-                    "provider_executions": [{
-                        "task_id": task_id,
-                        "attempt": attempt,
-                        "owner_identity": format!("{run_id}:{task_id}:{attempt}"),
-                        "execution_identity": format!("{run_id}:{task_id}:{attempt}:execution")
-                    }]
-                }
-            }))
-            .expect("run record");
-        store.write_record(&record).expect("persist reservation");
-        let context = AgentTaskExecutionContext {
-            plan_id: "plan-extension".to_string(),
-            run_id: Some(run_id.to_string()),
-            attempt,
-            cancellation: crate::agent_task_scheduler::AgentTaskCancellationToken::default(),
-            lifecycle_store: Some(store),
-            provider_capacity_key: None,
-        };
-
-        let identity = reserved_control_plane_identity(task_id, &context)
-            .expect("resolve identity")
-            .expect("canonical identity");
-
-        assert_eq!(identity.run.as_str(), run_id);
-        assert_eq!(identity.task.as_str(), task_id);
-        assert_eq!(identity.attempt_number, attempt);
-        assert_eq!(
-            identity.attempt.as_str(),
-            format!("{run_id}:{task_id}:{attempt}")
-        );
-        assert_eq!(
-            identity.execution.as_str(),
-            format!("{run_id}:{task_id}:{attempt}:execution")
-        );
-        assert_eq!(
-            homeboy_core::extension::invoke::control_plane_identity_env(&identity).len(),
-            6
-        );
-    }
 }
 
 /// Environment that denies a provider the ability to authenticate a `git push`.

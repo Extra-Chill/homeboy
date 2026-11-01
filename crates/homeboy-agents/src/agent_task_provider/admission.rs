@@ -100,11 +100,7 @@ impl AgentTaskProviderAdmissionPlan {
         let mut required_runtime_sources = Vec::new();
         let resolved_provider_id = resolved.map(|provider| provider.id.clone());
 
-        if let Some(provider) = resolved {
-            if let Some(extension_id) = provider.extension_id.as_ref().filter(|id| !id.is_empty()) {
-                required_extension_ids.push(extension_id.clone());
-            }
-        } else {
+        if resolved.is_none() {
             actions.push(AgentTaskProviderAdmissionAction::SyncProviderExtension {
                 provider_id: request
                     .selector
@@ -339,10 +335,8 @@ mod tests {
 
     #[test]
     fn catalog_permutations_preserve_admission_identity() {
-        let mut first = provider("alpha.a", "alpha", None);
-        first.extension_id = Some("extension".to_string());
-        let mut second = provider("alpha.b", "alpha", None);
-        second.extension_id = Some("extension".to_string());
+        let first = provider("alpha.a", "alpha", None);
+        let second = provider("alpha.b", "alpha", None);
         for request in [
             AgentTaskProviderAdmissionRequest {
                 backend: "alpha".to_string(),

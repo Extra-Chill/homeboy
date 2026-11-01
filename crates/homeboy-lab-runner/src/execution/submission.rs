@@ -21,7 +21,7 @@ pub(super) struct RunnerApiExecutionInput {
     pub env: HashMap<String, String>,
     pub secret_env_names: Vec<String>,
     /// Controller-resolved secret references for the dispatch. The plan carries
-    /// names, requirements, and provider credential provenance — never values —
+    /// secret environment names — never values —
     /// so a durable worker can rehydrate credentials from runner-owned sources
     /// after replay (Extra-Chill/homeboy#14382).
     pub secret_env_plan: Option<SecretEnvPlan>,
