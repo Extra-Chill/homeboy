@@ -173,7 +173,7 @@ fn commit_refuses_contract_drift_since_plan() {
     write_json(&incoming.path().join("commit.json"), &request).unwrap();
     let error = format!("{:?}", materialization_commit(incoming.path()).unwrap_err());
     assert!(error.contains(&format!(
-        "Lab contract {} != {}",
+        "Lab contract version mismatch: received {}, expected {}",
         request.lab_contract_version,
         homeboy_lab_contract::LAB_CONTRACT_VERSION
     )));
@@ -249,6 +249,9 @@ fn plan_accepts_different_build_with_same_contract_and_refuses_contract_mismatch
     request["lab_contract_version"] = (version + 1).into();
     write_json(&input, &request).unwrap();
     let error = materialization_plan_controlled(&input, &WorkspaceControl::default()).unwrap_err();
-    assert!(format!("{error:?}").contains(&format!("Lab contract {} != {version}", version + 1)));
+    assert!(format!("{error:?}").contains(&format!(
+        "Lab contract version mismatch: received {}, expected {version}",
+        version + 1
+    )));
     assert!(!destination.exists());
 }

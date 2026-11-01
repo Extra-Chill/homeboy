@@ -83,7 +83,9 @@ pub(super) fn materialization_plan_controlled(
     let request: PlanRequest = json(&fs::read(input).map_err(io)?)?;
     let version = request.lab_contract_version;
     if version != CONTRACT {
-        return Err(io(format!("Lab contract {version} != {CONTRACT}")));
+        return Err(io(format!(
+            "Lab contract version mismatch: received {version}, expected {CONTRACT}"
+        )));
     }
     let first = request
         .roots
@@ -173,7 +175,9 @@ pub(super) fn materialization_commit_controlled(
     let request: CommitRequest = json(&fs::read(input.join("commit.json")).map_err(io)?)?;
     let version = request.lab_contract_version;
     if version != CONTRACT {
-        return Err(io(format!("Lab contract {version} != {CONTRACT}")));
+        return Err(io(format!(
+            "Lab contract version mismatch: received {version}, expected {CONTRACT}"
+        )));
     }
     let first = request.roots.first().ok_or_else(|| io("empty commit"))?;
     let store = super::blobs::store(&first.summary.remote_path);

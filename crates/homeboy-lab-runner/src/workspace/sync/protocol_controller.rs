@@ -257,7 +257,9 @@ pub(super) fn sync_workspace_batch_in_roots(
     let response: PlanResponse = serde_json::from_value(response).map_err(io)?;
     let version = response.lab_contract_version;
     if version != CONTRACT {
-        return Err(io(format!("Lab contract {version} != {CONTRACT}")));
+        return Err(io(format!(
+            "Lab contract version mismatch: received {version}, expected {CONTRACT}"
+        )));
     }
     let inventory = super::blobs::inventory(&plan.roots)?;
     let missing_bytes: u64 = response
