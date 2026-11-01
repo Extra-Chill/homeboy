@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.439.3] - 2026-11-01
+
+### Changed
+- Judge Lab daemon compatibility by contract version, not build identity; upgrade no longer waits for live jobs
+- install artifacts through one path and one remote script
+
+### Fixed
+- preserve oversized pre-execution failure causes
+
 ## [0.439.2] - 2026-11-01
 
 ### Changed
