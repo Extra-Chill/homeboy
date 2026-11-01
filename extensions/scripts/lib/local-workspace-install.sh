@@ -17,7 +17,7 @@ homeboy_apply_local_workspace_install() {
         return 0
     fi
 
-    local helper="${HOMEBOY_RUNTIME_LOCAL_WORKSPACE_DEPS:-${collection_dir}/nodejs/scripts/lib/local-workspace-deps.sh}"
+    local helper="${HOMEBOY_RUNTIME_LOCAL_WORKSPACE_DEPS:-${collection_dir}/scripts/lib/local-workspace-deps.sh}"
     if [ ! -f "$helper" ]; then
         echo "local_workspace_dependencies declared but helper not found: $helper" >&2
         return 1
