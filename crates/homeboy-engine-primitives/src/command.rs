@@ -1533,7 +1533,9 @@ pub fn wait_with_bounded_output_until_cancelled_with_stdout_observer(
         if is_cancelled() {
             break terminate_process_tree_and_reap(child)?;
         }
-        thread::sleep(Duration::from_millis(100));
+        // Short Git probes are often chained; avoid adding 100ms per probe
+        // to otherwise concurrent source refreshes.
+        thread::sleep(Duration::from_millis(10));
     };
     let stdout = join_capture(stdout_handle)?;
     let stderr = join_capture(stderr_handle)?;

@@ -9,9 +9,9 @@ use homeboy_extension_contract::update_output::{
 
 /// Update installed extensions, refreshing linked sources once per Git root.
 ///
-/// `progress` runs before each extension's result is processed (a linked group
-/// may do its shared work on the first member). Callback errors abort the sweep;
-/// extension update errors remain best-effort skips.
+/// `progress` runs before each extension's result is processed. Callback errors
+/// abort the sweep without starting another batch; already-started units finish.
+/// Extension update errors remain best-effort skips.
 pub fn update_all(
     force: bool,
     mut progress: impl FnMut(&str, usize, usize) -> Result<()>,
@@ -42,7 +42,26 @@ pub fn update_all(
             }
         }
     }
-    let mut grouped_results: HashMap<String, Result<UpdateResult>> = HashMap::new();
+    // Keep each linked root in one unit, ordered by its first extension.
+    let mut units = Vec::new();
+    let mut grouped = HashMap::new();
+    for ids in linked_groups.into_values() {
+        for id in &ids {
+            grouped.insert(id.clone(), ids.clone());
+        }
+    }
+    let mut scheduled = std::collections::HashSet::new();
+    for id in &extension_ids {
+        if scheduled.contains(id) {
+            continue;
+        }
+        let ids = grouped.get(id).cloned().unwrap_or_else(|| vec![id.clone()]);
+        scheduled.extend(ids.iter().cloned());
+        units.push((grouped.contains_key(id), ids));
+    }
+    let mut units = units.chunks(4);
+    let mut results: HashMap<String, Result<UpdateResult>> = HashMap::new();
+    let mut before = HashMap::new();
     let revisions = if force {
         HashMap::new()
     } else {
@@ -51,17 +70,59 @@ pub fn update_all(
 
     for (index, id) in extension_ids.iter().enumerate() {
         progress(id, index + 1, extension_ids.len())?;
-        let old_version = load_extension(id).ok().map(|m| m.version.clone());
-        let old_source_revision = homeboy_core::extension::lifecycle::read_source_revision(id);
-
-        let update_result = linked_group_result(id, force, &linked_groups, &mut grouped_results);
-        match update_result.unwrap_or_else(|| {
-            update(
-                id,
-                force,
-                revisions.get(id).map(|revision| revision.as_deref()),
-            )
-        }) {
+        if !results.contains_key(id) {
+            let batch = units.next().expect("one update unit per extension");
+            // Git, extraction, and setup use child-process env/current_dir,
+            // never process-global set_var or set_current_dir. Independent
+            // units write distinct installs; shared linked roots stay together.
+            std::thread::scope(|scope| {
+                let handles: Vec<_> = batch
+                    .iter()
+                    .map(|(linked, ids)| {
+                        let revisions = &revisions;
+                        scope.spawn(move || {
+                            // Snapshot every member before this unit changes its root.
+                            let before: Vec<_> = ids
+                                .iter()
+                                .map(|id| {
+                                    (id.clone(), (
+                                    load_extension(id).ok().map(|m| m.version.clone()),
+                                    homeboy_core::extension::lifecycle::read_source_revision(id),
+                                ))
+                                })
+                                .collect();
+                            let results = if *linked {
+                                match update_linked_group(ids, force) {
+                                    Ok(entries) => entries
+                                        .into_iter()
+                                        .map(|entry| (entry.extension_id.clone(), Ok(entry)))
+                                        .collect::<Vec<_>>(),
+                                    Err(error) => ids
+                                        .iter()
+                                        .map(|id| (id.clone(), Err(error.clone())))
+                                        .collect(),
+                                }
+                            } else {
+                                let id = &ids[0];
+                                vec![(
+                                    id.clone(),
+                                    update(id, force, revisions.get(id).map(|r| r.as_deref())),
+                                )]
+                            };
+                            (before, results)
+                        })
+                    })
+                    .collect();
+                for handle in handles {
+                    let (snapshots, entries) =
+                        handle.join().expect("extension update worker panicked");
+                    before.extend(snapshots);
+                    results.extend(entries);
+                }
+            });
+        }
+        let (old_version, old_source_revision) = before.remove(id).unwrap();
+        match results.remove(id).expect("update unit returned extension") {
             Ok(mut result) => {
                 let new_version = load_extension(id)
                     .ok()
@@ -127,36 +188,6 @@ pub fn update_all(
         skipped_details,
         repaired_source_metadata,
     })
-}
-
-/// A linked monorepo is refreshed once per Git root. Every extension still gets
-/// its own compatibility/setup validation and inherits the root's exact revision
-/// transition for independent service targeting.
-fn linked_group_result(
-    id: &str,
-    force: bool,
-    groups: &HashMap<String, Vec<String>>,
-    results: &mut HashMap<String, Result<UpdateResult>>,
-) -> Option<Result<UpdateResult>> {
-    let path = homeboy_core::paths::extension(id).ok()?;
-    let source = std::fs::canonicalize(path).ok()?;
-    let root = homeboy_core::git::get_git_root(&source.to_string_lossy()).ok()?;
-    let ids = groups.get(&root)?;
-    if !results.contains_key(id) {
-        match update_linked_group(ids, force) {
-            Ok(entries) => {
-                for entry in entries {
-                    results.insert(entry.extension_id.clone(), Ok(entry));
-                }
-            }
-            Err(error) => {
-                for member in ids {
-                    results.insert(member.clone(), Err(error.clone()));
-                }
-            }
-        }
-    }
-    results.get(id).cloned()
 }
 
 #[cfg(test)]
