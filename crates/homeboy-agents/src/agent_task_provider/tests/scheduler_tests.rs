@@ -779,6 +779,22 @@ fn provider_timeout_persists_bounded_redacted_last_activity() {
 }
 
 #[test]
+fn retrying_runner_preserves_capability_evidence_without_runtime_attachments() {
+    let (mut request, provider) = request(
+        "task-capability-evidence",
+        "missing-provider-command".into(),
+    );
+    request.limits.execution_deadline_unix_ms = Some(0);
+    let evidence = json!({"requested": {"provider": ["structured_outcome"]}});
+    request.metadata["capability_evidence"] = evidence.clone();
+
+    let outcome = run_provider_command(&request, &provider, None);
+
+    assert_eq!(outcome.status, AgentTaskOutcomeStatus::Timeout);
+    assert_eq!(outcome.metadata["capability_evidence"], evidence);
+}
+
+#[test]
 fn expired_execution_deadline_returns_typed_outcome_without_spawning_provider() {
     let (mut request, provider) = request("task-deadline", "missing-provider-command".to_string());
     request.limits.execution_deadline_unix_ms = Some(0);

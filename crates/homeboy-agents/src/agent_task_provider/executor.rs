@@ -3,7 +3,7 @@ fn is_immutable_revision(value: &str) -> bool {
     value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
-use super::command_runner::{failure_outcome, run_materialized_provider_command_with_credentials};
+use super::command_runner::{failure_outcome, run_materialized_provider_command};
 use super::*;
 
 const PROVIDER_ACCOUNT_BLOCK_TTL: chrono::Duration = chrono::Duration::minutes(5);
@@ -694,25 +694,12 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
         let unavailable_attached_tools = requirements
             .attached_tools
             .iter()
-            .filter_map(|required| {
-                let resolved = request
-                    .resolved_runtime_tools
-                    .iter()
-                    .find(|tool| tool.id == required.id);
-                let missing = required
-                    .contributes
-                    .iter()
-                    .filter(|capability| {
-                        resolved.is_none_or(|tool| !tool.capabilities.contains(capability))
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>();
-                (!missing.is_empty()).then(|| {
-                    json!({
-                        "tool_id": required.id,
-                        "missing_capabilities": missing,
-                        "readiness": resolved.map_or("missing", |tool| tool.readiness.status.as_str()),
-                    })
+            .filter(|required| !required.contributes.is_empty())
+            .map(|required| {
+                json!({
+                    "tool_id": required.id,
+                    "missing_capabilities": required.contributes,
+                    "readiness": "missing",
                 })
             })
             .collect::<Vec<_>>();
@@ -741,7 +728,7 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
                 &ready_tools,
             ));
 
-        run_materialized_provider_command_with_credentials(
+        run_materialized_provider_command(
             &request,
             &provider,
             &context,
@@ -849,7 +836,6 @@ fn materialize_executor_request_at_root(
         artifacts_path: path,
         artifact_store_root: root,
         artifacts_path_provenance: provenance,
-        resolved_runtime_tools: Vec::new(),
         artifacts_root_identity,
     })
 }

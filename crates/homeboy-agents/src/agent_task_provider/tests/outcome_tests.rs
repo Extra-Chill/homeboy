@@ -21,7 +21,6 @@ fn controller_owned_publication_is_reported_as_not_attempted() {
             task_id: "controller-publication".to_string(),
             attempt: 1,
         },
-        resolved_runtime_tools: Vec::new(),
         artifacts_root_identity: crate::agent_task_provider::artifact_finalization::ExecutorArtifactRootIdentity::capture_with_finalized_root(&artifacts_path, artifact_store_root.join("executor-finalized")).expect("artifact identity"),
     };
     let mut outcome = AgentTaskOutcome {

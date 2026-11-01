@@ -7,7 +7,7 @@ use super::{
     AgentTaskArtifactDeclaration, AgentTaskAttachedToolCapability, AgentTaskCapabilityEvidence,
     AgentTaskCapabilityRequirements, AgentTaskEvidenceRef, AgentTaskExecutor, AgentTaskLimits,
     AgentTaskOutcome, AgentTaskPolicy, AgentTaskRuntimeTool, AgentTaskSourceRef,
-    AgentTaskWorkspace, ResolvedAgentTaskRuntimeTool,
+    AgentTaskWorkspace,
 };
 
 /// Provider capability payload used by extension discovery and durable run metadata.
@@ -181,9 +181,6 @@ pub struct AgentTaskExecutorRequest {
     pub artifacts_path: PathBuf,
     pub(crate) artifact_store_root: PathBuf,
     pub artifacts_path_provenance: AgentTaskArtifactsPathProvenance,
-    /// Host-resolved runtime attachments for the provider adapter. This is
-    /// distinct from the caller declaration carried in the flattened request.
-    pub resolved_runtime_tools: Vec<ResolvedAgentTaskRuntimeTool>,
     pub(crate) artifacts_root_identity:
         crate::agent_task_provider::artifact_finalization::ExecutorArtifactRootIdentity,
 }
@@ -197,8 +194,8 @@ impl Serialize for AgentTaskExecutorRequest {
         let object = value.as_object_mut().ok_or_else(|| {
             serde::ser::Error::custom("agent task request must serialize as an object")
         })?;
-        // Callers retain declarations for durable planning, but providers receive
-        // only Homeboy's validated, host-resolved projection.
+        // Callers retain declarations for durable planning, but providers do not
+        // receive runtime tool declarations.
         object.remove("runtime_tools");
         object.insert(
             "artifacts_path".to_string(),
@@ -209,13 +206,6 @@ impl Serialize for AgentTaskExecutorRequest {
             serde_json::to_value(&self.artifacts_path_provenance)
                 .map_err(serde::ser::Error::custom)?,
         );
-        if !self.resolved_runtime_tools.is_empty() {
-            object.insert(
-                "resolved_runtime_tools".to_string(),
-                serde_json::to_value(&self.resolved_runtime_tools)
-                    .map_err(serde::ser::Error::custom)?,
-            );
-        }
         value.serialize(serializer)
     }
 }

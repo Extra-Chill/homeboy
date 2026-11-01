@@ -347,32 +347,12 @@ fn sanitize_task_id(task_id: &str) -> String {
 /// typed artifact expectations are retained.
 fn redacted_request_value(request: &AgentTaskExecutorRequest, policy: &RedactionPolicy) -> Value {
     match serde_json::to_value(request) {
-        Ok(mut value) => {
-            redact_runtime_tool_env(&mut value, "runtime_tools");
-            redact_runtime_tool_env(&mut value, "resolved_runtime_tools");
-            policy.redact_json(&value)
-        }
+        Ok(value) => policy.redact_json(&value),
         Err(error) => json!({
             "error": "failed to serialize executor request for evidence",
             "detail": error.to_string(),
             "task_id": request.task_id,
         }),
-    }
-}
-
-/// Runtime tool literals are execution input, not durable evidence. Keep their
-/// names visible for diagnosis while replacing every value before persistence.
-fn redact_runtime_tool_env(value: &mut Value, field: &str) {
-    let Some(tools) = value.get_mut(field).and_then(Value::as_array_mut) else {
-        return;
-    };
-    for tool in tools {
-        let Some(env) = tool.get_mut("env").and_then(Value::as_object_mut) else {
-            continue;
-        };
-        for env_value in env.values_mut() {
-            *env_value = Value::String("[redacted]".to_string());
-        }
     }
 }
 
@@ -530,7 +510,6 @@ mod tests {
                 attempt: 1,
             },
             request,
-            resolved_runtime_tools: Vec::new(),
         }
     }
 
@@ -723,7 +702,7 @@ mod tests {
     }
 
     #[test]
-    fn persisted_input_redacts_runtime_tool_literal_environment_values() {
+    fn persisted_input_omits_runtime_tool_declarations() {
         let mut request = executor_test_request();
         request.request.runtime_tools = vec![serde_json::from_value(json!({
             "id": "fixture.mcp",
@@ -731,42 +710,10 @@ mod tests {
             "env": { "FIXTURE_MODE": "private-declaration" }
         }))
         .expect("runtime tool")];
-        request.resolved_runtime_tools = vec![crate::agent_task::ResolvedAgentTaskRuntimeTool {
-            schema: crate::agent_task::RESOLVED_AGENT_TASK_RUNTIME_TOOL_SCHEMA.to_string(),
-            id: "fixture.mcp".to_string(),
-            transport: "stdio".to_string(),
-            executable: "/fixture-mcp".to_string(),
-            argv: vec!["/fixture-mcp".to_string()],
-            env: [("FIXTURE_MODE".to_string(), "private-resolved".to_string())]
-                .into_iter()
-                .collect(),
-            version: None,
-            capabilities: vec!["browser".to_string()],
-            capability_probe: Some(crate::agent_task::AgentTaskRuntimeToolProbeEvidence {
-                status: "succeeded".to_string(),
-                argv: Vec::new(),
-            }),
-            env_names: vec!["FIXTURE_MODE".to_string()],
-            secret_env_names: Vec::new(),
-            readiness: crate::agent_task::ResolvedAgentTaskRuntimeToolReadiness {
-                status: "ready".to_string(),
-                evidence: Some(
-                    crate::agent_task::ResolvedAgentTaskRuntimeToolReadinessEvidence {
-                        kind: "declared_probe".to_string(),
-                        success: true,
-                    },
-                ),
-            },
-            lifecycle: Default::default(),
-        }];
 
         let value = redacted_request_value(&request, &RedactionPolicy::default());
 
         assert!(value.get("runtime_tools").is_none());
-        assert_eq!(
-            value["resolved_runtime_tools"][0]["env"]["FIXTURE_MODE"],
-            "[redacted]"
-        );
         assert!(!value.to_string().contains("private-"));
     }
 

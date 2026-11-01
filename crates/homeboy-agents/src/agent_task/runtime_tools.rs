@@ -3,8 +3,6 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 pub const AGENT_TASK_RUNTIME_TOOL_SCHEMA: &str = "homeboy/agent-task-runtime-tool/v1";
-pub const RESOLVED_AGENT_TASK_RUNTIME_TOOL_SCHEMA: &str =
-    "homeboy/resolved-agent-task-runtime-tool/v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentTaskRuntimeTool {
@@ -59,54 +57,6 @@ pub enum AgentTaskRuntimeToolLifecycle {
     RuntimeOwned,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ResolvedAgentTaskRuntimeTool {
-    #[serde(default = "resolved_runtime_tool_schema")]
-    pub schema: String,
-    pub id: String,
-    pub transport: String,
-    pub executable: String,
-    /// Complete argv projected to an adapter. It is executable-path normalized
-    /// so adapters never need to repeat host resolution.
-    pub argv: Vec<String>,
-    /// Literal environment passed only in the live executor request. Evidence
-    /// serialization redacts this field while retaining `env_names` provenance.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub env: BTreeMap<String, String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub version: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub capabilities: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub capability_probe: Option<AgentTaskRuntimeToolProbeEvidence>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub env_names: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub secret_env_names: Vec<String>,
-    pub readiness: ResolvedAgentTaskRuntimeToolReadiness,
-    pub lifecycle: AgentTaskRuntimeToolLifecycle,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ResolvedAgentTaskRuntimeToolReadiness {
-    pub status: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub evidence: Option<ResolvedAgentTaskRuntimeToolReadinessEvidence>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ResolvedAgentTaskRuntimeToolReadinessEvidence {
-    pub kind: String,
-    pub success: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct AgentTaskRuntimeToolProbeEvidence {
-    pub status: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub argv: Vec<String>,
-}
-
 #[cfg(test)]
 impl AgentTaskRuntimeTool {
     pub(crate) fn redacted(mut self) -> Self {
@@ -119,23 +69,8 @@ impl AgentTaskRuntimeTool {
     }
 }
 
-impl ResolvedAgentTaskRuntimeTool {
-    pub(crate) fn redacted(mut self) -> Self {
-        self.env = self
-            .env
-            .keys()
-            .map(|name| (name.clone(), "[redacted]".to_string()))
-            .collect();
-        self
-    }
-}
-
 fn runtime_tool_schema() -> String {
     AGENT_TASK_RUNTIME_TOOL_SCHEMA.to_string()
-}
-
-fn resolved_runtime_tool_schema() -> String {
-    RESOLVED_AGENT_TASK_RUNTIME_TOOL_SCHEMA.to_string()
 }
 
 fn stdio_transport() -> String {
