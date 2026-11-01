@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.53.19] - 2026-11-01
+
+### Fixed
+- share the local workspace deps helper from the collection scripts/lib
+
 ## [3.53.18] - 2026-11-01
 
 ### Fixed
