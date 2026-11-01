@@ -116,10 +116,19 @@ fn an_externalized_promotion_report_reads_back_as_the_report() {
     record_promotion(run_id, promotion.clone()).expect("applied promotion persisted");
 
     let restarted = status(run_id).expect("reload durable run");
+    // Lifecycle reads resolve content-addressed metadata before returning it.
+    // Inspect the stored row to prove this fixture exercised externalization.
+    let stored = homeboy_core::observation::ObservationStore::open_readonly_at(
+        homeboy_core::paths::observation_db().expect("observation path"),
+    )
+    .expect("observation store")
+    .get_run(run_id)
+    .expect("stored run")
+    .expect("run exists");
     assert!(
-        restarted
-            .metadata
-            .pointer("/cook_delivery/artifacts/promotion/metadata_payload")
+        stored
+            .metadata_json
+            .pointer("/agent_task_run/metadata/cook_delivery/artifacts/promotion/metadata_payload")
             .is_some(),
         "the stored report must be externalized for this test to mean anything"
     );

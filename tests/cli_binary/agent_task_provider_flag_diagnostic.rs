@@ -25,21 +25,19 @@ List available executor providers: `homeboy agent-task providers`\n\
 
 #[test]
 fn cook_accepts_current_executor_selection_flags() {
-    for selector_flag in ["--selector", "--dispatch-provider-id"] {
-        let output = cook_command([
-            "--backend",
-            "pi",
-            selector_flag,
-            "pi.agent-task-executor",
-            "--help-full",
-        ]);
+    let output = cook_command([
+        "--backend",
+        "pi",
+        "--selector",
+        "pi.agent-task-executor",
+        "--help-full",
+    ]);
 
-        assert!(output.status.success(), "{selector_flag}: {output:?}");
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("--backend <BACKEND>"));
-        assert!(stdout.contains("--selector <PROVIDER_ID>"));
-        assert!(stdout.contains("--dispatch-provider-id"));
-    }
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("--backend <BACKEND>"));
+    assert!(stdout.contains("--selector <PROVIDER_ID>"));
+    assert!(!stdout.contains("--dispatch-provider-id"));
 }
 
 #[test]

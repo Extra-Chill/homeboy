@@ -125,10 +125,48 @@ use homeboy_core::phase_timing::PhaseTimer;
 use homeboy_core::project;
 use uuid::Uuid;
 
-/// High-level deploy entry point. Resolves SSH context internally.
-///
-/// This is the preferred entry point for callers - it handles project loading
-/// and SSH context resolution, keeping those details encapsulated.
+/// Verify only successful writes from this invocation, using receipt-first checks.
+pub fn verify_deployed(project_id: &str, result: &mut DeployOrchestrationResult) -> Result<()> {
+    let component_ids: Vec<String> = result
+        .results
+        .iter()
+        .filter(|entry| entry.status == "deployed")
+        .map(|entry| entry.id.clone())
+        .collect();
+    if component_ids.is_empty() {
+        return Ok(());
+    }
+    let checked = run(
+        project_id,
+        &DeployConfig {
+            component_ids,
+            check: true,
+            ..DeployConfig::check_all_no_pull_head()
+        },
+    )?;
+    for verification in checked.results {
+        if let Some(entry) = result
+            .results
+            .iter_mut()
+            .find(|entry| entry.id == verification.id)
+        {
+            if verification
+                .content_manifest
+                .as_ref()
+                .is_none_or(|manifest| manifest.status != "match")
+            {
+                entry.status = "failed".into();
+                entry.error = Some("Post-deploy receipt verification failed".into());
+                result.summary.failed += 1;
+                result.summary.succeeded = result.summary.succeeded.saturating_sub(1);
+            }
+            entry.content_manifest = verification.content_manifest;
+        }
+    }
+    Ok(())
+}
+
+/// Run deployment for a project, resolving project and SSH context once.
 pub fn run(project_id: &str, config: &DeployConfig) -> Result<DeployOrchestrationResult> {
     // One deploy reuses one SSH connection per server (#16806).
     let _ssh_mux = homeboy_core::server::ssh_mux::scope();

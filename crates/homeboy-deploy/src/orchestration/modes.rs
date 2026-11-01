@@ -95,7 +95,7 @@ pub(super) fn run_check_mode(input: CheckModeInput<'_>) -> DeployOrchestrationRe
                     c.build_artifact.as_deref(),
                 )
             } else {
-                let version = local_versions.get(&c.id).map(String::as_str).unwrap_or_default();
+                let version = remote_versions.get(&c.id).map(String::as_str).unwrap_or_default();
                 match super::super::receipt::load(
                     data_root,
                     project,
