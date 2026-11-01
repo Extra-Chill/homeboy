@@ -113,8 +113,12 @@ for step in steps:
         value = (step.get("env") or {}).get(key)
         if value is not None:
             assert value.startswith("${{ github.workspace }}/"), f"{key} must be under github.workspace: {value}"
-        # Homeboy accepts exactly <cargo root>/homeboy-test-inventory.json
+        # Homeboy accepts exactly <inventory root>/homeboy-test-inventory.json
         # (TEST_INVENTORY_PUBLIC_FILE); any other name is RequestedPathRejected.
-        if key in ("HOMEBOY_TEST_INVENTORY_FILE", "BASELINE_INVENTORY_FILE") and value is not None:
+        # The request binds to the component directory when one is given
+        # (#565); consumers read the copy normalized to the workspace root.
+        if key == "HOMEBOY_TEST_INVENTORY_FILE" and value is not None:
+            assert value == "${{ github.workspace }}/${{ inputs.component != '' && format('{0}/', inputs.component) || '' }}homeboy-test-inventory.json", f"{key} must use Homeboy's fixed inventory name: {value}"
+        if key == "BASELINE_INVENTORY_FILE" and value is not None:
             assert value == "${{ github.workspace }}/homeboy-test-inventory.json", f"{key} must use Homeboy's fixed inventory name: {value}"
 print("PASS: scoped baseline selects only candidate identities, binds base provenance, and preserves differential verdicts")
