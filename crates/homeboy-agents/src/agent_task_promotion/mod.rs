@@ -31,8 +31,8 @@ pub(crate) use promote::gate_setup_outcome_failure;
 pub(crate) use promote::{active_gate_supervision, with_gate_supervision};
 pub(crate) use promote::{emit_promotion_progress, emit_promotion_progress_with_output};
 pub use promote::{
-    promote, promote_with_checkpoint, resume_promoted_patch, with_promotion_progress,
-    PromotionProgress, PromotionProgressCallback,
+    promote, promote_with_checkpoint, promotion_is_resumable, resume_promoted_patch,
+    with_promotion_progress, PromotionProgress, PromotionProgressCallback,
 };
 pub(crate) use promote::{
     promote_with_checkpoint_in_observation_store, resume_promoted_patch_in_observation_store,

@@ -538,17 +538,20 @@ fn resume_promoted_patch_admission(
     })
 }
 
+pub fn promotion_is_resumable(previous: &Value, rerun_completed_gates: bool) -> bool {
+    let status = previous.get("status").and_then(Value::as_str);
+    matches!(
+        status,
+        Some("gate_failed" | "verification_pending" | "gates_deferred")
+    ) || (rerun_completed_gates && status == Some("applied"))
+}
+
 fn validate_resume_provenance(
     options: &AgentTaskPromotionRequest,
     target_path: &Path,
     previous: &Value,
 ) -> Result<()> {
-    let previous_status = previous.get("status").and_then(Value::as_str);
-    if !(matches!(
-        previous_status,
-        Some("gate_failed" | "verification_pending" | "gates_deferred" | "gate_deferred")
-    ) || options.gates.rerun_completed_gates && previous_status == Some("applied"))
-    {
+    if !promotion_is_resumable(previous, options.gates.rerun_completed_gates) {
         return Err(Error::validation_invalid_argument(
             "promotion",
             "promotion resume requires a durable post-apply promotion or an explicit completed-gate rerun for an applied promotion",
