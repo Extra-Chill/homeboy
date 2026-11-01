@@ -1,5 +1,5 @@
 use homeboy_engine_primitives::content_hash;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -257,9 +257,9 @@ fn workspace_content_walk_controlled(
         entries: Vec::new(),
     };
     let mut stats = SnapshotStats { files: 0, bytes: 0 };
+    let membership = SnapshotMembership::new(&root, excludes, &[])?;
     ContentHashTraversal {
-        root: &root,
-        excludes,
+        membership: &membership,
         hasher: &mut hasher,
         stats: &mut stats,
         executable_capability,
@@ -282,9 +282,10 @@ fn workspace_content_walk_controlled(
             let target =
                 fs::read_link(&source).map_err(|e| Error::internal_io(e.to_string(), None))?;
             if entry.kind == "symlink"
-                || source
-                    .canonicalize()
-                    .is_ok_and(|p| p.starts_with(&root) && !is_excluded(&root, &p, excludes, &[]))
+                || source.canonicalize().is_ok_and(|p| {
+                    p.strip_prefix(&root)
+                        .is_ok_and(|rel| membership.includes(rel))
+                })
             {
                 entry.symlink_target = Some(target.to_string_lossy().into_owned());
             }
@@ -351,8 +352,7 @@ fn hash_file_entry_header(
 }
 
 struct ContentHashTraversal<'a> {
-    root: &'a Path,
-    excludes: &'a [String],
+    membership: &'a SnapshotMembership<'a>,
     hasher: &'a mut Sha256,
     stats: &'a mut SnapshotStats,
     executable_capability: ExecutableCapability,
@@ -393,14 +393,7 @@ impl ContentHashTraversal<'_> {
             let entry_path = entry.path();
             let relative_path = logical.join(entry.file_name());
             let relative = relative_path.to_string_lossy().replace('\\', "/");
-            if relative == ".git"
-                || is_excluded(
-                    self.root,
-                    &self.root.join(&relative_path),
-                    self.excludes,
-                    &[],
-                )
-            {
+            if !self.membership.includes(&relative_path) {
                 continue;
             }
             #[cfg(test)]
@@ -609,15 +602,15 @@ pub(super) fn local_snapshot_stats_controlled(
     control: &WorkspaceControl,
 ) -> Result<SnapshotStats> {
     let mut stats = SnapshotStats { files: 0, bytes: 0 };
-    collect_stats(path, path, excludes, includes, &mut stats, control)?;
+    let membership = SnapshotMembership::new(path, excludes, includes)?;
+    collect_stats(path, path, &membership, &mut stats, control)?;
     Ok(stats)
 }
 
 fn collect_stats(
     root: &Path,
     path: &Path,
-    excludes: &[String],
-    includes: &[String],
+    membership: &SnapshotMembership<'_>,
     stats: &mut SnapshotStats,
     control: &WorkspaceControl,
 ) -> Result<()> {
@@ -633,20 +626,83 @@ fn collect_stats(
             )
         })?;
         let entry_path = entry.path();
-        if is_excluded(root, &entry_path, excludes, includes) {
+        if !membership.includes(entry_path.strip_prefix(root).unwrap_or(&entry_path)) {
             continue;
         }
         let metadata = entry.metadata().map_err(|err| {
             Error::internal_io(err.to_string(), Some("read sync file metadata".to_string()))
         })?;
         if metadata.is_dir() {
-            collect_stats(root, &entry_path, excludes, includes, stats, control)?;
+            collect_stats(root, &entry_path, membership, stats, control)?;
         } else if metadata.is_file() {
             stats.files += 1;
             stats.bytes = stats.bytes.saturating_add(metadata.len());
         }
     }
     Ok(())
+}
+
+/// Shared membership for traversal and stats. The resulting manifest is also
+/// the membership list for full archives and incremental deltas.
+struct SnapshotMembership<'a> {
+    excludes: &'a [String],
+    includes: &'a [String],
+    tracked: Option<BTreeSet<PathBuf>>,
+}
+
+impl<'a> SnapshotMembership<'a> {
+    fn new(root: &Path, excludes: &'a [String], includes: &'a [String]) -> Result<Self> {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["ls-files", "-z", "--cached"])
+            .output()
+            .map_err(|error| Error::internal_io(error.to_string(), None))?;
+        let tracked = output.status.success().then(|| {
+            let mut paths = BTreeSet::new();
+            for bytes in output
+                .stdout
+                .split(|byte| *byte == 0)
+                .filter(|p| !p.is_empty())
+            {
+                #[cfg(unix)]
+                let path = {
+                    use std::os::unix::ffi::OsStrExt;
+                    PathBuf::from(std::ffi::OsStr::from_bytes(bytes))
+                };
+                #[cfg(not(unix))]
+                let path = PathBuf::from(String::from_utf8_lossy(bytes).into_owned());
+                for ancestor in path.ancestors().filter(|p| !p.as_os_str().is_empty()) {
+                    paths.insert(ancestor.to_path_buf());
+                }
+            }
+            paths
+        });
+        Ok(Self {
+            excludes,
+            includes,
+            tracked,
+        })
+    }
+
+    fn includes(&self, relative: &Path) -> bool {
+        if relative.starts_with(".git") {
+            return false;
+        }
+        if self
+            .tracked
+            .as_ref()
+            .is_some_and(|paths| paths.contains(relative))
+        {
+            return true;
+        }
+        // Opening an excluded directory for tracked content must not admit its
+        // untracked descendants.
+        !relative
+            .ancestors()
+            .filter(|p| !p.as_os_str().is_empty())
+            .any(|path| is_excluded(Path::new(""), path, self.excludes, self.includes))
+    }
 }
 
 pub(crate) fn is_excluded(
@@ -691,7 +747,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn snapshot_identity_ignores_declared_context_excludes() {
+    fn snapshot_identity_includes_tracked_context_despite_excludes() {
         let workspace = tempfile::tempdir().expect("workspace");
         std::fs::write(workspace.path().join("file.txt"), "baseline\n").expect("source file");
         std::fs::write(workspace.path().join("AGENTS.md"), "context\n").expect("context file");
@@ -716,10 +772,10 @@ mod tests {
 
         std::fs::write(workspace.path().join("AGENTS.md"), "changed context\n")
             .expect("change context");
-        assert_eq!(
-            snapshot_identity(workspace.path(), &excludes, &[]).expect("excluded identity"),
+        assert_ne!(
+            snapshot_identity(workspace.path(), &excludes, &[]).expect("tracked identity"),
             baseline,
-            "excluded context must not alter the snapshot identity"
+            "tracked context must alter the snapshot identity"
         );
 
         std::fs::write(workspace.path().join("file.txt"), "changed source\n")
@@ -729,6 +785,53 @@ mod tests {
             baseline,
             "non-excluded source drift must alter the snapshot identity"
         );
+    }
+
+    #[test]
+    fn snapshot_copy_preserves_tracked_excluded_files_only() {
+        let source = tempfile::tempdir().unwrap();
+        let destination = tempfile::tempdir().unwrap();
+        fs::create_dir(source.path().join("sub")).unwrap();
+        fs::create_dir(source.path().join("vendor")).unwrap();
+        fs::write(source.path().join(".DS_Store"), b"tracked metadata").unwrap();
+        fs::write(source.path().join("sub/.env.example"), b"EXAMPLE=public\n").unwrap();
+        fs::write(source.path().join("vendor/tracked.php"), b"<?php tracked\n").unwrap();
+        git(source.path(), &["init", "--quiet"]);
+        git(source.path(), &["add", "."]);
+        git(
+            source.path(),
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "--quiet",
+                "-m",
+                "baseline",
+            ],
+        );
+        // Materialize working-tree bytes, not the committed blob.
+        fs::write(source.path().join(".DS_Store"), b"modified metadata").unwrap();
+        fs::write(source.path().join(".env"), b"SECRET=private\n").unwrap();
+        fs::write(source.path().join("vendor/x.php"), b"untracked dependency").unwrap();
+        let mut excludes = homeboy_runner_contract::source_snapshot::default_sync_excludes();
+        excludes.push("vendor/".to_string());
+        copy_snapshot_to_directory(source.path(), destination.path(), &excludes).unwrap();
+        assert_eq!(
+            fs::read(destination.path().join(".DS_Store")).unwrap(),
+            b"modified metadata"
+        );
+        assert_eq!(
+            fs::read(destination.path().join("sub/.env.example")).unwrap(),
+            b"EXAMPLE=public\n"
+        );
+        assert_eq!(
+            fs::read(destination.path().join("vendor/tracked.php")).unwrap(),
+            b"<?php tracked\n"
+        );
+        assert!(!destination.path().join(".env").exists());
+        assert!(!destination.path().join("vendor/x.php").exists());
     }
 
     use homeboy_core::test_support::run_git_command as git;
@@ -1293,7 +1396,7 @@ fn materialize_changed_paths_controlled(
             .map_err(|err| Error::internal_io(err.to_string(), Some(action.to_string())))?;
     }
     let command = format!(
-        "{} -h -C {} --null -T {} -cf - | {}",
+        "{} -h --no-recursion -C {} --null -T {} -cf - | {}",
         super::util::PORTABLE_TAR_CREATE,
         shell::quote_arg(&local_path.display().to_string()),
         shell::quote_arg(&list.path().display().to_string()),
@@ -1558,14 +1661,19 @@ pub(crate) fn immutable_replay_snapshot(
             Some("create replay snapshot source".to_string()),
         )
     })?;
-    reject_replay_symlinks(source, source, excludes)?;
+    let membership = SnapshotMembership::new(source, excludes, &[])?;
+    reject_replay_symlinks(source, source, &membership)?;
     let copied = materialize_replay_archive(source, &staged, excludes);
-    reject_replay_symlinks(source, source, excludes)?;
+    reject_replay_symlinks(source, source, &membership)?;
     copied?;
     // Recheck after copying so a directory-to-link race cannot turn an
     // attested replay source into a different staged object.
-    reject_replay_symlinks(source, source, excludes)?;
-    reject_replay_symlinks(&staged, &staged, &[])?;
+    reject_replay_symlinks(source, source, &membership)?;
+    reject_replay_symlinks(
+        &staged,
+        &staged,
+        &SnapshotMembership::new(&staged, &[], &[])?,
+    )?;
     let identity = replay_artifact_identity(&staged, excludes)?;
     Ok(ImmutableReplaySnapshot { stage, identity })
 }
@@ -1609,7 +1717,11 @@ pub(crate) fn replay_artifact_identity(path: &Path, excludes: &[String]) -> Resu
     })
 }
 
-fn reject_replay_symlinks(root: &Path, path: &Path, excludes: &[String]) -> Result<()> {
+fn reject_replay_symlinks(
+    root: &Path,
+    path: &Path,
+    membership: &SnapshotMembership<'_>,
+) -> Result<()> {
     for entry in fs::read_dir(path).map_err(|error| {
         Error::internal_io(
             error.to_string(),
@@ -1623,7 +1735,7 @@ fn reject_replay_symlinks(root: &Path, path: &Path, excludes: &[String]) -> Resu
             )
         })?;
         let entry_path = entry.path();
-        if is_excluded(root, &entry_path, excludes, &[]) {
+        if !membership.includes(entry_path.strip_prefix(root).unwrap_or(&entry_path)) {
             continue;
         }
         let metadata = fs::symlink_metadata(&entry_path).map_err(|error| {
@@ -1636,7 +1748,7 @@ fn reject_replay_symlinks(root: &Path, path: &Path, excludes: &[String]) -> Resu
             return Err(replay_symlink_error(&entry_path));
         }
         if metadata.is_dir() {
-            reject_replay_symlinks(root, &entry_path, excludes)?;
+            reject_replay_symlinks(root, &entry_path, membership)?;
         }
     }
     Ok(())

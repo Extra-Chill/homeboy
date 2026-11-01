@@ -507,9 +507,6 @@ fn ssh_source_snapshot_plan_builds_natively_without_cross_compilation() {
             "[package]\nname='fixture'\nversion='0.1.0'\n",
         )
         .expect("manifest");
-        std::fs::create_dir_all(source.path().join("target")).expect("target");
-        std::fs::write(source.path().join("target/local"), "controller binary")
-            .expect("target output");
         for args in [
             ["init", "--quiet"].as_slice(),
             ["config", "user.name", "Homeboy Test"].as_slice(),
@@ -524,6 +521,10 @@ fn ssh_source_snapshot_plan_builds_natively_without_cross_compilation() {
                 .expect("set up git fixture")
                 .success());
         }
+        // Build outputs are untracked noise; tracked target/ content is source.
+        std::fs::create_dir_all(source.path().join("target")).expect("target");
+        std::fs::write(source.path().join("target/local"), "controller binary")
+            .expect("target output");
         let snapshot = build_runner_source_snapshot(source.path(), "/runner/ws").expect("snapshot");
         let script = source_snapshot_build_script(&snapshot);
         let archive = std::process::Command::new("tar")
