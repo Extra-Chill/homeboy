@@ -29,7 +29,7 @@ use super::detail::{
 };
 use super::download::{
     artifact_body_read_error, content_disposition_filename, download_remote_artifact,
-    resolve_placement,
+    fetch_daemon_artifact, resolve_placement, verify_artifact_body,
 };
 use super::mirror::{
     bounded_remote_events, controller_artifact_metadata, import_mirrored_artifact_with_downloader,
@@ -341,6 +341,195 @@ fn test_download_remote_artifact_rejects_non_runner_token() {
     assert_eq!(err.code.as_str(), "validation.invalid_argument");
 }
 
+/// Serve one daemon artifact response with exactly these headers and body,
+/// then close. `Content-Length` is whatever the caller puts in `headers`.
+fn serve_daemon_artifact(headers: Vec<(&'static str, String)>, body: Vec<u8>) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind daemon artifact fixture");
+    let addr = listener.local_addr().expect("fixture address");
+    thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept artifact request");
+        let mut buffer = [0; 4096];
+        let _ = stream.read(&mut buffer);
+        let mut response = String::from("HTTP/1.1 200 OK\r\nConnection: close\r\n");
+        for (name, value) in headers {
+            response.push_str(&format!("{name}: {value}\r\n"));
+        }
+        response.push_str("\r\n");
+        let _ = stream.write_all(response.as_bytes());
+        let _ = stream.write_all(&body);
+        let _ = stream.flush();
+    });
+    format!("http://{addr}")
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+fn directory_entries(dir: &std::path::Path) -> Vec<String> {
+    let mut entries: Vec<String> = fs::read_dir(dir)
+        .expect("read directory")
+        .map(|entry| {
+            entry
+                .expect("entry")
+                .file_name()
+                .to_string_lossy()
+                .to_string()
+        })
+        .collect();
+    entries.sort();
+    entries
+}
+
+#[test]
+fn test_fetch_daemon_artifact_streams_verified_bytes_into_place() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let body = b"candidate bundle bytes".to_vec();
+    let sha = sha256_hex(&body);
+    let url = serve_daemon_artifact(
+        vec![
+            ("Content-Length", body.len().to_string()),
+            ("Content-Type", "application/octet-stream".to_string()),
+            (
+                "Content-Disposition",
+                "attachment; filename=\"bundle.git\"".to_string(),
+            ),
+            ("x-homeboy-artifact-sha256", sha.clone()),
+        ],
+        body.clone(),
+    );
+    let token =
+        RemoteArtifactToken::parse("runner-artifact://lab/run-1/artifact-1").expect("parse token");
+    let artifact_root = context.artifact_dir();
+
+    let download = fetch_daemon_artifact(
+        &url,
+        &artifact_root,
+        &token,
+        None,
+        homeboy_core::runner_download_cache::RunnerDownloadIntent::InternalFetch,
+    )
+    .expect("download");
+
+    let cache = artifact_root.join("runner").join("lab").join("run-1");
+    assert_eq!(download.output_path, cache.join("bundle.git"));
+    assert_eq!(fs::read(&download.output_path).expect("read output"), body);
+    assert_eq!(download.sha256.as_deref(), Some(sha.as_str()));
+    assert_eq!(download.artifact_ref.sha256.as_deref(), Some(sha.as_str()));
+    assert_eq!(download.size_bytes, Some(body.len() as i64));
+    assert_eq!(download.artifact_ref.size_bytes, Some(body.len() as u64));
+    assert_eq!(
+        download.artifact_ref.transport.as_deref(),
+        Some("direct_daemon")
+    );
+    assert!(
+        !directory_entries(&cache)
+            .iter()
+            .any(|name| name.starts_with(".tmp")),
+        "temp file left behind: {:?}",
+        directory_entries(&cache)
+    );
+}
+
+#[test]
+fn test_fetch_daemon_artifact_rejects_a_sha256_mismatch_without_leaving_files() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let body = b"tampered bytes".to_vec();
+    let declared = sha256_hex(b"original bytes");
+    let url = serve_daemon_artifact(
+        vec![
+            ("Content-Length", body.len().to_string()),
+            ("x-homeboy-artifact-sha256", declared.clone()),
+        ],
+        body.clone(),
+    );
+    let token =
+        RemoteArtifactToken::parse("runner-artifact://lab/run-1/artifact-1").expect("parse token");
+    let out_dir = context.root().join("out");
+    fs::create_dir_all(&out_dir).expect("output directory");
+    let output = out_dir.join("artifact.bin");
+
+    let error = fetch_daemon_artifact(
+        &url,
+        &context.artifact_dir(),
+        &token,
+        Some(output.clone()),
+        homeboy_core::runner_download_cache::RunnerDownloadIntent::OperatorPull,
+    )
+    .expect_err("sha256 mismatch must fail");
+
+    assert!(error.retryable.unwrap_or(false), "{}", error.message);
+    assert!(error.message.contains(&declared), "{}", error.message);
+    assert!(
+        error.message.contains(&sha256_hex(&body)),
+        "{}",
+        error.message
+    );
+    assert!(!output.exists());
+    assert!(
+        directory_entries(&out_dir).is_empty(),
+        "{:?}",
+        directory_entries(&out_dir)
+    );
+}
+
+#[test]
+fn test_fetch_daemon_artifact_rejects_a_size_mismatch_without_leaving_files() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let body = b"short".to_vec();
+    // The daemon declares more bytes than it sends before closing.
+    let url = serve_daemon_artifact(
+        vec![("Content-Length", (body.len() + 64).to_string())],
+        body,
+    );
+    let token =
+        RemoteArtifactToken::parse("runner-artifact://lab/run-1/artifact-1").expect("parse token");
+    let out_dir = context.root().join("out");
+    fs::create_dir_all(&out_dir).expect("output directory");
+    let output = out_dir.join("artifact.bin");
+
+    let error = fetch_daemon_artifact(
+        &url,
+        &context.artifact_dir(),
+        &token,
+        Some(output.clone()),
+        homeboy_core::runner_download_cache::RunnerDownloadIntent::OperatorPull,
+    )
+    .expect_err("size mismatch must fail");
+
+    assert!(error.retryable.unwrap_or(false), "{}", error.message);
+    assert!(!output.exists());
+    assert!(
+        directory_entries(&out_dir).is_empty(),
+        "{:?}",
+        directory_entries(&out_dir)
+    );
+}
+
+#[test]
+fn test_verify_artifact_body_names_expected_and_actual_values() {
+    let size = verify_artifact_body(None, Some(10), "abc", 4).expect_err("size mismatch");
+    assert!(size.retryable.unwrap_or(false));
+    assert!(
+        size.message.contains("expected 10 bytes"),
+        "{}",
+        size.message
+    );
+    assert!(
+        size.message.contains("received 4 bytes"),
+        "{}",
+        size.message
+    );
+
+    let sha = verify_artifact_body(Some("def"), Some(4), "abc", 4).expect_err("sha mismatch");
+    assert!(sha.retryable.unwrap_or(false));
+    assert!(sha.message.contains("expected def"), "{}", sha.message);
+    assert!(sha.message.contains("computed abc"), "{}", sha.message);
+
+    verify_artifact_body(Some("ABC"), Some(4), "abc", 4).expect("matching body");
+    verify_artifact_body(None, None, "abc", 4).expect("nothing declared");
+}
+
 #[test]
 fn test_runner_artifact_token_round_trips_escaped_segments() {
     let token = runner_artifact_token("runner/a", "run b", "artifact:c");
@@ -351,7 +540,7 @@ fn test_runner_artifact_token_round_trips_escaped_segments() {
     assert_eq!(parsed.artifact_id, "artifact:c");
 }
 
-/// A traversal-shaped `filename` from the daemon body, on the relay transport.
+/// A traversal-shaped remote `filename` reaching the writer.
 ///
 /// #10586: `{"filename": "../../../../../../root/.ssh/authorized_keys"}` used
 /// to be joined straight onto the cache directory, `create_dir_all` made the
