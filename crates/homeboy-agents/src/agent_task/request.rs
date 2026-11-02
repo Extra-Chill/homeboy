@@ -4,10 +4,9 @@ use std::path::PathBuf;
 
 use super::schema::request_schema;
 use super::{
-    AgentTaskArtifactDeclaration, AgentTaskAttachedToolCapability, AgentTaskCapabilityEvidence,
-    AgentTaskCapabilityRequirements, AgentTaskEvidenceRef, AgentTaskExecutor, AgentTaskLimits,
-    AgentTaskOutcome, AgentTaskPolicy, AgentTaskRuntimeTool, AgentTaskSourceRef,
-    AgentTaskWorkspace,
+    AgentTaskArtifactDeclaration, AgentTaskCapabilityEvidence, AgentTaskCapabilityRequirements,
+    AgentTaskEvidenceRef, AgentTaskExecutor, AgentTaskLimits, AgentTaskOutcome, AgentTaskPolicy,
+    AgentTaskRuntimeTool, AgentTaskSourceRef, AgentTaskWorkspace,
 };
 
 /// Provider capability payload used by extension discovery and durable run metadata.
@@ -257,34 +256,10 @@ impl AgentTaskRequest {
     }
 
     pub fn capability_requirements(&self) -> Result<AgentTaskCapabilityRequirements, String> {
-        let mut requirements = super::capabilities::requirements_from_metadata(
+        super::capabilities::requirements_from_metadata(
             &self.metadata,
             &self.executor.required_capabilities,
-        )?;
-        for tool in &self.runtime_tools {
-            if tool.required_capabilities.is_empty() {
-                continue;
-            }
-            if let Some(attached) = requirements
-                .attached_tools
-                .iter_mut()
-                .find(|attached| attached.id == tool.id)
-            {
-                attached
-                    .contributes
-                    .extend(tool.required_capabilities.clone());
-            } else {
-                requirements
-                    .attached_tools
-                    .push(AgentTaskAttachedToolCapability {
-                        id: tool.id.clone(),
-                        contributes: tool.required_capabilities.clone(),
-                    });
-            }
-        }
-        let requirements = requirements.normalized();
-        requirements.validate()?;
-        Ok(requirements)
+        )
     }
 
     pub fn record_capability_evidence(&mut self, evidence: AgentTaskCapabilityEvidence) {

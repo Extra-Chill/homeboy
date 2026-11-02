@@ -625,42 +625,9 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
             );
         }
 
-        let unavailable_attached_tools = requirements
-            .attached_tools
-            .iter()
-            .filter(|required| !required.contributes.is_empty())
-            .map(|required| {
-                json!({
-                    "tool_id": required.id,
-                    "missing_capabilities": required.contributes,
-                    "readiness": "missing",
-                })
-            })
-            .collect::<Vec<_>>();
-        if !unavailable_attached_tools.is_empty() {
-            return failure_outcome(
-                &request,
-                AgentTaskOutcomeStatus::Failed,
-                AgentTaskFailureClassification::CapabilityMissing,
-                "agent_task.attached_tool_capability_unavailable",
-                "attached runtime tools did not satisfy their required capabilities".to_string(),
-                json!({
-                    "layer": "attached_tools",
-                    "tools": unavailable_attached_tools,
-                }),
-            );
-        }
-
-        // Readiness is owned by the attached runtime tool. A declaration alone
-        // cannot contribute capabilities; only its persisted ready observation can.
-        let ready_tools = crate::agent_task::ready_attached_tools_from_metadata(&request.metadata);
-        request
-            .request
-            .record_capability_evidence(requirements.evidence(
-                provider.capabilities.clone(),
-                Vec::new(),
-                &ready_tools,
-            ));
+        request.request.record_capability_evidence(
+            requirements.evidence(provider.capabilities.clone(), Vec::new()),
+        );
 
         run_materialized_provider_command(
             &request,

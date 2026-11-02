@@ -2484,7 +2484,6 @@ mod tests {
         source_request.runtime_tools = vec![serde_json::from_value(json!({
             "id": "fixture.mutation-tool",
             "command": ["fixture-tool"],
-            "required_capabilities": ["workspace_write"],
             "secret_env": ["FIXTURE_TOOL_TOKEN"]
         }))
         .expect("runtime tool fixture")];
