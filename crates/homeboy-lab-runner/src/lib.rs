@@ -1035,8 +1035,12 @@ fn lab_runner_admission_candidate(
             status,
             exact_version,
         ),
-        admission_failure_reason: admission_warning
-            .map(|warning| format!("{}: {}", warning.mismatch_predicate, warning.message)),
+        admission_failure_reason: if status.under_pressure() {
+            Some("pressure".to_string())
+        } else {
+            admission_warning
+                .map(|warning| format!("{}: {}", warning.mismatch_predicate, warning.message))
+        },
         admission_remediation: admission_warning
             .map(|warning| warning.safe_recovery_commands().join(" && ")),
         active_jobs: status.active_job_count.max(status.active_jobs.len()),
@@ -1112,7 +1116,10 @@ fn lab_runner_readiness_from_candidates(
         candidate.stale_daemon || (!candidate.admission_fresh && !candidate.unverified_daemon)
     }) {
         LabRunnerReadinessState::Stale
-    } else if reasons.iter().any(|reason| reason == "capacity_reached") {
+    } else if reasons
+        .iter()
+        .any(|reason| matches!(reason.as_str(), "capacity_reached" | "pressure"))
+    {
         LabRunnerReadinessState::CapacityBlocked
     } else if candidates.iter().any(|candidate| candidate.connected) {
         LabRunnerReadinessState::ConnectedIneligible
@@ -1207,6 +1214,7 @@ impl DefaultLabRunnerCandidate {
         }
         if let Some(reason) = &self.admission_failure_reason {
             availability.reasons.push(reason.clone());
+            availability.accepts_jobs = false;
         }
         if !self.active_jobs_available
             && !availability
@@ -1248,6 +1256,7 @@ impl DefaultLabRunnerCandidate {
             || !self.admission_fresh
             || at_capacity
             || capacity_unknown
+            || self.admission_failure_reason.as_deref() == Some("pressure")
         {
             return DefaultLabRunnerReadiness {
                 eligible: false,
@@ -2372,6 +2381,12 @@ mod tests {
         let full = lab_runner_readiness_from_candidates(None, vec![full]);
         assert_eq!(full.state, LabRunnerReadinessState::CapacityBlocked);
         assert!(full.reasons.contains(&"capacity_reached".to_string()));
+
+        let mut pressured = default_lab_candidate("pressured", true);
+        pressured.admission_failure_reason = Some("pressure".into());
+        let pressured = lab_runner_readiness_from_candidates(None, vec![pressured]);
+        assert_eq!(pressured.state, LabRunnerReadinessState::CapacityBlocked);
+        assert_eq!(pressured.reasons, ["pressure"]);
     }
 
     fn create_ssh_runner(id: &str) {

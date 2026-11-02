@@ -1261,6 +1261,8 @@ pub(super) struct DaemonOwnerLock {
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct DaemonRuntimeSnapshot {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pressure: Option<crate::runner_pressure::RunnerPressure>,
     pub loaded_at: String,
     pub paths: Vec<DaemonRuntimePathSnapshot>,
 }
@@ -2510,6 +2512,12 @@ where
             },
             Err(err) => error_response(503, err),
         },
+        ("POST", "/runner-inventory") => {
+            match crate::runner_inventory::owned_roots(body.as_ref().and_then(|value| value.get("workspace_root")).and_then(serde_json::Value::as_str).map(PathBuf::from)) {
+                Ok(roots) => daemon_endpoint_response("runner.inventory", json!(crate::runner_inventory::cached_scan(roots, Duration::from_secs(2)))),
+                Err(error) => error_response(500, error),
+            }
+        },
         ("GET", "/health") => HttpResponse {
             status_code: 200,
             body: json!({
@@ -2858,6 +2866,16 @@ fn reserve_admission(
     body: Option<serde_json::Value>,
     job_store: &JobStore,
 ) -> Result<serde_json::Value> {
+    reserve_admission_observed(body, job_store, crate::runner_pressure::sample)
+}
+
+fn reserve_admission_observed(
+    body: Option<serde_json::Value>,
+    job_store: &JobStore,
+    sample: impl FnOnce(
+        &crate::runner_pressure::PressureThresholds,
+    ) -> crate::runner_pressure::RunnerPressure,
+) -> Result<serde_json::Value> {
     let body = body.unwrap_or_else(|| json!({}));
     if body
         .get("admission_lease_protocol")
@@ -2923,6 +2941,17 @@ fn reserve_admission(
         .filter(|value| !value.is_empty());
     let daemon_lease = heartbeat_lease()?;
     validate_admission_lease(expected_daemon_lease_id, &daemon_lease.lease_id)?;
+    let thresholds = body
+        .get("pressure_thresholds")
+        .cloned()
+        .map(serde_json::from_value::<crate::runner_pressure::PressureThresholds>)
+        .transpose()
+        .map_err(|error| Error::internal_unexpected(error.to_string()))?
+        .unwrap_or_default();
+    let pressure = sample(&thresholds);
+    if pressure.admission_reason.is_some() {
+        return Err(pressure.admission_refusal());
+    }
     let metadata = json!({
         "runner_job_projection": {
             "runner_id": runner_id,
@@ -5131,6 +5160,14 @@ fn daemon_job_store() -> &'static JobStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Admission lifecycle tests own their host observation, not the CI host's PSI.
+    fn reserve_admission(
+        body: Option<serde_json::Value>,
+        store: &JobStore,
+    ) -> Result<serde_json::Value> {
+        super::reserve_admission_observed(body, store, |_| Default::default())
+    }
     use crate::daemon::runner_exec_driver::{
         self, DaemonExecOutput, PreparedDaemonExec, PreparedDaemonExecRequest, RunnerExecDriver,
         RunnerExecPrepareRequest,
@@ -5889,6 +5926,50 @@ mod tests {
     /// 400 (`runner subsystem is unavailable`).
     pub(super) fn register_enqueue_test_driver() {
         runner_exec_driver::register_runner_exec_driver(Arc::new(EnqueueTestDriver));
+    }
+
+    fn admission_with_cpu_pressure(cpu: u32) -> (Result<serde_json::Value>, usize) {
+        write_test_lease("pressure-test");
+        let store = JobStore::default();
+        let result = super::reserve_admission_observed(
+            Some(json!({
+                "runner_id": "lab",
+                "expected_daemon_lease_id": "pressure-test",
+                "admission_lease_protocol": 1,
+            })),
+            &store,
+            |thresholds| {
+                let mut pressure = crate::runner_pressure::RunnerPressure {
+                    cpu: Some(cpu),
+                    ..Default::default()
+                };
+                pressure.apply_thresholds(thresholds);
+                pressure
+            },
+        );
+        (result, store.active_runner_jobs().len())
+    }
+
+    #[test]
+    fn admission_refused_above_pressure_threshold_with_free_slots() {
+        with_isolated_home(|_| {
+            let (result, jobs) = admission_with_cpu_pressure(1001);
+            let error = result.unwrap_err();
+            assert_eq!(error.details["reason"], "runner_pressure");
+            assert_eq!(error.details["admission_reason"], "pressure");
+            assert_eq!(error.details["pressure"]["cpu"], 1001);
+            assert_eq!(error.retryable, Some(true));
+            assert_eq!(jobs, 0);
+        });
+    }
+
+    #[test]
+    fn admission_allowed_below_pressure_threshold() {
+        with_isolated_home(|_| {
+            let (result, jobs) = admission_with_cpu_pressure(999);
+            assert!(result.is_ok());
+            assert_eq!(jobs, 1);
+        });
     }
 
     #[test]
@@ -7299,6 +7380,7 @@ fn capture_daemon_runtime_snapshot() -> DaemonRuntimeSnapshot {
         .collect();
 
     DaemonRuntimeSnapshot {
+        pressure: None,
         loaded_at: chrono::Utc::now().to_rfc3339(),
         paths,
     }
@@ -7436,6 +7518,7 @@ pub(super) fn error_response(status_code: u16, err: Error) -> HttpResponse {
             "message": err.message,
             "details": err.details,
             "hints": err.hints,
+            "retryable": err.retryable,
         }),
         artifact: None,
     }

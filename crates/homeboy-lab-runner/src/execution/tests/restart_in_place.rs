@@ -644,7 +644,7 @@ fn service_refresh_repoints_and_restarts_the_unit_in_place_and_keeps_its_re_adop
         assert!(
             invocations
                 .iter()
-                .any(|(dir, argv)| dir == &state_dir && argv == "daemon status"),
+                .any(|(dir, argv)| dir == &state_dir && argv == "daemon status --full"),
             "{invocations:?}"
         );
         assert!(

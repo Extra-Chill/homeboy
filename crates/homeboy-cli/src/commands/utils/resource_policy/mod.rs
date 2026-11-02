@@ -2261,6 +2261,16 @@ mod tests {
             Some(&capacity_blocked),
             crate::cli_surface::Placement::Auto,
         ));
+        let pressured = LabRunnerReadiness {
+            reasons: vec!["pressure".to_string()],
+            ..capacity_blocked
+        };
+        assert!(!admits_auto_local_capacity_fallback(
+            command,
+            &local,
+            Some(&pressured),
+            crate::cli_surface::Placement::Lab,
+        ));
     }
 
     #[test]

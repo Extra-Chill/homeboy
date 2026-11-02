@@ -653,6 +653,59 @@ fn execution_step_deterministic_failure_and_cancellation_terminalize_without_suc
 }
 
 #[test]
+fn public_admission_pressure_refusal_keeps_cook_pending_resource_admission() {
+    with_isolated_home(|home| {
+        let store = test_lifecycle_store();
+        let subject = "pressure-wait";
+        agent_task_lifecycle::record_unmaterialized_cook_admission_in_store(
+            &store,
+            subject,
+            admission_binding(home.path(), subject, None),
+            "queued",
+            "test",
+        )
+        .unwrap();
+        struct PressureTransport;
+        impl ExecutionStepTransport for PressureTransport {
+            fn admission(&self, _: Vec<String>, _: Option<String>) -> homeboy_core::Result<i32> {
+                Err(homeboy_core::runner_pressure::RunnerPressure {
+                    cpu: Some(1001),
+                    admission_reason: Some("pressure".into()),
+                    ..Default::default()
+                }
+                .admission_refusal())
+            }
+        }
+        let intent = current_intent(&store, subject);
+        let error = execute_counted(
+            &intent.intent_id,
+            &Arc::new(AtomicUsize::new(0)),
+            &PressureTransport,
+        )
+        .unwrap_err();
+        let mut delivery = terminal_delivery(&intent);
+        delivery.outcome = homeboy_core::daemon::step_job::StepTerminalOutcome::Failed;
+        delivery.error = Some(serde_json::json!({
+            "message": error.message,
+            "details": error.details,
+            "retryable": error.retryable,
+        }));
+        let receipt = consume_execution_terminal_in_store(&store, &delivery).unwrap();
+        assert_eq!(receipt["disposition"], "runner_wait");
+        let record = store.read_record(subject).unwrap();
+        assert_eq!(record.state(), AgentTaskRunState::Queued);
+        assert_eq!(
+            record.metadata["execution_scheduling"]["recovery_failures"],
+            0
+        );
+        assert_eq!(current_intent(&store, subject).epoch, intent.epoch + 1);
+        assert!(serde_json::to_string(&record.metadata)
+            .unwrap()
+            .contains("runner_pressure"));
+    });
+}
+
+#[test]
 fn execution_step_runner_ineligible_deferrals_never_consume_recovery_budget() {
     with_isolated_home(|_| {
         let store = test_lifecycle_store();

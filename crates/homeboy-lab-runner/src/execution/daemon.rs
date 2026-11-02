@@ -753,6 +753,7 @@ pub(crate) fn reserve_daemon_admission(
         "expected_daemon_lease_id": expected_daemon_lease_id,
         "idempotency_key": idempotency_key,
         "admission_lease_protocol": 1,
+        "pressure_thresholds": crate::load(runner_id)?.settings.pressure_thresholds,
     });
     if let Some((workspace, owner_id)) = workspace_owner_registration.as_ref() {
         payload["workspace_owner_request"] = json!({
@@ -775,12 +776,19 @@ pub(crate) fn reserve_daemon_admission(
         )
     })?;
     if response.status_code >= 400 || !envelope.success {
+        let wire_error = envelope.error.unwrap_or(Value::Null);
+        let error = crate::remote_error::from_wire(
+            wire_error.clone(),
+            "daemon admission refused",
+            Some(response.status_code),
+            "/admissions",
+        );
+        if error.details["execution_step_disposition"] == "runner_ineligible" {
+            return Err(error);
+        }
         return Err(Error::validation_invalid_argument(
             "runner",
-            format!(
-                "runner `{runner_id}` refused Lab admission reservation: {}",
-                envelope.error.unwrap_or(Value::Null)
-            ),
+            format!("runner `{runner_id}` refused Lab admission reservation: {wire_error}"),
             Some(runner_id.to_string()),
             None,
         ));
@@ -946,6 +954,10 @@ where
                     .expect("admission recovery failure registry")
                     .remove(&key);
                 return Ok(reservation);
+            }
+            // Capacity waits belong to durable scheduling, not reconnect recovery.
+            Err(error) if error.details["execution_step_disposition"] == "runner_ineligible" => {
+                return Err(error);
             }
             // A different admitted lease proves another daemon owns this endpoint.
             Err(error) if admission_recovery_failure_is_authoritative(&error) => return Err(error),
@@ -1153,6 +1165,54 @@ fn spawn_admission_renewer(
 mod admission_tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn admission_http_pressure_refusal_preserves_capacity_wait_contract() {
+        crate::test_support::with_isolated_home(|_| {
+            use std::io::{Read, Write};
+            let mut runner = crate::test_support::ssh_runner();
+            runner.kind = crate::RunnerKind::Local;
+            runner.server_id = None;
+            crate::create(&serde_json::to_string(&runner).unwrap(), false).unwrap();
+            let pressure = homeboy_core::runner_pressure::RunnerPressure {
+                cpu: Some(1001),
+                admission_reason: Some("pressure".into()),
+                ..Default::default()
+            };
+            let refusal = pressure.admission_refusal();
+            let body = json!({"success": false, "error": {
+                "error": refusal.code.as_str(), "message": refusal.message,
+                "details": refusal.details, "retryable": refusal.retryable,
+            }})
+            .to_string();
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0; 8192];
+                let count = stream.read(&mut request).unwrap();
+                assert!(request[..count].starts_with(b"POST /admissions "));
+                write!(stream, "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
+            });
+            let error = reserve_daemon_admission_with_recovery_with(
+                "lab",
+                "lease",
+                Instant::now() + Duration::from_secs(30),
+                || reserve_daemon_admission("lab", &url, "cook", "lease", None, None),
+                || panic!("capacity waits must return to durable scheduling"),
+            )
+            .err()
+            .expect("pressure refusal");
+            server.join().unwrap();
+            assert_eq!(error.retryable, Some(true));
+            assert_eq!(
+                error.details["execution_step_disposition"],
+                "runner_ineligible"
+            );
+            assert_eq!(error.details["reason"], "runner_pressure");
+            assert_eq!(error.details["pressure"]["cpu"], 1001);
+        });
+    }
 
     #[test]
     fn daemon_capability_preflight_overlays_job_env_on_runner_env() {

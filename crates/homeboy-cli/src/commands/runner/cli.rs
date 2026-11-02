@@ -296,6 +296,8 @@ pub(super) enum RunnerCommand {
         #[arg(long)]
         recorded_endpoint: Option<String>,
     },
+    /// Bounded disk usage inventory of Homeboy-owned roots (two-second scan).
+    Inventory { id: String },
     /// Show persisted runner tunnel status
     Status {
         /// Runner ID. Omit to show all runner session states.

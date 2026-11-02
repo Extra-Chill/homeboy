@@ -333,7 +333,11 @@ pub(crate) fn freshness_report_from_validation(
         binary_hash: state.and_then(|state| state.binary_sha256.clone()),
         daemon_version: state.map(|state| state.build_identity.version.clone()),
         daemon_build_identity: state.map(|state| state.build_identity.display.clone()),
-        runtime_paths: state.map(|state| state.runtime_paths.clone()),
+        runtime_paths: state.map(|state| {
+            let mut paths = state.runtime_paths.clone();
+            paths.pressure = Some(crate::runner_pressure::sample(&Default::default()));
+            paths
+        }),
         active_jobs,
         termination_evidence: (!validation.running)
             .then(read_termination_evidence)
@@ -421,6 +425,7 @@ mod tests {
             build_identity: build_identity::current(),
             binary_sha256: None,
             runtime_paths: DaemonRuntimeSnapshot {
+                pressure: None,
                 loaded_at: String::new(),
                 paths: Vec::new(),
             },

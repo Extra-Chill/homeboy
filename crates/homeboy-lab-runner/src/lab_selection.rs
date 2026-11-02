@@ -514,7 +514,7 @@ fn placement_readiness_from_status_with_catalog(
             status,
             require_exact_runner_version,
         );
-    let availability = RunnerAvailability::from_status_parts(
+    let mut availability = RunnerAvailability::from_status_parts(
         request.runner_id.clone(),
         status.connected,
         blocking_status_drift,
@@ -522,6 +522,10 @@ fn placement_readiness_from_status_with_catalog(
         &status.active_job_state,
         capacity,
     );
+    if status.under_pressure() {
+        availability.reasons.push("pressure".to_string());
+        availability.accepts_jobs = false;
+    }
     let compatible = matches!(capability, super::LabRunnerGateDecision::Eligible);
     let inputs_declared = source_path_inputs
         .iter()
@@ -802,7 +806,7 @@ pub(super) fn preflight_lab_runner_availability_from_status_with_transport(
         connect_authority,
         loopback_transport,
     )?;
-    let availability = RunnerAvailability::from_status_parts(
+    let mut availability = RunnerAvailability::from_status_parts(
         selection.runner_id.clone(),
         status.connected,
         status.admission_blocking_stale_daemon().is_some(),
@@ -810,6 +814,10 @@ pub(super) fn preflight_lab_runner_availability_from_status_with_transport(
         &status.active_job_state,
         capacity,
     );
+    if status.under_pressure() {
+        availability.reasons.push("pressure".to_string());
+        availability.accepts_jobs = false;
+    }
     Ok((availability, status))
 }
 

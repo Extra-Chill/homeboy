@@ -1676,6 +1676,7 @@ fn fake_daemon_state(daemon: super::DaemonStartResult) -> DaemonState {
         },
         binary_sha256: None,
         runtime_paths: DaemonRuntimeSnapshot {
+            pressure: None,
             loaded_at: "2026-01-01T00:00:00Z".to_string(),
             paths: Vec::new(),
         },

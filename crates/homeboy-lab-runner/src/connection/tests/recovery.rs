@@ -2303,7 +2303,7 @@ fn idle_stale_replacement_uses_actual_endpoint_envelopes_and_reprobes_the_new_ow
             assert_eq!(daemon.build_identity.as_deref(), Some(configured_identity));
             assert_eq!(
                 std::fs::read_to_string(argv_path).expect("read command argv"),
-                "daemon\nstatus\ndaemon\nstop\n--lease-id\nlease-old\ndaemon\nensure-running\n--addr\n127.0.0.1:0\ndaemon\nstatus\n"
+                "daemon\nstatus\n--full\ndaemon\nstop\n--lease-id\nlease-old\ndaemon\nensure-running\n--addr\n127.0.0.1:0\ndaemon\nstatus\n--full\n"
             );
         },
     );

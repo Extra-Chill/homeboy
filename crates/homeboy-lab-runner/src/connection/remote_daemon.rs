@@ -877,7 +877,18 @@ pub(super) fn remote_daemon_recovery_freshness_from_status(
         binary_hash: None,
         daemon_version: daemon.and_then(|daemon| daemon.version.clone()),
         daemon_build_identity: daemon.and_then(|daemon| daemon.build_identity.clone()),
-        runtime_paths: None,
+        runtime_paths: status
+            .daemon_freshness
+            .as_ref()
+            .and_then(|report| report.runtime_paths.clone())
+            .map(|mut paths| {
+                if let (Some(pressure), Ok(runner)) =
+                    (paths.pressure.as_mut(), crate::load(runner_id))
+                {
+                    pressure.apply_thresholds(&runner.settings.pressure_thresholds);
+                }
+                paths
+            }),
         active_jobs: status.active_jobs,
         termination_evidence: status.termination_evidence.clone(),
         repair_plan,
@@ -1448,7 +1459,7 @@ fn remote_daemon_status_with_timeout(
     runner_id: &str,
     timeout: Duration,
 ) -> std::result::Result<RemoteDaemonStatus, String> {
-    let command = remote_daemon_command(runner_id, homeboy, "daemon status");
+    let command = remote_daemon_command(runner_id, homeboy, "daemon status --full");
     let started = std::time::Instant::now();
     let output = client.execute_with_timeout(&command, timeout);
     crate::readonly_probe::record_probe_outcome(

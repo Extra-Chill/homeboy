@@ -93,6 +93,35 @@ pub use crate::{
     observe_runner_capabilities, runner_capability_inventory, runner_capability_inventory_until,
 };
 
+/// Inventory requests are inspection, not admitted workload jobs.
+pub fn disk_inventory(runner_id: &str) -> homeboy_core::error::Result<serde_json::Value> {
+    let report = crate::connection::status(runner_id)?;
+    let url = report
+        .session
+        .as_ref()
+        .and_then(|session| session.local_url.as_deref())
+        .ok_or_else(|| {
+            homeboy_core::error::Error::internal_unexpected(
+                "connect the runner before requesting its inventory",
+            )
+        })?;
+    let client = reqwest::blocking::Client::builder()
+        .no_proxy()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+        .map_err(|error| homeboy_core::error::Error::internal_unexpected(error.to_string()))?;
+    let response = client
+        .post(format!("{}/runner-inventory", url.trim_end_matches('/')))
+        .json(&serde_json::json!({"workspace_root": crate::load(runner_id)?.workspace_root}))
+        .send()
+        .and_then(|response| response.error_for_status())
+        .map_err(|error| homeboy_core::error::Error::internal_unexpected(error.to_string()))?;
+    let envelope: serde_json::Value = response
+        .json()
+        .map_err(|error| homeboy_core::error::Error::internal_unexpected(error.to_string()))?;
+    Ok(envelope.get("data").cloned().unwrap_or(envelope))
+}
+
 // Registry CRUD entry points.
 pub use crate::{
     apply_secret_env_migration, create, delete_safe, effective_env, enable_server_runner, exists,

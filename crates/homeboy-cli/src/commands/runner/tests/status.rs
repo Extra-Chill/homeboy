@@ -68,6 +68,7 @@ fn runner_session_fixture() -> RunnerSession {
 
 fn admission_fixture() -> homeboy::runner::runners::RunnerAdmissionSummary {
     homeboy::runner::runners::RunnerAdmissionSummary {
+        pressure: None,
         runner_id: "homeboy-lab".to_string(),
         connected: true,
         daemon_fresh: true,
