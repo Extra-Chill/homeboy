@@ -8550,7 +8550,8 @@ fn preflight_cook_workspace_base_ancestry_with_provider(
         .filter(|sha| options.workspace.task_base_sha.as_deref() == Some(*sha));
     if cook_uses_explicit_cwd_workspace(options) {
         if let Some(prepared_base) = prepared_base {
-            let prepared_base = materialize_prepared_cook_base(target, prepared_base)?;
+            let prepared_base =
+                materialize_prepared_cook_base(target, &options.finalization.base, prepared_base)?;
             return preflight_cook_workspace_resolved_base_ancestry(
                 target,
                 target,
@@ -8597,7 +8598,7 @@ fn preflight_cook_workspace_base_ancestry_with_provider(
             // the immutable base, not in the earlier read-only preflight.
             return Ok(None);
         };
-        let resolved = materialize_prepared_cook_base(target, pin)?;
+        let resolved = materialize_prepared_cook_base(target, &options.finalization.base, pin)?;
         let issue_owned = options
             .identity
             .initial_plan
@@ -8633,6 +8634,7 @@ fn preflight_cook_workspace_base_ancestry_with_provider(
     }
     preflight_cook_workspace_base_ancestry(
         target,
+        &options.finalization.base,
         base,
         adopted_dirty_candidate,
         options
@@ -8653,6 +8655,7 @@ fn preflight_cook_workspace_base_ancestry_with_provider(
 /// ensuring provider output is based on the observed remote base.
 fn preflight_cook_workspace_base_ancestry(
     target: &Path,
+    declared_base: &str,
     base: &str,
     adopted_dirty_candidate: bool,
     task_url: Option<&str>,
@@ -8671,8 +8674,8 @@ fn preflight_cook_workspace_base_ancestry(
     let (declared_base, resolved_base) =
         if base.len() == 40 && base.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             (
-                base.to_string(),
-                materialize_prepared_cook_base(target, base)?,
+                declared_base.to_string(),
+                materialize_prepared_cook_base(target, declared_base, base)?,
             )
         } else {
             let Some(base) = homeboy_core::worktree::convergence::retry_fetch(|| {
@@ -8694,35 +8697,13 @@ fn preflight_cook_workspace_base_ancestry(
     )
 }
 
-fn materialize_prepared_cook_base(target: &Path, base_sha: &str) -> Result<String> {
-    if let Some(resolved) = homeboy_core::git::output_optional(
-        target,
-        &["rev-parse", "--verify", &format!("{base_sha}^{{commit}}")],
-    ) {
-        return Ok(resolved.trim().to_string());
-    }
+fn materialize_prepared_cook_base(
+    target: &Path,
+    declared_base: &str,
+    base_sha: &str,
+) -> Result<String> {
     homeboy_core::worktree::convergence::retry_fetch(|| {
-        homeboy_core::git::with_remote_tracking_authority_until(
-            target,
-            "materialize prepared Cook base",
-            std::time::Instant::now() + std::time::Duration::from_secs(30),
-            |remaining| {
-                homeboy_core::git::run_git_with_env_timeout(
-                    target,
-                    &[
-                        "fetch",
-                        "--no-tags",
-                        "--no-write-fetch-head",
-                        "origin",
-                        base_sha,
-                    ],
-                    "materialize prepared Cook base",
-                    &[],
-                    remaining,
-                )
-                .map(|_| ())
-            },
-        )
+        crate::agent_task_promotion::materialize_declared_base_sha(target, declared_base, base_sha)
     })?;
     Ok(homeboy_core::git::run_git(
         target,

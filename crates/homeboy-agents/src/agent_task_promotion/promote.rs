@@ -3464,6 +3464,53 @@ fn capture_declared_base_with_git_and_timeout(
             )
         })?
         .to_string();
+    fetch_declared_base_sha(worktree_path, base_ref, &sha, git, environment, timeout)?;
+    let output = run_declared_base_git(
+        worktree_path,
+        git,
+        &["rev-parse", "--verify", &format!("{sha}^{{commit}}")],
+        environment,
+        base_ref,
+        "verify",
+        timeout,
+    )?;
+    if !output.status.success() {
+        return Err(Error::validation_invalid_argument(
+            "base_ref",
+            format!("could not resolve declared base `{base_ref}` before promotion gates"),
+            None,
+            None,
+        ));
+    }
+    Ok(Some(AgentTaskPromotionVerifiedBase {
+        base: base_ref.to_string(),
+        sha: String::from_utf8_lossy(&output.stdout).trim().to_string(),
+    }))
+}
+
+pub(crate) fn materialize_declared_base_sha(
+    worktree_path: &Path,
+    base_ref: &str,
+    sha: &str,
+) -> Result<()> {
+    fetch_declared_base_sha(
+        worktree_path,
+        base_ref,
+        sha,
+        "git",
+        &transport_environment(worktree_path),
+        declared_base_git_timeout(),
+    )
+}
+
+fn fetch_declared_base_sha(
+    worktree_path: &Path,
+    base_ref: &str,
+    sha: &str,
+    git: &str,
+    environment: &[(String, String)],
+    timeout: Duration,
+) -> Result<()> {
     // Materializing a verified remote tip must also advance its tracking ref.
     // Otherwise a later Cook transport retry can pin an older tracking commit
     // and mistake this already-converged base for unique destination work.
@@ -3501,27 +3548,7 @@ fn capture_declared_base_with_git_and_timeout(
             timeout,
         ));
     }
-    let output = run_declared_base_git(
-        worktree_path,
-        git,
-        &["rev-parse", "--verify", &format!("{sha}^{{commit}}")],
-        environment,
-        base_ref,
-        "verify",
-        timeout,
-    )?;
-    if !output.status.success() {
-        return Err(Error::validation_invalid_argument(
-            "base_ref",
-            format!("could not resolve declared base `{base_ref}` before promotion gates"),
-            None,
-            None,
-        ));
-    }
-    Ok(Some(AgentTaskPromotionVerifiedBase {
-        base: base_ref.to_string(),
-        sha: String::from_utf8_lossy(&output.stdout).trim().to_string(),
-    }))
+    Ok(())
 }
 
 fn transport_environment(worktree_path: &Path) -> Vec<(String, String)> {

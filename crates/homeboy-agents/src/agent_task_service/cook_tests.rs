@@ -5904,8 +5904,9 @@ fn workspace_base_ancestry_preflight_converges_clean_behind_destination_at_pinne
         );
 
         std::fs::write(destination.join("uncommitted.txt"), "user drift\n").unwrap();
-        let dirty = preflight_cook_workspace_base_ancestry(&destination, "main", false, None)
-            .expect_err("dirty destination remains blocked");
+        let dirty =
+            preflight_cook_workspace_base_ancestry(&destination, "main", "main", false, None)
+                .expect_err("dirty destination remains blocked");
         assert_eq!(
             dirty.details["workspace_base_ancestry"]["direction"],
             "dirty"
@@ -5917,8 +5918,9 @@ fn workspace_base_ancestry_preflight_converges_clean_behind_destination_at_pinne
         let stray = destination.join(".homeboy/evidence/issue/context.json");
         std::fs::create_dir_all(stray.parent().expect("stray parent")).unwrap();
         std::fs::write(&stray, "{\"issue\":13276}\n").unwrap();
-        let dirty = preflight_cook_workspace_base_ancestry(&destination, "main", false, None)
-            .expect_err("no in-tree path is excluded from cleanliness admission");
+        let dirty =
+            preflight_cook_workspace_base_ancestry(&destination, "main", "main", false, None)
+                .expect_err("no in-tree path is excluded from cleanliness admission");
         assert_eq!(
             dirty.details["workspace_base_ancestry"]["direction"],
             "dirty"
@@ -5929,8 +5931,9 @@ fn workspace_base_ancestry_preflight_converges_clean_behind_destination_at_pinne
         git(&destination, &["add", "candidate.txt"]);
         git(&destination, &["commit", "-m", "candidate"]);
 
-        let diverged = preflight_cook_workspace_base_ancestry(&destination, "main", false, None)
-            .expect_err("diverged destination is rejected before provider execution");
+        let diverged =
+            preflight_cook_workspace_base_ancestry(&destination, "main", "main", false, None)
+                .expect_err("diverged destination is rejected before provider execution");
         assert_eq!(
             diverged.details["workspace_base_ancestry"]["direction"],
             "diverged"
@@ -6024,8 +6027,9 @@ fn diverged_workspace_base_ancestry_preflight_is_deterministic_not_transport_ret
         git(&destination, &["add", "candidate-only.txt"]);
         git(&destination, &["commit", "-m", "candidate"]);
 
-        let diverged = preflight_cook_workspace_base_ancestry(&destination, "main", false, None)
-            .expect_err("diverged destination is rejected before provider execution");
+        let diverged =
+            preflight_cook_workspace_base_ancestry(&destination, "main", "main", false, None)
+                .expect_err("diverged destination is rejected before provider execution");
         assert_eq!(diverged.code.as_str(), "validation.invalid_argument");
         assert_eq!(
             diverged.details["workspace_base_ancestry"]["direction"],
@@ -6126,7 +6130,7 @@ fn workspace_base_ancestry_preflight_preserves_provider_owned_non_origin_targets
     git(&["add", "provider.txt"]);
     git(&["commit", "-m", "provider base"]);
 
-    preflight_cook_workspace_base_ancestry(workspace.path(), "main", false, None)
+    preflight_cook_workspace_base_ancestry(workspace.path(), "main", "main", false, None)
         .expect("a provider-owned Git workspace without origin has no remote base to converge");
 }
 
@@ -11922,15 +11926,28 @@ fn cook_workspace_base_readmission_after_sha_fetch_converges() {
         let t2 = git(&origin, &["rev-parse", "HEAD"]);
         assert_eq!(git(&destination, &["rev-parse", "origin/main"]), t1);
 
-        // First Cook captures T2 by SHA and converges the linked destination.
-        let captured =
-            crate::agent_task_promotion::capture_declared_base(&destination, Some("main"))
-                .unwrap()
-                .unwrap();
-        assert_eq!(captured.sha, t2);
+        // Preparation fetches T2 into an isolated graph, not the real repository.
+        let prepared = prepare_cook_workspace_base(&destination, "main", None).unwrap();
+        assert_eq!(prepared.base_sha.as_deref(), Some(t2.as_str()));
+        assert_eq!(git(&repository, &["rev-parse", "origin/main"]), t1);
+
+        // Even an already-present object must not bypass tracking-ref publication.
+        git(
+            &destination,
+            &["fetch", "--no-tags", "--no-write-fetch-head", "origin", &t2],
+        );
+        assert_eq!(git(&repository, &["rev-parse", "origin/main"]), t1);
+        let resolved = materialize_prepared_cook_base(
+            &destination,
+            &prepared.declared_base,
+            prepared.base_sha.as_deref().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(resolved, t2);
+        assert_eq!(git(&repository, &["rev-parse", "origin/main"]), t2);
         homeboy_core::worktree::convergence::converge_destination(
             &destination,
-            &captured.sha,
+            &resolved,
             false,
             true,
             None,
@@ -11953,6 +11970,10 @@ fn cook_workspace_base_readmission_after_sha_fetch_converges() {
             Arc::new(AcceptedDetachedAttemptDispatcher),
         );
         pin_cook_workspace_base_at(&mut options, &destination).unwrap();
+        assert_eq!(
+            options.identity.initial_plan.metadata["cook_workspace_base"]["provenance"],
+            "local_remote_tracking_ref"
+        );
         homeboy_core::worktree::convergence::converge_destination(
             &destination,
             options.workspace.task_base_sha.as_deref().unwrap(),
