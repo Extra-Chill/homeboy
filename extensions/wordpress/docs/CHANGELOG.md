@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.54.2] - 2026-11-02
+
+### Fixed
+- keep the commit SHA out of production composer packages
+
 ## [3.54.1] - 2026-11-02
 
 ### Fixed
