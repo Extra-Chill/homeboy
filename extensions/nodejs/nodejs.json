@@ -1,6 +1,6 @@
 {
   "name": "Node.js",
-  "version": "3.9.1",
+  "version": "3.9.2",
   "source_url": "https://github.com/Extra-Chill/homeboy",
   "icon": "server.rack",
   "description": "Node.js project type — discovery, lint/test runners, and npm release lifecycle",
