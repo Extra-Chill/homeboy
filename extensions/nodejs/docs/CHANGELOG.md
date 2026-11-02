@@ -2,6 +2,11 @@
 
 All notable changes to the **nodejs** extension will be documented in this file.
 
+## [3.9.5] - 2026-11-02
+
+### Fixed
+- Fix Node dependency reuse and honor Cook’s hydration opt-out
+
 ## [3.9.4] - 2026-11-02
 
 ### Fixed
