@@ -1432,10 +1432,11 @@ fn lab_placed_retry_refusal(
             source.run_id
         ),
         Some(source.run_id.clone()),
-        Some(vec![format!(
-            "Start a fresh Lab Cook for the same task (`homeboy agent-task cook ... --placement lab`) so it is admitted and executed on `{runner}`."
-        )]),
-    );
+        None,
+    )
+    .with_hint(format!(
+        "Start a fresh Lab Cook for the same task (`homeboy agent-task cook ... --placement lab`) so it is admitted and executed on `{runner}`."
+    ));
     error.details["source_placement"] = serde_json::json!({
         "decision_id": decision.decision_id,
         "required": "lab",
