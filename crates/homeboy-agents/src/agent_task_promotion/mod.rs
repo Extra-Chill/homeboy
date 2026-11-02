@@ -26,9 +26,9 @@ pub use apply::{apply_materialized_workspace_patch, preflight_managed_workspace}
 pub use fingerprint::{
     candidate_fingerprint, AgentTaskCandidateFingerprint, AgentTaskPromotionCandidate,
 };
-pub(crate) use promote::capture_declared_base;
 pub(crate) use promote::gate_setup_outcome_failure;
 pub(crate) use promote::{active_gate_supervision, with_gate_supervision};
+pub(crate) use promote::{capture_declared_base, materialize_declared_base_sha};
 pub(crate) use promote::{emit_promotion_progress, emit_promotion_progress_with_output};
 pub use promote::{
     promote, promote_with_checkpoint, promotion_is_resumable, resume_promoted_patch,
