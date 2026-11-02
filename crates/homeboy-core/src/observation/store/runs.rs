@@ -22,8 +22,14 @@ pub const MAX_EXHAUSTIVE_RUN_ROWS: i64 = 100_000;
 
 const ACTIVE_TASK_SCOPE_QUERY: &str = r#"
     SELECT id,
-           json_extract(metadata_json, '$.agent_task_run.metadata.caller_workspace.repository'),
-           json_extract(metadata_json, '$.agent_task_run.metadata.caller_workspace.working_directory')
+           COALESCE(
+               json_extract(metadata_json, '$.agent_task_run.metadata.caller_workspace.repository'),
+               json_extract(metadata_json, '$.agent_task_run.metadata.unmaterialized_cook_admission.binding.caller_workspace.repository')
+           ),
+           COALESCE(
+               json_extract(metadata_json, '$.agent_task_run.metadata.caller_workspace.working_directory'),
+               json_extract(metadata_json, '$.agent_task_run.metadata.unmaterialized_cook_admission.binding.caller_workspace.working_directory')
+           )
     FROM runs INDEXED BY idx_agent_task_active_scope
     WHERE kind = 'agent-task'
       AND json_extract(metadata_json, '$.agent_task_run.state') IN ('queued', 'running')
@@ -2589,6 +2595,39 @@ mod tests {
                 store.active_task_scope("caller").unwrap()["pending_run_ids"],
                 serde_json::json!(["pending-cook"])
             );
+        });
+    }
+
+    #[test]
+    fn active_scope_resolves_admission_binding_workspace_or_reports_pending() {
+        with_isolated_home(|_| {
+            let store = ObservationStore::open_initialized().unwrap();
+            let cases = [
+                (
+                    "admitted-bound",
+                    Some(serde_json::json!({"repository": "repo-bound", "working_directory": "/fixtures/repo-bound"})),
+                ),
+                ("admitted-unbound", None),
+            ];
+            for (id, workspace) in cases {
+                let mut run = scoped_run(id, "caller", "queued", None);
+                let metadata = run.metadata_json["agent_task_run"]["metadata"]
+                    .as_object_mut()
+                    .unwrap();
+                metadata.remove("caller_workspace");
+                metadata.insert(
+                    "unmaterialized_cook_admission".into(),
+                    serde_json::json!({"binding": {"caller_workspace": workspace}}),
+                );
+                store.upsert_imported_run(&run).unwrap();
+            }
+
+            let scope = store.active_task_scope("caller").unwrap();
+            assert_eq!(scope["workspaces"].as_array().unwrap().len(), 1);
+            assert_eq!(scope["workspaces"][0]["repository"], "repo-bound");
+            assert_eq!(scope["workspaces"][0]["working_directory"], "/fixtures/repo-bound");
+            assert_eq!(scope["workspaces"][0]["run_ids"], serde_json::json!(["admitted-bound"]));
+            assert_eq!(scope["pending_run_ids"], serde_json::json!(["admitted-unbound"]));
         });
     }
 
