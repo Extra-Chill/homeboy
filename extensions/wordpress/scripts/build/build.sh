@@ -440,7 +440,12 @@ install_production_deps() {
         # source/git package whose .git was stripped during the build copy.
         rm -rf vendor
         source_is_disposable || DEV_DEPS_PENDING_RESTORE=1
-        composer install --no-dev --optimize-autoloader --prefer-dist --no-interaction --quiet 2>&1
+        # Without a root version, composer guesses one from git and records the
+        # commit SHA in vendor/composer/installed.php, so every commit changes
+        # the package even when nothing it ships did. The release version keeps
+        # the package a function of its content.
+        COMPOSER_ROOT_VERSION="${COMPOSER_ROOT_VERSION:-$PROJECT_VERSION}" \
+            composer install --no-dev --optimize-autoloader --prefer-dist --no-interaction --quiet 2>&1
         print_success "Production dependencies installed"
     else
         print_warning "No composer.json found, skipping Composer dependencies"
