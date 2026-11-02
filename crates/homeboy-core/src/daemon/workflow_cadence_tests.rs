@@ -189,6 +189,47 @@ fn registration_keeps_its_grid_and_a_builtin_never_overrides_the_operator() {
     });
 }
 
+#[test]
+fn a_scopeless_running_instance_is_recovered_instead_of_skipping_forever() {
+    with_isolated_home(|home| {
+        register_workflow_job_driver();
+        let path = crate::paths::observation_db().unwrap();
+        let legacy = JobStore::open_without_reconciliation(&path)
+            .unwrap()
+            .with_daemon_lease("dead-owner".into());
+        let base = 1_791_900_000_000;
+        let request = template(json!({"interval": "1h"}), "true", home.path());
+        let (mut cadence, _) = register(request.clone(), false, base).unwrap();
+        let old = slot_request(&request, &slot_instance_name(base));
+        let envelope = serde_json::from_value(old.submission().unwrap()).unwrap();
+        let admission = super::super::admit_controller_job(envelope, &legacy).unwrap();
+        legacy.start_controller_execution(admission.job.id).unwrap();
+        assert_eq!(
+            legacy.get(admission.job.id).unwrap().status,
+            crate::api_jobs::JobStatus::Running
+        );
+        cadence.last_instance = Some(old.instance.clone());
+        cadence.next_due_ms = base + HOUR;
+        write(&open().unwrap(), &cadence).unwrap();
+        drop(legacy);
+
+        let store = JobStore::open_without_reconciliation(&path)
+            .unwrap()
+            .with_daemon_scope(crate::api_jobs::DaemonScope::from_state_dir(home.path()))
+            .with_daemon_lease("replacement".into());
+        // Startup holds the owner lock and has proved this recorded lease dead.
+        store.adopt_scopeless_controller_jobs("dead-owner").unwrap();
+        super::super::recover_controller_jobs(&store);
+        wait_terminal(&store, &old.instance);
+        let admitted = admit_due(&store, base + HOUR);
+        assert_eq!(admitted.len(), 1);
+        assert!(admitted[0].get("admitted").is_some(), "{admitted:?}");
+        let cadence = list().unwrap().remove(0);
+        assert_eq!(cadence.skipped, 0);
+        wait_terminal(&store, cadence.last_instance.as_deref().unwrap());
+    });
+}
+
 fn wait_terminal(store: &JobStore, instance: &str) {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
