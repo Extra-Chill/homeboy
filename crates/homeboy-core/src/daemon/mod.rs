@@ -2948,13 +2948,9 @@ fn reserve_admission_observed(
         .transpose()
         .map_err(|error| Error::internal_unexpected(error.to_string()))?
         .unwrap_or_default();
-    if sample(&thresholds).admission_reason.is_some() {
-        return Err(Error::validation_invalid_argument(
-            "admission",
-            "admission: pressure — host pressure exceeds runner thresholds",
-            None,
-            None,
-        ));
+    let pressure = sample(&thresholds);
+    if pressure.admission_reason.is_some() {
+        return Err(pressure.admission_refusal());
     }
     let metadata = json!({
         "runner_job_projection": {
@@ -5958,7 +5954,11 @@ mod tests {
     fn admission_refused_above_pressure_threshold_with_free_slots() {
         with_isolated_home(|_| {
             let (result, jobs) = admission_with_cpu_pressure(1001);
-            assert!(result.unwrap_err().message.contains("admission: pressure"));
+            let error = result.unwrap_err();
+            assert_eq!(error.details["reason"], "runner_pressure");
+            assert_eq!(error.details["admission_reason"], "pressure");
+            assert_eq!(error.details["pressure"]["cpu"], 1001);
+            assert_eq!(error.retryable, Some(true));
             assert_eq!(jobs, 0);
         });
     }
@@ -7518,6 +7518,7 @@ pub(super) fn error_response(status_code: u16, err: Error) -> HttpResponse {
             "message": err.message,
             "details": err.details,
             "hints": err.hints,
+            "retryable": err.retryable,
         }),
         artifact: None,
     }

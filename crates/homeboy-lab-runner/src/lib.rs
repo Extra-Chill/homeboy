@@ -1116,7 +1116,10 @@ fn lab_runner_readiness_from_candidates(
         candidate.stale_daemon || (!candidate.admission_fresh && !candidate.unverified_daemon)
     }) {
         LabRunnerReadinessState::Stale
-    } else if reasons.iter().any(|reason| reason == "capacity_reached") {
+    } else if reasons
+        .iter()
+        .any(|reason| matches!(reason.as_str(), "capacity_reached" | "pressure"))
+    {
         LabRunnerReadinessState::CapacityBlocked
     } else if candidates.iter().any(|candidate| candidate.connected) {
         LabRunnerReadinessState::ConnectedIneligible
@@ -2378,6 +2381,12 @@ mod tests {
         let full = lab_runner_readiness_from_candidates(None, vec![full]);
         assert_eq!(full.state, LabRunnerReadinessState::CapacityBlocked);
         assert!(full.reasons.contains(&"capacity_reached".to_string()));
+
+        let mut pressured = default_lab_candidate("pressured", true);
+        pressured.admission_failure_reason = Some("pressure".into());
+        let pressured = lab_runner_readiness_from_candidates(None, vec![pressured]);
+        assert_eq!(pressured.state, LabRunnerReadinessState::CapacityBlocked);
+        assert_eq!(pressured.reasons, ["pressure"]);
     }
 
     fn create_ssh_runner(id: &str) {

@@ -37,6 +37,23 @@ pub struct RunnerPressure {
 }
 
 impl RunnerPressure {
+    /// A pre-acceptance wait, using the execution scheduler's capacity deferral
+    /// contract rather than consuming its infrastructure recovery budget.
+    pub fn admission_refusal(&self) -> crate::Error {
+        let mut error = crate::Error::validation_invalid_argument(
+            "admission",
+            "admission: pressure — waiting for host pressure to clear",
+            None,
+            None,
+        )
+        .with_retryable(true);
+        error.details["reason"] = serde_json::json!("runner_pressure");
+        error.details["admission_reason"] = serde_json::json!("pressure");
+        error.details["pressure"] = serde_json::json!(self);
+        error.details["execution_step_disposition"] = serde_json::json!("runner_ineligible");
+        error
+    }
+
     pub fn apply_thresholds(&mut self, thresholds: &PressureThresholds) {
         self.admission_reason = self.above(thresholds).then(|| "pressure".to_string());
     }
