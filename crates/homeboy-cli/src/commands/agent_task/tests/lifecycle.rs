@@ -1724,7 +1724,7 @@ fn cook_runner_preflight_failure_is_visible_through_public_commands() {
 }
 
 #[test]
-fn continuation_rearm_reserves_a_retryable_pre_execution_successor() {
+fn recover_corrects_pre_provider_gates_and_reserves_one_successor() {
     for block_capacity in [false, true] {
         assert_cook_rearm_queue_ownership(block_capacity);
     }
@@ -1804,7 +1804,7 @@ fn assert_cook_rearm_queue_ownership(block_capacity: bool) {
                 attempt_dispatcher: None,
             },
             gates: homeboy::agents::agent_tasks::gate::VerifyGateOptions {
-                verify: vec!["true".to_string()],
+                verify: vec!["homeboy review test fixture".to_string()],
                 ..Default::default()
             },
             retry_policy: homeboy::agents::agent_task_service::CookRetryPolicy { max_attempts: 2 },
@@ -1838,8 +1838,8 @@ fn assert_cook_rearm_queue_ownership(block_capacity: bool) {
         agent_task_lifecycle::record_pre_execution_failure(
             source_run_id,
             &source_plan,
-            "provider_readiness",
-            &Error::internal_unexpected("injected readiness timeout").with_retryable(true),
+            "gate_toolchain_preflight",
+            &Error::internal_unexpected("Declare a gate that runs from the repository itself"),
         )
         .expect("persist retryable readiness failure");
         assert_eq!(
@@ -1855,47 +1855,46 @@ fn assert_cook_rearm_queue_ownership(block_capacity: bool) {
         assert_eq!(probe["status"], "pre_execution_failure");
         assert_eq!(probe["step"], json!({ "kind": "retry" }));
         assert!(probe["admission"].is_null(), "{probe:#}");
-        let refusal = continue_cook_with(
-            CookContinueArgs {
-                cook_or_attempt_id: source_run_id.to_string(),
-                rearm: false,
-                timeout_ms: None,
-                review_form_timeout_ms: None,
-                backend: None,
-                selector: None,
-                model: None,
-                acknowledge_model_override: false,
-                full: true,
-            },
-            Arc::new(CapturingExecutor::default()),
-            |_| Ok(None),
-        )
-        .expect_err("non-rearm continuation cannot reuse a terminal attempt");
-        assert!(refusal.message.contains("must be rearmed"));
-
-        let (continued, continued_exit_code) = continue_cook_with(
-            CookContinueArgs {
-                cook_or_attempt_id: source_run_id.to_string(),
-                rearm: true,
-                timeout_ms: None,
-                review_form_timeout_ms: None,
-                backend: None,
-                selector: None,
-                model: None,
-                acknowledge_model_override: false,
-                full: true,
-            },
-            Arc::new(CapturingExecutor::default()),
-            |_| Ok(None),
-        )
-        .expect("rearm reserves and dispatches a successor");
+        let gate_file = root.path().join("corrected-gate.sh");
+        std::fs::write(&gate_file, "true").expect("corrected gate file");
+        let gate_spec = if block_capacity {
+            vec!["--verify-file", gate_file.to_str().unwrap()]
+        } else {
+            vec!["--verify", "true"]
+        };
+        let mut argv = vec!["homeboy", cook_id];
+        argv.extend(gate_spec);
+        let args = RecoverCli::try_parse_from(argv.clone())
+            .expect("public recover arguments")
+            .args;
+        let performer = FixtureCookRecoveryPerformer {
+            executor: Arc::new(CountingCookExecutor::default()),
+        };
+        argv.push("--preflight");
+        let preflight = RecoverCli::try_parse_from(argv)
+            .expect("correction preflight")
+            .args;
+        super::super::recover::recover_with(preflight, &performer)
+            .expect("preflight validates correction without writing");
+        assert_eq!(
+            homeboy::agents::agent_task_service::load_recipe(cook_id)
+                .unwrap()
+                .gate_policy["verify"],
+            json!(["homeboy review test fixture"])
+        );
+        let (recovered, continued_exit_code) =
+            super::super::recover::recover_with(args, &performer)
+                .expect("corrected recovery reserves a successor in the same Cook");
+        let continued = recovered["result"].clone();
+        let recipe =
+            homeboy::agents::agent_task_service::load_recipe(cook_id).expect("corrected recipe");
+        assert_eq!(recipe.gate_policy["verify"], json!(["true"]));
 
         assert_eq!(continued_exit_code, 0, "{continued:#}");
         let index =
             agent_task_lifecycle::cook_index(cook_id).expect("Cook index includes successor");
         let successor_run_id = index.latest_run_id;
         assert_ne!(successor_run_id, source_run_id, "{continued:#}");
-        assert_eq!(continued["latest_run_id"], successor_run_id);
         let successor = agent_task_lifecycle::exact_record(&successor_run_id)
             .expect("successor record is durable");
         assert_eq!(
@@ -1905,6 +1904,14 @@ fn assert_cook_rearm_queue_ownership(block_capacity: bool) {
         );
         assert_eq!(successor.metadata["retry_of"], source_run_id);
         assert_eq!(successor.metadata["provider_executions_consumed"], 0);
+        assert!(
+            !test_lifecycle_store()
+                .cook_dir(cook_id)
+                .join("notification-outcome.json")
+                .exists(),
+            "the replaced failure must not announce open work"
+        );
+        assert_eq!(recipe.attempts.len(), 2, "one Cook owns both attempts");
         // The successor is reserved through the control-plane Retry action, so
         // the source run carries an accepted retry action in its event log.
         homeboy::agents::orchestration::register();
@@ -2129,7 +2136,13 @@ impl homeboy::agents::agent_task_service::CookRecoveryPerformer for FixtureCookR
     }
 
     fn retry(&self, run_id: &str) -> homeboy::core::Result<(Value, i32)> {
-        panic!("a recipe-only attempt is continued, not retried: {run_id}")
+        super::super::run::retry_exact(super::super::RetryArgs {
+            run_id: run_id.to_string(),
+            new_run_id: None,
+            run: false,
+            force: false,
+            idempotency_key: None,
+        })
     }
 
     fn reconcile(&self, run_id: &str) -> homeboy::core::Result<(Value, i32)> {
@@ -6301,10 +6314,7 @@ fn recover_refuses_replacement_inputs_without_authorization_or_proof() {
         let performer = FixtureCookRecoveryPerformer {
             executor: Arc::new(CountingCookExecutor::default()),
         };
-        for argv in [
-            vec!["cook-12788", "--verify", "true"],
-            vec!["cook-12788", "--accept-inherited-failures"],
-        ] {
+        for argv in [vec!["cook-12788", "--accept-inherited-failures"]] {
             let error = super::super::recover::recover_with(parse_recover(&argv), &performer)
                 .expect_err("replacement inputs without authorization are refused");
             assert!(
