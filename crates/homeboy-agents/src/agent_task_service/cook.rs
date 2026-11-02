@@ -8878,8 +8878,9 @@ fn preflight_cook_workspace_resolved_base_ancestry(
         let mut error = Error::validation_invalid_argument(
             "workspace",
             format!(
-                "Cook cannot attribute uncommitted destination changes: {}",
-                dirty_paths.join(", ")
+                "Cook cannot attribute uncommitted destination changes: {}. Preserve them with `git -C {} stash push --include-untracked -m 'before Cook retry'`, then retry the Cook",
+                dirty_paths.join(", "),
+                quote_arg(target.to_string_lossy().as_ref())
             ),
             Some(target.display().to_string()),
             None,
