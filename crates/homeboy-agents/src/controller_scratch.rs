@@ -35,7 +35,6 @@ pub struct ControllerScratchResource {
     /// detached Git checkout with no upstream.
     #[serde(default)]
     pub ephemeral: bool,
-    pub retention: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_ref: Option<String>,
     pub created_at: String,
@@ -209,7 +208,6 @@ fn allocate_attempt_at_roots(
             lease_id: lease_id.clone(),
             reconstructable: true,
             ephemeral: false,
-            retention: "P7D".to_string(),
             source_ref: None,
             created_at: chrono::Utc::now().to_rfc3339(),
             finalized_at: None,
@@ -580,10 +578,10 @@ pub struct ControllerScratchCleanupOutput {
     pub applied_count: usize,
     pub skipped_count: usize,
     pub estimated_bytes: u64,
-    /// Bytes that would be eligible under the DEFAULT per-resource retention
+    /// Bytes that would be eligible under the DEFAULT lifecycle retention
     /// policy (i.e. with no `--older-than-days` override). Equal to
     /// `estimated_bytes` when no override is active; smaller when an override
-    /// unlocks additional released, clean scratch that is still inside its
+    /// unlocks additional interrupted/orphaned scratch that is still inside its
     /// default retention window. Lets operators see exactly how much a
     /// pressure-reclaim override adds versus normal cleanup.
     pub default_policy_eligible_bytes: u64,
@@ -661,15 +659,10 @@ pub struct ControllerScratchCleanupOptions {
     pub limit: usize,
     /// Return all detail rows rather than the normal agent-facing response budget.
     pub full: bool,
-    /// Optional override for the terminal-run retention window, in seconds.
-    ///
-    /// `None` (default) uses each resource's own configured retention window
-    /// (e.g. `P7D`), preserving historical behavior. `Some(0)` lets released,
-    /// clean, terminal scratch converge immediately once finalized — this is the
-    /// disk-pressure path exposed by `--older-than-days`. The override ONLY
-    /// affects the retention time-window comparison; it never bypasses the
-    /// still-active-run, running-owner, not-finalized, orphaned-retention, or
-    /// dirty/unpushed guards, which continue to protect in-use resources.
+    /// Optional override for interrupted/orphaned retention, in seconds,
+    /// exposed by `--older-than-days`. Released scratch has no time window.
+    /// This only affects time comparisons, never owner, run, finalization,
+    /// or dirty/unpushed safety guards.
     pub retention_override_seconds: Option<i64>,
 }
 
@@ -708,9 +701,11 @@ pub fn retained_storage_inventory() -> Result<Vec<ControllerScratchRetainedResou
                 ("owner process is still running", "active")
             } else if resource.finalized_at.is_none() {
                 ("resource has not been finalized by its owning run", "stale")
+            } else if resource.lifecycle_state == "released" {
+                ("released resource is awaiting guarded cleanup", "terminal")
             } else {
                 (
-                    "retention policy has not been advanced by cleanup",
+                    "resource is awaiting lifecycle retention cleanup",
                     "terminal",
                 )
             };
@@ -994,11 +989,6 @@ fn register_outcome_resources_unlocked(
                     .get("ephemeral")
                     .and_then(serde_json::Value::as_bool)
                     .unwrap_or(false),
-                retention: value
-                    .get("retention")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("P7D")
-                    .to_string(),
                 source_ref: value
                     .get("source_ref")
                     .and_then(serde_json::Value::as_str)
@@ -1752,13 +1742,16 @@ fn cleanup_block_reason_with_observation(
     // Only the time-window comparison honors the override. All the guards above
     // (still-active run, running owner, not yet finalized) have already returned,
     // and the dirty/unpushed guard below still applies — so an aggressive
-    // override can only converge released, clean, finalized, terminal scratch,
-    // never in-use resources.
+    // override only affects interrupted/orphaned retention, never admits
+    // in-use resources.
     let override_retention = retention_override_seconds.map(|seconds| format!("{seconds}s"));
     let retention = override_retention
         .as_deref()
-        .unwrap_or(default_retention_window(resource, lifecycle_state));
-    if !interrupted_owner_dead && !retention_expired(finalized_at, retention, path, now) {
+        .unwrap_or(INTERRUPTED_RETENTION);
+    if matches!(lifecycle_state, "interrupted" | "orphaned")
+        && !interrupted_owner_dead
+        && !retention_expired(finalized_at, retention, path, now)
+    {
         return Ok(Some(if lifecycle_state == "orphaned" {
             "terminal or missing run has a dead active lease owner; orphaned retention has started"
                 .to_string()
@@ -1786,21 +1779,6 @@ fn cleanup_block_reason_with_observation(
     Ok(None)
 }
 
-/// The retention window a resource is subject to under the DEFAULT policy (no
-/// `--older-than-days` override): the shorter orphaned/interrupted window when
-/// the effective lifecycle is interrupted or orphaned, otherwise the
-/// resource's own configured retention.
-fn default_retention_window<'a>(
-    resource: &'a ControllerScratchResource,
-    lifecycle_state: &str,
-) -> &'a str {
-    if matches!(lifecycle_state, "interrupted" | "orphaned") {
-        INTERRUPTED_RETENTION
-    } else {
-        &resource.retention
-    }
-}
-
 /// Whether an already-eligible candidate would ALSO clear its default retention
 /// window (i.e. would be a candidate even without an override). Callers must
 /// only use this for resources that have already passed the other cleanup
@@ -1812,12 +1790,8 @@ fn resource_retention_window_expired(
     now: chrono::DateTime<chrono::Utc>,
 ) -> bool {
     let (lifecycle_state, finalized_at) = effective_lifecycle(resource, owning_run);
-    retention_expired(
-        finalized_at,
-        default_retention_window(resource, lifecycle_state),
-        path,
-        now,
-    )
+    !matches!(lifecycle_state, "interrupted" | "orphaned")
+        || retention_expired(finalized_at, INTERRUPTED_RETENTION, path, now)
 }
 
 fn retention_expired(
@@ -2774,7 +2748,6 @@ mod tests {
             lease_id: "test-lease".to_string(),
             reconstructable: true,
             ephemeral: false,
-            retention: "0s".to_string(),
             source_ref: None,
             created_at: chrono::Utc::now().to_rfc3339(),
             finalized_at: Some(chrono::Utc::now().to_rfc3339()),
@@ -2811,7 +2784,6 @@ mod tests {
         let mut resource = resource(&scratch, root.path());
         resource.lifecycle_state = "interrupted".to_string();
         resource.ephemeral = true;
-        resource.retention = "P7D".to_string();
         resource.finalized_at = Some(chrono::Utc::now().to_rfc3339());
         resource.terminal_evidence = Some(serde_json::json!({
             "workspace_recovery": { "state": "explicitly_ephemeral" }
@@ -3321,65 +3293,82 @@ mod tests {
     }
 
     #[test]
-    fn released_resource_waits_for_its_configured_retention() {
-        let (_observation_root, observation) = observation_store();
-        let root = tempfile::tempdir().expect("root");
-        let scratch = root.path().join("scratch");
-        fs::create_dir(&scratch).expect("scratch");
-        let mut resource = resource(&scratch, root.path());
-        resource.lifecycle_state = "released".to_string();
-        resource.retention = "P7D".to_string();
-
-        assert_eq!(
-            cleanup_reason(&observation, &resource, &scratch, None),
-            Some("retention has not expired".to_string())
-        );
-    }
-
-    #[test]
-    fn retention_override_lets_clean_released_resource_converge() {
-        let (_observation_root, observation) = observation_store();
-        // A finalized, clean, terminal resource WITHIN its P7D window is
-        // skipped by default but becomes eligible with `Some(0)` override.
-        let root = tempfile::tempdir().expect("root");
-        let scratch = root.path().join("scratch");
-        fs::create_dir(&scratch).expect("scratch");
-        let mut resource = resource(&scratch, root.path());
-        resource.lifecycle_state = "released".to_string();
-        resource.retention = "P7D".to_string();
-
-        // Default: still within the 7-day window, so it is retained.
-        assert_eq!(
-            cleanup_reason(&observation, &resource, &scratch, None),
-            Some("retention has not expired".to_string())
-        );
-
-        // Pressure override (expire-immediately): now eligible (no block).
-        assert_eq!(
-            cleanup_reason(&observation, &resource, &scratch, Some(0)),
-            None
-        );
-    }
-
-    #[test]
-    fn retention_override_does_not_bypass_dirty_guard() {
-        let (_observation_root, observation) = observation_store();
-        // A dirty/unpushed resource stays skipped EVEN with an aggressive
-        // override — the override only relaxes the time window, never the
-        // dirty/unpushed safety guard.
-        let root = tempfile::tempdir().expect("root");
-        let scratch = root.path().join("scratch");
-        fs::create_dir(&scratch).expect("scratch");
-        run_git(&scratch, &["init", "-b", "main"]);
-        fs::write(scratch.join("untracked.txt"), "dirty").expect("dirty file");
-        let mut resource = resource(&scratch, root.path());
-        resource.lifecycle_state = "released".to_string();
-
-        assert_eq!(
-            cleanup_reason(&observation, &resource, &scratch, Some(0)),
-            Some("git checkout has dirty or unpushed state".to_string())
-        );
-        assert!(scratch.exists());
+    fn released_scratch_real_index_respects_safety_guards_without_a_window() {
+        for (case, expected) in [
+            ("clean", None),
+            ("active_run", Some("owning run is still active")),
+            ("live_owner", Some("owner process is still running")),
+            ("dirty", Some("git checkout has dirty or unpushed state")),
+        ] {
+            let data_root = tempfile::tempdir().expect("data root");
+            let (_observation_root, observation) = observation_store();
+            let root = tempfile::tempdir().expect("root");
+            let scratch = root.path().join("scratch");
+            fs::create_dir(&scratch).expect("scratch");
+            run_git(&scratch, &["init", "-b", "main"]);
+            run_git(
+                &scratch,
+                &[
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.com",
+                    "commit",
+                    "--allow-empty",
+                    "-m",
+                    "base",
+                ],
+            );
+            run_git(&scratch, &["remote", "add", "origin", "."]);
+            run_git(&scratch, &["fetch", "origin", "main"]);
+            run_git(&scratch, &["branch", "--set-upstream-to=origin/main"]);
+            let mut resource = resource(&scratch, root.path());
+            resource.lifecycle_state = "released".to_string();
+            if case == "active_run" {
+                resource.run_id = observation
+                    .start_run(homeboy_core::observation::NewRunRecord::builder("test").build())
+                    .expect("active run")
+                    .id;
+            }
+            if case == "live_owner" {
+                resource.owner_pid = std::process::id();
+            }
+            if case == "dirty" {
+                fs::write(scratch.join("untracked.txt"), "dirty").expect("dirty file");
+            }
+            // Legacy retention fields are ignored, not migrated or reserialized.
+            let mut index = serde_json::to_value(ControllerScratchIndex {
+                schema: schema(),
+                resources: vec![resource],
+            })
+            .expect("index JSON");
+            index["resources"][0]["retention"] = serde_json::json!("P7D");
+            let index_path = data_root.path().join("controller-scratch/resources.json");
+            fs::create_dir_all(index_path.parent().unwrap()).expect("index directory");
+            fs::write(&index_path, serde_json::to_vec(&index).unwrap()).expect("legacy index");
+            let output = cleanup_at(
+                data_root.path(),
+                &observation,
+                ControllerScratchCleanupOptions {
+                    apply: false,
+                    limit: 10,
+                    full: false,
+                    retention_override_seconds: None,
+                },
+            );
+            assert_eq!(
+                output.candidate_count,
+                usize::from(expected.is_none()),
+                "{case}"
+            );
+            assert_eq!(
+                output.skipped.first().map(|row| row.reason.as_str()),
+                expected,
+                "{case}"
+            );
+            let stored = serde_json::to_value(read_index_at(data_root.path())).unwrap();
+            assert!(stored["resources"][0].get("retention").is_none());
+        }
     }
 
     #[test]
@@ -4165,9 +4154,8 @@ mod tests {
             let mut resource = resource(&scratch, root.path());
             resource.run_id = format!("run-{index}");
             resource.lease_id = format!("lease-{index}");
-            resource.lifecycle_state = "released".to_string();
-            // Within the retention window, so every resource is skipped.
-            resource.retention = "P7D".to_string();
+            // Within interrupted retention, so every resource is skipped.
+            resource.lifecycle_state = "interrupted".to_string();
             resources.push(resource);
         }
         write_index_at(
@@ -4328,7 +4316,7 @@ mod tests {
     fn override_unlocked_bytes_are_reported_separately_from_default_policy() {
         let data_root = tempfile::tempdir().expect("data root");
         let (_observation_root, observation) = observation_store();
-        // A released, clean resource still inside its default P7D window:
+        // An interrupted resource still inside its default P1D window:
         // eligible only because of the override. Its bytes must be reported
         // as override-unlocked, not default-policy-eligible.
         let root = tempfile::tempdir().expect("root");
@@ -4336,8 +4324,7 @@ mod tests {
         fs::create_dir(&scratch).expect("scratch");
         fs::write(scratch.join("generated.txt"), "some generated bytes").expect("content");
         let mut resource = resource(&scratch, root.path());
-        resource.lifecycle_state = "released".to_string();
-        resource.retention = "P7D".to_string();
+        resource.lifecycle_state = "interrupted".to_string();
         write_index_at(
             data_root.path(),
             &ControllerScratchIndex {
