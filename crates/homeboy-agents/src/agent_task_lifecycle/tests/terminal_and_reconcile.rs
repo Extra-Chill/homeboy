@@ -12,7 +12,7 @@ use homeboy_core::api_jobs::{JobEventKind, JobStore};
 use homeboy_core::test_support::with_isolated_home;
 use sha2::Digest;
 use std::process::Command;
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
 
 /// The tests below drive the store-rooted lifecycle entry points. Resolving the
@@ -64,21 +64,8 @@ impl RunnerContinuationProvider for IdleRunnerFixture {
     }
 }
 
-static CONFIG_LOCK_STRICT_TEST: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
-
 fn with_strict_config_lock(test: impl FnOnce()) {
-    let _guard = CONFIG_LOCK_STRICT_TEST
-        .lock()
-        .expect("strict lock test guard");
-    std::env::set_var(homeboy_core::config::CONFIG_LOCK_STRICT_ENV, "1");
-    struct StrictLockEnv;
-    impl Drop for StrictLockEnv {
-        fn drop(&mut self) {
-            std::env::remove_var(homeboy_core::config::CONFIG_LOCK_STRICT_ENV);
-        }
-    }
-    let _env = StrictLockEnv;
-    test();
+    homeboy_core::config::with_strict_config_lock_for_test(test);
 }
 
 struct FixtureAcceptanceVerifier;

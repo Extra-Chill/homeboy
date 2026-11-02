@@ -119,7 +119,29 @@ fn config_read_lock_timeout() -> std::time::Duration {
     std::time::Duration::from_secs(seconds)
 }
 
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static TEST_STRICT_CONFIG_LOCK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Enable strict re-entry checks only on the calling test thread.
+#[cfg(any(test, feature = "test-support"))]
+pub fn with_strict_config_lock_for_test<T>(operation: impl FnOnce() -> T) -> T {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            TEST_STRICT_CONFIG_LOCK.with(|strict| strict.set(self.0));
+        }
+    }
+    let _restore = Restore(TEST_STRICT_CONFIG_LOCK.with(|strict| strict.replace(true)));
+    operation()
+}
+
 fn config_lock_strict() -> bool {
+    #[cfg(any(test, feature = "test-support"))]
+    if TEST_STRICT_CONFIG_LOCK.with(|strict| strict.get()) {
+        return true;
+    }
     std::env::var(CONFIG_LOCK_STRICT_ENV)
         .ok()
         .is_some_and(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "yes"))
@@ -1756,6 +1778,26 @@ mod tests {
         assert!(left_lock.exists());
         assert!(right_lock.exists());
         assert_ne!(left_lock, right_lock);
+    }
+
+    #[test]
+    fn strict_test_scope_is_thread_local_and_restored_after_unwind() {
+        assert!(!TEST_STRICT_CONFIG_LOCK.with(|strict| strict.get()));
+        let result = std::panic::catch_unwind(|| {
+            with_strict_config_lock_for_test(|| {
+                assert!(config_lock_strict());
+                std::thread::spawn(|| {
+                    assert!(!TEST_STRICT_CONFIG_LOCK.with(|strict| strict.get()));
+                })
+                .join()
+                .unwrap();
+                with_strict_config_lock_for_test(|| assert!(config_lock_strict()));
+                assert!(config_lock_strict());
+                panic!("exercise strict scope cleanup");
+            });
+        });
+        assert!(result.is_err());
+        assert!(!TEST_STRICT_CONFIG_LOCK.with(|strict| strict.get()));
     }
 
     #[test]

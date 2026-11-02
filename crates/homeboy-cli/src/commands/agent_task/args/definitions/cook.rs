@@ -277,7 +277,8 @@ pub struct VerifyGateArgs {
     /// Do not add the component's declared lint gate. By default, when the
     /// Cook resolves to a registered component whose configuration declares
     /// lint support (`scripts.lint` or a linked lint extension), Cook requires
-    /// `homeboy review lint <component> --path .` before promotion so a
+    /// `homeboy review lint <component> --path <repository-relative-component>`
+    /// before promotion so a
     /// candidate that fails the component's own CI lint cannot open a PR.
     #[arg(long = "no-component-lint-gate")]
     pub no_component_lint_gate: bool,
