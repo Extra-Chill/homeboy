@@ -4,6 +4,16 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.444.2] - 2026-11-02
+
+### Changed
+- Report a protected-job daemon replacement as a pending restart, not a failed upgrade
+
+### Fixed
+- release the shared admission guard at durable job handoff
+- inherit the source component's baseline for files moved between components
+- derive Cook gates for nested components from the repository root
+
 ## [0.444.1] - 2026-11-02
 
 ### Fixed
