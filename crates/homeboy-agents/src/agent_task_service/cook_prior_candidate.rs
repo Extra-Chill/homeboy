@@ -65,7 +65,10 @@ fn foreign_destination_owner(
     }
     let handle = options.workspace.to_worktree.as_str();
     let Some(homeboy_core::worktree::WorkspaceRefRecord::Task(record)) =
-        homeboy_core::worktree::resolve_workspace_ref_if_present(handle)?
+        homeboy_core::worktree::resolve_workspace_ref_if_present_in_root(
+            handle,
+            &lifecycle_store.data_root(),
+        )?
     else {
         return Ok(None);
     };

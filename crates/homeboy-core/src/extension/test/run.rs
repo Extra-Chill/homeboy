@@ -1736,19 +1736,17 @@ fn run_main_test_workflow_inner(
                 .unwrap_or_else(|| real_home.join(fallback)),
         ));
     }
-    for name in crate::paths::HOMEBOY_ROOT_ENV_VARS {
-        if let Some(path) = crate::paths::homeboy_root_env_default_under_home(name, home) {
-            sandbox_env.push((name.to_string(), path));
-        }
-    }
-    sandbox_env.extend([
-        ("XDG_CONFIG_HOME".to_string(), home.join(".config")),
-        ("XDG_DATA_HOME".to_string(), home.join(".local/share")),
-        (
-            crate::paths::DAEMON_STATE_DIR_ENV.to_string(),
-            home.join(".config/homeboy/daemon"),
-        ),
-    ]);
+    // Derived roots must follow HOME, including a HOME assigned by a test to
+    // its own subprocess. Never pin those roots to the gate's shared home.
+    let sandbox_remove_env = crate::paths::HOMEBOY_ROOT_ENV_VARS
+        .iter()
+        .copied()
+        .chain([
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_HOME",
+            crate::paths::DAEMON_STATE_DIR_ENV,
+        ])
+        .collect::<Vec<_>>();
 
     #[cfg(unix)]
     let internal_runtime_plan = if !inventory_mode
@@ -1788,6 +1786,9 @@ fn run_main_test_workflow_inner(
                         let producer = sandbox_env.iter().fold(producer, |runner, (name, path)| {
                             runner.env(name, &path.to_string_lossy())
                         });
+                        let producer = sandbox_remove_env
+                            .iter()
+                            .fold(producer, |runner, name| runner.env_remove_if(true, name));
                         let output = producer
                             .env(suite_timeout_env, &suite_timeout_value)
                             .env(TEST_INVENTORY_ONLY_ENV, "1")
@@ -1860,6 +1861,9 @@ fn run_main_test_workflow_inner(
     let runner = sandbox_env.iter().fold(runner, |runner, (name, path)| {
         runner.env(name, &path.to_string_lossy())
     });
+    let runner = sandbox_remove_env
+        .iter()
+        .fold(runner, |runner, name| runner.env_remove_if(true, name));
     let runner = runner
         // Normalize inherited configuration before a Cargo adapter reaches the
         // global runner: an explicit zero falls back to the declared default,

@@ -47,7 +47,8 @@ use crate::agent_task_timeout::timeout_with_grace;
 pub(crate) use attempt_workspace::set_snapshot_fence_test_hook;
 pub use attempt_workspace::HarvestExecutionContext;
 use attempt_workspace::{
-    prepare_attempt_workspace, prepare_committed_harvest, remap_workspace_config, AttemptWorkspace,
+    prepare_attempt_workspace_in_root, prepare_committed_harvest, remap_workspace_config,
+    AttemptWorkspace,
 };
 use candidate_adoption::{
     attach_candidate_adoption_provenance, select_candidate_adoption,
@@ -58,7 +59,8 @@ use engine::{QuarantinedTask, ResourceWait, RunningTask, ScheduledTask};
 use harvest::mark_timeout_workspace_candidates_incomplete;
 pub(crate) use harvest::{candidate_from_workspace, git_output, HarvestError};
 use harvest::{
-    committed_harvest_failure, committed_harvest_preflight_outcome, harvest_candidate_commit,
+    committed_harvest_failure, committed_harvest_preflight_outcome,
+    harvest_candidate_commit_in_store,
 };
 use outcome::event;
 pub use postprocess::run_postprocess_worker;

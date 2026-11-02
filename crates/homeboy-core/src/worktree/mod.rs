@@ -110,6 +110,11 @@ pub fn retire_residue() -> Result<Vec<String>> {
     retire_residue_with_store(&metadata_dir()?)
 }
 
+pub(crate) fn retire_residue_in_root(data_root: &Path) -> Result<Vec<String>> {
+    let store = metadata_dir_in_root(data_root);
+    with_task_worktree_registry_write_lock_at(&store, || retire_residue_unlocked(&store))
+}
+
 /// Read a bounded, stable keyset page for the operator-facing worktree list.
 pub fn list_page(options: WorktreeListOptions) -> Result<WorktreeListOutput> {
     with_task_worktree_registry_read_lock(|| list_page_with_store(&metadata_dir()?, options))
@@ -358,6 +363,10 @@ pub(crate) fn list_unlocked() -> Result<WorktreeListOutput> {
     list_with_store(&metadata_dir()?)
 }
 
+pub(crate) fn list_unlocked_in_root(data_root: &Path) -> Result<WorktreeListOutput> {
+    list_with_store(&metadata_dir_in_root(data_root))
+}
+
 /// Evidence retained when a malformed task-worktree record is removed from the
 /// active registry. The original bytes and this provenance sidecar remain under
 /// `.quarantine`, so uncertain activity is never silently discarded.
@@ -380,8 +389,21 @@ pub struct TaskWorktreeRegistryQuarantine {
 pub(crate) fn reconcile_malformed_task_worktree_records(
     apply: bool,
 ) -> Result<Vec<TaskWorktreeRegistryQuarantine>> {
-    with_task_worktree_registry_write_lock(|| {
-        let store = metadata_dir()?;
+    reconcile_malformed_task_worktree_records_with_store(apply, &metadata_dir()?)
+}
+
+pub(crate) fn reconcile_malformed_task_worktree_records_in_root(
+    apply: bool,
+    data_root: &Path,
+) -> Result<Vec<TaskWorktreeRegistryQuarantine>> {
+    reconcile_malformed_task_worktree_records_with_store(apply, &metadata_dir_in_root(data_root))
+}
+
+fn reconcile_malformed_task_worktree_records_with_store(
+    apply: bool,
+    store: &Path,
+) -> Result<Vec<TaskWorktreeRegistryQuarantine>> {
+    with_task_worktree_registry_write_lock_at(store, || {
         if !store.exists() {
             return Ok(Vec::new());
         }
@@ -572,11 +594,25 @@ fn active_task_worktree_registry_quarantines(
 pub(crate) fn with_task_worktree_registry_read_lock<T>(
     operation: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
+    with_task_worktree_registry_read_lock_at(&metadata_dir()?, operation)
+}
+
+pub(crate) fn with_task_worktree_registry_read_lock_in_root<T>(
+    data_root: &Path,
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    with_task_worktree_registry_read_lock_at(&metadata_dir_in_root(data_root), operation)
+}
+
+fn with_task_worktree_registry_read_lock_at<T>(
+    store: &Path,
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
     let _gate = TASK_WORKTREE_REGISTRY_GATE
         .get_or_init(|| RwLock::new(()))
         .read()
         .map_err(|_| Error::internal_unexpected("task worktree registry read gate poisoned"))?;
-    let _lock = match open_existing_task_worktree_registry_lock()? {
+    let _lock = match open_existing_task_worktree_registry_lock(store)? {
         Some(lock) => {
             lock.lock_shared().map_err(|error| {
                 Error::internal_io(
@@ -594,11 +630,18 @@ pub(crate) fn with_task_worktree_registry_read_lock<T>(
 pub(super) fn with_task_worktree_registry_write_lock<T>(
     operation: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
+    with_task_worktree_registry_write_lock_at(&metadata_dir()?, operation)
+}
+
+fn with_task_worktree_registry_write_lock_at<T>(
+    store: &Path,
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
     let _gate = TASK_WORKTREE_REGISTRY_GATE
         .get_or_init(|| RwLock::new(()))
         .write()
         .map_err(|_| Error::internal_unexpected("task worktree registry write gate poisoned"))?;
-    let lock = open_task_worktree_registry_lock()?;
+    let lock = open_task_worktree_registry_lock_at(store)?;
     lock.lock_exclusive().map_err(|error| {
         Error::internal_io(
             error.to_string(),
@@ -629,7 +672,7 @@ pub(super) fn with_task_worktree_registry_write_lock_until<T>(
                     Some("lock task worktree registry".into()),
                 ));
             }
-            let lock = open_task_worktree_registry_lock()?;
+            let lock = open_task_worktree_registry_lock_at(&metadata_dir()?)?;
             while lock.try_lock_exclusive().is_err() {
                 if std::time::Instant::now() >= deadline {
                     return Err(Error::internal_io(
@@ -659,8 +702,7 @@ pub(super) fn with_task_worktree_registry_write_lock_until<T>(
     }
 }
 
-fn open_task_worktree_registry_lock() -> Result<std::fs::File> {
-    let store = metadata_dir()?;
+fn open_task_worktree_registry_lock_at(store: &Path) -> Result<std::fs::File> {
     let parent = store.parent().ok_or_else(|| {
         Error::internal_unexpected(format!(
             "task worktree store has no parent: {}",
@@ -682,8 +724,7 @@ fn open_task_worktree_registry_lock() -> Result<std::fs::File> {
         })
 }
 
-fn open_existing_task_worktree_registry_lock() -> Result<Option<std::fs::File>> {
-    let store = metadata_dir()?;
+fn open_existing_task_worktree_registry_lock(store: &Path) -> Result<Option<std::fs::File>> {
     let parent = store.parent().ok_or_else(|| {
         Error::internal_unexpected(format!(
             "task worktree store has no parent: {}",
@@ -737,14 +778,22 @@ pub fn resolve_workspace_ref(handle: &str) -> Result<WorkspaceRefRecord> {
 /// handle. Corrupt records remain errors so callers never mask them with an
 /// external provider fallback.
 pub fn resolve_workspace_ref_if_present(handle: &str) -> Result<Option<WorkspaceRefRecord>> {
-    let task_path = record_path(&metadata_dir()?, handle);
+    resolve_workspace_ref_if_present_in_root(handle, &paths::homeboy_data()?)
+}
+
+/// Resolve a workspace only within the owning lifecycle's registries.
+pub fn resolve_workspace_ref_if_present_in_root(
+    handle: &str,
+    data_root: &Path,
+) -> Result<Option<WorkspaceRefRecord>> {
+    let task_path = record_path(&metadata_dir_in_root(data_root), handle);
     if task_path.exists() {
         return read_record_path(&task_path)
             .map(WorkspaceRefRecord::Task)
             .map(Some);
     }
 
-    let adopted_path = record_path(&adopted_metadata_dir()?, handle);
+    let adopted_path = record_path(&adopted_metadata_dir_in_root(data_root), handle);
     if adopted_path.exists() {
         return read_adopted_record_path(&adopted_path)
             .map(WorkspaceRefRecord::Adopted)

@@ -2,6 +2,8 @@ use homeboy_engine_primitives::content_hash;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[cfg(test)]
+use super::attempt_workspace::prepare_attempt_workspace;
 use super::*;
 
 /// Ref namespace that pins harvested candidates against garbage collection.
@@ -14,19 +16,28 @@ pub(crate) const CANDIDATE_REF_PREFIX: &str = "refs/homeboy/candidates/";
 /// written (#13448). Identity and dates are fixed (the date is the parent's
 /// committer date), so the same tree on the same parent is the same sha. A
 /// tree equal to the base tree is `NoChanges`: no candidate is recorded.
-pub(super) fn harvest_candidate_commit(
+#[cfg(test)]
+fn harvest_candidate_commit(
     outcome: &mut AgentTaskOutcome,
     running: &RunningTask,
+) -> Result<(), HarvestError> {
+    harvest_candidate_commit_in_store(outcome, running, None)
+}
+
+pub(super) fn harvest_candidate_commit_in_store(
+    outcome: &mut AgentTaskOutcome,
+    running: &RunningTask,
+    lifecycle_store: Option<&crate::agent_task_lifecycle::AgentTaskLifecycleStore>,
 ) -> Result<(), HarvestError> {
     let on_runner = crate::agent_task_lifecycle::execution_runner_id().is_some();
     let mut timer = homeboy_engine_primitives::phase_timing::PhaseTimer::new();
     let result = timer.time("promote.harvest", || {
         harvest_candidate_commit_with_bundle(outcome, running, on_runner)
     });
-    if let Some(run_id) = running.run_id.as_deref() {
+    if let (Some(run_id), Some(lifecycle_store)) = (running.run_id.as_deref(), lifecycle_store) {
         let report = timer.into_report();
         let persist = (|| -> homeboy_core::Result<()> {
-            let store = homeboy_core::observation::ObservationStore::open_initialized()?;
+            let store = lifecycle_store.open_observation_initialized()?;
             store.record_phase_spans(
                 run_id,
                 &format!(
