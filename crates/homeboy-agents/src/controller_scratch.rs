@@ -1220,13 +1220,53 @@ fn cleanup_unlocked(
                 stranded.push(position);
             }
         }
-        let reason = cleanup_block_reason_with_observation(
-            observation,
-            resource,
-            &path,
-            now,
-            options.retention_override_seconds,
-        )?;
+        let retry_recovery = resource.lifecycle_state == "interrupted"
+            && resource
+                .terminal_evidence
+                .as_ref()
+                .and_then(|evidence| evidence.pointer("/workspace_recovery/state"))
+                .and_then(serde_json::Value::as_str)
+                != Some("recovered")
+            && cleanup_lifecycle_block_reason(
+                observation,
+                resource,
+                &path,
+                now,
+                options.retention_override_seconds,
+            )?
+            .is_none();
+        if retry_recovery && options.apply {
+            let resource = &mut index.resources[position];
+            let evidence = recover_authoritative_workspace(resource, &recovery.artifact_root);
+            resource
+                .terminal_evidence
+                .get_or_insert_with(|| serde_json::json!({}))["workspace_recovery"] = evidence;
+            // Persist recovery before any removal, under the cleanup index lock.
+            write_index_at_unlocked(index_path, &index)?;
+        }
+        let resource = &index.resources[position];
+        let recovery_pending = retry_recovery
+            && !options.apply
+            && git_safety_path(resource, &path).is_some_and(|workspace| {
+                git::run_git(&workspace, &["ls-files", "--stage"], "git ls-files --stage")
+                    .is_ok_and(|staged| !staged.lines().any(|line| line.starts_with("160000 ")))
+                    && !git_unpushed(&workspace)
+            });
+        let reason = if retry_recovery
+            && git_safety_path(resource, &path).is_some_and(|workspace| git_unpushed(&workspace))
+        {
+            Some("git checkout has dirty or unpushed state".to_string())
+        } else if recovery_pending {
+            None
+        } else {
+            cleanup_block_reason_with_observation(
+                observation,
+                resource,
+                &path,
+                now,
+                options.retention_override_seconds,
+            )?
+        };
         if let Some(reason) = reason {
             // Keep every row for an explicit `--full` inspection. The default
             // response admits rows directly to its item/byte budget so a large
@@ -1263,7 +1303,9 @@ fn cleanup_unlocked(
             size_bytes,
             owner_pid: resource.owner_pid,
             lease_id: resource.lease_id.clone(),
-            reason: if resource.lifecycle_state == "interrupted"
+            reason: if recovery_pending {
+                "recovery will be re-evaluated on apply".to_string()
+            } else if resource.lifecycle_state == "interrupted"
                 && !homeboy_core::process::pid_is_running(resource.owner_pid)
                 && recovery_evidence_is_current(resource)
             {
@@ -1628,8 +1670,8 @@ fn summarize_retention(
 
 /// The lifecycle a lease is effectively in at inspection time, derived from
 /// owner-side records and external evidence instead of persisted. Release and
-/// run finalization remain the only writers of the durable row; cleanup only
-/// reads it.
+/// run finalization own the durable lifecycle; cleanup derives it read-only,
+/// even when apply refreshes workspace recovery evidence.
 ///
 /// * A recorded finalization wins: the lease is in the state its owner wrote,
 ///   aged from that finalization. One exception: a lease that never left
@@ -1667,7 +1709,7 @@ fn effective_lifecycle<'a>(
     (resource.lifecycle_state.as_str(), Some(finalized_at))
 }
 
-fn cleanup_block_reason_with_observation(
+fn cleanup_lifecycle_block_reason(
     observation: &ObservationStore,
     resource: &ControllerScratchResource,
     path: &Path,
@@ -1733,6 +1775,26 @@ fn cleanup_block_reason_with_observation(
         } else {
             "retention has not expired".to_string()
         }));
+    }
+    Ok(None)
+}
+
+fn cleanup_block_reason_with_observation(
+    observation: &ObservationStore,
+    resource: &ControllerScratchResource,
+    path: &Path,
+    now: chrono::DateTime<chrono::Utc>,
+    retention_override_seconds: Option<i64>,
+) -> Result<Option<String>> {
+    let reason = cleanup_lifecycle_block_reason(
+        observation,
+        resource,
+        path,
+        now,
+        retention_override_seconds,
+    )?;
+    if reason.is_some() {
+        return Ok(reason);
     }
     if !resource.ephemeral {
         match git_safety_path(resource, path) {
@@ -1915,6 +1977,10 @@ fn git_dirty_or_unpushed(path: &Path) -> bool {
     {
         return true;
     }
+    git_unpushed(path)
+}
+
+fn git_unpushed(path: &Path) -> bool {
     // A linked attempt worktree is created with `git worktree add --detach`, so
     // it has no upstream *by construction*: `@{upstream}..HEAD` can never
     // resolve, the error branch below answered "unpushed", and every attempt
@@ -3768,7 +3834,15 @@ mod tests {
     /// Recovery preserves source, not ignored build output, independent of component metadata.
     #[test]
     fn recovery_preserves_worktree_without_changing_real_index() {
-        for case in ["ignored", "untracked", "tracked", "submodule"] {
+        for case in [
+            "ignored",
+            "untracked",
+            "tracked",
+            "submodule",
+            "stale_tracked",
+            "stale_submodule",
+            "stale_unpushed",
+        ] {
             let data_root = tempfile::tempdir().expect("data root");
             let allocation = allocate_at(data_root.path(), case, "plan", "task", 1);
             let workspace = allocation.path.join("workspace");
@@ -3814,13 +3888,13 @@ mod tests {
                 "untracked" => {
                     fs::write(workspace.join("new.rs"), b"source\0bytes\n").expect("new source")
                 }
-                "tracked" => {
+                "tracked" | "stale_tracked" | "stale_unpushed" => {
                     fs::write(workspace.join("tracked.txt"), "staged\n").expect("staged change");
                     run_git(&workspace, &["add", "tracked.txt"]);
                     fs::write(workspace.join("tracked.txt"), "worktree\n")
                         .expect("unstaged change");
                 }
-                "submodule" => {
+                "submodule" | "stale_submodule" => {
                     let source = data_root.path().join("submodule");
                     run_git(
                         data_root.path(),
@@ -3844,6 +3918,22 @@ mod tests {
                 }
                 _ => {}
             }
+            if case == "stale_unpushed" {
+                run_git(&workspace, &["add", "tracked.txt"]);
+                run_git(
+                    &workspace,
+                    &[
+                        "-c",
+                        "user.name=Homeboy",
+                        "-c",
+                        "user.email=homeboy@example.test",
+                        "commit",
+                        "-m",
+                        "unpushed work",
+                    ],
+                );
+                fs::write(workspace.join("tracked.txt"), "later work\n").unwrap();
+            }
             assert_eq!(
                 git_dirty_or_unpushed_status_only(&workspace),
                 case != "ignored",
@@ -3861,6 +3951,71 @@ mod tests {
             let mut legacy = serde_json::to_value(&resource).expect("serialize resource");
             legacy["component_id"] = serde_json::json!("retired-component");
             resource = serde_json::from_value(legacy).expect("legacy resource");
+            if case.starts_with("stale_") {
+                let (_observation_root, observation) = observation_store();
+                resource.lifecycle_state = "interrupted".to_string();
+                resource.owner_pid = u32::MAX;
+                resource.finalized_at = Some("2020-01-01T00:00:00Z".to_string());
+                resource.terminal_evidence = Some(serde_json::json!({
+                    "workspace_recovery": {"state": "untracked_changes_retained"},
+                    "preserved": true,
+                }));
+                let mut index = read_index_at(data_root.path());
+                index.resources[0] = resource;
+                write_index_at(data_root.path(), &index);
+                let index_file = data_root.path().join("controller-scratch/resources.json");
+                let before = fs::read(&index_file).unwrap();
+                let options = ControllerScratchCleanupOptions {
+                    apply: false,
+                    limit: 10,
+                    full: true,
+                    retention_override_seconds: None,
+                };
+                let preview = cleanup_at(data_root.path(), &observation, options);
+                assert_eq!(fs::read(&index_file).unwrap(), before);
+                assert!(!data_root.path().join("artifacts").exists());
+                assert_eq!(fs::read(&index_path).unwrap(), original_index);
+                let reclaimable = case == "stale_tracked";
+                assert_eq!(preview.candidate_count, usize::from(reclaimable));
+                if reclaimable {
+                    assert_eq!(
+                        preview.candidates[0].reason,
+                        "recovery will be re-evaluated on apply"
+                    );
+                }
+                let applied = cleanup_at(
+                    data_root.path(),
+                    &observation,
+                    ControllerScratchCleanupOptions {
+                        apply: true,
+                        ..options
+                    },
+                );
+                assert_eq!(applied.applied_count, usize::from(reclaimable));
+                assert_eq!(workspace.exists(), !reclaimable);
+                let index = read_index_at(data_root.path());
+                let evidence = index.resources[0].terminal_evidence.as_ref().unwrap();
+                assert_eq!(evidence["preserved"], true);
+                let recovery = &evidence["workspace_recovery"];
+                if reclaimable {
+                    assert_eq!(recovery["state"], "recovered");
+                    let patch = Path::new(recovery["patch"]["path"].as_str().unwrap());
+                    let patch = fs::read_to_string(patch).unwrap();
+                    assert!(patch.contains("+worktree"));
+                    assert!(!patch.contains("generated"));
+                } else {
+                    assert_eq!(
+                        recovery["state"],
+                        if case == "stale_submodule" {
+                            "submodules_retained"
+                        } else {
+                            "recovered"
+                        }
+                    );
+                    assert_eq!(fs::read(&index_path).unwrap(), original_index);
+                }
+                continue;
+            }
             let recovery = recover_authoritative_workspace_inner(&resource, data_root.path())
                 .expect("recover");
             assert_eq!(fs::read(&index_path).unwrap(), original_index, "{case}");
