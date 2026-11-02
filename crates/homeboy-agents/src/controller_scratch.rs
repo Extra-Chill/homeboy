@@ -38,12 +38,6 @@ pub struct ControllerScratchResource {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_ref: Option<String>,
     pub created_at: String,
-    /// Component whose checkout this scratch holds, when the task named one.
-    /// Its declared rebuildable paths (`cleanup_artifacts` and extension
-    /// `build.cleanup_paths`) are expected build output, not local work, when
-    /// deciding whether the workspace is safe to reclaim.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub component_id: Option<String>,
     /// Commit the scheduler prepared this attempt's checkout at. Recovery
     /// bundles only `<base_sha>..HEAD`, the commits the attempt produced.
     /// Resources without one (provider-registered, or recorded before the
@@ -107,7 +101,6 @@ pub fn allocate_attempt(
         plan_id,
         task_id,
         attempt,
-        None,
         paths::controller_scratch_store()?.join("attempts"),
         index_path()?,
     )
@@ -120,26 +113,12 @@ pub(crate) fn allocate_attempt_at(
     task_id: &str,
     attempt: u32,
 ) -> Result<ControllerScratchAllocation> {
-    allocate_attempt_for_component_at(data_root, run_id, plan_id, task_id, attempt, None)
-}
-
-/// [`allocate_attempt_at`] for a task that names the component it checks out,
-/// so reclaim can tell that component's build output from local work.
-pub(crate) fn allocate_attempt_for_component_at(
-    data_root: &Path,
-    run_id: &str,
-    plan_id: &str,
-    task_id: &str,
-    attempt: u32,
-    component_id: Option<&str>,
-) -> Result<ControllerScratchAllocation> {
     let store = data_root.join("controller-scratch");
     allocate_attempt_at_roots(
         run_id,
         plan_id,
         task_id,
         attempt,
-        component_id,
         store.join("attempts"),
         store.join("resources.json"),
     )
@@ -150,7 +129,6 @@ fn allocate_attempt_at_roots(
     plan_id: &str,
     task_id: &str,
     attempt: u32,
-    component_id: Option<&str>,
     root: PathBuf,
     index_path: PathBuf,
 ) -> Result<ControllerScratchAllocation> {
@@ -215,7 +193,6 @@ fn allocate_attempt_at_roots(
             terminal_evidence: None,
             interrupted_at: None,
             git_worktree: None,
-            component_id: component_id.map(str::to_string),
             base_sha: None,
         });
         write_index_at_unlocked(&index_path, &index)
@@ -999,7 +976,6 @@ fn register_outcome_resources_unlocked(
                 terminal_evidence: None,
                 interrupted_at: None,
                 git_worktree: None,
-                component_id: None,
                 base_sha: None,
             };
             index
@@ -1072,9 +1048,8 @@ fn finalize_run_unlocked(
             }
             let has_recovery_evidence = recovery_evidence_is_current(resource);
             let stale_dirty_workspace = !resource.ephemeral
-                && git_safety_path(resource, Path::new(&resource.path)).is_some_and(|workspace| {
-                    git_dirty_or_unpushed(&workspace, &rebuildable_paths(resource))
-                });
+                && git_safety_path(resource, Path::new(&resource.path))
+                    .is_some_and(|workspace| git_dirty_or_unpushed(&workspace));
             let needs_recovery = !has_recovery_evidence
                 && (matches!(
                     resource.lifecycle_state.as_str(),
@@ -1764,7 +1739,7 @@ fn cleanup_block_reason_with_observation(
             Some(path) if recovered_workspace_matches(resource, &path) => {}
             Some(path) if terminal_evidence_attempt_workspace_matches(resource, &path) => {}
             Some(path) if promoted_attempt_workspace_matches(resource, &path) => {}
-            Some(path) if git_dirty_or_unpushed(&path, &rebuildable_paths(resource)) => {
+            Some(path) if git_dirty_or_unpushed(&path) => {
                 return Ok(Some("git checkout has dirty or unpushed state".to_string()));
             }
             Some(_) => {}
@@ -1924,11 +1899,8 @@ fn cleanup_command(options: ControllerScratchCleanupOptions) -> String {
     command
 }
 
-fn git_dirty_or_unpushed(path: &Path, rebuildable: &[String]) -> bool {
-    // Include ignored files. They are still local source state and therefore
-    // must be retained unless the terminal recovery path has preserved it,
-    // except the component's declared rebuildable output (see
-    // `rebuildable_paths`), which a build recreates.
+fn git_dirty_or_unpushed(path: &Path) -> bool {
+    // Gitignore declares disposable output; only non-ignored work needs preservation.
     let status = git::run_git(
         path,
         &["status", "--porcelain=v1", "--ignored"],
@@ -1939,7 +1911,7 @@ fn git_dirty_or_unpushed(path: &Path, rebuildable: &[String]) -> bool {
     };
     if status
         .lines()
-        .any(|line| !line.trim().is_empty() && !is_rebuildable_status_line(line, rebuildable))
+        .any(|line| !line.trim().is_empty() && !line.starts_with("!! "))
     {
         return true;
     }
@@ -2122,38 +2094,47 @@ fn recover_authoritative_workspace(
     })
 }
 
-/// Paths the scratch's component declares as rebuildable build output
-/// (`cleanup_artifacts` plus each extension's `build.cleanup_paths`, e.g.
-/// `node_modules`, `vendor`, `target`). Untracked or ignored files under them
-/// are expected churn from installing or building the checkout, not local
-/// work, so they neither block recovery nor make the workspace "dirty".
-/// Without a recorded component (older index rows) or a loadable one, this
-/// is empty and every untracked or ignored file still fails closed
-/// (Extra-Chill/homeboy#15404).
-fn rebuildable_paths(resource: &ControllerScratchResource) -> Vec<String> {
-    let Some(component_id) = resource.component_id.as_deref() else {
-        return Vec::new();
-    };
-    homeboy_core::component::load(component_id)
-        .and_then(|component| homeboy_core::component::declared_cleanup_artifact_paths(&component))
-        .unwrap_or_default()
-}
-
-/// Whether one `git status --porcelain=v1` line is an untracked (`??`) or
-/// ignored (`!!`) entry inside a declared rebuildable path. Tracked changes
-/// never qualify: they are always real work.
-fn is_rebuildable_status_line(line: &str, rebuildable: &[String]) -> bool {
-    let Some(entry) = line
-        .strip_prefix("?? ")
-        .or_else(|| line.strip_prefix("!! "))
-    else {
-        return false;
-    };
-    let entry = entry.trim_matches('"').trim_end_matches('/');
-    rebuildable.iter().any(|declared| {
-        let declared = declared.trim_end_matches('/');
-        !declared.is_empty() && (entry == declared || entry.starts_with(&format!("{declared}/")))
-    })
+/// Capture the full non-ignored worktree on top of HEAD without changing the
+/// real index (including any staged/unstaged split). The temporary directory
+/// removes the index and any lock file on both success and failure.
+fn recovery_patch(workspace: &Path) -> Result<Vec<u8>> {
+    let temporary = tempfile::tempdir().map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("create recovery index directory".to_string()),
+        )
+    })?;
+    let env = vec![(
+        "GIT_INDEX_FILE".to_string(),
+        temporary.path().join("index").display().to_string(),
+    )];
+    git::run_git_with_env(
+        workspace,
+        &["read-tree", "HEAD"],
+        "initialize recovery index",
+        &env,
+    )?;
+    git::run_git_with_env(
+        workspace,
+        &["add", "-A", "--", "."],
+        "stage recovery worktree",
+        &env,
+    )?;
+    git::run_git_bytes_with_env(
+        workspace,
+        &[
+            "diff",
+            "--cached",
+            "--binary",
+            "--full-index",
+            "--find-renames",
+            "HEAD",
+            "--",
+            ".",
+        ],
+        "capture recovery patch",
+        &env,
+    )
 }
 
 fn recover_authoritative_workspace_inner(
@@ -2173,21 +2154,7 @@ fn recover_authoritative_workspace_inner(
             },
         }));
     };
-    let rebuildable = rebuildable_paths(resource);
-    let status = git::run_git(
-        &workspace,
-        &["status", "--porcelain=v1", "--ignored"],
-        "git status",
-    )?;
-    if status.lines().any(|line| {
-        (line.starts_with("??") || line.starts_with("!!"))
-            && !is_rebuildable_status_line(line, &rebuildable)
-    }) {
-        return Ok(serde_json::json!({
-            "state": "untracked_changes_retained",
-            "workspace": workspace,
-        }));
-    }
+    let status = git::run_git(&workspace, &["status", "--porcelain=v1"], "git status")?;
     let staged = git::run_git(&workspace, &["ls-files", "--stage"], "git ls-files --stage")?;
     if staged.lines().any(|line| line.starts_with("160000 ")) {
         return Ok(serde_json::json!({
@@ -2197,19 +2164,7 @@ fn recover_authoritative_workspace_inner(
     }
     let head = git::run_git(&workspace, &["rev-parse", "HEAD"], "git rev-parse HEAD")?;
     let head = head.trim();
-    let patch = git::run_git(
-        &workspace,
-        &[
-            "diff",
-            "--binary",
-            "--full-index",
-            "--find-renames",
-            "HEAD",
-            "--",
-            ".",
-        ],
-        "git diff HEAD",
-    )?;
+    let patch = recovery_patch(&workspace)?;
     let recovery_root = artifact_root
         .join(RECOVERY_DIR)
         .join(paths::sanitize_path_segment(&resource.run_id))
@@ -2221,7 +2176,7 @@ fn recover_authoritative_workspace_inner(
         )
     })?;
     let patch_path = recovery_root.join("tracked-changes.patch");
-    fs::write(&patch_path, patch.as_bytes()).map_err(|error| {
+    fs::write(&patch_path, &patch).map_err(|error| {
         Error::internal_io(
             error.to_string(),
             Some(format!("write {}", patch_path.display())),
@@ -2234,7 +2189,7 @@ fn recover_authoritative_workspace_inner(
         "status": status,
         "patch": {
             "path": patch_path,
-            "sha256": sha256(patch.as_bytes()),
+            "sha256": sha256(&patch),
         },
     });
     if let Some(base) = resource.base_sha.as_deref() {
@@ -2324,33 +2279,15 @@ fn recovered_workspace_matches(resource: &ControllerScratchResource, workspace: 
     };
     let expected_status = recovery.get("status").and_then(serde_json::Value::as_str);
     let current_head = git::run_git(workspace, &["rev-parse", "HEAD"], "git rev-parse HEAD").ok();
-    let current_status = git::run_git(
-        workspace,
-        &["status", "--porcelain=v1", "--ignored"],
-        "git status",
-    )
-    .ok();
-    let current_patch = git::run_git(
-        workspace,
-        &[
-            "diff",
-            "--binary",
-            "--full-index",
-            "--find-renames",
-            "HEAD",
-            "--",
-            ".",
-        ],
-        "git diff HEAD",
-    )
-    .ok();
+    let current_status = git::run_git(workspace, &["status", "--porcelain=v1"], "git status").ok();
+    let current_patch = recovery_patch(workspace).ok();
 
     commits_preserved
         && Some(expected_head) == current_head.as_deref().map(str::trim)
         && expected_status == current_status.as_deref()
         && current_patch
             .as_deref()
-            .is_some_and(|patch| sha256(patch.as_bytes()) == patch_sha256)
+            .is_some_and(|patch| sha256(patch) == patch_sha256)
         && file_sha256(Path::new(patch_path)).ok().as_deref() == Some(patch_sha256)
 }
 
@@ -2656,7 +2593,6 @@ mod tests {
             plan_id,
             task_id,
             attempt,
-            None,
             data_root.join("controller-scratch/attempts"),
             data_root.join("controller-scratch/resources.json"),
         )
@@ -2665,7 +2601,7 @@ mod tests {
 
     /// The working-tree half of `git_dirty_or_unpushed`, without the
     /// upstream/reachability half that a bare test repository cannot answer.
-    fn git_dirty_or_unpushed_status_only(path: &Path, rebuildable: &[String]) -> bool {
+    fn git_dirty_or_unpushed_status_only(path: &Path) -> bool {
         let status = git::run_git(
             path,
             &["status", "--porcelain=v1", "--ignored"],
@@ -2674,7 +2610,7 @@ mod tests {
         .expect("status");
         status
             .lines()
-            .any(|line| !line.trim().is_empty() && !is_rebuildable_status_line(line, rebuildable))
+            .any(|line| !line.trim().is_empty() && !line.starts_with("!! "))
     }
 
     fn read_index_at(data_root: &Path) -> ControllerScratchIndex {
@@ -2755,7 +2691,6 @@ mod tests {
             terminal_evidence: None,
             interrupted_at: None,
             git_worktree: None,
-            component_id: None,
             base_sha: None,
         }
     }
@@ -3830,170 +3765,155 @@ mod tests {
         assert!(pinned.exists());
     }
 
+    /// Recovery preserves source, not ignored build output, independent of component metadata.
     #[test]
-    fn rebuildable_status_lines_match_only_declared_untracked_or_ignored_paths() {
-        let declared = vec!["node_modules".to_string(), "vendor/".to_string()];
-        assert!(is_rebuildable_status_line("!! node_modules/", &declared));
-        assert!(is_rebuildable_status_line(
-            "?? node_modules/left-pad/index.js",
-            &declared
-        ));
-        assert!(is_rebuildable_status_line(
-            "!! vendor/autoload.php",
-            &declared
-        ));
-        // Look-alike names, other paths, and tracked changes are real work.
-        assert!(!is_rebuildable_status_line(
-            "!! node_modules_backup/",
-            &declared
-        ));
-        assert!(!is_rebuildable_status_line("?? src/new.rs", &declared));
-        assert!(!is_rebuildable_status_line(" M node_modules/x", &declared));
-        assert!(!is_rebuildable_status_line("!! node_modules/", &[]));
-    }
-
-    /// Extra-Chill/homeboy#15404: a cook that installed its component's
-    /// dependencies left an ignored `node_modules`, so recovery refused with
-    /// `untracked_changes_retained` and the attempt was kept forever. With the
-    /// component's declared rebuildable paths, that output no longer blocks
-    /// recovery, while anything else still does.
-    #[test]
-    fn declared_rebuildable_output_does_not_block_recovery_but_other_files_do() {
-        let data_root = tempfile::tempdir().expect("data root");
-        let allocation = allocate_at(data_root.path(), "built-run", "scheduler-plan", "task", 1);
-        let workspace = allocation.path.join("workspace");
-        fs::create_dir(&workspace).expect("workspace");
-        run_git(&workspace, &["init", "-b", "main"]);
-        fs::write(workspace.join(".gitignore"), "node_modules\n").expect("ignore rule");
-        fs::write(workspace.join("tracked.txt"), "base\n").expect("base file");
-        run_git(&workspace, &["add", "."]);
-        run_git(
-            &workspace,
-            &[
-                "-c",
-                "user.name=Homeboy",
-                "-c",
-                "user.email=homeboy@example.test",
-                "commit",
-                "-m",
-                "base",
-            ],
-        );
-        fs::create_dir_all(workspace.join("node_modules/left-pad")).expect("installed deps");
-        fs::write(workspace.join("node_modules/left-pad/index.js"), "x").expect("dep file");
-
-        let resource = read_index_at(data_root.path())
-            .resources
-            .into_iter()
-            .find(|resource| resource.lease_id == allocation.lease_id)
-            .expect("resource");
-        let declared = vec!["node_modules".to_string()];
-
-        let status = git::run_git(
-            &workspace,
-            &["status", "--porcelain=v1", "--ignored"],
-            "git status",
-        )
-        .expect("status");
-        assert!(
-            status
-                .lines()
-                .any(|line| line.starts_with("!! node_modules")),
-            "{status}"
-        );
-        assert!(status
-            .lines()
-            .filter(|line| !line.trim().is_empty())
-            .all(|line| is_rebuildable_status_line(line, &declared)));
-        assert!(!git_dirty_or_unpushed_status_only(&workspace, &declared));
-        // Without the declaration the same workspace stays retained.
-        assert!(git_dirty_or_unpushed_status_only(&workspace, &[]));
-        let undeclared = recover_authoritative_workspace_inner(&resource, data_root.path())
-            .expect("recover without component");
-        assert_eq!(undeclared["state"], "untracked_changes_retained");
-
-        // A real untracked source file is still retained, declaration or not.
-        fs::write(workspace.join("notes.md"), "local work").expect("local file");
-        assert!(git_dirty_or_unpushed_status_only(&workspace, &declared));
-    }
-
-    #[test]
-    fn ignored_untracked_workspace_state_fails_closed_during_recovery() {
-        let data_root = tempfile::tempdir().expect("data root");
-        let allocation = allocate_at(data_root.path(), "ignored-run", "scheduler-plan", "task", 1);
-        let workspace = allocation.path.join("workspace");
-        fs::create_dir(&workspace).expect("workspace");
-        run_git(&workspace, &["init", "-b", "main"]);
-        fs::write(workspace.join(".gitignore"), "local-source\n").expect("ignore rule");
-        fs::write(workspace.join("tracked.txt"), "base\n").expect("base file");
-        run_git(&workspace, &["add", "."]);
-        run_git(
-            &workspace,
-            &[
-                "-c",
-                "user.name=Homeboy",
-                "-c",
-                "user.email=homeboy@example.test",
-                "commit",
-                "-m",
-                "base",
-            ],
-        );
-        fs::write(workspace.join("local-source"), "preserve\n").expect("local source");
-
-        let resource = read_index_at(data_root.path())
-            .resources
-            .into_iter()
-            .find(|resource| resource.lease_id == allocation.lease_id)
-            .expect("resource");
-        let recovery =
-            recover_authoritative_workspace_inner(&resource, data_root.path()).expect("recover");
-
-        assert_eq!(recovery["state"], "untracked_changes_retained");
-    }
-
-    #[test]
-    fn submodule_workspaces_remain_retained() {
-        let root = tempfile::tempdir().expect("root");
-        let artifact_root = tempfile::tempdir().expect("artifact root");
-        let submodule = root.path().join("submodule");
-        fs::create_dir(&submodule).expect("submodule source");
-        run_git(&submodule, &["init", "-b", "main"]);
-        fs::write(submodule.join("source.txt"), "source\n").expect("submodule source file");
-        run_git(&submodule, &["add", "."]);
-        run_git(
-            &submodule,
-            &[
-                "-c",
-                "user.name=Homeboy",
-                "-c",
-                "user.email=homeboy@example.test",
-                "commit",
-                "-m",
-                "submodule",
-            ],
-        );
-        let scratch = root.path().join("scratch");
-        fs::create_dir(&scratch).expect("scratch");
-        run_git(&scratch, &["init", "-b", "main"]);
-        run_git(
-            &scratch,
-            &[
-                "-c",
-                "protocol.file.allow=always",
-                "submodule",
-                "add",
-                submodule.to_str().expect("submodule path"),
-                "vendor/submodule",
-            ],
-        );
-        let mut resource = resource(&scratch, root.path());
-        resource.plan_id.clear();
-
-        let recovery = recover_authoritative_workspace_inner(&resource, artifact_root.path())
-            .expect("inspect workspace");
-
-        assert_eq!(recovery["state"], "submodules_retained");
+    fn recovery_preserves_worktree_without_changing_real_index() {
+        for case in ["ignored", "untracked", "tracked", "submodule"] {
+            let data_root = tempfile::tempdir().expect("data root");
+            let allocation = allocate_at(data_root.path(), case, "plan", "task", 1);
+            let workspace = allocation.path.join("workspace");
+            fs::create_dir(&workspace).expect("workspace");
+            run_git(&workspace, &["init", "-b", "main"]);
+            fs::write(workspace.join(".gitignore"), "build/\n").expect("ignore rule");
+            fs::write(workspace.join("tracked.txt"), "base\n").expect("base file");
+            run_git(&workspace, &["add", "."]);
+            run_git(
+                &workspace,
+                &[
+                    "-c",
+                    "user.name=Homeboy",
+                    "-c",
+                    "user.email=homeboy@example.test",
+                    "commit",
+                    "-m",
+                    "base",
+                ],
+            );
+            let head = git::run_git(&workspace, &["rev-parse", "HEAD"], "head").expect("head");
+            // Give the dirty/unpushed guard a real upstream with no local commits.
+            run_git(
+                &workspace,
+                &["update-ref", "refs/remotes/origin/main", head.trim()],
+            );
+            run_git(&workspace, &["config", "remote.origin.url", "."]);
+            run_git(
+                &workspace,
+                &[
+                    "config",
+                    "remote.origin.fetch",
+                    "+refs/heads/*:refs/remotes/origin/*",
+                ],
+            );
+            run_git(
+                &workspace,
+                &["branch", "--set-upstream-to=origin/main", "main"],
+            );
+            fs::create_dir(workspace.join("build")).expect("build directory");
+            fs::write(workspace.join("build/output"), "generated\n").expect("build output");
+            match case {
+                "untracked" => {
+                    fs::write(workspace.join("new.rs"), b"source\0bytes\n").expect("new source")
+                }
+                "tracked" => {
+                    fs::write(workspace.join("tracked.txt"), "staged\n").expect("staged change");
+                    run_git(&workspace, &["add", "tracked.txt"]);
+                    fs::write(workspace.join("tracked.txt"), "worktree\n")
+                        .expect("unstaged change");
+                }
+                "submodule" => {
+                    let source = data_root.path().join("submodule");
+                    run_git(
+                        data_root.path(),
+                        &[
+                            "clone",
+                            workspace.to_str().unwrap(),
+                            source.to_str().unwrap(),
+                        ],
+                    );
+                    run_git(
+                        &workspace,
+                        &[
+                            "-c",
+                            "protocol.file.allow=always",
+                            "submodule",
+                            "add",
+                            source.to_str().unwrap(),
+                            "vendor/submodule",
+                        ],
+                    );
+                }
+                _ => {}
+            }
+            assert_eq!(
+                git_dirty_or_unpushed_status_only(&workspace),
+                case != "ignored",
+                "{case}"
+            );
+            assert_eq!(
+                git_dirty_or_unpushed(&workspace),
+                case != "ignored",
+                "{case}"
+            );
+            let index_path = workspace.join(".git/index");
+            let original_index = fs::read(&index_path).expect("real index");
+            let mut resource = read_index_at(data_root.path()).resources.remove(0);
+            // Old index rows may still carry the retired field; serde ignores it.
+            let mut legacy = serde_json::to_value(&resource).expect("serialize resource");
+            legacy["component_id"] = serde_json::json!("retired-component");
+            resource = serde_json::from_value(legacy).expect("legacy resource");
+            let recovery = recover_authoritative_workspace_inner(&resource, data_root.path())
+                .expect("recover");
+            assert_eq!(fs::read(&index_path).unwrap(), original_index, "{case}");
+            if case == "submodule" {
+                assert_eq!(recovery["state"], "submodules_retained");
+                continue;
+            }
+            assert_eq!(recovery["state"], "recovered", "{case}");
+            resource.terminal_evidence = Some(serde_json::json!({"workspace_recovery": recovery}));
+            assert!(
+                recovered_workspace_matches(&resource, &workspace),
+                "{case}: reclaimable"
+            );
+            fs::remove_dir_all(workspace.join("build")).expect("remove disposable output");
+            assert!(
+                recovered_workspace_matches(&resource, &workspace),
+                "ignored changes stay reclaimable"
+            );
+            let recovery = &resource.terminal_evidence.as_ref().unwrap()["workspace_recovery"];
+            let patch = Path::new(recovery["patch"]["path"].as_str().unwrap());
+            let restored = data_root.path().join("restored");
+            run_git(
+                data_root.path(),
+                &[
+                    "clone",
+                    workspace.to_str().unwrap(),
+                    restored.to_str().unwrap(),
+                ],
+            );
+            run_git(&restored, &["checkout", "--detach", head.trim()]);
+            if case == "ignored" {
+                assert!(fs::read(patch).unwrap().is_empty());
+            } else {
+                run_git(&restored, &["apply", patch.to_str().unwrap()]);
+                let file = if case == "untracked" {
+                    "new.rs"
+                } else {
+                    "tracked.txt"
+                };
+                assert_eq!(
+                    fs::read(restored.join(file)).unwrap(),
+                    fs::read(workspace.join(file)).unwrap(),
+                    "{case}"
+                );
+                fs::write(workspace.join(file), "later work\n").expect("later edit");
+                assert!(
+                    !recovered_workspace_matches(&resource, &workspace),
+                    "new work retained"
+                );
+            }
+            assert!(!restored.join("build").exists());
+            assert_eq!(fs::read(&index_path).unwrap(), original_index, "{case}");
+        }
     }
 
     #[test]
