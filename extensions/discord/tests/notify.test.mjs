@@ -28,6 +28,7 @@ await testMalformedRouteBeforeNetwork();
 await testCrossModeRouteBeforeNetwork();
 await testAuthFailureClassification();
 await testTruncation();
+await testRenderingFidelity();
 await testRedactionAndDryRun();
 await testTransportFlagIsAccepted();
 await testConfigurationFailuresAreTerminalRejections();
@@ -528,6 +529,70 @@ async function testTruncation() {
   });
 }
 
+async function testRenderingFidelity() {
+  const runId = 'agent-task-render-test';
+  const schema = 'homeboy/notification-payload/v1';
+  const payload = {
+    schema,
+    kind: 'completed',
+    subject: { kind: 'agent_task_cook', id: runId, component: 'homeboy', attempt: 1 },
+    facts: [{ label: 'Gates', value: 'passed' }, { label: 'Attempts', value: '1' }],
+    links: [{ label: 'Pull request', url: 'https://github.com/Extra-Chill/homeboy/pull/123' }],
+    actions: [{ label: 'Details', command: `homeboy agent-task status ${runId}`, kind: 'show' }],
+    attachments: [{ id: 'ignored', kind: 'artifact', uri: 'file:///tmp/proof', fetch_command: 'ignored' }],
+  };
+  // Real LF and CRLF input: do not mirror rendering with escaped backslash-n.
+  const body = '  Gates:   passed\r\n\n Attempts:  1\n  Fallback only  ';
+  const structuredLines = [
+    'Gates: passed · Attempts: 1',
+    'Pull request: https://github.com/Extra-Chill/homeboy/pull/123',
+    `Details: \`homeboy agent-task status ${runId}\``,
+  ];
+  const fallbackLines = [`Run: ${runId}`, 'Gates: passed', 'Attempts: 1', 'Fallback only'];
+  const cases = [
+    { name: 'payload', env: { HOMEBOY_NOTIFY_PAYLOAD_SCHEMA: schema, HOMEBOY_NOTIFY_PAYLOAD: JSON.stringify(payload) }, lines: structuredLines },
+    { name: 'no payload', env: {}, lines: fallbackLines },
+    { name: 'unknown schema', env: { HOMEBOY_NOTIFY_PAYLOAD_SCHEMA: 'homeboy/notification-payload/v2', HOMEBOY_NOTIFY_PAYLOAD: JSON.stringify(payload) }, lines: fallbackLines },
+    { name: 'missing schema', env: { HOMEBOY_NOTIFY_PAYLOAD: JSON.stringify(payload) }, lines: fallbackLines },
+    { name: 'invalid JSON', env: { HOMEBOY_NOTIFY_PAYLOAD_SCHEMA: schema, HOMEBOY_NOTIFY_PAYLOAD: '{' }, lines: fallbackLines },
+    { name: 'malformed fields', env: { HOMEBOY_NOTIFY_PAYLOAD_SCHEMA: schema, HOMEBOY_NOTIFY_PAYLOAD: JSON.stringify({ actions: [{}] }) }, lines: fallbackLines },
+    { name: 'payload without actions', env: { HOMEBOY_NOTIFY_PAYLOAD_SCHEMA: schema, HOMEBOY_NOTIFY_PAYLOAD: JSON.stringify({ ...payload, actions: [] }) }, lines: [`Run: ${runId}`, ...structuredLines.slice(0, 2)] },
+  ];
+  for (const { name, env, lines } of cases) {
+    await withServer(async ({ baseUrl, requests }) => {
+      await notify(
+        { DISCORD_BOT_TOKEN: secretToken, DISCORD_API_BASE_URL: `${baseUrl}/api/v10`, ...env },
+        { route: threadRoute(threadOneId), runId, status: 'review_ready', body },
+      );
+      const content = requests[0].body.content;
+      assert.ok(content.includes(String.fromCharCode(10)), name);
+      assert.deepEqual(content.split(String.fromCharCode(10)), ['✅ **homeboy run pass**', ...lines], name);
+      assert.doesNotMatch(content, /\[object Object\]|\\\\n/, name);
+      assert.equal(content.split(runId).length - 1, 1, name);
+      assert.ok(content.length <= 2000, name);
+    });
+  }
+  for (const [status, marker] of [
+    ['succeeded', '✅'], ['passed', '✅'], ['completed', '✅'], ['cancelled', '⏹'],
+    ['failed', '⚠️'], ['not_completed', '⚠️'], ['unsucceeded', '⚠️'],
+  ]) {
+    await withServer(async ({ baseUrl, requests }) => {
+      await notify({ DISCORD_WEBHOOK_URL: `${baseUrl}${secretWebhook}` }, { status, body });
+      assert.ok(requests[0].body.content.startsWith(`${marker} **`), status);
+    });
+  }
+  await withServer(async ({ baseUrl, requests }) => {
+    const result = await notify({
+      DISCORD_WEBHOOK_URL: `${baseUrl}${secretWebhook}`,
+      HOMEBOY_NOTIFY_PAYLOAD_SCHEMA: schema,
+      HOMEBOY_NOTIFY_PAYLOAD: JSON.stringify({ ...payload, facts: [{ label: 'Detail', value: '😀'.repeat(2000) }] }),
+    }, { body });
+    assert.ok(requests[0].body.content.length <= 2000);
+    assert.equal(result.delivery.truncated, true);
+    assert.ok(requests[0].body.content.endsWith('...'));
+  });
+}
+
 async function testRedactionAndDryRun() {
   for (const env of [
     { DISCORD_BOT_TOKEN: secretToken, DISCORD_OPERATIONS_CHANNEL_ID: channelId },
@@ -576,7 +641,7 @@ function notifyRaw(env, overrides = {}, extraArgs = []) {
   return new Promise((resolve, reject) => {
     const childEnv = { ...process.env };
     for (const name of Object.keys(childEnv)) {
-      if (/^(DISCORD_|HOMEBOY_SESSION_|KIMAKI_|ROADIE_)/.test(name)) delete childEnv[name];
+      if (/^(DISCORD_|HOMEBOY_SESSION_|HOMEBOY_NOTIFY_|KIMAKI_|ROADIE_)/.test(name)) delete childEnv[name];
     }
     const child = spawn(process.execPath, [helper, ...args], { env: { ...childEnv, ...env } });
     let stdout = '';
