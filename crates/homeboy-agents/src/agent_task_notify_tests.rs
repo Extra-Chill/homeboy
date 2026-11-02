@@ -79,7 +79,7 @@ fn terminal_outcomes_lead_with_work_and_offer_only_useful_actions() {
             (
                 "succeeded",
                 0,
-                "✅ homeboy#42: Fix notifications",
+                "homeboy#42: Fix notifications",
                 vec!["Closes", "Model", "Gates"],
                 vec!["review", "details"],
             ),
@@ -126,6 +126,12 @@ fn terminal_outcomes_lead_with_work_and_offer_only_useful_actions() {
             }
             let payload = terminal_payload(&report, Some("homeboy"), code);
             assert_eq!(payload.title.as_deref(), Some(title));
+            let expected_kind = match status {
+                "succeeded" => NotifyEventKind::Completed,
+                "cancelled" => NotifyEventKind::Cancelled,
+                _ => NotifyEventKind::NeedsAttention,
+            };
+            assert_eq!(payload.kind, expected_kind, "{status}");
             assert_eq!(
                 payload.subject.as_ref().unwrap().component.as_deref(),
                 Some("homeboy")
@@ -156,7 +162,10 @@ fn terminal_outcomes_lead_with_work_and_offer_only_useful_actions() {
             assert!(body.starts_with(title), "{body}");
             assert!(!body.contains("Batch:"), "{body}");
             assert!(!body.contains("Attempt:"), "{body}");
-            assert_eq!(body.matches("cook-abc").count(), 1, "{body}");
+            // Commands are forwarded verbatim; the cook id appears only inside them.
+            for line in body.lines().filter(|line| !line.starts_with("Next — ")) {
+                assert!(!line.contains("cook-abc"), "{body}");
+            }
             assert!(!body.contains("--watch"), "{body}");
             assert!(!body.contains("run-1"), "{body}");
             if success {
@@ -177,6 +186,21 @@ fn terminal_outcomes_lead_with_work_and_offer_only_useful_actions() {
             }
         }
     });
+}
+
+#[test]
+fn non_recoverable_failure_never_offers_recover() {
+    let mut failed = report("durable_failure", None);
+    let mut context = failure_context();
+    context.recovery_legal = false;
+    context.recovery_reason = "baseline has no immutable candidate; run a new Cook".to_string();
+    failed.failure_context = Some(context);
+    let payload = terminal_payload(&failed, None, 1);
+    assert!(payload
+        .actions
+        .iter()
+        .all(|action| !action.command.contains("agent-task recover")));
+    assert!(payload.render_body().contains("run a new Cook"));
 }
 
 #[test]

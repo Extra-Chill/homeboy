@@ -390,14 +390,16 @@ fn terminal_payload(
 ) -> NotifyPayload {
     let metadata = terminal_work::metadata(report, component);
     let cancelled = metadata.cancelled;
-    let kind = if cancelled || (exit_code == 0 && report.completed_successfully()) {
+    let kind = if cancelled {
+        NotifyEventKind::Cancelled
+    } else if exit_code == 0 && report.completed_successfully() {
         NotifyEventKind::Completed
     } else {
         NotifyEventKind::NeedsAttention
     };
     let attempts = u32::try_from(report.attempts.len()).unwrap_or(u32::MAX);
 
-    let mut subject = cook_subject(&report.cook_id, "", Some(&metadata.component));
+    let mut subject = cook_subject(&report.cook_id, "", metadata.component.as_deref());
     if attempts > 1 || (kind == NotifyEventKind::NeedsAttention && attempts > 0) {
         subject.attempt = Some(attempts);
     }
@@ -501,7 +503,7 @@ fn terminal_payload(
         let publication = crate::agent_task_service::publication_receipt(finalization);
         if publication.published {
             if let Some(url) = publication.pr_url.as_deref() {
-                if !cancelled && kind == NotifyEventKind::Completed {
+                if kind == NotifyEventKind::Completed {
                     payload =
                         payload.with_action(NotifyAction::new("review", url).with_kind("review"));
                 }
@@ -514,7 +516,7 @@ fn terminal_payload(
     if let Some(context) = report
         .failure_context
         .as_ref()
-        .filter(|_| !cancelled && kind == NotifyEventKind::NeedsAttention)
+        .filter(|_| kind == NotifyEventKind::NeedsAttention)
     {
         payload = payload
             .with_fact("Phase", context.phase.clone())
@@ -523,6 +525,11 @@ fn terminal_payload(
         let mut forwarded = HashSet::new();
         for action in context.next_actions.iter().chain(&context.legal_actions) {
             if matches!(action.action.as_str(), "status" | "watch") {
+                continue;
+            }
+            // A non-recoverable state names its own next step in `Recovery`;
+            // offering `recover` there only invites a command that must fail.
+            if !context.recovery_legal && action.command.contains("agent-task recover") {
                 continue;
             }
             if !forwarded.insert((action.action.as_str(), action.command.as_str())) {
@@ -629,7 +636,7 @@ fn cook_terminal_with(
             return;
         }
     }
-    let status = if terminal_work::metadata(report, component).cancelled {
+    let status = if payload.kind == NotifyEventKind::Cancelled {
         "cancelled"
     } else {
         &report.status

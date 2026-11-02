@@ -64,6 +64,8 @@ pub enum NotifyEventKind {
     Completed,
     /// Terminal, but a human decision is required before anything advances.
     NeedsAttention,
+    /// Terminal because an operator stopped it; nothing needs repair.
+    Cancelled,
 }
 
 impl NotifyEventKind {
@@ -74,12 +76,16 @@ impl NotifyEventKind {
             Self::Progress => "progress",
             Self::Completed => "completed",
             Self::NeedsAttention => "needs_attention",
+            Self::Cancelled => "cancelled",
         }
     }
 
     /// Whether the subject will not transition further on its own.
     pub fn is_terminal(&self) -> bool {
-        matches!(self, Self::Completed | Self::NeedsAttention)
+        matches!(
+            self,
+            Self::Completed | Self::NeedsAttention | Self::Cancelled
+        )
     }
 }
 
@@ -400,33 +406,8 @@ impl NotifyPayload {
         for link in &self.links {
             lines.push(format!("{}: {}", link.label, link.url));
         }
-        let shared_id = self
-            .subject
-            .as_ref()
-            .filter(|subject| {
-                self.title.is_some()
-                    && self
-                        .actions
-                        .iter()
-                        .filter(|action| action.command.contains(&subject.id))
-                        .count()
-                        > 1
-            })
-            .map(|subject| subject.id.as_str());
-        if let Some(id) = shared_id {
-            lines.push(format!("Details: cook={id}"));
-        }
         for action in &self.actions {
-            let command = if let Some(id) = shared_id {
-                action.command.replace(id, "\"$cook\"")
-            } else {
-                action.command.clone()
-            };
-            if action.label == "details" {
-                lines.push(format!("Details: {command}"));
-            } else {
-                lines.push(format!("Next — {}: {command}", action.label));
-            }
+            lines.push(format!("Next — {}: {}", action.label, action.command));
         }
         if !self.attachments.is_empty() {
             lines.push(format!("Attachments: {}", self.attachments.len()));
@@ -515,6 +496,21 @@ mod tests {
             "pull request",
             "https://example.test/pull/1",
         ))
+    }
+
+    #[test]
+    fn rendered_body_carries_every_structured_member() {
+        let body = cook_payload().render_body();
+        assert!(body.contains("Component: homeboy"), "{body}");
+        assert!(body.contains("Attempt: 2"), "{body}");
+        assert!(body.contains("Phase: promotion"), "{body}");
+        assert!(body.contains("Status: failed"), "{body}");
+        assert!(body.contains("Stop reason: gate_failed"), "{body}");
+        assert!(
+            body.contains("Next — diagnose: homeboy agent-task diagnose cook-abc"),
+            "{body}"
+        );
+        assert!(body.contains("https://example.test/pull/1"), "{body}");
     }
 
     #[test]
@@ -613,6 +609,7 @@ mod tests {
     fn event_kind_terminality_is_explicit() {
         assert!(NotifyEventKind::Completed.is_terminal());
         assert!(NotifyEventKind::NeedsAttention.is_terminal());
+        assert!(NotifyEventKind::Cancelled.is_terminal());
         assert!(!NotifyEventKind::Queued.is_terminal());
         assert!(!NotifyEventKind::Started.is_terminal());
         assert!(!NotifyEventKind::Progress.is_terminal());
