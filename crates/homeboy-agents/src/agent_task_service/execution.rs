@@ -3466,9 +3466,10 @@ mod tests {
             error.details["source_placement"]["runner_id"],
             "homeboy-lab"
         );
-        assert!(error.hints.iter().any(|hint| hint
-            .message
-            .contains("--placement local agent-task recover lab-run")));
+        assert!(error
+            .hints
+            .iter()
+            .any(|hint| hint.message.contains("--placement lab")));
     }
 
     #[test]
