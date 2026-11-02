@@ -341,17 +341,24 @@ fn acquire_managed_cargo_target_for_compatibility_in(
     _source_path: &Path,
     compatibility: &CargoTargetCompatibility,
 ) -> Result<ManagedCargoTarget> {
+    acquire_managed_cargo_target_for_compatibility_in_until(
+        root,
+        owner,
+        _source_path,
+        compatibility,
+        Instant::now() + CARGO_TARGET_LEASE_WAIT,
+    )
+}
+
+fn acquire_managed_cargo_target_for_compatibility_in_until(
+    root: &Path,
+    owner: &str,
+    _source_path: &Path,
+    compatibility: &CargoTargetCompatibility,
+    seed_deadline: Instant,
+) -> Result<ManagedCargoTarget> {
     let base_owner = format!("{owner}:{}", compatibility.identity());
     let base_dir = shared_store_dir(&root, &base_owner);
-    // Touch the base store's liveness so it isn't reclaimed as unused while
-    // it exists only to seed worktree-private stores, then release it
-    // immediately: nothing compiles directly into it any more.
-    drop(acquire_shared_cargo_target_in(
-        &root,
-        &base_owner,
-        SystemTime::now(),
-    )?);
-
     let sequence = ISOLATED_TARGET_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let started = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -362,7 +369,17 @@ fn acquire_managed_cargo_target_for_compatibility_in(
         std::process::id()
     );
     let lease = acquire_shared_cargo_target_in(&root, &run_owner, SystemTime::now())?;
-    seed_worktree_cargo_target(&base_dir, lease.target_dir())?;
+    optional_cargo_cache_seed(|| {
+        // Touch base liveness, then release it: nothing compiles there.
+        drop(acquire_shared_cargo_target_in_until(
+            root,
+            &base_owner,
+            SystemTime::now(),
+            seed_deadline,
+            || false,
+        )?);
+        seed_worktree_cargo_target_until(&base_dir, lease.target_dir(), Some(seed_deadline))
+    })?;
 
     Ok(ManagedCargoTarget {
         target_dir: lease.target_dir().to_path_buf(),
@@ -374,18 +391,49 @@ fn acquire_managed_cargo_target_for_compatibility_in(
 }
 
 /// Seed a freshly created run-private Cargo target from the shared base store.
+#[cfg(test)]
 fn seed_worktree_cargo_target(base_dir: &Path, private_dir: &Path) -> Result<()> {
-    phase_timing::time("cargo_target.seed", || {
-        if base_dir.exists() {
-            with_base_store_publication_lock(base_dir, "warm-cache-seed", false, None, || {
-                copy_cargo_cache(
-                    &cache_projection(base_dir),
-                    private_dir,
-                    CacheTransfer::Copy,
-                )
-            })?;
+    seed_worktree_cargo_target_until(base_dir, private_dir, None)
+}
+
+fn optional_cargo_cache_seed(operation: impl FnOnce() -> Result<()>) -> Result<()> {
+    match operation() {
+        Err(error) if error.details["reason"] == "deadline_exhausted" => {
+            crate::log_status!(
+                "cargo",
+                "Warm Cargo cache seed skipped; using cold private target: {}",
+                error
+            );
+            Ok(())
         }
-        Ok(())
+        result => result,
+    }
+}
+
+fn seed_worktree_cargo_target_until(
+    base_dir: &Path,
+    private_dir: &Path,
+    deadline: Option<Instant>,
+) -> Result<()> {
+    phase_timing::time("cargo_target.seed", || {
+        optional_cargo_cache_seed(|| {
+            if base_dir.exists() {
+                with_base_store_publication_lock(
+                    base_dir,
+                    "warm-cache-seed",
+                    false,
+                    deadline,
+                    || {
+                        copy_cargo_cache(
+                            &cache_projection(base_dir),
+                            private_dir,
+                            CacheTransfer::Copy,
+                        )
+                    },
+                )?;
+            }
+            Ok(())
+        })
     })
 }
 
@@ -456,6 +504,7 @@ fn publish_cargo_cache(from: &Path, base_dir: &Path) -> Result<()> {
                     },
                 )?;
                 copy_cargo_cache(from, &staging, CacheTransfer::Replace)?;
+                let previous = staging.with_extension("previous");
                 let swapped = with_base_store_publication_lock(
                     base_dir,
                     "warm-cache-publication",
@@ -473,7 +522,6 @@ fn publish_cargo_cache(from: &Path, base_dir: &Path) -> Result<()> {
                             return Ok(false);
                         }
                         let published = base_dir.join(CACHE_CURRENT);
-                        let previous = staging.with_extension("previous");
                         if published.exists() {
                             fs::rename(&published, &previous).map_err(|error| {
                                 io_error(error, "stage previous Cargo cache publication")
@@ -485,15 +533,17 @@ fn publish_cargo_cache(from: &Path, base_dir: &Path) -> Result<()> {
                             }
                             return Err(io_error(error, "publish complete Cargo cache projection"));
                         }
-                        if previous.exists() {
-                            fs::remove_dir_all(&previous).map_err(|error| {
-                                io_error(error, "remove superseded Cargo cache projection")
-                            })?;
-                        }
                         Ok(true)
                     },
                 )?;
                 if swapped {
+                    // The superseded projection is unreachable; readers only
+                    // need the lock for the swap, not this potentially huge delete.
+                    if previous.exists() {
+                        fs::remove_dir_all(&previous).map_err(|error| {
+                            io_error(error, "remove superseded Cargo cache projection")
+                        })?;
+                    }
                     return Ok(());
                 }
             }
@@ -2685,6 +2735,45 @@ mod tests {
             Err(error) => error,
         };
         assert_eq!(cancelled.details["reason"], "cancelled");
+    }
+
+    #[test]
+    fn managed_target_starts_cold_when_publication_lock_deadline_exhausted() {
+        let root = TempDir::new().unwrap();
+        let source = root.path().join("source");
+        let compatibility = cargo_target_compatibility(&source, &[]);
+        let base = shared_store_dir(root.path(), &format!("gate:{}", compatibility.identity()));
+        fs::create_dir_all(base.join(CACHE_CURRENT)).unwrap();
+        fs::write(base.join(CACHE_CURRENT).join("warm-artifact"), b"warm").unwrap();
+        let lock = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(base.join(LOCK_FILE))
+            .unwrap();
+        FileExt::lock_exclusive(&lock).unwrap();
+
+        let mut target = acquire_managed_cargo_target_for_compatibility_in_until(
+            root.path(),
+            "gate",
+            &source,
+            &compatibility,
+            Instant::now() + Duration::from_millis(10),
+        )
+        .unwrap();
+
+        assert_ne!(target.target_dir(), base);
+        assert_eq!(target.resolution(), "isolated");
+        assert!(!target.target_dir().join("warm-artifact").exists());
+        assert!(target._lease.is_some());
+        fs::write(target.target_dir().join("cold-artifact"), b"cold").unwrap();
+        FileExt::unlock(&lock).unwrap();
+        target.publish().unwrap();
+        assert_eq!(
+            fs::read(base.join(CACHE_CURRENT).join("cold-artifact")).unwrap(),
+            b"cold"
+        );
     }
 
     #[test]
