@@ -210,6 +210,32 @@ fn wait_terminal(store: &JobStore, instance: &str) {
 /// 1's instance runs, slot 3 fires after it finishes, and re-firing slot 3
 /// (a crash before the registration advanced) reuses its instance.
 #[test]
+fn retention_failed_cadence_is_visible_in_registered_list() {
+    with_isolated_home(|home| {
+        register_workflow_job_driver();
+        let store = JobStore::open_without_reconciliation(crate::paths::observation_db().unwrap())
+            .unwrap()
+            .with_daemon_lease("retention-test".to_string());
+        let base = 1_791_900_000_000;
+        register(
+            template(json!({"interval": "2m"}), "exit 2", home.path()),
+            false,
+            base,
+        )
+        .unwrap();
+        admit_due(&store, base + 1_000);
+        let registration = list().unwrap().remove(0);
+        wait_terminal(&store, registration.last_instance.as_ref().unwrap());
+        let output = http_list(&store).unwrap();
+        assert_eq!(output["entities"][0]["last_outcome"], "failed");
+        assert!(output["entities"][0]["last_error"]
+            .as_str()
+            .unwrap()
+            .contains("2"));
+    });
+}
+
+#[test]
 fn the_tick_fires_skips_overlap_and_never_fires_a_slot_twice() {
     with_isolated_home(|home| {
         register_workflow_job_driver();

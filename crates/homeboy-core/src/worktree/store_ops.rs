@@ -3171,8 +3171,10 @@ pub(super) fn read_record(store_dir: &Path, id: &str) -> Result<TaskWorktreeReco
 pub(super) fn read_record_path(path: &Path) -> Result<TaskWorktreeRecord> {
     let raw = fs::read_to_string(path)
         .map_err(|err| Error::internal_io(err.to_string(), Some(path.display().to_string())))?;
-    serde_json::from_str(&raw)
-        .map_err(|err| Error::internal_json(err.to_string(), Some(path.display().to_string())))
+    let record: TaskWorktreeRecord = serde_json::from_str(&raw)
+        .map_err(|err| Error::internal_json(err.to_string(), Some(path.display().to_string())))?;
+    record.effective_workspace_identity()?;
+    Ok(record)
 }
 
 pub(super) fn read_adopted_record_path(path: &Path) -> Result<AdoptedWorkspaceRecord> {

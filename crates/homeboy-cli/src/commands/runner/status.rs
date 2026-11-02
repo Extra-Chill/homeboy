@@ -1189,6 +1189,13 @@ fn declared_run_followup(declaration: &RunFollowup) -> LabFollowup {
     }
 }
 
+pub(super) fn cadence_failure_hints(report: &RunnerStatusReport) -> Vec<String> {
+    match runner::runner_cadence_failures(report) {
+        Ok(findings) => findings,
+        Err(error) => vec![format!("Cadence health unavailable: {}", error.message)],
+    }
+}
+
 pub(super) fn runner_status_operator_hints(report: &RunnerStatusReport) -> Vec<String> {
     if report.session.is_none() || !report.connected {
         return Vec::new();

@@ -530,8 +530,33 @@ pub fn view(cadence: &Cadence) -> Value {
 }
 
 /// `GET /workflows/cadences`.
-pub(crate) fn http_list() -> Result<Value> {
-    Ok(json!({ "entities": list()?.iter().map(view).collect::<Vec<_>>() }))
+pub(crate) fn http_list(store: &JobStore) -> Result<Value> {
+    let entities = list()?
+        .iter()
+        .map(|cadence| {
+            let mut output = view(cadence);
+            if let Some(job) = cadence
+                .last_instance
+                .as_deref()
+                .and_then(|instance| store.controller_job_for_key(instance))
+            {
+                output["last_outcome"] = json!(job.status);
+                if job.status == crate::api_jobs::JobStatus::Failed {
+                    let error = store
+                        .events(job.id)?
+                        .into_iter()
+                        .rev()
+                        .find(|event| event.kind == crate::api_jobs::JobEventKind::Error)
+                        .and_then(|event| event.message)
+                        .unwrap_or_else(|| "workflow instance failed".to_string());
+                    output["last_error"] = json!(error);
+                    output["failing_since"] = output["last_fired_slot"].clone();
+                }
+            }
+            Ok(output)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(json!({ "entities": entities }))
 }
 
 /// `POST /workflows/cadences`: the body is the admitted request template.
