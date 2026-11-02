@@ -6619,12 +6619,6 @@ fn run_cook_spine(
                 // host. Keep the complete route policy intact so local
                 // persistence and external transports retain restart authority.
                 let mut dispatch_plan = plan.clone();
-                for task in &mut dispatch_plan.tasks {
-                    task.metadata["cook_hydrate_dependencies"] = serde_json::json!(
-                        options.gates.hydrate_dependencies
-                            && options.gates.gate_environment.hydrate_dependencies
-                    );
-                }
                 if let Some(snapshot) = base_snapshot {
                     agent_task_lifecycle::record_metadata_value_in_store(
                         lifecycle_store,
