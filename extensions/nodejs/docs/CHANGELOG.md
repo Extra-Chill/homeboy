@@ -2,6 +2,11 @@
 
 All notable changes to the **nodejs** extension will be documented in this file.
 
+## [3.9.4] - 2026-11-02
+
+### Fixed
+- declare the nodejs build cache where builds read it; keep dependency failure output
+
 ## [3.9.3] - 2026-11-02
 
 ### Fixed
