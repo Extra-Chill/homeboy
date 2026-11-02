@@ -102,7 +102,6 @@ impl From<DispatchCoreArgs> for DispatchCoreInputs {
             tasks_json: args.tasks_json,
             provider_config: None,
             client_context: args.client_context,
-            generated_fanout_context: false,
             attempts: args.attempts,
             same_provider_retries: args.same_provider_retries,
             queue_only: args.queue_only,
