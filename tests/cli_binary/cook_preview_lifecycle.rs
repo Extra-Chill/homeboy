@@ -4,6 +4,81 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 #[test]
+fn cook_previews_preflight_gate_targets_before_creating_runs() {
+    for batch in [false, true] {
+        let home = tempfile::tempdir().expect("home");
+        let repository = tempfile::tempdir().expect("repository");
+        let repo = repository.path().join("repo");
+        initialize_git_repository(&repo);
+        run_homeboy(
+            home.path(),
+            [
+                "component",
+                "create",
+                "--local-path",
+                repo.to_str().unwrap(),
+            ],
+        );
+        let path = super::fake_pi::install(home.path(), "test model");
+        let mut command = Command::new(homeboy_bin());
+        command
+            .current_dir(&repo)
+            .env("PATH", path)
+            .env("HOME", home.path())
+            .env("XDG_CONFIG_HOME", home.path().join(".config"))
+            .env("XDG_DATA_HOME", home.path().join(".local/share"))
+            .env("HOMEBOY_NO_UPDATE_CHECK", "1")
+            .args(["--placement", "local", "agent-task"]);
+        if batch {
+            command.args(["fanout", "cook-batch"]);
+        } else {
+            command.args([
+                "cook",
+                "--preview",
+                "--goal",
+                "Check preflight",
+                "--head",
+                "fix/preflight",
+            ]);
+        }
+        command.args([
+            "--repo",
+            repo.to_str().unwrap(),
+            "--base",
+            "main",
+            "--verify",
+            "homeboy review test missing-preflight-component",
+        ]);
+        if !batch {
+            command.arg("--task-url");
+        }
+        command.arg("https://github.com/Extra-Chill/homeboy/issues/17283");
+        let output = command.output().expect("preview");
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!output.status.success(), "batch={batch}: {text}");
+        assert!(
+            text.contains("cannot run in the gate environment"),
+            "batch={batch}: {text}"
+        );
+        assert!(
+            text.contains("Declare a gate that runs from the repository itself"),
+            "{text}"
+        );
+        assert!(
+            !home
+                .path()
+                .join(".local/share/homeboy/agent-task-runs")
+                .exists(),
+            "preview created a run"
+        );
+    }
+}
+
+#[test]
 fn unresolved_backend_preview_binds_stable_replay_lifecycle_without_mutation() {
     let home = tempfile::tempdir().expect("home");
     let output_dir = tempfile::tempdir().expect("output directory");

@@ -82,6 +82,19 @@ fn cook_batch(args: AgentTaskFanoutCookBatchArgs, placement: Placement) -> CmdRe
         Placement::Lab | Placement::LabOrLocal => lab_runner()?,
         Placement::Auto | Placement::Local => None,
     };
+    let repo = registered_repo(&args.repo)?;
+    let (_, component) = super::run::cook_repository_names_for_selection(&repo)?;
+    let workspace =
+        super::run::cook_component_path_for_repository_name(&component)?.ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "repo",
+                "Cook gate preflight requires a repository checkout",
+                Some(repo),
+                None,
+            )
+        })?;
+    let mut gates = visible.into();
+    super::run::preflight_resolved_cook_gates(&mut gates, Path::new(&workspace))?;
     let definition = compile(&args, placement, bundle_runner.as_deref())?;
     super::super::workflow::validate(&definition)?;
     let instance = definition.instance_id(&BTreeMap::new(), args.fanout_id.as_deref());

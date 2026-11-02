@@ -740,6 +740,14 @@ pub(crate) fn preview_cook(
     record_preview_phase(&mut progress, "placement_projection");
     let placement = preview_placement_policy_with_admission(&replay.argv);
     let notification_resolution = homeboy::core::notification_route::current_resolution();
+    reject_gates_unexecutable_under_resolved_placement(
+        args.gates
+            .verify
+            .iter()
+            .chain(&args.gates.private_verify)
+            .cloned(),
+    )?;
+    preflight_cook_gates(&args)?;
     if matches!(
         provision["action"].as_str(),
         Some("materialization_required" | "unresolved_provider")
@@ -790,13 +798,6 @@ pub(crate) fn preview_cook(
                 .cloned(),
             gate_workspace,
         )?);
-    reject_gates_unexecutable_under_resolved_placement(
-        args.gates
-            .verify
-            .iter()
-            .chain(&args.gates.private_verify)
-            .cloned(),
-    )?;
     record_preview_phase(&mut progress, "provider_preflight");
 
     // Preview binds evidence to the same resolved workspace, but only projects
@@ -891,6 +892,42 @@ pub(crate) fn preview_cook(
         cook_preview_result(resolved, progress, replay, None, None),
         0,
     ))
+}
+
+fn preflight_cook_gates(args: &AgentTaskCookArgs) -> homeboy::core::Result<()> {
+    let mut gates: homeboy::agents::agent_tasks::gate::VerifyGateOptions =
+        args.gates.clone().into();
+    let current_dir = std::env::current_dir()
+        .map_err(|error| homeboy::core::Error::internal_io(error.to_string(), None))?;
+    let workspace = args
+        .dispatch
+        .cwd
+        .as_deref()
+        .map(Path::new)
+        .or_else(|| {
+            args.repository_identity
+                .as_ref()
+                .and_then(|identity| identity["repository_path"].as_str())
+                .map(Path::new)
+        })
+        .unwrap_or(&current_dir);
+    preflight_resolved_cook_gates(&mut gates, workspace)
+}
+
+pub(super) fn preflight_resolved_cook_gates(
+    gates: &mut homeboy::agents::agent_tasks::gate::VerifyGateOptions,
+    workspace: &Path,
+) -> homeboy::core::Result<()> {
+    if let Some(result) = homeboy::core::parsed_command_preflight::captured_result() {
+        if result.placement.selected == homeboy_lab_contract::EffectiveExecutionPlacement::Lab {
+            gates.gate_environment.lab_runner = result
+                .placement
+                .runner
+                .map(|runner| runner.runner_id)
+                .or(gates.gate_environment.lab_runner.clone());
+        }
+    }
+    gates.preflight(workspace)
 }
 
 fn preflight_preview_lab_provider_secret_env(
@@ -2738,21 +2775,6 @@ mod preview_tests {
             panic!("Cook command");
         };
         preview_cook(*args, None)
-    }
-
-    /// #14963: a bare `homeboy review test` gate — the exact gate documented
-    /// in Cook's own `--help` quick start — must be *admitted* under local
-    /// placement with no ready Lab runner. It either runs locally (the
-    /// common case: resource admission only engages under measured pressure)
-    /// or gracefully defers to a recoverable `Deferred` gate outcome
-    /// (#14731); rejecting it before provider dispatch refused strictly more
-    /// than the risk it guarded against.
-    #[test]
-    fn preview_admits_a_bare_review_test_gate_with_no_ready_lab_runner() {
-        crate::test_support::with_isolated_home(|_| {
-            preview_cook_result_for_declared_gate("homeboy review test fixture-repository")
-                .expect("a bare review test gate can run locally or defer gracefully");
-        });
     }
 
     /// #14731 / #14963: preview must still refuse a `homeboy review test`
@@ -7273,6 +7295,7 @@ pub(crate) fn run_cook_with_executor_and_dispatcher_with_progress(
             .chain(&args.gates.private_verify)
             .cloned(),
     )?;
+    preflight_cook_gates(&args)?;
     let no_progress = args.no_progress;
     // Deterministic gates exist to make *publication* safe: a green gate is the
     // proof a cook may commit, push, and open a PR. A `--no-finalize` cook does

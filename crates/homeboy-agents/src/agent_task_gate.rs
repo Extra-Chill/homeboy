@@ -326,6 +326,12 @@ fn default_gate_no_progress_timeout_seconds() -> u64 {
 }
 
 impl VerifyGateOptions {
+    /// Check declared gate toolchains and targets in their execution placement
+    /// before admitting a run. Runner-backed environments use the runner probe.
+    pub fn preflight(&self, workspace: &Path) -> Result<()> {
+        preflight_verify_gate_options(workspace, self)
+    }
+
     pub fn gate_timeout(&self) -> Duration {
         Duration::from_secs(self.gate_timeout_seconds.max(1))
     }
@@ -4588,6 +4594,13 @@ pub fn preflight_gate_toolchains(
 }
 
 pub(crate) fn preflight_verify_gate_options(cwd: &Path, gates: &VerifyGateOptions) -> Result<()> {
+    if gates.required_toolchains().is_empty()
+        && gates.gate_target_probes().is_empty()
+        && gates.gate_package_artifacts.is_empty()
+        && gates.gate_environment.extension_inputs.is_empty()
+    {
+        return Ok(());
+    }
     let mut placements = std::collections::BTreeSet::new();
     if gates.gate_environment.lab_runner.is_some() {
         placements.insert(gates.gate_environment.lab_runner.clone());
