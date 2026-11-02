@@ -215,10 +215,10 @@ write_phpstan_findings_sidecar() {
     homeboy_sidecar_merge_json_array "$target" "$source"
 }
 
-# Validate PHPStan exists (soft failure - not all installations have it)
+# Missing toolchains are setup failures, not successful static analysis.
 if [ ! -f "$PHPSTAN_BIN" ]; then
-    echo "Warning: PHPStan not found at $PHPSTAN_BIN, skipping static analysis"
-    exit 0
+    echo "Error: PHPStan not found at $PHPSTAN_BIN. Run: homeboy extension setup wordpress" >&2
+    exit 1
 fi
 
 # Integrity guard (homeboy-extensions#2233): a corrupted/truncated phpstan.phar
