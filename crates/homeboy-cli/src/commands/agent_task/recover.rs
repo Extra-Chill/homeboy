@@ -42,6 +42,17 @@ pub(super) fn recover_with(
 /// malformed input fails before any durable state is read.
 fn recovery_request(mut args: RecoverArgs) -> homeboy::core::Result<CookRecoveryRequest> {
     let overrides = args.overrides();
+    // Without external-proof authorization, verification corrects the recipe
+    // before provider execution; authorized candidate replacement is unchanged.
+    let corrected_gates = if args.authorize_external_proof.is_none()
+        && args.promotion.is_none()
+        && args.gates.has_deterministic_gate()
+    {
+        args.gates.snapshot_file_inputs()?;
+        Some(std::mem::take(&mut args.gates).into())
+    } else {
+        None
+    };
     let replace_gates = replace_gates_request(&mut args)?;
     let publish = CookPublishRequest {
         review_form: super::review::supplied_review_form(
@@ -57,6 +68,7 @@ fn recovery_request(mut args: RecoverArgs) -> homeboy::core::Result<CookRecovery
         preflight: args.preflight,
         overrides,
         replace_gates,
+        corrected_gates,
         publish,
     })
 }

@@ -365,6 +365,51 @@ impl CookRecipeStore {
         load_recipe_for_attempt_from(&self.recipe_root(), run_id)
     }
 
+    /// Correct a stopped Cook's gate before any provider work, using the same
+    /// durable recipe supersession as initial admission. Retry remains the owner
+    /// of successor reservation, lineage and budget.
+    pub(crate) fn correct_pre_provider_gates(
+        &self,
+        cook_id: &str,
+        gates: crate::agent_task_gate::VerifyGateOptions,
+        preflight: bool,
+    ) -> Result<()> {
+        if !preflight {
+            recover_pending_supersession(self, cook_id)?;
+        }
+        let recipe = self.load_recipe(cook_id)?;
+        if reached_freeze_boundary_in_store(&self.lifecycle_store(), &recipe)?.is_some() {
+            return Err(Error::validation_invalid_argument(
+                "verify",
+                "Cook gate correction requires a pre-provider failure",
+                Some(cook_id.to_string()),
+                None,
+            ));
+        }
+        let mut replacement = recipe.clone();
+        replacement.gate_policy = serde_json::to_value(gates)
+            .map_err(|error| Error::internal_json(error.to_string(), None))?;
+        let mismatches = recipe_mismatch_fields(&recipe, &replacement);
+        ensure_correction_is_safe_in_store(
+            &self.lifecycle_store(),
+            &recipe,
+            &replacement,
+            &mismatches,
+        )?;
+        validate_recipe(&replacement)?;
+        if !preflight && !mismatches.is_empty() {
+            let supersession = AgentTaskCookRecipeSupersession {
+                schema: SUPERSESSION_SCHEMA.to_string(),
+                previous: recipe,
+                replacement,
+                changed_fields: mismatches.into_iter().map(str::to_string).collect(),
+            };
+            write_supersession(self, &supersession)?;
+            complete_supersession(self, &supersession)?;
+        }
+        Ok(())
+    }
+
     pub fn persist_initial_recipe(&self, options: &CookRequest) -> Result<AgentTaskCookRecipe> {
         self.persist_initial_recipe_with_outcome(options)
             .map(|materialization| materialization.recipe)

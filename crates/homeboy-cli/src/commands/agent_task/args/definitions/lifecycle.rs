@@ -561,7 +561,8 @@ pub struct RecoverArgs {
     pub full: bool,
     /// Replace-gates step: explicit operator authorization for the replacement
     /// proof recorded for an applied candidate whose gates failed. Required
-    /// with corrected gates (`--verify`/`--verify-file`) or `--promotion`.
+    /// with corrected gates for an applied candidate or with `--promotion`.
+    /// Pre-provider recipe correction needs no external-proof authorization.
     #[arg(long, value_name = "TEXT")]
     pub authorize_external_proof: Option<String>,
     /// Replace-gates step: explicit authorization to rerun corrected gates
@@ -578,8 +579,8 @@ pub struct RecoverArgs {
         conflicts_with = "authorize_interrupted_rerun"
     )]
     pub promotion: Option<String>,
-    /// Replace-gates step: corrected verification gates executed against the
-    /// already-applied candidate.
+    /// Corrected verification gates: update a pre-provider failure's recipe,
+    /// or, with --authorize-external-proof, verify the already-applied candidate.
     #[command(flatten)]
     pub gates: VerifyGateArgs,
     /// Publish step: complete typed AI review form for a candidate whose

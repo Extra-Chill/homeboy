@@ -369,6 +369,8 @@ pub struct CookRecoveryRequest {
     /// Inputs for [`CookRecoveryStep::ReplaceGates`]. Supplying them selects
     /// that step for an applied candidate whose gates failed.
     pub replace_gates: Option<CookReplaceGatesRequest>,
+    /// Correct the recipe gates before retrying a pre-provider failure.
+    pub corrected_gates: Option<crate::agent_task_gate::VerifyGateOptions>,
     /// Inputs for [`CookRecoveryStep::Publish`]. Supplying them selects
     /// publication when no other mutating step must come first.
     pub publish: CookPublishRequest,
@@ -611,9 +613,18 @@ pub fn recover_cook(
         preflight,
         overrides,
         replace_gates,
+        corrected_gates,
         publish,
     } = request;
     if let Some(ci) = super::cook_ci::cook_ci_status(id)? {
+        if corrected_gates.is_some() {
+            return Err(Error::validation_invalid_argument(
+                "verify",
+                "CI recovery does not accept recipe gate corrections",
+                Some(id.to_string()),
+                None,
+            ));
+        }
         let ci = if preflight {
             ci
         } else {
@@ -647,6 +658,38 @@ pub fn recover_cook(
     validate_step_inputs(&mut plan, &overrides, replace_gates.is_some(), &publish)?;
     if !overrides.is_empty() {
         validate_overrides(&plan, preflight)?;
+    }
+    // Keep the normal retry contract: only a terminal pre-execution failure
+    // may change its recipe, and retry still reserves the successor.
+    if let Some(gates) = corrected_gates {
+        let record = agent_task_lifecycle::exact_record(&plan.run_id)?;
+        if !overrides.is_empty()
+            || replace_gates.is_some()
+            || !publish.is_empty()
+            || !record.state().is_terminal()
+            || !record.metadata["pre_execution_failure"].is_object()
+            || record.metadata["provider_executions_consumed"].as_u64() != Some(0)
+            || plan.step != CookRecoveryStep::Retry
+        {
+            return Err(Error::validation_invalid_argument(
+                "verify",
+                "recipe gate correction requires a pre-provider failure and cannot be combined with other recovery inputs",
+                Some(plan.run_id.clone()),
+                None,
+            ));
+        }
+        let store = super::CookRecipeStore::from_current_data_root()?;
+        let _driver = store
+            .try_acquire_cook_driver(&plan.cook_id)?
+            .ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "verify",
+                    "another controller is driving this Cook",
+                    Some(plan.cook_id.clone()),
+                    None,
+                )
+            })?;
+        store.correct_pre_provider_gates(&plan.cook_id, gates, preflight)?;
     }
     let report = CookRecoveryReport {
         schema: COOK_RECOVERY_SCHEMA,
