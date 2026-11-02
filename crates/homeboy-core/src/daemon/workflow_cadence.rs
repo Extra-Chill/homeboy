@@ -346,7 +346,6 @@ fn advance(
 /// previous instance is still running. Called by the admission owner's
 /// orchestration tick.
 pub fn admit_due(store: &JobStore, now_ms: u64) -> Vec<Value> {
-    super::recover_controller_jobs(store);
     let Ok(cadences) = list() else {
         return Vec::new();
     };

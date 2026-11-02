@@ -1762,16 +1762,7 @@ where
     job_store.reconcile_expired_local_child_reservations()?;
     job_store.reconcile_expired_admissions()?;
     if let Some(prior) = proven_dead {
-        job_store.adopt_scopeless_controller_jobs(&prior.lease_id)?;
         recover_staged_direct_jobs_after_owner_death(&job_store, &prior.lease_id)?;
-    }
-    if let Some(lease) = read_termination_evidence()
-        .ok()
-        .flatten()
-        .filter(|evidence| evidence.stop_requested)
-        .and_then(|evidence| evidence.lease_id)
-    {
-        job_store.adopt_scopeless_controller_jobs(&lease)?;
     }
     reconcile_pending_workspace_owner_releases();
     reconcile_terminal_workspace_owner_leases(&job_store);
@@ -1784,6 +1775,7 @@ where
         let _ = job_store.rearm_recovery_after_requested_stop(&stopped_lease);
     }
     runner_exec_job::recover_runner_exec_jobs(&job_store);
+    job_store.adopt_scopeless_controller_jobs()?;
     recover_controller_jobs(&job_store);
     // Built-in cadences (`homeboy.retention`) are registered unless the
     // operator opted out; a failure here must not keep the daemon down.

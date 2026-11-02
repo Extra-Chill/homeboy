@@ -328,8 +328,9 @@ pub(crate) struct StoredJob {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) local_child: Option<LocalChildExecution>,
     /// Daemon scope that created or admitted this job (#16104). Records
-    /// persisted before scopes existed carry none. Startup may adopt controller
-    /// records after proving their exact lease owner gone under the owner lock.
+    /// persisted before scopes existed carry none. Startup adopts every
+    /// non-terminal scope-less controller under the exclusive owner lock,
+    /// regardless of lease identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) daemon_scope: Option<DaemonScope>,
 }
@@ -995,9 +996,9 @@ impl JobStore {
     /// Whether a stored job belongs to this store's daemon scope (#16104).
     /// Every daemon of one Unix user shares one ledger, so a daemon never
     /// expires, recovers, adopts, delivers, or waits on another scope's job.
-    /// Scope-less controllers must first be explicitly adopted after owner
-    /// death is proven. A store opened without a scope acts only for scope-less
-    /// records.
+    /// Startup adopts every non-terminal scope-less controller into this scope
+    /// under the exclusive owner lock, regardless of lease identity. A store
+    /// opened without a scope acts only for scope-less records.
     pub(super) fn owns(&self, stored: &StoredJob) -> bool {
         stored.daemon_scope == self.daemon_scope
     }

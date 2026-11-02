@@ -26,9 +26,10 @@ use crate::api_jobs::types::DaemonLinkedDurableRunState;
 use crate::error::{Error, Result};
 
 impl JobStore {
-    /// Adopt pre-scope controllers only after the caller proves this exact
-    /// lease's owner absent while holding the daemon owner lock.
-    pub fn adopt_scopeless_controller_jobs(&self, dead_lease_id: &str) -> Result<()> {
+    /// Adopt every non-terminal pre-scope controller at startup.
+    /// The caller holds the exclusive daemon owner lock: all current daemons
+    /// stamp scopes, so no pre-scope owner can still be alive, regardless of lease.
+    pub fn adopt_scopeless_controller_jobs(&self) -> Result<()> {
         let Some(scope) = self.daemon_scope.as_ref() else {
             return Ok(());
         };
@@ -37,9 +38,7 @@ impl JobStore {
                 stored.daemon_scope.is_none()
                     && stored.controller_job.is_some()
                     && !stored.job.status.is_terminal()
-                    && stored.job.daemon_lease_id.as_deref() == Some(dead_lease_id)
             }) {
-                let ownership = stored_job_execution_liveness(stored, &local_child_liveness);
                 let controller = stored.controller_job.as_ref().expect("controller exists");
                 let invalid = crate::daemon::controller_job_driver::driver(
                     &controller.job_type,
@@ -51,14 +50,6 @@ impl JobStore {
                         .execution_owner(&controller.request, controller.checkpoint.as_ref())
                         .map_err(|_| "controller_request_invalid")
                 });
-                if invalid.is_ok()
-                    && matches!(
-                        ownership.state,
-                        Some(LocalChildLiveness::Live | LocalChildLiveness::Unsupported(_))
-                    )
-                {
-                    continue;
-                }
                 stored.daemon_scope = Some(scope.clone());
                 let now = timestamp_ms();
                 let reason = if let Err(reason) = invalid {
@@ -80,7 +71,7 @@ impl JobStore {
                     data: Some(serde_json::json!({
                         "reason": reason,
                         "status": stored.job.status,
-                        "daemon_lease_id": dead_lease_id,
+                        "daemon_lease_id": stored.job.daemon_lease_id,
                     })),
                 });
                 apply_event_retention(&mut stored.events, self.event_retention_limit());
