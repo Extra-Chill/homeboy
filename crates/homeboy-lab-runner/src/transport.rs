@@ -1,13 +1,8 @@
 use homeboy_engine_primitives::content_hash;
 use std::fs;
 use std::io::{Read, Write};
-use std::time::Duration;
 
-use base64::Engine;
-use reqwest::blocking::Client;
-use serde::Deserialize;
 use serde_json::json;
-use serde_json::Value;
 use sha2::Digest;
 
 use homeboy_core::engine::shell;
@@ -17,10 +12,9 @@ use homeboy_lab_contract::lab::transport_failure::provider_evidence_io_error;
 
 use super::session::{RunnerSession, RunnerStatusReport};
 use super::{Runner, RunnerKind};
-use homeboy_core::broker_auth;
 
 const MAX_PROVIDER_EVIDENCE_BYTES: u64 = 64 * 1024 * 1024;
-const CHUNK_UPLOAD_PROTOCOL_VERSION: u64 = 1;
+const FILE_TRANSFER_TRANSPORT: &str = "direct_ssh";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RunnerSessionHandle {
@@ -49,11 +43,10 @@ pub(crate) enum RunnerTransport {
     Unavailable,
 }
 
+/// Lab runner file transfer has one channel: direct SSH to the runner's
+/// configured `server_id`. A connected daemon session does not change it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RunnerFileTransferCapability {
-    DaemonHttp {
-        endpoint_url: String,
-    },
     DirectSsh {
         server_id: String,
     },
@@ -63,63 +56,33 @@ pub(crate) enum RunnerFileTransferCapability {
     },
 }
 
+/// Controller-side file operations against a remote Lab runner over SSH.
 pub(crate) struct RunnerFileTransfer {
     runner_id: String,
-    workspace_root: Option<String>,
-    channel: RunnerFileChannel,
-}
-
-enum RunnerFileChannel {
-    DirectSsh(SshClient),
-    DaemonHttp {
-        client: Client,
-        endpoint_url: String,
-        broker_token: Option<String>,
-    },
-}
-
-#[derive(Debug, Deserialize)]
-struct HttpFileEnvelope {
-    success: bool,
-    data: Option<Value>,
-    error: Option<Value>,
+    client: SshClient,
 }
 
 impl RunnerFileTransferCapability {
-    pub(crate) fn for_runner(
-        runner: &Runner,
-        status: Option<&RunnerStatusReport>,
-    ) -> RunnerFileTransferCapability {
-        match select_runner_transport(runner, status, false) {
-            RunnerTransport::Local => RunnerFileTransferCapability::Unsupported {
+    pub(crate) fn for_runner(runner: &Runner) -> RunnerFileTransferCapability {
+        match (&runner.kind, &runner.server_id) {
+            (RunnerKind::Ssh, Some(server_id)) => RunnerFileTransferCapability::DirectSsh {
+                server_id: server_id.clone(),
+            },
+            (RunnerKind::Ssh, None) => RunnerFileTransferCapability::Unsupported {
+                transport: "ssh",
+                reason:
+                    "Lab runner file transfer uses direct SSH and no SSH server_id is configured",
+            },
+            (RunnerKind::Local, _) => RunnerFileTransferCapability::Unsupported {
                 transport: "local",
                 reason: "Lab runner file transfer requires a remote runner transport",
             },
-            RunnerTransport::DirectDaemon(handle) => RunnerFileTransferCapability::DaemonHttp {
-                endpoint_url: handle.endpoint_url().to_string(),
-            },
-            RunnerTransport::DiagnosticSsh | RunnerTransport::Unavailable => {
-                match (runner.kind.clone(), runner.server_id.clone()) {
-                (RunnerKind::Ssh, Some(server_id)) => {
-                    RunnerFileTransferCapability::DirectSsh { server_id }
-                }
-                (RunnerKind::Ssh, None) => RunnerFileTransferCapability::Unsupported {
-                    transport: "direct_daemon",
-                    reason: "Lab runner file transfer over the direct daemon API is not implemented yet and no SSH server_id is configured",
-                },
-                (RunnerKind::Local, _) => RunnerFileTransferCapability::Unsupported {
-                    transport: "local",
-                    reason: "Lab runner file transfer requires a remote runner transport",
-                },
-                }
-            }
         }
     }
 
     pub(crate) fn ensure_supported(&self, runner_id: &str) -> Result<()> {
         match self {
-            RunnerFileTransferCapability::DaemonHttp { .. }
-            | RunnerFileTransferCapability::DirectSsh { .. } => Ok(()),
+            RunnerFileTransferCapability::DirectSsh { .. } => Ok(()),
             RunnerFileTransferCapability::Unsupported { transport, reason } => Err(
                 unsupported_file_transfer_error(runner_id, transport, reason),
             ),
@@ -128,177 +91,68 @@ impl RunnerFileTransferCapability {
 }
 
 impl RunnerFileTransfer {
-    pub(crate) fn for_runner(
-        runner: &Runner,
-        status: Option<&RunnerStatusReport>,
-    ) -> Result<RunnerFileTransfer> {
-        let capability = RunnerFileTransferCapability::for_runner(runner, status);
+    pub(crate) fn for_runner(runner: &Runner) -> Result<RunnerFileTransfer> {
+        let capability = RunnerFileTransferCapability::for_runner(runner);
         capability.ensure_supported(&runner.id)?;
-        let channel = match capability {
-            RunnerFileTransferCapability::DaemonHttp { endpoint_url } => {
-                let client = Client::builder()
-                    .timeout(Duration::from_secs(30))
-                    .no_proxy()
-                    .build()
-                    .map_err(|err| {
-                        Error::internal_unexpected(format!("build runner file HTTP client: {err}"))
-                    })?;
-                let broker_token = broker_auth::broker_submit_token_for_runner(&runner.id)?;
-                if broker_token.is_none() && runner.server_id.is_some() {
-                    // The direct daemon tunnel is controller-owned, but /files/*
-                    // is broker-token protected. Use the configured SSH authority
-                    // when this runner was never paired with a broker credential.
-                    direct_ssh_file_channel(runner)?
-                } else {
-                    RunnerFileChannel::DaemonHttp {
-                        client,
-                        endpoint_url,
-                        broker_token,
-                    }
-                }
-            }
-            RunnerFileTransferCapability::DirectSsh { .. } => direct_ssh_file_channel(runner)?,
-            RunnerFileTransferCapability::Unsupported { .. } => unreachable!("checked above"),
+        let RunnerFileTransferCapability::DirectSsh { server_id } = capability else {
+            unreachable!("checked above");
         };
-        let transfer = RunnerFileTransfer {
+        let server = server::load(&server_id)?;
+        let mut client = SshClient::from_server(&server, &server_id)?;
+        client.env.extend(runner.env.clone());
+        Ok(RunnerFileTransfer {
             runner_id: runner.id.clone(),
-            workspace_root: runner.workspace_root.clone(),
-            channel,
-        };
-        // Validate the advertised protocol before materializing workspace state.
-        transfer.ensure_chunk_upload_protocol()?;
-        Ok(transfer)
-    }
-
-    fn ensure_chunk_upload_protocol(&self) -> Result<()> {
-        self.ensure_file_protocol("private_file_chunk_upload")
-    }
-
-    fn ensure_file_protocol(&self, capability: &str) -> Result<()> {
-        let RunnerFileChannel::DaemonHttp {
             client,
-            endpoint_url,
-            broker_token,
-        } = &self.channel
-        else {
-            // SSH has its own bounded atomic upload protocol and never calls
-            // the daemon chunk endpoint.
-            return Ok(());
-        };
-        let response = daemon_file_get_json(
-            client,
-            endpoint_url,
-            "/files/capabilities",
-            broker_token.as_deref(),
-        )?;
-        let version = response.get("protocol_version").and_then(Value::as_u64);
-        let enabled = response
-            .get("capabilities")
-            .and_then(Value::as_array)
-            .is_some_and(|values| {
-                values
-                    .iter()
-                    .any(|value| value.as_str() == Some(capability))
-            });
-        if version != Some(CHUNK_UPLOAD_PROTOCOL_VERSION) || !enabled {
-            let mut error = unsupported_chunk_upload_error(
-                &self.runner_id,
-                format!("daemon did not advertise {capability} protocol version 1"),
-            );
-            error.details["missing_capability"] = json!(capability);
-            return Err(error);
-        }
-        Ok(())
+        })
     }
 
     pub(crate) fn ensure_directory(&self, remote_dir: &str) -> Result<()> {
-        match &self.channel {
-            RunnerFileChannel::DirectSsh(client) => {
-                let mkdir = client.execute(&format!("mkdir -p {}", shell::quote_arg(remote_dir)));
-                if !mkdir.success {
-                    return Err(file_transfer_operation_error(
-                        &self.runner_id,
-                        "mkdir",
-                        remote_dir,
-                        mkdir.stderr,
-                        "direct_ssh",
-                    ));
-                }
-            }
-            RunnerFileChannel::DaemonHttp { .. } => {
-                self.http_post_json(
-                    "/files/mkdir",
-                    self.file_path_body(remote_dir),
-                    "mkdir",
-                    remote_dir,
-                )?;
-            }
+        let mkdir = self
+            .client
+            .execute(&format!("mkdir -p {}", shell::quote_arg(remote_dir)));
+        if !mkdir.success {
+            return Err(self.operation_error("mkdir", remote_dir, mkdir.stderr));
         }
         Ok(())
     }
 
     pub(crate) fn ensure_private_directory(&self, remote_dir: &str) -> Result<()> {
-        self.ensure_file_protocol("private_file_directory")?;
-        match &self.channel {
-            RunnerFileChannel::DirectSsh(client) => {
-                let command = format!(
-                    "umask 077; dir={}; mkdir -p -- \"$dir\" && test ! -L \"$dir\" && test -O \"$dir\" && mode=$(stat -c %a -- \"$dir\" 2>/dev/null || stat -f %Lp \"$dir\") && test \"$mode\" = 700",
-                    shell::quote_arg(remote_dir),
-                );
-                let result = client.execute(&command);
-                if !result.success {
-                    return Err(file_transfer_operation_error(
-                        &self.runner_id,
-                        "private mkdir",
-                        remote_dir,
-                        result.stderr,
-                        "direct_ssh",
-                    ));
-                }
-            }
-            RunnerFileChannel::DaemonHttp { .. } => {
-                let mut body = self.file_path_body(remote_dir);
-                body["private"] = json!(true);
-                self.http_post_json("/files/mkdir", body, "private mkdir", remote_dir)?;
-            }
+        let command = format!(
+            "umask 077; dir={}; mkdir -p -- \"$dir\" && test ! -L \"$dir\" && test -O \"$dir\" && mode=$(stat -c %a -- \"$dir\" 2>/dev/null || stat -f %Lp \"$dir\") && test \"$mode\" = 700",
+            shell::quote_arg(remote_dir),
+        );
+        let result = self.client.execute(&command);
+        if !result.success {
+            return Err(self.operation_error("private mkdir", remote_dir, result.stderr));
         }
         Ok(())
     }
 
+    /// Upload a file and verify the remote copy's SHA-256 and size match the
+    /// local bytes before reporting success. A mismatched copy is removed.
     pub(crate) fn upload_file(&self, local_path: &str, remote_path: &str) -> Result<()> {
-        match &self.channel {
-            RunnerFileChannel::DirectSsh(client) => {
-                let upload = client.upload_file(local_path, remote_path);
-                if !upload.success {
-                    return Err(file_transfer_operation_error(
-                        &self.runner_id,
-                        "upload",
-                        remote_path,
-                        upload.stderr,
-                        "direct_ssh",
-                    ));
-                }
-            }
-            RunnerFileChannel::DaemonHttp { .. } => {
-                let content = fs::read(local_path).map_err(|err| {
-                    Error::internal_io(err.to_string(), Some(format!("read {local_path}")))
-                })?;
-                self.http_post_json(
-                    "/files/upload",
-                    self.file_upload_body(
-                        remote_path,
-                        base64::engine::general_purpose::STANDARD.encode(content),
-                    ),
-                    "upload",
-                    remote_path,
-                )?;
-            }
+        let (expected_sha256, expected_size) = local_file_digest(local_path)?;
+        let upload = self.client.upload_file(local_path, remote_path);
+        if !upload.success {
+            return Err(self.operation_error("upload", remote_path, upload.stderr));
+        }
+        let verify = self.client.execute(&remote_digest_check(
+            remote_path,
+            &expected_sha256,
+            expected_size,
+        ));
+        if !verify.success {
+            let _ = self
+                .client
+                .execute(&format!("rm -f {}", shell::quote_arg(remote_path)));
+            return Err(self.operation_error("upload verify", remote_path, verify.stderr));
         }
         Ok(())
     }
 
     /// Publish a private file only after its content hash and owner-only mode
-    /// are established. The temporary file is never visible at the final path.
+    /// are established. The verified bytes are snapshotted before transfer and
+    /// the temporary file is never visible at the final path.
     pub(crate) fn upload_private_file_atomic(
         &self,
         local_path: &str,
@@ -307,64 +161,18 @@ impl RunnerFileTransfer {
     ) -> Result<()> {
         let content =
             private_file_bytes_with_expected_digest(local_path, expected_sha256, remote_path)?;
-        let temp_path = format!("{remote_path}.{}.tmp", uuid::Uuid::new_v4());
-        let result = match &self.channel {
-            RunnerFileChannel::DirectSsh(client) => {
-                let upload = client.upload_file_private(local_path, &temp_path);
-                if !upload.success {
-                    Err(file_transfer_operation_error(
-                        &self.runner_id,
-                        "private upload",
-                        remote_path,
-                        upload.stderr,
-                        "direct_ssh",
-                    ))
-                } else {
-                    let publish = client.execute(&format!(
-                        "test \"$(shasum -a 256 {} | awk '{{print $1}}')\" = {} && chmod 600 {} && mv -f {} {}",
-                        shell::quote_arg(&temp_path),
-                        shell::quote_arg(expected_sha256),
-                        shell::quote_arg(&temp_path),
-                        shell::quote_arg(&temp_path),
-                        shell::quote_arg(remote_path),
-                    ));
-                    if publish.success {
-                        Ok(())
-                    } else {
-                        Err(file_transfer_operation_error(
-                            &self.runner_id,
-                            "private publish",
-                            remote_path,
-                            publish.stderr,
-                            "direct_ssh",
-                        ))
-                    }
-                }
-            }
-            RunnerFileChannel::DaemonHttp { .. } => {
-                self.http_post_json(
-                    "/files/upload",
-                    self.private_file_upload_body(
-                        remote_path,
-                        base64::engine::general_purpose::STANDARD.encode(content),
-                        expected_sha256,
-                    ),
-                    "private upload",
-                    remote_path,
-                )?;
-                Ok(())
-            }
-        };
-        if result.is_err() {
-            if let RunnerFileChannel::DirectSsh(client) = &self.channel {
-                let _ = client.execute(&format!("rm -f {}", shell::quote_arg(&temp_path)));
-            }
-        }
-        result
+        let snapshot = private_bytes_snapshot(&content)?;
+        self.publish_private_snapshot(
+            snapshot.path(),
+            remote_path,
+            expected_sha256,
+            content.len() as u64,
+            "private upload",
+            "private publish",
+        )
     }
 
     /// Transfer a declared evidence blob from one verified, bounded snapshot.
-    /// SSH consumes the snapshot path; HTTP sends it in bounded chunks.
     pub(crate) fn upload_private_evidence_atomic(
         &self,
         local_path: &str,
@@ -373,218 +181,116 @@ impl RunnerFileTransfer {
         expected_size: u64,
     ) -> Result<()> {
         let snapshot = private_evidence_snapshot(local_path, expected_sha256, expected_size)?;
+        self.publish_private_snapshot(
+            snapshot.path(),
+            remote_path,
+            expected_sha256,
+            expected_size,
+            "private evidence upload",
+            "private evidence publish",
+        )
+    }
+
+    fn publish_private_snapshot(
+        &self,
+        snapshot: &std::path::Path,
+        remote_path: &str,
+        expected_sha256: &str,
+        expected_size: u64,
+        upload_operation: &str,
+        publish_operation: &str,
+    ) -> Result<()> {
+        let snapshot = snapshot.to_str().ok_or_else(|| {
+            Error::internal_unexpected(format!(
+                "private snapshot path is not UTF-8: {}",
+                snapshot.display()
+            ))
+        })?;
         let temp_path = format!("{remote_path}.{}.tmp", uuid::Uuid::new_v4());
-        let result = match &self.channel {
-            RunnerFileChannel::DirectSsh(client) => {
-                let upload = client.upload_file_private(
-                    snapshot.path().to_str().expect("snapshot path"),
-                    &temp_path,
-                );
-                if !upload.success {
-                    Err(file_transfer_operation_error(
-                        &self.runner_id,
-                        "private evidence upload",
-                        remote_path,
-                        upload.stderr,
-                        "direct_ssh",
-                    ))
-                } else {
-                    let publish = client.execute(&format!(
-                        "test \"$(shasum -a 256 {} | awk '{{print $1}}')\" = {} && test \"$(wc -c < {})\" -eq {} && chmod 600 {} && mv -f {} {}",
-                        shell::quote_arg(&temp_path), shell::quote_arg(expected_sha256), shell::quote_arg(&temp_path), expected_size, shell::quote_arg(&temp_path), shell::quote_arg(&temp_path), shell::quote_arg(remote_path),
-                    ));
-                    if publish.success {
-                        Ok(())
-                    } else {
-                        Err(file_transfer_operation_error(
-                            &self.runner_id,
-                            "private evidence publish",
-                            remote_path,
-                            publish.stderr,
-                            "direct_ssh",
-                        ))
-                    }
-                }
+        let upload = self.client.upload_file_private(snapshot, &temp_path);
+        let result = if !upload.success {
+            Err(self.operation_error(upload_operation, remote_path, upload.stderr))
+        } else {
+            let publish = self.client.execute(&format!(
+                "{} && chmod 600 {} && mv -f {} {}",
+                remote_digest_check(&temp_path, expected_sha256, expected_size),
+                shell::quote_arg(&temp_path),
+                shell::quote_arg(&temp_path),
+                shell::quote_arg(remote_path),
+            ));
+            if publish.success {
+                Ok(())
+            } else {
+                Err(self.operation_error(publish_operation, remote_path, publish.stderr))
             }
-            RunnerFileChannel::DaemonHttp { .. } => self.upload_private_file_chunks(
-                snapshot.path(),
-                remote_path,
-                expected_sha256,
-                expected_size,
-            ),
         };
         if result.is_err() {
-            if let RunnerFileChannel::DirectSsh(client) = &self.channel {
-                let _ = client.execute(&format!("rm -f {}", shell::quote_arg(&temp_path)));
-            }
+            let _ = self
+                .client
+                .execute(&format!("rm -f {}", shell::quote_arg(&temp_path)));
         }
         result
     }
 
-    fn upload_private_file_chunks(
-        &self,
-        path: &std::path::Path,
-        remote_path: &str,
-        sha256: &str,
-        size: u64,
-    ) -> Result<()> {
-        const CHUNK_BYTES: usize = 64 * 1024;
-        let upload_id = uuid::Uuid::new_v4().to_string();
-        let mut input = fs::File::open(path).map_err(|error| {
-            provider_evidence_io_error(error, format!("open evidence snapshot {}", path.display()))
-        })?;
-        let mut offset = 0u64;
-        let mut buffer = [0u8; CHUNK_BYTES];
-        loop {
-            let read = input.read(&mut buffer).map_err(|error| {
-                provider_evidence_io_error(
-                    error,
-                    format!("read evidence snapshot {}", path.display()),
-                )
-            })?;
-            let final_chunk = read == 0 || offset + read as u64 == size;
-            if read == 0 && offset != size {
-                return Err(Error::validation_invalid_argument(
-                    "provider_evidence",
-                    "evidence snapshot ended before its declared size",
-                    Some(remote_path.to_string()),
-                    None,
-                ));
-            }
-            let upload = self.http_post_json(
-                "/files/upload-chunk",
-                json!({"runner_id": &self.runner_id, "path": remote_path, "workspace_root": &self.workspace_root, "upload_id": upload_id, "offset": offset, "content_base64": base64::engine::general_purpose::STANDARD.encode(&buffer[..read]), "final": final_chunk, "sha256": final_chunk.then_some(sha256), "size_bytes": size, "private": true}),
-                "private evidence upload",
-                remote_path,
-            );
-            if let Err(error) = upload {
-                let _ = self.http_post_json(
-                    "/files/upload-chunk/abort",
-                    json!({"runner_id": &self.runner_id, "workspace_root": &self.workspace_root, "upload_id": upload_id}),
-                    "private evidence upload abort",
-                    remote_path,
-                );
-                return Err(error);
-            }
-            offset += read as u64;
-            if final_chunk {
-                return Ok(());
-            }
-        }
-    }
-
     pub(crate) fn download_file(&self, remote_path: &str, local_path: &str) -> Result<()> {
-        match &self.channel {
-            RunnerFileChannel::DirectSsh(client) => {
-                let download = client.download_file(remote_path, local_path);
-                if !download.success {
-                    return Err(file_transfer_operation_error(
-                        &self.runner_id,
-                        "download",
-                        remote_path,
-                        download.stderr,
-                        "direct_ssh",
-                    ));
-                }
-            }
-            RunnerFileChannel::DaemonHttp { .. } => {
-                let body = self.http_post_json(
-                    "/files/download",
-                    self.file_path_body(remote_path),
-                    "download",
-                    remote_path,
-                )?;
-                let encoded = body
-                    .get("content_base64")
-                    .and_then(|value| value.as_str())
-                    .ok_or_else(|| {
-                        Error::internal_unexpected("runner file download missing content_base64")
-                    })?;
-                let content = base64::engine::general_purpose::STANDARD
-                    .decode(encoded)
-                    .map_err(|err| {
-                        Error::internal_json(
-                            err.to_string(),
-                            Some("decode runner file download".to_string()),
-                        )
-                    })?;
-                fs::write(local_path, content).map_err(|err| {
-                    Error::internal_io(err.to_string(), Some(format!("write {local_path}")))
-                })?;
-            }
+        let download = self.client.download_file(remote_path, local_path);
+        if !download.success {
+            return Err(self.operation_error("download", remote_path, download.stderr));
         }
         Ok(())
     }
 
-    fn http_post_json(
-        &self,
-        path: &str,
-        body: Value,
-        operation: &str,
-        remote_path: &str,
-    ) -> Result<Value> {
-        match &self.channel {
-            RunnerFileChannel::DirectSsh(_) => unreachable!("direct SSH does not use HTTP"),
-            RunnerFileChannel::DaemonHttp {
-                client,
-                endpoint_url,
-                broker_token,
-            } => daemon_file_post_json(client, endpoint_url, path, body, broker_token.as_deref())
-                .map_err(|err| {
-                    http_file_transfer_error(
-                        &self.runner_id,
-                        operation,
-                        remote_path,
-                        err,
-                        "daemon_http",
-                    )
-                }),
-        }
-    }
-
-    fn file_path_body(&self, path: &str) -> Value {
-        json!({
-            "runner_id": &self.runner_id,
-            "path": path,
-            "workspace_root": &self.workspace_root,
-        })
-    }
-
-    fn file_upload_body(&self, path: &str, content_base64: String) -> Value {
-        json!({
-            "runner_id": &self.runner_id,
-            "path": path,
-            "workspace_root": &self.workspace_root,
-            "content_base64": content_base64,
-        })
-    }
-
-    fn private_file_upload_body(&self, path: &str, content_base64: String, sha256: &str) -> Value {
-        json!({
-            "runner_id": &self.runner_id,
-            "path": path,
-            "workspace_root": &self.workspace_root,
-            "content_base64": content_base64,
-            "sha256": sha256,
-            "private": true,
-            "atomic": true,
-        })
+    fn operation_error(&self, operation: &str, remote_path: &str, stderr: String) -> Error {
+        file_transfer_operation_error(
+            &self.runner_id,
+            operation,
+            remote_path,
+            stderr,
+            FILE_TRANSFER_TRANSPORT,
+        )
     }
 }
 
-fn direct_ssh_file_channel(runner: &Runner) -> Result<RunnerFileChannel> {
-    let server_id = runner.server_id.as_deref().ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "server_id",
-            "SSH runner file transfer requires server_id",
-            Some(runner.id.clone()),
-            None,
-        )
+/// Remote shell check that `path` holds exactly `size` bytes hashing to
+/// `sha256`.
+fn remote_digest_check(path: &str, sha256: &str, size: u64) -> String {
+    let path = shell::quote_arg(path);
+    format!(
+        "test \"$( (sha256sum {path} 2>/dev/null || shasum -a 256 {path}) | awk '{{print $1}}')\" = {} && test \"$(wc -c < {path})\" -eq {size}",
+        shell::quote_arg(sha256),
+    )
+}
+
+fn local_file_digest(local_path: &str) -> Result<(String, u64)> {
+    let mut input = fs::File::open(local_path)
+        .map_err(|err| Error::internal_io(err.to_string(), Some(format!("open {local_path}"))))?;
+    let mut digest = sha2::Sha256::new();
+    let mut total = 0u64;
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = input.read(&mut buffer).map_err(|err| {
+            Error::internal_io(err.to_string(), Some(format!("read {local_path}")))
+        })?;
+        if read == 0 {
+            break;
+        }
+        total += read as u64;
+        digest.update(&buffer[..read]);
+    }
+    Ok((format!("{:x}", digest.finalize()), total))
+}
+
+fn private_bytes_snapshot(content: &[u8]) -> Result<tempfile::NamedTempFile> {
+    let mut snapshot = tempfile::NamedTempFile::new().map_err(|err| {
+        Error::internal_io(err.to_string(), Some("create private snapshot".into()))
     })?;
-    let server = server::load(server_id)?;
-    let mut client = SshClient::from_server(&server, server_id)?;
-    client.env.extend(runner.env.clone());
-    Ok(RunnerFileChannel::DirectSsh(client))
+    snapshot
+        .write_all(content)
+        .and_then(|()| snapshot.as_file().sync_all())
+        .map_err(|err| {
+            Error::internal_io(err.to_string(), Some("write private snapshot".into()))
+        })?;
+    Ok(snapshot)
 }
 
 fn private_evidence_snapshot(
@@ -770,85 +476,6 @@ mod content_addressed_evidence_tests {
     }
 }
 
-fn daemon_file_post_json(
-    client: &Client,
-    base_url: &str,
-    path: &str,
-    body: Value,
-    token: Option<&str>,
-) -> Result<Value> {
-    let mut request = client
-        .post(format!("{}{}", base_url.trim_end_matches('/'), path))
-        .json(&body);
-    if let Some(token) = token.filter(|token| !token.trim().is_empty()) {
-        request = request
-            .header(broker_auth::BROKER_TOKEN_HEADER, token)
-            .bearer_auth(token);
-    }
-    let response = request
-        .send()
-        .map_err(|err| Error::internal_unexpected(format!("runner file daemon request: {err}")))?;
-    let status_code = response.status().as_u16();
-    let envelope: HttpFileEnvelope = response.json().map_err(|err| {
-        Error::internal_json(
-            err.to_string(),
-            Some("parse runner file daemon response".to_string()),
-        )
-    })?;
-    if status_code >= 400 || !envelope.success {
-        return Err(crate::remote_error::from_wire(
-            envelope.error.unwrap_or(Value::Null),
-            "runner file daemon request failed",
-            Some(status_code),
-            path,
-        ));
-    }
-    let data = envelope
-        .data
-        .ok_or_else(|| Error::internal_unexpected("runner file daemon response missing data"))?;
-    data.get("body")
-        .cloned()
-        .ok_or_else(|| Error::internal_unexpected("runner file daemon response missing data.body"))
-}
-
-fn daemon_file_get_json(
-    client: &Client,
-    base_url: &str,
-    path: &str,
-    token: Option<&str>,
-) -> Result<Value> {
-    let mut request = client.get(format!("{}{}", base_url.trim_end_matches('/'), path));
-    if let Some(token) = token.filter(|token| !token.trim().is_empty()) {
-        request = request
-            .header(broker_auth::BROKER_TOKEN_HEADER, token)
-            .bearer_auth(token);
-    }
-    let response = request.send().map_err(|err| {
-        Error::internal_unexpected(format!("runner file daemon capability request: {err}"))
-    })?;
-    let status_code = response.status().as_u16();
-    let envelope: HttpFileEnvelope = response.json().map_err(|err| {
-        Error::internal_json(
-            err.to_string(),
-            Some("parse runner file daemon capability response".to_string()),
-        )
-    })?;
-    if status_code >= 400 || !envelope.success {
-        return Err(crate::remote_error::from_wire(
-            envelope.error.unwrap_or(Value::Null),
-            "runner file daemon capability request failed",
-            Some(status_code),
-            path,
-        ));
-    }
-    envelope
-        .data
-        .and_then(|data| data.get("body").cloned())
-        .ok_or_else(|| {
-            Error::internal_unexpected("runner file daemon capability response missing data.body")
-        })
-}
-
 pub(crate) fn select_runner_transport(
     runner: &Runner,
     status: Option<&RunnerStatusReport>,
@@ -882,35 +509,17 @@ fn unsupported_file_transfer_error(runner_id: &str, transport: &str, reason: &st
     Error::new(
         ErrorCode::RunnerLabTransportFailure,
         format!(
-            "Lab offload runner `{runner_id}` does not currently support controller file transfer over `{transport}`: {reason}"
+            "Lab offload runner `{runner_id}` does not support controller file transfer over `{transport}`: {reason}"
         ),
         json!({
             "runner_id": runner_id,
             "transport": transport,
             "missing_capability": "runner_file_transfer",
-            "supported_transports": ["direct_ssh"],
+            "supported_transports": [FILE_TRANSFER_TRANSPORT],
         }),
     )
     .with_retryable(false)
-        .with_hint("Use a direct SSH runner for Lab @file arguments and structured-output download or connect the runner so its daemon file API is reachable.".to_string())
-        .with_hint("Next transport implementation should provide mkdir/upload/download through the selected runner transport instead of calling SSH directly.".to_string())
-}
-
-fn unsupported_chunk_upload_error(runner_id: &str, reason: impl Into<String>) -> Error {
-    Error::new(
-        ErrorCode::RunnerLabTransportFailure,
-        format!(
-            "Lab offload runner `{runner_id}` cannot negotiate the private chunk-upload protocol: {}",
-            reason.into()
-        ),
-        json!({
-            "runner_id": runner_id,
-            "missing_capability": "private_file_chunk_upload",
-            "required_protocol_version": CHUNK_UPLOAD_PROTOCOL_VERSION,
-        }),
-    )
-    .with_retryable(false)
-    .with_hint("Upgrade the runner daemon or select direct SSH, which uses its native bounded atomic transfer protocol.".to_string())
+    .with_hint("Lab @file arguments and structured-output download use direct SSH; configure an SSH runner with a server_id.".to_string())
 }
 
 fn file_transfer_operation_error(
@@ -939,43 +548,6 @@ fn file_transfer_operation_error(
     .with_retryable(true)
 }
 
-fn http_file_transfer_error(
-    runner_id: &str,
-    operation: &str,
-    remote_path: &str,
-    source: Error,
-    transport: &str,
-) -> Error {
-    let remote_path = homeboy_core::redaction::redact_string(remote_path);
-    let source_cause = ["cause", "reason", "error"]
-        .iter()
-        .find_map(|key| source.details.get(*key).and_then(Value::as_str))
-        .filter(|cause| !cause.is_empty() && !source.message.contains(cause))
-        .map(homeboy_core::redaction::redact_string);
-    let source_message = homeboy_core::redaction::redact_string(&source.message);
-    let diagnostic_cause = source_cause
-        .clone()
-        .unwrap_or_else(|| source_message.clone());
-    let source_details = homeboy_core::redaction::redact_json(&source.details);
-    let summary = format!(
-        "{diagnostic_cause} (Lab runner file transfer `{operation}` failed on runner `{runner_id}` for `{remote_path}`: {source_message})"
-    );
-    Error::new(
-        ErrorCode::RunnerLabTransportFailure,
-        bounded_redacted_text(&summary, 512),
-        json!({
-            "runner_id": runner_id,
-            "operation": operation,
-            "remote_path": remote_path,
-            "transport": transport,
-            "diagnostic_cause": diagnostic_cause,
-            "source": source_details,
-        }),
-    )
-    .with_retryable(true)
-    .with_source(source)
-}
-
 fn bounded_redacted_text(value: &str, limit: usize) -> String {
     homeboy_core::redaction::redact_string(value)
         .chars()
@@ -989,7 +561,6 @@ mod tests {
     use crate::session::{
         RunnerActiveJobState, RunnerSessionRole, RunnerSessionState, RunnerTunnelMode,
     };
-    use std::io::{Read, Write};
 
     fn runner(kind: RunnerKind) -> Runner {
         Runner {
@@ -1080,7 +651,7 @@ mod tests {
         runner.server_id = Some("srv".to_string());
 
         assert_eq!(
-            RunnerFileTransferCapability::for_runner(&runner, None),
+            RunnerFileTransferCapability::for_runner(&runner),
             RunnerFileTransferCapability::DirectSsh {
                 server_id: "srv".to_string(),
             }
@@ -1088,37 +659,47 @@ mod tests {
     }
 
     #[test]
-    fn file_transfer_selects_direct_daemon_http_when_connected() {
-        let runner = runner(RunnerKind::Ssh);
+    fn runner_with_a_live_daemon_session_still_selects_ssh_for_files() {
+        let mut runner = runner(RunnerKind::Ssh);
+        runner.server_id = Some("srv".to_string());
         let mut session = session(RunnerTunnelMode::DirectSsh);
         session.local_url = Some("http://127.0.0.1:1234".to_string());
-        let capability = RunnerFileTransferCapability::for_runner(&runner, Some(&status(session)));
+        assert!(matches!(
+            select_runner_transport(&runner, Some(&status(session)), false),
+            RunnerTransport::DirectDaemon(_)
+        ));
 
         assert_eq!(
-            capability,
-            RunnerFileTransferCapability::DaemonHttp {
-                endpoint_url: "http://127.0.0.1:1234".to_string(),
+            RunnerFileTransferCapability::for_runner(&runner),
+            RunnerFileTransferCapability::DirectSsh {
+                server_id: "srv".to_string(),
             }
         );
     }
 
     #[test]
-    fn direct_daemon_without_a_broker_token_uses_ssh_for_files() {
-        crate::test_support::with_isolated_home(|_| {
-            server::create(
-                &serde_json::json!({ "id": "srv", "host": "localhost", "user": "test" })
-                    .to_string(),
-                false,
-            )
-            .expect("create SSH server");
-            let mut runner = runner(RunnerKind::Ssh);
-            runner.server_id = Some("srv".to_string());
+    fn ssh_runner_without_server_id_cannot_transfer_files() {
+        let runner = runner(RunnerKind::Ssh);
+        let capability = RunnerFileTransferCapability::for_runner(&runner);
+        let error = capability
+            .ensure_supported(&runner.id)
+            .expect_err("no SSH authority");
 
-            assert!(matches!(
-                direct_ssh_file_channel(&runner),
-                Ok(RunnerFileChannel::DirectSsh(_))
-            ));
-        });
+        assert_eq!(error.code, ErrorCode::RunnerLabTransportFailure);
+        assert_eq!(error.retryable, Some(false));
+        assert_eq!(error.details["supported_transports"], json!(["direct_ssh"]));
+    }
+
+    #[cfg(unix)]
+    fn local_ssh_transfer(server_id: &str) -> RunnerFileTransfer {
+        server::create(
+            &json!({"id": server_id, "host": "localhost", "user": "test"}).to_string(),
+            false,
+        )
+        .unwrap();
+        let mut runner = runner(RunnerKind::Ssh);
+        runner.server_id = Some(server_id.to_string());
+        RunnerFileTransfer::for_runner(&runner).expect("SSH file transfer")
     }
 
     #[cfg(unix)]
@@ -1126,19 +707,8 @@ mod tests {
     fn ssh_private_directory_creation_preserves_existing_shared_permissions() {
         use std::os::unix::fs::PermissionsExt;
         crate::test_support::with_isolated_home(|_| {
-            server::create(
-                &json!({"id": "private-mkdir", "host": "localhost", "user": "test"}).to_string(),
-                false,
-            )
-            .unwrap();
-            let mut runner = runner(RunnerKind::Ssh);
-            runner.server_id = Some("private-mkdir".to_string());
+            let transfer = local_ssh_transfer("private-mkdir");
             let root = tempfile::tempdir().unwrap();
-            let transfer = RunnerFileTransfer {
-                runner_id: runner.id.clone(),
-                workspace_root: Some(root.path().display().to_string()),
-                channel: direct_ssh_file_channel(&runner).unwrap(),
-            };
             let private = root.path().join("evidence/nested");
             transfer
                 .ensure_private_directory(private.to_str().unwrap())
@@ -1163,65 +733,76 @@ mod tests {
         });
     }
 
+    #[cfg(unix)]
     #[test]
-    fn daemon_file_post_json_attaches_broker_token_headers() {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
-        let address = listener.local_addr().expect("addr");
-        let server = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("accept");
-            let mut request = String::new();
-            let mut buffer = [0_u8; 4096];
-            loop {
-                let read = stream.read(&mut buffer).expect("read");
-                if read == 0 {
-                    break;
-                }
-                request.push_str(&String::from_utf8_lossy(&buffer[..read]));
-                if request.contains("\r\n\r\n") {
-                    break;
-                }
-            }
-            let response = concat!(
-                "HTTP/1.1 200 OK\r\n",
-                "Content-Type: application/json\r\n",
-                "Connection: close\r\n",
-                "\r\n",
-                "{\"success\":true,\"data\":{\"body\":{\"ok\":true}}}"
-            );
-            stream.write_all(response.as_bytes()).expect("write");
-            request
+    fn ssh_upload_verifies_remote_digest_and_size_before_success() {
+        crate::test_support::with_isolated_home(|_| {
+            let transfer = local_ssh_transfer("verified-upload");
+            let root = tempfile::tempdir().unwrap();
+            let source = root.path().join("source.bin");
+            let remote = root.path().join("remote.bin");
+            fs::write(&source, b"verified upload bytes").unwrap();
+
+            transfer
+                .upload_file(source.to_str().unwrap(), remote.to_str().unwrap())
+                .expect("verified upload");
+            assert_eq!(fs::read(&remote).unwrap(), b"verified upload bytes");
+
+            let (sha256, size) = local_file_digest(source.to_str().unwrap()).unwrap();
+            assert_eq!(size, 21);
+            let check = transfer.client.execute(&remote_digest_check(
+                remote.to_str().unwrap(),
+                &sha256,
+                size,
+            ));
+            assert!(check.success, "matching remote copy verifies");
+            let mismatch = transfer.client.execute(&remote_digest_check(
+                remote.to_str().unwrap(),
+                &sha256,
+                size + 1,
+            ));
+            assert!(!mismatch.success, "size mismatch is refused");
+            let wrong_digest = transfer.client.execute(&remote_digest_check(
+                remote.to_str().unwrap(),
+                &"0".repeat(64),
+                size,
+            ));
+            assert!(!wrong_digest.success, "digest mismatch is refused");
         });
-        let client = Client::builder()
-            .no_proxy()
-            .timeout(Duration::from_secs(5))
-            .build()
-            .expect("client");
-
-        let body = daemon_file_post_json(
-            &client,
-            &format!("http://{address}"),
-            "/files/mkdir",
-            json!({ "runner_id": "test-runner", "path": "/tmp/x" }),
-            Some("secret-token"),
-        )
-        .expect("daemon response");
-
-        assert_eq!(body["ok"], true);
-        let request = server.join().expect("server");
-        assert!(request.contains("x-homeboy-broker-token: secret-token"));
-        assert!(request.contains("authorization: Bearer secret-token"));
     }
 
+    #[cfg(unix)]
     #[test]
-    fn old_daemon_capability_preflight_is_a_typed_non_retryable_refusal() {
-        let refusal = unsupported_chunk_upload_error("runner-old", "HTTP 404");
-        assert_eq!(refusal.code, ErrorCode::RunnerLabTransportFailure);
-        assert_eq!(refusal.retryable, Some(false));
-        assert_eq!(
-            refusal.details["missing_capability"],
-            "private_file_chunk_upload"
-        );
-        assert_eq!(refusal.details["required_protocol_version"], 1);
+    fn ssh_private_upload_publishes_owner_only_verified_bytes() {
+        use std::os::unix::fs::PermissionsExt;
+        crate::test_support::with_isolated_home(|_| {
+            let transfer = local_ssh_transfer("private-upload");
+            let root = tempfile::tempdir().unwrap();
+            let source = root.path().join("evidence.json");
+            let remote = root.path().join("published.json");
+            fs::write(&source, b"private evidence").unwrap();
+            let sha256 = content_hash::sha256_hex(b"private evidence");
+
+            transfer
+                .upload_private_evidence_atomic(
+                    source.to_str().unwrap(),
+                    remote.to_str().unwrap(),
+                    &sha256,
+                    16,
+                )
+                .expect("private evidence upload");
+            assert_eq!(fs::read(&remote).unwrap(), b"private evidence");
+            assert_eq!(
+                fs::metadata(&remote).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            let leftovers = fs::read_dir(root.path())
+                .unwrap()
+                .filter_map(|entry| entry.ok())
+                .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
+                .count();
+            assert_eq!(leftovers, 0, "temporary upload is renamed into place");
+        });
     }
 
     #[test]
@@ -1270,130 +851,6 @@ mod tests {
         assert!(!serde_json::to_string(&persisted_candidate.details)
             .expect("serialize full SSH evidence")
             .contains("ssh-fixture-secret"));
-    }
-
-    #[test]
-    fn denied_private_upload_keeps_the_daemon_response_cause() {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
-        let address = listener.local_addr().expect("address");
-        let cause = format!(
-            "Authorization: Bearer http-fixture-secret; {}",
-            "remote policy detail ".repeat(80)
-        );
-        assert!(cause.contains("http-fixture-secret"));
-        let large_detail = "complete daemon rejection detail ".repeat(180);
-        let body = serde_json::to_string(&json!({
-            "success": false,
-            "error": {
-                "error": "runner.lab_transport_failure",
-                "message": format!("private upload parent rejected: {cause}"),
-                "details": {
-                    "operation": "private evidence upload",
-                    "cause": cause,
-                    "diagnostic_payload": large_detail,
-                }
-            }
-        }))
-        .expect("serialize large daemon rejection");
-        assert!(body.len() > 4 * 1024);
-        let server = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("accept");
-            let mut request = [0_u8; 4096];
-            let _ = stream.read(&mut request).expect("read request");
-            write!(
-                stream,
-                "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                body.len(),
-                body
-            )
-            .expect("write refusal");
-        });
-        let client = Client::builder()
-            .no_proxy()
-            .timeout(Duration::from_secs(5))
-            .build()
-            .expect("client");
-        let long_remote_path = format!(
-            "/{}",
-            (0..8)
-                .map(|index| format!("segment-{index}-{}", "r".repeat(76)))
-                .collect::<Vec<_>>()
-                .join("/")
-        );
-        assert!(long_remote_path.len() > 512);
-        let source = daemon_file_post_json(
-            &client,
-            &format!("http://{address}"),
-            "/files/upload-chunk",
-            json!({ "path": &long_remote_path }),
-            None,
-        )
-        .expect_err("daemon refuses group-writable evidence parent");
-        server.join().expect("server");
-
-        let error = http_file_transfer_error(
-            "test-runner",
-            "private evidence upload",
-            &long_remote_path,
-            source,
-            "daemon_http",
-        );
-
-        let redacted_cause = homeboy_core::redaction::redact_string(&cause);
-        assert!(error.message.contains("remote policy detail"));
-        assert_eq!(error.details["operation"], "private evidence upload");
-        assert_eq!(error.details["source"]["cause"], redacted_cause);
-        assert_eq!(error.details["source"]["diagnostic_payload"], large_detail);
-        let source = std::error::Error::source(&error)
-            .and_then(|source| source.downcast_ref::<Error>())
-            .expect("daemon response error remains in the source chain");
-        assert_eq!(
-            source.message,
-            format!("private upload parent rejected: {cause}")
-        );
-        assert_eq!(source.details["cause"], cause);
-        assert_eq!(source.details["diagnostic_payload"], large_detail);
-        let redacted_source_message = homeboy_core::redaction::redact_string(&error.message);
-        let persisted_candidate = homeboy_lab_contract::lab::transport_failure::preacceptance_transport_error(
-            "attempt-denied-private-upload",
-            "test-runner",
-            homeboy_lab_contract::lab::transport_failure::LabTransportOperation::DispatchCookAttempt,
-            homeboy_lab_contract::lab::transport_failure::LabJobAcceptanceDisposition::NoJobAccepted,
-            error,
-        );
-        assert!(
-            persisted_candidate.details["lab_transport_attempt_receipt"]["error"]["message"]
-                .as_str()
-                .is_some_and(|message| message.contains("remote policy detail"))
-        );
-        let source_error = &persisted_candidate.details["source_error"];
-        assert_eq!(source_error["code"], "runner.lab_transport_failure");
-        assert_eq!(source_error["message"], redacted_source_message);
-        assert_eq!(source_error["details"]["source"]["cause"], redacted_cause);
-        assert_eq!(
-            source_error["details"]["source"]["diagnostic_payload"],
-            large_detail
-        );
-        let full_evidence = serde_json::to_string(&persisted_candidate.details)
-            .expect("serialize complete daemon failure");
-        assert!(full_evidence.contains("complete daemon rejection detail"));
-        assert!(!full_evidence.contains("http-fixture-secret"));
-        assert!(
-            persisted_candidate.details["lab_transport_attempt_receipt"]["error"]["context"]
-                .as_str()
-                .is_some_and(
-                    |context| context.len() <= 4 * 1024 && context.contains(&long_remote_path)
-                )
-        );
-        assert!(
-            persisted_candidate.details["lab_transport_attempt_receipt"]["error"]["causes"]
-                .as_array()
-                .is_some_and(|causes| causes.iter().any(|cause| {
-                    cause["message"]
-                        .as_str()
-                        .is_some_and(|message| message.contains("remote policy detail"))
-                }))
-        );
     }
 
     #[test]

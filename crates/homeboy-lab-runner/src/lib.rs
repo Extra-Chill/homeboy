@@ -163,7 +163,6 @@ mod tool_registry;
 mod transport;
 mod validation_dependencies;
 mod validation_dependency_cache;
-mod workspace_root_provider;
 pub use runner_cache::{
     prune_homeboy_binary_cache, RunnerBinaryCachePruneEntry, RunnerBinaryCachePruneOptions,
     RunnerBinaryCachePruneOutput,
@@ -440,7 +439,6 @@ pub(crate) use workspace::{workspace_content_hash, workspace_content_manifest_fo
 pub(crate) use workspace::{
     workspace_content_hash_algorithm, WORKSPACE_CONTENT_DEFAULT_PERMISSION_POLICY,
 };
-pub use workspace_root_provider::register as register_runner_workspace_root_provider;
 
 use homeboy_runner_contract::RunnerKind;
 

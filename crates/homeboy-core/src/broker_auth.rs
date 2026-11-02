@@ -1,7 +1,7 @@
 //! Trust model for the runner daemon's authenticated `/runner/*` routes.
 //!
 //! A controller reaches a runner's own daemon over an SSH tunnel and submits
-//! staged work and file transfers to it over HTTP. Every `/runner/*` request
+//! staged work to it over HTTP. Every `/runner/*` request
 //! must present a paired bearer credential.
 //!
 //! ## Trust model
@@ -10,10 +10,10 @@
 //!   *runner credential* (`broker_auth_pair`). Pairing generates a random
 //!   bearer token, stores its SHA-256 hash for enforcement, and binds it to a
 //!   single `runner_id` with a set of [`BrokerScope`]s. The controller copy
-//!   may retain the plaintext token so controller-side submit/file requests can
+//!   may retain the plaintext token so controller-side submit requests can
 //!   attach it; enforcement-host installs strip plaintext token material and
 //!   keep hashes only.
-//! * **Controller submit.** Staged submission and runner file transfer are
+//! * **Controller submit.** Staged submission is
 //!   authorized by a credential carrying the [`BrokerScope::Submit`] scope.
 //! * **Runner-id binding.** Requests carry a `runner_id`. The presented token
 //!   must belong to a credential whose `runner_id` matches, so a credential
@@ -71,7 +71,7 @@ pub fn broker_submit_token_for_runner(runner_id: &str) -> Result<Option<String>>
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BrokerScope {
-    /// Controller-side staged submission and runner file transfer.
+    /// Controller-side staged submission.
     Submit,
 }
 

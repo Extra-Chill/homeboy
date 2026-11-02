@@ -316,10 +316,10 @@ fn prepare_lab_offload_workspace_stage_inner(
     // Compatible snapshots are mutable runner workspaces, not shared immutable
     // source objects. A job-owned execution view must therefore materialize its
     // own checkout instead of borrowing a snapshot another job may reap.
-    let requires_chunk_transfer = !declared_agent_task_evidence_inputs(&offload_args).is_empty();
+    let requires_evidence_transfer = !declared_agent_task_evidence_inputs(&offload_args).is_empty();
     let mut batched_extras = None;
     let synced = preflight_before_workspace_sync(
-        requires_chunk_transfer,
+        requires_evidence_transfer,
         || lab_runner_file_transfer(runner_id).map(|_| ()),
         || {
             control.checkpoint()?;
@@ -828,15 +828,14 @@ fn prepare_lab_offload_workspace_stage_inner(
     })
 }
 
-/// Chunk evidence needs the daemon file API, so refuse an old daemon before a
-/// workspace sync creates any remote state. SSH transfer has no daemon chunk
-/// dependency and its preflight is intentionally a no-op.
+/// Declared evidence travels over the runner's SSH file channel, so refuse a
+/// runner without one before a workspace sync creates any remote state.
 fn preflight_before_workspace_sync<T>(
-    requires_chunk_transfer: bool,
+    requires_evidence_transfer: bool,
     preflight: impl FnOnce() -> Result<()>,
     sync: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
-    if requires_chunk_transfer {
+    if requires_evidence_transfer {
         preflight()?;
     }
     sync()
@@ -1729,28 +1728,24 @@ mod tests {
     }
 
     #[test]
-    fn old_daemon_evidence_refusal_precedes_workspace_sync() {
+    fn evidence_transfer_refusal_precedes_workspace_sync() {
         let synced = Cell::new(false);
         let error = preflight_before_workspace_sync(
             true,
-            || {
-                Err(Error::internal_unexpected(
-                    "old daemon refuses chunk upload",
-                ))
-            },
+            || Err(Error::internal_unexpected("runner has no SSH file channel")),
             || {
                 synced.set(true);
                 Ok(())
             },
         )
-        .expect_err("old daemon must refuse before sync");
+        .expect_err("missing file channel must refuse before sync");
 
-        assert!(error.message.contains("old daemon"));
+        assert!(error.message.contains("no SSH file channel"));
         assert!(!synced.get(), "workspace sync must not run after refusal");
     }
 
     #[test]
-    fn no_evidence_skips_chunk_preflight_before_workspace_sync() {
+    fn no_evidence_skips_file_channel_preflight_before_workspace_sync() {
         let synced = Cell::new(false);
         preflight_before_workspace_sync(
             false,
