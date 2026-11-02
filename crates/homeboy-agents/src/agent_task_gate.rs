@@ -3031,6 +3031,12 @@ impl SelectedGateEnvironment {
                         .filter(|name| !self.values.contains_key(**name))
                         .map(|name| name.to_string()),
                 )
+                .chain(std::env::vars_os().filter_map(|(name, _)| {
+                    let name = name.to_str()?;
+                    (homeboy_core::runner_job_environment::is_runner_job_identity_env(name)
+                        && !self.values.contains_key(name))
+                    .then(|| name.to_string())
+                }))
                 .collect(),
             set: self.values.clone(),
         }
@@ -11292,6 +11298,95 @@ exit 2
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn gate_command_drops_worker_identity_but_keeps_capabilities_and_policy_inputs() {
+        use homeboy_core::runner_job_environment::{
+            is_runner_job_identity_env, RUNNER_JOB_IDENTITY_ENV,
+        };
+
+        const WORKER: &str = "TEST_GATE_IDENTITY_WORKER";
+        if std::env::var_os(WORKER).is_none() {
+            let test_name = homeboy_core::test_support::harness_test_name(
+                module_path!(),
+                "gate_command_drops_worker_identity_but_keeps_capabilities_and_policy_inputs",
+            );
+            let mut worker = Command::new(std::env::current_exe().expect("test binary"));
+            worker.args(["--exact", &test_name, "--nocapture"]);
+            worker.env(WORKER, "1");
+            let (prefixes, names) = RUNNER_JOB_IDENTITY_ENV;
+            for prefix in prefixes {
+                worker.env(format!("{prefix}FUTURE_CONTROL"), "worker-identity");
+            }
+            for name in names.iter().chain(COOK_SUPERVISOR_PRIVATE_ENV_VARS) {
+                worker.env(name, "worker-identity");
+            }
+            worker.env("HOMEBOY_WP_CODEBOX_BIN", "/worker/codebox");
+            worker.env("HOMEBOY_NO_UPDATE_CHECK", "1");
+            let output = homeboy_core::test_support::run_child_test(&mut worker, &test_name);
+            assert!(
+                output.status.success(),
+                "worker failed:\n{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        assert_eq!(
+            std::env::var("HOMEBOY_RUNNER_JOB_ID").unwrap(),
+            "worker-identity"
+        );
+        let runtime_tmpdir = tempfile::tempdir().expect("runtime tmpdir");
+        let mut policy = AgentTaskGateEnvironmentPolicy::default();
+        policy
+            .variables
+            .insert("HOMEBOY_GATE_INPUT".into(), "declared".into());
+        let selected = selected_gate_environment(&policy, Some(runtime_tmpdir.path()))
+            .expect("gate environment");
+        let mut command = Command::new("/usr/bin/env");
+        selected.apply(&mut command);
+        let output = command.output().expect("gate command");
+        assert!(output.status.success());
+        let stdout = String::from_utf8(output.stdout).expect("environment output");
+        let environment: BTreeMap<_, _> = stdout
+            .lines()
+            .filter_map(|line| line.split_once('='))
+            .collect();
+        for name in environment.keys() {
+            assert!(!is_runner_job_identity_env(name), "leaked {name}");
+            assert!(
+                !COOK_SUPERVISOR_PRIVATE_ENV_VARS.contains(name),
+                "leaked {name}"
+            );
+        }
+        assert_eq!(
+            environment.get("HOMEBOY_WP_CODEBOX_BIN"),
+            Some(&"/worker/codebox")
+        );
+        assert_eq!(environment.get("HOMEBOY_NO_UPDATE_CHECK"), Some(&"1"));
+        assert_eq!(environment.get("HOMEBOY_GATE_INPUT"), Some(&"declared"));
+
+        // Even an identity name is allowed when explicitly owned by gate policy.
+        policy
+            .variables
+            .insert("HOMEBOY_RUN_ID".into(), "gate-run".into());
+        let selected = selected_gate_environment(&policy, Some(runtime_tmpdir.path()))
+            .expect("gate environment");
+        assert!(!selected
+            .hydration_environment()
+            .remove
+            .contains(&"HOMEBOY_RUN_ID".to_string()));
+        let mut command = Command::new("/usr/bin/env");
+        selected.apply(&mut command);
+        let output = command
+            .output()
+            .expect("gate command with explicit identity");
+        assert!(String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .any(|line| line == "HOMEBOY_RUN_ID=gate-run"));
+    }
+
     #[test]
     fn dependency_setup_environment_matches_the_gate_command_environment() {
         let runtime_tmpdir = tempfile::tempdir().expect("runtime tmpdir");
@@ -11326,6 +11421,11 @@ exit 2
                         .iter()
                         .map(|name| name.to_string()),
                 )
+                .chain(std::env::vars_os().filter_map(|(name, _)| {
+                    let name = name.to_str()?;
+                    homeboy_core::runner_job_environment::is_runner_job_identity_env(name)
+                        .then(|| name.to_string())
+                }))
                 .collect();
             assert_eq!(setup.remove, sanitized);
         }
