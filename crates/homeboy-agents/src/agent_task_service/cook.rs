@@ -8261,6 +8261,12 @@ fn validate_cook_workspace_with_adopted_candidate(
     if let Some(continuation) = continuation {
         authenticate_tracked_promotion_continuation(&target, &continuation)?;
     }
+    if !tracked_candidate
+        && !cook_uses_explicit_cwd_workspace(options)
+        && !cook_has_provider_execution_in_store(lifecycle_store, &options.identity.cook_id)?
+    {
+        supersede_previous_cook_candidate(lifecycle_store, options, &target)?;
+    }
     preflight_cook_workspace_base_ancestry_with_provider(
         &target,
         options,
@@ -8268,6 +8274,115 @@ fn validate_cook_workspace_with_adopted_candidate(
         tracked_candidate,
     )
     .map_err(|error| with_pre_execution_phase(error, "workspace_base_ancestry_preflight"))
+}
+
+/// Retire only an exact, unpublished destination candidate. A fingerprint binds
+/// the entire tree, changed path set, destination and HEAD, not just overlapping
+/// paths. Keep a Git-owned durable copy before removing anything from disk.
+fn supersede_previous_cook_candidate(
+    store: &AgentTaskLifecycleStore,
+    options: &CookRequest,
+    target: &Path,
+) -> Result<()> {
+    let actual = candidate_fingerprint(target.to_string_lossy().as_ref())?;
+    let AgentTaskPromotionCandidate::Git { fingerprint } = &actual else {
+        return Ok(());
+    };
+    if fingerprint.changed_files.is_empty() {
+        return Ok(());
+    }
+    // Do not discard index-only edits hidden by the final workspace tree.
+    // Candidate placement stages the whole candidate; an independently edited
+    // or partially staged index is not sufficient supersession authority.
+    let index_tree =
+        homeboy_core::git::run_git(target, &["write-tree"], "inspect candidate index")?;
+    let head_tree = homeboy_core::git::run_git(
+        target,
+        &["rev-parse", "HEAD^{tree}"],
+        "inspect candidate base",
+    )?;
+    if index_tree.trim() != fingerprint.tree && index_tree.trim() != head_tree.trim() {
+        return Ok(());
+    }
+    for old in agent_task_lifecycle::list_records_in_store(store)? {
+        if old.run_id == options.identity.initial_run_id
+            || old.metadata.get("superseded_by_run_id").is_some()
+        {
+            continue;
+        }
+        let Some(delivery) = super::CookDelivery::from_run_metadata(&old.metadata) else {
+            continue;
+        };
+        if delivery.publication.is_some() {
+            continue;
+        }
+        let Some(promotion) = super::recorded_promotion_report(&old.metadata)? else {
+            continue;
+        };
+        let expected = promotion
+            .pointer("/provenance/candidate")
+            .cloned()
+            .and_then(|value| serde_json::from_value::<AgentTaskPromotionCandidate>(value).ok());
+        if expected.as_ref() != Some(&actual) {
+            continue;
+        }
+        // Destination identity is included in the fingerprint. Only stopped
+        // cooks may surrender it; never steal a live provider's workspace.
+        if !matches!(
+            old.state(),
+            agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
+                | agent_task_lifecycle::AgentTaskRunState::PartialFailure
+                | agent_task_lifecycle::AgentTaskRunState::Failed
+        ) {
+            continue;
+        }
+        let message = format!("homeboy: superseded candidate of {}", old.run_id);
+        homeboy_core::git::run_git(
+            target,
+            &["stash", "push", "--include-untracked", "-m", &message],
+            "preserve superseded Cook candidate",
+        )?;
+        let stash = homeboy_core::git::run_git(
+            target,
+            &["rev-parse", "refs/stash"],
+            "resolve superseded Cook candidate stash",
+        )?;
+        let status = homeboy_core::git::run_git(
+            target,
+            &["status", "--porcelain=v1", "--untracked-files=all"],
+            "verify superseded candidate was removed",
+        )?;
+        if !status.trim().is_empty() {
+            return Err(Error::validation_invalid_argument("workspace",
+                "Superseded candidate was stashed but the destination is still dirty; refusing provider execution",
+                Some(target.display().to_string()), None));
+        }
+        // A dedicated ref survives stash-list edits and ordinary Git GC.
+        let preserved_ref = format!("refs/homeboy/superseded/{}", stash.trim());
+        homeboy_core::git::run_git(
+            target,
+            &["update-ref", &preserved_ref, stash.trim()],
+            "retain superseded Cook candidate",
+        )?;
+        let evidence = serde_json::json!({
+            "superseded_run_id": old.run_id,
+            "preserved_ref": preserved_ref,
+            "stash_oid": stash.trim(),
+            "workspace": target,
+        });
+        store.mutate_record(&options.identity.initial_run_id, |record| {
+            record.metadata["superseded_candidate"] = evidence.clone();
+            true
+        })?;
+        store.mutate_record(&old.run_id, |record| {
+            record.metadata["superseded_by_run_id"] =
+                options.identity.initial_run_id.clone().into();
+            record.metadata["superseded_candidate"] = evidence.clone();
+            true
+        })?;
+        return Ok(());
+    }
+    Ok(())
 }
 
 /// Snapshot authority is passed to the scheduler, while convergence evidence is
@@ -9718,6 +9833,17 @@ fn tracked_promotion_continuation_in_store(
 ) -> Result<Option<TrackedPromotionContinuation>> {
     if !lifecycle_store.record_exists(&options.identity.initial_run_id)? {
         return Ok(None);
+    }
+    if lifecycle_store
+        .read_record(&options.identity.initial_run_id)?
+        .metadata
+        .get("superseded_by_run_id")
+        .is_some()
+    {
+        return Err(Error::validation_invalid_argument(
+            "run_id", "This candidate was superseded by a newer Cook; use its preserved Git stash instead of resuming",
+            Some(options.identity.initial_run_id.clone()), None,
+        ));
     }
     if super::CookDelivery::from_run_metadata(
         &lifecycle_store
