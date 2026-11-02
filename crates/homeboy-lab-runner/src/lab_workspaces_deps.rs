@@ -298,6 +298,10 @@ pub(super) fn discovered_validation_dependency_workspaces(
         homeboy_core::hygiene::effective_validation_dependency_ids(source_path, settings)?
     {
         let path = resolve_dependency_workspace_path(source_path, &dependency)?;
+        if homeboy_core::hygiene::validation_dependency_is_in_source_repository(source_path, &path)
+        {
+            continue;
+        }
         workspaces.push(ExtraLabWorkspace {
             role: "dependency".to_string(),
             path,
