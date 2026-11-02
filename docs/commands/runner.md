@@ -531,9 +531,12 @@ or ambiguous probes abort without changing the store.
 
 #### Broker authentication and pairing
 
-Every authenticated `/runner/*` daemon route (`/runner/staging/capabilities`,
-`/runner/staging/direct`, and runner file transfer) requires a scoped bearer
-token (#2990). The trust model is:
+Every authenticated `/runner/*` daemon route (`/runner/staging/capabilities`
+and `/runner/staging/direct`) requires a scoped bearer token (#2990). Lab
+runner file transfer (`@file` arguments, provider evidence, structured-output
+download) does not use the daemon: it always runs over direct SSH to the
+runner's `server_id`, and every upload is verified by remote SHA-256 and size
+before it succeeds. The trust model is:
 
 - **Pairing.** On the controller, mint a credential with
   `homeboy runner broker pair <id> --runner-id <runner-id>`. Unless
@@ -543,7 +546,7 @@ token (#2990). The trust model is:
   `~/.config/homeboy/broker_auth.json` (`0600`). The plaintext token is shown
   once and never re-displayed or logged.
 - **Scope.** Pairing grants the `submit` scope, which authorizes staged
-  submission and runner file transfer. Credentials stored with the retired
+  submission. Credentials stored with the retired
   `work` scope still load but grant no route.
 - **Runner-id binding.** Requests carry a `runner_id`; the presented token
   must belong to a credential paired to that exact `runner_id`.

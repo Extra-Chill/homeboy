@@ -2113,7 +2113,7 @@ pub fn runner_dev_sync(options: RunnerDevSyncOptions) -> Result<(RunnerDevSyncOu
                     validate_dev_sync_binary_for_runner(&runner, &local_binary)?;
                     let sha256 = sha256_file(&local_binary)?;
                     let remote_binary = dev_binary_path(&plan.workspace_root, &sha256);
-                    let transfer = RunnerFileTransfer::for_runner(&runner, None)?;
+                    let transfer = RunnerFileTransfer::for_runner(&runner)?;
                     let remote_parent = Path::new(&remote_binary)
                         .parent()
                         .and_then(Path::to_str)
@@ -2143,7 +2143,7 @@ pub fn runner_dev_sync(options: RunnerDevSyncOptions) -> Result<(RunnerDevSyncOu
                             .map_err(|err| Error::internal_json(err.to_string(), None))?,
                     );
                     let snapshot = build_runner_source_snapshot(&source, &plan.workspace_root)?;
-                    let transfer = RunnerFileTransfer::for_runner(&runner, None)?;
+                    let transfer = RunnerFileTransfer::for_runner(&runner)?;
                     let archive = snapshot.archive.path();
                     let parent = Path::new(&snapshot.remote_archive)
                         .parent()

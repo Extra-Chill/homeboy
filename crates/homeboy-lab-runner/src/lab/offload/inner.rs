@@ -64,8 +64,7 @@ pub(crate) fn remote_lab_output_file(checkout_root: &str) -> String {
 /// Remote structured-output path for runner-resident commands.
 ///
 /// Runner-resident commands execute from the runner workspace root itself, not a
-/// synced checkout under that root. Keep their output inside `workspace_root` so
-/// daemon-mode file transfer can create/read it, while still keeping the file out
+/// synced checkout under that root. Keep their output inside `workspace_root`, while still keeping the file out
 /// of any materialized git checkout.
 pub(crate) fn remote_runner_resident_lab_output_file(workspace_root: &str) -> String {
     let nonce = SystemTime::now()
@@ -259,9 +258,7 @@ pub(crate) fn materialize_lab_at_files_on_runner(
 }
 
 pub(crate) fn lab_runner_file_transfer(runner_id: &str) -> Result<RunnerFileTransfer> {
-    let runner = load(runner_id)?;
-    let runner_status = status(runner_id).ok();
-    RunnerFileTransfer::for_runner(&runner, runner_status.as_ref())
+    RunnerFileTransfer::for_runner(&load(runner_id)?)
 }
 
 pub(crate) fn lab_artifact_directory_error(runner_id: &str, parent: &str, err: Error) -> Error {

@@ -49,26 +49,12 @@ pub mod recovery_actions;
 mod remote_runner;
 pub mod runner_exec_driver;
 pub mod runner_exec_job;
-mod runner_files;
 pub mod runner_staging;
 pub(crate) mod runner_watch;
 pub mod step_job;
 mod stop;
 pub mod workflow_cadence;
 pub mod workflow_job;
-/// The daemon's own executable. A direct daemon child shares the daemon's
-/// build-specific durable store, so runner drivers launch Homeboy children
-/// from this path rather than from configuration or `PATH`.
-pub use lifetime::launchable_executable as daemon_launchable_executable;
-/// Idle window, in seconds, for automatically launched daemons; `0` selects a
-/// resident launch. See `lifetime::launch_idle_timeout`.
-pub use lifetime::IDLE_TIMEOUT_ENV as DAEMON_IDLE_TIMEOUT_ENV;
-#[cfg(test)]
-use stop::active_daemon_job_ids;
-pub(crate) use stop::stop_unlocked;
-use stop::stop_with_force_for_lease;
-pub use stop::{force_stop_for_lease, stop, stop_for_lease, stop_with_force};
-pub mod runner_workspace_root;
 pub use artifact_download::ArtifactDownload;
 pub use control::{
     adopt_orphaned_lease, artifact_content_url, ensure_running,
@@ -77,11 +63,19 @@ pub use control::{
     recover_missing_lease_state, start_background, supervise, ArtifactFetchOutcome,
 };
 use daemon_lease::{daemon_state_identity, freshness_report_from_validation, validate_lease_file};
+/// The daemon's own executable. A direct daemon child shares the daemon's
+/// build-specific durable store, so runner drivers launch Homeboy children
+/// from this path rather than from configuration or `PATH`.
+pub use lifetime::launchable_executable as daemon_launchable_executable;
+/// Idle window, in seconds, for automatically launched daemons; `0` selects a
+/// resident launch. See `lifetime::launch_idle_timeout`.
+pub use lifetime::IDLE_TIMEOUT_ENV as DAEMON_IDLE_TIMEOUT_ENV;
 use patch_capture::{capture_baseline, capture_patch_report};
-use runner_files::{
-    abort_runner_file_chunk_upload, create_runner_file_directory, download_runner_file,
-    reap_expired_uploads, upload_capabilities, upload_runner_file, upload_runner_file_chunk,
-};
+#[cfg(test)]
+use stop::active_daemon_job_ids;
+pub(crate) use stop::stop_unlocked;
+use stop::stop_with_force_for_lease;
+pub use stop::{force_stop_for_lease, stop, stop_for_lease, stop_with_force};
 
 pub const DEFAULT_ADDR: &str = "127.0.0.1:0";
 
@@ -1345,57 +1339,6 @@ pub struct ControllerJobRequest {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub(super) struct FilePathRequest {
-    runner_id: String,
-    path: String,
-    #[serde(default)]
-    workspace_root: Option<String>,
-    #[serde(default)]
-    private: bool,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub(super) struct FileUploadRequest {
-    runner_id: String,
-    path: String,
-    #[serde(default)]
-    workspace_root: Option<String>,
-    content_base64: String,
-    #[serde(default)]
-    sha256: Option<String>,
-    #[serde(default)]
-    private: bool,
-    #[serde(default)]
-    atomic: bool,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub(super) struct FileUploadChunkRequest {
-    runner_id: String,
-    path: String,
-    #[serde(default)]
-    workspace_root: Option<String>,
-    upload_id: String,
-    offset: u64,
-    content_base64: String,
-    #[serde(rename = "final")]
-    final_chunk: bool,
-    #[serde(default)]
-    sha256: Option<String>,
-    size_bytes: u64,
-    #[serde(default)]
-    private: bool,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub(super) struct FileUploadAbortRequest {
-    runner_id: String,
-    #[serde(default)]
-    workspace_root: Option<String>,
-    upload_id: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
 struct LifecycleStopRequest {
     lease_id: String,
     #[serde(default)]
@@ -1843,14 +1786,12 @@ where
     let (local_shutdown_tx, local_shutdown_rx) = mpsc::channel();
     let (completion_shutdown_tx, completion_shutdown_rx) = mpsc::channel();
     let (orchestration_shutdown_tx, orchestration_shutdown_rx) = mpsc::channel();
-    let (upload_shutdown_tx, upload_shutdown_rx) = mpsc::channel();
     let (work_intent_shutdown_tx, work_intent_shutdown_rx) = mpsc::channel();
     let local_child_reconciler =
         spawn_local_child_reservation_reconciler(job_store.clone(), local_shutdown_rx);
     let completion_notifier = spawn_completion_notifier(completion_shutdown_rx);
     let orchestration_reconciler =
         spawn_orchestration_reconciler(job_store.clone(), orchestration_shutdown_rx);
-    let upload_reaper = spawn_upload_reaper(upload_shutdown_rx);
     let work_intent_deliverer =
         spawn_work_intent_deliverer(job_store.clone(), work_intent_shutdown_rx);
 
@@ -1947,14 +1888,12 @@ where
     let _ = local_shutdown_tx.send(());
     let _ = completion_shutdown_tx.send(());
     let _ = orchestration_shutdown_tx.send(());
-    let _ = upload_shutdown_tx.send(());
     let _ = work_intent_shutdown_tx.send(());
     join_helpers_with_deadline(
         vec![
             ("local-child-reservation-reconciler", local_child_reconciler),
             ("completion-notifier", completion_notifier),
             ("orchestration-reconciler", orchestration_reconciler),
-            ("upload-reaper", upload_reaper),
             ("work-intent-deliverer", work_intent_deliverer),
         ],
         HELPER_DRAIN_DEADLINE,
@@ -2053,20 +1992,6 @@ mod helper_drain_tests {
 const COMPLETION_NOTIFY_INTERVAL_ENV: &str = "HOMEBOY_DAEMON_NOTIFY_INTERVAL_SECS";
 const COMPLETION_NOTIFY_DEFAULT_INTERVAL_SECS: u64 = 5;
 const LOCAL_CHILD_RESERVATION_RECONCILE_INTERVAL_SECS: u64 = 5;
-const UPLOAD_REAP_INTERVAL_SECS: u64 = 60;
-
-/// Reap abandoned uploads without depending on another request arriving.
-fn spawn_upload_reaper(shutdown: mpsc::Receiver<()>) -> std::thread::JoinHandle<()> {
-    std::thread::spawn(move || loop {
-        reap_expired_uploads();
-        if shutdown.recv_timeout(std::time::Duration::from_secs(UPLOAD_REAP_INTERVAL_SECS))
-            != Err(mpsc::RecvTimeoutError::Timeout)
-        {
-            return;
-        }
-    })
-}
-
 /// Environment variable overriding how often the daemon reconciles orphaned
 /// agent-task orchestration state, in seconds. Defaults to
 /// [`ORCHESTRATION_TICK_DEFAULT_INTERVAL_SECS`].
@@ -2559,7 +2484,6 @@ where
     if let Err(error) = job_store.reconcile_expired_local_child_reservations() {
         return error_response(500, error);
     }
-    reap_expired_uploads();
     match (method, path.split('?').next().unwrap_or(path)) {
         ("GET", homeboy_runner_contract::RUNNER_API_DESCRIBE_PATH) => match describe_runner(job_store) {
             Ok(body) => daemon_endpoint_response("runner.describe", body),
@@ -2773,31 +2697,6 @@ where
             ),
             Err(err) => error_response(400, err),
         },
-        ("POST", "/files/mkdir") => match create_runner_file_directory(body, &broker_auth) {
-            Ok(body) => daemon_endpoint_response("files.mkdir", body),
-            Err(err) => remote_runner::auth_or_bad_request(err),
-        },
-        ("POST", "/files/upload") => match upload_runner_file(body, &broker_auth) {
-            Ok(body) => daemon_endpoint_response("files.upload", body),
-            Err(err) => remote_runner::auth_or_bad_request(err),
-        },
-        ("POST", "/files/upload-chunk") => match upload_runner_file_chunk(body, &broker_auth) {
-            Ok(body) => daemon_endpoint_response("files.upload_chunk", body),
-            Err(err) => remote_runner::auth_or_bad_request(err),
-        },
-        ("POST", "/files/upload-chunk/abort") => {
-            match abort_runner_file_chunk_upload(body, &broker_auth) {
-                Ok(body) => daemon_endpoint_response("files.upload_chunk.abort", body),
-                Err(err) => remote_runner::auth_or_bad_request(err),
-            }
-        }
-        ("POST", "/files/download") => match download_runner_file(body, &broker_auth) {
-            Ok(body) => daemon_endpoint_response("files.download", body),
-            Err(err) => remote_runner::auth_or_bad_request(err),
-        },
-        ("GET", "/files/capabilities") => {
-            daemon_endpoint_response("files.capabilities", upload_capabilities())
-        }
         ("GET", path) if path.starts_with("/controller/jobs/") && path.ends_with("/cancel") => {
             HttpResponse {
                 status_code: 405,
@@ -2825,11 +2724,6 @@ where
             artifact: None,
         },
         ("GET", "/lifecycle/stop") => method_not_allowed(),
-        ("GET", "/files/mkdir")
-        | ("GET", "/files/upload")
-        | ("GET", "/files/upload-chunk")
-        | ("GET", "/files/upload-chunk/abort")
-        | ("GET", "/files/download") => method_not_allowed(),
         ("POST", "/runner/staging/direct") | ("POST", "/runner/staging/capabilities") => {
             remote_runner::route(method, path, body, job_store, &broker_auth)
         }
@@ -8523,7 +8417,6 @@ where
 
 fn read_http_request(stream: &mut TcpStream) -> std::io::Result<Vec<u8>> {
     const MAX_HEADER_BYTES: usize = 16 * 1024;
-    const MAX_UPLOAD_CHUNK_BODY_BYTES: usize = 96 * 1024;
     let mut request = Vec::new();
     let mut buffer = [0; 8 * 1024];
     let headers_end = loop {
@@ -8545,23 +8438,6 @@ fn read_http_request(stream: &mut TcpStream) -> std::io::Result<Vec<u8>> {
 
     let headers = String::from_utf8_lossy(&request[..headers_end]);
     let content_length = http_content_length(&headers).unwrap_or(0);
-    let upload_chunk_request = headers
-        .lines()
-        .next()
-        .and_then(|line| line.split_whitespace().nth(1))
-        .and_then(|target| {
-            target
-                .split_once('?')
-                .map(|(path, _)| path)
-                .or(Some(target))
-        })
-        .is_some_and(|path| path == "/files/upload-chunk");
-    if upload_chunk_request && content_length > MAX_UPLOAD_CHUNK_BODY_BYTES {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "upload chunk request body exceeds the 96 KiB limit",
-        ));
-    }
     let body_start = headers_end + 4;
     let body_bytes = request.len().saturating_sub(body_start);
     let remaining = content_length.saturating_sub(body_bytes);
