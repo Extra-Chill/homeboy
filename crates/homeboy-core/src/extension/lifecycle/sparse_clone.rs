@@ -33,20 +33,38 @@ pub(super) fn clone_with_runner(
 ) -> Result<()> {
     let sparse = (|| {
         let target_path = target.to_string_lossy();
-        let mut args = vec![
-            "clone",
-            "--depth=1",
-            "--filter=blob:none",
-            "--no-checkout",
-            "--sparse",
-        ];
-        if let Some(revision) = revision {
-            args.extend(["--branch", revision]);
-        }
-        args.extend([url, &target_path]);
-        run(Path::new("."), &args)?;
-        // --branch selects either a branch tip or a tag as the cloned HEAD.
-        let resolved = run(target, &["rev-parse", "--verify", "HEAD"])?;
+        let commit = revision.filter(|rev| {
+            matches!(rev.len(), 40 | 64) && rev.bytes().all(|byte| byte.is_ascii_hexdigit())
+        });
+        let head = if let Some(commit) = commit {
+            let mut args = vec!["init"];
+            if commit.len() == 64 {
+                args.push("--object-format=sha256");
+            }
+            args.push(&target_path);
+            run(Path::new("."), &args)?;
+            run(target, &["remote", "add", "origin", url])?;
+            run(
+                target,
+                &["fetch", "--depth=1", "--filter=blob:none", "origin", commit],
+            )?;
+            "FETCH_HEAD"
+        } else {
+            let mut args = vec![
+                "clone",
+                "--depth=1",
+                "--filter=blob:none",
+                "--no-checkout",
+                "--sparse",
+            ];
+            if let Some(revision) = revision {
+                args.extend(["--branch", revision]);
+            }
+            args.extend([url, &target_path]);
+            run(Path::new("."), &args)?;
+            "HEAD"
+        };
+        let resolved = run(target, &["rev-parse", "--verify", head])?;
         let revision = resolved.trim();
         let tree = run(target, &["ls-tree", "-r", "--name-only", "-z", revision])?;
         let files: Vec<_> = tree.split('\0').filter(|s| !s.is_empty()).collect();
@@ -95,7 +113,7 @@ pub(super) fn clone_with_runner(
             args.extend(paths.iter().map(String::as_str));
             run(target, &args)?;
         }
-        run(target, &["checkout", "--quiet", "HEAD"])?;
+        run(target, &["checkout", "--quiet", revision])?;
         Ok(())
     })();
     if let Err(error) = sparse {
