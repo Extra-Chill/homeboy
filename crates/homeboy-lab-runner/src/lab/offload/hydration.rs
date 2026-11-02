@@ -337,10 +337,7 @@ fn restore_controller_dependency_package(
         package,
         plan,
         |runner, cache_dir, archive| {
-            let transfer = crate::RunnerFileTransfer::for_runner(
-                runner,
-                crate::status(runner_id).ok().as_ref(),
-            )?;
+            let transfer = crate::RunnerFileTransfer::for_runner(runner)?;
             transfer.ensure_directory(cache_dir)?;
             transfer.upload_file(&package.path.display().to_string(), archive)
         },

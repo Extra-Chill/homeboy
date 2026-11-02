@@ -1410,20 +1410,6 @@ fn write_legacy_daemon_state_for_test(pid: u32, address: &str) -> (std::path::Pa
     (path, content)
 }
 
-fn create_local_runner_for_file_api(id: &str, workspace_root: &std::path::Path) {
-    // Write the runner config directly (the runner subsystem's `create` lives in
-    // the homeboy-runner crate, which core tests cannot depend on). A runner is a
-    // config entity stored at `<homeboy>/runners/<id>.json`.
-    write_runner_config(
-        id,
-        &serde_json::json!({
-            "id": id,
-            "kind": "local",
-            "workspace_root": workspace_root.display().to_string(),
-        }),
-    );
-}
-
 fn write_runner_config(id: &str, value: &serde_json::Value) {
     let dir = crate::paths::homeboy()
         .expect("homeboy dir")
@@ -1434,16 +1420,6 @@ fn write_runner_config(id: &str, value: &serde_json::Value) {
         serde_json::to_string_pretty(value).expect("serialize runner"),
     )
     .expect("write runner config");
-}
-
-fn file_api_workspace(configure_runner: bool) -> (tempfile::TempDir, std::path::PathBuf) {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let workspace = temp.path().join("workspace");
-    std::fs::create_dir_all(&workspace).expect("workspace");
-    if configure_runner {
-        create_local_runner_for_file_api("file-lab", &workspace);
-    }
-    (temp, workspace)
 }
 
 #[test]
@@ -1530,96 +1506,6 @@ fn health_route_refreshes_daemon_lease_heartbeat() {
 
     assert_eq!(response.status_code, 200);
     assert_ne!(refreshed.last_seen_at, state.last_seen_at);
-}
-
-#[test]
-fn file_route_requires_broker_submit_auth_for_untrusted_requests() {
-    let _home = HomeGuard::new();
-    let (_temp, _workspace) = file_api_workspace(true);
-
-    let response = route_with_job_store_and_body_and_runner_and_auth(
-        "POST",
-        "/files/upload-chunk",
-        Some(serde_json::json!({
-            "runner_id": "file-lab",
-            "path": "report.json",
-            "upload_id": uuid::Uuid::new_v4().to_string(),
-            "offset": 0,
-            "content_base64": "",
-            "final": false,
-            "size_bytes": 1,
-        })),
-        &JobStore::default(),
-        UnsupportedAnalysisJobRunner,
-        remote_runner::BrokerAuthContext {
-            token: None,
-            loopback_bind: false,
-            trusted_local: false,
-        },
-    );
-
-    assert_eq!(response.status_code, 401);
-    assert_eq!(response.body["error"], "broker.auth_denied");
-}
-
-#[test]
-fn upload_chunk_network_reader_rejects_oversized_body_before_allocating_it() {
-    use std::io::Write;
-
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
-    let address = listener.local_addr().expect("listener address");
-    let client = std::thread::spawn(move || {
-        let mut stream = std::net::TcpStream::connect(address).expect("connect");
-        stream
-            .write_all(b"POST /files/upload-chunk HTTP/1.1\r\nContent-Length: 98305\r\n\r\n")
-            .expect("write headers");
-    });
-    let (mut stream, _) = listener.accept().expect("accept");
-    let error = read_http_request(&mut stream).expect_err("body cap");
-    client.join().expect("client");
-
-    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
-}
-
-#[test]
-fn upload_chunk_network_reader_rejects_query_target_body_bypass_before_allocation() {
-    use std::io::Write;
-
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
-    let address = listener.local_addr().expect("listener address");
-    let client = std::thread::spawn(move || {
-        let mut stream = std::net::TcpStream::connect(address).expect("connect");
-        stream
-            .write_all(
-                b"POST /files/upload-chunk?unauth=1 HTTP/1.1\r\nContent-Length: 98305\r\n\r\n",
-            )
-            .expect("write headers");
-    });
-    let (mut stream, _) = listener.accept().expect("accept");
-    let error = read_http_request(&mut stream).expect_err("query target body cap");
-    client.join().expect("client");
-
-    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
-}
-
-#[test]
-fn file_route_accepts_request_workspace_root_without_runner_config() {
-    let _home = HomeGuard::new();
-    let (_temp, workspace) = file_api_workspace(false);
-
-    let response = route_with_job_store_and_body(
-        "POST",
-        "/files/mkdir",
-        Some(serde_json::json!({
-            "runner_id": "file-lab-without-local-config",
-            "workspace_root": workspace.display().to_string(),
-            "path": workspace.join("artifacts").display().to_string(),
-        })),
-        &JobStore::default(),
-    );
-
-    assert_eq!(response.status_code, 200, "mkdir body: {}", response.body);
-    assert!(workspace.join("artifacts").is_dir());
 }
 
 #[test]
