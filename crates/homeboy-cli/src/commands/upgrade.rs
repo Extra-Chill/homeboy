@@ -551,6 +551,7 @@ mod tests {
             runner_convergence: None,
             message: "Upgraded to 0.228.7".to_string(),
             restart_required: false,
+            daemon_pending_restart: None,
             extensions_updated: Vec::new(),
             extensions_skipped: Vec::new(),
             extension_skips: Vec::new(),

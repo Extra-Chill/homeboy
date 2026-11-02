@@ -737,6 +737,7 @@ pub fn converge_current_build_idle_daemon() -> Result<bool> {
             Some(vec![format!("Run: {recovery_command}")]),
         );
         error.details["restart_required"] = serde_json::Value::Bool(true);
+        error.details["protected_job_count"] = serde_json::json!(status.freshness.active_jobs);
         error.details["recovery_command"] = serde_json::Value::String(recovery_command);
         return Err(error);
     }
@@ -753,6 +754,7 @@ pub fn converge_current_build_idle_daemon() -> Result<bool> {
             Some(vec!["Run: homeboy daemon recover --dry-run".to_string()]),
         );
         error.details["restart_required"] = serde_json::Value::Bool(true);
+        error.details["protected_job_count"] = serde_json::json!(status.freshness.active_jobs);
         error.details["recovery_command"] =
             serde_json::Value::String("homeboy daemon recover --dry-run".to_string());
         return Err(error);
@@ -7827,6 +7829,15 @@ fn daemon_admission_fence_timeout_error_at(path: &Path, wait: Duration) -> Error
         "wait_ms": wait.as_millis(),
         "lifecycle_mutation": "not_started",
     });
+    // A held admission fence is not itself proof of deferred replacement.
+    // Require a resident daemon with protected work before classifying it so.
+    if let Ok(status) = read_status() {
+        if status.running && !status.fresh && status.freshness.active_jobs > 0 {
+            error.details["restart_required"] = serde_json::json!(true);
+            error.details["protected_job_count"] = serde_json::json!(status.freshness.active_jobs);
+            error.details["recovery_command"] = serde_json::json!("homeboy daemon start");
+        }
+    }
     error
 }
 

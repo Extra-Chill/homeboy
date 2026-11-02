@@ -580,6 +580,7 @@ fn run_controller_upgrade_with_operation(
                 runners_deferred: Vec::new(),
                 // No binary swap happened, so resident services already run the
                 // current binary and need no restart.
+                daemon_pending_restart: None,
                 services_restarted: Vec::new(),
                 services_pending_restart: Vec::new(),
                 operation_id: None,
@@ -589,7 +590,8 @@ fn run_controller_upgrade_with_operation(
                     .extension_skips
                     .extend(target_missing_extension_warnings());
             }
-            converge_resident_daemon_after_controller_reconciliation(&completion)?;
+            result.daemon_pending_restart =
+                converge_resident_daemon_after_controller_reconciliation(&completion)?;
             if completion.superseded {
                 invalidate_superseded_evidence(&mut result);
             }
@@ -907,7 +909,8 @@ fn run_controller_upgrade_with_operation(
                 restart_resident_services_after_reconciliation(completion_superseded, || {
                     restart_resident_services_after_swap(success, skip_services)
                 });
-            converge_resident_daemon_after_controller_reconciliation(&completion)?;
+            let daemon_pending_restart =
+                converge_resident_daemon_after_controller_reconciliation(&completion)?;
 
             let runner_disposition = runner_convergence_disposition(
                 runner_completion_is_skipped(
@@ -996,6 +999,7 @@ fn run_controller_upgrade_with_operation(
                 // exits immediately afterwards. Re-execing only `--version` skips the
                 // normal completion path and provides no lifecycle benefit.
                 restart_required: false,
+                daemon_pending_restart,
                 extensions_unrefreshed: warn_unrefreshed_symlinked_extensions(&extensions_updated),
                 extensions_updated,
                 extensions_skipped: extension_skips
@@ -1053,6 +1057,7 @@ fn source_upgrade_noop_result(
         partial: false,
         // No upgrade occurred, so there is no runner-convergence claim to make.
         runner_convergence: None,
+        daemon_pending_restart: None,
         message: decision.no_op_message(),
         restart_required: false,
         extensions_updated: Vec::new(),
@@ -1117,6 +1122,7 @@ fn runner_preflight_failure_result(
         )),
         partial: true,
         runner_convergence: Some(RunnerConvergenceDisposition::Partial),
+        daemon_pending_restart: None,
         message: "runner_preflight_failed: controller was not updated".to_string(),
         restart_required: false,
         extensions_updated: Vec::new(),
@@ -1167,6 +1173,7 @@ fn extension_preflight_failure_result(
         )),
         partial: true,
         runner_convergence: None,
+        daemon_pending_restart: None,
         message: "extension_preflight_failed: controller was not updated".to_string(),
         restart_required: false,
         extensions_updated: Vec::new(),
@@ -1537,6 +1544,7 @@ fn run_targeted_runner_upgrade(
     })?;
 
     Ok(UpgradeResult {
+        daemon_pending_restart: None,
         command: "upgrade".to_string(),
         install_method,
         previous_version: previous_version.clone(),
@@ -2042,9 +2050,9 @@ const INSTALLED_DAEMON_START_WAIT: Duration = Duration::from_secs(45);
 /// Lab Cook timeout for a daemon that already matches the installed binary.
 fn converge_resident_daemon_after_controller_reconciliation(
     completion: &ControllerCompletionIdentity,
-) -> Result<bool> {
+) -> Result<Option<DaemonPendingRestart>> {
     if completion.superseded {
-        return Ok(false);
+        return Ok(None);
     }
     let Some(installed_identity) = completion.build_identity.as_deref() else {
         return converge_invoking_daemon();
@@ -2056,6 +2064,19 @@ fn converge_resident_daemon_after_controller_reconciliation(
         .as_ref()
         .map(|state| state.build_identity.display.as_str())
         .or(status.freshness.daemon_build_identity.as_deref());
+    if status.running
+        && daemon_identity != Some(installed_identity)
+        && status.freshness.active_jobs > 0
+    {
+        return Ok(Some(DaemonPendingRestart {
+            reason: status
+                .replacement_blocked_reason
+                .clone()
+                .unwrap_or_else(|| "protected jobs hold the resident daemon".to_string()),
+            recovery_command: homeboy_core::daemon::recovery_actions::start().render_command(),
+            protected_job_count: Some(status.freshness.active_jobs),
+        }));
+    }
     match promoted_daemon_start(
         &invoking,
         installed_identity,
@@ -2064,14 +2085,18 @@ fn converge_resident_daemon_after_controller_reconciliation(
         status.freshness.lease_id.as_deref().is_some(),
     ) {
         PromotedDaemonStart::InProcess => converge_invoking_daemon(),
-        PromotedDaemonStart::AlreadyInstalled => Ok(false),
-        PromotedDaemonStart::PendingRestart => Err(upgrade_daemon_start_required(
-            "the stale resident daemon has no exact lease identity to stop safely",
-        )),
-        PromotedDaemonStart::InstalledBinary => start_installed_daemon(installed_identity, None),
-        PromotedDaemonStart::RestartInstalledBinary => {
-            start_installed_daemon(installed_identity, status.freshness.lease_id.as_deref())
+        PromotedDaemonStart::AlreadyInstalled => Ok(None),
+        PromotedDaemonStart::PendingRestart => {
+            daemon_convergence_result(Err(upgrade_daemon_start_required(
+                "the stale resident daemon has no exact lease identity to stop safely",
+            )))
         }
+        PromotedDaemonStart::InstalledBinary => {
+            daemon_convergence_result(start_installed_daemon(installed_identity, None))
+        }
+        PromotedDaemonStart::RestartInstalledBinary => daemon_convergence_result(
+            start_installed_daemon(installed_identity, status.freshness.lease_id.as_deref()),
+        ),
     }
 }
 
@@ -2109,32 +2134,24 @@ fn promoted_daemon_start(
     }
 }
 
-fn converge_invoking_daemon() -> Result<bool> {
-    match homeboy_core::daemon::converge_current_build_idle_daemon() {
-        // The binary swap already succeeded. A resident daemon Homeboy may not
-        // restart (externally supervised, or busy) is a pending restart, not a
-        // failed upgrade (#15436).
-        Err(error)
-            if error.details.get("restart_required") == Some(&serde_json::Value::Bool(true)) =>
-        {
-            Err(upgrade_daemon_start_required(&error.message))
-        }
-        result => result.map_err(upgrade_daemon_startup_error),
-    }
+fn converge_invoking_daemon() -> Result<Option<DaemonPendingRestart>> {
+    daemon_convergence_result(homeboy_core::daemon::converge_current_build_idle_daemon())
 }
 
-fn upgrade_daemon_startup_error(error: Error) -> Error {
-    if error
-        .details
-        .get("classification")
-        .and_then(|value| value.as_str())
-        == Some("terminal_pre_provider_startup")
-    {
-        upgrade_daemon_start_required(
-            "daemon startup did not reach a work-admitting lease for the installed controller",
-        )
-    } else {
-        error
+fn daemon_convergence_result(result: Result<bool>) -> Result<Option<DaemonPendingRestart>> {
+    match result {
+        Ok(_) => Ok(None),
+        Err(error) if error.details["restart_required"] == true => Ok(Some(DaemonPendingRestart {
+            reason: error.message,
+            recovery_command: error.details["recovery_command"]
+                .as_str()
+                .unwrap_or("homeboy daemon start")
+                .to_string(),
+            protected_job_count: error.details["protected_job_count"]
+                .as_u64()
+                .map(|count| count as usize),
+        })),
+        Err(error) => Err(error),
     }
 }
 
@@ -2163,7 +2180,11 @@ pub fn start_installed_daemon(
         // A refused stop leaves the old daemon serving; starting a second one
         // would only contend for its owner lock. Report it pending (#15436).
         if let Err(error) = homeboy_core::daemon::stop_for_lease(lease_id) {
-            return Err(upgrade_daemon_start_required(&error.message));
+            return Err(if error.details["restart_required"] == true {
+                error
+            } else {
+                upgrade_daemon_start_required(&error.message)
+            });
         }
     }
     let binary = active_binary_path()?;
@@ -2173,12 +2194,11 @@ pub fn start_installed_daemon(
         &mut command,
         INSTALLED_DAEMON_START_WAIT,
         "installed controller daemon start",
-    )
-    .map_err(|error| upgrade_daemon_start_required(&error.message))?;
+    )?;
     if output.status.success() && installed_daemon_matches(installed_identity) {
         return Ok(true);
     }
-    Err(upgrade_daemon_start_required(
+    Err(Error::internal_unexpected(
         "installed controller daemon start did not admit a lease for the promoted binary",
     ))
 }
@@ -4544,6 +4564,7 @@ mod convergence_tests {
             runners: Some(component_status("partial", "stale runner evidence")),
             partial: true,
             runner_convergence: Some(RunnerConvergenceDisposition::Partial),
+            daemon_pending_restart: None,
             message: "stale runner and extension classifications".to_string(),
             restart_required: false,
             extensions_updated: vec![stale_extension],
@@ -5162,10 +5183,7 @@ mod pinned_release_tests {
 
 #[cfg(test)]
 mod promoted_daemon_tests {
-    use super::{
-        promoted_daemon_start, upgrade_daemon_start_required, upgrade_daemon_startup_error,
-        PromotedDaemonStart,
-    };
+    use super::{promoted_daemon_start, upgrade_daemon_start_required, PromotedDaemonStart};
     use homeboy_core::error::Error;
 
     const OLD: &str = "homeboy 0.391.1+old";
@@ -5215,7 +5233,25 @@ mod promoted_daemon_tests {
     }
 
     #[test]
-    fn startup_timeout_reports_the_typed_daemon_start_action() {
+    fn protected_daemon_replacement_returns_a_successful_pending_note() {
+        let mut error = upgrade_daemon_start_required("protected jobs hold the daemon");
+        error.details["protected_job_count"] = serde_json::json!(15);
+        let pending = super::daemon_convergence_result(Err(error))
+            .unwrap()
+            .unwrap();
+        assert!(pending.reason.contains("protected jobs"));
+        assert_eq!(pending.recovery_command, "homeboy daemon start");
+        assert_eq!(pending.protected_job_count, Some(15));
+    }
+
+    #[test]
+    fn real_daemon_startup_failure_remains_an_error() {
+        let error = Error::internal_unexpected("daemon executable could not start");
+        assert!(super::daemon_convergence_result(Err(error)).is_err());
+    }
+
+    #[test]
+    fn startup_timeout_is_not_a_deferred_restart() {
         let mut startup = Error::internal_unexpected(
             "daemon startup did not reach a work-admitting lease before timeout: the daemon binary was stale (did not match this Homeboy build)",
         );
@@ -5224,28 +5260,11 @@ mod promoted_daemon_tests {
             "safe_next_action": "Retry the same Lab Cook. Inspect `homeboy daemon status` if the failure repeats.",
         });
 
-        let error = upgrade_daemon_startup_error(startup);
-        let direct = upgrade_daemon_start_required(
-            "installed controller daemon start did not admit a lease for the promoted binary",
+        let error = super::daemon_convergence_result(Err(startup)).unwrap_err();
+        assert_eq!(
+            error.details["classification"],
+            "terminal_pre_provider_startup"
         );
-
-        for error in [&error, &direct] {
-            assert_eq!(error.details["recovery_command"], "homeboy daemon start");
-            assert_eq!(error.details["restart_required"], true);
-            assert!(
-                error.message.contains("installed binary"),
-                "{}",
-                error.message
-            );
-            assert!(!error.message.contains("Lab Cook"), "{}", error.message);
-            assert!(
-                error
-                    .hints
-                    .iter()
-                    .all(|hint| !hint.message.contains("Lab Cook")),
-                "{:?}",
-                error.hints
-            );
-        }
+        assert_ne!(error.details["restart_required"], true);
     }
 }
