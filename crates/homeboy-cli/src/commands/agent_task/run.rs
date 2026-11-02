@@ -8449,6 +8449,12 @@ pub(crate) fn compile_cook_plan(
         })?;
         task.metadata["cook_workspace_identity"] = workspace_identity_attestation(Path::new(root))?;
     }
+    // Part of the durable plan, so retries and continuations keep the same
+    // attempt-workspace dependency policy as the promotion gates.
+    for task in &mut plan.tasks {
+        task.metadata["cook_hydrate_dependencies"] =
+            serde_json::json!(!crate::commands::skip_deps_hydration());
+    }
     record_cook_goal(&mut plan, args.goal.as_deref());
     if !args.provider_evidence_inputs.is_empty() {
         for task in &mut plan.tasks {

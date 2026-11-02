@@ -761,6 +761,72 @@ mod committed_harvest_tests {
         patch
     }
 
+    #[test]
+    fn attempt_workspace_skip_dependencies_also_skips_promotion_installs() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            use crate::agent_task_promotion::{promote, AgentTaskPromotionRequest};
+            let temp = tempfile::tempdir().unwrap();
+            let (workspace, _) = candidate_attempt_repo(temp.path());
+            std::fs::write(
+                workspace.join("homeboy.json"),
+                r#"{
+                "id":"fixture", "deps":{"provider":"fixture", "commands":{
+                    "install":{"argv":["sh","-c","touch install-ran; exit 1"]}
+                }}
+            }"#,
+            )
+            .unwrap();
+            git(&workspace, &["add", "homeboy.json"]);
+            git(&workspace, &["commit", "-m", "dependency contract"]);
+            let base = git(&workspace, &["rev-parse", "HEAD"]);
+            let mut request = gate_feedback_request(&workspace, String::new());
+            request.metadata["cook_hydrate_dependencies"] = serde_json::json!(false);
+            let scratch = tempfile::tempdir().unwrap();
+            let attempt =
+                prepare_attempt_workspace(&mut request, Some(&base), None, scratch.path())
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(
+                request.metadata["cook_attempt_workspace_setup"]["outcomes"],
+                serde_json::json!([])
+            );
+            assert!(!attempt.root().join("install-ran").exists());
+            let running =
+                committed_harvest_running_task(temp.path(), &workspace, None, base.clone());
+            let mut outcome = committed_harvest_preflight_outcome(running.task_id.clone());
+            outcome.status = AgentTaskOutcomeStatus::Succeeded;
+            std::fs::write(workspace.join("file.txt"), "candidate\n").unwrap();
+            git(&workspace, &["commit", "-am", "candidate"]);
+            harvest_candidate_commit_with_bundle(&mut outcome, &running, true).unwrap();
+            git(&workspace, &["reset", "--hard", &base]);
+            let plan = AgentTaskPlan::new("skip-plan", vec![running.request.clone()]);
+            let run = crate::agent_task_lifecycle::submit_plan(&plan, Some("skip-run")).unwrap();
+            let promotion = promote(AgentTaskPromotionRequest {
+                source: serde_json::to_string(&outcome).unwrap(),
+                source_run_id: Some(run.run_id),
+                source_path: None,
+                source_worktree_path: Some(workspace.clone()),
+                base_ref: None,
+                task_base_sha: Some(base),
+                candidate_ref: None,
+                to_worktree: workspace.display().to_string(),
+                task_id: None,
+                artifact_id: None,
+                dry_run: false,
+                gates: crate::agent_task_gate::VerifyGateOptions {
+                    verify: vec!["test ! -e install-ran".into()],
+                    hydrate_dependencies: false,
+                    ..Default::default()
+                },
+                provider_invocation: None,
+                repository_integrity_evidence: None,
+            })
+            .unwrap();
+            assert!(promotion.finalization_eligible(true), "{promotion:?}");
+            assert!(!workspace.join("install-ran").exists());
+        });
+    }
+
     /// #15355: the provider's detached checkout must have its submodules
     /// before the provider starts, or a submodule/workspace repository can
     /// neither install nor build there.

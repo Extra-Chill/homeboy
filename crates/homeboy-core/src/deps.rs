@@ -2139,6 +2139,88 @@ esac
     }
 
     #[test]
+    fn nodejs_deps_reuses_current_install_and_refreshes_changed_lockfile() {
+        crate::extension::component_script::register_component_script_runner();
+        crate::test_support::with_isolated_home(|home| {
+            let extension = home.path().join(".config/homeboy/extensions/nodejs");
+            std::fs::create_dir_all(&extension).unwrap();
+            let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../extensions/nodejs");
+            assert!(std::process::Command::new("cp")
+                .args([
+                    "-R",
+                    source.join("scripts").to_str().unwrap(),
+                    extension.to_str().unwrap()
+                ])
+                .status()
+                .unwrap()
+                .success());
+            assert!(std::process::Command::new("cp")
+                .args([
+                    "-R",
+                    source.join("../scripts").to_str().unwrap(),
+                    extension.parent().unwrap().to_str().unwrap()
+                ])
+                .status()
+                .unwrap()
+                .success());
+            assert!(std::process::Command::new("cp")
+                .args([
+                    "-R",
+                    source.join("dependency-adapters").to_str().unwrap(),
+                    extension.to_str().unwrap()
+                ])
+                .status()
+                .unwrap()
+                .success());
+            std::fs::write(
+                extension.join("nodejs.json"),
+                r#"{
+                "name":"Node.js", "version":"1.0.0",
+                "deps":{"extension_script":"scripts/deps/deps-runner.sh"},
+                "provides":{"discovery_markers":[{"all":["package.json"]}]}
+            }"#,
+            )
+            .unwrap();
+            let root = tempfile::tempdir().unwrap();
+            std::fs::write(
+                root.path().join("homeboy.json"),
+                r#"{"id":"fixture","extensions":{"nodejs":{}}}"#,
+            )
+            .unwrap();
+            std::fs::write(
+                root.path().join("package.json"),
+                r#"{"name":"fixture","version":"1.0.0"}"#,
+            )
+            .unwrap();
+            let lock = r#"{"name":"fixture","version":"1.0.0","lockfileVersion":3,"packages":{"":{"name":"fixture","version":"1.0.0"}}}"#;
+            std::fs::write(root.path().join("package-lock.json"), lock).unwrap();
+            let modules = root.path().join("node_modules");
+            std::fs::create_dir(&modules).unwrap();
+            std::fs::write(modules.join("sentinel"), "keep").unwrap();
+            std::fs::write(modules.join(".package-lock.json"), lock).unwrap();
+            let hydrate = || {
+                hydrate_declared_dependencies(
+                    root.path(),
+                    "fixture",
+                    ".",
+                    &DependencyHydrationPolicy::default(),
+                )
+                .unwrap()
+            };
+            let outcomes = hydrate();
+            assert_eq!(outcomes.len(), 1);
+            assert_eq!(outcomes[0].status, DependencyHydrationStatus::Reused);
+            assert!(modules.join("sentinel").exists());
+            std::thread::sleep(Duration::from_millis(20));
+            std::fs::write(root.path().join("package-lock.json"), format!("{lock}\n")).unwrap();
+            let outcomes = hydrate();
+            assert_eq!(outcomes.len(), 1);
+            assert_eq!(outcomes[0].status, DependencyHydrationStatus::Succeeded);
+            assert!(!modules.join("sentinel").exists());
+        });
+    }
+
+    #[test]
     fn provider_declared_reusable_state_skips_install() {
         let timing_dir = tempfile::tempdir().unwrap();
         let timing_store = crate::observation::ObservationStore::open_initialized_at(
