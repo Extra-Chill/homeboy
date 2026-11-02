@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.444.3] - 2026-11-02
+
+### Changed
+- delete the failed-job inline artifact-bytes mirror
+
+### Fixed
+- Fix runner release prefetch to stage managed upgrade slots
+- Fix failed update fetches being cached as no update
+
 ## [0.444.2] - 2026-11-02
 
 ### Changed
