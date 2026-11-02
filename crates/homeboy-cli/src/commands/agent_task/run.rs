@@ -512,12 +512,32 @@ pub(crate) fn run_cook(mut args: AgentTaskCookArgs) -> CmdResult<Value> {
     )
 }
 
-/// Add the gates a registered component declares for every Cook: its
-/// `default_verify_gates` when the caller supplied none, and its lint gate when
-/// the component declares lint support (#15888). Explicit caller gates never
-/// suppress the lint gate; repository-level checkouts and
-/// `--no-component-lint-gate` do.
-fn apply_component_verify_gates(
+/// Add a registered component's `default_verify_gates` when the caller
+/// supplied none. Defaults belong to the component, so they run in its
+/// repository-relative directory. Runs before request validation, which
+/// requires a gate.
+fn apply_component_default_verify_gates(
+    args: &mut AgentTaskCookArgs,
+    component: Option<&homeboy::core::component::Component>,
+) -> homeboy::core::Result<()> {
+    let Some(component) = component else {
+        return Ok(());
+    };
+    if args.gates.has_deterministic_gate() {
+        return Ok(());
+    }
+    let component_cwd = component_gate_cwd(component)?;
+    for gate in component_default_gates(&component.default_verify_gates, &component_cwd) {
+        args.gates.push_controller_verify(gate);
+    }
+    Ok(())
+}
+
+/// Add the component's lint gate when it declares lint support (#15888).
+/// Explicit caller gates never suppress it; repository-level checkouts and
+/// `--no-component-lint-gate` do. Runs after destination resolution, because
+/// the gate is scoped to the Cook's resolved base (#17226).
+fn apply_component_lint_gate(
     args: &mut AgentTaskCookArgs,
     retained_gate_contract: bool,
     component: Option<&homeboy::core::component::Component>,
@@ -535,31 +555,34 @@ fn apply_component_verify_gates(
             component_id
         );
     }
-    let root = homeboy::core::git::repo_root(Path::new(&component.local_path));
-    let component_cwd = durable_component_cwd(component, component_id, root.as_deref())?;
-    let gates = component_cook_gates(ComponentCookGateInputs {
-        component_id,
-        component_cwd: &component_cwd,
-        has_explicit_gate: args.gates.has_deterministic_gate(),
-        retained_gate_contract,
-        lint_gate_opted_out: args.gates.no_component_lint_gate,
-        // Resolve extension metadata only when the lint gate can apply.
-        declares_lint: !repository_level
-            && !retained_gate_contract
-            && !args.gates.no_component_lint_gate
-            && component_declares_lint(component),
-        existing: args
-            .gates
-            .verify
-            .iter()
-            .chain(&args.gates.private_verify)
-            .map(String::as_str),
-        defaults: component.default_verify_gates.clone(),
-    });
-    for gate in gates {
-        args.gates.push_controller_verify(gate);
+    let declares_lint = !repository_level
+        && !retained_gate_contract
+        && !args.gates.no_component_lint_gate
+        && component_declares_lint(component);
+    let already_linted = args
+        .gates
+        .verify
+        .iter()
+        .chain(&args.gates.private_verify)
+        .any(|program| program.contains("review lint") || program.contains("homeboy lint"));
+    if !declares_lint || already_linted {
+        return Ok(());
     }
+    let base = args.base.as_deref().ok_or_else(|| {
+        homeboy::core::Error::internal_unexpected(
+            "Cook base must be resolved before inferring the component lint gate",
+        )
+    })?;
+    let gate = component_lint_gate(component_id, &component_gate_cwd(component)?, base);
+    args.gates.push_controller_verify(gate);
     Ok(())
+}
+
+fn component_gate_cwd(
+    component: &homeboy::core::component::Component,
+) -> homeboy::core::Result<String> {
+    let root = homeboy::core::git::repo_root(Path::new(&component.local_path));
+    durable_component_cwd(component, &component.id, root.as_deref())
 }
 
 /// A component declares lint when it owns a `scripts.lint` command or links an
@@ -580,63 +603,38 @@ fn component_declares_lint(component: &homeboy::core::component::Component) -> b
 
 /// The canonical lint gate for a component, run from the candidate repository
 /// root with a repository-relative component path. It mirrors the component's CI
-/// `homeboy review lint`, including its declared baseline policy. Cook already
+/// `homeboy review lint`, including its declared baseline policy, and checks
+/// only what the candidate changed since its base, so pre-existing findings
+/// elsewhere cannot reject an unrelated change (#17226). Lab snapshots publish
+/// the base as `origin/<base>`, not necessarily a local branch. Cook already
 /// placed this workspace, so the gate runs there instead of re-entering
 /// resource-policy placement from its sanitized gate home (#16517).
-fn component_lint_gate(component_id: &str, component_cwd: &str) -> String {
+fn component_lint_gate(component_id: &str, component_cwd: &str, base: &str) -> String {
     format!(
-        "homeboy --placement local review lint {} --path {}",
+        "homeboy --placement local review lint {} --path {} --changed-since {}",
         quote_args(&[component_id.to_string()]),
-        quote_args(&[component_cwd.to_string()])
+        quote_args(&[component_cwd.to_string()]),
+        quote_args(&[format!("origin/{base}")])
     )
 }
 
-struct ComponentCookGateInputs<'a, I> {
-    component_id: &'a str,
-    component_cwd: &'a str,
-    has_explicit_gate: bool,
-    retained_gate_contract: bool,
-    lint_gate_opted_out: bool,
-    declares_lint: bool,
-    existing: I,
-    defaults: Vec<String>,
-}
-
-/// Pure gate-selection policy for [`apply_component_verify_gates`].
-fn component_cook_gates<'a, I: Iterator<Item = &'a str>>(
-    inputs: ComponentCookGateInputs<'a, I>,
-) -> Vec<String> {
-    let mut gates = Vec::new();
-    if !inputs.has_explicit_gate {
-        gates.extend(inputs.defaults.into_iter().map(|gate| {
-            if inputs.component_cwd == "." {
-                gate
+/// Component defaults, scoped to the component directory. A subshell scopes
+/// compound commands too.
+fn component_default_gates(defaults: &[String], component_cwd: &str) -> Vec<String> {
+    defaults
+        .iter()
+        .map(|gate| {
+            if component_cwd == "." {
+                gate.clone()
             } else {
-                // Defaults belong to the component, unlike caller-supplied
-                // repository gates. A subshell scopes compound commands too.
                 format!(
                     "(cd {} && {})",
-                    quote_args(&[inputs.component_cwd.to_string()]),
+                    quote_args(&[component_cwd.to_string()]),
                     gate
                 )
             }
-        }));
-    }
-    if inputs.retained_gate_contract || inputs.lint_gate_opted_out || !inputs.declares_lint {
-        return gates;
-    }
-    let mut existing = inputs.existing.map(str::to_string).collect::<Vec<_>>();
-    existing.extend(gates.iter().cloned());
-    let already_linted = existing
-        .iter()
-        .any(|program| program.contains("review lint") || program.contains("homeboy lint"));
-    if !already_linted {
-        gates.push(component_lint_gate(
-            inputs.component_id,
-            inputs.component_cwd,
-        ));
-    }
-    gates
+        })
+        .collect()
 }
 
 /// Resolve the same pre-provisioning Cook inputs used by execution. This path
@@ -678,7 +676,7 @@ pub(crate) fn preview_cook(
         .ok()
         .and_then(|repo| repo.as_ref())
         .map(|repo| &repo.component);
-    apply_component_verify_gates(&mut args, retained_gate_contract, component)?;
+    apply_component_default_verify_gates(&mut args, component)?;
     // Source policy is a static validation and must apply to preview exactly as
     // it applies before an execution route can inspect the destination.
     validate_cook_request_with_provenance(&args, provenance)?;
@@ -689,7 +687,11 @@ pub(crate) fn preview_cook(
     record_preview_phase(&mut progress, "destination_resolution");
     let (mut args, mut provision) =
         with_preview_heartbeat(&mut progress, "destination_resolution", || {
-            let args = resolve_cook_destination(args, repository.as_ref())?;
+            let args = resolve_cook_destination_with_component_lint_gate(
+                args,
+                repository.as_ref(),
+                retained_gate_contract,
+            )?;
             let provision = provision_cook_destination(&args, repository.as_ref(), true)?;
             Ok::<_, homeboy::core::Error>((args, provision))
         })?;
@@ -5514,6 +5516,22 @@ pub(crate) struct ResolvedCookRepository {
     source_checkout: PathBuf,
 }
 
+/// Preview and execution infer the lint gate only after PR/default base
+/// resolution, so the gate is scoped to the Cook's final base.
+pub(crate) fn resolve_cook_destination_with_component_lint_gate(
+    args: AgentTaskCookArgs,
+    repository: Option<&ResolvedCookRepository>,
+    retained_gate_contract: bool,
+) -> homeboy::core::Result<AgentTaskCookArgs> {
+    let mut args = resolve_cook_destination(args, repository)?;
+    apply_component_lint_gate(
+        &mut args,
+        retained_gate_contract,
+        repository.map(|repo| &repo.component),
+    )?;
+    Ok(args)
+}
+
 pub(crate) fn resolve_cook_destination(
     mut args: AgentTaskCookArgs,
     repository: Option<&ResolvedCookRepository>,
@@ -7257,7 +7275,7 @@ pub(crate) fn run_cook_with_executor_and_dispatcher_with_progress(
     let retained_gate_contract = args.gates.has_retained_contract();
     snapshot_cook_prompt(&mut args)?;
     args.gates.snapshot_file_inputs()?;
-    apply_component_verify_gates(&mut args, retained_gate_contract, component)?;
+    apply_component_default_verify_gates(&mut args, component)?;
     validate_cook_request_with_provenance(&args, provenance)?;
     confirm_model_override(&mut args)?;
     let repository = repository_result?;
@@ -7272,7 +7290,11 @@ pub(crate) fn run_cook_with_executor_and_dispatcher_with_progress(
             )?;
         }
     }
-    let args = resolve_cook_destination(args, repository.as_ref())?;
+    let args = resolve_cook_destination_with_component_lint_gate(
+        args,
+        repository.as_ref(),
+        retained_gate_contract,
+    )?;
     let gate_workspace = args.dispatch.cwd.as_deref().map(Path::new).or_else(|| {
         args.to_worktree
             .as_deref()
@@ -11126,12 +11148,11 @@ fn explicit_local_retry_admission_refusal(
 mod tests {
     use super::CookContinueArgs;
     use super::{
-        apply_preview_worktree_capacity, component_cook_gates, component_lint_gate,
-        cook_continuation_status, cook_preview_result, cook_provider_timeout_disclosure,
-        cook_report_with_continuation, cook_resolved_policy_disclosure,
-        cook_review_form_timeout_disclosure, detached_cook_route_less_warning,
-        durable_cook_identity_lines, preflight_continue_cook, preview_gate_contract_disclosure,
-        project_preview_dirty_admission, ComponentCookGateInputs, PreviewReplayArgv,
+        apply_preview_worktree_capacity, component_lint_gate, cook_continuation_status,
+        cook_preview_result, cook_provider_timeout_disclosure, cook_report_with_continuation,
+        cook_resolved_policy_disclosure, cook_review_form_timeout_disclosure,
+        detached_cook_route_less_warning, durable_cook_identity_lines, preflight_continue_cook,
+        preview_gate_contract_disclosure, project_preview_dirty_admission, PreviewReplayArgv,
     };
     use crate::cli_surface::{Cli, Commands};
     use crate::commands::agent_task::AgentTaskCommand;
@@ -11148,85 +11169,112 @@ mod tests {
         *cook
     }
 
-    fn gates_for(
-        has_explicit_gate: bool,
-        existing: &[&str],
+    /// Infer a root component's Cook gates the way admission does: defaults
+    /// before validation, lint after the base resolves.
+    fn cook_gates(
+        argv: &[&str],
         defaults: &[&str],
         declares_lint: bool,
         retained_gate_contract: bool,
-        lint_gate_opted_out: bool,
     ) -> Vec<String> {
-        component_cook_gates(ComponentCookGateInputs {
-            component_id: "data-machine",
-            component_cwd: ".",
-            has_explicit_gate,
-            retained_gate_contract,
-            lint_gate_opted_out,
-            declares_lint,
-            existing: existing.iter().copied(),
-            defaults: defaults.iter().map(|gate| gate.to_string()).collect(),
-        })
+        let dir = tempfile::tempdir().unwrap();
+        assert!(std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(dir.path())
+            .status()
+            .unwrap()
+            .success());
+        std::fs::write(dir.path().join("homeboy.json"), r#"{"id":"data-machine"}"#).unwrap();
+        let mut component = serde_json::json!({
+            "id": "data-machine",
+            "local_path": dir.path(),
+            "default_verify_gates": defaults,
+        });
+        if declares_lint {
+            component["scripts"] = serde_json::json!({"lint": ["echo lint"]});
+        }
+        let component = serde_json::from_value(component).unwrap();
+        let mut args = parse_cook(&[&["homeboy", "agent-task", "cook"], argv].concat());
+        super::apply_component_default_verify_gates(&mut args, Some(&component)).unwrap();
+        args.base = Some("release".to_string());
+        super::apply_component_lint_gate(&mut args, retained_gate_contract, Some(&component))
+            .unwrap();
+        args.gates.verify.clone()
     }
 
     #[test]
     fn component_default_gates_fill_only_an_unconfigured_cook() {
         assert_eq!(
-            gates_for(false, &[], &["cargo test"], false, false, false),
+            cook_gates(&[], &["cargo test"], false, false),
             ["cargo test"]
         );
-        assert!(gates_for(true, &["npm test"], &["cargo test"], false, false, false).is_empty());
+        assert_eq!(
+            cook_gates(&["--verify", "npm test"], &["cargo test"], false, false),
+            ["npm test"]
+        );
     }
 
     #[test]
     fn component_lint_gate_is_added_beside_explicit_test_gate() {
         // #15888: data-machine#3608 declared only `homeboy review test` and
         // published a PR that failed the component's required CI lint.
+        // #17226: the gate checks only what changed since the Cook's base.
+        let lint = "homeboy --placement local review lint data-machine --path . --changed-since origin/release";
         assert_eq!(
-            gates_for(
-                true,
-                &["homeboy review test data-machine"],
+            cook_gates(
+                &["--verify", "homeboy review test data-machine"],
                 &[],
                 true,
-                false,
                 false
             ),
-            ["homeboy --placement local review lint data-machine --path ."]
+            ["homeboy review test data-machine", lint]
         );
         assert_eq!(
-            gates_for(false, &[], &["cargo test"], true, false, false),
-            [
-                "cargo test",
-                "homeboy --placement local review lint data-machine --path ."
-            ]
+            cook_gates(&[], &["cargo test"], true, false),
+            ["cargo test", lint]
         );
     }
 
     #[test]
     fn component_lint_gate_respects_opt_out_replay_and_existing_lint() {
-        let test_gate = ["homeboy review test data-machine"];
-        assert!(gates_for(true, &test_gate, &[], false, false, false).is_empty());
-        assert!(gates_for(true, &test_gate, &[], true, false, true).is_empty());
-        assert!(gates_for(true, &test_gate, &[], true, true, false).is_empty());
-        assert!(gates_for(
-            true,
-            &["homeboy review lint data-machine --changed-since origin/main"],
-            &[],
-            true,
-            false,
-            false
-        )
-        .is_empty());
-        assert_eq!(
-            gates_for(
-                false,
-                &[],
-                &["homeboy lint data-machine"],
+        let test_gate = ["--verify", "homeboy review test data-machine"];
+        for (argv, defaults, declares_lint, retained, expected) in [
+            (&test_gate[..], &[][..], false, false, &test_gate[1..]),
+            (
+                &[
+                    "--no-component-lint-gate",
+                    "--verify",
+                    "homeboy review test data-machine",
+                ][..],
+                &[][..],
                 true,
                 false,
-                false
+                &test_gate[1..],
             ),
-            ["homeboy lint data-machine"]
-        );
+            (&test_gate[..], &[][..], true, true, &test_gate[1..]),
+            (
+                &[
+                    "--verify",
+                    "homeboy review lint data-machine --changed-since origin/main",
+                ][..],
+                &[][..],
+                true,
+                false,
+                &["homeboy review lint data-machine --changed-since origin/main"][..],
+            ),
+            (
+                &[][..],
+                &["homeboy lint data-machine"][..],
+                true,
+                false,
+                &["homeboy lint data-machine"][..],
+            ),
+        ] {
+            assert_eq!(
+                cook_gates(argv, defaults, declares_lint, retained),
+                expected
+            );
+        }
     }
 
     #[test]
@@ -11250,14 +11298,15 @@ mod tests {
         }))
         .expect("component");
         let mut args = parse_cook(&["homeboy", "agent-task", "cook", "--verify", "echo explicit"]);
-        super::apply_component_verify_gates(&mut args, false, Some(&component))
+        args.base = Some("main".to_string());
+        super::apply_component_lint_gate(&mut args, false, Some(&component))
             .expect("repository gates");
         assert_eq!(args.gates.verify, ["echo explicit"]);
 
         // The same registration still gets its inferred lint gate when the
         // checkout has a root component manifest.
         std::fs::write(dir.path().join("homeboy.json"), r#"{"id":"repository"}"#).unwrap();
-        super::apply_component_verify_gates(&mut args, false, Some(&component))
+        super::apply_component_lint_gate(&mut args, false, Some(&component))
             .expect("component gates");
         assert_eq!(args.gates.verify.len(), 2);
         assert!(args.gates.verify[1].contains("review lint repository"));
@@ -11283,12 +11332,14 @@ mod tests {
         }))
         .unwrap();
         let mut args = parse_cook(&["homeboy", "agent-task", "cook"]);
-        super::apply_component_verify_gates(&mut args, false, Some(&component)).unwrap();
+        super::apply_component_default_verify_gates(&mut args, Some(&component)).unwrap();
+        args.base = Some("main".to_string());
+        super::apply_component_lint_gate(&mut args, false, Some(&component)).unwrap();
         assert_eq!(
             args.gates.verify,
             [
                 "(cd 'plugins/users plugin' && homeboy review test users --path .)",
-                "homeboy --placement local review lint users --path 'plugins/users plugin'"
+                "homeboy --placement local review lint users --path 'plugins/users plugin' --changed-since origin/main"
             ]
         );
         assert!(!args
@@ -11304,12 +11355,14 @@ mod tests {
             "--verify",
             "echo repository gate",
         ]);
-        super::apply_component_verify_gates(&mut explicit, false, Some(&component)).unwrap();
+        super::apply_component_default_verify_gates(&mut explicit, Some(&component)).unwrap();
+        explicit.base = Some("main".to_string());
+        super::apply_component_lint_gate(&mut explicit, false, Some(&component)).unwrap();
         assert_eq!(
             explicit.gates.verify,
             [
                 "echo repository gate",
-                "homeboy --placement local review lint users --path 'plugins/users plugin'"
+                "homeboy --placement local review lint users --path 'plugins/users plugin' --changed-since origin/main"
             ]
         );
     }
@@ -11317,8 +11370,8 @@ mod tests {
     #[test]
     fn component_lint_gate_quotes_component_id() {
         assert_eq!(
-            component_lint_gate("odd id", "."),
-            "homeboy --placement local review lint 'odd id' --path ."
+            component_lint_gate("odd id", ".", "odd base"),
+            "homeboy --placement local review lint 'odd id' --path . --changed-since 'origin/odd base'"
         );
     }
 
@@ -11336,14 +11389,14 @@ mod tests {
             .snapshot_file_inputs()
             .expect("snapshot inline gates");
         args.gates
-            .push_controller_verify(component_lint_gate("data-machine", "."));
+            .push_controller_verify(component_lint_gate("data-machine", ".", "main"));
         args.gates
-            .push_controller_verify(component_lint_gate("data-machine", "."));
+            .push_controller_verify(component_lint_gate("data-machine", ".", "main"));
         assert_eq!(
             args.gates.verify,
             [
                 "homeboy review test data-machine",
-                "homeboy --placement local review lint data-machine --path ."
+                "homeboy --placement local review lint data-machine --path . --changed-since origin/main"
             ]
         );
         assert_eq!(args.gates.input_sources.len(), 2);
