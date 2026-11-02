@@ -557,6 +557,25 @@ fn runner_hydration_command(invocation: &deps::DependencyInstallInvocation) -> R
     }
 }
 
+/// Keep a character-bounded suffix, dropping a partial first line when possible.
+/// A single oversized line retains its suffix rather than losing all output.
+fn output_tail(text: &str, max_chars: usize) -> &str {
+    let text = text.trim();
+    let start = text
+        .char_indices()
+        .rev()
+        .take(max_chars)
+        .last()
+        .map_or(text.len(), |(index, _)| index);
+    let tail = &text[start..];
+    if start > 0 && !text[..start].ends_with('\n') {
+        if let Some((_, lines)) = tail.split_once('\n') {
+            return lines;
+        }
+    }
+    tail
+}
+
 /// Build the pre-executor failure for a hydration step that exited non-zero.
 ///
 /// Classified as workspace setup (`classification = "workspace_setup"`) so it is
@@ -567,6 +586,17 @@ pub(crate) fn hydration_failure_error(
     remote_path: &str,
     step: &LabWorkspaceHydrationStep,
 ) -> Error {
+    let (source, output) = if step.stderr.trim().is_empty() {
+        ("stdout", &step.stdout)
+    } else {
+        ("stderr", &step.stderr)
+    };
+    let tail = output_tail(output, 2_000);
+    let excerpt = if tail.is_empty() {
+        "The provider install produced no output.".to_string()
+    } else {
+        format!("{source} (last lines): {tail}")
+    };
     let mut error = Error::validation_invalid_argument(
         "lab_workspace_dependency_hydration",
         format!(
@@ -581,12 +611,7 @@ pub(crate) fn hydration_failure_error(
             format!("provider: {}", step.provider_id),
             format!("command: {}", step.command.join(" ")),
             format!("exit_code: {}", step.exit_code),
-            if step.stderr.trim().is_empty() && step.stdout.trim().is_empty() {
-                "The provider install produced no output.".to_string()
-            } else {
-                let tail: String = step.stderr.trim().chars().take(400).collect();
-                format!("stderr: {tail}")
-            },
+            excerpt.clone(),
             "Reproduce locally by running the provider install in the source checkout, then retry Lab offload.".to_string(),
             "Pass --skip-deps-hydration only if the workspace is already hydrated or the job does not need installed dependencies.".to_string(),
         ]),
@@ -597,6 +622,7 @@ pub(crate) fn hydration_failure_error(
     error.details["provider_id"] = serde_json::json!(step.provider_id);
     error.details["command"] = serde_json::json!(step.command);
     error.details["exit_code"] = serde_json::json!(step.exit_code);
+    error.details["output_tail"] = serde_json::json!(excerpt);
     error.details["job_id"] = serde_json::json!(step.job_id);
     error
 }
@@ -933,6 +959,43 @@ mod tests {
         assert_eq!(error.details["exit_code"], 2);
         assert_eq!(error.details["job_id"], "job-1");
         assert!(error.message.contains("lab_workspace_dependency_hydration"));
+    }
+
+    #[test]
+    fn hydration_failure_keeps_actionable_output_tail() {
+        let noisy_output = format!(
+            "npm warn first warning must be omitted\n{}npm error code EINTEGRITY\n",
+            "npm warn deprecated dépendance 🦀\n".repeat(200),
+        );
+        for (stderr, stdout, source) in [
+            (noisy_output.as_str(), "ignored stdout", "stderr"),
+            (" \n", noisy_output.as_str(), "stdout"),
+        ] {
+            let step = LabWorkspaceHydrationStep {
+                provider_id: "npm".to_string(),
+                command: vec!["npm".to_string(), "ci".to_string()],
+                exit_code: 1,
+                stdout: stdout.to_string(),
+                stderr: stderr.to_string(),
+                job_id: None,
+                event_count: 0,
+            };
+            let error = hydration_failure_error("/runner/workspace", &step);
+            let excerpt = error.details["output_tail"].as_str().expect("output tail");
+            let prefix = format!("{source} (last lines): ");
+            let tail = excerpt.strip_prefix(&prefix).expect("source label");
+            assert!(tail.contains("npm error code EINTEGRITY"));
+            assert!(!tail.contains("first warning"));
+            assert!(!tail.contains("ignored stdout"));
+            assert!(tail.chars().count() <= 2_000);
+            assert!(tail.starts_with("npm warn "));
+            assert!(tail.contains("dépendance 🦀"));
+            assert!(error.details["tried"]
+                .as_array()
+                .expect("tried entries")
+                .iter()
+                .any(|entry| entry.as_str() == Some(excerpt)));
+        }
     }
 
     /// Hydration is a no-op (skipped_no_provider) when no provider detects the
