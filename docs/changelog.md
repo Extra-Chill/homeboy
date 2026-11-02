@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.443.2] - 2026-11-02
+
+### Changed
+- Avoid duplicate controller upgrade compatibility preflights
+
+### Fixed
+- ignore hydrated dependency Git metadata during harvest
+- gate setup hydrates only the root and descendant roots a gate names
+
 ## [0.443.1] - 2026-11-01
 
 ### Changed
