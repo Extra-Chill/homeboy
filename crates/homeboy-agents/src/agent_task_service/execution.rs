@@ -1378,6 +1378,75 @@ fn terminal_record_exit_code(
     }
 }
 
+/// Refuse a retry that would silently move a Lab-required run onto the
+/// controller.
+///
+/// A retry successor carries no routing decision of its own, so submission
+/// stamps it controller-local and the queued run then admits the provider
+/// route against this controller's catalog and credentials. For a run whose
+/// durable decision *required* Lab with no local fallback, that both breaks
+/// the recorded placement contract and fails with a misleading provider error
+/// (for example a model the controller's runtime does not serve), after the
+/// controller has already spent its readiness probe budget
+/// (Extra-Chill/homeboy#15198). Refuse up front and name the runner instead.
+///
+/// This matches the explicit-local-continuation rule, which already refuses to
+/// move a Lab-required placement onto the controller. A process that already
+/// selected Lab placement is not moving the run, and generic Lab command
+/// replays own their own Lab route, so neither is affected.
+fn lab_placed_retry_refusal(
+    source: &AgentTaskRunRecord,
+    source_plan: &AgentTaskPlan,
+    current_placement_is_lab: bool,
+) -> Option<Error> {
+    use homeboy_lab_contract::{EffectiveExecutionPlacement, ExecutionPlacementRequirement};
+
+    if current_placement_is_lab
+        || source_plan
+            .metadata
+            .get("generic_lab_command_replay")
+            .is_some()
+    {
+        return None;
+    }
+    let decision = serde_json::from_value::<homeboy_lab_contract::ExecutionPlacementDecision>(
+        source.metadata.get("execution_placement_decision")?.clone(),
+    )
+    .ok()?;
+    if decision.selected != EffectiveExecutionPlacement::Lab
+        || decision.required != ExecutionPlacementRequirement::Lab
+        || decision.fallback.local_allowed
+    {
+        return None;
+    }
+    let runner = decision
+        .runner
+        .as_ref()
+        .map(|runner| runner.runner_id.clone())
+        .or_else(|| source.runner_id().map(str::to_string))
+        .unwrap_or_else(|| "its Lab runner".to_string());
+    let mut error = Error::validation_invalid_argument(
+        "placement",
+        format!(
+            "run {} required Lab placement on `{runner}` with no local fallback; retrying it would re-admit and execute the provider route on this controller instead, so the retry was refused",
+            source.run_id
+        ),
+        Some(source.run_id.clone()),
+        None,
+    )
+    .with_hint(format!(
+        "Start a fresh Lab Cook for the same task (`homeboy agent-task cook ... --placement lab`) so it is admitted and executed on `{runner}`."
+    ));
+    error.details["source_placement"] = serde_json::json!({
+        "decision_id": decision.decision_id,
+        "required": "lab",
+        "selected": "lab",
+        "runner_id": runner,
+        "local_allowed": false,
+    });
+    Some(error)
+}
+
 pub fn retry(
     run_id: &str,
     new_run_id: Option<&str>,
@@ -1574,9 +1643,20 @@ where
         &mut source_plan,
     )?;
     preflight(&source_plan)?;
-    if source.state().is_terminal()
-        && agent_task_lifecycle::is_unmaterialized_cook_admission(&source)
-    {
+    let unmaterialized_admission = source.state().is_terminal()
+        && agent_task_lifecycle::is_unmaterialized_cook_admission(&source);
+    if !unmaterialized_admission {
+        if let Some(error) = lab_placed_retry_refusal(
+            &source,
+            &source_plan,
+            homeboy_core::parsed_command_preflight::captured_result().is_some_and(|result| {
+                result.placement.selected == homeboy_lab_contract::EffectiveExecutionPlacement::Lab
+            }),
+        ) {
+            return Err(error);
+        }
+    }
+    if unmaterialized_admission {
         if let Some(route_override) = route_override.filter(|override_| !override_.is_empty()) {
             validate_admission_route_override(&source, route_override)?;
         }
@@ -3342,6 +3422,78 @@ mod tests {
         AgentTaskExecutionContext, AgentTaskExecutorAdapter, AgentTaskManagedService,
         AgentTaskManagedServiceLifecycle, AgentTaskPlan, HarvestExecutionContext,
     };
+
+    fn lab_placed_source(decision: serde_json::Value) -> AgentTaskRunRecord {
+        serde_json::from_value(json!({
+            "schema": "homeboy/agent-task-run/v1",
+            "run_id": "lab-run",
+            "plan_id": "plan",
+            "state": "failed",
+            "submitted_at": "2026-10-31T00:00:00Z",
+            "plan_path": "plan.json",
+            "metadata": { "execution_placement_decision": decision },
+        }))
+        .expect("record")
+    }
+
+    fn lab_required_decision() -> serde_json::Value {
+        // Shape recorded by a real `--placement lab` Cook (homeboy#15198).
+        json!({
+            "decision_id": "epd-b1c17cc15df3f3c6",
+            "policy_id": "lab-route-contract",
+            "policy_revision": "v1",
+            "identity": { "repository": "repo", "workspace": "/ws/repo", "task": "cook-repo" },
+            "requested": "Auto",
+            "required": "lab",
+            "selected": "lab",
+            "runner": { "runner_id": "homeboy-lab", "source": "explicit" },
+            "fallback": { "local_allowed": false },
+            "override_authorization": { "authorized": false },
+        })
+    }
+
+    #[test]
+    fn retry_of_lab_required_run_is_refused_instead_of_moving_to_the_controller() {
+        let source = lab_placed_source(lab_required_decision());
+        let plan = AgentTaskPlan::new("plan", Vec::new());
+
+        let error = lab_placed_retry_refusal(&source, &plan, false)
+            .expect("a Lab-required run must not be retried onto the controller");
+
+        assert_eq!(error.details["field"], "placement");
+        assert!(error.message.contains("`homeboy-lab`"), "{}", error.message);
+        assert!(error.message.contains("lab-run"));
+        assert_eq!(
+            error.details["source_placement"]["runner_id"],
+            "homeboy-lab"
+        );
+        assert!(error
+            .hints
+            .iter()
+            .any(|hint| hint.message.contains("--placement lab")));
+    }
+
+    #[test]
+    fn lab_retry_guard_allows_lab_processes_replays_and_non_lab_sources() {
+        let plan = AgentTaskPlan::new("plan", Vec::new());
+        let lab = lab_placed_source(lab_required_decision());
+        assert!(lab_placed_retry_refusal(&lab, &plan, true).is_none());
+
+        let mut replay = AgentTaskPlan::new("plan", Vec::new());
+        replay.metadata = json!({ "generic_lab_command_replay": {} });
+        assert!(lab_placed_retry_refusal(&lab, &replay, false).is_none());
+
+        let mut fallback = lab_required_decision();
+        fallback["fallback"]["local_allowed"] = json!(true);
+        assert!(lab_placed_retry_refusal(&lab_placed_source(fallback), &plan, false).is_none());
+
+        let mut either = lab_required_decision();
+        either["required"] = json!("either");
+        assert!(lab_placed_retry_refusal(&lab_placed_source(either), &plan, false).is_none());
+
+        let unrouted = lab_placed_source(json!(null));
+        assert!(lab_placed_retry_refusal(&unrouted, &plan, false).is_none());
+    }
 
     #[derive(Clone)]
     struct SuccessfulExecutor;
