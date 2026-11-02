@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.444.8] - 2026-11-02
+
+### Changed
+- Reclaim finalized released controller scratch without a retention window
+
+### Fixed
+- keep extension output and ANSI escapes out of --report=pr-comment
+
 ## [0.444.7] - 2026-11-02
 
 ### Changed
