@@ -865,13 +865,12 @@ impl AgentTaskScheduler {
                 let source_workspace_root = request.workspace.root.clone();
                 let source_provenance = harvest_preflight.source_provenance;
                 let scratch = self.durable_lifecycle_store().and_then(|lifecycle_store| {
-                    crate::controller_scratch::allocate_attempt_for_component_at(
+                    crate::controller_scratch::allocate_attempt_at(
                         &lifecycle_store.data_root(),
                         &scratch_run_id,
                         &plan.plan_id,
                         &request.task_id,
                         scheduled.attempt,
-                        task_component_id(&request).as_deref(),
                     )
                 });
                 let scratch = match scratch {
