@@ -2605,7 +2605,9 @@ mod tests {
             let cases = [
                 (
                     "admitted-bound",
-                    Some(serde_json::json!({"repository": "repo-bound", "working_directory": "/fixtures/repo-bound"})),
+                    Some(
+                        serde_json::json!({"repository": "repo-bound", "working_directory": "/fixtures/repo-bound"}),
+                    ),
                 ),
                 ("admitted-unbound", None),
             ];
@@ -2625,9 +2627,18 @@ mod tests {
             let scope = store.active_task_scope("caller").unwrap();
             assert_eq!(scope["workspaces"].as_array().unwrap().len(), 1);
             assert_eq!(scope["workspaces"][0]["repository"], "repo-bound");
-            assert_eq!(scope["workspaces"][0]["working_directory"], "/fixtures/repo-bound");
-            assert_eq!(scope["workspaces"][0]["run_ids"], serde_json::json!(["admitted-bound"]));
-            assert_eq!(scope["pending_run_ids"], serde_json::json!(["admitted-unbound"]));
+            assert_eq!(
+                scope["workspaces"][0]["working_directory"],
+                "/fixtures/repo-bound"
+            );
+            assert_eq!(
+                scope["workspaces"][0]["run_ids"],
+                serde_json::json!(["admitted-bound"])
+            );
+            assert_eq!(
+                scope["pending_run_ids"],
+                serde_json::json!(["admitted-unbound"])
+            );
         });
     }
 
