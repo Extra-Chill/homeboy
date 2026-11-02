@@ -8,7 +8,6 @@ printf '%s\n' 'HOMEBOY_RUNNER_PROGRESS {"schema":"homeboy/runner-progress/v1","p
 ref=@REF@
 binaries=@BINARIES@
 release_tag="$ref"
-running_tag=@RUNNING@
 homeboy_installer=@INSTALLER@
 hash_binary() { (sha256sum "$1" 2>/dev/null || shasum -a 256 "$1") | awk '{print $1}'; }
 release_stage=
@@ -96,19 +95,6 @@ elif ! ln "$staged_provenance" "$provenance"; then
 fi
 rm -f "$staged_provenance"
 trap - EXIT HUP INT TERM
-# Keep the running release and the release just acquired, never a live stage.
-running_sha=$(cat "$binaries/.release-$running_tag.sha256" 2>/dev/null || true)
-for slot in "$binaries"/homeboy-*; do
-  [ -d "$slot" ] || continue
-  [ "$slot" = "$slot_dir" ] && continue
-  [ "$slot" = "$binaries/homeboy-$running_sha" ] && continue
-  rm -rf "$slot"
-done
-for marker in "$binaries"/.release-*.sha256; do
-  [ "$marker" = "$release_marker" ] && continue
-  [ "$marker" = "$binaries/.release-$running_tag.sha256" ] && continue
-  rm -f "$marker"
-done
 printf '%s\n' "$identity"
 "#;
 
@@ -119,10 +105,6 @@ pub fn materialize_script(git_ref: &str, binaries_dir: &str) -> String {
         &[
             ("@REF@", &quote_path(git_ref)),
             ("@BINARIES@", &quote_path(binaries_dir)),
-            (
-                "@RUNNING@",
-                &quote_path(&format!("v{}", super::current_version())),
-            ),
             ("@INSTALLER@", &installer),
         ],
     )
@@ -169,11 +151,40 @@ pub fn acquire_release_slot(tag: &str, binaries: &Path) -> Result<PathBuf> {
             String::from_utf8_lossy(&output.stderr)
         )));
     }
-    String::from_utf8_lossy(&output.stdout)
+    let slot = String::from_utf8_lossy(&output.stdout)
         .lines()
         .find_map(|line| line.strip_prefix("HOMEBOY_REFRESH_BINARY_PATH="))
         .map(PathBuf::from)
-        .ok_or_else(|| Error::internal_unexpected("release acquisition returned no slot"))
+        .ok_or_else(|| Error::internal_unexpected("release acquisition returned no slot"))?;
+    prune_controller_slots(binaries, tag);
+    Ok(slot)
+}
+
+/// Keep only the running release and the release just acquired. Controller
+/// only: runner service units may still execute older slots.
+fn prune_controller_slots(binaries: &Path, acquired_tag: &str) {
+    let running_tag = format!("v{}", super::current_version());
+    let keep_markers =
+        [acquired_tag, running_tag.as_str()].map(|tag| format!(".release-{tag}.sha256"));
+    let keep_slots: Vec<String> = keep_markers
+        .iter()
+        .filter_map(|marker| std::fs::read_to_string(binaries.join(marker)).ok())
+        .map(|sha| format!("homeboy-{}", sha.trim()))
+        .collect();
+    let Ok(entries) = std::fs::read_dir(binaries) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with("homeboy-") && !keep_slots.contains(&name) {
+            let _ = std::fs::remove_dir_all(entry.path());
+        } else if name.starts_with(".release-")
+            && name.ends_with(".sha256")
+            && !keep_markers.contains(&name)
+        {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 #[cfg(test)]

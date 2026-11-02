@@ -24,7 +24,10 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 const CACHE_FILENAME: &str = "update_check.json";
-pub const CHECK_INTERVAL_SECS: u64 = 86400;
+const CHECK_INTERVAL_SECS: u64 = 86400;
+/// Releases ship several times a day; a prefetch must see each one before
+/// the operator runs `homeboy upgrade`.
+pub const PREFETCH_INTERVAL_SECS: u64 = 15 * 60;
 const ENV_VAR_DISABLE: &str = "HOMEBOY_NO_UPDATE_CHECK";
 const VERSION_PROBE_TIMEOUT: Duration = Duration::from_millis(250);
 
@@ -402,7 +405,10 @@ pub fn prefetch_release() -> homeboy_core::Result<Option<PathBuf>> {
     if is_disabled() {
         return Ok(None);
     }
-    if !read_cache().as_ref().is_some_and(is_cache_fresh) {
+    if !read_cache().as_ref().is_some_and(|cache| {
+        is_cache_fresh(cache)
+            && update_check_cache::is_cache_fresh(cache.checked_at, PREFETCH_INTERVAL_SECS)
+    }) {
         refresh_verdict()?;
     }
     let Some(stable) = latest_allowed_stable()

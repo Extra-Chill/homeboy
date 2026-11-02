@@ -1322,7 +1322,7 @@ fn serve(addr: &str, foreground: bool) -> CmdResult<DaemonOutput> {
                 homeboy::core::log_status!("update", "Release prefetch failed: {}", error);
             }
             std::thread::sleep(std::time::Duration::from_secs(
-                homeboy_upgrade::update_check::CHECK_INTERVAL_SECS,
+                homeboy_upgrade::update_check::PREFETCH_INTERVAL_SECS,
             ));
         })
     {
