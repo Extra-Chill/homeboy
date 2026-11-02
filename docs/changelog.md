@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.444.6] - 2026-11-02
+
+### Fixed
+- keep warm Cargo cache seeding off the gate's critical path
+- Fix follow-up publication after a branch PR merges
+
 ## [0.444.5] - 2026-11-02
 
 ### Changed
