@@ -516,7 +516,8 @@ pub fn drain(now: DateTime<Utc>) -> NotifyOutboxDrainReport {
     report
 }
 
-/// Delete dead letters older than [`DEAD_LETTER_RETENTION`]. Runs only on a
+/// Delete expired dead letters and legacy configuration-state rejections.
+/// Runs only on a
 /// pass that added one, so the directory is bounded without a scan per drain.
 fn prune_dead_letters(config_root: &Path) {
     let entries = std::fs::read_dir(dead_letter_dir_in_root(config_root));
@@ -527,7 +528,12 @@ fn prune_dead_letters(config_root: &Path) {
             .ok()
             .and_then(|modified| modified.elapsed().ok())
             .is_some_and(|age| age > DEAD_LETTER_RETENTION);
-        if expired {
+        let not_configured = read_entry(&entry.path()).is_some_and(|entry| {
+            entry
+                .terminal_rejection
+                .is_some_and(|rejection| rejection.reason_code == "not_configured")
+        });
+        if expired || not_configured {
             let _ = std::fs::remove_file(entry.path());
         }
     }
@@ -844,6 +850,32 @@ mod tests {
     }
 
     #[test]
+    fn transport_configuration_rejections_do_not_persist_per_event() {
+        crate::test_support::with_isolated_home(|_| {
+            install_transport(
+                "outbox.unconfigured",
+                vec!["sh", "-c", "printf '%s\\n' '{\"schema\":\"homeboy/notification-transport-result/v1\",\"status\":\"rejected\",\"attempts\":0,\"terminal_rejection\":{\"schema\":\"homeboy/notification-transport-rejection/v1\",\"reason_code\":\"not_configured\",\"validation_field\":\"auth\"},\"error\":{\"message\":\"Configure transport auth\"}}'; exit 1"],
+            );
+            set_default_transport("outbox.unconfigured");
+
+            for run in ["run-one", "run-two"] {
+                let dispatch = dispatch_with_outbox(&event(run), None);
+                assert_eq!(dispatch.outcome.delivery, NotifyDelivery::NotConfigured);
+                assert_eq!(dispatch.disposition, NotifyOutboxDisposition::Dropped);
+                assert!(!dispatch.outcome.delivered);
+                assert!(dispatch
+                    .outcome
+                    .error
+                    .as_deref()
+                    .unwrap()
+                    .contains("Configure transport auth"));
+            }
+            assert!(pending_entries().is_empty());
+            assert!(dead_letter_entries().is_empty());
+        });
+    }
+
+    #[test]
     fn a_rejection_before_an_attempt_is_not_queued() {
         crate::test_support::with_isolated_home(|_| {
             install_transport(
@@ -964,7 +996,7 @@ mod tests {
     }
 
     #[test]
-    fn a_dead_lettering_pass_prunes_expired_dead_letters_only() {
+    fn a_dead_lettering_pass_prunes_expired_and_not_configured_dead_letters() {
         crate::test_support::with_isolated_home(|home| {
             let root = home.path().join(".config/homeboy");
             let dead_dir = dead_letter_dir_in_root(&root);
@@ -982,6 +1014,30 @@ mod tests {
                     std::time::SystemTime::now() - DEAD_LETTER_RETENTION - Duration::from_secs(60),
                 )
                 .unwrap();
+            // A legacy configuration rejection is removed even while recent;
+            // genuine rejection evidence survives the same pruning pass.
+            let mut legacy = NotifyOutboxEntry {
+                schema: entry_schema(),
+                entry_id: "legacy".to_string(),
+                enqueued_at: Utc::now().to_rfc3339(),
+                event: event("run-legacy"),
+                attempts: 0,
+                next_attempt_at: Utc::now().to_rfc3339(),
+                last_attempt_at: None,
+                last_error: None,
+                terminal_rejection: Some(NotifyTerminalRejection {
+                    schema: notify::NOTIFICATION_TRANSPORT_REJECTION_SCHEMA.to_string(),
+                    reason_code: "not_configured".to_string(),
+                    validation_code: None,
+                    validation_field: Some("auth".to_string()),
+                }),
+                once_marker: None,
+            };
+            let unconfigured = dead_dir.join("unconfigured.json");
+            assert!(write_entry(&unconfigured, &legacy));
+            legacy.terminal_rejection.as_mut().unwrap().reason_code = "invalid_route".to_string();
+            let rejected = dead_dir.join("rejected.json");
+            assert!(write_entry(&rejected, &legacy));
             let pending = pending_dir_in_root(&root);
             std::fs::create_dir_all(&pending).unwrap();
             std::fs::write(pending.join("garbage.json"), b"not json").unwrap();
@@ -990,6 +1046,8 @@ mod tests {
             assert_eq!(report.unreadable, 1);
             assert!(!expired.exists());
             assert!(recent.exists());
+            assert!(!unconfigured.exists());
+            assert!(rejected.exists());
             assert!(dead_dir.join("garbage.json").exists());
         });
     }
