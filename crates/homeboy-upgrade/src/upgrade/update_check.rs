@@ -425,11 +425,20 @@ pub fn prefetch_release() -> homeboy_core::Result<Option<PathBuf>> {
     else {
         return Ok(None);
     };
-    super::release_slot::acquire_release_slot(
-        &format!("v{}", latest.trim_start_matches('v')),
-        &super::release_slot::binaries_dir()?,
-    )
-    .map(Some)
+    let tag = format!("v{}", latest.trim_start_matches('v'));
+    let slot =
+        super::release_slot::acquire_release_slot(&tag, &super::release_slot::binaries_dir()?)?;
+    if let Err(error) = super::runner_upgrade_provider::with_runner_upgrade(|provider| {
+        provider.acquire_runner_release(&tag, &[])
+    }) {
+        homeboy_core::log_status!(
+            "update",
+            "Runner release prefetch failed for {}: {}",
+            tag,
+            error
+        );
+    }
+    Ok(Some(slot))
 }
 
 #[cfg(test)]
@@ -459,6 +468,126 @@ mod tests {
         });
 
         assert!(path.is_file(), "cache fixture was written to {path:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prefetch_stages_runners_after_controller_and_preserves_slot_on_runner_failure() {
+        // A child test process exposes the normal status logger's stderr without
+        // adding a logging hook or redirecting other parallel tests' output.
+        const CHILD: &str = "HOMEBOY_TEST_RUNNER_PREFETCH_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "upgrade::update_check::tests::prefetch_stages_runners_after_controller_and_preserves_slot_on_runner_failure",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env(homeboy_core::STATUS_ENV, "1")
+                .output()
+                .unwrap();
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(output.status.success(), "{stderr}");
+            assert!(
+                stderr.contains("Runner release prefetch failed for v99.0.0: IO error"),
+                "{stderr}"
+            );
+            return;
+        }
+
+        use super::super::{
+            register_runner_upgrade_provider, ExtensionUpgradeEntry, RunnerUpgradeEntry,
+            RunnerUpgradeProvider,
+        };
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Default)]
+        struct Runners {
+            acquisition: PathBuf,
+            calls: Arc<Mutex<Vec<String>>>,
+            fail: bool,
+        }
+        impl RunnerUpgradeProvider for Runners {
+            fn preflight_configured_runners_for_upgrade(
+                &self,
+                _: &[String],
+                _: &str,
+            ) -> homeboy_core::Result<Vec<RunnerUpgradeEntry>> {
+                Ok(Vec::new())
+            }
+
+            fn acquire_runner_release(
+                &self,
+                tag: &str,
+                targets: &[String],
+            ) -> homeboy_core::Result<()> {
+                if self.acquisition.as_os_str().is_empty() {
+                    return Ok(());
+                }
+                let acquisition = std::fs::read_to_string(&self.acquisition)
+                    .expect("controller slot must be acquired before runner slots");
+                assert!(acquisition.contains(tag), "{acquisition}");
+                assert!(
+                    targets.is_empty(),
+                    "prefetch must target all configured runners"
+                );
+                self.calls.lock().unwrap().push(tag.to_owned());
+                if self.fail {
+                    return Err(homeboy_core::Error::internal_io("runner unavailable", None));
+                }
+                Ok(())
+            }
+
+            fn upgrade_configured_runners(
+                &self,
+                _: Option<&str>,
+                _: &[String],
+                _: &[ExtensionUpgradeEntry],
+                _: Option<&homeboy_core::runtime_promotion::RuntimePromotionLease>,
+            ) -> homeboy_core::Result<(Vec<RunnerUpgradeEntry>, Vec<RunnerUpgradeEntry>)>
+            {
+                panic!("prefetch must not promote runners");
+            }
+        }
+        struct ResetProvider;
+        impl Drop for ResetProvider {
+            fn drop(&mut self) {
+                register_runner_upgrade_provider(Box::new(Runners::default()));
+            }
+        }
+
+        for fail in [false, true] {
+            with_isolated_home(|home| {
+                let _disable = homeboy_core::test_support::EnvVarGuard::unset(ENV_VAR_DISABLE);
+                let tools = home.path().join("tools");
+                std::fs::create_dir_all(&tools).unwrap();
+                let acquisition = home.path().join("acquisition");
+                let slot = home.path().join("slot");
+                homeboy_test_support::write_executable(
+                    &tools.join("sh"),
+                    &format!(
+                        "#!/bin/sh\nprintf '%s' \"$HOMEBOY_INSTALLER_SCRIPT\" > '{}'\necho 'HOMEBOY_REFRESH_BINARY_PATH={}'\n",
+                        acquisition.display(), slot.display()
+                    ),
+                    0o755,
+                ).unwrap();
+                let _path = homeboy_core::test_support::EnvVarGuard::set(
+                    "PATH",
+                    format!("{}:{}", tools.display(), std::env::var("PATH").unwrap()),
+                );
+                seed_cache("99.0.0", true, update_check_cache::now_unix());
+                let calls = Arc::new(Mutex::new(Vec::new()));
+                register_runner_upgrade_provider(Box::new(Runners {
+                    acquisition,
+                    calls: calls.clone(),
+                    fail,
+                }));
+                let _reset = ResetProvider;
+                assert_eq!(prefetch_release().unwrap(), Some(slot));
+                assert_eq!(*calls.lock().unwrap(), ["v99.0.0"]);
+            });
+        }
     }
 
     #[cfg(unix)]

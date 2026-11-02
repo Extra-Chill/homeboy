@@ -1315,18 +1315,20 @@ fn artifact_get(args: DaemonArtifactGetArgs) -> CmdResult<DaemonOutput> {
 fn serve(addr: &str, foreground: bool) -> CmdResult<DaemonOutput> {
     register_daemon_controller_job_providers();
     let parsed = daemon::parse_bind_addr(addr)?;
-    if let Err(error) = std::thread::Builder::new()
-        .name("release-prefetch".into())
-        .spawn(|| loop {
-            if let Err(error) = homeboy_upgrade::update_check::prefetch_release() {
-                homeboy::core::log_status!("update", "Release prefetch failed: {}", error);
-            }
-            std::thread::sleep(std::time::Duration::from_secs(
-                homeboy_upgrade::update_check::PREFETCH_INTERVAL_SECS,
-            ));
-        })
-    {
-        homeboy::core::log_status!("update", "Could not start release prefetch: {}", error);
+    if !is_runner_hosted_daemon() {
+        if let Err(error) = std::thread::Builder::new()
+            .name("release-prefetch".into())
+            .spawn(|| loop {
+                if let Err(error) = homeboy_upgrade::update_check::prefetch_release() {
+                    homeboy::core::log_status!("update", "Release prefetch failed: {}", error);
+                }
+                std::thread::sleep(std::time::Duration::from_secs(
+                    homeboy_upgrade::update_check::PREFETCH_INTERVAL_SECS,
+                ));
+            })
+        {
+            homeboy::core::log_status!("update", "Could not start release prefetch: {}", error);
+        }
     }
     let state = if foreground {
         let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -1349,12 +1351,23 @@ fn serve(addr: &str, foreground: bool) -> CmdResult<DaemonOutput> {
     ))
 }
 
+fn is_runner_hosted_daemon() -> bool {
+    // Lab runner service units and remote daemon startup both use this namespace.
+    // They install from runner workspace slots, not the controller binaries dir.
+    std::env::var_os(homeboy::core::paths::DAEMON_STATE_DIR_ENV).is_some_and(|dir| {
+        std::path::Path::new(&dir)
+            .components()
+            .any(|part| part.as_os_str() == "runner-daemons")
+    })
+}
+
 fn register_daemon_controller_job_providers() {
     // A daemon executes controller jobs after the submitting CLI has exited.
     // Register the runner continuation here, at the process boundary that owns
     // those jobs, rather than relying on a later status command to populate the
     // process-global projection provider.
     crate::runner::register_runner_continuation_provider();
+    crate::runner::register_runner_upgrade();
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1397,6 +1410,30 @@ mod tests {
     use super::*;
 
     use crate::cli_surface::{Cli, Commands};
+
+    #[test]
+    fn daemon_prefetch_skips_runner_state_namespace() {
+        with_isolated_home(|_| {
+            for (dir, expected) in [
+                (
+                    "/home/lab/.config/homeboy/runner-daemons/lab/controller",
+                    true,
+                ),
+                ("/home/controller/.config/homeboy/daemon", false),
+                ("/tmp/not-runner-daemons/controller", false),
+            ] {
+                let _state = homeboy::core::test_support::EnvVarGuard::set(
+                    homeboy::core::paths::DAEMON_STATE_DIR_ENV,
+                    dir,
+                );
+                assert_eq!(is_runner_hosted_daemon(), expected, "{dir}");
+            }
+            let _state = homeboy::core::test_support::EnvVarGuard::unset(
+                homeboy::core::paths::DAEMON_STATE_DIR_ENV,
+            );
+            assert!(!is_runner_hosted_daemon());
+        });
+    }
 
     #[test]
     fn daemon_job_status_filters_and_watch_exit_semantics_are_stable() {
