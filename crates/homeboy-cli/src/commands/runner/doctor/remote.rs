@@ -91,14 +91,29 @@ pub fn report(
             .clone()
             .or_else(|| common::remote_line(client, "command -v homeboy")),
     };
-    if let Some(check) = checks::homeboy_version_skew_check(
-        local_homeboy_version,
-        &local_homeboy_identity.display,
-        &homeboy.version,
-        runner_id,
-        &server.id,
-    ) {
-        checks.push(check);
+    if let Some(status) = persisted_status {
+        match runner::runner_capability_handshake(runner, status, homeboy_command) {
+            Ok(handshake) => {
+                if let Some(check) = checks::homeboy_version_skew_check(
+                    local_homeboy_version,
+                    &handshake,
+                    runner
+                        .settings
+                        .require_exact_homeboy_version
+                        .unwrap_or(false),
+                    runner_id,
+                    &server.id,
+                ) {
+                    checks.push(check);
+                }
+            }
+            Err(error) => checks.push(checks::error(
+                "homeboy.version_skew",
+                format!("Could not observe runner compatibility: {error}"),
+                Some("Restore runner connectivity and re-run doctor".to_string()),
+                BTreeMap::new(),
+            )),
+        }
     }
     checks.push(if homeboy.path.is_some() {
         checks::ok(
