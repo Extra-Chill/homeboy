@@ -421,7 +421,7 @@ impl<M: RunnerStagingMaterializer> RunnerStagingStore<M> {
             materializer,
         };
         let _lock = store.admission_lock()?;
-        store.migrate_ledger()?;
+        store.retire_ledger()?;
         Ok(store)
     }
 
@@ -543,75 +543,53 @@ impl<M: RunnerStagingMaterializer> RunnerStagingStore<M> {
         Ok(receipt)
     }
 
-    /// Split the retired ledger once. Strict decoding is scoped to the selected
-    /// record; an obsolete envelope never poisons unrelated admission.
-    fn migrate_ledger(&self) -> Result<()> {
+    /// Upgrades drain runner jobs first; the old ledger is transient state,
+    /// not a wire contract to migrate into the new per-stage store.
+    fn retire_ledger(&self) -> Result<()> {
         if !self.path.exists() {
             return Ok(());
         }
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Ledger {
-            schema: String,
-            stages: BTreeMap<String, serde_json::Value>,
-            #[serde(default)]
-            intents: BTreeMap<String, serde_json::Value>,
-        }
-        let bytes = fs::read(&self.path).map_err(|error| {
+        let size_bytes = fs::metadata(&self.path)
+            .map_err(|error| {
+                Error::internal_io(error.to_string(), Some(self.path.display().to_string()))
+            })?
+            .len();
+        // Inspect only for reporting. Even malformed legacy state is retired;
+        // no old envelope is decoded or copied into the live store.
+        let stage_count = File::open(&self.path)
+            .ok()
+            .and_then(|file| {
+                serde_json::from_reader::<_, serde_json::Value>(std::io::BufReader::new(file)).ok()
+            })
+            .and_then(|ledger| {
+                ledger
+                    .get("stages")
+                    .and_then(serde_json::Value::as_object)
+                    .map(|stages| stages.len())
+            });
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let retired_path = self.path.with_file_name(format!(
+            "{}.retired-{timestamp}",
+            self.path.file_name().unwrap_or_default().to_string_lossy(),
+        ));
+        fs::rename(&self.path, &retired_path).map_err(|error| {
             Error::internal_io(error.to_string(), Some(self.path.display().to_string()))
         })?;
-        let ledger: Ledger = serde_json::from_slice(&bytes)
-            .map_err(|error| incompatible_stage(&self.path, error))?;
-        if ledger.schema != STORE_SCHEMA {
-            return Err(incompatible_stage(&self.path, "unsupported schema"));
-        }
-        let keys: std::collections::BTreeSet<_> =
-            ledger.stages.keys().chain(ledger.intents.keys()).collect();
-        for key in keys {
-            let mut stages = BTreeMap::new();
-            let mut intents = BTreeMap::new();
-            if let Some(stage) = ledger.stages.get(key) {
-                stages.insert(key, stage);
-            }
-            if let Some(intent) = ledger.intents.get(key) {
-                intents.insert(key, intent);
-            }
-            let path = stage_record_path(&self.path, key);
-            if !path.exists() {
-                persist_stage(
-                    &path,
-                    &serde_json::json!({
-                        "schema": STORE_SCHEMA, "stages": stages, "intents": intents,
-                    }),
-                )?;
-            }
-        }
-        // Persist an operator-facing migration report rather than silently
-        // accepting obsolete contracts. The record remains isolated and strict.
-        let mut incompatible = Vec::new();
-        for key in ledger.stages.keys().chain(ledger.intents.keys()) {
-            let path = stage_record_path(&self.path, key);
-            if let Err(error) = load_stage(&path) {
-                incompatible.push(serde_json::json!({
-                    "record": path, "message": error.message,
-                    "repair": error.hints,
-                }));
-            }
-        }
         persist_stage(
-            &self.path.with_extension("migration-report.json"),
+            &self.path.with_extension("retirement-report.json"),
             &serde_json::json!({
-                "schema": "homeboy/runner-staging-migration-report/v1",
-                "incompatible_records": incompatible,
+                "retired_path": retired_path,
+                "size_bytes": size_bytes,
+                "stage_count": stage_count,
             }),
-        )?;
-        fs::remove_file(&self.path).map_err(|error| {
-            Error::internal_io(error.to_string(), Some(self.path.display().to_string()))
-        })
+        )
     }
 
-    /// Reclaim only records whose runner job is durably terminal. Unknown jobs
-    /// and undecodable records retain their evidence for operator repair.
+    /// Missing jobs have already been compacted. Undecodable records cannot
+    /// execute on this runner and are retired rather than pinning artifacts.
     fn reclaim_terminal(&self, jobs: &homeboy_core::api_jobs::JobStore) -> Result<()> {
         let _lock = self.admission_lock()?;
         let directory = self.path.with_extension("stages");
@@ -627,7 +605,7 @@ impl<M: RunnerStagingMaterializer> RunnerStagingStore<M> {
         };
         let mut retained_artifacts = std::collections::BTreeSet::new();
         let mut retired_artifacts = BTreeMap::new();
-        let mut unknown_references = false;
+        let mut incompatible_records = Vec::new();
         for entry in entries {
             let entry = entry.map_err(|error| Error::internal_io(error.to_string(), None))?;
             if !entry
@@ -638,17 +616,30 @@ impl<M: RunnerStagingMaterializer> RunnerStagingStore<M> {
                 continue;
             }
             let path = entry.path();
-            let Ok(state) = load_stage(&path) else {
-                unknown_references = true;
-                continue;
+            let state = match load_stage(&path) {
+                Ok(state) => state,
+                Err(error) => {
+                    let directory = self.path.with_extension("stages.incompatible");
+                    fs::create_dir_all(&directory).map_err(|error| {
+                        Error::internal_io(error.to_string(), Some(directory.display().to_string()))
+                    })?;
+                    let retired_path = directory.join(entry.file_name());
+                    fs::rename(&path, &retired_path).map_err(|error| {
+                        Error::internal_io(error.to_string(), Some(path.display().to_string()))
+                    })?;
+                    incompatible_records.push(serde_json::json!({
+                        "record": path, "retired_path": retired_path,
+                        "message": error.message, "repair": error.hints,
+                    }));
+                    continue;
+                }
             };
             let terminal = !state.stages.is_empty()
                 && state.intents.is_empty()
                 && state.stages.values().all(|stage| {
                     uuid::Uuid::parse_str(&stage.receipt.handoff.runner_job_id)
                         .ok()
-                        .and_then(|id| jobs.get(id).ok())
-                        .is_some_and(|job| job.status.is_terminal())
+                        .is_some_and(|id| jobs.get(id).map_or(true, |job| job.status.is_terminal()))
                 });
             if !terminal {
                 for artifact in state
@@ -709,9 +700,14 @@ impl<M: RunnerStagingMaterializer> RunnerStagingStore<M> {
                 Error::internal_io(error.to_string(), Some(path.display().to_string()))
             })?;
         }
-        // Artifacts are content-addressed and may be shared. Never delete a
-        // blob still referenced by an active or incompatible record.
-        if !unknown_references {
+        if !incompatible_records.is_empty() {
+            persist_stage(
+                &self.path.with_extension("reclamation-report.json"),
+                &serde_json::json!({ "incompatible_records": incompatible_records }),
+            )?;
+        }
+        // Only live, decodable records can retain content-addressed artifacts.
+        {
             for (id, artifact) in retired_artifacts {
                 if retained_artifacts.contains(&id) {
                     continue;
@@ -1382,16 +1378,72 @@ mod tests {
         let mut restarted = transport(&path);
         let new_run = crate::runner_staging_operation::tests_support::envelope_for_run("new-run");
         restarted.store.stage_durable(&new_run).unwrap();
-        let error = restarted.store.stage_durable(&request).unwrap_err();
-        assert_ne!(error.code, homeboy_core::ErrorCode::InternalJsonError);
-        assert!(error.message.contains("incompatible runner staging state"));
-        assert!(!error.hints.is_empty());
         assert!(!path.exists());
-        let report: serde_json::Value = serde_json::from_slice(
-            &fs::read(path.with_extension("migration-report.json")).unwrap(),
+        assert!(!record.exists(), "legacy stages must not be migrated");
+        let report_path = path.with_extension("retirement-report.json");
+        let report_bytes = fs::read(&report_path).unwrap();
+        let report: serde_json::Value = serde_json::from_slice(&report_bytes).unwrap();
+        assert_eq!(
+            report["size_bytes"],
+            fs::read(report["retired_path"].as_str().unwrap())
+                .unwrap()
+                .len()
+        );
+        assert_eq!(report["stage_count"], 1);
+        let retired = PathBuf::from(report["retired_path"].as_str().unwrap());
+        assert!(retired
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with("store.json.retired-"));
+        assert_eq!(
+            fs::read(&retired).unwrap(),
+            serde_json::to_vec(&stored).unwrap()
+        );
+        drop(transport(&path));
+        assert_eq!(fs::read(&report_path).unwrap(), report_bytes);
+
+        let jobs = homeboy_core::api_jobs::JobStore::open_without_reconciliation(
+            temp.path().join("jobs.json"),
         )
         .unwrap();
-        assert_eq!(report["incompatible_records"].as_array().unwrap().len(), 1);
+        let mut compacted = envelope();
+        compacted.materialization.authority_id = "staging-compacted".to_string();
+        let receipt = restarted
+            .store
+            .stage_durable_with_job_id(&compacted, uuid::Uuid::new_v4().to_string())
+            .unwrap();
+        let artifact = receipt.artifacts.source_artifact.unwrap();
+        let artifact_path = restarted.store.source_artifact_path(&artifact).unwrap();
+        let directory = temp.path().join("staging-compacted");
+        fs::create_dir(&directory).unwrap();
+        let mut bad =
+            crate::runner_staging_operation::tests_support::envelope_for_run("undecodable");
+        bad.materialization.source_artifact = compacted.materialization.source_artifact.clone();
+        restarted.store.stage_durable(&bad).unwrap();
+        let bad_path = stage_record_path(&path, &bad.handoff.idempotency_key);
+        let mut bad_record: serde_json::Value =
+            serde_json::from_slice(&fs::read(&bad_path).unwrap()).unwrap();
+        bad_record["stages"][&bad.handoff.idempotency_key]["envelope"]["handoff"]
+            ["reuse_compatible_snapshot"] = true.into();
+        fs::write(&bad_path, serde_json::to_vec(&bad_record).unwrap()).unwrap();
+        // Remove the new run's reference to the shared test source.
+        fs::remove_file(stage_record_path(&path, &new_run.handoff.idempotency_key)).unwrap();
+        restarted.store.reclaim_terminal(&jobs).unwrap();
+        assert!(!record.exists());
+        assert!(!bad_path.exists());
+        assert!(!directory.exists());
+        assert!(!artifact_path.exists());
+        let reclaimed: serde_json::Value = serde_json::from_slice(
+            &fs::read(path.with_extension("reclamation-report.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            reclaimed["incompatible_records"][0]["record"],
+            bad_path.to_str().unwrap()
+        );
+        restarted.store.reclaim_terminal(&jobs).unwrap();
     }
 
     #[test]
