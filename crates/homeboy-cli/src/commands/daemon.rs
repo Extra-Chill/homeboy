@@ -1315,6 +1315,19 @@ fn artifact_get(args: DaemonArtifactGetArgs) -> CmdResult<DaemonOutput> {
 fn serve(addr: &str, foreground: bool) -> CmdResult<DaemonOutput> {
     register_daemon_controller_job_providers();
     let parsed = daemon::parse_bind_addr(addr)?;
+    if let Err(error) = std::thread::Builder::new()
+        .name("release-prefetch".into())
+        .spawn(|| loop {
+            if let Err(error) = homeboy_upgrade::update_check::prefetch_release() {
+                homeboy::core::log_status!("update", "Release prefetch failed: {}", error);
+            }
+            std::thread::sleep(std::time::Duration::from_secs(
+                homeboy_upgrade::update_check::CHECK_INTERVAL_SECS,
+            ));
+        })
+    {
+        homeboy::core::log_status!("update", "Could not start release prefetch: {}", error);
+    }
     let state = if foreground {
         let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         // SIGINT (Ctrl-C) and SIGTERM (supervisor stop) both request a
