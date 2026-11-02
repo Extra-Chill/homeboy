@@ -8,7 +8,7 @@ pub(crate) const GITHUB_RELEASES_API: &str =
 /// whether that release ships an asset for the running target, nor name an
 /// older release that does (#11750).
 pub(crate) const GITHUB_RELEASES_LIST_API: &str =
-    "https://api.github.com/repos/Extra-Chill/homeboy/releases?per_page=30";
+    "https://api.github.com/repos/Extra-Chill/homeboy/releases?per_page=10";
 
 /// Base for release asset downloads. Kept beside the API constant so the URL
 /// surfaced in a 404 failure is built from the same source as the installer's.

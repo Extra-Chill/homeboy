@@ -23,7 +23,7 @@ use super::release_catalog::{self, InstallableSelection, ReleaseEntry, SelectedR
 use super::services;
 use super::types::*;
 use super::update_check::RuntimeCompatibility;
-use super::validation::{check_for_updates, selects_an_installable_release};
+use super::validation::{check_for_updates, installable_check, selects_an_installable_release};
 
 pub(super) const CONTROLLER_UPGRADE_PROMOTION_WAIT_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 
@@ -112,7 +112,16 @@ fn runtime_compatibility_from_release_notes(body: &str) -> Result<Option<Runtime
     })
 }
 
+#[cfg(test)]
+thread_local! {
+    static TEST_INSTALL_METHOD: std::cell::Cell<Option<InstallMethod>> = const { std::cell::Cell::new(None) };
+}
+
 pub fn detect_install_method() -> InstallMethod {
+    #[cfg(test)]
+    if let Some(method) = TEST_INSTALL_METHOD.get() {
+        return method;
+    }
     let exe_path = match std::env::current_exe() {
         Ok(path) => path.to_string_lossy().to_string(),
         Err(_) => return InstallMethod::Unknown,
@@ -338,11 +347,13 @@ fn run_controller_upgrade_with_operation(
 
     // Resolve the candidate; compatibility is checked under the mutation lease
     // only when the controller needs replacement.
-    let selected_release = if selects_an_installable_release(install_method) {
-        Some(resolve_binary_release(pinned_version)?)
-    } else {
-        None
-    };
+    let releases = selects_an_installable_release(install_method)
+        .then(release_catalog::fetch_release_catalog)
+        .transpose()?;
+    let selected_release = releases
+        .as_deref()
+        .map(|releases| resolve_binary_release(releases, pinned_version))
+        .transpose()?;
     let candidate_version = if source_noop {
         target_version.clone()
     } else if let Some(release) = selected_release.as_ref() {
@@ -377,7 +388,10 @@ fn run_controller_upgrade_with_operation(
                 false,
             )
         } else {
-            let check = check_for_updates()?;
+            let check = match releases.as_deref() {
+                Some(releases) => installable_check(install_method, current_version(), releases),
+                None => check_for_updates()?,
+            };
             controller_replacement_required_after_discovery(
                 false,
                 deliberate,
@@ -1410,15 +1424,17 @@ fn pinned_version_scope_error(problem: &str) -> Error {
 /// platform's asset used to make `upgrade` 404 with no way past it (#11750);
 /// falling back one release is the difference between a stuck controller and a
 /// controller five minor versions ahead.
-fn resolve_binary_release(pinned_version: Option<&str>) -> Result<SelectedRelease> {
+fn resolve_binary_release(
+    releases: &[ReleaseEntry],
+    pinned_version: Option<&str>,
+) -> Result<SelectedRelease> {
     let target = release_catalog::running_target_triple();
-    let releases = release_catalog::fetch_release_catalog()?;
 
     if let Some(requested) = pinned_version {
-        return resolve_pinned_release(&releases, requested, target);
+        return resolve_pinned_release(releases, requested, target);
     }
 
-    let selection = release_catalog::select_installable(&releases, target);
+    let selection = release_catalog::select_installable(releases, target);
     let Some(installable) = selection.installable.clone() else {
         return Err(no_installable_release_error(&selection, target));
     };
@@ -3026,6 +3042,44 @@ mod runner_source_upgrade_tests {
     use std::cell::RefCell;
     use std::process::Command;
     use tempfile::tempdir;
+
+    #[test]
+    fn controller_upgrade_fetches_catalog_once() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let body = serde_json::json!([{
+                "tag_name": format!("v{}", current_version()),
+                "assets": [
+                    {"name": "homeboy-x86_64-unknown-linux-gnu.tar.xz"},
+                    {"name": "homeboy-x86_64-unknown-linux-gnu.tar.xz.sha256"},
+                    {"name": "homeboy-aarch64-unknown-linux-gnu.tar.xz"},
+                    {"name": "homeboy-aarch64-unknown-linux-gnu.tar.xz.sha256"},
+                    {"name": "homeboy-aarch64-apple-darwin.tar.xz"},
+                    {"name": "homeboy-aarch64-apple-darwin.tar.xz.sha256"}
+                ]
+            }])
+            .to_string();
+            let count = release_catalog::tests::with_catalog_server("200 OK", &body, |_| {
+                // Exercise the detected binary path too: the old verdict code
+                // re-detected the method before fetching the catalog again.
+                TEST_INSTALL_METHOD.set(Some(InstallMethod::Binary));
+                let result = run_upgrade_with_operation(
+                    false,
+                    Some(InstallMethod::Binary),
+                    true,
+                    true,
+                    true,
+                    false,
+                    &[],
+                    None,
+                    None,
+                );
+                TEST_INSTALL_METHOD.set(None);
+                let result = result.expect("same-version controller upgrade succeeds");
+                assert_eq!(result.previous_version, current_version());
+            });
+            assert_eq!(count, 1, "selection and verdict must share one catalog");
+        });
+    }
 
     #[test]
     fn controller_upgrade_errors_preserve_the_durable_operation_id() {
