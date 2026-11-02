@@ -6973,9 +6973,18 @@ mod tests {
             .contains("deterministic gate failed with exit code 101"));
     }
 
+    // Allocation fixtures must not depend on the runner's spare bytes/inodes.
+    fn configure_fixture_cargo_capacity() {
+        let mut config = homeboy_core::defaults::HomeboyConfig::default();
+        config.retention.shared_store_reserve_bytes = 0;
+        config.retention.shared_store_reserve_inodes = 0;
+        homeboy_core::defaults::save_config(&config).expect("fixture capacity policy");
+    }
+
     #[test]
     fn declared_shared_cargo_target_is_reported_without_parsing_gate_shell_text() {
         homeboy_core::test_support::with_isolated_home(|_| {
+            configure_fixture_cargo_capacity();
             let temp = tempfile::tempdir().expect("gate fixture");
             let mut policy = AgentTaskGateEnvironmentPolicy::default();
             policy.shared_cargo_target = Some(true);
@@ -7008,6 +7017,7 @@ mod tests {
     #[test]
     fn gate_inherits_shared_cargo_target_from_component_metadata() {
         homeboy_core::test_support::with_isolated_home(|_| {
+            configure_fixture_cargo_capacity();
             let temp = tempfile::tempdir().expect("gate fixture");
             std::fs::write(
                 temp.path().join("homeboy.json"),
@@ -7046,6 +7056,7 @@ mod tests {
     #[test]
     fn isolated_cargo_targets_report_warm_cache_hits_and_distinct_allocations() {
         homeboy_core::test_support::with_isolated_home(|_| {
+            configure_fixture_cargo_capacity();
             let temp = tempfile::tempdir().expect("gate fixture");
             let store = homeboy_core::observation::ObservationStore::open_initialized().unwrap();
             let run_id = store
@@ -7109,6 +7120,7 @@ mod tests {
     #[test]
     fn concurrent_cargo_build_gates_with_one_declared_target_get_isolated_stores() {
         homeboy_core::test_support::with_isolated_home(|_| {
+            configure_fixture_cargo_capacity();
             let temp = tempfile::tempdir().expect("gate fixture root");
             let first_worktree = temp.path().join("first");
             let second_worktree = temp.path().join("second");
