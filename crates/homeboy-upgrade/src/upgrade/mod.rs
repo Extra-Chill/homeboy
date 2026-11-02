@@ -41,8 +41,8 @@ pub(crate) use runner_upgrade_provider::with_runner_upgrade;
 pub use runner_upgrade_provider::{register_runner_upgrade_provider, RunnerUpgradeProvider};
 pub use services::restart_extension_services;
 pub use types::{
-    ExtensionPreflightBlocker, ExtensionUpgradeEntry, ExtensionUpgradeSkip, InstallMethod,
-    RunnerCheckEntry, RunnerConvergenceDisposition, RunnerDaemonDriftEntry,
+    DaemonPendingRestart, ExtensionPreflightBlocker, ExtensionUpgradeEntry, ExtensionUpgradeSkip,
+    InstallMethod, RunnerCheckEntry, RunnerConvergenceDisposition, RunnerDaemonDriftEntry,
     RunnerExtensionSyncEntry, RunnerServiceBinaryEntry, RunnerUpgradeEntry, ServiceRestartEntry,
     UpgradeComponentStatus, UpgradePreflight, UpgradeResult, VersionCheck,
 };

@@ -55,6 +55,8 @@ pub struct UpgradeOperationStatus {
     /// post-install verification prevents convergence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure: Option<UpgradeOperationFailure>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub daemon_pending_restart: Option<super::types::DaemonPendingRestart>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -959,6 +961,10 @@ fn status_from_run(run: &RunRecord) -> Result<UpgradeOperationStatus> {
             .cloned()
             .and_then(|value| serde_json::from_value(value).ok()),
         failure: failure_from_metadata(&metadata, &run.status),
+        daemon_pending_restart: serde_json::from_value(
+            metadata["result"]["daemon_pending_restart"].clone(),
+        )
+        .ok(),
     })
 }
 
@@ -1712,6 +1718,25 @@ mod tests {
     }
 
     #[test]
+    fn deferred_daemon_restart_is_durably_completed() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let mut operation = UpgradeOperation::start("homeboy upgrade");
+            let mut result = completed_upgrade_result();
+            result.daemon_pending_restart = Some(super::super::types::DaemonPendingRestart {
+                reason: "15 protected jobs hold the daemon".into(),
+                recovery_command: "homeboy daemon start".into(),
+                protected_job_count: Some(15),
+            });
+            assert_eq!(result.exit_code(), 0);
+            operation.finish_completed_durable(&result).unwrap();
+            let status = load_upgrade_operation_status(operation.id()).unwrap();
+            assert_eq!(status.status, RunStatus::Pass.as_str());
+            assert_eq!(status.phase, "completed");
+            assert_eq!(status.daemon_pending_restart, result.daemon_pending_restart);
+        });
+    }
+
+    #[test]
     fn completed_result_is_terminal_pass_with_independent_component_statuses() {
         homeboy_core::test_support::with_isolated_home(|_| {
             let mut operation = UpgradeOperation::start("homeboy upgrade");
@@ -2093,6 +2118,7 @@ mod tests {
             runner_convergence: None,
             message: "Upgraded".to_string(),
             restart_required: false,
+            daemon_pending_restart: None,
             extensions_updated: Vec::new(),
             extensions_skipped: Vec::new(),
             extension_skips: Vec::new(),

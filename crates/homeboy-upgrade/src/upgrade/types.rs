@@ -205,6 +205,9 @@ pub struct UpgradeResult {
     pub runner_convergence: Option<RunnerConvergenceDisposition>,
     pub message: String,
     pub restart_required: bool,
+    /// Resident daemon replacement deferred without failing the controller upgrade.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub daemon_pending_restart: Option<DaemonPendingRestart>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extensions_updated: Vec<ExtensionUpgradeEntry>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -271,6 +274,14 @@ impl UpgradeResult {
                     }),
         )
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DaemonPendingRestart {
+    pub reason: String,
+    pub recovery_command: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protected_job_count: Option<usize>,
 }
 
 /// Compact named outcome for one upgrade dimension. Detailed build output stays
@@ -509,6 +520,7 @@ mod tests {
             runner_convergence: None,
             message: "Controller upgraded to 0.338.0".to_string(),
             restart_required: false,
+            daemon_pending_restart: None,
             extensions_updated: Vec::new(),
             extensions_skipped: vec!["wordpress".to_string()],
             extension_skips: vec![ExtensionUpgradeSkip {
