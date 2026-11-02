@@ -1299,14 +1299,6 @@ impl AgentTaskScheduleSupport {
             }
         }
         if let Some(overrides) = entry.provider_config.as_object() {
-            if overrides.contains_key("client_context") {
-                if !request.metadata.is_object() {
-                    request.metadata = Value::Object(serde_json::Map::new());
-                }
-                // A rotation route explicitly owns its replacement context.
-                request.metadata["provider_readiness_generated_fanout_context"] =
-                    Value::Bool(false);
-            }
             if !overrides.is_empty() {
                 if !executor.config.is_object() {
                     executor.config = Value::Object(serde_json::Map::new());
@@ -1335,12 +1327,6 @@ impl AgentTaskScheduleSupport {
             {
                 selection.ai_provider_id = Some(provider.to_string());
             }
-        }
-        if route_changed {
-            request
-                .metadata
-                .as_object_mut()
-                .map(|metadata| metadata.remove("resolved_runtime_identity"));
         }
         Self::apply_rotation_policy_limits(request, policy);
     }

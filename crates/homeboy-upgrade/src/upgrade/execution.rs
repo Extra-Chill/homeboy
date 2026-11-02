@@ -18,9 +18,7 @@ use std::time::{Duration, Instant};
 #[cfg(unix)]
 use std::{io, os::fd::RawFd};
 
-use super::constants::{
-    RELEASE_TAG_ENV, RELEASE_VERSION_ENV, VERIFY_READBACK_ATTEMPTS, VERIFY_READBACK_DELAY,
-};
+use super::constants::{VERIFY_READBACK_ATTEMPTS, VERIFY_READBACK_DELAY};
 use super::helpers::{current_version, source_promotion_decision, version_is_newer};
 use super::planning::resolve_binary_on_path;
 use super::release_catalog::{self, SelectedRelease};
@@ -179,10 +177,8 @@ pub(crate) fn execute_upgrade(
 ) -> UpgradeExecutionResult {
     let selected_binary_version = selected_release.map(|release| release.version.as_str());
     let defaults = defaults::load_defaults();
-    // The release installer only writes an isolated stage; Rust verifies,
-    // admits, and promotes the staged candidate over `command -v homeboy`.
-    // Capture that destination before the installer runs so verification
-    // proves the intended PATH target was replaced.
+    // Slot acquisition never selects a binary. Capture the PATH destination
+    // before acquisition; admission and fenced promotion still happen here.
     let release_binary = method == InstallMethod::Binary;
     let binary_destination = release_binary.then(active_binary_path).transpose()?;
     if release_binary {
@@ -200,61 +196,28 @@ pub(crate) fn execute_upgrade(
         phase("running_candidate_admission")?;
         phase("installing_controller")?;
     }
-    let release_stage = release_binary
-        .then(|| {
-            tempfile::Builder::new()
-                .prefix("homeboy-release-stage-")
-                .tempdir()
-                .map_err(|error| {
-                    Error::internal_io(
-                        error.to_string(),
-                        Some("create release staging directory".to_string()),
-                    )
-                })
-        })
-        .transpose()?;
-    let staged_release_binary = release_stage
-        .as_ref()
-        .map(|stage| stage.path().join("homeboy"));
+    let staged_release_binary = if release_binary {
+        Some(super::release_slot::acquire_release_slot(
+            &selected_release
+                .expect("release upgrades select a release")
+                .tag,
+            &super::release_slot::binaries_dir()?,
+        )?)
+    } else {
+        None
+    };
     let output = match method {
         InstallMethod::Homebrew => {
             let cmd = &defaults.install_methods.homebrew.upgrade_command;
-            run_installer_shell_command(
+            Some(run_installer_shell_command(
                 cmd,
                 promotion_lease,
                 INSTALLER_UPGRADE_TIMEOUT,
                 "run homebrew upgrade",
                 |_| {},
-            )?
+            )?)
         }
-        InstallMethod::Binary => {
-            let lease = promotion_lease.ok_or_else(|| {
-                Error::internal_unexpected("release staging requires promotion ownership")
-            })?;
-            match supervise_installer_shell_command(
-                RELEASE_INSTALLER_SCRIPT,
-                INSTALLER_UPGRADE_TIMEOUT,
-                "run release binary upgrade",
-                |command| lease.authorize_mutating_subprocess(command),
-                |command| {
-                    configure_release_installer(
-                        command,
-                        staged_release_binary
-                            .as_deref()
-                            .expect("release upgrades have an isolated stage"),
-                        selected_release,
-                    )
-                },
-            ) {
-                Ok(output) => output,
-                Err(error) => {
-                    return Err(Error::internal_io(
-                        error.to_string(),
-                        Some("run release binary upgrade".to_string()),
-                    ));
-                }
-            }
-        }
+        InstallMethod::Binary => None,
         InstallMethod::Source => {
             if env::var_os(REENTRANCY_GUARD_ENV).is_some() {
                 return Err(Error::internal_unexpected(
@@ -318,7 +281,7 @@ pub(crate) fn execute_upgrade(
         }
     };
 
-    if !output.status.success() {
+    if let Some(output) = output.filter(|output| !output.status.success()) {
         // Keep both bounded streams: installers may log progress to stderr while
         // a staged candidate returns the actionable failure contract on stdout.
         let error_detail = upgrade_failure_detail(&output.stderr, &output.stdout)
@@ -333,17 +296,14 @@ pub(crate) fn execute_upgrade(
     if release_binary {
         let staged = staged_release_binary
             .as_deref()
-            .expect("release upgrades have an isolated stage");
+            .expect("release upgrades acquire a slot");
         let selected_version =
             selected_binary_version.expect("release upgrades select a release version");
         let destination = binary_destination
             .as_deref()
             .expect("release upgrades capture a destination");
-        // The stage is the only candidate: an installer that exits 0 without
-        // staging anything has proven nothing, and the live destination must
-        // not stand in for the candidate it is about to be replaced by.
-        // The controller is the single admission point for the staged
-        // candidate; the installer runs in stage-only mode and skips its own.
+        // Admit the slot binary, never the live destination. A cache hit skips
+        // acquisition work, not today's candidate admission or promotion fence.
         let candidate = verify_staged_release_candidate(selected_version, staged)?;
         let replacement = ReplacementEvidence::new(
             destination,
@@ -431,22 +391,6 @@ pub const RELEASE_INSTALLER_SCRIPT: &str = include_str!(concat!(
     "/../../scripts/homeboy-installer.sh"
 ));
 
-/// Point the release installer at the isolated stage and the selected release.
-/// Stage-only mode places the verified candidate at the stage path and leaves
-/// admission and promotion into the live destination to the controller.
-fn configure_release_installer(
-    command: &mut Command,
-    staged_release_binary: &Path,
-    selected_release: Option<&SelectedRelease>,
-) {
-    command.env("HOMEBOY_INSTALL_STAGE_ONLY", "1");
-    command.env("HOMEBOY_INSTALL_PATH", staged_release_binary);
-    if let Some(release) = selected_release {
-        command.env(RELEASE_TAG_ENV, &release.tag);
-        command.env(RELEASE_VERSION_ENV, &release.version);
-    }
-}
-
 fn run_installer_shell_command(
     script: &str,
     promotion_lease: Option<&homeboy_core::runtime_promotion::RuntimePromotionLease>,
@@ -467,7 +411,7 @@ fn run_installer_shell_command(
     )
 }
 
-fn supervise_installer_shell_command<A>(
+pub(super) fn supervise_installer_shell_command<A>(
     script: &str,
     timeout: Duration,
     context: &str,

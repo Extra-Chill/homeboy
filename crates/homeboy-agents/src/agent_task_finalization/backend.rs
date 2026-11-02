@@ -9,14 +9,88 @@ use homeboy_core::error::{Error, Result};
 use homeboy_core::git::{
     classify_git_push_failure, commit_at, get_uncommitted_changes, pr_create_with_token,
     pr_edit_with_token, pr_find_with_token, pr_view_with_token, push_at,
-    remote_branch_head_over_push_transport, resolve_default_remote, resolve_effective_push_url,
-    run_git, CommitOptions, GitPushRemote, GitPushTransportClass, GitPushTransportKind,
-    PrCreateOptions, PrEditOptions, PrFindOptions, PrState, PushOptions,
-    DEFAULT_NON_INTERACTIVE_PUSH_TIMEOUT,
+    remote_branch_head_over_push_transport, resolve_effective_push_url, run_git, CommitOptions,
+    GitPushRemote, GitPushTransportClass, GitPushTransportKind, PrCreateOptions, PrEditOptions,
+    PrFindOptions, PrState, PushOptions, DEFAULT_NON_INTERACTIVE_PUSH_TIMEOUT,
 };
 use homeboy_core::run_lifecycle_record::RunLifecycleRecord;
 use serde::de::DeserializeOwned;
 use std::path::Path;
+
+fn publication_route(path: &str) -> Result<super::AgentTaskPublicationRoute> {
+    let config = homeboy_core::defaults::load_config_for_read()?;
+    resolve_publication_route(path, &config.git_hosts)
+}
+
+fn resolve_publication_route(
+    path: &str,
+    hosts: &std::collections::HashMap<String, homeboy_core::defaults::GitHostConfig>,
+) -> Result<super::AgentTaskPublicationRoute> {
+    use homeboy_core::git::release_download::{detect_remote_url, parse_github_url};
+    let base = detect_remote_url(Path::new(path)).and_then(|url| parse_github_url(&url));
+    let mut route = super::AgentTaskPublicationRoute {
+        route: "direct".into(),
+        push_remote: "origin".into(),
+        head_repository: base
+            .as_ref()
+            .map(|repo| format!("{}/{}", repo.owner, repo.repo))
+            .unwrap_or_default(),
+    };
+    let Some(base) = base else { return Ok(route) };
+    let policy = hosts
+        .iter()
+        .find(|(host, _)| host.eq_ignore_ascii_case(&base.host))
+        .map(|(_, policy)| policy);
+    let Some(policy) = policy else {
+        return Ok(route);
+    };
+    let Some(owners) = &policy.direct_owners else {
+        return Ok(route);
+    };
+    if owners
+        .iter()
+        .any(|owner| owner.eq_ignore_ascii_case(&base.owner))
+    {
+        return Ok(route);
+    }
+    let fork_owner = policy.fork_owner.as_deref().filter(|owner| !owner.trim().is_empty()).ok_or_else(|| {
+        Error::git_command_failed(format!(
+            "origin is {}/{} on {}; direct_owners={owners:?} selects fork publication but fork_owner is missing; set git_hosts.{}.fork_owner to your fork owner before retrying finalization.", base.owner, base.repo, base.host, base.host
+        ))
+    })?;
+    let mut matches = Vec::new();
+    for remote in git_output(path, &["remote"])?.lines() {
+        let url = git_output(
+            path,
+            &["config", "--get", &format!("remote.{remote}.pushurl")],
+        )
+        .or_else(|_| git_output(path, &["config", "--get", &format!("remote.{remote}.url")]))?;
+        if let Some(repo) = parse_github_url(&url) {
+            if repo.host.eq_ignore_ascii_case(&base.host)
+                && repo.owner.eq_ignore_ascii_case(fork_owner)
+                && repo.repo.eq_ignore_ascii_case(&base.repo)
+            {
+                matches.push(remote.to_string());
+            }
+        }
+    }
+    if matches.len() != 1 {
+        let remediation = if matches.is_empty() {
+            format!("run `gh repo fork {}/{} --clone=false` then `git remote add {fork_owner} https://{}/{fork_owner}/{}.git`", base.owner, base.repo, base.host, base.repo)
+        } else {
+            format!("remove duplicate fork remotes with `git remote remove <duplicate>` until exactly one remote points to {fork_owner}/{}", base.repo)
+        };
+        return Err(Error::git_command_failed(format!(
+            "origin is {}/{} on {}; direct_owners={owners:?}, fork_owner={fork_owner}; expected one fork remote for {fork_owner}/{}, observed {} ({matches:?}); {remediation}, then retry finalization.", base.owner, base.repo, base.host, base.repo, matches.len()
+        )));
+    }
+    // A base-owner App cannot push to a personal fork. Fork publication uses
+    // the user's gh/Git credentials, never the base installation token.
+    route.route = "fork".into();
+    route.push_remote = matches.remove(0);
+    route.head_repository = format!("{fork_owner}/{}", base.repo);
+    Ok(route)
+}
 
 fn publication_credential(
     path: &str,
@@ -27,7 +101,7 @@ fn publication_credential(
     )>,
 > {
     let config = homeboy_core::defaults::load_config_for_read()?;
-    if config.github_app.is_none() {
+    if config.github_app.is_none() || publication_route(path)?.route == "fork" {
         return Ok(None);
     }
     let remote = homeboy_core::git::release_download::detect_remote_url(Path::new(path))
@@ -40,6 +114,13 @@ fn publication_credential(
 pub struct RealAgentTaskPrFinalizationBackend;
 
 impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
+    fn publication_route(
+        &mut self,
+        path: &str,
+    ) -> Result<Option<super::AgentTaskPublicationRoute>> {
+        let route = publication_route(path)?;
+        Ok((!route.head_repository.is_empty()).then_some(route))
+    }
     fn publication_context(
         &mut self,
         run_id: &str,
@@ -461,15 +542,21 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
         // Resolve the transport the push will actually use (pushurl beats a
         // pushInsteadOf rewrite) before mutating anything, so a classified
         // failure can report it (#10734).
-        let push_remote = resolve_default_remote(Path::new(path));
+        let route = publication_route(path)?;
+        let push_remote = route.push_remote.clone();
         let effective_remote = resolve_effective_push_url(Path::new(path), &push_remote).ok();
         let credential = publication_credential(path)?;
         let output = push_at(
             None,
             PushOptions {
-                remote_url: credential.as_ref().map(|(repo, _)| {
-                    format!("https://{}/{}/{}.git", repo.host, repo.owner, repo.repo)
-                }),
+                remote_url: Some(
+                    credential
+                        .as_ref()
+                        .map(|(repo, _)| {
+                            format!("https://{}/{}/{}.git", repo.host, repo.owner, repo.repo)
+                        })
+                        .unwrap_or_else(|| push_remote.clone()),
+                ),
                 token: credential
                     .as_ref()
                     .map(|(_, credential)| credential.token().to_string()),
@@ -510,7 +597,7 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
             )));
         }
 
-        let upstream_ref = format!("refs/remotes/origin/{head}");
+        let upstream_ref = format!("refs/remotes/{push_remote}/{head}");
         let existing_upstream =
             git_output(path, &["rev-parse", "--symbolic-full-name", "@{upstream}"]).ok();
         git_output(path, &["update-ref", &upstream_ref, &verified_remote_sha])?;
@@ -520,7 +607,7 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
                 &[
                     "branch",
                     "--set-upstream-to",
-                    &format!("origin/{head}"),
+                    &format!("{push_remote}/{head}"),
                     head,
                 ],
             )?;
@@ -528,7 +615,7 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
 
         Ok(AgentTaskPublicationGitTracking {
             local_branch: head.to_string(),
-            remote: "origin".to_string(),
+            remote: push_remote,
             upstream_ref,
             verified_remote_sha,
         })
@@ -546,7 +633,7 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
             component_id,
             PrFindOptions {
                 base: Some(base.to_string()),
-                head: Some(head.to_string()),
+                head: Some(publication_route(path)?.pr_head(head)),
                 state: PrState::Open,
                 limit: 10,
                 path: Some(path.to_string()),
@@ -574,7 +661,7 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
             component_id,
             PrFindOptions {
                 base: Some(base.to_string()),
-                head: Some(head.to_string()),
+                head: Some(publication_route(path)?.pr_head(head)),
                 state: PrState::Merged,
                 limit: 10,
                 path: Some(path.to_string()),
@@ -650,7 +737,7 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
             component_id,
             PrCreateOptions {
                 base: base.to_string(),
-                head: head.to_string(),
+                head: publication_route(path)?.pr_head(head),
                 title: title.to_string(),
                 body: body.to_string(),
                 draft,
@@ -751,8 +838,11 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
             .unwrap_or_default()
             .to_string();
         let head_repository = pr_head_repository_from_json(&pr_value);
+        let route = publication_route(path)?;
         if pr_value["baseRefName"].as_str() != Some(base)
             || pr_value["headRefName"].as_str() != Some(head)
+            || (!route.head_repository.is_empty()
+                && !head_repository.eq_ignore_ascii_case(&route.head_repository))
         {
             return Err(Error::validation_invalid_argument(
                 "publication_binding",
@@ -905,7 +995,7 @@ fn remote_branch_head(path: &str, head: &str) -> Result<Option<String>> {
             .next()
             .map(str::to_owned));
     }
-    let remote = resolve_default_remote(git_root);
+    let remote = publication_route(path)?.push_remote;
     let read = remote_branch_head_over_push_transport(git_root, &remote, head)?;
     if !read.success {
         let classification = classify_git_push_failure(&read.stderr);
@@ -1042,7 +1132,12 @@ fn remote_head_is_ancestor_of_candidate(path: &str, remote_head: &str, local_hea
         |remaining| {
             homeboy_core::git::run_git_output_with_env_timeout(
                 Path::new(path),
-                &["fetch", "--no-tags", "origin", remote_head],
+                &[
+                    "fetch",
+                    "--no-tags",
+                    &publication_route(path)?.push_remote,
+                    remote_head,
+                ],
                 "materialize finalization remote head",
                 &[],
                 remaining,
@@ -1075,6 +1170,17 @@ fn publication_gh_output(path: &str, args: &[&str]) -> Result<std::process::Outp
     let credential = publication_credential(path)?;
     let mut command = std::process::Command::new("gh");
     command.args(args).current_dir(path);
+    // gh may otherwise select a fork as its default repository after `repo fork`.
+    if publication_route(path)?.route == "fork" {
+        if let Some(repo) = homeboy_core::git::release_download::detect_remote_url(Path::new(path))
+            .and_then(|url| homeboy_core::git::release_download::parse_github_url(&url))
+        {
+            command.env(
+                "GH_REPO",
+                format!("{}/{}/{}", repo.host, repo.owner, repo.repo),
+            );
+        }
+    }
     if let Some((repo, credential)) = &credential {
         command
             .env("GH_TOKEN", credential.token())
@@ -1472,6 +1578,153 @@ mod remote_base_tests {
             path.to_str().unwrap(),
             &["rev-parse", "--symbolic-full-name", "@{upstream}"],
         )
+    }
+
+    #[test]
+    fn owner_policy_routes_real_publication_and_persists_coordinates() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            for (owner, expected_route, expected_remote, expected_head) in [
+                ("eXtRa-ChIlL", "direct", "origin", "feature"),
+                ("WordPress", "fork", "chubes4", "chubes4:feature"),
+            ] {
+                let (repo, origin) = publication_repo();
+                let fork = tempfile::tempdir().unwrap();
+                git(fork.path(), &["init", "--bare", "-b", "main"]);
+                let base_url = format!("https://github.com/{owner}/reprint.git");
+                let fork_url = "https://github.com/chubes4/reprint.git";
+                git(repo.path(), &["remote", "set-url", "origin", &base_url]);
+                git(repo.path(), &["remote", "add", "chubes4", fork_url]);
+                for (url, destination) in [(&*base_url, origin.path()), (fork_url, fork.path())] {
+                    git(
+                        repo.path(),
+                        &[
+                            "config",
+                            &format!("url.{}.pushInsteadOf", destination.display()),
+                            url,
+                        ],
+                    );
+                }
+                homeboy_core::defaults::save_config(&homeboy_core::defaults::HomeboyConfig {
+                    git_hosts: std::collections::HashMap::from([(
+                        "github.com".into(),
+                        homeboy_core::defaults::GitHostConfig {
+                            direct_owners: Some(vec!["Extra-Chill".into()]),
+                            fork_owner: Some("chubes4".into()),
+                            ..Default::default()
+                        },
+                    )]),
+                    ..Default::default()
+                })
+                .unwrap();
+                let path = repo.path().to_str().unwrap();
+                let route = publication_route(path).unwrap();
+                assert_eq!(route.route, expected_route);
+                assert_eq!(route.push_remote, expected_remote);
+                assert_eq!(route.pr_head("feature"), expected_head);
+                let sha = git_output(path, &["rev-parse", "HEAD"]).unwrap();
+                let tracking = RealAgentTaskPrFinalizationBackend
+                    .push_branch(path, &sha, "feature")
+                    .unwrap();
+                assert_eq!(tracking.remote, expected_remote);
+                assert_eq!(
+                    remote_branch_head(path, "feature").unwrap().as_deref(),
+                    Some(sha.as_str())
+                );
+                assert_eq!(
+                    upstream(repo.path()).unwrap(),
+                    format!("refs/remotes/{expected_remote}/feature")
+                );
+                let untouched = if expected_route == "fork" {
+                    origin.path()
+                } else {
+                    fork.path()
+                };
+                assert!(git_output(
+                    untouched.to_str().unwrap(),
+                    &["show-ref", "--verify", "refs/heads/feature"]
+                )
+                .is_err());
+                let mut intent = super::super::build_pr_publication_intent(
+                    &super::super::tests::options(),
+                    "feature",
+                    &[],
+                    super::super::build_finalization_proof(&super::super::tests::options(), vec![]),
+                    &base("main", &sha),
+                );
+                intent.target.publication_route = Some(route.clone());
+                let proof = super::super::publication_proof(
+                    &intent,
+                    "published",
+                    "create",
+                    None,
+                    None,
+                    Some(tracking),
+                    None,
+                );
+                let value = serde_json::to_value(proof).unwrap();
+                assert_eq!(
+                    value["target"]["publication_route"]["route"],
+                    expected_route
+                );
+                assert_eq!(
+                    value["target"]["publication_route"]["head_repository"],
+                    route.head_repository
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn fork_policy_rejects_missing_owner_missing_remote_and_ambiguous_remote_before_push() {
+        let (repo, origin) = publication_repo();
+        let path = repo.path().to_str().unwrap();
+        git(
+            repo.path(),
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                "https://github.com/WordPress/reprint.git",
+            ],
+        );
+        let mut hosts = std::collections::HashMap::from([(
+            "github.com".into(),
+            homeboy_core::defaults::GitHostConfig {
+                direct_owners: Some(vec![]),
+                ..Default::default()
+            },
+        )]);
+        let error = resolve_publication_route(path, &hosts).unwrap_err();
+        assert!(error
+            .message
+            .contains("set git_hosts.github.com.fork_owner"));
+        hosts.get_mut("github.com").unwrap().fork_owner = Some("chubes4".into());
+        let error = resolve_publication_route(path, &hosts).unwrap_err();
+        assert!(error
+            .message
+            .contains("gh repo fork WordPress/reprint --clone=false"));
+        assert!(error
+            .message
+            .contains("git remote add chubes4 https://github.com/chubes4/reprint.git"));
+        for remote in ["fork", "duplicate"] {
+            git(
+                repo.path(),
+                &[
+                    "remote",
+                    "add",
+                    remote,
+                    "git@github.com:chubes4/reprint.git",
+                ],
+            );
+        }
+        let error = resolve_publication_route(path, &hosts).unwrap_err();
+        assert!(error.message.contains("observed 2"));
+        assert!(error.message.contains("git remote remove <duplicate>"));
+        assert!(git_output(
+            origin.path().to_str().unwrap(),
+            &["show-ref", "--verify", "refs/heads/feature"]
+        )
+        .is_err());
     }
 
     #[test]

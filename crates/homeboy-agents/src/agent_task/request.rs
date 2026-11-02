@@ -4,10 +4,9 @@ use std::path::PathBuf;
 
 use super::schema::request_schema;
 use super::{
-    AgentTaskArtifactDeclaration, AgentTaskAttachedToolCapability, AgentTaskCapabilityEvidence,
-    AgentTaskCapabilityRequirements, AgentTaskEvidenceRef, AgentTaskExecutor, AgentTaskLimits,
-    AgentTaskOutcome, AgentTaskPolicy, AgentTaskRuntimeTool, AgentTaskSourceRef,
-    AgentTaskWorkspace,
+    AgentTaskArtifactDeclaration, AgentTaskCapabilityEvidence, AgentTaskCapabilityRequirements,
+    AgentTaskEvidenceRef, AgentTaskExecutor, AgentTaskLimits, AgentTaskOutcome, AgentTaskPolicy,
+    AgentTaskRuntimeTool, AgentTaskSourceRef, AgentTaskWorkspace,
 };
 
 /// Provider capability payload used by extension discovery and durable run metadata.
@@ -74,43 +73,6 @@ pub struct AgentTaskStart {
     pub handle: AgentTaskExecutionHandle,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome: Option<AgentTaskOutcome>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct AgentTaskProgress {
-    pub handle: AgentTaskExecutionHandle,
-    pub state: AgentTaskExecutionState,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub events: Vec<AgentTaskProgressEvent>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider_payload: Option<Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub outcome: Option<AgentTaskOutcome>,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum AgentTaskExecutionState {
-    Queued,
-    Running,
-    Waiting,
-    Succeeded,
-    Failed,
-    Cancelled,
-}
-
-impl AgentTaskExecutionState {
-    pub fn is_terminal(self) -> bool {
-        matches!(self, Self::Succeeded | Self::Failed | Self::Cancelled)
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct AgentTaskProgressEvent {
-    pub kind: String,
-    pub message: String,
-    #[serde(default, skip_serializing_if = "Value::is_null")]
-    pub data: Value,
 }
 
 /// A named value the provider returns in `AgentTaskOutcome.outputs`.
@@ -257,34 +219,10 @@ impl AgentTaskRequest {
     }
 
     pub fn capability_requirements(&self) -> Result<AgentTaskCapabilityRequirements, String> {
-        let mut requirements = super::capabilities::requirements_from_metadata(
+        super::capabilities::requirements_from_metadata(
             &self.metadata,
             &self.executor.required_capabilities,
-        )?;
-        for tool in &self.runtime_tools {
-            if tool.required_capabilities.is_empty() {
-                continue;
-            }
-            if let Some(attached) = requirements
-                .attached_tools
-                .iter_mut()
-                .find(|attached| attached.id == tool.id)
-            {
-                attached
-                    .contributes
-                    .extend(tool.required_capabilities.clone());
-            } else {
-                requirements
-                    .attached_tools
-                    .push(AgentTaskAttachedToolCapability {
-                        id: tool.id.clone(),
-                        contributes: tool.required_capabilities.clone(),
-                    });
-            }
-        }
-        let requirements = requirements.normalized();
-        requirements.validate()?;
-        Ok(requirements)
+        )
     }
 
     pub fn record_capability_evidence(&mut self, evidence: AgentTaskCapabilityEvidence) {

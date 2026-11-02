@@ -734,7 +734,7 @@ fn finish_performed_step(
     match result {
         Ok((value, exit_code)) => {
             if exit_code != 0 {
-                report.failure = blocked_phase_failure(&value);
+                report.failure = performed_step_failure(&value);
             }
             if report.preflight {
                 report.admission = Some(value);
@@ -752,6 +752,38 @@ fn finish_performed_step(
             (report, 1)
         }
     }
+}
+
+/// Preserve the concrete cause returned by retries as well as continuations.
+/// Retry waits return a status-watch envelope, not a phase report.
+fn performed_step_failure(value: &Value) -> Option<Value> {
+    if let Some(failure) = blocked_phase_failure(value) {
+        return Some(failure);
+    }
+    for pointer in [
+        "/failure",
+        "/terminal_summary/blocker",
+        "/latest/blocker",
+        "/blocker",
+    ] {
+        if let Some(failure) = value.pointer(pointer).filter(|failure| {
+            failure["message"]
+                .as_str()
+                .is_some_and(|message| !message.trim().is_empty())
+        }) {
+            return Some(failure.clone());
+        }
+    }
+    value["stop_reason"]
+        .as_str()
+        .filter(|reason| !reason.trim().is_empty())
+        .map(|reason| {
+            serde_json::json!({
+                "code": "agent_task.recover_failed",
+                "message": reason,
+                "details": { "status": value["status"] },
+            })
+        })
 }
 
 /// A refused step reports its blocking phase deep in its payload. Lift that
@@ -1319,6 +1351,40 @@ mod tests {
             .unwrap()
             .contains(message));
         assert!(report.result.is_none());
+    }
+
+    #[test]
+    fn retry_pre_execution_failure_preserves_concrete_cause() {
+        let cause = "Cook cannot attribute uncommitted destination changes: M source.rs; stash changes before retrying";
+        for preflight in [false, true] {
+            for payload in [
+                serde_json::json!({
+                    "status": "pre_execution_failure",
+                    "stop_reason": cause,
+                }),
+                serde_json::json!({
+                    "terminal_summary": {
+                        "state": "pre_execution_failure",
+                        "blocker": { "code": "invalid_input", "message": cause },
+                    },
+                }),
+            ] {
+                let mut report = no_step_report("pre_execution_failure", "");
+                report.step = CookRecoveryStep::Retry;
+                report.preflight = preflight;
+                let (report, exit_code) = finish_performed_step(report, Ok((payload.clone(), 1)));
+                assert_eq!(exit_code, 1);
+                assert_eq!(report.failure.unwrap()["message"], cause);
+                assert_eq!(
+                    if preflight {
+                        report.admission
+                    } else {
+                        report.result
+                    },
+                    Some(payload)
+                );
+            }
+        }
     }
 
     #[test]

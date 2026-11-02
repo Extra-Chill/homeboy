@@ -158,7 +158,6 @@ pub fn evaluate_provider_capacity_with_config(
         &[],
         cache,
         deadline_unix_ms,
-        false,
         Some(super::command_runner::PROVIDER_READINESS_CAPACITY_MODE),
     ) {
         Ok(verdict) => {
@@ -209,7 +208,6 @@ pub fn evaluate_provider_dispatchability(
     cache: &mut ProviderRuntimeReadinessCache,
     runtime_evidence_out: &mut Option<AgentTaskProviderRuntimeEvidence>,
     deadline_unix_ms: Option<u64>,
-    generated_fanout_context: bool,
 ) -> AgentTaskProviderDispatchability {
     let unresolved = |state: &'static str, reason: &'static str, route_reason: String| {
         let checks = AgentTaskProviderDispatchabilityChecks {
@@ -276,7 +274,6 @@ pub fn evaluate_provider_dispatchability(
             credential_env,
             cache,
             deadline_unix_ms,
-            generated_fanout_context,
             // Live dispatchability never probes in capacity mode; the two
             // verdicts are distinct cache identities by design (#15024).
             None,
@@ -674,7 +671,6 @@ pub(crate) fn evaluate_request_dispatchability(
         cache,
         &mut runtime_evidence,
         request.limits.execution_deadline_unix_ms,
-        request.metadata["provider_readiness_generated_fanout_context"] == true,
     );
     EvaluatedRequestDispatchability {
         dispatchability,
@@ -718,13 +714,7 @@ pub fn provider_runtime_readiness_cache_identity_for_plan(
         })?;
     let credential_env = Vec::new();
     let config = effective_provider_config(&request.executor.config, request.executor.model());
-    super::runtime_readiness::readiness_cache_identity_for_generated_fanout_context(
-        &provider,
-        &config,
-        &credential_env,
-        task.metadata["provider_readiness_generated_fanout_context"] == true,
-        None,
-    )
+    super::runtime_readiness::readiness_cache_identity(&provider, &config, &credential_env, None)
 }
 
 fn unavailable_request_dispatchability(
@@ -810,7 +800,6 @@ pub fn preflight_provider_dispatchability(
         cache,
         &mut None,
         None,
-        false,
     );
     if verdict.ready
         || (!probe_runtime
@@ -1488,7 +1477,6 @@ mod tests {
             &mut ProviderRuntimeReadinessCache::default(),
             &mut None,
             None,
-            false,
         );
 
         assert_eq!(verdict.state, "credentials_unusable");
@@ -1540,7 +1528,6 @@ mod tests {
             &mut ProviderRuntimeReadinessCache::default(),
             &mut None,
             None,
-            false,
         );
 
         assert_eq!(verdict.state, "runtime_unavailable");
@@ -1574,7 +1561,6 @@ mod tests {
             &mut ProviderRuntimeReadinessCache::default(),
             &mut None,
             None,
-            false,
         );
         assert_eq!(missing.state, "route_unavailable");
         assert!(!missing.checks.route.ready);
@@ -1603,7 +1589,6 @@ mod tests {
             &mut ProviderRuntimeReadinessCache::default(),
             &mut None,
             None,
-            false,
         );
 
         assert_eq!(verdict.state, "route_unavailable");
@@ -1639,7 +1624,6 @@ mod tests {
             &mut cache,
             &mut None,
             None,
-            false,
         );
         assert_eq!(blocked.state, "runtime_unavailable");
         assert_eq!(
@@ -1658,7 +1642,6 @@ mod tests {
             &mut cache,
             &mut None,
             None,
-            false,
         );
         assert!(ready.ready);
         let ready_again = evaluate_provider_dispatchability(
@@ -1672,7 +1655,6 @@ mod tests {
             &mut cache,
             &mut None,
             None,
-            false,
         );
         assert!(ready_again.ready);
         let probes = std::fs::read_to_string(count).expect("probe count");
@@ -1939,7 +1921,6 @@ mod tests {
             &mut cache,
             &mut None,
             None,
-            false,
         );
 
         assert!(

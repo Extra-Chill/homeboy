@@ -1944,7 +1944,6 @@ fn providers_with_catalog(
             &mut readiness_cache,
             &mut None,
             None,
-            false,
         )
     });
     // An absent `--backend` sweeps every declared backend instead of inheriting
@@ -2345,7 +2344,6 @@ fn resolved_provider_dispatchability(
         cache,
         &mut None,
         None,
-        false,
     );
     *dispatchable = verdict.ready;
     Some(verdict)
@@ -2377,7 +2375,6 @@ fn provider_dispatchability(
         &mut cache,
         &mut None,
         None,
-        false,
     )
 }
 
@@ -2483,7 +2480,6 @@ fn dispatchable_backend_choices(
                 &mut cache,
                 &mut None,
                 None,
-                false,
             )
             .ready
         })
@@ -3124,7 +3120,6 @@ mod tests {
                     &mut ProviderRuntimeReadinessCache::default(),
                     &mut None,
                     None,
-                    false,
                 );
                 compact_provider(&provider, &dispatchability)
             })
@@ -3339,7 +3334,6 @@ mod tests {
                         &mut Default::default(),
                         &mut None,
                         None,
-                        false,
                     );
                 let projection = readiness_validation_projection(
                     None,
@@ -3508,7 +3502,6 @@ mod tests {
                 &mut ProviderRuntimeReadinessCache::default(),
                 &mut None,
                 None,
-                false,
             );
             assert_eq!(provider_status(&provider, &dispatchability), "available");
             assert!(compact_provider(&provider, &dispatchability)["reason"].is_null());

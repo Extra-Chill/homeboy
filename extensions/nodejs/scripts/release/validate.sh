@@ -10,6 +10,16 @@ if [[ ! -f "package.json" ]]; then
   exit 1
 fi
 
+# Private workspaces do not need publish validation.
+if [[ "$(node -p "require('./package.json').private===true")" == "true" ]]; then
+  PACKAGE_NAME=$(node -p "require('./package.json').name")
+  echo "Skipping npm publish validation: $PACKAGE_NAME is private" >&2
+  exit 0
+fi
+
+source "$(dirname "${BASH_SOURCE[0]}")/../lib/project-scripts.sh"
+homeboy_project_ensure_workspace_dependencies
+
 # Check if a validate script exists
 has_validate=$(node -e "
   const pkg = require('./package.json');

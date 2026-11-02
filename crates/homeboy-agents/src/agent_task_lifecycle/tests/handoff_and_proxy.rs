@@ -555,7 +555,7 @@ fn stamp_stale_controller_runtime(run_id: &str, stale_identity: &str) {
     .expect("stamp stale controller runtime");
 }
 
-fn stamped_runtime_identity(run_id: &str) -> String {
+fn stamped_controller_build(run_id: &str) -> String {
     reconcile_status(run_id).expect("record loaded").metadata
         [homeboy_core::controller_runtime::CONTROLLER_RUNTIME_METADATA_KEY]["originating"]
         ["build_identity"]
@@ -580,14 +580,14 @@ fn retry_stamps_replacement_run_with_current_runtime_not_stale_source() {
 
         let source = submit_plan(&plan, Some("cook-8550-source")).expect("source submitted");
         stamp_stale_controller_runtime(&source.run_id, &stale_identity);
-        assert_eq!(stamped_runtime_identity(&source.run_id), stale_identity);
+        assert_eq!(stamped_controller_build(&source.run_id), stale_identity);
 
         // (1) A failed run created by runtime A can be retried with a new run ID
         //     under runtime B, and the replacement run records runtime B.
         let replacement = retry(&source.run_id, Some("cook-8550-retry")).expect("retry succeeds");
         assert_ne!(replacement.run_id, source.run_id);
         assert_eq!(
-            stamped_runtime_identity(&replacement.run_id),
+            stamped_controller_build(&replacement.run_id),
             current_identity,
             "replacement run must be stamped with the current runtime that created it"
         );
@@ -601,17 +601,17 @@ fn retry_stamps_replacement_run_with_current_runtime_not_stale_source() {
         let same_runtime_source =
             submit_plan(&plan, Some("cook-8550-fresh")).expect("fresh source submitted");
         assert_eq!(
-            stamped_runtime_identity(&same_runtime_source.run_id),
+            stamped_controller_build(&same_runtime_source.run_id),
             current_identity
         );
         let same_runtime_replacement =
             retry(&same_runtime_source.run_id, None).expect("same-runtime retry succeeds");
         assert_eq!(
-            stamped_runtime_identity(&same_runtime_replacement.run_id),
+            stamped_controller_build(&same_runtime_replacement.run_id),
             current_identity
         );
         assert_eq!(
-            stamped_runtime_identity(&same_runtime_source.run_id),
+            stamped_controller_build(&same_runtime_source.run_id),
             current_identity,
             "retry must not rewrite the source run's runtime provenance"
         );

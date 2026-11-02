@@ -984,10 +984,6 @@ fn register_startup_providers_after_reconcile(
     // that registry as deliberately optional.
     crate::agents::agent_task_lifecycle::register_acceptance_verifier_from_config(agent_task)?;
     crate::runner::enable_production_lab_staging();
-    // Register the runner workspace-root provider so the daemon file API can
-    // resolve a runner's configured workspace_root without core depending on
-    // the runner config registry.
-    crate::runner::register_runner_workspace_root_provider();
     // Register Runner as a config entity so it participates in config
     // id/alias collision detection, mirroring how feature crates register
     // their own entities (moves into the runner crate once extracted).

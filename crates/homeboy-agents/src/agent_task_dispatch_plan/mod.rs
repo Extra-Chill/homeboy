@@ -154,7 +154,7 @@ pub fn build_dispatch_plan_with_provider_requirements(
     )?);
 
     let client_context = dispatch_client_context(request)?;
-    let (mut provider_config, mut generated_provider_client_context) = dispatch_provider_config(
+    let mut provider_config = dispatch_provider_config(
         request,
         &repo,
         &component,
@@ -167,9 +167,6 @@ pub fn build_dispatch_plan_with_provider_requirements(
         .as_ref()
         .and_then(|route| route.provider_config.as_object())
     {
-        // A selected policy route owns its explicit context, even when the
-        // base config received a Homeboy-generated fanout context.
-        generated_provider_client_context &= !overrides.contains_key("client_context");
         provider_config
             .as_object_mut()
             .expect("dispatch provider config object")
@@ -272,28 +269,12 @@ pub fn build_dispatch_plan_with_provider_requirements(
                 backend: policy_backend.clone(),
                 selector: policy_selector.clone(),
                 runtime_selection: Some(AgentTaskRuntimeSelection {
-                    runtime_id: request
-                        .core
-                        .resolved_provider_policy
-                        .as_ref()
-                        .and_then(|policy| policy.runtime_identity.as_ref())
-                        .map(|identity| identity.runtime_id.clone()),
+                    runtime_id: None,
                     executor_backend: Some(policy_backend.clone()),
-                    executor_provider_id: request
-                        .core
-                        .resolved_provider_policy
-                        .as_ref()
-                        .and_then(|policy| policy.runtime_identity.as_ref())
-                        .map(|identity| identity.provider_id.clone())
-                        .or_else(|| policy_selector.clone()),
+                    executor_provider_id: policy_selector.clone(),
                     ai_provider_id: config_string(&provider_config, "provider"),
                     model: policy_model.clone(),
-                    substrate_ref: request
-                        .core
-                        .resolved_provider_policy
-                        .as_ref()
-                        .and_then(|policy| policy.runtime_identity.as_ref())
-                        .map(|identity| identity.source_revision.clone()),
+                    substrate_ref: None,
                 }),
                 required_capabilities: request.required_capabilities.clone(),
                 secret_env: secret_env.clone(),
@@ -359,10 +340,6 @@ pub fn build_dispatch_plan_with_provider_requirements(
                 "dispatch": "agent-task cook",
                 "required_capabilities": request.required_capabilities,
                 "runtime_dependency_graph": runtime_dependency_graph_evidence,
-                "resolved_runtime_identity": request.core.resolved_provider_policy
-                    .as_ref()
-                    .and_then(|policy| policy.runtime_identity.as_ref()),
-                "provider_readiness_generated_fanout_context": request.core.generated_fanout_context && generated_provider_client_context,
             }),
         });
     }
@@ -1109,7 +1086,6 @@ mod tests {
                                 ..Default::default()
                             },
                             liveness_timeout_ms: Some(45_000),
-                            runtime_identity: None,
                         },
                     ),
                     ..DispatchCoreInputs::default()
@@ -1175,7 +1151,6 @@ mod tests {
                                 ..Default::default()
                             },
                             liveness_timeout_ms: None,
-                            runtime_identity: None,
                         },
                     ),
                     ..DispatchCoreInputs::default()
@@ -1217,7 +1192,6 @@ mod tests {
                             ..Default::default()
                         },
                         liveness_timeout_ms: None,
-                        runtime_identity: None,
                     },
                 ),
                 ..DispatchCoreInputs::default()
@@ -1238,78 +1212,6 @@ mod tests {
                 .filter_map(|entry| entry.model.as_deref())
                 .collect::<Vec<_>>(),
             ["model-two", "model-three"]
-        );
-    }
-
-    #[test]
-    fn policy_route_client_context_is_not_marked_as_generated_fanout_context() {
-        let plan = build_dispatch_plan(&dispatch_request(DispatchRequestOverrides {
-            prompt: Some("Cook with the policy provider context.".to_string()),
-            core: DispatchCoreInputs {
-                generated_fanout_context: true,
-                resolved_provider_policy: Some(
-                    crate::agent_task_dispatch_service::ResolvedAgentTaskProviderPolicy {
-                        backend: "policy-backend".to_string(),
-                        selector: None,
-                        model: None,
-                        rotation: Some(AgentTaskProviderRotationPolicy {
-                            entries: vec![
-                                crate::agent_task_scheduler::AgentTaskProviderRotationEntry {
-                                    provider_config: serde_json::json!({
-                                        "client_context": {"fanout": {"cook_id": "caller-owned"}}
-                                    }),
-                                    ..Default::default()
-                                },
-                            ],
-                            ..Default::default()
-                        }),
-                        rotation_starts_with_first_entry: true,
-                        retry: AgentTaskRetryPolicy::default(),
-                        liveness_timeout_ms: None,
-                        runtime_identity: None,
-                    },
-                ),
-                ..DispatchCoreInputs::default()
-            },
-            ..DispatchRequestOverrides::default()
-        }))
-        .expect("dispatch plan");
-
-        assert_eq!(
-            plan.tasks[0].executor.config["client_context"]["fanout"]["cook_id"],
-            "caller-owned"
-        );
-        assert_eq!(
-            plan.tasks[0].metadata["provider_readiness_generated_fanout_context"],
-            false
-        );
-    }
-
-    #[test]
-    fn generated_fanout_context_remains_marked_for_readiness_identity() {
-        let plan = build_dispatch_plan(&dispatch_request(DispatchRequestOverrides {
-            prompt: Some("Cook with generated fanout context.".to_string()),
-            core: DispatchCoreInputs {
-                generated_fanout_context: true,
-                client_context: Some(
-                    serde_json::json!({
-                        "fanout": {
-                            "id": "shared-fanout",
-                            "semantics": "batch_cook",
-                            "cook_id": "generated-child"
-                        }
-                    })
-                    .to_string(),
-                ),
-                ..DispatchCoreInputs::default()
-            },
-            ..DispatchRequestOverrides::default()
-        }))
-        .expect("dispatch plan");
-
-        assert_eq!(
-            plan.tasks[0].metadata["provider_readiness_generated_fanout_context"],
-            true
         );
     }
 
@@ -1534,7 +1436,6 @@ mod tests {
                     rotation_starts_with_first_entry: false,
                     retry: AgentTaskRetryPolicy::default(),
                     liveness_timeout_ms: None,
-                    runtime_identity: None,
                 };
             let mut request = dispatch_request(DispatchRequestOverrides {
                 prompt: Some("Cook with the submitted model.".to_string()),
@@ -2302,7 +2203,6 @@ mod tests {
                 tasks_json: overrides.core.tasks_json,
                 provider_config: overrides.core.provider_config,
                 client_context: overrides.core.client_context,
-                generated_fanout_context: overrides.core.generated_fanout_context,
                 attempts: overrides.core.attempts,
                 same_provider_retries: overrides.core.same_provider_retries,
                 queue_only: overrides.core.queue_only,

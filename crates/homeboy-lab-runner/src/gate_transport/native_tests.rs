@@ -61,7 +61,6 @@ fn full_native_transport() {
     let evidence = std::path::PathBuf::from(std::env::var("HOMEBOY_NATIVE_GATE_EVIDENCE").unwrap());
     let binary = std::env::var("HOMEBOY_NATIVE_GATE_BINARY").unwrap();
     let runner = "native-gate-lab";
-    crate::register_runner_workspace_root_provider();
     crate::register_workspace_snapshot_provider();
     crate::register_runner_evidence_provider();
     crate::register_runner_job_preparation_provider();

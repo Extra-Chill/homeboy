@@ -1198,7 +1198,6 @@ mod tests {
                         rotation_starts_with_first_entry: true,
                         retry: Default::default(),
                         liveness_timeout_ms: None,
-                        runtime_identity: None,
                     },
                 ),
                 dispatch_kind:

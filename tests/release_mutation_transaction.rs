@@ -45,7 +45,7 @@ fn release_package_commit_and_tag_share_the_declared_version_identity() {
 }
 
 #[test]
-fn package_that_discards_release_mutations_rolls_back_without_a_tag() {
+fn package_that_reverts_release_mutations_rolls_back_without_a_tag() {
     let context = HermeticTestContext::new();
     let fixture = ReleaseFixture::new(&context, true);
 
@@ -87,7 +87,7 @@ fn package_that_discards_release_mutations_rolls_back_without_a_tag() {
         fixture.original_head
     );
 
-    // The package was built from the bumped checkout before its action restored
+    // The package was built from the bumped checkout before its action reverted
     // tracked files. Its durable bytes remain diagnostic evidence, but cannot
     // authorize a commit, tag, or push after the ownership violation.
     assert_release_targets(&unzip_file(&durable_artifact(&context), "fixture.php"));
@@ -101,7 +101,7 @@ struct ReleaseFixture {
 }
 
 impl ReleaseFixture {
-    fn new(context: &HermeticTestContext, discard_mutations: bool) -> Self {
+    fn new(context: &HermeticTestContext, revert_mutations: bool) -> Self {
         let root = tempfile::tempdir().expect("release fixture root");
         let repo = root.path().join("component");
         let remote = root.path().join("origin.git");
@@ -159,7 +159,7 @@ impl ReleaseFixture {
         run(&repo, &["git", "push", "-q", "-u", "origin", "main"]);
         run(&remote, &["git", "symbolic-ref", "HEAD", "refs/heads/main"]);
 
-        install_package_extension(context, discard_mutations);
+        install_package_extension(context, revert_mutations);
         let original_head = git(&repo, &["rev-parse", "HEAD"]);
         Self {
             _root: root,
@@ -188,11 +188,11 @@ impl ReleaseFixture {
     }
 }
 
-fn install_package_extension(context: &HermeticTestContext, discard_mutations: bool) {
+fn install_package_extension(context: &HermeticTestContext, revert_mutations: bool) {
     let extension_dir = context.config_dir().join("extensions/fixture-packager");
     std::fs::create_dir_all(&extension_dir).expect("extension dir");
-    let restore = if discard_mutations {
-        "git restore fixture.php CHANGELOG.md;"
+    let restore = if revert_mutations {
+        "git show HEAD~1:fixture.php > fixture.php; git show HEAD~1:CHANGELOG.md > CHANGELOG.md;"
     } else {
         ""
     };

@@ -6,6 +6,7 @@ mod helpers;
 mod operation;
 mod planning;
 pub mod release_catalog;
+pub mod release_slot;
 mod runner_admission_provider;
 mod runner_upgrade_provider;
 mod services;

@@ -17,6 +17,11 @@ fi
 
 # Read package info
 PACKAGE_NAME=$(node -e "console.log(require('./package.json').name)" 2>/dev/null)
+if [[ "$(node -p "require('./package.json').private===true")" == "true" ]]; then
+  echo "Skipping npm publish: $PACKAGE_NAME is private" >&2
+  exit 0
+fi
+
 CURRENT_VERSION=$(node -e "console.log(require('./package.json').version)" 2>/dev/null)
 
 if [[ -z "$PACKAGE_NAME" || -z "$CURRENT_VERSION" ]]; then

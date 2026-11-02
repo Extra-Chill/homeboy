@@ -10,9 +10,9 @@ homeboy_node_project_scripts_helper() {
 
     local _candidate
     for _candidate in \
+        "${SCRIPT_DIR}/project-scripts.sh" \
         "${HOMEBOY_EXTENSION_PATH:+$(dirname "$HOMEBOY_EXTENSION_PATH")/scripts/lib/project-scripts.sh}" \
-        "${SCRIPT_DIR}/../../../scripts/lib/project-scripts.sh" \
-        "${SCRIPT_DIR}/project-scripts.sh"; do
+        "${SCRIPT_DIR}/../../../scripts/lib/project-scripts.sh"; do
         if [ -n "$_candidate" ] && [ -f "$_candidate" ]; then
             printf '%s\n' "$_candidate"
             return 0

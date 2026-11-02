@@ -15,6 +15,9 @@ if ! command -v node >/dev/null 2>&1; then
   exit 1
 fi
 
+source "$(dirname "${BASH_SOURCE[0]}")/../lib/project-scripts.sh"
+homeboy_project_ensure_workspace_dependencies
+
 PACKAGE_NAME=$(node -e "console.log(require('./package.json').name || '')" 2>/dev/null)
 PACKAGE_VERSION=$(node -e "console.log(require('./package.json').version || '')" 2>/dev/null)
 RELEASE_PACKAGE_SCRIPT=""

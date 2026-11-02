@@ -2,6 +2,16 @@
 
 All notable changes to the **nodejs** extension will be documented in this file.
 
+## [3.9.3] - 2026-11-02
+
+### Fixed
+- resolve npm workspace roots for member dependency hydration and release
+
+## [3.9.2] - 2026-11-02
+
+### Fixed
+- skip npm publishing for private packages
+
 ## [3.9.1] - 2026-11-01
 
 ### Fixed

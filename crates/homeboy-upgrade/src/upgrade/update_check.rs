@@ -25,6 +25,9 @@ use std::time::{Duration, Instant};
 
 const CACHE_FILENAME: &str = "update_check.json";
 const CHECK_INTERVAL_SECS: u64 = 86400;
+/// Releases ship several times a day; a prefetch must see each one before
+/// the operator runs `homeboy upgrade`.
+pub const PREFETCH_INTERVAL_SECS: u64 = 15 * 60;
 const ENV_VAR_DISABLE: &str = "HOMEBOY_NO_UPDATE_CHECK";
 const VERSION_PROBE_TIMEOUT: Duration = Duration::from_millis(250);
 
@@ -91,16 +94,12 @@ fn read_cache() -> Option<UpdateCheckCache> {
 /// check. Durable admission deliberately never performs network I/O: an
 /// unavailable cache is explicit offline evidence, not a reason to guess.
 pub fn latest_allowed_stable() -> Option<AllowedStableRuntime> {
-    if is_disabled() {
-        return None;
-    }
-    read_cache().and_then(|cache| {
-        (is_cache_fresh(&cache) && cache.update_available && !cache.latest_version.is_empty()).then(
-            || AllowedStableRuntime {
-                version: cache.latest_version,
-                compatibility: cache.runtime_compatibility,
-            },
-        )
+    let cache = read_cache().filter(|c| {
+        !is_disabled() && is_cache_fresh(c) && c.update_available && !c.latest_version.is_empty()
+    })?;
+    Some(AllowedStableRuntime {
+        version: cache.latest_version,
+        compatibility: cache.runtime_compatibility,
     })
 }
 
@@ -365,11 +364,30 @@ pub fn run_startup_check() {
         }
     }
 
-    let check = match upgrade::check_for_updates() {
+    let check = match refresh_verdict() {
         Ok(check) => check,
         Err(_) => return,
     };
+    let checked_at = update_check_cache::now_unix();
 
+    if !already_printed && check.update_available {
+        if let Some(latest) = &check.latest_version {
+            print_hint(latest, Some(checked_at));
+        }
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static REFRESH_VERDICT: std::cell::Cell<Option<fn() -> super::VersionCheck>> = const { std::cell::Cell::new(None) };
+}
+
+fn refresh_verdict() -> homeboy_core::Result<super::VersionCheck> {
+    #[cfg(test)]
+    if let Some(refresh) = REFRESH_VERDICT.with(|hook| hook.get()) {
+        return Ok(refresh());
+    }
+    let check = upgrade::check_for_updates()?;
     let checked_at = update_check_cache::now_unix();
     let runtime_compatibility = check
         .latest_version
@@ -383,12 +401,35 @@ pub fn run_startup_check() {
         checked_at,
         runtime_compatibility,
     });
+    Ok(check)
+}
 
-    if !already_printed && check.update_available {
-        if let Some(latest) = &check.latest_version {
-            print_hint(latest, Some(checked_at));
-        }
+/// One daemon pass: refresh stale verdicts, then only materialize a newer release.
+/// This owns no promotion authority and cannot replace the controller.
+pub fn prefetch_release() -> homeboy_core::Result<Option<PathBuf>> {
+    if is_disabled() {
+        return Ok(None);
     }
+    let latest = match read_cache().filter(|cache| {
+        cache.current_version == upgrade::current_version()
+            && update_check_cache::is_cache_fresh(cache.checked_at, PREFETCH_INTERVAL_SECS)
+    }) {
+        Some(cache) => cache.update_available.then_some(cache.latest_version),
+        None => {
+            let check = refresh_verdict()?; // Other versions can overwrite the shared cache.
+            check.latest_version.filter(|_| check.update_available)
+        }
+    };
+    let Some(latest) =
+        latest.filter(|latest| upgrade::version_is_newer(latest, upgrade::current_version()))
+    else {
+        return Ok(None);
+    };
+    super::release_slot::acquire_release_slot(
+        &format!("v{}", latest.trim_start_matches('v')),
+        &super::release_slot::binaries_dir()?,
+    )
+    .map(Some)
 }
 
 #[cfg(test)]
@@ -418,6 +459,78 @@ mod tests {
         });
 
         assert!(path.is_file(), "cache fixture was written to {path:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prefetch_uses_its_verdict_despite_another_versions_cache() {
+        fn refresh() -> super::super::VersionCheck {
+            // Simulate a successful refresh followed by another process writing
+            // a no-update verdict before prefetch can read the shared file.
+            seed_cache("99.0.0", true, update_check_cache::now_unix());
+            let mut cache = read_cache().unwrap();
+            cache.current_version = "99.0.0".into();
+            cache.update_available = false;
+            write_cache(&cache);
+            serde_json::from_value(serde_json::json!({
+                "command": "upgrade",
+                "current_version": upgrade::current_version(),
+                "latest_version": "99.0.0",
+                "update_available": true,
+                "install_method": "binary"
+            }))
+            .unwrap()
+        }
+        struct ResetRefresh;
+        impl Drop for ResetRefresh {
+            fn drop(&mut self) {
+                REFRESH_VERDICT.with(|hook| hook.set(None));
+            }
+        }
+
+        for other_version in [false, true] {
+            with_isolated_home(|home| {
+                let _disable = homeboy_core::test_support::EnvVarGuard::unset(ENV_VAR_DISABLE);
+                let tools = home.path().join("tools");
+                std::fs::create_dir_all(&tools).unwrap();
+                // Intercept slot acquisition at its existing shell boundary.
+                // Record the script so the assertion checks the selected tag.
+                let script = home.path().join("acquisition");
+                let slot = home.path().join("slot");
+                homeboy_test_support::write_executable(
+                    &tools.join("sh"),
+                    &format!(
+                        "#!/bin/sh\nprintf '%s' \"$HOMEBOY_INSTALLER_SCRIPT\" > '{}'\necho 'HOMEBOY_REFRESH_BINARY_PATH={}'\n",
+                        script.display(), slot.display()
+                    ),
+                    0o755,
+                ).unwrap();
+                let _path = homeboy_core::test_support::EnvVarGuard::set(
+                    "PATH",
+                    format!("{}:{}", tools.display(), std::env::var("PATH").unwrap()),
+                );
+                seed_cache(
+                    "1.0.0",
+                    false,
+                    update_check_cache::now_unix() - PREFETCH_INTERVAL_SECS - 1,
+                );
+                if other_version {
+                    let mut cache = read_cache().unwrap();
+                    cache.current_version = "1.0.0".into();
+                    cache.checked_at = update_check_cache::now_unix();
+                    write_cache(&cache);
+                }
+                REFRESH_VERDICT.with(|hook| hook.set(Some(refresh)));
+                let _reset = ResetRefresh;
+                assert_eq!(prefetch_release().unwrap(), Some(slot));
+                let acquisition = std::fs::read_to_string(script).unwrap();
+                assert!(acquisition.contains("v99.0.0"), "{acquisition}");
+                assert!(
+                    latest_allowed_stable().is_none(),
+                    "the shared verdict belongs to another version"
+                );
+            });
+        }
     }
 
     /// The staleness surface reads this cache on every command, so the read must

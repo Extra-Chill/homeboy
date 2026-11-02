@@ -776,6 +776,7 @@ mod identity_tests {
                 GitHostConfig {
                     name: "Expected Author".to_string(),
                     email: "expected@example.test".to_string(),
+                    ..Default::default()
                 },
             )]),
             ..HomeboyConfig::default()

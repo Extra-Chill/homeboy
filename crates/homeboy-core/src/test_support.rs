@@ -1522,6 +1522,8 @@ fn with_isolated_home_guard<R>(home: HomeGuard, body: impl FnOnce(&TempDir) -> R
     // Nor to the chat session or requester whose shell launched the gate.
     let _caller_context = EnvVarGuard::unset("HOMEBOY_CALLER_CONTEXT");
     let _requester = EnvVarGuard::unset("HOMEBOY_REQUESTER");
+    // Nor to the runner snapshot the suite itself executes in.
+    let _source_snapshot = EnvVarGuard::unset(crate::observation::SOURCE_SNAPSHOT_METADATA_ENV);
     body(&home.context.root)
 }
 

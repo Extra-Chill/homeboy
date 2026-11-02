@@ -4,6 +4,60 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.444.0] - 2026-11-02
+
+### Added
+- publish fork-first from per-host owner policy
+
+### Changed
+- Prefetch from the daemon's own update verdict, not the shared cache
+- delete the unused async progress vocabulary and unbuilt runtime_contract docs
+- delete the unsatisfiable attached-tool capability layer
+
+### Fixed
+- concurrent blob prunes no longer fail materialization
+- resolve npm workspace roots for member dependency hydration and release
+- recover reports the concrete cause of a failed retry; actionable unattributed-changes error
+
+## [0.443.6] - 2026-11-02
+
+### Changed
+- keep rustc incremental state out of the shared warm cache
+- one streamed, verified Lab artifact download
+- delete durable fanout readiness cache and generated fanout context
+
+### Fixed
+- refuse retrying a Lab-required run onto the controller
+- restore green main — local SSH stdin redirect and stale test fixtures
+
+## [0.443.5] - 2026-11-02
+
+### Changed
+- Fetch the release catalog once per upgrade and check its HTTP status
+- keep the tail of provider output when dependency hydration fails
+- Lab file transfer is SSH only; delete daemon /files/*
+- Delete dead pinned runtime-identity contract
+
+### Fixed
+- revalidate before acquisition and overlap extension refresh
+- resolve a registered component to the runner snapshot it runs in
+- revert Lab exec cwd projection from #17197
+- recover unreceipted staging intents by re-staging, not failing ambiguous
+- execute rig staging in materialized workspace
+
+## [0.443.4] - 2026-11-02
+
+### Changed
+- Share release slots across upgrades, runners, and daemon prefetch
+
+### Fixed
+- Fix Cook readmission against stale remote-tracking bases
+
+## [0.443.3] - 2026-11-02
+
+### Changed
+- Make the built-in Pi provider typed and remove provider extra metadata
+
 ## [0.443.2] - 2026-11-02
 
 ### Changed

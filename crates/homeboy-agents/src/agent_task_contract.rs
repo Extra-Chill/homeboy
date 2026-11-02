@@ -1,11 +1,11 @@
 use serde::Serialize;
 
 use crate::agent_task::{
-    AgentTaskExecutionState, AgentTaskFailureClassification, AgentTaskOutcomeStatus,
-    AgentTaskWorkflowStepStatus, AGENT_COMMAND_POLICY_SCHEMA, AGENT_TASK_ARTIFACT_SCHEMA,
-    AGENT_TASK_MATRIX_AGGREGATE_SCHEMA, AGENT_TASK_MATRIX_PLAN_SCHEMA, AGENT_TASK_OUTCOME_SCHEMA,
-    AGENT_TASK_REQUEST_SCHEMA, AGENT_TASK_WORKFLOW_SCHEMA, AGENT_TOOL_POLICY_SCHEMA,
-    AGENT_TOOL_REQUEST_SCHEMA, AGENT_TOOL_RESULT_SCHEMA,
+    AgentTaskFailureClassification, AgentTaskOutcomeStatus, AgentTaskWorkflowStepStatus,
+    AGENT_COMMAND_POLICY_SCHEMA, AGENT_TASK_ARTIFACT_SCHEMA, AGENT_TASK_MATRIX_AGGREGATE_SCHEMA,
+    AGENT_TASK_MATRIX_PLAN_SCHEMA, AGENT_TASK_OUTCOME_SCHEMA, AGENT_TASK_REQUEST_SCHEMA,
+    AGENT_TASK_WORKFLOW_SCHEMA, AGENT_TOOL_POLICY_SCHEMA, AGENT_TOOL_REQUEST_SCHEMA,
+    AGENT_TOOL_RESULT_SCHEMA,
 };
 use crate::agent_task_aggregate::AGENT_TASK_AGGREGATE_SCHEMA;
 use crate::agent_task_cook_loop::AGENT_TASK_COOK_FEEDBACK_REPORT_SCHEMA;
@@ -112,7 +112,6 @@ pub struct AgentTaskCoreProviderCapabilityContract {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct AgentTaskCoreContractEnums {
     pub execution_handle_kind: Vec<String>,
-    pub execution_state: Vec<String>,
     pub task_state: Vec<String>,
     pub run_state: Vec<String>,
     pub aggregate_status: Vec<String>,
@@ -255,14 +254,6 @@ pub fn agent_task_core_contract() -> AgentTaskCoreContract {
                 "local_pid",
                 "runner_job",
                 "provider_run",
-            ]),
-            execution_state: enum_values(&[
-                AgentTaskExecutionState::Queued,
-                AgentTaskExecutionState::Running,
-                AgentTaskExecutionState::Waiting,
-                AgentTaskExecutionState::Succeeded,
-                AgentTaskExecutionState::Failed,
-                AgentTaskExecutionState::Cancelled,
             ]),
             task_state: enum_values(&[
                 AgentTaskState::Queued,

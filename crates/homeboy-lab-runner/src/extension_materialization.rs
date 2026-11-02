@@ -442,7 +442,7 @@ fn sync_controller_snapshot(
             remove_appledouble_files(destination)
         }
         RunnerKind::Ssh => {
-            let transfer = RunnerFileTransfer::for_runner(runner, None)?;
+            let transfer = RunnerFileTransfer::for_runner(runner)?;
             upload_snapshot(runner, plan, &transfer)
         }
     }

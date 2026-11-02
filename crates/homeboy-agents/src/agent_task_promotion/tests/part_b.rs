@@ -1748,7 +1748,7 @@ fn promotion_setup_failure_is_bounded_and_never_dispatches_a_gate() {
                 artifact_id: None,
                 dry_run: false,
                 gates: VerifyGateOptions {
-                    verify: vec!["false".to_string()],
+                    verify: vec!["cd component && false".to_string()],
                     ..Default::default()
                 },
                 provider_invocation: None,

@@ -61,15 +61,9 @@ pub use super::agent_task_contract::agent_task_core_contract;
 pub use super::agent_task_schedule::{
     AgentTaskAdaptiveConcurrencyPolicy, AgentTaskAggregate, AgentTaskAggregateTotals,
     AgentTaskArtifactOutputDeclaration, AgentTaskArtifactPostprocessStep,
-    AgentTaskExecutionContext, AgentTaskPlan, AgentTaskResourceBudget, AgentTaskResourcePressure,
-    AgentTaskRetryPolicy, AgentTaskScheduleOptions, AgentTaskState,
+    AgentTaskExecutionContext, AgentTaskPlan, AgentTaskProgressEvent, AgentTaskResourceBudget,
+    AgentTaskResourcePressure, AgentTaskRetryPolicy, AgentTaskScheduleOptions, AgentTaskState,
 };
-
-// `AgentTaskProgressEvent` is defined in both `agent_task` and
-// `agent_task_schedule`. Historically the wildcard facade picked whichever the
-// glob resolved last; the canonical type for orchestration callers is the
-// schedule-side variant, so name it explicitly here.
-pub use super::agent_task_schedule::AgentTaskProgressEvent;
 
 pub use super::agent_task_scheduler::{
     AgentTaskExecutorAdapter, AgentTaskScheduler, SharedAgentTaskExecutor,

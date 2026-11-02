@@ -175,6 +175,33 @@ fn content_addressed_stages_reuse_repair_and_preserve_exact_trees() {
                 .missing_blobs,
             0
         );
+        // A reused blob nearing the age limit is refreshed by the plan, so a
+        // concurrent prune cannot evict it before assembly.
+        let six_days = std::time::Duration::from_secs(6 * 86400);
+        fs::File::open(&blob)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - six_days)
+            .unwrap();
+        let refreshed = stage();
+        assert_eq!(
+            refreshed[0]
+                .materialization_plan
+                .snapshot_transfer
+                .as_ref()
+                .unwrap()
+                .missing_blobs,
+            0
+        );
+        let age = fs::metadata(&blob)
+            .unwrap()
+            .modified()
+            .unwrap()
+            .elapsed()
+            .unwrap_or_default();
+        assert!(
+            age < std::time::Duration::from_secs(3600),
+            "reused blob age {age:?}"
+        );
     });
 }
 

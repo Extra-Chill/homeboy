@@ -104,7 +104,13 @@ pub(super) fn materialization_plan_controlled(
     let mut required_bytes = 0u64;
     for (digest, bytes) in &inventory {
         let path = store.join(super::blobs::key(digest)?);
-        if !super::blobs::valid(&path, digest, control)? {
+        // Refreshing a reused blob's mtime keeps concurrent age pruning off it
+        // until this materialization assembles it.
+        let reusable = super::blobs::valid(&path, digest, control)?
+            && fs::File::open(&path)
+                .and_then(|file| file.set_modified(std::time::SystemTime::now()))
+                .is_ok();
+        if !reusable {
             let _ = fs::remove_file(path);
             missing.push(digest.clone());
             required_bytes = required_bytes.saturating_add(*bytes);

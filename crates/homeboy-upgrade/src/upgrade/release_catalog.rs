@@ -1,18 +1,8 @@
 //! Which published releases this host can actually install.
 //!
-//! `homeboy upgrade` used to resolve exactly one release — the newest tag — and
-//! hand it to a shell installer that downloads
-//! `releases/latest/download/homeboy-<target>.tar.xz`. When a release is
-//! published without the running platform's asset (#11749), that installer 404s
-//! and the operator has no way forward: `--force` retries the same missing
-//! asset and building from source is not viable on a host that routes builds to
-//! CI. `--check` made it worse by reporting `update_available: true` for a
-//! release this platform cannot install.
-//!
-//! This module answers the narrower, honest question: *which is the newest
-//! release that ships an artifact for the running target*. Selection is a pure
-//! function over a release list so the fallback, the pin, and the `--check`
-//! verdict are all testable without network access.
+//! Selection and update verdicts share one explicitly passed catalog during a
+//! binary upgrade. Pure selection finds the newest release shipping this
+//! target's artifacts, avoiding missing-asset upgrades (#11749, #11750).
 //!
 //! Target detection is deliberately allowed to fail. An unrecognized
 //! OS/architecture pair yields `None`, and every caller reports "the running
@@ -321,11 +311,17 @@ pub fn installable_tags(
         .collect()
 }
 
-pub(crate) fn fetch_release_catalog() -> Result<Vec<ReleaseEntry>> {
-    fetch_release_catalog_at(GITHUB_RELEASES_LIST_API)
+#[cfg(test)]
+thread_local! {
+    static TEST_CATALOG_URL: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
 }
 
-pub(crate) fn fetch_release_catalog_at(url: &str) -> Result<Vec<ReleaseEntry>> {
+pub(crate) fn fetch_release_catalog() -> Result<Vec<ReleaseEntry>> {
+    let url = GITHUB_RELEASES_LIST_API;
+    #[cfg(test)]
+    let url = TEST_CATALOG_URL
+        .with_borrow(Clone::clone)
+        .unwrap_or_else(|| url.to_string());
     let client = reqwest::blocking::Client::builder()
         .user_agent(format!("homeboy/{}", VERSION))
         .timeout(RELEASE_CATALOG_TIMEOUT)
@@ -335,7 +331,13 @@ pub(crate) fn fetch_release_catalog_at(url: &str) -> Result<Vec<ReleaseEntry>> {
     client
         .get(url)
         .send()
-        .map_err(|e| Error::internal_io(e.to_string(), Some("list GitHub releases".to_string())))?
+        .and_then(reqwest::blocking::Response::error_for_status)
+        .map_err(|e| {
+            let mut error =
+                Error::internal_io(e.to_string(), Some("list GitHub releases".to_string()));
+            error.message = format!("Failed to list GitHub releases: {e}");
+            error
+        })?
         .json::<Vec<ReleaseEntry>>()
         .map_err(|e| {
             Error::internal_json(
@@ -346,8 +348,71 @@ pub(crate) fn fetch_release_catalog_at(url: &str) -> Result<Vec<ReleaseEntry>> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
+
+    /// A thread-local URL seam keeps concurrent upgrade tests off the network.
+    pub(crate) fn with_catalog_server(status: &str, body: &str, test: impl FnOnce(&str)) -> usize {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::{
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+            Arc,
+        };
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let url = format!(
+            "http://{}/releases?per_page=10",
+            listener.local_addr().unwrap()
+        );
+        let response = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()
+        );
+        let stopped = Arc::new(AtomicBool::new(false));
+        let count = Arc::new(AtomicUsize::new(0));
+        let server = {
+            let stopped = stopped.clone();
+            let count = count.clone();
+            std::thread::spawn(move || {
+                while !stopped.load(Ordering::SeqCst) {
+                    match listener.accept() {
+                        Ok((mut stream, _)) => {
+                            stream
+                                .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                                .unwrap();
+                            let mut request = [0; 4096];
+                            let _ = stream.read(&mut request);
+                            count.fetch_add(1, Ordering::SeqCst);
+                            stream.write_all(response.as_bytes()).unwrap();
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(std::time::Duration::from_millis(1));
+                        }
+                        Err(error) => panic!("catalog fixture: {error}"),
+                    }
+                }
+            })
+        };
+        TEST_CATALOG_URL.with_borrow_mut(|slot| *slot = Some(url.clone()));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| test(&url)));
+        TEST_CATALOG_URL.with_borrow_mut(|slot| *slot = None);
+        stopped.store(true, Ordering::SeqCst);
+        server.join().unwrap();
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
+        }
+        count.load(Ordering::SeqCst)
+    }
+
+    #[test]
+    fn forbidden_catalog_reports_http_status_before_decoding() {
+        let count = with_catalog_server("403 Forbidden", "rate limited", |_| {
+            let error = fetch_release_catalog().unwrap_err();
+            assert!(error.to_string().contains("403"), "{error}");
+        });
+        assert_eq!(count, 1);
+    }
 
     fn release(tag: &str, targets: &[&str]) -> ReleaseEntry {
         let mut assets = Vec::new();

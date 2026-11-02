@@ -232,8 +232,42 @@ function parseRoute(route) {
   return { error: 'route must be discord:v1:<channel|thread>:<destination-id> with Discord snowflake IDs.' };
 }
 
+function notificationPayload(env) {
+  if (env.HOMEBOY_NOTIFY_PAYLOAD_SCHEMA !== 'homeboy/notification-payload/v1') return undefined;
+  try {
+    const payload = JSON.parse(env.HOMEBOY_NOTIFY_PAYLOAD);
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return undefined;
+    for (const [name, field] of [['facts', 'value'], ['links', 'url'], ['actions', 'command']]) {
+      if (payload[name] !== undefined && (!Array.isArray(payload[name]) || !payload[name].every(
+        (entry) => entry && typeof entry.label === 'string' && typeof entry[field] === 'string',
+      ))) return undefined;
+    }
+    return payload;
+  } catch {
+    return undefined;
+  }
+}
+
+function statusMarker(status) {
+  if (['review_ready', 'succeeded', 'passed', 'completed'].includes(status)) return '✅';
+  return status === 'cancelled' ? '⏹' : '⚠️';
+}
+
 function renderContent(args) {
-  const content = `[${compact(args.status)}] ${compact(args.title)}\nRun: ${compact(args.runId)}\n${compact(args.body)}`;
+  const payload = notificationPayload(process.env);
+  const lines = [`${statusMarker(args.status)} **${compact(args.title)}**`];
+  if (!(payload?.actions || []).some((action) => action.command.includes(args.runId))) {
+    lines.push(`Run: ${compact(args.runId)}`);
+  }
+  if (payload) {
+    const facts = (payload.facts || []).map((fact) => `${compact(fact.label)}: ${compact(fact.value)}`);
+    if (facts.length) lines.push(facts.join(' · '));
+    for (const link of payload.links || []) lines.push(`${compact(link.label)}: ${compact(link.url)}`);
+    for (const action of payload.actions || []) lines.push(`${compact(action.label)}: \`${compact(action.command)}\``);
+  } else {
+    lines.push(...args.body.split(/\r?\n/).map(compact).filter(Boolean));
+  }
+  const content = lines.join('\n');
   if (content.length <= DISCORD_CONTENT_LIMIT) return { content, truncated: false };
   let bounded = '';
   for (const character of content) {

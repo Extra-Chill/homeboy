@@ -3,7 +3,7 @@ use homeboy_core::error::Result;
 use super::helpers::{
     current_version, detect_install_method, fetch_latest_version, version_is_newer,
 };
-use super::release_catalog::{self, InstallableSelection};
+use super::release_catalog::{self, InstallableSelection, ReleaseEntry};
 use super::types::{InstallMethod, VersionCheck};
 
 /// Whether this install method resolves a *specific* published release before
@@ -19,8 +19,8 @@ pub fn check_for_updates() -> Result<VersionCheck> {
     let current = current_version().to_string();
 
     if selects_an_installable_release(install_method) {
-        if let Some(check) = installable_check(install_method, &current) {
-            return Ok(check);
+        if let Ok(releases) = release_catalog::fetch_release_catalog() {
+            return Ok(installable_check(install_method, &current, &releases));
         }
         // The release list was unreachable. Fall through to the single-release
         // fetch rather than reporting "no update": one failing endpoint is not
@@ -78,19 +78,16 @@ pub(crate) fn runner_check_target_version(check: &VersionCheck, runner_only: boo
         .unwrap_or_else(|| check.current_version.clone())
 }
 
-/// Build a check verdict from the release catalog, or `None` when the catalog
-/// could not be fetched.
-fn installable_check(install_method: InstallMethod, current: &str) -> Option<VersionCheck> {
-    let releases = release_catalog::fetch_release_catalog().ok()?;
+/// Build a check verdict from the caller's release catalog.
+pub(crate) fn installable_check(
+    install_method: InstallMethod,
+    current: &str,
+    releases: &[ReleaseEntry],
+) -> VersionCheck {
     let target = release_catalog::running_target_triple();
-    let selection = release_catalog::select_installable(&releases, target);
+    let selection = release_catalog::select_installable(releases, target);
 
-    Some(version_check_from_selection(
-        install_method,
-        current,
-        target,
-        &selection,
-    ))
+    version_check_from_selection(install_method, current, target, &selection)
 }
 
 /// Pure projection of a selection into the reported verdict.

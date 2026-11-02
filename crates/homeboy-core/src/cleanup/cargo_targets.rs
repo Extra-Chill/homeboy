@@ -554,10 +554,14 @@ fn copy_cargo_cache(from: &Path, to: &Path, transfer: CacheTransfer) -> Result<(
 }
 
 fn is_cargo_coordination_state(name: &std::ffi::OsStr) -> bool {
-    // Fingerprints and incremental outputs are safe in a run-private target and
-    // are essential to Cargo's warm path. Only its live lock and probe result
-    // must not cross target boundaries.
-    matches!(name.to_str(), Some(".cargo-lock" | ".rustc_info.json"))
+    // Keep fingerprints, but not live locks, probe results, or incremental state.
+    // Each Lab gate builds in a fresh, uniquely named workspace, so incremental
+    // sessions do not carry across; they were 89% (39.7 of 45 GB) of the store
+    // copied before every gate.
+    matches!(
+        name.to_str(),
+        Some(".cargo-lock" | ".rustc_info.json" | "incremental")
+    )
 }
 
 fn with_base_store_publication_lock<T>(
@@ -1800,6 +1804,42 @@ mod tests {
     }
 
     #[test]
+    fn seed_and_publish_exclude_incremental_state() {
+        let root = TempDir::new().unwrap();
+        let base = store(root.path(), "gate", 0, Duration::ZERO, SystemTime::now());
+        let projection = base.join(CACHE_CURRENT);
+        fs::create_dir_all(projection.join("debug/deps")).unwrap();
+        fs::create_dir_all(projection.join("debug/incremental/c-1/s-x")).unwrap();
+        fs::write(projection.join("debug/deps/a.rlib"), b"a").unwrap();
+        fs::write(projection.join("debug/incremental/c-1/s-x/q.bin"), b"old").unwrap();
+        let private = root.path().join("private");
+        fs::create_dir(&private).unwrap();
+
+        seed_worktree_cargo_target(&base, &private).unwrap();
+        assert_eq!(fs::read(private.join("debug/deps/a.rlib")).unwrap(), b"a");
+        assert!(!private.join("debug/incremental").exists());
+
+        fs::create_dir_all(private.join("debug/incremental/c-2/s-y")).unwrap();
+        fs::write(private.join("debug/incremental/c-2/s-y/q.bin"), b"new").unwrap();
+        fs::write(private.join("debug/deps/b.rlib"), b"b").unwrap();
+        publish_cargo_cache(&private, &base).unwrap();
+
+        assert_eq!(
+            fs::read(projection.join("debug/deps/a.rlib")).unwrap(),
+            b"a"
+        );
+        assert_eq!(
+            fs::read(projection.join("debug/deps/b.rlib")).unwrap(),
+            b"b"
+        );
+        assert!(!projection.join("debug/incremental").exists());
+        assert_eq!(
+            fs::read(private.join("debug/incremental/c-2/s-y/q.bin")).unwrap(),
+            b"new"
+        );
+    }
+
+    #[test]
     fn two_seeds_complete_concurrently_under_a_shared_lock() {
         let root = TempDir::new().unwrap();
         let base = root.path().join("base");
@@ -2526,6 +2566,7 @@ mod tests {
         for path in [
             projection.join("debug/.cargo-lock"),
             projection.join(".rustc_info.json"),
+            projection.join("debug/incremental"),
         ] {
             assert!(
                 !path.exists(),
@@ -2533,10 +2574,7 @@ mod tests {
                 path.display()
             );
         }
-        for path in [
-            projection.join("debug/.fingerprint/state"),
-            projection.join("debug/incremental/state"),
-        ] {
+        for path in [projection.join("debug/.fingerprint/state")] {
             assert!(
                 path.exists(),
                 "Cargo warmth state is retained: {}",
@@ -2594,13 +2632,13 @@ mod tests {
                 "warm artifacts must be copied, never hard-linked"
             );
         }
-        for state in ["debug/.cargo-lock", ".rustc_info.json"] {
+        for state in ["debug/.cargo-lock", ".rustc_info.json", "debug/incremental"] {
             assert!(
                 !target.target_dir().join(state).exists(),
                 "Cargo coordination state must not be seeded: {state}"
             );
         }
-        for state in ["debug/.fingerprint/state", "debug/incremental/state"] {
+        for state in ["debug/.fingerprint/state"] {
             assert!(
                 target.target_dir().join(state).exists(),
                 "Cargo warmth state must be seeded: {state}"

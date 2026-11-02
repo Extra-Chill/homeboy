@@ -130,6 +130,15 @@ node ~/.config/homeboy/extensions/discord/scripts/notify.mjs \
   --run-id run-123 --status pass --title 'homeboy run pass' --body 'Run completed' --dry-run
 ```
 
+Notifications start with a status marker and bold title. When
+`HOMEBOY_NOTIFY_PAYLOAD_SCHEMA` is `homeboy/notification-payload/v1`, the helper
+renders `HOMEBOY_NOTIFY_PAYLOAD` JSON as one facts line, individual links, and
+individual inline-code action commands. Attachments are ignored. The separate
+`Run:` line is omitted when an action command already contains the run ID;
+content selection remains Homeboy's responsibility. Without a supported, valid
+payload, body line breaks are preserved, whitespace is compacted within each
+line, and empty lines are dropped.
+
 Discord content is bounded to 2,000 characters. The helper retries a Discord `429` at most twice, using the service's `retry_after` value capped at five seconds. Authentication and destination/input rejections are reported as typed `auth_error` or `input_error` results; credentials, webhook URLs, and destination IDs are never included in diagnostics.
 
 A request refused before any delivery attempt (missing or ambiguous auth mode, no destination, malformed route, or invalid configuration) is reported as a Homeboy terminal rejection, so the outbox stops instead of retrying an event that cannot succeed:

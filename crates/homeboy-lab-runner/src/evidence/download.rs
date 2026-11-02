@@ -1,10 +1,10 @@
 use std::fs;
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
-use base64::Engine;
 use reqwest::blocking::Client;
 use reqwest::header;
-use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use homeboy_core::error::{Error, Result};
 use homeboy_core::execution_contract::{encode_uri_component, EXECUTION_CONTRACT};
@@ -14,8 +14,7 @@ use homeboy_core::runner_download_cache::{
     RunnerDownloadIntent,
 };
 
-use super::super::execution::{canonical_daemon_body, daemon_api_get};
-use super::super::{load, status, RunnerArtifactRef, RunnerTunnelMode};
+use super::super::{load, status, RunnerArtifactRef};
 use super::tokens::RemoteArtifactToken;
 
 #[derive(Debug)]
@@ -55,94 +54,10 @@ pub fn download_remote_artifact_with_intent(
     intent: RunnerDownloadIntent,
 ) -> Result<RemoteArtifactDownload> {
     let token = RemoteArtifactToken::parse(path)?;
-    // One resolution for both transports. The direct-SSH attempt and the relay
-    // fallback below have to place bytes in the same cache, or `runs artifact
-    // get` reports a path from one home while the tag lands in another (#7505).
     let artifact_root = paths::PathRoots::from_environment()?
         .artifacts()
         .to_path_buf();
-    if let Some(download) =
-        download_direct_runner_artifact(&artifact_root, &token, output.clone(), intent)?
-    {
-        return Ok(download);
-    }
-
-    let data = daemon_api_get(
-        &token.runner_id,
-        &format!(
-            "/runs/{}/artifacts/{}/content",
-            encode_uri_component(&token.run_id),
-            encode_uri_component(&token.artifact_id)
-        ),
-    )?;
-    let body = canonical_daemon_body(&data, "runner artifact response")?;
-    let content_base64 = body
-        .get("content_base64")
-        .and_then(Value::as_str)
-        .ok_or_else(|| Error::internal_unexpected("runner artifact response missing content"))?;
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(content_base64)
-        .map_err(|err| {
-            Error::internal_json(
-                err.to_string(),
-                Some("decode runner artifact content".to_string()),
-            )
-        })?;
-    let remote_file_name = body
-        .get("filename")
-        .and_then(Value::as_str)
-        .filter(|name| !name.is_empty());
-    // The remote controls `filename` outright, and `token.runner_id` /
-    // `token.run_id` are percent-decoded copies of remote-supplied strings.
-    // Nothing below is joined until this has proven all three (#10586).
-    let placement = resolve_placement(&artifact_root, &token, output, remote_file_name)?;
-    let output_path = placement.output_path;
-    if let Some(parent) = output_path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-    {
-        fs::create_dir_all(parent).map_err(|err| {
-            Error::internal_io(
-                err.to_string(),
-                Some(format!("create {}", parent.display())),
-            )
-        })?;
-    }
-    fs::write(&output_path, bytes).map_err(|err| {
-        Error::internal_io(
-            err.to_string(),
-            Some(format!("write runner artifact {}", output_path.display())),
-        )
-    })?;
-    if let Some(cache_dir) = &placement.cache_dir {
-        record_download_intent(cache_dir, intent, &token.artifact_id);
-    }
-    Ok(RemoteArtifactDownload {
-        output_path,
-        content_type: body.get("mime").and_then(Value::as_str).map(str::to_string),
-        size_bytes: body.get("size_bytes").and_then(Value::as_i64),
-        sha256: body
-            .get("sha256")
-            .and_then(Value::as_str)
-            .map(str::to_string),
-        artifact_ref: RunnerArtifactRef {
-            artifact_id: token.artifact_id.clone(),
-            name: Some(placement.file_name.clone()),
-            path: Some(EXECUTION_CONTRACT.artifacts.runner_artifact_ref(
-                &token.runner_id,
-                &token.run_id,
-                &token.artifact_id,
-            )),
-            url: None,
-            mime: body.get("mime").and_then(Value::as_str).map(str::to_string),
-            size_bytes: body.get("size_bytes").and_then(Value::as_u64),
-            sha256: body
-                .get("sha256")
-                .and_then(Value::as_str)
-                .map(str::to_string),
-            transport: Some("daemon".to_string()),
-        },
-    })
+    download_direct_runner_artifact(&artifact_root, &token, output, intent)
 }
 
 /// Where one download's bytes may be written, and what to tag afterwards.
@@ -188,7 +103,7 @@ pub(super) fn resolve_placement(
     // `paths::artifact_root()?`, itself replacing an
     // `.unwrap_or_else(|_| PathBuf::from("."))` that silently relocated the
     // whole cache into the process working directory. It is now supplied by the
-    // caller, which resolves it once for both transports.
+    // caller, which resolves it once per download.
     let target = resolve_runner_download_target(
         artifact_root,
         &token.runner_id,
@@ -226,7 +141,7 @@ fn download_direct_runner_artifact(
     token: &RemoteArtifactToken,
     output: Option<PathBuf>,
     intent: RunnerDownloadIntent,
-) -> Result<Option<RemoteArtifactDownload>> {
+) -> Result<RemoteArtifactDownload> {
     let runner = load(&token.runner_id)?;
     let connected = status(&token.runner_id)?;
     let Some(session) = connected.session.filter(|_| connected.connected) else {
@@ -239,15 +154,32 @@ fn download_direct_runner_artifact(
             ]),
         ));
     };
-
-    if session.mode != RunnerTunnelMode::DirectSsh {
-        return Ok(None);
-    }
-
     let Some(local_url) = session.local_url.as_deref() else {
-        return Ok(None);
+        return Err(Error::validation_invalid_argument(
+            "runner",
+            "runner session has no direct daemon URL; run `homeboy runner connect <runner-id>` to re-establish it",
+            Some(runner.id),
+            Some(vec![
+                "Runner artifacts are streamed from the connected daemon over the direct SSH session.".to_string(),
+            ]),
+        ));
     };
+    fetch_daemon_artifact(local_url, artifact_root, token, output, intent)
+}
 
+/// Stream one artifact from a connected daemon into place, verified.
+///
+/// The body is copied into a temp file beside the destination while it is
+/// hashed, checked against the daemon's `x-homeboy-artifact-sha256` and
+/// `Content-Length` when present, and only then renamed into place, so a
+/// truncated or corrupted transfer never appears at the output path.
+pub(super) fn fetch_daemon_artifact(
+    local_url: &str,
+    artifact_root: &Path,
+    token: &RemoteArtifactToken,
+    output: Option<PathBuf>,
+    intent: RunnerDownloadIntent,
+) -> Result<RemoteArtifactDownload> {
     // Artifact content (candidate git bundles in particular) can be large on
     // monorepos. A 30s whole-request budget cut the body read off mid-stream
     // and surfaced as reqwest's opaque "error decoding response body",
@@ -263,7 +195,7 @@ fn download_direct_runner_artifact(
         encode_uri_component(&token.run_id),
         encode_uri_component(&token.artifact_id)
     );
-    let response = client
+    let mut response = client
         .get(format!("{}{}", local_url.trim_end_matches('/'), path))
         .send()
         .map_err(|err| {
@@ -284,30 +216,78 @@ fn download_direct_runner_artifact(
             None,
         ));
     }
+    let expected_sha256 = header_string(&headers, ARTIFACT_SHA256_HEADER);
+    let expected_size = header_string(&headers, header::CONTENT_LENGTH.as_str())
+        .map(|value| {
+            value.trim().parse::<u64>().map_err(|err| {
+                Error::internal_unexpected(format!(
+                    "runner artifact Content-Length `{value}` is not a byte count: {err}"
+                ))
+            })
+        })
+        .transpose()?;
 
-    let bytes = response
-        .bytes()
-        .map_err(|err| artifact_body_read_error(&err.to_string(), err.is_timeout()))?;
     // `Content-Disposition` is parsed by splitting on `;` and trimming quotes,
     // so the value reaching here is whatever the daemon sent, `../` included.
     let remote_file_name = content_disposition_filename(&headers).filter(|name| !name.is_empty());
     let placement = resolve_placement(artifact_root, token, output, remote_file_name.as_deref())?;
     let output_path = placement.output_path;
-    if let Some(parent) = output_path
+    let parent = output_path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
-    {
-        fs::create_dir_all(parent).map_err(|err| {
-            Error::internal_io(
-                err.to_string(),
-                Some(format!("create {}", parent.display())),
-            )
-        })?;
-    }
-    let size_bytes = i64::try_from(bytes.len()).ok();
-    fs::write(&output_path, bytes).map_err(|err| {
+        .unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent).map_err(|err| {
         Error::internal_io(
             err.to_string(),
+            Some(format!("create {}", parent.display())),
+        )
+    })?;
+    let temp = tempfile::NamedTempFile::new_in(parent).map_err(|err| {
+        Error::internal_io(
+            err.to_string(),
+            Some(format!("create temp file in {}", parent.display())),
+        )
+    })?;
+
+    let mut reader = HashingReader::new(&mut response);
+    let mut writer = io::BufWriter::new(temp.as_file());
+    let copied = io::copy(&mut reader, &mut writer).and_then(|copied| {
+        writer.flush()?;
+        Ok(copied)
+    });
+    drop(writer);
+    let actual_size = match copied {
+        Ok(copied) => copied,
+        Err(err) if reader.read_failed => {
+            return Err(artifact_body_read_error(
+                &err.to_string(),
+                io_error_is_timeout(&err),
+            ));
+        }
+        Err(err) => {
+            return Err(Error::internal_io(
+                err.to_string(),
+                Some(format!("write runner artifact {}", output_path.display())),
+            ));
+        }
+    };
+    let actual_sha256 = format!("{:x}", reader.hasher.finalize());
+    // Dropping `temp` on the error path deletes it.
+    verify_artifact_body(
+        expected_sha256.as_deref(),
+        expected_size,
+        &actual_sha256,
+        actual_size,
+    )?;
+    temp.as_file().sync_all().map_err(|err| {
+        Error::internal_io(
+            err.to_string(),
+            Some(format!("sync runner artifact {}", output_path.display())),
+        )
+    })?;
+    temp.persist(&output_path).map_err(|err| {
+        Error::internal_io(
+            err.error.to_string(),
             Some(format!("write runner artifact {}", output_path.display())),
         )
     })?;
@@ -315,11 +295,12 @@ fn download_direct_runner_artifact(
         record_download_intent(cache_dir, intent, &token.artifact_id);
     }
 
-    Ok(Some(RemoteArtifactDownload {
+    let content_type = header_string(&headers, header::CONTENT_TYPE.as_str());
+    Ok(RemoteArtifactDownload {
         output_path,
-        content_type: header_string(&headers, header::CONTENT_TYPE.as_str()),
-        size_bytes,
-        sha256: header_string(&headers, "x-homeboy-artifact-sha256"),
+        content_type: content_type.clone(),
+        size_bytes: i64::try_from(actual_size).ok(),
+        sha256: Some(actual_sha256.clone()),
         artifact_ref: RunnerArtifactRef {
             artifact_id: token.artifact_id.clone(),
             name: Some(placement.file_name.clone()),
@@ -329,12 +310,99 @@ fn download_direct_runner_artifact(
                 &token.artifact_id,
             )),
             url: None,
-            mime: header_string(&headers, header::CONTENT_TYPE.as_str()),
-            size_bytes: size_bytes.and_then(|value| u64::try_from(value).ok()),
-            sha256: header_string(&headers, "x-homeboy-artifact-sha256"),
+            mime: content_type,
+            size_bytes: Some(actual_size),
+            sha256: Some(actual_sha256),
             transport: Some("direct_daemon".to_string()),
         },
-    }))
+    })
+}
+
+const ARTIFACT_SHA256_HEADER: &str = "x-homeboy-artifact-sha256";
+
+/// Check streamed bytes against what the daemon declared. A mismatch is a
+/// transfer fault, not proof the artifact is bad, so it is retryable.
+pub(super) fn verify_artifact_body(
+    expected_sha256: Option<&str>,
+    expected_size: Option<u64>,
+    actual_sha256: &str,
+    actual_size: u64,
+) -> Result<()> {
+    if let Some(expected) = expected_size {
+        if expected != actual_size {
+            return Err(Error::internal_unexpected(format!(
+                "runner artifact size mismatch: expected {expected} bytes (Content-Length), received {actual_size} bytes"
+            ))
+            .with_retryable(true));
+        }
+    }
+    if let Some(expected) = expected_sha256 {
+        let expected = expected.trim();
+        if !expected.eq_ignore_ascii_case(actual_sha256) {
+            return Err(Error::internal_unexpected(format!(
+                "runner artifact sha256 mismatch: expected {expected} ({ARTIFACT_SHA256_HEADER}), computed {actual_sha256}"
+            ))
+            .with_retryable(true));
+        }
+    }
+    Ok(())
+}
+
+/// Hashes bytes as they are read and remembers whether the failure, if any,
+/// came from the body read rather than the disk write.
+struct HashingReader<R> {
+    inner: R,
+    hasher: Sha256,
+    read_failed: bool,
+}
+
+impl<R> HashingReader<R> {
+    fn new(inner: R) -> Self {
+        Self {
+            inner,
+            hasher: Sha256::new(),
+            read_failed: false,
+        }
+    }
+}
+
+impl<R: Read> Read for HashingReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match self.inner.read(buf) {
+            Ok(read) => {
+                self.hasher.update(&buf[..read]);
+                Ok(read)
+            }
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => Err(err),
+            Err(err) => {
+                self.read_failed = true;
+                Err(err)
+            }
+        }
+    }
+}
+
+fn io_error_is_timeout(err: &io::Error) -> bool {
+    if err.kind() == io::ErrorKind::TimedOut {
+        return true;
+    }
+    let mut source = err
+        .get_ref()
+        .map(|inner| inner as &(dyn std::error::Error + 'static));
+    while let Some(inner) = source {
+        if let Some(reqwest_err) = inner.downcast_ref::<reqwest::Error>() {
+            if reqwest_err.is_timeout() {
+                return true;
+            }
+        }
+        if let Some(io_err) = inner.downcast_ref::<io::Error>() {
+            if io_err.kind() == io::ErrorKind::TimedOut {
+                return true;
+            }
+        }
+        source = inner.source();
+    }
+    false
 }
 
 fn header_string(headers: &header::HeaderMap, name: &str) -> Option<String> {

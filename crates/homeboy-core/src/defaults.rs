@@ -196,6 +196,11 @@ pub struct ArtifactOriginConfig {
 pub struct GitHostConfig {
     pub name: String,
     pub email: String,
+    /// Owners allowed to publish directly; absent preserves legacy routing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direct_owners: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fork_owner: Option<String>,
 }
 
 /// Safe default retention windows for resources created by Homeboy commands.

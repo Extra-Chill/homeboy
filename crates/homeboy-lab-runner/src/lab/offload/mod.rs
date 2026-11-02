@@ -106,7 +106,7 @@ use super::super::{
     configured_runner_homeboy_build_identity, evaluate_lab_runner_capabilities_for_runner, exec,
     exec_with_status_snapshot, lab_offload_changed_since_ref, lab_offload_metadata,
     lab_offload_metadata_with_workspace_mapping, load, preflight_lab_offload_changed_since,
-    prepare_git_lab_offload_changed_since, remote_runner_homeboy_path, rig_materialization, status,
+    prepare_git_lab_offload_changed_since, remote_runner_homeboy_path, rig_materialization,
     status_for_admission, LabRunnerGateDecision, MaterializedWorkspace, Runner,
     RunnerCapabilityPreflight, RunnerExecOptions, RunnerFileTransfer, RunnerStaleDaemonWarning,
     RunnerStatusReport, RunnerTunnelMode, RunnerWorkspaceApplyOutput, RunnerWorkspaceOutputPaths,

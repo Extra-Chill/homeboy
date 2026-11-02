@@ -1788,9 +1788,10 @@ impl SshClient {
         if self.is_local {
             return match stdin {
                 SshStdin::File(stdin_file_path) => {
-                    // For stdin piping (used by upload_file), use shell redirection
+                    // Redirect the whole command, not only its first pipeline:
+                    // `umask 077; cat > path` must read the file in `cat`.
                     let local_cmd =
-                        format!("cat {} | {}", shell::quote_path(stdin_file_path), command);
+                        format!("( {} ) < {}", command, shell::quote_path(stdin_file_path));
                     execute_local_command(&local_cmd)
                 }
                 SshStdin::Inline(bytes) => execute_local_command_with_stdin(command, bytes),

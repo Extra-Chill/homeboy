@@ -3769,7 +3769,7 @@ fn legacy_durable_finalization_report_defaults_inherited_failure_acceptance_to_f
     assert!(!restored.accept_inherited_failures);
 }
 
-fn options() -> AgentTaskPrFinalizationOptions {
+pub(super) fn options() -> AgentTaskPrFinalizationOptions {
     let gate_results = vec![AgentTaskGateResult {
         name: "focused project check".to_string(),
         status: "passed".to_string(),

@@ -127,10 +127,6 @@ pub(super) fn assemble(
                 )
                 .map_err(io)?;
             }
-            fs::File::open(&blob)
-                .map_err(io)?
-                .set_modified(SystemTime::now())
-                .map_err(io)?;
         } else {
             return Err(io("unsupported manifest entry"));
         }
@@ -163,8 +159,14 @@ pub(in crate::workspace) fn prune(store: &Path) -> Result<()> {
         if bytes > 10 * 1024 * 1024 * 1024
             || mtime.elapsed().unwrap_or_default() > Duration::from_secs(7 * 86400)
         {
-            fs::remove_file(path).map_err(io)?;
-            bytes = bytes.saturating_sub(size);
+            // Concurrent plans prune the same expired blobs; one already gone
+            // is pruned, not a failure.
+            match fs::remove_file(path) {
+                Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                    return Err(io(error));
+                }
+                _ => bytes = bytes.saturating_sub(size),
+            }
         }
     }
     Ok(())

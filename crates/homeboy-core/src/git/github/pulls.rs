@@ -236,7 +236,7 @@ pub fn pr_find_with_token(
         "--limit".into(),
         limit.to_string(),
         "--json".into(),
-        "number,title,url,state,isDraft,baseRefName,headRefName".into(),
+        "number,title,url,state,isDraft,baseRefName,headRefName,headRepositoryOwner".into(),
     ];
     if let Some(base) = &options.base {
         args.push("--base".into());
@@ -244,10 +244,34 @@ pub fn pr_find_with_token(
     }
     if let Some(head) = &options.head {
         args.push("--head".into());
-        args.push(head.clone());
+        args.push(
+            head.split_once(':')
+                .map(|(_, branch)| branch)
+                .unwrap_or(head)
+                .to_string(),
+        );
     }
 
     let raw = gh.run(&args)?;
+    // gh --head accepts a branch, not owner:branch. Filter the observed owner
+    // as well so a same-named branch in the base repository cannot match.
+    let raw = if let Some((owner, _)) = options
+        .head
+        .as_deref()
+        .and_then(|head| head.split_once(':'))
+    {
+        let mut values: Vec<serde_json::Value> = serde_json::from_str(&raw)
+            .map_err(|error| Error::git_command_failed(error.to_string()))?;
+        values.retain(|value| {
+            value["headRepositoryOwner"]["login"]
+                .as_str()
+                .is_some_and(|login| login.eq_ignore_ascii_case(owner))
+        });
+        serde_json::to_string(&values)
+            .map_err(|error| Error::git_command_failed(error.to_string()))?
+    } else {
+        raw
+    };
     let items = parse_pr_list_json(&raw)?;
 
     Ok(GithubFindOutput {
@@ -570,6 +594,42 @@ mod tests {
                 .and_then(|v| v.as_str()),
             Some("Extra-Chill/homeboy")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fork_pr_lookup_filters_same_branch_by_observed_owner() {
+        crate::test_support::with_isolated_home(|home| {
+            let fixture = super::super::fake_gh::fake_gh_component(
+                home.path(),
+                "fork-find-fixture",
+                r#"#!/bin/sh
+printf '%s\n' "$*" >> "$HOMEBOY_FAKE_GH_LOG"
+if [ "$1 $2" = "pr list" ]; then
+  printf '%s\n' '[{"number":1,"title":"base","url":"base","state":"OPEN","isDraft":false,"baseRefName":"main","headRefName":"feature","headRepositoryOwner":{"login":"example"}},{"number":2,"title":"fork","url":"fork","state":"OPEN","isDraft":false,"baseRefName":"main","headRefName":"feature","headRepositoryOwner":{"login":"Chubes4"}}]'
+fi
+exit 0
+"#,
+            );
+            for state in [PrState::Open, PrState::Merged] {
+                let result = pr_find(
+                    Some("fork-find-fixture"),
+                    PrFindOptions {
+                        base: Some("main".into()),
+                        head: Some("chubes4:feature".into()),
+                        state,
+                        limit: 10,
+                        path: None,
+                    },
+                )
+                .unwrap();
+                assert_eq!(result.items.len(), 1);
+                assert_eq!(result.items[0].number, 2);
+            }
+            let log = std::fs::read_to_string(fixture.log).unwrap();
+            assert!(log.contains("--head feature"));
+            assert!(!log.contains("--head chubes4:feature"));
+        });
     }
 
     #[cfg(unix)]

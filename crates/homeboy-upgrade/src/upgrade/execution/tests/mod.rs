@@ -206,7 +206,11 @@ fn release_installer_writes_only_the_stage_and_never_the_live_binary() {
         "PATH",
         format!("{}:{}:/usr/bin:/bin", tools.display(), live_dir.display()),
     );
-    configure_release_installer(&mut command, &staged, Some(&release));
+    command
+        .env("HOMEBOY_INSTALL_STAGE_ONLY", "1")
+        .env("HOMEBOY_INSTALL_PATH", &staged)
+        .env("HOMEBOY_UPGRADE_RELEASE_TAG", &release.tag)
+        .env("HOMEBOY_UPGRADE_RELEASE_VERSION", &release.version);
     let output = command.output().expect("run release installer");
 
     assert_eq!(
