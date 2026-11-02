@@ -34,6 +34,34 @@ impl Drop for RunPhaseGuard<'_> {
 }
 
 impl ObservationStore {
+    /// Import runner timing evidence onto the controller owner timeline and retain
+    /// the runner execution as its own queryable run. Event identities make replay
+    /// idempotent; callers validate the accepted job binding before importing.
+    pub fn record_runner_phase_spans(
+        &self,
+        owner_run_id: &str,
+        job_id: &str,
+        events: &[crate::api_jobs::JobEvent],
+    ) -> Result<()> {
+        for event in events {
+            let Some(data) = event.data.as_ref() else {
+                continue;
+            };
+            let Some(value) = data.get("phase_spans") else {
+                continue;
+            };
+            let report: PhaseTimingReport = serde_json::from_value(value.clone())
+                .map_err(|error| Error::internal_unexpected(error.to_string()))?;
+            let run: super::RunRecord = serde_json::from_value(data["phase_run"].clone())
+                .map_err(|error| Error::internal_unexpected(error.to_string()))?;
+            self.upsert_imported_run_preserving_terminal(&run)?;
+            let identity = format!("runner:{job_id}:{}", event.sequence);
+            self.record_phase_spans(&run.id, &identity, &report)?;
+            self.record_phase_spans(owner_run_id, &identity, &report)?;
+        }
+        Ok(())
+    }
+
     pub fn run_phase_guard(&self, run_id: &str, phase: &str) -> RunPhaseGuard<'_> {
         RunPhaseGuard {
             _context: super::phase_timing::for_run(self, run_id),

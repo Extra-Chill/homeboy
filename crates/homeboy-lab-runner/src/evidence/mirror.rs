@@ -807,6 +807,19 @@ pub(super) fn mirror_job_run_request(
     store: &ObservationStore,
     request: MirrorEvidenceRequest<'_>,
 ) -> Result<MirroredJobRun> {
+    let mirrored = mirror_job_run_record(store, request)?;
+    store.record_runner_phase_spans(
+        &mirrored.run.id,
+        &request.job.id.to_string(),
+        request.events,
+    )?;
+    Ok(mirrored)
+}
+
+fn mirror_job_run_record(
+    store: &ObservationStore,
+    request: MirrorEvidenceRequest<'_>,
+) -> Result<MirroredJobRun> {
     let MirrorEvidenceRequest {
         runner,
         cwd,

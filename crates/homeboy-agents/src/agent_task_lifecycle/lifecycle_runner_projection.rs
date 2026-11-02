@@ -170,6 +170,14 @@ pub(crate) fn reconcile_runner_job_snapshot_in_store(
         start_run(record);
     }
     if record.state().is_terminal() {
+        validate_runner_job_snapshot(record, snapshot)?;
+        lifecycle_store
+            .open_observation_initialized()?
+            .record_runner_phase_spans(
+                &record.run_id,
+                &snapshot.job.id.to_string(),
+                &snapshot.events,
+            )?;
         // A transport-only terminal result can arrive before the daemon has
         // published the inner agent-task aggregate. Adopt that later evidence
         // when it proves the same controller run rather than losing its patch.
@@ -197,6 +205,13 @@ pub(crate) fn reconcile_runner_job_snapshot_in_store(
         }
     }
     validate_runner_job_snapshot(record, snapshot)?;
+    lifecycle_store
+        .open_observation_initialized()?
+        .record_runner_phase_spans(
+            &record.run_id,
+            &snapshot.job.id.to_string(),
+            &snapshot.events,
+        )?;
     let mut reconciled = record.clone();
     reconciled.record_runner_reachable();
     // Typed terminal evidence is authoritative even when a daemon restart left

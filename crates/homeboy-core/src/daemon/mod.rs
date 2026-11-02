@@ -4352,7 +4352,14 @@ fn enqueue_exec_request(
                 job.progress(json!({ "phase": "local_child_driver_execution_started" }))?;
                 job.progress(json!({ "phase": "local_child_command_spawn_attempted" }))?;
                 let driver_cancellation = Arc::clone(&cancellation_requested);
-                let process_output = runner_exec_driver::execute_exec(
+                let timing_store = crate::observation::ObservationStore::open_initialized()?;
+                let timing_run = timing_store.start_run(
+                    crate::observation::NewRunRecord::builder("runner_execution").build(),
+                )?;
+                let process_output = timing_store.time_run_phase_with_outcome(
+                    &timing_run.id,
+                    "stage.lab.observe.runner.execute",
+                    || runner_exec_driver::execute_exec(
                     &plan,
                     &execution_context,
                     Box::new(move || {
@@ -4361,7 +4368,20 @@ fn enqueue_exec_request(
                     Some(progress_sink),
                     true,
                     Some(child_started),
+                    ),
+                    |output| output.exit_code != 0,
                 );
+                let timing_run = timing_store.finish_run(
+                    &timing_run.id,
+                    if process_output.as_ref().is_ok_and(|output| output.exit_code == 0) {
+                        crate::observation::RunStatus::Pass
+                    } else {
+                        crate::observation::RunStatus::Fail
+                    },
+                    None,
+                )?;
+                let report = timing_store.phase_spans(&timing_run.id)?;
+                job.progress(json!({ "phase_spans": report, "phase_run": timing_run }))?;
                 let _ = watchdog_stop.send(());
                 let _ = watchdog.join();
                 let process_output = match process_output {
@@ -7153,6 +7173,87 @@ mod tests {
 
         assert_eq!(metadata["durable_run_id"], "agent-task-run-123");
         assert_eq!(metadata["agent_task_run_id"], "agent-task-run-123");
+    }
+
+    #[test]
+    fn daemon_exec_records_runner_spans_and_publishes_them_for_controller_linking() {
+        with_isolated_home(|_| {
+            runner_exec_driver::register_runner_exec_driver(Arc::new(EnqueueTestDriver));
+            let store = JobStore::default();
+            let response = enqueue_exec_job(
+                Some(crate::test_support::direct_exec_body(
+                    json!({
+                        "runner_id": "homeboy-lab",
+                        "cwd": "/tmp",
+                        "command": ["true"]
+                    }),
+                    "phase-span-job",
+                )),
+                &store,
+            )
+            .unwrap();
+            let job_id = response["job"]["id"].as_str().unwrap().parse().unwrap();
+            wait_for_daemon_job_status(&store, job_id, JobStatus::Succeeded);
+            let events = store.events(job_id).unwrap();
+            let evidence = events
+                .iter()
+                .filter_map(|event| event.data.as_ref())
+                .find(|data| data.get("phase_spans").is_some())
+                .unwrap();
+            let run_id = evidence["phase_run"]["id"].as_str().unwrap();
+            let observation = crate::observation::ObservationStore::open_initialized().unwrap();
+            assert_eq!(
+                serde_json::to_value(observation.phase_spans(run_id).unwrap()).unwrap(),
+                evidence["phase_spans"]
+            );
+            let summary = crate::performance_hotspots::phase_hotspots(
+                &observation,
+                &crate::performance_hotspots::PhaseHotspotQuery {
+                    kind: Some("runner_execution".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(summary.runs_with_spans, 1);
+            assert_eq!(summary.phases[0].phase, "stage.lab.observe.runner.execute");
+            let controller_dir = tempfile::tempdir().unwrap();
+            let controller = crate::observation::ObservationStore::open_initialized_at(
+                controller_dir.path().join("controller.sqlite"),
+            )
+            .unwrap();
+            let owner = controller
+                .start_run(crate::observation::NewRunRecord::builder("agent-task").build())
+                .unwrap();
+            let mut parent = observation.phase_spans(run_id).unwrap();
+            parent.spans[0].id = "stage.lab.observe".into();
+            parent.spans[0].duration_ms = parent.spans[0].duration_ms.map(|ms| ms + 10.0);
+            controller
+                .record_phase_spans(&owner.id, "observe", &parent)
+                .unwrap();
+            for _ in 0..2 {
+                controller
+                    .record_runner_phase_spans(&owner.id, &job_id.to_string(), &events)
+                    .unwrap();
+            }
+            assert_eq!(controller.phase_spans(&owner.id).unwrap().spans.len(), 2);
+            assert_eq!(
+                controller.phase_spans(run_id).unwrap(),
+                observation.phase_spans(run_id).unwrap()
+            );
+            let summary = crate::performance_hotspots::phase_hotspots(
+                &controller,
+                &crate::performance_hotspots::PhaseHotspotQuery {
+                    kind: Some("agent-task".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert!(summary
+                .phases
+                .iter()
+                .any(|phase| phase.phase == "stage.lab.observe.runner.execute"
+                    && phase.self_ms_total > 0.0));
+        });
     }
 
     #[test]
