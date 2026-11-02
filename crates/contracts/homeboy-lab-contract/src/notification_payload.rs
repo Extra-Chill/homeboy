@@ -64,6 +64,8 @@ pub enum NotifyEventKind {
     Completed,
     /// Terminal, but a human decision is required before anything advances.
     NeedsAttention,
+    /// Terminal because an operator stopped it; nothing needs repair.
+    Cancelled,
 }
 
 impl NotifyEventKind {
@@ -74,12 +76,16 @@ impl NotifyEventKind {
             Self::Progress => "progress",
             Self::Completed => "completed",
             Self::NeedsAttention => "needs_attention",
+            Self::Cancelled => "cancelled",
         }
     }
 
     /// Whether the subject will not transition further on its own.
     pub fn is_terminal(&self) -> bool {
-        matches!(self, Self::Completed | Self::NeedsAttention)
+        matches!(
+            self,
+            Self::Completed | Self::NeedsAttention | Self::Cancelled
+        )
     }
 }
 
@@ -265,6 +271,8 @@ pub struct NotifyPayload {
     #[serde(default)]
     pub kind: NotifyEventKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subject: Option<NotifySubject>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub facts: Vec<NotifyFact>,
@@ -285,6 +293,7 @@ impl Default for NotifyPayload {
         Self {
             schema: notification_payload_schema(),
             kind: NotifyEventKind::default(),
+            title: None,
             subject: None,
             facts: Vec::new(),
             actions: Vec::new(),
@@ -363,8 +372,15 @@ impl NotifyPayload {
     /// coordinated release.
     pub fn render_body(&self) -> String {
         let mut lines: Vec<String> = Vec::new();
+        if let Some(title) = &self.title {
+            lines.push(title.clone());
+        }
         if let Some(subject) = &self.subject {
-            if let Some(component) = subject.component.as_deref().filter(|it| !it.is_empty()) {
+            if let Some(component) = subject
+                .component
+                .as_deref()
+                .filter(|it| !it.is_empty() && self.title.is_none())
+            {
                 lines.push(format!("Component: {component}"));
             }
             if let Some(parent) = subject.parent_id.as_deref().filter(|it| !it.is_empty()) {
@@ -377,8 +393,15 @@ impl NotifyPayload {
                 lines.push(format!("Phase: {phase}"));
             }
         }
-        for fact in &self.facts {
-            lines.push(format!("{}: {}", fact.label, fact.value));
+        let facts: Vec<_> = self
+            .facts
+            .iter()
+            .map(|fact| format!("{}: {}", fact.label, fact.value))
+            .collect();
+        if self.title.is_some() && !facts.is_empty() {
+            lines.push(facts.join(" · "));
+        } else {
+            lines.extend(facts);
         }
         for link in &self.links {
             lines.push(format!("{}: {}", link.label, link.url));
@@ -429,6 +452,7 @@ impl NotifyPayload {
         let minimal = Self {
             schema: bounded.schema,
             kind: bounded.kind,
+            title: bounded.title,
             subject: bounded.subject,
             facts: Vec::new(),
             actions: bounded.actions,
@@ -585,6 +609,7 @@ mod tests {
     fn event_kind_terminality_is_explicit() {
         assert!(NotifyEventKind::Completed.is_terminal());
         assert!(NotifyEventKind::NeedsAttention.is_terminal());
+        assert!(NotifyEventKind::Cancelled.is_terminal());
         assert!(!NotifyEventKind::Queued.is_terminal());
         assert!(!NotifyEventKind::Started.is_terminal());
         assert!(!NotifyEventKind::Progress.is_terminal());
