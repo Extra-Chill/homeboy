@@ -174,9 +174,6 @@ pub(crate) fn cook_recovery_step(inputs: &CookRecoveryInputs<'_>) -> CookRecover
     if inputs.blocking_claim {
         return CookRecoveryStep::Reconcile;
     }
-    if inputs.exact_checkpoint_candidate_mismatch && inputs.retry_admitted {
-        return CookRecoveryStep::ForkReplacement;
-    }
     // A publishable candidate whose agent declared the task incomplete stops
     // here whatever the gate status: rearming would replay provider work only
     // to re-read the same verdict (#16772).
@@ -192,6 +189,11 @@ pub(crate) fn cook_recovery_step(inputs: &CookRecoveryInputs<'_>) -> CookRecover
     }
     if publishable {
         return CookRecoveryStep::Publish;
+    }
+    // A stale destination checkpoint cannot authorize replacing a verified
+    // candidate. Publication validates and uses its immutable candidate commit.
+    if inputs.exact_checkpoint_candidate_mismatch && inputs.retry_admitted {
+        return CookRecoveryStep::ForkReplacement;
     }
     if status == CookStatus::CandidateRecoverable && inputs.continuation_completed {
         return CookRecoveryStep::none(
@@ -993,6 +995,27 @@ mod tests {
         };
         configure(&mut inputs);
         cook_recovery_step(&inputs)
+    }
+
+    #[test]
+    fn recover_publication_failure_never_forks_a_green_applied_candidate() {
+        assert_eq!(
+            step("durable_failure", |inputs| {
+                inputs.verified_unpublished = true;
+                inputs.retry_admitted = true;
+                inputs.exact_checkpoint_candidate_mismatch = true;
+                inputs.continuation_rearm_required = true;
+            }),
+            CookRecoveryStep::Publish
+        );
+        assert_eq!(
+            step("gate_failed", |inputs| {
+                inputs.applied_gate_failure = true;
+                inputs.retry_admitted = true;
+            }),
+            CookRecoveryStep::Continue,
+            "gate remediation retries through the recorded Cook continuation"
+        );
     }
 
     #[test]
