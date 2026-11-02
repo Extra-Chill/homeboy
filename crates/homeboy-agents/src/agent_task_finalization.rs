@@ -585,39 +585,42 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
                 &changed_files,
                 &merged,
             )?;
-            if let Err(error) = validate_publication_binding(
-                &binding,
-                commit_sha,
-                &changed_files,
-                intent.target.publication_route.as_ref(),
-            ) {
-                return Err(append_binding_error(
-                    publication_drift_error(
-                        commit_sha,
-                        &binding.remote_sha,
-                        Some(&binding.pr_head_sha),
-                        "no PR mutation performed",
-                    ),
-                    binding_validation_reason(&error),
+            // A different merged head is a prior publication, not this candidate.
+            if binding.pr_head_sha == commit_sha {
+                if let Err(error) = validate_publication_binding(
+                    &binding,
+                    commit_sha,
+                    &changed_files,
+                    intent.target.publication_route.as_ref(),
+                ) {
+                    return Err(append_binding_error(
+                        publication_drift_error(
+                            commit_sha,
+                            &binding.remote_sha,
+                            Some(&binding.pr_head_sha),
+                            "no PR mutation performed",
+                        ),
+                        binding_validation_reason(&error),
+                    ));
+                }
+                return Ok(report(
+                    &options,
+                    intent,
+                    &head,
+                    "review_ready",
+                    "already_merged",
+                    Some(merged.number),
+                    Some(merged.url),
+                    changed_files,
+                    Some(proof),
+                    commit_required,
+                    push_required,
+                    Some(git_identity),
+                    git_tracking,
+                    Some(binding),
+                    durable_acceptance,
                 ));
             }
-            return Ok(report(
-                &options,
-                intent,
-                &head,
-                "review_ready",
-                "already_merged",
-                Some(merged.number),
-                Some(merged.url),
-                changed_files,
-                Some(proof),
-                commit_required,
-                push_required,
-                Some(git_identity),
-                git_tracking,
-                Some(binding),
-                durable_acceptance,
-            ));
         }
     }
     let publication_base_sha = backend.publication_base_sha(&options.path, &options.base)?;

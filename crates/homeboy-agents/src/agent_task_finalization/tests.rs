@@ -59,6 +59,7 @@ struct MockBackend {
     existing_title: Option<String>,
     last_title: Option<String>,
     merged_pr: Option<AgentTaskPrRef>,
+    merged_pr_head_sha: Option<String>,
     create_error: bool,
     /// A PR a concurrent publication opens between our lookup and create:
     /// `create_pr` reports GitHub's conflict and the PR becomes findable.
@@ -468,7 +469,12 @@ impl AgentTaskPrFinalizationBackend for MockBackend {
                 candidate_sha: candidate_sha.to_string(),
                 candidate_tree: "candidate-tree".to_string(),
                 remote_sha: candidate_sha.to_string(),
-                pr_head_sha: candidate_sha.to_string(),
+                pr_head_sha: self
+                    .merged_pr
+                    .as_ref()
+                    .filter(|merged| merged.number == _pr.number)
+                    .and(self.merged_pr_head_sha.clone())
+                    .unwrap_or_else(|| candidate_sha.to_string()),
                 repository: "Extra-Chill/homeboy".to_string(),
                 head_repository: "Extra-Chill/homeboy".to_string(),
                 changed_files: changed_files.to_vec(),
@@ -1374,32 +1380,42 @@ fn updates_existing_pr_for_same_branch() {
 }
 
 #[test]
-fn recovers_a_merged_pr_without_republishing() {
-    let mut backend = MockBackend {
-        candidate_state: Some(AgentTaskPrCandidateState::Committed {
-            changed_files: vec!["src/lib.rs".to_string()],
-            push_required: false,
-        }),
-        merged_pr: Some(AgentTaskPrRef {
-            number: 76,
-            url: "https://github.com/Extra-Chill/homeboy/pull/76".to_string(),
-            is_draft: false,
-        }),
-        ..Default::default()
-    };
+fn merged_pr_replay_and_follow_up_bind_to_the_candidate() {
+    for (merged_head, action, pr_number, created, binding_calls) in [
+        ("candidate-sha", "already_merged", 76, false, 1),
+        ("older-merged-sha", "created", 123, true, 2),
+    ] {
+        let mut backend = MockBackend {
+            candidate_state: Some(AgentTaskPrCandidateState::Committed {
+                changed_files: vec!["src/lib.rs".to_string()],
+                push_required: false,
+            }),
+            merged_pr: Some(AgentTaskPrRef {
+                number: 76,
+                url: "https://github.com/Extra-Chill/homeboy/pull/76".to_string(),
+                is_draft: false,
+            }),
+            ..Default::default()
+        };
 
-    let report = finalize_pr_with_backend(options(), &mut backend).expect("merged receipt");
+        backend.merged_pr_head_sha = Some(merged_head.to_string());
+        backend.remote_candidate_sha = Some("candidate-sha".to_string());
+        let report = finalize_pr_with_backend(options(), &mut backend).expect(merged_head);
 
-    assert_eq!(report.status, "review_ready");
-    assert_eq!(report.pr_action, "already_merged");
-    assert_eq!(report.pr_number, Some(76));
-    assert_eq!(
-        report.finalization_outcome.publication_action,
-        "already_merged"
-    );
-    assert!(report.finalization_outcome.published);
-    assert!(!backend.created && !backend.updated);
-    assert_eq!(backend.publication_binding_calls, 1);
+        assert_eq!(report.status, "review_ready");
+        assert_eq!(report.pr_action, action);
+        assert_eq!(report.pr_number, Some(pr_number));
+        assert_eq!(report.finalization_outcome.publication_action, action);
+        assert!(report.finalization_outcome.published);
+        assert_eq!(backend.created, created);
+        assert_eq!(backend.create_calls, u8::from(created));
+        assert!(!backend.updated);
+        assert_eq!(backend.publication_binding_calls, binding_calls);
+        let binding = report.publication_proof.binding.expect("candidate binding");
+        assert_eq!(binding.candidate_sha, "candidate-sha");
+        assert_eq!(binding.remote_sha, "candidate-sha");
+        assert_eq!(binding.pr_head_sha, "candidate-sha");
+    }
 }
 
 #[test]
