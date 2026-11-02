@@ -76,43 +76,6 @@ pub struct AgentTaskStart {
     pub outcome: Option<AgentTaskOutcome>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct AgentTaskProgress {
-    pub handle: AgentTaskExecutionHandle,
-    pub state: AgentTaskExecutionState,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub events: Vec<AgentTaskProgressEvent>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider_payload: Option<Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub outcome: Option<AgentTaskOutcome>,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum AgentTaskExecutionState {
-    Queued,
-    Running,
-    Waiting,
-    Succeeded,
-    Failed,
-    Cancelled,
-}
-
-impl AgentTaskExecutionState {
-    pub fn is_terminal(self) -> bool {
-        matches!(self, Self::Succeeded | Self::Failed | Self::Cancelled)
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct AgentTaskProgressEvent {
-    pub kind: String,
-    pub message: String,
-    #[serde(default, skip_serializing_if = "Value::is_null")]
-    pub data: Value,
-}
-
 /// A named value the provider returns in `AgentTaskOutcome.outputs`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AgentTaskOutputDeclaration {

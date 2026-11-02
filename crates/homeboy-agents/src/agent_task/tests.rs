@@ -579,25 +579,12 @@ fn executor_contract_round_trips_provider_neutral_lifecycle_shapes() {
         metadata: json!({ "attempt": 1 }),
     };
 
-    let progress = AgentTaskProgress {
-        handle,
-        state: AgentTaskExecutionState::Running,
-        events: vec![AgentTaskProgressEvent {
-            kind: "log".to_string(),
-            message: "started".to_string(),
-            data: json!({ "sequence": 1 }),
-        }],
-        provider_payload: None,
-        outcome: None,
-    };
-
-    let encoded = serde_json::to_value((&capabilities, &progress)).expect("serialize");
-    let (decoded_capabilities, decoded_progress): (
+    let encoded = serde_json::to_value((&capabilities, &handle)).expect("serialize");
+    let (decoded_capabilities, decoded_handle): (
         AgentTaskExecutorCapabilities,
-        AgentTaskProgress,
+        AgentTaskExecutionHandle,
     ) = serde_json::from_value(encoded).expect("decode");
 
     assert_eq!(decoded_capabilities, capabilities);
-    assert_eq!(decoded_progress, progress);
-    assert!(!decoded_progress.state.is_terminal());
+    assert_eq!(decoded_handle, handle);
 }
