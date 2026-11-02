@@ -32,11 +32,17 @@ for expected in 'data-machine' "requires PHP >= $higher" "running PHP $running" 
     grep -F "$expected" "$TMP/output" >/dev/null
 done
 ! grep -E 'Fatal error|infrastructure failure' "$TMP/output"
-# Equal and lower floors must reach the normal missing-PHPStan pass-through.
+# Equal and lower floors pass the floor check and reach the missing-PHPStan
+# toolchain failure (a missing toolchain fails lint; homeboy#17254).
 for floor in "$running" '7.4'; do
     printf '{"require":{"php":">=%s"}}\n' "$floor" > "$TMP/data-machine/composer.json"
-    run_runner
+    if run_runner; then
+        echo 'FAIL: missing PHPStan should fail' >&2
+        exit 1
+    fi
     grep -F 'PHPStan not found' "$TMP/output" >/dev/null
+    grep -F 'homeboy extension setup wordpress' "$TMP/output" >/dev/null
+    ! grep -F 'requires PHP >=' "$TMP/output"
 done
 # Header takes precedence over Composer, including themes.
 printf '/*\nTheme Name: Dependency\nRequires PHP: %s\n*/\n' "$higher" > "$TMP/data-machine/style.css"
