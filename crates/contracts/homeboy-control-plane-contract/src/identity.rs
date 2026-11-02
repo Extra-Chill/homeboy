@@ -16,6 +16,19 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+/// Derive a bounded control-plane identity from unbounded decision components.
+/// Length framing prevents ambiguous component boundaries. The namespace is
+/// hashed too, so every result is exactly 64 ASCII bytes, within all ID bounds.
+pub fn derived_control_plane_identity(namespace: &str, components: &[&str]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hash = Sha256::new();
+    for component in std::iter::once(namespace).chain(components.iter().copied()) {
+        hash.update((component.len() as u64).to_be_bytes());
+        hash.update(component.as_bytes());
+    }
+    format!("{:x}", hash.finalize())
+}
+
 macro_rules! opaque_identity {
     ($(#[$meta:meta])* $name:ident) => {
         $(#[$meta])*
@@ -164,6 +177,24 @@ mod tests {
         );
         let decoded: MissionId = serde_json::from_value(json).expect("deserialize");
         assert_eq!(decoded, mission);
+    }
+
+    #[test]
+    fn derived_identities_are_bounded_and_frame_decision_components() {
+        use super::derived_control_plane_identity as derive;
+        let long = "🦀".repeat(10_000);
+        for namespace in ["fleet-reconcile", "other"] {
+            let key = derive(namespace, &[&long, "timestamp", "runner_removed"]);
+            assert_eq!(key.len(), 64);
+            assert_eq!(
+                key,
+                derive(namespace, &[&long, "timestamp", "runner_removed"])
+            );
+            assert_ne!(key, derive(namespace, &[&long, "timestamp", "runner_idle"]));
+        }
+        assert_ne!(derive("a", &["b", "c"]), derive("a", &["bc"]));
+        assert_ne!(derive("a", &["b"]), derive("b", &["a"]));
+        assert_ne!(derive("a", &["b", "c"]), derive("a", &["c", "b"]));
     }
 
     #[test]

@@ -97,6 +97,8 @@ struct AutomaticRetentionControllerOutput {
     state_key: String,
     resume_command: &'static str,
     reconciliation: homeboy::agents::agent_task_service::AgentTaskReconcileReport,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    failure: Option<Value>,
     /// Which phases this pass ran and deferred; the controller record's
     /// cursor is `rotation.next_phase`.
     rotation: AutomaticRetentionRotation,
@@ -2055,7 +2057,9 @@ fn automatic_retention() -> CmdResult<Value> {
     // telling the operator another pass is owed (#12727).
     let cleanup_continuation_required =
         cleanup.output["continuation_required"] == true || !rotation.deferred.is_empty();
-    let status = if cleanup_exit_code == 0 {
+    let status = if reconciliation.failed > 0 {
+        "partial_failure"
+    } else if cleanup_exit_code == 0 {
         if runtime_tmp["status"] == "retained" {
             "partial_failure"
         } else if cleanup_continuation_required
@@ -2079,6 +2083,12 @@ fn automatic_retention() -> CmdResult<Value> {
         status,
         state_key,
         resume_command: "homeboy cleanup automatic-retention",
+        failure: reconciliation.failure_summary().map(|message| {
+            serde_json::json!({
+                "code": "cleanup.reconciliation_failed",
+                "message": message,
+            })
+        }),
         reconciliation,
         rotation,
         repo_artifacts,
