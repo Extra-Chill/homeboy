@@ -2892,6 +2892,7 @@ struct SelectedGateEnvironment {
     isolated_home: Option<PathBuf>,
     _cargo_target: Option<homeboy_core::cleanup::ManagedCargoTarget>,
     _scratch: Option<tempfile::TempDir>,
+    _rust_overlay: Option<tempfile::TempDir>,
 }
 
 impl SelectedGateEnvironment {
@@ -3186,11 +3187,15 @@ impl SelectedGateEnvironment {
                 None,
             )
         })?;
-        let overlay = home
-            .join(".homeboy-rust-cache")
-            .join(uuid::Uuid::new_v4().to_string());
+        let overlay_root = home.join(".homeboy-rust-cache");
+        fs::create_dir_all(&overlay_root)
+            .map_err(|error| Error::internal_io(error.to_string(), None))?;
+        let overlay_guard = tempfile::tempdir_in(&overlay_root)
+            .map_err(|error| Error::internal_io(error.to_string(), None))?;
+        let overlay = overlay_guard.path().to_path_buf();
+        self._rust_overlay = Some(overlay_guard);
         copy_tree_preserving_safe_symlinks(&cache.join("cargo"), &overlay.join("cargo"))?;
-        copy_tree_preserving_safe_symlinks(&cache.join("rustup"), &overlay.join("rustup"))?;
+        hydrate_gate_rustup(&cache.join("rustup"), &overlay.join("rustup"))?;
         self.values.insert(
             "CARGO_HOME".to_string(),
             overlay.join("cargo").display().to_string(),
@@ -3389,16 +3394,18 @@ fn hydrate_rust_cache_with_timeout(
         // the proxy itself lives under that new home. Seed the cache with a real
         // file rather than inheriting the host home into controller-owned state.
         let rustup_proxy = prepare_rustup_proxy(cache)?;
-        let rustup = run_rust_cache_command(
-            cwd,
-            cache,
-            &environment,
-            "install_toolchain",
-            &rustup_proxy,
-            &["toolchain", "install"],
-            timeout,
-        )?;
-        drop(rustup);
+        if !share_host_toolchain(cwd, cache, &rustup_proxy, timeout)? {
+            let rustup = run_rust_cache_command(
+                cwd,
+                cache,
+                &environment,
+                "install_toolchain",
+                &rustup_proxy,
+                &["toolchain", "install"],
+                timeout,
+            )?;
+            drop(rustup);
+        }
         let resolved = run_rust_cache_command(
             cwd,
             cache,
@@ -3441,6 +3448,101 @@ fn hydrate_rust_cache_with_timeout(
         timeout,
     )?;
     Ok(relative.to_path_buf())
+}
+
+/// Seed rustup with the runner's installed toolchain, when available. Resolve
+/// using the host homes but the checkout's toolchain selection; installation
+/// and all subsequent writable state remain isolated.
+fn share_host_toolchain(cwd: &Path, cache: &Path, proxy: &Path, timeout: Duration) -> Result<bool> {
+    let environment = ["HOME", "CARGO_HOME", "RUSTUP_HOME", "RUSTUP_TOOLCHAIN"]
+        .into_iter()
+        .filter_map(|name| {
+            std::env::var(name)
+                .ok()
+                .map(|value| (name.to_string(), value))
+        })
+        .collect();
+    let Ok(output) = run_rust_cache_command(
+        cwd,
+        cache,
+        &environment,
+        "resolve_host_toolchain",
+        proxy,
+        &["which", "cargo"],
+        timeout,
+    ) else {
+        return Ok(false);
+    };
+    let cargo = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+    let Some(toolchain) = cargo.parent().and_then(Path::parent) else {
+        return Ok(false);
+    };
+    // Only trust a complete, installed toolchain, not arbitrary proxy output.
+    if !cargo.is_absolute() || !cargo.is_file() || !toolchain.join("bin/rustc").is_file() {
+        return Ok(false);
+    }
+    let Some(name) = toolchain.file_name() else {
+        return Ok(false);
+    };
+    let directory = cache.join("rustup/toolchains");
+    fs::create_dir_all(&directory)
+        .and_then(|()| create_rust_cache_symlink(toolchain, &directory.join(name), true))
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("share host Rust toolchain".to_string()),
+            )
+        })?;
+    Ok(true)
+}
+
+/// Copy writable rustup state, but share each immutable installed toolchain.
+/// Canonical targets keep overlays independent of cache identity eviction.
+fn hydrate_gate_rustup(source: &Path, destination: &Path) -> Result<()> {
+    fs::create_dir_all(destination).map_err(|error| Error::internal_io(error.to_string(), None))?;
+    for entry in
+        fs::read_dir(source).map_err(|error| Error::internal_io(error.to_string(), None))?
+    {
+        let entry = entry.map_err(|error| Error::internal_io(error.to_string(), None))?;
+        let target = destination.join(entry.file_name());
+        if entry.file_name() == "toolchains" {
+            fs::create_dir_all(&target)
+                .map_err(|error| Error::internal_io(error.to_string(), None))?;
+            for toolchain in fs::read_dir(entry.path())
+                .map_err(|error| Error::internal_io(error.to_string(), None))?
+            {
+                let toolchain =
+                    toolchain.map_err(|error| Error::internal_io(error.to_string(), None))?;
+                let resolved = toolchain
+                    .path()
+                    .canonicalize()
+                    .map_err(|error| Error::internal_io(error.to_string(), None))?;
+                let destination = target.join(toolchain.file_name());
+                if toolchain
+                    .file_type()
+                    .map_err(|error| Error::internal_io(error.to_string(), None))?
+                    .is_symlink()
+                {
+                    create_rust_cache_symlink(&resolved, &destination, true)
+                        .map_err(|error| Error::internal_io(error.to_string(), None))?;
+                } else {
+                    // Cache-owned installs can be evicted while the gate runs.
+                    // Hardlinks retain their bytes without duplicating them.
+                    copy_rust_cache_tree(&resolved, &destination, &resolved, &destination, true)?;
+                }
+            }
+        } else if entry
+            .file_type()
+            .map_err(|error| Error::internal_io(error.to_string(), None))?
+            .is_dir()
+        {
+            copy_tree_preserving_safe_symlinks(&entry.path(), &target)?;
+        } else {
+            fs::copy(entry.path(), target)
+                .map_err(|error| Error::internal_io(error.to_string(), None))?;
+        }
+    }
+    Ok(())
 }
 
 /// Find the host `rustup` to proxy into the isolated gate cache.
@@ -3612,7 +3714,7 @@ fn copy_tree_preserving_safe_symlinks(source: &Path, destination: &Path) -> Resu
         )
         .with_hint(rust_cache_repair_command())
     })?;
-    copy_rust_cache_tree(source, destination, &source_root, destination)
+    copy_rust_cache_tree(source, destination, &source_root, destination, false)
 }
 
 fn copy_rust_cache_tree(
@@ -3620,6 +3722,7 @@ fn copy_rust_cache_tree(
     destination: &Path,
     source_root: &Path,
     destination_root: &Path,
+    hardlink_files: bool,
 ) -> Result<()> {
     fs::create_dir_all(destination).map_err(|error| {
         Error::internal_io(
@@ -3661,8 +3764,26 @@ fn copy_rust_cache_tree(
                 &destination_path,
                 source_root,
                 destination_root,
+                hardlink_files,
             )?;
         } else if file_type.is_file() {
+            let linked = if hardlink_files {
+                match fs::hard_link(&source_path, &destination_path) {
+                    Ok(()) => true,
+                    Err(error) if error.raw_os_error() == Some(libc::EXDEV) => false,
+                    Err(error) => {
+                        return Err(Error::internal_io(
+                            error.to_string(),
+                            Some("hardlink Rust toolchain".to_string()),
+                        ))
+                    }
+                }
+            } else {
+                false
+            };
+            if linked {
+                continue;
+            }
             fs::copy(&source_path, &destination_path).map_err(|error| {
                 Error::internal_io(
                     error.to_string(),
@@ -4093,6 +4214,7 @@ fn selected_gate_environment(
         hydrate_rust_cache: policy.hydrate_rust_cache,
         admitted_component_id: policy.admitted_component_id.clone(),
         isolated_home,
+        _rust_overlay: None,
         _cargo_target: None,
         _scratch: scratch,
     })
@@ -10466,6 +10588,43 @@ mod tests {
             toolchain_identity,
             rust_cache_identity(workspace.path()).expect("config identity")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rust_gate_overlay_shares_installed_toolchain_and_cleans_up() {
+        use std::os::unix::fs::{symlink, MetadataExt};
+
+        let runner = tempfile::tempdir().expect("runner");
+        let cache = tempfile::tempdir().expect("cache");
+        let gate = tempfile::tempdir().expect("gate");
+        let toolchain = runner.path().join(".rustup/toolchains/test");
+        fs::create_dir_all(toolchain.join("bin")).unwrap();
+        fs::write(toolchain.join("bin/rustc"), "shared compiler").unwrap();
+        fs::create_dir_all(cache.path().join("toolchains")).unwrap();
+        symlink(&toolchain, cache.path().join("toolchains/test")).unwrap();
+        fs::write(cache.path().join("settings.toml"), "isolated settings").unwrap();
+
+        let overlay = tempfile::tempdir_in(gate.path()).unwrap();
+        hydrate_gate_rustup(cache.path(), overlay.path()).unwrap();
+        let compiler = overlay.path().join("toolchains/test/bin/rustc");
+        assert_eq!(
+            compiler.canonicalize().unwrap(),
+            toolchain.join("bin/rustc")
+        );
+        assert_eq!(
+            fs::metadata(&compiler).unwrap().ino(),
+            fs::metadata(toolchain.join("bin/rustc")).unwrap().ino()
+        );
+        fs::write(overlay.path().join("settings.toml"), "gate settings").unwrap();
+        assert_eq!(
+            fs::read_to_string(cache.path().join("settings.toml")).unwrap(),
+            "isolated settings"
+        );
+        let overlay_path = overlay.path().to_path_buf();
+        drop(overlay);
+        assert!(!overlay_path.exists());
+        assert!(toolchain.join("bin/rustc").is_file());
     }
 
     #[cfg(unix)]
