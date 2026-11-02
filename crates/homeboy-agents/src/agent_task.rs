@@ -56,10 +56,9 @@ pub use policy::{
 };
 pub use request::{
     AgentTaskArtifactsPathProvenance, AgentTaskComponentContract, AgentTaskExecutionHandle,
-    AgentTaskExecutionHandleKind, AgentTaskExecutionState, AgentTaskExecutorCapabilities,
-    AgentTaskExecutorRequest, AgentTaskOutputDeclaration, AgentTaskOutputEvidenceRelationship,
-    AgentTaskPreparedWorkspace, AgentTaskProgress, AgentTaskProgressEvent, AgentTaskRequest,
-    AgentTaskStart,
+    AgentTaskExecutionHandleKind, AgentTaskExecutorCapabilities, AgentTaskExecutorRequest,
+    AgentTaskOutputDeclaration, AgentTaskOutputEvidenceRelationship, AgentTaskPreparedWorkspace,
+    AgentTaskRequest, AgentTaskStart,
 };
 pub use runtime_tools::{
     AgentTaskRuntimeTool, AgentTaskRuntimeToolLifecycle, AgentTaskRuntimeToolReadiness,
