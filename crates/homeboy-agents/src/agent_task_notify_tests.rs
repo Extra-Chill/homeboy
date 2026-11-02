@@ -73,37 +73,121 @@ fn failure_context() -> AgentTaskCookFailureContext {
 }
 
 #[test]
-fn successful_cook_carries_the_pull_request_link() {
-    let report = report(
-        "succeeded",
-        Some(serde_json::json!({
-            "status": "review_ready",
-            "pr_url": "https://example.test/pull/42",
-            "pr_action": "created",
-        })),
-    );
-    let payload = terminal_payload(&report, Some("homeboy"), 0);
-    assert_eq!(payload.kind, NotifyEventKind::Completed);
-    assert_eq!(payload.links.len(), 1);
-    assert_eq!(payload.links[0].url, "https://example.test/pull/42");
-    // The prose half must carry it too, for transports that only render text.
-    let body = payload.render_body();
-    assert!(body.contains("https://example.test/pull/42"), "{body}");
-    assert!(body.contains("Pull request: created"), "{body}");
-    assert!(body.contains("Component: homeboy"), "{body}");
+fn terminal_outcomes_lead_with_work_and_offer_only_useful_actions() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        for (status, code, title, facts, actions) in [
+            (
+                "succeeded",
+                0,
+                "✅ homeboy#42: Fix notifications",
+                vec!["Closes", "Model", "Gates"],
+                vec!["review", "details"],
+            ),
+            (
+                "gate_failed",
+                1,
+                "homeboy: Cook task — needs attention",
+                vec!["Stop reason", "Failure classification", "Gates"],
+                vec!["diagnose", "continue"],
+            ),
+            (
+                "cancelled",
+                1,
+                "homeboy: Cook task — cancelled",
+                vec!["Stop reason"],
+                vec!["details"],
+            ),
+        ] {
+            let success = status == "succeeded";
+            let mut report = report(status, success.then(|| json!({
+            "status": "review_ready", "title": "Fix notifications",
+            "pr_url": "https://github.com/Extra-Chill/homeboy/pull/42",
+            "pr_action": "created pull request", "ai_model": "gpt-6.1-sol",
+            "gate_results": [{"name": "lint", "status": "passed"}],
+            "review_dossier": {"source_relationships": [{"kind": "closes", "reference": "#41"}]}
+        })));
+            if !success {
+                report.stop_reason = Some("lint failed".to_string());
+                report.terminal_failure_classification = Some("gate_failure".to_string());
+                report.failure_context = Some(failure_context());
+            }
+            if status == "gate_failed" {
+                report.finalization =
+                    Some(json!({"gate_results": [{"name": "lint", "status": "failed"}]}));
+            }
+            if status == "cancelled" {
+                // A stale failure context must not offer recovery before materialization.
+                report.latest_run_id = None;
+                report.status = "durable_failure".to_string();
+                seed_run_with_route("cook-abc", "cancel-thread");
+                crate::agent_task_lifecycle::cancel_run("cook-abc", Some("operator cancellation"))
+                    .expect("cancel before materialization");
+                assert!(report.attempts.is_empty());
+            }
+            let payload = terminal_payload(&report, Some("homeboy"), code);
+            assert_eq!(payload.title.as_deref(), Some(title));
+            assert_eq!(
+                payload.subject.as_ref().unwrap().component.as_deref(),
+                Some("homeboy")
+            );
+            let labels: Vec<_> = payload
+                .facts
+                .iter()
+                .map(|fact| fact.label.as_str())
+                .collect();
+            for fact in facts {
+                assert!(labels.contains(&fact), "{status}: {labels:?}");
+            }
+            for absent in ["Status", "Attempts", "Completion", "Pull request"] {
+                assert!(!labels.contains(&absent), "{status}: {labels:?}");
+            }
+            if status == "cancelled" {
+                assert_eq!(labels, vec!["Stop reason"]);
+            }
+            assert_eq!(
+                payload
+                    .actions
+                    .iter()
+                    .map(|action| action.label.as_str())
+                    .collect::<Vec<_>>(),
+                actions
+            );
+            let body = payload.render_body();
+            assert!(body.starts_with(title), "{body}");
+            assert!(!body.contains("Batch:"), "{body}");
+            assert!(!body.contains("Attempt:"), "{body}");
+            assert_eq!(body.matches("cook-abc").count(), 1, "{body}");
+            assert!(!body.contains("--watch"), "{body}");
+            assert!(!body.contains("run-1"), "{body}");
+            if success {
+                assert!(
+                    body.contains("Next — review: https://github.com/Extra-Chill/homeboy/pull/42")
+                );
+                assert!(body.contains("lint passed"));
+                assert!(!labels.contains(&"Failure classification"));
+                assert!(!labels.contains(&"Stop reason"));
+            }
+            if status == "gate_failed" {
+                assert!(payload
+                    .facts
+                    .iter()
+                    .any(|fact| fact.label == "Gates" && fact.value.contains("lint failed")));
+                assert!(!labels.contains(&"Model"));
+                assert!(!labels.contains(&"Closes"));
+            }
+        }
+    });
 }
 
 #[test]
 fn intentional_no_change_terminal_notifications_match_policy_outcome() {
     let accepted = terminal_payload(&report("intentional_no_change", None), None, 0);
     assert_eq!(accepted.kind, NotifyEventKind::Completed);
-    assert!(accepted
-        .render_body()
-        .contains("Status: intentional_no_change"));
+    assert!(accepted.render_body().contains("succeeded"));
 
     let refused = terminal_payload(&report("no_candidate", None), None, 1);
     assert_eq!(refused.kind, NotifyEventKind::NeedsAttention);
-    assert!(refused.render_body().contains("Status: no_candidate"));
+    assert!(refused.render_body().contains("needs attention"));
 }
 
 #[test]
@@ -111,7 +195,7 @@ fn green_no_finalize_is_completed_without_a_pull_request_link() {
     let payload = terminal_payload(&report("green_no_finalize", None), None, 0);
     assert_eq!(payload.kind, NotifyEventKind::Completed);
     assert!(payload.links.is_empty());
-    assert!(payload.render_body().contains("Status: green_no_finalize"));
+    assert!(payload.render_body().contains("succeeded"));
 }
 
 /// #15881: a primary route skipped before dispatch is named in the terminal
@@ -139,27 +223,6 @@ fn terminal_notification_names_skipped_provider_routes() {
     // Without skips the notification gains no extra fact.
     let plain = terminal_payload(&report("succeeded", None), None, 0);
     assert!(!plain.render_body().contains("Skipped route:"),);
-}
-
-#[test]
-fn cancelled_cook_cannot_render_as_success_without_failure_recovery_actions() {
-    let mut cancelled = report("cancelled", None);
-    cancelled.stop_reason = Some("Cook was cancelled: operator replacement".to_string());
-    cancelled.terminal_phase = Some("cancellation".to_string());
-    cancelled.terminal_failure_classification = Some("cancelled".to_string());
-
-    let payload = terminal_payload(&cancelled, None, 1);
-
-    assert_eq!(payload.kind, NotifyEventKind::NeedsAttention);
-    let body = payload.render_body();
-    assert!(body.contains("Status: cancelled"), "{body}");
-    assert!(body.contains("operator replacement"), "{body}");
-    assert!(!body.contains("cook succeeded"), "{body}");
-    assert!(!cancelled.completed_successfully());
-    assert!(!payload
-        .actions
-        .iter()
-        .any(|action| action.command.contains("resume") || action.command.contains("recover")));
 }
 
 #[test]
@@ -1057,6 +1120,6 @@ fn pull_request_link_reads_every_tolerated_receipt_identity() {
         })),
     );
     let payload = terminal_payload(&report, None, 0);
-    assert_eq!(payload.links.len(), 1);
-    assert_eq!(payload.links[0].url, "https://example.test/pull/44");
+    assert_eq!(payload.actions[0].label, "review");
+    assert_eq!(payload.actions[0].command, "https://example.test/pull/44");
 }
