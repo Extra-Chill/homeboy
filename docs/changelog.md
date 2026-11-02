@@ -4,6 +4,21 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.443.5] - 2026-11-02
+
+### Changed
+- Fetch the release catalog once per upgrade and check its HTTP status
+- keep the tail of provider output when dependency hydration fails
+- Lab file transfer is SSH only; delete daemon /files/*
+- Delete dead pinned runtime-identity contract
+
+### Fixed
+- revalidate before acquisition and overlap extension refresh
+- resolve a registered component to the runner snapshot it runs in
+- revert Lab exec cwd projection from #17197
+- recover unreceipted staging intents by re-staging, not failing ambiguous
+- execute rig staging in materialized workspace
+
 ## [0.443.4] - 2026-11-02
 
 ### Changed
