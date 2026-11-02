@@ -50,7 +50,6 @@ pub(super) fn request(
         workspace_materialization: None,
         provider_defaults: BTreeMap::new(),
         pi_readiness: Default::default(),
-        extra: BTreeMap::new(),
     };
     let mut command_parts = command.split_whitespace();
     let mut program = command_parts.next().unwrap_or("pi");

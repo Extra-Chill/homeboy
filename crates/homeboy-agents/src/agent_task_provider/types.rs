@@ -85,8 +85,6 @@ pub struct AgentTaskExecutorProvider {
     pub provider_defaults: BTreeMap<String, Value>,
     #[serde(default)]
     pub pi_readiness: PiReadinessConfig,
-    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub extra: BTreeMap<String, Value>,
 }
 
 /// Configuration for the built-in Pi readiness probe.

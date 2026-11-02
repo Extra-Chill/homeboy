@@ -413,7 +413,7 @@ fn provider_manifest_rejects_deprecated_string_command() {
 }
 
 #[test]
-fn provider_manifest_preserves_unknown_metadata_on_export() {
+fn provider_manifest_ignores_unknown_metadata_on_export() {
     let provider: AgentTaskExecutorProvider = serde_json::from_value(json!({
         "id": "metadata.provider",
         "backend": "metadata",
@@ -429,10 +429,6 @@ fn provider_manifest_preserves_unknown_metadata_on_export() {
     .expect("provider manifest");
 
     assert_eq!(
-        provider.extra["provider_metadata"]["runtime"],
-        "provider-owned"
-    );
-    assert_eq!(
         provider
             .workspace_materialization
             .as_ref()
@@ -442,7 +438,7 @@ fn provider_manifest_preserves_unknown_metadata_on_export() {
     );
 
     let exported = serde_json::to_value(&provider).expect("provider export");
-    assert_eq!(exported["provider_metadata"]["runtime"], "provider-owned");
+    assert!(exported.get("provider_metadata").is_none());
     assert_eq!(
         exported["workspace_materialization"]["provider_workspace_mode"],
         "linked"
