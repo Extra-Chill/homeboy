@@ -73,6 +73,7 @@
       "bash scripts/lint/lint-producers-smoke.sh",
       "bash scripts/lint/phpcbf-readonly-smoke.sh",
       "bash scripts/lint/phpstan-scoped-smoke.sh",
+      "bash scripts/lint/missing-toolchain-smoke.sh",
       "bash scripts/lint/scoped-fix-only-smoke.sh",
       "bash scripts/lint/sidecar-writer-missing-exit-smoke.sh",
       "bash tests/phpstan-wordpress-api-stubs-smoke.sh",

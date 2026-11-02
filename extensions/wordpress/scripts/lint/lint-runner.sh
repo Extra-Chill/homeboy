@@ -385,7 +385,7 @@ fi
 
 # Validate tools exist
 if [ ! -f "$PHPCS_BIN" ]; then
-    echo "Error: phpcs not found at $PHPCS_BIN"
+    echo "Error: phpcs not found at $PHPCS_BIN. Run: homeboy extension setup wordpress" >&2
     exit 1
 fi
 
@@ -1164,7 +1164,7 @@ else
     ESLINT_EXIT=2
 fi
 
-# Run PHPStan in warn-only mode (optional static analysis)
+# Run PHPStan and propagate failures into the aggregate lint result.
 run_phpstan() {
     local phpstan_runner="${EXTENSION_PATH}/scripts/lint/phpstan-runner.sh"
     if [ ! -f "$phpstan_runner" ]; then
