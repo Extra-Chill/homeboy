@@ -1022,3 +1022,68 @@ fn scoped_lint_run_dir_disposes_success_and_failure_explicitly() {
     assert!(failure_path.exists());
     std::env::remove_var("HOMEBOY_RUNTIME_TMPDIR");
 }
+
+#[test]
+fn moved_component_findings_are_inherited_but_new_rules_still_block() {
+    homeboy_core::test_support::with_isolated_home(|home| {
+        let repo = tempfile::tempdir().unwrap();
+        let source = repo.path().join("source");
+        let destination = repo.path().join("destination");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::create_dir(&destination).unwrap();
+        let component = routed_lint_component(
+            home.path(),
+            &destination,
+            r#"#!/bin/sh
+cd "$HOMEBOY_COMPONENT_PATH"
+file="$(find . -name '*.php' -type f | head -1 | cut -c3-)"
+printf '[{"tool":"phpcs","message":"standing","file":"%s","fingerprint":"%s:1:standing"}]' "$file" "$file" > "$HOMEBOY_LINT_FINDINGS_FILE"
+if grep -q introduced "$file"; then
+  printf '[{"tool":"phpcs","message":"new rule","file":"%s","fingerprint":"%s:1:new"},{"tool":"phpcs","message":"standing","file":"%s","fingerprint":"%s:1:standing"}]' "$file" "$file" "$file" "$file" > "$HOMEBOY_LINT_FINDINGS_FILE"
+fi
+exit 1
+"#,
+        );
+        let portable = crate::component::portable_json(&component).unwrap();
+        std::fs::write(source.join("homeboy.json"), portable.to_string()).unwrap();
+        std::fs::write(source.join("old.php"), "<?php // standing warning\n").unwrap();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .current_dir(repo.path())
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "test@example.com"]);
+        git(&["config", "user.name", "Test"]);
+        git(&["add", "."]);
+        git(&["commit", "-qm", "base"]);
+        git(&["branch", "baseline"]);
+        git(&["mv", "source/old.php", "destination/new.php"]);
+        git(&["commit", "-qm", "move"]);
+        let run = || {
+            let mut args = lint_args();
+            args.changed_since = Some("baseline".into());
+            args.precomputed_changed_files = Some(vec!["destination/new.php".into()]);
+            run_main_lint_workflow(&component, &destination, args, &RunDir::create().unwrap())
+                .unwrap()
+        };
+        let moved = run();
+        assert_eq!(moved.exit_code, 0);
+        assert!(moved.baseline_comparison.unwrap().new_items.is_empty());
+        std::fs::write(
+            destination.join("new.php"),
+            "<?php // standing warning\n// introduced\n",
+        )
+        .unwrap();
+        let changed = run();
+        assert_eq!(changed.exit_code, 1, "{changed:?}");
+        assert_eq!(changed.baseline_comparison.unwrap().new_items.len(), 1);
+    });
+}

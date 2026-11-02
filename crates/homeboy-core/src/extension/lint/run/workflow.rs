@@ -809,6 +809,49 @@ pub(super) fn process_changed_since_baseline(
 
     let baseline_component_path = checkout.join(component_suffix);
     let baseline_result = (|| {
+        let groups = crate::extension::renamed_baseline::source_groups(
+            &repo_root,
+            &checkout,
+            component_suffix,
+            &base_ref,
+            &changed_files,
+        )?;
+        let mut inherited = Vec::new();
+        for (owner, paths) in groups {
+            let owner_path = checkout.join(&owner);
+            let Some(source_component) = crate::component::try_discover_from_portable(&owner_path)?
+            else {
+                continue;
+            };
+            let mut source_args = args.clone();
+            source_args.path_override = Some(owner_path.to_string_lossy().into_owned());
+            source_args.changed_only = true;
+            source_args.changed_since = None;
+            source_args.precomputed_changed_files = Some(
+                paths
+                    .iter()
+                    .map(|(old, _)| owner.join(old).to_string_lossy().into_owned())
+                    .collect(),
+            );
+            source_args.baseline_flags.ignore_baseline = true;
+            let source_run_dir = RunDir::create()?;
+            let result = run_main_lint_workflow(
+                &source_component,
+                &owner_path,
+                source_args,
+                &source_run_dir,
+            )?;
+            if result.harness_error || result.infrastructure_failure {
+                return Err(homeboy_core::Error::git_command_failed(format!(
+                    "rename source baseline unavailable for {}",
+                    owner_path.display()
+                )));
+            }
+            inherited.extend(crate::extension::renamed_baseline::rewrite(
+                result.findings.unwrap_or_default(),
+                &paths,
+            ));
+        }
         // A component introduced or moved after the merge base has no findings
         // at its current path in that ref. Do not invoke extensions with a
         // nonexistent working directory (including their environment provider).
@@ -818,7 +861,7 @@ pub(super) fn process_changed_since_baseline(
                 Some("lint.changed_since_baseline".to_string()),
             )
         })? {
-            return Ok(Vec::new());
+            return Ok(inherited);
         }
         let mut baseline_component = component.clone();
         baseline_component.local_path = baseline_component_path.to_string_lossy().to_string();
@@ -826,7 +869,12 @@ pub(super) fn process_changed_since_baseline(
         baseline_args.path_override = Some(baseline_component.local_path.clone());
         baseline_args.changed_only = true;
         baseline_args.changed_since = None;
-        baseline_args.precomputed_changed_files = Some(changed_files);
+        baseline_args.precomputed_changed_files = Some(
+            changed_files
+                .into_iter()
+                .map(|file| component_suffix.join(file).to_string_lossy().into_owned())
+                .collect(),
+        );
         baseline_args.baseline_flags.ignore_baseline = true;
         let baseline_run_dir = RunDir::create()?;
         run_main_lint_workflow(
@@ -835,7 +883,10 @@ pub(super) fn process_changed_since_baseline(
             baseline_args,
             &baseline_run_dir,
         )
-        .map(|result| result.findings.unwrap_or_default())
+        .map(|result| {
+            inherited.extend(result.findings.unwrap_or_default());
+            inherited
+        })
     })();
     let remove = Command::new("git")
         .current_dir(&repo_root)
