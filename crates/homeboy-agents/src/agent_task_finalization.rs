@@ -436,6 +436,7 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
     let proof = build_finalization_proof(&options, options.normalized_gate_results.clone());
     let mut intent =
         build_pr_publication_intent(&options, &head, &changed_files, proof.clone(), &base);
+    intent.target.publication_route = backend.publication_route(&options.path)?;
     validate_publication_intent(&intent)?;
 
     if changed_files.is_empty() {
@@ -584,7 +585,12 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
                 &changed_files,
                 &merged,
             )?;
-            if let Err(error) = validate_publication_binding(&binding, commit_sha, &changed_files) {
+            if let Err(error) = validate_publication_binding(
+                &binding,
+                commit_sha,
+                &changed_files,
+                intent.target.publication_route.as_ref(),
+            ) {
                 return Err(append_binding_error(
                     publication_drift_error(
                         commit_sha,
@@ -704,7 +710,12 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
             ));
         }
     };
-    if let Err(error) = validate_publication_binding(&binding, commit_sha, &changed_files) {
+    if let Err(error) = validate_publication_binding(
+        &binding,
+        commit_sha,
+        &changed_files,
+        intent.target.publication_route.as_ref(),
+    ) {
         return Err(publication_drift_with_cleanup_error(
             backend,
             &options.path,
@@ -1296,6 +1307,7 @@ fn validate_publication_binding(
     binding: &AgentTaskPublicationBinding,
     candidate_sha: &str,
     changed_files: &[String],
+    route: Option<&AgentTaskPublicationRoute>,
 ) -> Result<()> {
     if binding.candidate_sha != candidate_sha
         || binding.remote_sha != candidate_sha
@@ -1310,7 +1322,11 @@ fn validate_publication_binding(
     }
     if binding.candidate_tree.is_empty()
         || binding.repository.is_empty()
-        || binding.head_repository != binding.repository
+        || !binding.head_repository.eq_ignore_ascii_case(
+            route
+                .map(|route| route.head_repository.as_str())
+                .unwrap_or(&binding.repository),
+        )
         || normalize_changed_files(&binding.changed_files) != normalize_changed_files(changed_files)
     {
         return Err(Error::validation_invalid_argument(
@@ -1467,6 +1483,7 @@ fn build_pr_publication_intent(
         action: "review_request".to_string(),
         target: AgentTaskPublicationTarget {
             kind: "code_review".to_string(),
+            publication_route: None,
             adapter: Some("github_pull_request".to_string()),
             path: Some(options.path.clone()),
             base: Some(options.base.clone()),

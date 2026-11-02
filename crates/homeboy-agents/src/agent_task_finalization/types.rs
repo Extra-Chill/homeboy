@@ -128,6 +128,8 @@ pub struct AgentTaskPublicationIntent {
 pub struct AgentTaskPublicationTarget {
     pub kind: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publication_route: Option<AgentTaskPublicationRoute>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub adapter: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
@@ -172,6 +174,26 @@ pub struct AgentTaskPublicationGitTracking {
     pub remote: String,
     pub upstream_ref: String,
     pub verified_remote_sha: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskPublicationRoute {
+    pub route: String,
+    pub push_remote: String,
+    pub head_repository: String,
+}
+
+impl AgentTaskPublicationRoute {
+    pub fn pr_head(&self, branch: &str) -> String {
+        if self.route == "fork" {
+            format!(
+                "{}:{branch}",
+                self.head_repository.split('/').next().unwrap_or_default()
+            )
+        } else {
+            branch.to_string()
+        }
+    }
 }
 
 /// Immutable identities observed from Git and GitHub after publication.
@@ -389,6 +411,9 @@ pub struct AgentTaskPrDurableGateProof {
 }
 
 pub trait AgentTaskPrFinalizationBackend {
+    fn publication_route(&mut self, _path: &str) -> Result<Option<AgentTaskPublicationRoute>> {
+        Ok(None)
+    }
     fn hydrate_run(&mut self, run_id: &str) -> Result<RunLifecycleRecord>;
     fn hydrate_gate_proof(&mut self, run_id: &str) -> Result<AgentTaskPrDurableGateProof>;
     fn hydrate_optional_gate_proof(
