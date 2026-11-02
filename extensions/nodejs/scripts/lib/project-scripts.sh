@@ -89,7 +89,7 @@ EOF
 homeboy_project_select_package_manager() {
     local _manifest="$1"
     local _root="$2"
-    MANIFEST_FILE="$_manifest" PROJECT_ROOT="$_root" node <<'NODE'
+    MANIFEST_FILE="$_manifest" PROJECT_ROOT="$_root" NPM_WORKSPACE_HELPER="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/npm-workspace.cjs" node <<'NODE'
 const fs = require('fs');
 const path = require('path');
 const manifest = JSON.parse(fs.readFileSync(process.env.MANIFEST_FILE, 'utf8'));
@@ -110,7 +110,10 @@ for (const manager of managers) {
     const selection = manager.selection || {};
     if (selection.default) fallback = manager;
     const files = selection.files || [];
-    const selectedRoot = selection.search === 'upward' ? findUpward(files) : (files.some((file) => fs.existsSync(path.join(root, file))) ? root : null);
+    let selectedRoot = selection.search === 'upward' ? findUpward(files) : (files.some((file) => fs.existsSync(path.join(root, file))) ? root : null);
+    if (!selectedRoot && manager.id === 'npm') {
+        selectedRoot = require(process.env.NPM_WORKSPACE_HELPER).workspaceRoot(root, files);
+    }
     if (selectedRoot) {
         console.log(`${manager.id}\t${selectedRoot}`);
         process.exit(0);
@@ -290,6 +293,15 @@ homeboy_project_exec() {
     (cd "$HOMEBOY_PROJECT_ROOT" && $HOMEBOY_PROJECT_EXEC_CMD "$_binary" "$@")
 }
 
+# Release scripts keep cwd at the member; only dependency hydration moves up.
+homeboy_project_ensure_workspace_dependencies() {
+    homeboy_project_init --ecosystem nodejs --path "$PWD"
+    if [ "$HOMEBOY_PROJECT_PACKAGE_MANAGER" = npm ] \
+        && [ "$HOMEBOY_PROJECT_DEPENDENCY_ROOT" != "$HOMEBOY_PROJECT_ROOT" ]; then
+        homeboy_project_ensure_dependencies >&2
+    fi
+}
+
 homeboy_project_ensure_dependencies() {
     local _dir="${HOMEBOY_PROJECT_DEPENDENCY_ROOT:-${HOMEBOY_PROJECT_ROOT:-}}"
     if [ -z "$_dir" ]; then
@@ -333,7 +345,13 @@ homeboy_project_ensure_dependencies() {
             npm) _lockfile="package-lock.json" ;;
             composer) _lockfile="composer.lock" ;;
         esac
-        if [ -n "$_lockfile" ] \
+        if [ "$HOMEBOY_PROJECT_PACKAGE_MANAGER" = npm ] && [ -f "$_dir/npm-shrinkwrap.json" ]; then
+            _lockfile="npm-shrinkwrap.json"
+        fi
+        if [ "$HOMEBOY_PROJECT_PACKAGE_MANAGER" = npm ] \
+            && [ "$HOMEBOY_PROJECT_DEPENDENCY_ROOT" != "$HOMEBOY_PROJECT_ROOT" ]; then
+            (cd "$_dir" && $_command)
+        elif [ -n "$_lockfile" ] \
             && [ -f "$_dir/$_lockfile" ] \
             && command -v git >/dev/null 2>&1 \
             && git -C "$_dir" rev-parse --is-inside-work-tree >/dev/null 2>&1 \

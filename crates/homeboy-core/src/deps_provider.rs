@@ -975,6 +975,39 @@ enum DependencyAdapterOutputKind {
     Directory,
 }
 
+/// Find the nearest npm workspace that owns this member and has a lockfile.
+fn npm_workspace_root(member: &Path, lockfiles: &[String]) -> Option<PathBuf> {
+    let member = fs::canonicalize(member).ok()?;
+    member.ancestors().skip(1).find_map(|root| {
+        if !lockfiles.iter().any(|file| root.join(file).is_file()) {
+            return None;
+        }
+        let manifest: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(root.join("package.json")).ok()?).ok()?;
+        let workspaces = manifest.get("workspaces")?;
+        let patterns = workspaces
+            .as_array()
+            .or_else(|| workspaces.get("packages")?.as_array())?;
+        let relative = member.strip_prefix(root).ok()?.to_str()?;
+        patterns
+            .iter()
+            .filter_map(|pattern| pattern.as_str())
+            .any(|pattern| {
+                glob::Pattern::new(pattern.trim_start_matches("./").trim_end_matches('/'))
+                    .is_ok_and(|pattern| {
+                        pattern.matches_with(
+                            relative,
+                            glob::MatchOptions {
+                                require_literal_separator: true,
+                                ..Default::default()
+                            },
+                        )
+                    })
+            })
+            .then(|| root.to_path_buf())
+    })
+}
+
 impl AdapterPackageManager {
     fn selection_root(&self, path: &Path) -> Option<PathBuf> {
         let matches = |directory: &Path| {
@@ -988,7 +1021,13 @@ impl AdapterPackageManager {
                 .ancestors()
                 .find(|directory| matches(directory))
                 .map(Path::to_path_buf),
-            _ => matches(path).then(|| path.to_path_buf()),
+            _ => matches(path).then(|| path.to_path_buf()).or_else(|| {
+                // npm workspaces share the root lockfile, but package identity
+                // and update commands must continue to address the member.
+                (self.id == "npm")
+                    .then(|| npm_workspace_root(path, &self.selection.files))
+                    .flatten()
+            }),
         }
     }
 }
@@ -2403,6 +2442,55 @@ esac
             assert_eq!(plan.install.argv(), vec!["sh", "-c", "npm ci"]);
             assert_eq!(plan.install.cwd, project.path());
         });
+    }
+
+    #[test]
+    fn npm_workspace_install_keeps_member_identity_and_prefers_member_lockfile() {
+        let workspace = tempdir().unwrap();
+        let member = workspace.path().join("packages/client");
+        fs::create_dir_all(&member).unwrap();
+        fs::write(
+            member.join("package.json"),
+            r#"{"name":"client","dependencies":{"example":"1"}}"#,
+        )
+        .unwrap();
+        fs::write(workspace.path().join("package-lock.json"), "{}").unwrap();
+        let adapter = read_installed_dependency_adapter(Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../extensions/nodejs/dependency-adapters/examples/nodejs.json"
+        )))
+        .unwrap();
+        for workspaces in [r#"["packages/*"]"#, r#"{"packages":["packages/*"]}"#] {
+            fs::write(
+                workspace.path().join("package.json"),
+                format!(r#"{{"workspaces":{workspaces}}}"#),
+            )
+            .unwrap();
+            let selected = adapter.providers(&member).remove(0);
+            assert_eq!(selected.install_path, workspace.path());
+            assert_eq!(selected.project_path, member);
+            assert_eq!(selected.package_identity().unwrap(), vec!["client"]);
+            assert!(selected.has_declared_lockfile());
+            // Exercise the same lockfile gate as release preflight without npm/network.
+            let provider = AdapterDependencyProvider { adapter: selected };
+            let command = AdapterCommand {
+                command: "test -f package-lock.json".into(),
+                requires_lockfile: true,
+                ..serde_json::from_str("{\"command\":\"true\"}").unwrap()
+            };
+            provider.run(&command, "install").unwrap();
+        }
+        fs::write(member.join("package-lock.json"), "{}").unwrap();
+        assert_eq!(adapter.providers(&member)[0].install_path, member);
+        fs::remove_file(member.join("package-lock.json")).unwrap();
+        fs::write(
+            workspace.path().join("package.json"),
+            r#"{"workspaces":["other/*"]}"#,
+        )
+        .unwrap();
+        let selected = adapter.providers(&member).remove(0);
+        assert_eq!(selected.install_path, member);
+        assert!(!selected.has_declared_lockfile());
     }
 
     #[test]

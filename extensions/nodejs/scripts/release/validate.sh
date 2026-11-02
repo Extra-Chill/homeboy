@@ -17,6 +17,9 @@ if [[ "$(node -p "require('./package.json').private===true")" == "true" ]]; then
   exit 0
 fi
 
+source "$(dirname "${BASH_SOURCE[0]}")/../lib/project-scripts.sh"
+homeboy_project_ensure_workspace_dependencies
+
 # Check if a validate script exists
 has_validate=$(node -e "
   const pkg = require('./package.json');
