@@ -346,6 +346,7 @@ fn advance(
 /// previous instance is still running. Called by the admission owner's
 /// orchestration tick.
 pub fn admit_due(store: &JobStore, now_ms: u64) -> Vec<Value> {
+    super::recover_controller_jobs(store);
     let Ok(cadences) = list() else {
         return Vec::new();
     };
@@ -361,7 +362,7 @@ fn admit_one(store: &JobStore, cadence: Cadence, now_ms: u64) -> Result<Value> {
     let workflow = cadence.workflow.clone();
     // A crash left this slot pending: complete it where it was admitted.
     if let Some(pending) = cadence.pending.clone() {
-        let admitted = if instance_activity(store, &pending.instance).is_some() {
+        let admitted = if instance_activity(store, &pending.instance)?.is_some() {
             Ok("existing")
         } else {
             admit_slot(
@@ -372,10 +373,20 @@ fn admit_one(store: &JobStore, cadence: Cadence, now_ms: u64) -> Result<Value> {
         finish(&workflow, due, &pending, &admitted)?;
         return Ok(fired(&workflow, &pending.instance, &admitted));
     }
-    let previous_active = cadence
+    let previous_active = match cadence
         .last_instance
         .as_deref()
-        .is_some_and(|instance| instance_activity(store, instance) == Some(true));
+        .map(|instance| instance_activity(store, instance))
+        .transpose()
+    {
+        Ok(activity) => activity.flatten() == Some(true),
+        Err(error) => {
+            advance(&workflow, due, |cadence| {
+                cadence.last_error = Some(error.message.clone())
+            })?;
+            return Err(error);
+        }
+    };
     match decide(&cadence, now_ms, previous_active) {
         Decision::NotDue => Ok(Value::Null),
         Decision::Skip {
@@ -383,6 +394,21 @@ fn admit_one(store: &JobStore, cadence: Cadence, now_ms: u64) -> Result<Value> {
             next_due_ms,
         } => {
             advance(&workflow, due, |cadence| {
+                if let Some(job) = cadence
+                    .last_instance
+                    .as_deref()
+                    .and_then(|instance| store.controller_job_for_key(instance))
+                {
+                    if cadence
+                        .last_skipped_at_ms
+                        .is_some_and(|last| job.updated_at_ms <= last)
+                    {
+                        cadence.last_error = Some(
+                            "previous instance has made no progress since the last skipped slot"
+                                .into(),
+                        );
+                    }
+                }
                 cadence.skipped += 1;
                 cadence.last_skipped_at_ms = Some(slot_ms);
                 cadence.next_due_ms = next_due_ms;
@@ -453,10 +479,8 @@ fn admit_slot(store: &JobStore, request: &WorkflowJobRequest) -> Admission {
 
 /// Whether `instance` is running (`Some(true)`), terminal (`Some(false)`), or
 /// unknown (`None`) in the daemon's one job store.
-fn instance_activity(store: &JobStore, instance: &str) -> Option<bool> {
-    store
-        .controller_job_for_key(instance)
-        .map(|job| !job.status.is_terminal())
+fn instance_activity(store: &JobStore, instance: &str) -> Result<Option<bool>> {
+    store.controller_instance_activity(instance)
 }
 
 // ---------------------------------------------------------------------------

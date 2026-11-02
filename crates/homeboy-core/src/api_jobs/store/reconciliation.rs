@@ -26,6 +26,100 @@ use crate::api_jobs::types::DaemonLinkedDurableRunState;
 use crate::error::{Error, Result};
 
 impl JobStore {
+    /// Adopt pre-scope controllers only after the caller proves this exact
+    /// lease's owner absent while holding the daemon owner lock.
+    pub fn adopt_scopeless_controller_jobs(&self, dead_lease_id: &str) -> Result<()> {
+        let Some(scope) = self.daemon_scope.as_ref() else {
+            return Ok(());
+        };
+        self.durable_transaction(|inner| {
+            for stored in inner.jobs.values_mut().filter(|stored| {
+                stored.daemon_scope.is_none()
+                    && stored.controller_job.is_some()
+                    && !stored.job.status.is_terminal()
+                    && stored.job.daemon_lease_id.as_deref() == Some(dead_lease_id)
+            }) {
+                let ownership = stored_job_execution_liveness(stored, &local_child_liveness);
+                let controller = stored.controller_job.as_ref().expect("controller exists");
+                let invalid = crate::daemon::controller_job_driver::driver(
+                    &controller.job_type,
+                    controller.version,
+                )
+                .map_err(|_| "controller_driver_missing")
+                .and_then(|driver| {
+                    driver
+                        .execution_owner(&controller.request, controller.checkpoint.as_ref())
+                        .map_err(|_| "controller_request_invalid")
+                });
+                if invalid.is_ok()
+                    && matches!(
+                        ownership.state,
+                        Some(LocalChildLiveness::Live | LocalChildLiveness::Unsupported(_))
+                    )
+                {
+                    continue;
+                }
+                stored.daemon_scope = Some(scope.clone());
+                let now = timestamp_ms();
+                let reason = if let Err(reason) = invalid {
+                    stored.job.status = JobStatus::Failed;
+                    stored.job.finished_at_ms = Some(now);
+                    stored.job.stale_reason = Some(reason.into());
+                    reason
+                } else {
+                    "controller_adopted_after_owner_death"
+                };
+                stored.job.updated_at_ms = now;
+                let sequence = self.next_event_sequence.fetch_add(1, Ordering::SeqCst) + 1;
+                stored.events.push(JobEvent {
+                    sequence,
+                    job_id: stored.job.id,
+                    kind: JobEventKind::Status,
+                    timestamp_ms: now,
+                    message: Some("scope-less controller adopted after owner death".into()),
+                    data: Some(serde_json::json!({
+                        "reason": reason,
+                        "status": stored.job.status,
+                        "daemon_lease_id": dead_lease_id,
+                    })),
+                });
+                apply_event_retention(&mut stored.events, self.event_retention_limit());
+                stored.job.event_count = stored.events.len();
+            }
+            Ok(())
+        })
+    }
+
+    /// Overlap requires a controller this store can advance, not merely a
+    /// nonterminal row in the shared ledger. Unowned work requires repair.
+    pub(crate) fn controller_instance_activity(&self, instance: &str) -> Result<Option<bool>> {
+        let Some(job) = self.controller_job_for_key(instance) else {
+            return Ok(None);
+        };
+        if job.status.is_terminal() {
+            return Ok(Some(false));
+        }
+        let advanceable = {
+            let inner = self.inner.lock().expect("job store mutex poisoned");
+            inner.jobs.get(&job.id).is_some_and(|stored| {
+                self.owns(stored)
+                    && !matches!(
+                        stored_job_execution_liveness(stored, &local_child_liveness).state,
+                        Some(LocalChildLiveness::Unsupported(_))
+                    )
+            })
+        };
+        if advanceable {
+            return Ok(Some(true));
+        }
+        Err(Error::validation_invalid_argument(
+            "instance",
+            "cadence blocked by an instance this daemon cannot advance; owner reconciliation required",
+            Some(instance.to_string()),
+            None,
+        ))
+    }
+
     pub fn daemon_lease_job_diagnostics(
         &self,
         expected_lease_id: &str,
