@@ -76,6 +76,18 @@ fn disposable_overlapping_dependencies_build_once_and_reuse_content_cache() {
             .unwrap()
             .unwrap();
         let original_key = cache::content_key(&community).expect("clean content key");
+        // Deploy preparation carries a reduced component; a target binding must
+        // not move the key away from the one the build stored.
+        let bound = Component {
+            remote_path: "wp-content/plugins/community".into(),
+            remote_url: Some("/srv/checkout".into()),
+            changelog_target: Some("docs/CHANGELOG.md".into()),
+            ..community.clone()
+        };
+        assert_eq!(
+            cache::content_key(&bound).as_deref(),
+            Some(original_key.as_str())
+        );
         community
             .env
             .insert("HOMEBOY_BUILD_SOURCE_DISPOSABLE".into(), "1".into());
