@@ -10,6 +10,7 @@ pub mod lint;
 mod manifest_sidecar;
 pub mod readiness;
 pub mod recipe_run_api;
+pub(crate) mod renamed_baseline;
 pub mod resolve;
 pub(crate) mod root_manifest;
 pub mod self_check;
