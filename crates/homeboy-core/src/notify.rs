@@ -477,15 +477,44 @@ pub fn dispatch(event: &NotifyEvent) -> NotifyOutcome {
         Ok(output) => {
             let delivered = output.status.success();
             let result = parse_transport_result(&output.stdout);
+            // Missing transport configuration is not an undeliverable event.
+            // Keep the result/error for configuration diagnostics, but give all
+            // producers the same disposition as an undeclared transport.
+            let not_configured = !delivered
+                && terminal_rejection_result(result.as_ref())
+                    .is_some_and(|rejection| rejection.reason_code == "not_configured");
+            if not_configured {
+                // Configuration warnings belong to the transport, not each
+                // event. A long-lived observer reports each missing field once.
+                static WARNED: std::sync::LazyLock<
+                    std::sync::Mutex<std::collections::HashSet<(String, Option<String>)>>,
+                > = std::sync::LazyLock::new(|| {
+                    std::sync::Mutex::new(std::collections::HashSet::new())
+                });
+                let rejection = terminal_rejection_result(result.as_ref()).unwrap();
+                if let Ok(mut warned) = WARNED.lock() {
+                    if warned.insert((transport_id.clone(), rejection.validation_field.clone())) {
+                        eprintln!(
+                            "Warning: notification transport `{transport_id}` is not configured ({}): {}",
+                            rejection.validation_field.as_deref().unwrap_or("configuration"),
+                            transport_failure_message(&output)
+                        );
+                    }
+                }
+            }
             NotifyOutcome {
                 delivered,
                 event_kind: event.kind,
-                delivery: NotifyDelivery::Transport {
-                    extension_id: extension.id.clone(),
-                    transport_id,
-                    command: argv,
-                    exit_code: output.status.code(),
-                    payload_env: payload_env_names,
+                delivery: if not_configured {
+                    NotifyDelivery::NotConfigured
+                } else {
+                    NotifyDelivery::Transport {
+                        extension_id: extension.id.clone(),
+                        transport_id,
+                        command: argv,
+                        exit_code: output.status.code(),
+                        payload_env: payload_env_names,
+                    }
                 },
                 error: (!delivered).then(|| transport_failure_message(&output)),
                 result,
