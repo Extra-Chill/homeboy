@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.54.1] - 2026-11-02
+
+### Fixed
+- exclude wp-config.php from Lab source snapshots
+
 ## [3.54.0] - 2026-11-01
 
 ### Added
