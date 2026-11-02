@@ -4,6 +4,17 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.444.14] - 2026-11-02
+
+### Changed
+- Prevent gate commands from inheriting runner-job identity
+- Isolate test gates from the operator store; fail closed on ambient store resolution
+
+### Fixed
+- resolve active scope from admitted Cook workspace bindings
+- re-evaluate stale scratch recovery during cleanup apply
+- Fix Cook cancellation during live promotion verification
+
 ## [0.444.13] - 2026-11-02
 
 ### Fixed
