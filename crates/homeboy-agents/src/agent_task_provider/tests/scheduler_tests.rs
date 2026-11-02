@@ -685,6 +685,14 @@ fn provider_empty_stdout_records_failed_run_with_executor_evidence() {
         .unwrap()
         .phase_spans(run_id)
         .unwrap();
+    assert_eq!(
+        spans
+            .spans
+            .iter()
+            .filter(|span| span.id == "provider")
+            .count(),
+        1
+    );
     let command = spans
         .spans
         .iter()

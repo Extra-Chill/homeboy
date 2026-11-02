@@ -165,24 +165,38 @@ pub(crate) fn runs_hotspots(
 ) -> CmdResult<RunsOutput> {
     let limit = args.limit.clamp(1, 500);
     if args.coverage {
-        if args.run_ids.is_empty()
+        if (args.run_ids.is_empty() && args.kind.is_none())
             || !args.baseline_runs.is_empty()
             || !args.candidate_runs.is_empty()
-            || args.kind.is_some()
-            || args.component.is_some()
+            || (!args.run_ids.is_empty() && (args.kind.is_some() || args.component.is_some()))
             || args.homeboy_version.is_some()
             || args.baseline_version.is_some()
             || args.candidate_version.is_some()
         {
             return Err(Error::validation_invalid_argument(
                 "coverage",
-                "coverage requires positional run ids and cannot be combined with cohort filters",
+                "coverage requires positional run ids or --kind; version comparisons are not supported",
                 None,
                 None,
             ));
         }
-        let coverage = args
-            .run_ids
+        let run_ids = if args.run_ids.is_empty() {
+            runs_service::dedupe_runner_execution_mirrors(store.list_runs(
+                homeboy::core::observation::RunListFilter {
+                    kind: args.kind.clone(),
+                    component_id: args.component.clone(),
+                    limit: Some(args.last.clamp(1, 1000) as i64),
+                    ..Default::default()
+                },
+            )?)
+            .canonical
+            .into_iter()
+            .map(|run| run.id)
+            .collect()
+        } else {
+            args.run_ids
+        };
+        let coverage = run_ids
             .iter()
             .map(|id| store.phase_coverage(id, limit))
             .collect::<homeboy::core::Result<Vec<_>>>()?;
@@ -190,7 +204,7 @@ pub(crate) fn runs_hotspots(
             RunsOutput::Hotspots(RunsHotspotsOutput {
                 coverage,
                 command: "runs.hotspots",
-                run_ids: args.run_ids,
+                run_ids,
                 inspected_artifact_count: 0,
                 matched_artifact_count: 0,
                 skipped_artifact_count: 0,
@@ -1032,6 +1046,39 @@ mod tests {
         assert_eq!(output.coverage[1], expected_attempt);
         assert!(store.phase_spans(&mission.id).unwrap().spans.is_empty());
         assert_eq!(output.inspected_artifact_count, 0);
+    }
+
+    #[test]
+    fn coverage_selects_a_bounded_kind_cohort() {
+        let dir = tempfile::tempdir().unwrap();
+        let store =
+            ObservationStore::open_initialized_at(dir.path().join("cohort.sqlite")).unwrap();
+        store
+            .start_run(NewRunRecord::builder("unrelated").build())
+            .unwrap();
+        let run = store
+            .start_run(NewRunRecord::builder("agent-task").build())
+            .unwrap();
+        store.finish_run(&run.id, RunStatus::Pass, None).unwrap();
+        let (output, exit) = runs_hotspots(
+            &store,
+            RunsHotspotsArgs {
+                coverage: true,
+                kind: Some("agent-task".into()),
+                last: 10,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let RunsOutput::Hotspots(output) = output else {
+            panic!("hotspots output expected")
+        };
+        assert_eq!(exit, 0);
+        assert_eq!(output.run_ids, vec![run.id.clone()]);
+        assert_eq!(
+            output.coverage,
+            vec![store.phase_coverage(&run.id, 20).unwrap()]
+        );
     }
 
     #[test]

@@ -1096,6 +1096,10 @@ impl AgentTaskScheduler {
                         let _attempt_workspace = attempt_workspace;
                         let outcome =
                             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                let _timing =
+                                    crate::agent_task_schedule::for_execution_timing(&context);
+                                let _provider =
+                                    homeboy_core::observation::phase_timing::guard("provider");
                                 executor.execute(request, context)
                             }))
                             .unwrap_or_else(|_| provider_worker_panic(task_id.clone()));
