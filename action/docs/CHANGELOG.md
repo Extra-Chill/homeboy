@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.25.6] - 2026-11-02
+
+### Fixed
+- keep release version bumps out of the source cache compatibility key
+
 ## [2.25.5] - 2026-11-01
 
 ### Fixed
