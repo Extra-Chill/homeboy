@@ -27,20 +27,17 @@ pub fn check_for_updates() -> Result<VersionCheck> {
         // evidence about the release train.
     }
 
-    let latest = fetch_latest_version().ok();
-    let update_available = latest
-        .as_ref()
-        .map(|l| version_is_newer(l, &current))
-        .unwrap_or(false);
+    let latest = fetch_latest_version()?;
+    let update_available = version_is_newer(&latest, &current);
 
     Ok(VersionCheck {
         command: "upgrade.check".to_string(),
         current_version: current,
-        latest_version: latest.clone(),
+        latest_version: Some(latest.clone()),
         update_available,
         install_method,
         target: release_catalog::running_target_triple().map(str::to_string),
-        newest_version: latest,
+        newest_version: Some(latest),
         uninstallable_versions: Vec::new(),
         notice: None,
         runners: Vec::new(),
