@@ -4,6 +4,21 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.444.0] - 2026-11-02
+
+### Added
+- publish fork-first from per-host owner policy
+
+### Changed
+- Prefetch from the daemon's own update verdict, not the shared cache
+- delete the unused async progress vocabulary and unbuilt runtime_contract docs
+- delete the unsatisfiable attached-tool capability layer
+
+### Fixed
+- concurrent blob prunes no longer fail materialization
+- resolve npm workspace roots for member dependency hydration and release
+- recover reports the concrete cause of a failed retry; actionable unattributed-changes error
+
 ## [0.443.6] - 2026-11-02
 
 ### Changed
