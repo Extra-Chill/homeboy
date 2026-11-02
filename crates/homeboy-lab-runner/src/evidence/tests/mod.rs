@@ -35,10 +35,10 @@ use super::mirror::{
     bounded_remote_events, controller_artifact_metadata, import_mirrored_artifact_with_downloader,
     mirror_daemon_evidence, mirror_job_run, mirror_job_run_request,
     mirror_remote_observation_runs_by_id_with,
-    mirror_remote_observation_runs_by_id_with_downloader, mirror_terminal_job_artifacts_with,
-    mirrored_patch_result, mirrored_runner_job_identity, primary_mirrored_run,
-    refresh_mirrored_daemon_evidence_with, runner_job_log_snapshot_with_owner_recovery_with,
-    MirrorEvidenceRequest, MIRRORED_REMOTE_EVENT_LIMIT, MIRRORED_REMOTE_EVENT_MESSAGE_LIMIT,
+    mirror_remote_observation_runs_by_id_with_downloader, mirrored_patch_result,
+    mirrored_runner_job_identity, primary_mirrored_run, refresh_mirrored_daemon_evidence_with,
+    runner_job_log_snapshot_with_owner_recovery_with, MirrorEvidenceRequest,
+    MIRRORED_REMOTE_EVENT_LIMIT, MIRRORED_REMOTE_EVENT_MESSAGE_LIMIT,
 };
 
 use super::tokens::{
@@ -1409,7 +1409,6 @@ fn test_mirrored_patch_result_reports_accessible_artifact_token() {
         mime: Some("text/x-diff".to_string()),
         size_bytes: Some(12),
         sha256: None,
-        content_base64: None,
         metadata: None,
     });
     let run = mirror_job_run(
@@ -1619,7 +1618,6 @@ fn test_remote_fuzz_run_mirrors_under_requested_run_id_with_lab_links() {
             mime: None,
             size_bytes: None,
             sha256: None,
-            content_base64: None,
             metadata: None,
         }],
         runner_job_projection: None,
@@ -1752,7 +1750,6 @@ fn test_explicit_observation_run_ids_prefers_result_lineage() {
             mime: None,
             size_bytes: None,
             sha256: None,
-            content_base64: None,
             metadata: None,
         }],
         runner_job_projection: None,
@@ -1790,7 +1787,6 @@ fn terminal_mirroring_imports_only_the_submitted_overlapping_job_run_and_artifac
         mime: None,
         size_bytes: None,
         sha256: None,
-        content_base64: None,
         metadata: None,
     }];
     let mut second = first.clone();
@@ -2335,287 +2331,114 @@ fn direct_result_refresh_treats_preterminal_absence_as_pending() {
 }
 
 #[test]
-fn legacy_terminal_artifacts_use_the_controller_runner_run_and_survive_runner_disconnect() {
+fn failed_job_with_recovered_artifact_bindings_mirrors_without_fetching_bytes() {
+    // Terminal recovery binds artifacts without size, media type, or bytes;
+    // their bytes live in the durable run, so the job mirror must not fail.
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let roots = context.path_roots();
+    let store = ObservationStore::open_initialized_in_roots(&roots).expect("store");
+    let mut job = terminal_runner_job();
+    job.status = JobStatus::Failed;
+    job.artifacts = vec![JobArtifactMetadata {
+        id: "recovered-patch".to_string(),
+        name: Some("patch.diff".to_string()),
+        path: Some("/runner/agent-task/patch.diff".to_string()),
+        url: None,
+        mime: None,
+        size_bytes: None,
+        sha256: None,
+        metadata: Some(json!({ "kind": "patch", "durable_run_id": "durable-run" })),
+    }];
+    let command = vec!["homeboy".to_string(), "test".to_string()];
+    let synthetic_id = super::util::local_job_run_id("lab", &job.id.to_string(), "test");
+
+    let runs = refresh_mirrored_daemon_evidence_with(
+        &store,
+        MirrorEvidenceRequest::new(
+            &ssh_runner(),
+            "/runner",
+            &command,
+            &job,
+            &[],
+            &json!({}),
+            None,
+            None,
+        ),
+    )
+    .expect("recovered failed job mirrors")
+    .expect("mirrored runs");
+
+    assert!(runs.iter().any(|run| run.id == synthetic_id));
+    assert!(store
+        .list_artifacts(&synthetic_id)
+        .expect("artifacts")
+        .is_empty());
+}
+
+#[test]
+fn failed_refresh_discards_its_synthetic_run_after_remote_projection_error() {
     crate::test_support::with_isolated_home(|_| {
         let store = ObservationStore::open_initialized().expect("store");
-        let mut job = terminal_runner_job();
-        let bytes = b"legacy terminal evidence";
-        job.artifacts = vec![JobArtifactMetadata {
-            id: "legacy-result".to_string(),
-            name: Some("result.json".to_string()),
-            path: Some("/runner-only/result.json".to_string()),
-            url: Some("https://runner.invalid/result.json".to_string()),
-            mime: Some("application/json".to_string()),
-            size_bytes: Some(bytes.len() as u64),
-            sha256: Some(format!("{:x}", Sha256::digest(bytes))),
-            content_base64: None,
-            metadata: None,
-        }];
-        let run = mirror_job_run(
+        let job = terminal_runner_job();
+        let command = vec!["homeboy".to_string(), "test".to_string()];
+        let synthetic_id = super::util::local_job_run_id("lab", &job.id.to_string(), "test");
+        // The runner is not configured in the isolated home, so projecting
+        // the declared remote run fails before any network access.
+        refresh_mirrored_daemon_evidence_with(
+            &store,
+            MirrorEvidenceRequest::new(
+                &ssh_runner(),
+                "/runner",
+                &command,
+                &job,
+                &[],
+                &json!({ "mirror_run_id": "declared-remote-run" }),
+                None,
+                None,
+            ),
+        )
+        .expect_err("unprojectable remote run fails refresh");
+        assert!(store
+            .get_run(&synthetic_id)
+            .expect("synthetic lookup")
+            .is_none());
+    });
+}
+
+#[test]
+fn failed_refresh_preserves_a_concurrent_synthetic_winner() {
+    crate::test_support::with_isolated_home(|_| {
+        let store = ObservationStore::open_initialized().expect("store");
+        let job = terminal_runner_job();
+        let command = vec!["homeboy".to_string(), "test".to_string()];
+        let winner = mirror_job_run(
             &store,
             &ssh_runner(),
-            "/runner/project",
-            &["homeboy".to_string(), "test".to_string()],
+            "/runner",
+            &command,
             &job,
             &[],
             &json!({}),
             None,
             None,
         )
-        .expect("synthetic terminal run");
-
-        mirror_terminal_job_artifacts_with(&store, &ssh_runner(), &job, &run, |artifact_id| {
-            assert_eq!(artifact_id, "legacy-result");
-            Ok(bytes.to_vec())
-        })
-        .expect("project all legacy terminal artifacts");
-
-        let artifacts = super::mirror::controller_artifact_metadata(std::slice::from_ref(&run.run))
-            .expect("controller artifact response");
-        assert_eq!(artifacts.len(), 1);
-        assert_ne!(
-            artifacts[0].path.as_deref(),
-            Some("/runner-only/result.json")
-        );
-        assert_eq!(
-            fs::read(artifacts[0].path.as_ref().expect("controller path")).expect("bytes"),
-            bytes
-        );
+        .expect("concurrent winner");
+        refresh_mirrored_daemon_evidence_with(
+            &store,
+            MirrorEvidenceRequest::new(
+                &ssh_runner(),
+                "/runner",
+                &command,
+                &job,
+                &[],
+                &json!({ "mirror_run_id": "declared-remote-run" }),
+                None,
+                None,
+            ),
+        )
+        .expect_err("unprojectable remote run fails refresh");
+        assert!(store.get_run(&winner.id).expect("winner lookup").is_some());
     });
-}
-
-#[test]
-fn terminal_artifacts_missing_integrity_are_permanent_provenance_errors() {
-    let context = homeboy_core::test_support::HermeticTestContext::new();
-    let roots = context.path_roots();
-    let store = ObservationStore::open_initialized_in_roots(&roots).expect("store");
-    let mut job = terminal_runner_job();
-    job.artifacts = vec![JobArtifactMetadata {
-        id: "missing-digest".to_string(),
-        name: None,
-        path: None,
-        url: None,
-        mime: None,
-        size_bytes: Some(1),
-        sha256: None,
-        content_base64: None,
-        metadata: None,
-    }];
-    let run = mirror_job_run(
-        &store,
-        &ssh_runner(),
-        "/runner",
-        &[],
-        &job,
-        &[],
-        &json!({}),
-        None,
-        None,
-    )
-    .expect("synthetic run");
-    let error =
-        mirror_terminal_job_artifacts_with(&store, &ssh_runner(), &job, &run, |_| Ok(vec![1]))
-            .expect_err("missing provenance is not retryable");
-    assert_eq!(error.code, ErrorCode::ValidationInvalidArgument);
-    assert!(!error.retryable.unwrap_or(true));
-    assert!(store.list_artifacts(&run.id).expect("artifacts").is_empty());
-}
-
-#[test]
-fn terminal_artifact_missing_mime_is_a_permanent_provenance_error() {
-    let context = homeboy_core::test_support::HermeticTestContext::new();
-    let roots = context.path_roots();
-    let store = ObservationStore::open_initialized_in_roots(&roots).expect("store");
-    let mut job = terminal_runner_job();
-    let bytes = b"typed terminal artifact";
-    job.artifacts = vec![JobArtifactMetadata {
-        id: "missing-mime".to_string(),
-        name: Some("artifact.unknown".to_string()),
-        path: Some("/runner/artifact.unknown".to_string()),
-        url: None,
-        mime: None,
-        size_bytes: Some(bytes.len() as u64),
-        sha256: Some(format!("{:x}", Sha256::digest(bytes))),
-        content_base64: None,
-        metadata: None,
-    }];
-    let run = mirror_job_run(
-        &store,
-        &ssh_runner(),
-        "/runner",
-        &[],
-        &job,
-        &[],
-        &json!({}),
-        None,
-        None,
-    )
-    .expect("synthetic run");
-
-    let error = mirror_terminal_job_artifacts_with(&store, &ssh_runner(), &job, &run, |_| {
-        Ok(bytes.to_vec())
-    })
-    .expect_err("missing media type is rejected");
-
-    assert_eq!(error.code, ErrorCode::ValidationInvalidArgument);
-    assert_eq!(
-        error.details["source_error"]["details"]["field"],
-        "artifact.mime"
-    );
-    assert!(!error.retryable.unwrap_or(true));
-    assert!(store.list_artifacts(&run.id).expect("artifacts").is_empty());
-}
-
-#[test]
-fn terminal_artifact_download_failure_rolls_back_every_artifact_and_retry_is_idempotent() {
-    let context = homeboy_core::test_support::HermeticTestContext::new();
-    let roots = context.path_roots();
-    let store = ObservationStore::open_initialized_in_roots(&roots).expect("store");
-    let mut job = terminal_runner_job();
-    let first = b"first terminal artifact";
-    let second = b"second terminal artifact";
-    job.artifacts = [("first", first.as_slice()), ("second", second.as_slice())]
-        .into_iter()
-        .map(|(id, bytes)| JobArtifactMetadata {
-            id: id.to_string(),
-            name: None,
-            path: None,
-            url: None,
-            mime: Some("application/octet-stream".to_string()),
-            size_bytes: Some(bytes.len() as u64),
-            sha256: Some(format!("{:x}", Sha256::digest(bytes))),
-            content_base64: None,
-            metadata: None,
-        })
-        .collect();
-    let run = mirror_job_run(
-        &store,
-        &ssh_runner(),
-        "/runner",
-        &[],
-        &job,
-        &[],
-        &json!({}),
-        None,
-        None,
-    )
-    .expect("synthetic run");
-    let error = mirror_terminal_job_artifacts_with(&store, &ssh_runner(), &job, &run, |id| {
-        if id == "second" {
-            Err(Error::internal_io("runner disconnected", None))
-        } else {
-            Ok(first.to_vec())
-        }
-    })
-    .expect_err("later artifact download fails the complete projection");
-    assert!(error.retryable.unwrap_or(false));
-    assert!(store.list_artifacts(&run.id).expect("artifacts").is_empty());
-
-    let first_projection =
-        mirror_terminal_job_artifacts_with(&store, &ssh_runner(), &job, &run, |id| {
-            Ok(if id == "first" {
-                first.to_vec()
-            } else {
-                second.to_vec()
-            })
-        })
-        .expect("retry projects complete artifact set");
-    let replay = mirror_terminal_job_artifacts_with(&store, &ssh_runner(), &job, &run, |id| {
-        Ok(if id == "first" {
-            first.to_vec()
-        } else {
-            second.to_vec()
-        })
-    })
-    .expect("identical retry is idempotent");
-    assert_eq!(first_projection, replay);
-    assert_eq!(store.list_artifacts(&run.id).expect("artifacts").len(), 2);
-}
-
-#[test]
-fn failed_refresh_discards_its_synthetic_run_after_artifact_projection_error() {
-    let context = homeboy_core::test_support::HermeticTestContext::new();
-    let roots = context.path_roots();
-    let store = ObservationStore::open_initialized_in_roots(&roots).expect("store");
-    let mut job = terminal_runner_job();
-    job.artifacts = vec![JobArtifactMetadata {
-        id: "malformed".to_string(),
-        name: None,
-        path: None,
-        url: None,
-        mime: None,
-        size_bytes: Some(1),
-        sha256: None,
-        content_base64: None,
-        metadata: None,
-    }];
-    let command = vec!["homeboy".to_string(), "test".to_string()];
-    let synthetic_id = super::util::local_job_run_id("lab", &job.id.to_string(), "test");
-    refresh_mirrored_daemon_evidence_with(
-        &store,
-        MirrorEvidenceRequest::new(
-            &ssh_runner(),
-            "/runner",
-            &command,
-            &job,
-            &[],
-            &json!({}),
-            None,
-            None,
-        ),
-    )
-    .expect_err("malformed terminal artifact fails refresh");
-    assert!(store
-        .get_run(&synthetic_id)
-        .expect("synthetic lookup")
-        .is_none());
-}
-
-#[test]
-fn failed_refresh_preserves_a_concurrent_synthetic_winner() {
-    let context = homeboy_core::test_support::HermeticTestContext::new();
-    let roots = context.path_roots();
-    let store = ObservationStore::open_initialized_in_roots(&roots).expect("store");
-    let mut job = terminal_runner_job();
-    job.artifacts = vec![JobArtifactMetadata {
-        id: "malformed".to_string(),
-        name: None,
-        path: None,
-        url: None,
-        mime: None,
-        size_bytes: Some(1),
-        sha256: None,
-        content_base64: None,
-        metadata: None,
-    }];
-    let command = vec!["homeboy".to_string(), "test".to_string()];
-    let winner = mirror_job_run(
-        &store,
-        &ssh_runner(),
-        "/runner",
-        &command,
-        &job,
-        &[],
-        &json!({}),
-        None,
-        None,
-    )
-    .expect("concurrent winner");
-    refresh_mirrored_daemon_evidence_with(
-        &store,
-        MirrorEvidenceRequest::new(
-            &ssh_runner(),
-            "/runner",
-            &command,
-            &job,
-            &[],
-            &json!({}),
-            None,
-            None,
-        ),
-    )
-    .expect_err("malformed terminal artifact fails refresh");
-    assert!(store.get_run(&winner.id).expect("winner lookup").is_some());
 }
 
 #[test]

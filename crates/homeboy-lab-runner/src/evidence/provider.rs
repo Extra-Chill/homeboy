@@ -82,15 +82,6 @@ impl RunnerEvidenceProvider for RunnerEvidence {
         super::super::execution::daemon_api_get(runner_id, path)
     }
 
-    fn runner_artifact_content(
-        &self,
-        runner_id: &str,
-        job_id: &str,
-        artifact_id: &str,
-    ) -> Result<Value> {
-        super::super::connection::runner_artifact_content(runner_id, job_id, artifact_id)
-    }
-
     fn runner_job_cancel_projection(
         &self,
         runner_id: &str,

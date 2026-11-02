@@ -11,8 +11,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use homeboy_core::api_jobs::{
-    ActiveRunnerJobSummary, JobClaimMetadata, JobEventKind, JobStatus, RemoteRunnerJobResult,
-    RunnerJobSource,
+    ActiveRunnerJobSummary, JobClaimMetadata, JobStatus, RunnerJobSource,
 };
 use homeboy_core::daemon::{
     DaemonCandidateReconciliationResult, DaemonFreshnessReport, DaemonLeaselessRecoveryResult,
@@ -3060,104 +3059,6 @@ fn reconcile_terminal_jobs_for_session<T>(
         Some(session.runner_id.clone()),
         None,
     ))
-}
-
-/// Retrieve terminal job artifact bytes through the runner's active managed
-/// transport. Direct sessions read the daemon's persisted job result.
-pub fn runner_artifact_content(runner_id: &str, job_id: &str, artifact_id: &str) -> Result<Value> {
-    let report = status(runner_id)?;
-    let Some(session) = report.session.filter(|_| report.connected) else {
-        return Err(Error::validation_invalid_argument(
-            "runner_id",
-            format!("runner `{runner_id}` is not connected"),
-            Some(runner_id.to_string()),
-            None,
-        ));
-    };
-    ensure_artifact_content_endpoint(&session)?;
-    direct_daemon_job_artifact_content(runner_id, job_id, artifact_id)
-}
-
-fn ensure_artifact_content_endpoint(session: &RunnerSession) -> Result<()> {
-    if session.local_url.is_some() {
-        return Ok(());
-    }
-    Err(Error::validation_invalid_argument(
-            "runner_id",
-            format!(
-                "direct runner `{}` has no managed daemon endpoint for artifact retrieval",
-                session.runner_id
-            ),
-            Some(session.runner_id.clone()),
-            Some(vec![
-                "Reconnect the direct runner so its local daemon URL is available, then retry the review or promotion."
-                    .to_string(),
-            ]),
-        ))
-}
-
-fn direct_daemon_job_artifact_content(
-    runner_id: &str,
-    job_id: &str,
-    artifact_id: &str,
-) -> Result<Value> {
-    let snapshot = super::runner_job_log_snapshot(runner_id, job_id)?;
-    let result = snapshot
-        .events
-        .iter()
-        .rev()
-        .find(|event| event.kind == JobEventKind::Result)
-        .and_then(|event| event.data.clone())
-        .ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "artifact_id",
-                format!("runner job `{job_id}` has no terminal result containing artifact bytes"),
-                Some(artifact_id.to_string()),
-                None,
-            )
-        })?;
-    let result: RemoteRunnerJobResult = serde_json::from_value(result).map_err(|error| {
-        Error::internal_json(
-            error.to_string(),
-            Some("parse direct runner terminal job result for artifact retrieval".to_string()),
-        )
-    })?;
-    let artifact = result
-        .artifacts
-        .iter()
-        .chain(result.artifact_refs.iter())
-        .find(|artifact| artifact.id == artifact_id)
-        .ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "artifact_id",
-                format!("direct runner job `{job_id}` has no artifact `{artifact_id}`"),
-                Some(artifact_id.to_string()),
-                None,
-            )
-        })?;
-    let content_base64 = artifact.content_base64.clone().ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "artifact_id",
-            format!(
-                "direct runner job `{job_id}` did not retain bytes for artifact `{artifact_id}`"
-            ),
-            Some(artifact_id.to_string()),
-            Some(vec![
-                "Only artifacts mirrored in the direct runner terminal result can be materialized."
-                    .to_string(),
-            ]),
-        )
-    })?;
-    Ok(serde_json::json!({
-        "command": "runner.jobs.artifacts.direct_daemon_content",
-        "job_id": job_id,
-        "artifact_id": artifact_id,
-        "content_base64": content_base64,
-        "filename": artifact.name,
-        "mime": artifact.mime,
-        "size_bytes": artifact.size_bytes,
-        "sha256": artifact.sha256,
-    }))
 }
 
 fn stale_daemon_warning_until(

@@ -897,7 +897,6 @@ fn lab_stream_truncation_is_allowed_with_fuzz_results_artifact() {
             mime: Some("application/json".to_string()),
             size_bytes: Some(1234),
             sha256: None,
-            content_base64: None,
             metadata: Some(serde_json::json!({ "kind": "fuzz_results" })),
         });
 
