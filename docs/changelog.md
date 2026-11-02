@@ -4,6 +4,17 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.444.7] - 2026-11-02
+
+### Changed
+- Isolate runner staging records per stage and reclaim terminal stages
+- Lead cook terminal notifications with the work
+
+### Fixed
+- publish a verified candidate before forking a replacement on recover
+- bound fleet-reconcile idempotency keys and summarize item failures
+- materialize the prepared base through the shared tracking-ref fetch
+
 ## [0.444.6] - 2026-11-02
 
 ### Fixed
