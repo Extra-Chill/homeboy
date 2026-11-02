@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.444.13] - 2026-11-02
+
+### Fixed
+- Fix scope-less controller adoption at daemon startup
+- preserve untracked scratch work and ignore disposable output
+
 ## [0.444.12] - 2026-11-02
 
 ### Changed
