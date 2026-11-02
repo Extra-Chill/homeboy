@@ -23,7 +23,7 @@
   },
   "isolated_home_paths": [".cache/homeboy/wp-codebox", ".wordpress-playground"],
   "source_snapshot": {
-    "sync_excludes": ["vendor/", "vendor/**"]
+    "sync_excludes": ["vendor/", "vendor/**", "wp-config.php"]
   },
   "structured_sidecars": {
     "lint.findings": true,
