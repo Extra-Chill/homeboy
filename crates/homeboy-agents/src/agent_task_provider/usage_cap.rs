@@ -71,7 +71,6 @@ pub fn provider_usage_cap_key_for_request(request: &AgentTaskRequest) -> String 
         "runtime_selection": request.executor.runtime_selection(),
         "required_capabilities": request.executor.required_capabilities,
         "effective_config": provider_capacity_config(request),
-        "resolved_runtime_identity": request.metadata.get("resolved_runtime_identity"),
     }))
     .expect("provider route capacity identity serializes");
     content_hash::sha256_hex(&encoded)

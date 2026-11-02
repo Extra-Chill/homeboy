@@ -5620,7 +5620,6 @@ fn compiled_cook_binds_and_executes_the_first_ready_production_provider_route() 
                 rotation_starts_with_first_entry: true,
                 retry: Default::default(),
                 liveness_timeout_ms: None,
-                runtime_identity: None,
             },
         );
         let mut options = compile_options("production-readiness-cook");

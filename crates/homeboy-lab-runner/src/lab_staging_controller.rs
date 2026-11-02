@@ -8465,14 +8465,7 @@ mod tests {
                             "source": "/controller/runtime-library",
                             "strategy": "scoped-bundle"
                         }]
-                    }},
-                    "metadata": { "resolved_runtime_identity": {
-                        "materialization_plan": { "runtime_sources": [{
-                            "id": "controller-runtime",
-                            "locator": { "kind": "local_path", "path": "/controller/runtime" },
-                            "destination_path": "runtime"
-                        }]
-                    }}}
+                    }}
                 }]
             });
             let args = vec![
@@ -8499,11 +8492,6 @@ mod tests {
             assert_eq!(
                 stored["tasks"][0]["executor"]["config"]["runtime_overlays"][0]["source"],
                 "/controller/runtime-library"
-            );
-            assert_eq!(
-                stored["tasks"][0]["metadata"]["resolved_runtime_identity"]["materialization_plan"]
-                    ["runtime_sources"][0]["locator"]["path"],
-                "/controller/runtime"
             );
         });
     }

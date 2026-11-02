@@ -94,11 +94,6 @@ pub enum PlacementReadinessInvocation {
         selector: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<String>,
-        /// Controller pins are typed data, never caller-provided executable
-        /// readiness probes. They let preflight report materialization drift.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        runtime_identity:
-            Box<Option<homeboy_core::agent_task_config::ResolvedAgentTaskRuntimeIdentity>>,
     },
     CapabilityAudit {
         source_path: String,
@@ -677,7 +672,6 @@ fn provider_admission_for_request(
         provider,
         selector,
         model,
-        runtime_identity,
         ..
     } = &request.invocation
     else {
@@ -690,7 +684,6 @@ fn provider_admission_for_request(
                     backend: provider.clone(),
                     selector: selector.clone(),
                     model: model.clone(),
-                    runtime_identity: runtime_identity.as_ref().clone(),
                 },
                 catalog,
             )
@@ -701,7 +694,6 @@ fn provider_admission_for_request(
                     backend: provider.clone(),
                     selector: selector.clone(),
                     model: model.clone(),
-                    runtime_identity: runtime_identity.as_ref().clone(),
                 },
             )
         }
@@ -1814,7 +1806,6 @@ mod placement_readiness_tests {
                 durable_plan: None,
                 selector: selector.map(str::to_string),
                 model: Some("model".to_string()),
-                runtime_identity: Box::new(None),
             },
         }
     }
@@ -1884,25 +1875,6 @@ mod placement_readiness_tests {
                 .as_deref(),
             Some("provider-11")
         );
-    }
-
-    #[test]
-    fn placement_readiness_transport_blocks_incomplete_pinned_runtime() {
-        let mut request = cook_request(Some("provider-11"));
-        if let PlacementReadinessInvocation::AgentTaskCook {
-            runtime_identity, ..
-        } = &mut request.invocation
-        {
-            *runtime_identity = Box::new(Some(serde_json::from_value(serde_json::json!({
-                "runtime_id": "runtime-11", "provider_id": "provider-11", "source_selector": "catalog",
-                "source_revision": "abc", "freshness": "pinned", "provider": {}, "materialization_plan": {}
-            })).expect("runtime pin")));
-        }
-        let readiness = placement_readiness_with_transport(&request, |_, _| {
-            Ok(observed(vec![provider("provider-11")]))
-        })
-        .expect("readiness");
-        assert!(!readiness.provider_admission.expect("admission").is_ready());
     }
 
     #[test]
@@ -2032,7 +2004,6 @@ mod placement_readiness_tests {
             durable_plan: None,
             selector: None,
             model: None,
-            runtime_identity: Box::new(None),
         };
         assert!(validate_placement_readiness_request(&request).is_err());
     }

@@ -655,7 +655,6 @@ fn controller_resolved_execution_policy_with_sources(
         // An explicit model is immutable for the initial invocation. Rotation
         // remains available for retries, but cannot silently replace it.
         rotation_starts_with_first_entry,
-        runtime_identity: None,
     }
 }
 
@@ -837,7 +836,6 @@ mod tests {
                     rotation_starts_with_first_entry: false,
                     retry: Default::default(),
                     liveness_timeout_ms: None,
-                    runtime_identity: None,
                 }),
                 ..Default::default()
             },
@@ -1160,7 +1158,6 @@ mod tests {
                     rotation_starts_with_first_entry: false,
                     retry: Default::default(),
                     liveness_timeout_ms: None,
-                    runtime_identity: None,
                 }),
                 ..Default::default()
             },
@@ -1235,7 +1232,6 @@ mod tests {
                         rotation_starts_with_first_entry: false,
                         retry: Default::default(),
                         liveness_timeout_ms: None,
-                        runtime_identity: None,
                     }),
                     ..Default::default()
                 },
@@ -1310,7 +1306,6 @@ mod tests {
                         rotation_starts_with_first_entry: false,
                         retry: Default::default(),
                         liveness_timeout_ms: None,
-                        runtime_identity: None,
                     }),
                     ..Default::default()
                 },

@@ -418,9 +418,6 @@ mod provider_rotation_tests {
         let scheduler = AgentTaskScheduler::new(Arc::new(executor));
         let mut plan = plan_with_tasks(1);
         plan.tasks[0].executor.model = Some("primary-model".to_string());
-        plan.tasks[0].metadata = json!({
-            "resolved_runtime_identity": { "provider_id": "primary.provider" }
-        });
         plan.options.rotation = Some(rotation_policy(vec![
             AgentTaskProviderRotationEntry {
                 backend: Some("fallback-backend-a".to_string()),
@@ -456,13 +453,6 @@ mod provider_rotation_tests {
                 .get("provider")
                 .and_then(Value::as_str),
             Some("fallback-provider-a")
-        );
-        assert!(
-            observed[1]
-                .metadata
-                .get("resolved_runtime_identity")
-                .is_none(),
-            "a backend-changing fallback must resolve its own runtime identity"
         );
 
         let attempts = aggregate.outcomes[0]
