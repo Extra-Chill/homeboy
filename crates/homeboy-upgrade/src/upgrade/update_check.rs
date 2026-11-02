@@ -25,6 +25,9 @@ use std::time::{Duration, Instant};
 
 const CACHE_FILENAME: &str = "update_check.json";
 const CHECK_INTERVAL_SECS: u64 = 86400;
+/// Releases ship several times a day; a prefetch must see each one before
+/// the operator runs `homeboy upgrade`.
+pub const PREFETCH_INTERVAL_SECS: u64 = 15 * 60;
 const ENV_VAR_DISABLE: &str = "HOMEBOY_NO_UPDATE_CHECK";
 const VERSION_PROBE_TIMEOUT: Duration = Duration::from_millis(250);
 
@@ -365,11 +368,21 @@ pub fn run_startup_check() {
         }
     }
 
-    let check = match upgrade::check_for_updates() {
+    let check = match refresh_verdict() {
         Ok(check) => check,
         Err(_) => return,
     };
+    let checked_at = update_check_cache::now_unix();
 
+    if !already_printed && check.update_available {
+        if let Some(latest) = &check.latest_version {
+            print_hint(latest, Some(checked_at));
+        }
+    }
+}
+
+fn refresh_verdict() -> homeboy_core::Result<super::VersionCheck> {
+    let check = upgrade::check_for_updates()?;
     let checked_at = update_check_cache::now_unix();
     let runtime_compatibility = check
         .latest_version
@@ -383,12 +396,31 @@ pub fn run_startup_check() {
         checked_at,
         runtime_compatibility,
     });
+    Ok(check)
+}
 
-    if !already_printed && check.update_available {
-        if let Some(latest) = &check.latest_version {
-            print_hint(latest, Some(checked_at));
-        }
+/// One daemon pass: refresh stale verdicts, then only materialize a newer release.
+/// This owns no promotion authority and cannot replace the controller.
+pub fn prefetch_release() -> homeboy_core::Result<Option<PathBuf>> {
+    if is_disabled() {
+        return Ok(None);
     }
+    if !read_cache().as_ref().is_some_and(|cache| {
+        is_cache_fresh(cache)
+            && update_check_cache::is_cache_fresh(cache.checked_at, PREFETCH_INTERVAL_SECS)
+    }) {
+        refresh_verdict()?;
+    }
+    let Some(stable) = latest_allowed_stable()
+        .filter(|stable| upgrade::version_is_newer(&stable.version, upgrade::current_version()))
+    else {
+        return Ok(None);
+    };
+    super::release_slot::acquire_release_slot(
+        &format!("v{}", stable.version.trim_start_matches('v')),
+        &super::release_slot::binaries_dir()?,
+    )
+    .map(Some)
 }
 
 #[cfg(test)]

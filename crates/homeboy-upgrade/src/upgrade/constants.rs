@@ -15,12 +15,6 @@ pub(crate) const GITHUB_RELEASES_LIST_API: &str =
 pub(crate) const RELEASE_ASSET_DOWNLOAD_BASE: &str =
     "https://github.com/Extra-Chill/homeboy/releases";
 
-/// Environment variable read by the binary installer to pin the release tag it
-/// downloads from. Absent, the installer keeps using `latest/download`.
-pub(crate) const RELEASE_TAG_ENV: &str = "HOMEBOY_UPGRADE_RELEASE_TAG";
-/// Exact semantic version expected from the staged release candidate.
-pub(crate) const RELEASE_VERSION_ENV: &str = "HOMEBOY_UPGRADE_RELEASE_VERSION";
-
 /// Timeout for the release list request. Matches the single-release fetch: the
 /// update path must never hang a command.
 pub(crate) const RELEASE_CATALOG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);

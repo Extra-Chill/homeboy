@@ -1,4 +1,5 @@
 use homeboy_engine_primitives::content_hash;
+use homeboy_upgrade::release_slot::materialize_script;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -2434,102 +2435,6 @@ fn installed_homeboy_env(
     env
 }
 
-/// Acquire a verified release in stage-only mode and publish an immutable slot.
-const MATERIALIZE_SCRIPT: &str = r#"set -e
-printf '%s\n' 'HOMEBOY_RUNNER_PROGRESS {"schema":"homeboy/runner-progress/v1","phase":"fetch"}'
-ref=@REF@
-binaries=@BINARIES@
-release_tag="$ref"
-homeboy_installer=@INSTALLER@
-hash_binary() { (sha256sum "$1" 2>/dev/null || shasum -a 256 "$1") | awk '{print $1}'; }
-release_stage=
-cleanup_release_stage() {
-  if [ -n "$release_stage" ]; then
-    rm -rf "$release_stage"
-    release_stage=
-  fi
-}
-mkdir -p "$binaries"
-  # A tag already acquired here (e.g. by the upgrade's early acquisition)
-  # resolves to its content-addressed slot once the slot's hash re-verifies.
-  release_marker="$binaries/.release-$release_tag.sha256"
-  cached_sha=$(cat "$release_marker" 2>/dev/null || true)
-  cached_binary="$binaries/homeboy-$cached_sha/homeboy"
-  if [ -n "$cached_sha" ] && [ -x "$cached_binary" ] && [ "$(hash_binary "$cached_binary")" = "$cached_sha" ]; then
-    binary="$cached_binary"
-    echo "HOMEBOY_REFRESH_BINARY_ORIGIN=release-cache:$release_tag"
-  else
-    release_stage=$(mktemp -d "$binaries/.stage-XXXXXX")
-    trap cleanup_release_stage EXIT HUP INT TERM
-    HOMEBOY_INSTALL_STAGE_ONLY=1 HOMEBOY_INSTALL_PATH="$release_stage/homeboy" HOMEBOY_UPGRADE_RELEASE_TAG="$release_tag" HOMEBOY_UPGRADE_RELEASE_VERSION="${release_tag#v}" sh -c "$homeboy_installer"
-    binary="$release_stage/homeboy"
-    echo "HOMEBOY_REFRESH_BINARY_ORIGIN=release:$release_tag"
-  fi
-binary_sha=$(hash_binary "$binary")
-if [ -z "$binary_sha" ]; then
-  echo "could not hash materialized Homeboy binary" >&2
-  exit 1
-fi
-printf '%s\n' 'HOMEBOY_RUNNER_PROGRESS {"schema":"homeboy/runner-progress/v1","phase":"install"}'
-slot_dir="$binaries/homeboy-$binary_sha"
-immutable_binary="$slot_dir/homeboy"
-mkdir -p "$slot_dir"
-if [ -e "$immutable_binary" ]; then
-  existing_sha=$(hash_binary "$immutable_binary")
-  if [ "$existing_sha" != "$binary_sha" ]; then
-    echo "immutable Homeboy binary slot hash mismatch" >&2
-    exit 1
-  fi
-else
-  staged_binary=$(mktemp "$slot_dir/.homeboy.XXXXXX")
-  trap 'rm -f "$staged_binary"; cleanup_release_stage' EXIT HUP INT TERM
-  cp "$binary" "$staged_binary"
-  chmod 0755 "$staged_binary"
-  staged_sha=$(hash_binary "$staged_binary")
-  if [ "$staged_sha" != "$binary_sha" ]; then
-    echo "staged Homeboy binary hash mismatch" >&2
-    exit 1
-  fi
-  if ! ln "$staged_binary" "$immutable_binary"; then
-    if [ ! -e "$immutable_binary" ] || [ "$(hash_binary "$immutable_binary")" != "$binary_sha" ]; then
-      echo "immutable Homeboy binary slot publication failed" >&2
-      exit 1
-    fi
-  fi
-  rm -f "$staged_binary"
-  trap - EXIT HUP INT TERM
-fi
-cleanup_release_stage
-if [ -n "$release_tag" ]; then
-  staged_marker=$(mktemp "$binaries/.release-marker.XXXXXX")
-  printf '%s' "$binary_sha" > "$staged_marker"
-  mv -f "$staged_marker" "$release_marker"
-fi
-echo "HOMEBOY_REFRESH_BINARY_SHA256=$binary_sha"
-echo "HOMEBOY_REFRESH_BINARY_PATH=$immutable_binary"
-printf '%s\n' 'HOMEBOY_RUNNER_PROGRESS {"schema":"homeboy/runner-progress/v1","phase":"verify"}'
-identity=$("$immutable_binary" self identity)
-identity_record=$(printf '%s' "$identity" | tr -d '\n')
-provenance="$slot_dir/provenance"
-staged_provenance=$(mktemp "$slot_dir/.provenance.XXXXXX")
-trap 'rm -f "$staged_provenance"' EXIT HUP INT TERM
-printf '%s\n%s\n%s\n%s\n%s\n%s\n' 'https://github.com/Extra-Chill/homeboy.git' "" "$ref" "$ref" "$binary_sha" "$identity_record" > "$staged_provenance"
-# Source/cache/ref describe acquisition, not immutable content identity.
-provenance_matches() {
-  { IFS= read -r recorded_source && IFS= read -r recorded_cache && IFS= read -r recorded_ref && IFS= read -r recorded_target && IFS= read -r recorded_sha && IFS= read -r recorded_identity && ! IFS= read -r extra; } < "$provenance" &&
-    [ "$recorded_sha" = "$binary_sha" ] &&
-    [ "$recorded_identity" = "$identity_record" ]
-}
-if [ -e "$provenance" ]; then
-  provenance_matches || { echo "immutable Homeboy slot provenance mismatch" >&2; exit 1; }
-elif ! ln "$staged_provenance" "$provenance"; then
-  [ -e "$provenance" ] && provenance_matches || { echo "immutable Homeboy slot provenance publication failed" >&2; exit 1; }
-fi
-rm -f "$staged_provenance"
-trap - EXIT HUP INT TERM
-printf '%s\n' "$identity"
-"#;
-
 /// Acquire `tag` into the runner's content-addressed binary slot without
 /// selecting it. A later refresh of the same release reuses the slot.
 pub(crate) fn acquire_release_slot(runner_id: &str, tag: &str) -> Result<()> {
@@ -2554,35 +2459,6 @@ pub(crate) fn acquire_release_slot(runner_id: &str, tag: &str) -> Result<()> {
         )));
     }
     Ok(())
-}
-
-fn materialize_script(git_ref: &str, binaries_dir: &str) -> String {
-    let installer = quote_path(homeboy_upgrade::RELEASE_INSTALLER_SCRIPT);
-    fill_script_template(
-        MATERIALIZE_SCRIPT,
-        &[
-            ("@REF@", &quote_path(git_ref)),
-            ("@BINARIES@", &quote_path(binaries_dir)),
-            ("@INSTALLER@", &installer),
-        ],
-    )
-}
-
-/// Substitute each placeholder, in template order, in a single pass so a
-/// substituted value is never rescanned for later placeholders.
-fn fill_script_template(template: &str, values: &[(&str, &str)]) -> String {
-    let mut script = String::with_capacity(template.len());
-    let mut rest = template;
-    for (placeholder, value) in values {
-        let (head, tail) = rest
-            .split_once(placeholder)
-            .expect("script template placeholders are in order");
-        script.push_str(head);
-        script.push_str(value);
-        rest = tail;
-    }
-    script.push_str(rest);
-    script
 }
 
 fn source_sha_from_output(stdout: &str) -> Option<String> {
