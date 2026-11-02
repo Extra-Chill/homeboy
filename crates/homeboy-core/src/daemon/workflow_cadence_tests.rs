@@ -196,7 +196,7 @@ fn a_scopeless_running_instance_is_recovered_instead_of_skipping_forever() {
         let path = crate::paths::observation_db().unwrap();
         let legacy = JobStore::open_without_reconciliation(&path)
             .unwrap()
-            .with_daemon_lease("dead-owner".into());
+            .with_daemon_lease("ancient-owner".into());
         let base = 1_791_900_000_000;
         let request = template(json!({"interval": "1h"}), "true", home.path());
         let (mut cadence, _) = register(request.clone(), false, base).unwrap();
@@ -217,8 +217,12 @@ fn a_scopeless_running_instance_is_recovered_instead_of_skipping_forever() {
             .unwrap()
             .with_daemon_scope(crate::api_jobs::DaemonScope::from_state_dir(home.path()))
             .with_daemon_lease("replacement".into());
-        // Startup holds the owner lock and has proved this recorded lease dead.
-        store.adopt_scopeless_controller_jobs("dead-owner").unwrap();
+        // The ghost's lease is unrelated to the replacement's lease. Startup
+        // adopts it under the exclusive owner lock, without lease evidence.
+        let _owner_lock = super::super::try_acquire_daemon_owner_lock()
+            .unwrap()
+            .expect("exclusive startup owner lock");
+        store.adopt_scopeless_controller_jobs().unwrap();
         super::super::recover_controller_jobs(&store);
         wait_terminal(&store, &old.instance);
         let admitted = admit_due(&store, base + HOUR);
