@@ -808,11 +808,14 @@ pub(super) fn mirror_job_run_request(
     request: MirrorEvidenceRequest<'_>,
 ) -> Result<MirroredJobRun> {
     let mirrored = mirror_job_run_record(store, request)?;
-    store.record_runner_phase_spans(
+    // Timing is secondary evidence; the mirrored run stands without it.
+    if let Err(error) = store.record_runner_phase_spans(
         &mirrored.run.id,
         &request.job.id.to_string(),
         request.events,
-    )?;
+    ) {
+        homeboy_core::log_status!("observe", "runner timing import failed: {}", error);
+    }
     Ok(mirrored)
 }
 

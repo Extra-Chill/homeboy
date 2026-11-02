@@ -153,6 +153,27 @@ pub(crate) fn reconcile_runner_job_snapshot(
 /// against another home's aggregate would either re-project a result that is
 /// already durable here or, worse, skip projecting one because a *different*
 /// installation happened to hold a matching aggregate (#7505).
+/// Runner timing is evidence about the job; a store or decode failure is logged
+/// and never blocks lifecycle reconciliation. Replays are idempotent by event.
+fn import_runner_phase_spans(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    record: &AgentTaskRunRecord,
+    snapshot: &homeboy_core::api_jobs::RunnerJobLogSnapshot,
+) {
+    let imported = lifecycle_store
+        .open_observation_initialized()
+        .and_then(|store| {
+            store.record_runner_phase_spans(
+                &record.run_id,
+                &snapshot.job.id.to_string(),
+                &snapshot.events,
+            )
+        });
+    if let Err(error) = imported {
+        homeboy_core::log_status!("observe", "runner timing import failed: {}", error);
+    }
+}
+
 pub(crate) fn reconcile_runner_job_snapshot_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     record: &mut AgentTaskRunRecord,
@@ -171,13 +192,7 @@ pub(crate) fn reconcile_runner_job_snapshot_in_store(
     }
     if record.state().is_terminal() {
         validate_runner_job_snapshot(record, snapshot)?;
-        lifecycle_store
-            .open_observation_initialized()?
-            .record_runner_phase_spans(
-                &record.run_id,
-                &snapshot.job.id.to_string(),
-                &snapshot.events,
-            )?;
+        import_runner_phase_spans(lifecycle_store, record, snapshot);
         // A transport-only terminal result can arrive before the daemon has
         // published the inner agent-task aggregate. Adopt that later evidence
         // when it proves the same controller run rather than losing its patch.
@@ -205,13 +220,7 @@ pub(crate) fn reconcile_runner_job_snapshot_in_store(
         }
     }
     validate_runner_job_snapshot(record, snapshot)?;
-    lifecycle_store
-        .open_observation_initialized()?
-        .record_runner_phase_spans(
-            &record.run_id,
-            &snapshot.job.id.to_string(),
-            &snapshot.events,
-        )?;
+    import_runner_phase_spans(lifecycle_store, record, snapshot);
     let mut reconciled = record.clone();
     reconciled.record_runner_reachable();
     // Typed terminal evidence is authoritative even when a daemon restart left

@@ -3931,6 +3931,25 @@ fn validate_staged_materialization(
     Ok(())
 }
 
+/// Publish the runner execution's spans on the job stream so the controller
+/// can link them under its own run (`ObservationStore::record_runner_phase_spans`).
+fn publish_runner_phase_spans(
+    job: &crate::api_jobs::JobHandle,
+    store: &crate::observation::ObservationStore,
+    run_id: &str,
+    succeeded: bool,
+) -> crate::Result<()> {
+    let status = if succeeded {
+        crate::observation::RunStatus::Pass
+    } else {
+        crate::observation::RunStatus::Fail
+    };
+    let run = store.finish_run(run_id, status, None)?;
+    let report = store.phase_spans(&run.id)?;
+    job.progress(json!({ "phase_spans": report, "phase_run": run }))?;
+    Ok(())
+}
+
 fn enqueue_exec_request(
     request: ExecRequest,
     job_store: &JobStore,
@@ -4352,36 +4371,47 @@ fn enqueue_exec_request(
                 job.progress(json!({ "phase": "local_child_driver_execution_started" }))?;
                 job.progress(json!({ "phase": "local_child_command_spawn_attempted" }))?;
                 let driver_cancellation = Arc::clone(&cancellation_requested);
-                let timing_store = crate::observation::ObservationStore::open_initialized()?;
-                let timing_run = timing_store.start_run(
-                    crate::observation::NewRunRecord::builder("runner_execution").build(),
-                )?;
-                let process_output = timing_store.time_run_phase_with_outcome(
-                    &timing_run.id,
-                    "stage.lab.observe.runner.execute",
-                    || runner_exec_driver::execute_exec(
-                    &plan,
-                    &execution_context,
-                    Box::new(move || {
-                        driver_cancellation.load(Ordering::SeqCst) || cancel_job.is_cancelled()
-                    }),
-                    Some(progress_sink),
-                    true,
-                    Some(child_started),
+                // Timing is evidence about the execution, never a condition of it.
+                let timing = crate::observation::ObservationStore::open_initialized()
+                    .and_then(|store| {
+                        let run = store.start_run(
+                            crate::observation::NewRunRecord::builder("runner_execution").build(),
+                        )?;
+                        Ok((store, run.id))
+                    })
+                    .map_err(|error| {
+                        crate::log_status!("observe", "runner timing persistence failed: {}", error)
+                    })
+                    .ok();
+                let execute = || {
+                    runner_exec_driver::execute_exec(
+                        &plan,
+                        &execution_context,
+                        Box::new(move || {
+                            driver_cancellation.load(Ordering::SeqCst) || cancel_job.is_cancelled()
+                        }),
+                        Some(progress_sink),
+                        true,
+                        Some(child_started),
+                    )
+                };
+                let process_output = match &timing {
+                    Some((store, run_id)) => store.time_run_phase_with_outcome(
+                        run_id,
+                        "stage.lab.observe.runner.execute",
+                        execute,
+                        |output| output.exit_code != 0,
                     ),
-                    |output| output.exit_code != 0,
-                );
-                let timing_run = timing_store.finish_run(
-                    &timing_run.id,
-                    if process_output.as_ref().is_ok_and(|output| output.exit_code == 0) {
-                        crate::observation::RunStatus::Pass
-                    } else {
-                        crate::observation::RunStatus::Fail
-                    },
-                    None,
-                )?;
-                let report = timing_store.phase_spans(&timing_run.id)?;
-                job.progress(json!({ "phase_spans": report, "phase_run": timing_run }))?;
+                    None => execute(),
+                };
+                if let Some((store, run_id)) = &timing {
+                    let succeeded = process_output
+                        .as_ref()
+                        .is_ok_and(|output| output.exit_code == 0);
+                    if let Err(error) = publish_runner_phase_spans(&job, store, run_id, succeeded) {
+                        crate::log_status!("observe", "runner timing persistence failed: {}", error);
+                    }
+                }
                 let _ = watchdog_stop.send(());
                 let _ = watchdog.join();
                 let process_output = match process_output {
