@@ -60,6 +60,40 @@ pub fn render_pr_comment_with_banners(
         out.push_str(&render_ai_review(result));
     }
 
+    strip_terminal_escapes(&out)
+}
+
+/// Strip CSI styling and OSC links/titles from any captured extension text.
+/// Apply at the boundary so new rendered fields cannot accidentally leak ANSI.
+fn strip_terminal_escapes(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '\x1b' {
+            out.push(ch);
+            continue;
+        }
+        match chars.next() {
+            Some('[') => {
+                for ch in chars.by_ref() {
+                    if ('@'..='~').contains(&ch) {
+                        break;
+                    }
+                }
+            }
+            Some(']') => {
+                while let Some(ch) = chars.next() {
+                    if ch == '\x07' || (ch == '\x1b' && chars.peek() == Some(&'\\')) {
+                        if ch == '\x1b' {
+                            chars.next();
+                        }
+                        break;
+                    }
+                }
+            }
+            Some(_) | None => {}
+        }
+    }
     out
 }
 
@@ -148,7 +182,7 @@ pub fn render_ai_review(result: &super::ai::AiReviewResult) -> String {
         let _ = writeln!(out, "\n> {}", reason);
     }
     render_test_findings(&mut out, &result.findings);
-    out
+    strip_terminal_escapes(&out)
 }
 
 fn stage_header_icon(stage_ran: bool, stage_passed: bool) -> &'static str {
@@ -718,6 +752,22 @@ mod tests {
     }
 
     // ── Tests ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn rendered_report_strips_ansi_from_captured_text_and_banners() {
+        let mut env = passing_envelope();
+        env.summary.hints.push("\x1b[31mERROR\x1b[0m".into());
+        env.test.hint =
+            "Deep dive: \x1b]8;;https://example.test\x1b\\homeboy review test\x1b]8;;\x1b\\".into();
+        let md = render_pr_comment_with_banners(
+            &env,
+            &[("scope-mode".into(), "\x1b[1mfull\x1b[0m".into())],
+        );
+        assert!(!md.contains('\x1b'), "{md}");
+        assert!(md.contains("ERROR"));
+        assert!(md.contains("Deep dive: homeboy review test"));
+        assert!(md.contains("**scope-mode:** full"));
+    }
 
     #[test]
     fn renders_passing_review_with_full_scope() {

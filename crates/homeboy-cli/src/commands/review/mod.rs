@@ -842,7 +842,7 @@ pub(crate) fn run_umbrella(args: ReviewArgs) -> CmdResult<ReviewCommandOutput> {
             "in working tree".to_string()
         };
         let message = format!("No files changed {} — skipping review", scope_label);
-        println!("{}", message);
+        eprintln!("{}", message);
 
         let observation_metadata = review_observation.as_ref().map(|o| o.output_metadata());
 
@@ -1704,7 +1704,8 @@ fn build_lint_args(args: &ReviewArgs, review_context: &ReviewExecutionContext) -
     lint::LintArgs {
         comp: args.effective_component_args().clone(),
         release_readiness_source: None,
-        summary: args.summary,
+        // Capture extension chatter for markdown without dropping lint findings.
+        summary: args.summary || args.report.as_deref() == Some("pr-comment"),
         file: None,
         glob: None,
         changed: ChangedScopeArgs {
@@ -1757,7 +1758,8 @@ fn build_test_args(args: &ReviewArgs, review_context: &ReviewExecutionContext) -
         populate_differential_baseline: false,
         setting_args: Default::default(),
         args: Vec::new(),
-        json_summary: args.summary,
+        // The markdown renderer owns stdout; retain child output in run evidence.
+        json_summary: args.summary || args.report.as_deref() == Some("pr-comment"),
         preflight_only: false,
         restore_checkout: true,
     }
@@ -2579,6 +2581,26 @@ mod tests {
             args.json_summary,
             "review lint --summary must suppress the full findings payload"
         );
+    }
+
+    #[test]
+    fn pr_comment_captures_stage_output_without_dropping_lint_findings() {
+        let mut args = review_args_fixture();
+        args.summary = false;
+        args.report = Some("pr-comment".into());
+        let context = ReviewExecutionContext {
+            scope: "full".into(),
+            changed_file_count: None,
+            precomputed_changed_files: None,
+        };
+        let lint = build_lint_args(&args, &context);
+        assert!(lint.summary, "lint runner must capture, not tee stdout");
+        assert!(!lint.json_summary, "renderer still needs lint categories");
+        assert!(build_test_args(&args, &context).json_summary);
+
+        args.report = None;
+        assert!(!build_lint_args(&args, &context).summary);
+        assert!(!build_test_args(&args, &context).json_summary);
     }
 
     #[test]

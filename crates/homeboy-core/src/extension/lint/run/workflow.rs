@@ -249,7 +249,7 @@ pub fn run_main_lint_workflow(
             component,
             ExtensionCapability::Lint,
             source_path,
-            !args.json_summary,
+            !(args.summary || args.json_summary),
             None,
             Some(&checks_run_dir),
             None,
