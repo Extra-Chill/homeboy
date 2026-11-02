@@ -4,6 +4,17 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.443.6] - 2026-11-02
+
+### Changed
+- keep rustc incremental state out of the shared warm cache
+- one streamed, verified Lab artifact download
+- delete durable fanout readiness cache and generated fanout context
+
+### Fixed
+- refuse retrying a Lab-required run onto the controller
+- restore green main — local SSH stdin redirect and stale test fixtures
+
 ## [0.443.5] - 2026-11-02
 
 ### Changed
