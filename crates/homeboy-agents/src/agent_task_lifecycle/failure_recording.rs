@@ -1445,7 +1445,11 @@ pub(crate) fn record_aggregate_in_store(
     record.ensure_metadata_object();
     if !roots.is_empty() {
         record.metadata["automatic_artifact_retention"] =
-            match homeboy_core::cleanup::try_run_automatic_artifact_retention(roots) {
+            match homeboy_core::cleanup::try_run_automatic_artifact_retention_in_root(
+                &lifecycle_store.data_root(),
+                roots,
+                homeboy_core::cleanup::automatic_retention_deadline(&homeboy_core::defaults::load_config().retention),
+            ) {
                 Ok(Some(output)) => serde_json::to_value(output).unwrap_or_else(|error| {
                     serde_json::json!({ "status": "retained", "reason": error.to_string() })
                 }),

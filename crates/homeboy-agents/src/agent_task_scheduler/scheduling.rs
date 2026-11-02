@@ -498,8 +498,12 @@ impl AgentTaskScheduleSupport {
                         recovered.status = AgentTaskOutcomeStatus::Succeeded;
                         recovered.failure_classification = None;
                         let harvest = joined.and_then(|_| {
-                            super::harvest_candidate_commit(&mut recovered, &task)
-                                .map_err(|error| format!("{error:?}"))
+                            super::harvest_candidate_commit_in_store(
+                                &mut recovered,
+                                &task,
+                                lifecycle_store.as_ref(),
+                            )
+                            .map_err(|error| format!("{error:?}"))
                         });
                         if harvest.is_ok() {
                             super::mark_timeout_workspace_candidates_incomplete(&mut recovered);

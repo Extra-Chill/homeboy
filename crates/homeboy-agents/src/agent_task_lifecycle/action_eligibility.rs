@@ -12,6 +12,14 @@ pub fn lifecycle_action_eligibility(
     record: &AgentTaskRunRecord,
     plan: Option<&AgentTaskPlan>,
 ) -> ControlPlaneActionEligibilityReport {
+    lifecycle_action_eligibility_with_roots(record, plan, None)
+}
+
+pub(crate) fn lifecycle_action_eligibility_with_roots(
+    record: &AgentTaskRunRecord,
+    plan: Option<&AgentTaskPlan>,
+    roots: Option<&homeboy_core::paths::PathRoots>,
+) -> ControlPlaneActionEligibilityReport {
     let cancellation = match super::cancellation::ensure_rooted_exact_cancellation_supported(record)
     {
         Ok(()) => available("run is non-terminal and its ownership transport is supported"),
@@ -38,7 +46,7 @@ pub fn lifecycle_action_eligibility(
     } else {
         unavailable("run does not retain a potentially promotable candidate")
     };
-    let reconcile = reconcile_availability(record);
+    let reconcile = reconcile_availability(record, roots);
 
     ControlPlaneActionEligibilityReport {
         schema: CONTROL_PLANE_ACTION_ELIGIBILITY_SCHEMA.to_string(),
@@ -120,14 +128,24 @@ pub fn lifecycle_action_eligibility(
 /// advertised Reconcile for a runner-backed run with a fresh heartbeat that the
 /// reconciler would leave alone, and withheld it for an ownerless queued run
 /// that the reconciler cancels.
-fn reconcile_availability(record: &AgentTaskRunRecord) -> (ControlPlaneActionAvailability, String) {
+fn reconcile_availability(
+    record: &AgentTaskRunRecord,
+    roots: Option<&homeboy_core::paths::PathRoots>,
+) -> (ControlPlaneActionAvailability, String) {
     if dead_candidate_adoption_owner(record) {
         return available("candidate adoption owner is gone");
     }
     if record.state().is_terminal() {
         return unavailable("terminal runs have no ownership to reconcile");
     }
-    let liveness = crate::agent_task_service::liveness_for_record(record, chrono::Utc::now());
+    let liveness = match roots {
+        Some(roots) => crate::agent_task_service::liveness_for_record_in_roots(
+            record,
+            chrono::Utc::now(),
+            roots,
+        ),
+        None => crate::agent_task_service::liveness_for_record(record, chrono::Utc::now()),
+    };
     if liveness.is_reconcilable() {
         available(format!(
             "run liveness is {}; no authoritative owner holds it",

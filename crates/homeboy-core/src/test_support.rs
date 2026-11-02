@@ -520,6 +520,7 @@ pub fn wait_at_file_gate(variable: &str) -> crate::Result<()> {
 /// only for legacy in-process tests whose dependencies still read environment
 /// variables directly.
 pub struct HermeticTestContext {
+    _store_isolation: crate::paths::ObservationStoreIsolation,
     root: TempDir,
     runtime: TempDir,
     invocation_runtime: TempDir,
@@ -528,6 +529,7 @@ pub struct HermeticTestContext {
 impl HermeticTestContext {
     pub fn new() -> Self {
         let context = Self {
+            _store_isolation: crate::paths::ObservationStoreIsolation::enter(),
             root: exec_capable_tempdir(),
             runtime: exec_capable_tempdir(),
             invocation_runtime: short_invocation_tempdir(),
@@ -633,6 +635,22 @@ impl HermeticTestContext {
             .env("HOMEBOY_NO_UPDATE_CHECK", "1");
         command
     }
+}
+
+#[test]
+fn hermetic_default_observation_store_fails_closed() {
+    let context = HermeticTestContext::new();
+    assert_eq!(
+        crate::paths::observation_db_in_root(context.path_roots().data()),
+        context
+            .data_dir()
+            .join(crate::paths::OBSERVATION_DB_FILENAME)
+    );
+    let panic = std::panic::catch_unwind(|| crate::paths::observation_db())
+        .expect_err("ambient store resolution must fail closed");
+    let message = panic.downcast_ref::<String>().expect("panic message");
+    assert!(message.contains("default observation store resolved under test isolation"));
+    assert!(message.contains(file!()), "missing call site: {message}");
 }
 
 impl Default for HermeticTestContext {

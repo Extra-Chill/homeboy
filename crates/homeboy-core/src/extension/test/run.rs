@@ -1717,6 +1717,37 @@ fn run_main_test_workflow_inner(
         Ok(None)
     };
 
+    // One disposable home covers inventory production and test execution on
+    // both local and Lab placements, without relocating installed toolchains.
+    let sandbox = tempfile::Builder::new()
+        .prefix("homeboy-test-gate-")
+        .tempdir()
+        .map_err(|error| {
+            Error::internal_io(error.to_string(), Some("create test gate home".to_string()))
+        })?;
+    let home = sandbox.path();
+    let real_home = crate::paths::home_root()?;
+    let mut sandbox_env = vec![("HOME".to_string(), home.to_path_buf())];
+    for (name, fallback) in [("CARGO_HOME", ".cargo"), ("RUSTUP_HOME", ".rustup")] {
+        sandbox_env.push((
+            name.to_string(),
+            std::env::var_os(name)
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| real_home.join(fallback)),
+        ));
+    }
+    // Derived roots must follow HOME, including a HOME assigned by a test to
+    // its own subprocess. Never pin those roots to the gate's shared home.
+    let sandbox_remove_env = crate::paths::HOMEBOY_ROOT_ENV_VARS
+        .iter()
+        .copied()
+        .chain([
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_HOME",
+            crate::paths::DAEMON_STATE_DIR_ENV,
+        ])
+        .collect::<Vec<_>>();
+
     #[cfg(unix)]
     let internal_runtime_plan = if !inventory_mode
         && runtime_evidence_path(&args.ci_env, TEST_SHARD_MANIFEST_ENV).is_none()
@@ -1752,6 +1783,12 @@ fn run_main_test_workflow_inner(
                             .ci_env
                             .iter()
                             .fold(producer, |producer, (key, value)| producer.env(key, value));
+                        let producer = sandbox_env.iter().fold(producer, |runner, (name, path)| {
+                            runner.env(name, &path.to_string_lossy())
+                        });
+                        let producer = sandbox_remove_env
+                            .iter()
+                            .fold(producer, |runner, name| runner.env_remove_if(true, name));
                         let output = producer
                             .env(suite_timeout_env, &suite_timeout_value)
                             .env(TEST_INVENTORY_ONLY_ENV, "1")
@@ -1820,6 +1857,13 @@ fn run_main_test_workflow_inner(
         .ci_env
         .iter()
         .fold(runner, |runner, (key, value)| runner.env(key, value));
+    // Apply isolation after CI overrides so inherited operator roots cannot win.
+    let runner = sandbox_env.iter().fold(runner, |runner, (name, path)| {
+        runner.env(name, &path.to_string_lossy())
+    });
+    let runner = sandbox_remove_env
+        .iter()
+        .fold(runner, |runner, name| runner.env_remove_if(true, name));
     let runner = runner
         // Normalize inherited configuration before a Cargo adapter reaches the
         // global runner: an explicit zero falls back to the declared default,

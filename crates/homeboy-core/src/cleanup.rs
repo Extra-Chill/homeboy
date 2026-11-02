@@ -403,7 +403,7 @@ pub fn try_run_automatic_artifact_retention(
 
 /// Deadline for one standalone automatic pass that is not a phase of a larger
 /// pass: the configured automatic budget, starting now.
-pub(crate) fn automatic_retention_deadline(
+pub fn automatic_retention_deadline(
     retention: &crate::defaults::RetentionConfig,
 ) -> Option<SystemTime> {
     SystemTime::now().checked_add(Duration::from_secs(
@@ -458,7 +458,7 @@ fn try_run_automatic_artifact_retention_with_config(
     let Some(_cross_process_owner) = FsIndexLock::try_acquire_in(data, lock)? else {
         return Ok(None);
     };
-    run_automatic_artifact_retention_in(roots, retention, deadline).map(Some)
+    run_automatic_artifact_retention_at(data, roots, retention, deadline).map(Some)
 }
 
 fn existing_unique_roots(roots: Vec<PathBuf>) -> Vec<PathBuf> {
@@ -569,7 +569,17 @@ fn reconstructable_admission_error(
     .with_hint("Shared Cargo targets are not worktree artifacts; inspect them with `homeboy cleanup --include shared-cargo-targets`.")
 }
 
+#[cfg(test)]
 fn run_automatic_artifact_retention_in(
+    roots: &[PathBuf],
+    retention: &crate::defaults::RetentionConfig,
+    deadline: Option<SystemTime>,
+) -> Result<ArtifactCleanupOutput> {
+    run_automatic_artifact_retention_at(&crate::paths::homeboy_data()?, roots, retention, deadline)
+}
+
+fn run_automatic_artifact_retention_at(
+    data_root: &Path,
     roots: &[PathBuf],
     retention: &crate::defaults::RetentionConfig,
     deadline: Option<SystemTime>,
@@ -595,9 +605,10 @@ fn run_automatic_artifact_retention_in(
         min_age_days: retention.reconstructable_artifact_days,
         reserve_bytes: retention.reconstructable_artifact_reserve_bytes,
     };
-    crate::worktree::retire_residue()?;
-    let registry_quarantines = crate::worktree::reconcile_malformed_task_worktree_records(true)?;
-    crate::worktree::with_task_worktree_registry_read_lock(|| {
+    crate::worktree::retire_residue_in_root(data_root)?;
+    let registry_quarantines =
+        crate::worktree::reconcile_malformed_task_worktree_records_in_root(true, data_root)?;
+    crate::worktree::with_task_worktree_registry_read_lock_in_root(data_root, || {
         let mut worktrees = Vec::new();
         let mut root = None;
         for candidate_root in roots {
@@ -620,7 +631,7 @@ fn run_automatic_artifact_retention_in(
                 None,
             )
         })?;
-        cleanup_artifacts_in_worktrees(
+        cleanup_artifacts_in_worktrees_with_active(
             root,
             worktrees,
             &options,
@@ -632,6 +643,8 @@ fn run_automatic_artifact_retention_in(
                 measurement_step_limit: None,
                 automatic_policy: Some(automatic_policy),
             },
+            ActiveWorktrees::from_listing(crate::worktree::list_unlocked_in_root(data_root)),
+            Some(data_root),
         )
     })
 }
@@ -903,7 +916,11 @@ struct ActiveWorktrees {
 
 impl ActiveWorktrees {
     fn resolve() -> Self {
-        let Ok(listing) = crate::worktree::list_unlocked() else {
+        Self::from_listing(crate::worktree::list_unlocked())
+    }
+
+    fn from_listing(listing: Result<crate::worktree::WorktreeListOutput>) -> Self {
+        let Ok(listing) = listing else {
             return Self {
                 paths: HashSet::new(),
                 available: false,
@@ -1131,8 +1148,14 @@ pub fn cleanup_artifacts(options: ArtifactCleanupOptions) -> Result<ArtifactClea
 
 fn start_artifact_cleanup_run(
     root: &Path,
+    data_root: Option<&Path>,
 ) -> Result<(crate::observation::ObservationStore, String)> {
-    let store = crate::observation::ObservationStore::open_initialized()?;
+    let store = match data_root {
+        Some(data_root) => crate::observation::ObservationStore::open_initialized_at(
+            crate::paths::observation_db_in_root(data_root),
+        )?,
+        None => crate::observation::ObservationStore::open_initialized()?,
+    };
     let run = store.start_run(
         crate::observation::NewRunRecord::builder("cleanup.artifacts")
             .command("homeboy cleanup artifacts")
@@ -1154,11 +1177,20 @@ fn artifact_cleanup_run_status(failure_count: usize) -> crate::observation::RunS
 /// Remove declared rebuildable artifacts from one completed worktree without
 /// inspecting sibling worktrees that may still be owned by active tasks.
 pub fn cleanup_worktree_artifacts(worktree: &Path) -> Result<ArtifactCleanupOutput> {
-    let registry_quarantines = crate::worktree::reconcile_malformed_task_worktree_records(true)?;
-    crate::worktree::with_task_worktree_registry_read_lock(|| {
+    cleanup_worktree_artifacts_in_root(worktree, &crate::paths::homeboy_data()?)
+}
+
+/// Clean one completed worktree using the owning lifecycle's registry.
+pub fn cleanup_worktree_artifacts_in_root(
+    worktree: &Path,
+    data_root: &Path,
+) -> Result<ArtifactCleanupOutput> {
+    let registry_quarantines =
+        crate::worktree::reconcile_malformed_task_worktree_records_in_root(true, data_root)?;
+    crate::worktree::with_task_worktree_registry_read_lock_in_root(data_root, || {
         let root = git_root(worktree)?;
         let worktree = root.clone();
-        cleanup_artifacts_in_worktrees(
+        cleanup_artifacts_in_worktrees_with_active(
             root,
             vec![WorktreeInfo { path: worktree }],
             &ArtifactCleanupOptions {
@@ -1168,6 +1200,8 @@ pub fn cleanup_worktree_artifacts(worktree: &Path) -> Result<ArtifactCleanupOutp
             false,
             registry_quarantines,
             ArtifactInventoryBounds::default(),
+            ActiveWorktrees::from_listing(crate::worktree::list_unlocked_in_root(data_root)),
+            Some(data_root),
         )
     })
 }
@@ -1575,6 +1609,28 @@ fn cleanup_artifacts_in_worktrees(
     registry_quarantines: Vec<crate::worktree::TaskWorktreeRegistryQuarantine>,
     bounds: ArtifactInventoryBounds,
 ) -> Result<ArtifactCleanupOutput> {
+    cleanup_artifacts_in_worktrees_with_active(
+        root,
+        worktrees,
+        options,
+        include_self_temp_artifacts,
+        registry_quarantines,
+        bounds,
+        ActiveWorktrees::resolve(),
+        None,
+    )
+}
+
+fn cleanup_artifacts_in_worktrees_with_active(
+    root: PathBuf,
+    worktrees: Vec<WorktreeInfo>,
+    options: &ArtifactCleanupOptions,
+    include_self_temp_artifacts: bool,
+    registry_quarantines: Vec<crate::worktree::TaskWorktreeRegistryQuarantine>,
+    bounds: ArtifactInventoryBounds,
+    mut active: ActiveWorktrees,
+    data_root: Option<&Path>,
+) -> Result<ArtifactCleanupOutput> {
     let ArtifactInventoryBounds {
         deadline,
         inspection_limit,
@@ -1638,7 +1694,6 @@ fn cleanup_artifacts_in_worktrees(
     let mut skipped = Vec::new();
     let mut inspected_count = 0;
     let mut scan_complete = inspection_limit.is_none() || !worktrees.is_empty();
-    let mut active = ActiveWorktrees::resolve();
     // Durable pin references are resolved again at the apply boundary. The
     // full lifecycle-store read is deliberately excluded from inventory so a
     // bounded page cannot spend its entire deadline before its first cursor.
@@ -1786,7 +1841,7 @@ fn cleanup_artifacts_in_worktrees(
 
     let cleanup_run = options
         .apply
-        .then(|| start_artifact_cleanup_run(&root))
+        .then(|| start_artifact_cleanup_run(&root, data_root))
         .transpose()?;
     let cleanup_run_ref = cleanup_run
         .as_ref()

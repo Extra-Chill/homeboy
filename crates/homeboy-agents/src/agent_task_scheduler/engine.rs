@@ -872,8 +872,9 @@ impl AgentTaskScheduler {
                         &request.task_id,
                         scheduled.attempt,
                     )
+                    .map(|scratch| (scratch, lifecycle_store.data_root()))
                 });
-                let scratch = match scratch {
+                let (scratch, data_root) = match scratch {
                     Ok(scratch) => scratch,
                     Err(error) => {
                         let outcome =
@@ -888,11 +889,12 @@ impl AgentTaskScheduler {
                         continue;
                     }
                 };
-                let attempt_workspace = match prepare_attempt_workspace(
+                let attempt_workspace = match prepare_attempt_workspace_in_root(
                     &mut request,
                     task_base_sha.as_deref(),
                     harvest_preflight.candidate_baseline.as_ref(),
                     &scratch.path,
+                    &data_root,
                 ) {
                     Ok(workspace) => workspace,
                     Err(error) => {
@@ -1227,7 +1229,11 @@ impl AgentTaskScheduler {
                             });
                         }
                     }
-                    if let Err(error) = harvest_candidate_commit(&mut outcome, &running_task) {
+                    if let Err(error) = harvest_candidate_commit_in_store(
+                        &mut outcome,
+                        &running_task,
+                        self.durable_lifecycle_store().ok(),
+                    ) {
                         outcome = committed_harvest_failure(outcome, error);
                     }
                     // Harvest can add Homeboy-generated patch artifacts after the

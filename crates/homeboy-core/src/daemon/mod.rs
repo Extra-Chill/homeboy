@@ -1392,8 +1392,12 @@ pub fn read_status() -> Result<DaemonStatus> {
 /// Startup observes the exact candidate store before moving admission. Normal
 /// status continues to follow the current registry owner during that handoff.
 pub(super) fn read_status_for_state_path(path: PathBuf) -> Result<DaemonStatus> {
+    read_status_at_paths(path, paths::observation_db()?)
+}
+
+/// Read daemon ownership against explicitly injected state and observation paths.
+pub fn read_status_at_paths(path: PathBuf, jobs_path: PathBuf) -> Result<DaemonStatus> {
     let state_path = path.display().to_string();
-    let jobs_path = paths::observation_db()?;
     let state_dir = path.parent().unwrap_or(&path).to_path_buf();
     let state_identity = daemon_state_identity(&path, &jobs_path)?;
     let validation = validate_lease_file(&path)?;

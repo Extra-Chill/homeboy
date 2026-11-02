@@ -230,6 +230,7 @@ pub(super) struct AttemptWorkspace {
     source_root: PathBuf,
     root: PathBuf,
     base_sha: String,
+    data_root: PathBuf,
 }
 
 impl AttemptWorkspace {
@@ -248,7 +249,7 @@ impl AttemptWorkspace {
         // The provider has returned and this exact detached checkout is no
         // longer leased. Remove only declared rebuildable output before the
         // source-state guard decides whether the worktree itself is removable.
-        homeboy_core::cleanup::cleanup_worktree_artifacts(&self.root)
+        homeboy_core::cleanup::cleanup_worktree_artifacts_in_root(&self.root, &self.data_root)
             .map_err(|error| format!("cannot cleanup rebuildable artifacts: {}", error.message))?;
         let status = git_status_porcelain(&self.root)
             .map_err(|error| format!("cannot inspect attempt workspace state: {error:?}"))?;
@@ -707,11 +708,28 @@ fn validate_derived_cook_baseline(
 /// Give each provider dispatch a detached checkout at the caller's clean base.
 /// The managed task worktree remains a preflight-only source of truth, so a
 /// timed-out provider cannot contaminate a later provider rotation.
+#[cfg(test)]
 pub(super) fn prepare_attempt_workspace(
     request: &mut AgentTaskRequest,
     base: Option<&str>,
     candidate_baseline: Option<&crate::agent_task::AgentTaskCandidate>,
     scratch_root: &Path,
+) -> Result<Option<Arc<AttemptWorkspace>>, HarvestError> {
+    prepare_attempt_workspace_in_root(
+        request,
+        base,
+        candidate_baseline,
+        scratch_root,
+        scratch_root,
+    )
+}
+
+pub(super) fn prepare_attempt_workspace_in_root(
+    request: &mut AgentTaskRequest,
+    base: Option<&str>,
+    candidate_baseline: Option<&crate::agent_task::AgentTaskCandidate>,
+    scratch_root: &Path,
+    data_root: &Path,
 ) -> Result<Option<Arc<AttemptWorkspace>>, HarvestError> {
     let Some(root) = request.workspace.root.as_deref().map(PathBuf::from) else {
         return Ok(None);
@@ -754,6 +772,7 @@ pub(super) fn prepare_attempt_workspace(
         source_root: root.clone(),
         root: attempt_root.clone(),
         base_sha: base.to_string(),
+        data_root: data_root.to_path_buf(),
     });
     let adoption = request
         .workspace
@@ -1026,6 +1045,7 @@ mod tests {
             source_root: source.path().to_path_buf(),
             root: attempt_root.clone(),
             base_sha: git_output(&attempt_root, &["rev-parse", "HEAD"]).expect("attempt head"),
+            data_root: source.path().to_path_buf(),
         };
         let error = workspace
             .cleanup()
