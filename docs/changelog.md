@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.444.1] - 2026-11-02
+
+### Fixed
+- supersede exact unpublished candidates before re-cook
+- declare the nodejs build cache where builds read it; keep dependency failure output
+
 ## [0.444.0] - 2026-11-02
 
 ### Added
