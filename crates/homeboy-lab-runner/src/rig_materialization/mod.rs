@@ -808,7 +808,7 @@ pub(super) fn sync_lab_offload_broker_targets(
                 }
             },
         };
-        write_broker_target_projection(runner_id, &home, project.as_ref(), &server)?;
+        write_broker_target_projection(runner_id, remote_cwd, &home, project.as_ref(), &server)?;
         targets.push(projection);
     }
     Ok(LabBrokerTargetSync {
@@ -819,12 +819,13 @@ pub(super) fn sync_lab_offload_broker_targets(
 
 fn write_broker_target_projection(
     runner_id: &str,
+    remote_cwd: &str,
     home: &str,
     project: Option<&homeboy_core::project::Project>,
     server: &homeboy_core::server::Server,
 ) -> Result<()> {
     for (path, value) in broker_target_projection_files(home, project, server) {
-        write_runner_json(runner_id, &path, &value)?;
+        write_runner_json(runner_id, remote_cwd, &path, &value)?;
     }
     Ok(())
 }
@@ -857,7 +858,12 @@ fn broker_target_projection_files(
     files
 }
 
-fn write_runner_json(runner_id: &str, path: &str, value: &serde_json::Value) -> Result<()> {
+fn write_runner_json(
+    runner_id: &str,
+    remote_cwd: &str,
+    path: &str,
+    value: &serde_json::Value,
+) -> Result<()> {
     use base64::Engine;
 
     let encoded = base64::engine::general_purpose::STANDARD
@@ -875,7 +881,8 @@ fn write_runner_json(runner_id: &str, path: &str, value: &serde_json::Value) -> 
     );
     let (output, exit_code) = exec(
         runner_id,
-        RunnerExecOptions::command(vec!["sh".to_string(), "-c".to_string(), command]),
+        RunnerExecOptions::command(vec!["sh".to_string(), "-c".to_string(), command])
+            .with_cwd(remote_cwd),
     )?;
     if exit_code != 0 {
         return Err(Error::validation_invalid_argument(
