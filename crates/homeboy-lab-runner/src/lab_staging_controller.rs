@@ -2777,8 +2777,10 @@ trait LabStagingStageOperations: Send + Sync {
         checkpoint: &LabStagingCheckpoint,
     ) -> Result<()>;
     /// Reconcile an effect after its intent was persisted but before its
-    /// receipt/checkpoint was durably recorded. `None` proves no completion;
-    /// callers may then execute the one declared operation.
+    /// receipt/checkpoint was durably recorded. A stage's receipt is installed
+    /// atomically as its final step, so it is the completion commit point:
+    /// `None` proves no completion and callers re-execute the one declared
+    /// operation; a present receipt must validate or recovery fails closed.
     fn recover_stage(
         &self,
         _request: &LabStagingExecutionRequest,
@@ -3149,8 +3151,16 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
                 )))
             }
             LabStagingPhase::MaterializeRuntime => {
-                let runtime = Self::durable_runtime(request)
-                    .map_err(|_| Self::ambiguous_intent("runtime"))?;
+                let Some(runtime) =
+                    homeboy_agents::agent_task_lifecycle::try_load_private_run_attachment::<
+                        DurableLabRuntimeStage,
+                    >(
+                        &request.recipe.run_id,
+                        DURABLE_LAB_RUNTIME_STAGE_ATTACHMENT_KIND,
+                    )?
+                else {
+                    return Ok(None);
+                };
                 let mut completed = checkpoint.clone();
                 completed.phase = LabStagingPhase::HydrateDependencies;
                 completed.stage_intent = None;
@@ -3161,8 +3171,16 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
                 )))
             }
             LabStagingPhase::HydrateDependencies => {
-                let hydration = Self::durable_hydration(request)
-                    .map_err(|_| Self::ambiguous_intent("hydration"))?;
+                let Some(hydration) =
+                    homeboy_agents::agent_task_lifecycle::try_load_private_run_attachment::<
+                        DurableLabHydrationStage,
+                    >(
+                        &request.recipe.run_id,
+                        DURABLE_LAB_HYDRATION_STAGE_ATTACHMENT_KIND,
+                    )?
+                else {
+                    return Ok(None);
+                };
                 let workspace = Self::durable_workspace(request)?.payload;
                 let runtime = Self::durable_runtime(request)?.payload;
                 let mut completed = checkpoint.clone();
@@ -3189,13 +3207,19 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
                 )))
             }
             LabStagingPhase::ObserveRunner => {
-                let terminal = homeboy_agents::agent_task_lifecycle::load_private_run_attachment::<
-                    DurableLabTerminalReceipt,
-                >(
-                    &request.recipe.run_id,
-                    DURABLE_LAB_TERMINAL_RECEIPT_ATTACHMENT_KIND,
-                )
-                .map_err(|_| Self::ambiguous_intent("observe"))?;
+                // Observation is read-only polling of the recorded runner job,
+                // so an unreceipted intent (a controller restart mid-poll) is
+                // re-observed rather than treated as ambiguous.
+                let Some(terminal) =
+                    homeboy_agents::agent_task_lifecycle::try_load_private_run_attachment::<
+                        DurableLabTerminalReceipt,
+                    >(
+                        &request.recipe.run_id,
+                        DURABLE_LAB_TERMINAL_RECEIPT_ATTACHMENT_KIND,
+                    )?
+                else {
+                    return Ok(None);
+                };
                 let mut completed = checkpoint.clone();
                 completed.phase = LabStagingPhase::Completed;
                 completed.stage_intent = None;
@@ -3909,12 +3933,14 @@ impl LabStagingStageOperations for ProductionLabStagingOperations {
         }
         // A completed receipt prevents runner redispatch. Both fresh observation
         // and receipt replay must still ensure controller-owned Cook completion.
-        if let Ok(receipt) = homeboy_agents::agent_task_lifecycle::load_private_run_attachment::<
-            DurableLabTerminalReceipt,
-        >(
-            &request.recipe.run_id,
-            DURABLE_LAB_TERMINAL_RECEIPT_ATTACHMENT_KIND,
-        ) {
+        if let Some(receipt) =
+            homeboy_agents::agent_task_lifecycle::try_load_private_run_attachment::<
+                DurableLabTerminalReceipt,
+            >(
+                &request.recipe.run_id,
+                DURABLE_LAB_TERMINAL_RECEIPT_ATTACHMENT_KIND,
+            )?
+        {
             receipt.payload.validate(request, checkpoint)?;
         } else {
             Self::check_cancelled(cancellation)?;
@@ -7666,47 +7692,179 @@ mod tests {
         );
     }
 
+    /// Fault injection at each receipt-committed staging boundary: a controller
+    /// restart re-enters the persisted stage intent. The atomically installed
+    /// receipt is the commit point, so its absence proves an unfinished stage
+    /// (re-stage), a valid receipt proves completion (continue), and an invalid
+    /// receipt fails closed.
     #[test]
-    fn workspace_intent_without_receipt_recovers_to_rematerialize() {
-        crate::test_support::with_isolated_home(|_| {
-            let request = execution_request();
-            submit_recipe_run(&request.recipe.run_id);
-            let mut checkpoint = LabStagingCheckpoint::initial(&envelope());
-            let intent = checkpoint.intent_for_current_action();
-            checkpoint.stage_intent = Some(intent.clone());
-
-            let recovered = ProductionLabStagingOperations
-                .recover_stage(&request, &checkpoint, &intent)
-                .expect("an unreceipted workspace intent is re-run, not ambiguous");
-            assert!(recovered.is_none());
-        });
-    }
-
-    #[test]
-    fn workspace_intent_with_invalid_receipt_fails_closed() {
-        crate::test_support::with_isolated_home(|_| {
-            let request = execution_request();
-            submit_recipe_run(&request.recipe.run_id);
-            let mut checkpoint = LabStagingCheckpoint::initial(&envelope());
-            let intent = checkpoint.intent_for_current_action();
-            checkpoint.stage_intent = Some(intent.clone());
-            let mut tampered = durable_workspace_state(&request);
-            tampered.stage["source_snapshot"]["remote_path"] = json!("/other");
+    fn stage_intent_recovery_follows_the_atomic_completion_receipt() {
+        fn persist<T: Serialize + serde::de::DeserializeOwned + Clone + PartialEq>(
+            run_id: &str,
+            kind: &str,
+            payload: &T,
+        ) {
             homeboy_agents::agent_task_lifecycle::persist_private_run_attachment(
-                &request.recipe.run_id,
-                DURABLE_LAB_WORKSPACE_STAGE_ATTACHMENT_KIND,
-                &tampered,
+                run_id, kind, payload,
             )
-            .expect("persist tampered workspace receipt");
+            .expect("persist stage receipt");
+        }
+        let stages = [
+            LabStagingPhase::AcceptedMaterializeWorkspace,
+            LabStagingPhase::MaterializeRuntime,
+            LabStagingPhase::HydrateDependencies,
+            LabStagingPhase::ObserveRunner,
+        ];
+        for (stage, phase) in stages.iter().enumerate() {
+            for receipt in ["absent", "valid", "tampered"] {
+                crate::test_support::with_isolated_home(|_| {
+                    let request = execution_request();
+                    let run_id = request.recipe.run_id.as_str();
+                    submit_recipe_run(run_id);
+                    let workspace = durable_workspace_state(&request);
+                    let runtime = DurableLabRuntimeStage {
+                        schema: "homeboy/durable-lab-runtime-stage/v1".to_string(),
+                        run_id: run_id.to_string(),
+                        runner_id: request.recipe.runner_id.clone(),
+                        recipe_digest: canonical_digest(&request.recipe).expect("recipe digest"),
+                        plan_digest: canonical_digest(&request.durable_agent_task_plan)
+                            .expect("plan digest"),
+                        workspace_id: workspace.workspace_id.clone(),
+                        runtime_id: "runtime-1".to_string(),
+                        output: json!({ "remote_cwd": workspace.workspace_id }),
+                    };
+                    let hydration_record = json!({ "NotApplied": { "reason": "fixture" } });
+                    let hydration = DurableLabHydrationStage {
+                        schema: "homeboy/durable-lab-hydration-stage/v1".to_string(),
+                        run_id: run_id.to_string(),
+                        runner_id: request.recipe.runner_id.clone(),
+                        recipe_digest: canonical_digest(&request.recipe).expect("recipe digest"),
+                        plan_digest: canonical_digest(&request.durable_agent_task_plan)
+                            .expect("plan digest"),
+                        workspace_id: workspace.workspace_id.clone(),
+                        runtime_id: runtime.runtime_id.clone(),
+                        hydration_id: canonical_digest(&hydration_record)
+                            .expect("hydration digest"),
+                        plan: Value::Null,
+                        hydration_record: hydration_record.clone(),
+                        hydration_metadata: hydration_metadata_from_record(&hydration_record),
+                        execution_ids: Vec::new(),
+                        dispatch_inputs: json!({
+                            "workspace_stage": workspace.stage,
+                            "runtime_output": runtime.output,
+                            "plan": null,
+                        }),
+                    };
+                    let terminal = DurableLabTerminalReceipt {
+                        schema: "homeboy/durable-lab-terminal-receipt/v1".to_string(),
+                        run_id: run_id.to_string(),
+                        runner_id: request.recipe.runner_id.clone(),
+                        runner_job_id: "runner-job-1".to_string(),
+                        status: "succeeded".to_string(),
+                    };
+                    let persist_receipt = |index: usize, tampered: bool| match index {
+                        0 => {
+                            let mut receipt = workspace.clone();
+                            if tampered {
+                                receipt.stage["source_snapshot"]["remote_path"] = json!("/other");
+                            }
+                            persist(
+                                run_id,
+                                DURABLE_LAB_WORKSPACE_STAGE_ATTACHMENT_KIND,
+                                &receipt,
+                            );
+                        }
+                        1 => {
+                            let mut receipt = runtime.clone();
+                            if tampered {
+                                receipt.output["remote_cwd"] = json!("/other");
+                            }
+                            persist(run_id, DURABLE_LAB_RUNTIME_STAGE_ATTACHMENT_KIND, &receipt);
+                        }
+                        2 => {
+                            let mut receipt = hydration.clone();
+                            if tampered {
+                                receipt.hydration_id = "sha256:other".to_string();
+                            }
+                            persist(
+                                run_id,
+                                DURABLE_LAB_HYDRATION_STAGE_ATTACHMENT_KIND,
+                                &receipt,
+                            );
+                        }
+                        _ => {
+                            let mut receipt = terminal.clone();
+                            if tampered {
+                                receipt.runner_job_id = "runner-job-other".to_string();
+                            }
+                            persist(
+                                run_id,
+                                DURABLE_LAB_TERMINAL_RECEIPT_ATTACHMENT_KIND,
+                                &receipt,
+                            );
+                        }
+                    };
+                    let mut checkpoint = LabStagingCheckpoint::initial(&envelope());
+                    if stage >= 1 {
+                        checkpoint.source_snapshot_id = Some(workspace.source_snapshot_id.clone());
+                        checkpoint.workspace_id = Some(workspace.workspace_id.clone());
+                    }
+                    if stage >= 2 {
+                        checkpoint.runtime_id = Some(runtime.runtime_id.clone());
+                    }
+                    if stage >= 3 {
+                        checkpoint.hydration_id = Some(hydration.hydration_id.clone());
+                        checkpoint.final_runner_job_id = Some(terminal.runner_job_id.clone());
+                    }
+                    checkpoint.phase = phase.clone();
+                    let intent = checkpoint.intent_for_current_action();
+                    checkpoint.stage_intent = Some(intent.clone());
+                    for completed in 0..stage {
+                        persist_receipt(completed, false);
+                    }
+                    if receipt != "absent" {
+                        persist_receipt(stage, receipt == "tampered");
+                    }
 
-            let error = ProductionLabStagingOperations
-                .recover_stage(&request, &checkpoint, &intent)
-                .expect_err("a recorded but invalid workspace receipt fails closed");
-            assert_eq!(
-                error.code,
-                homeboy_core::ErrorCode::ValidationInvalidArgument
-            );
-        });
+                    let recovered = ProductionLabStagingOperations.recover_stage(
+                        &request,
+                        &checkpoint,
+                        &intent,
+                    );
+                    let case = format!("{phase:?} with {receipt} receipt");
+                    match receipt {
+                        "absent" => assert!(
+                            recovered
+                                .unwrap_or_else(|error| panic!("{case} must re-stage: {error}"))
+                                .is_none(),
+                            "{case} must re-stage the unfinished operation"
+                        ),
+                        "valid" => {
+                            let effect = recovered
+                                .unwrap_or_else(|error| panic!("{case} must continue: {error}"))
+                                .unwrap_or_else(|| panic!("{case} must continue from its receipt"));
+                            assert!(
+                                matches!(
+                                    (stage, &effect),
+                                    (0, LabStagingStageEffect::Workspace(_, _))
+                                        | (1, LabStagingStageEffect::Runtime(_))
+                                        | (2, LabStagingStageEffect::Hydration(_))
+                                        | (3, LabStagingStageEffect::Observe)
+                                ),
+                                "{case} recovered {effect:?}"
+                            );
+                        }
+                        _ => assert_eq!(
+                            recovered
+                                .expect_err(&format!("{case} must fail closed"))
+                                .code,
+                            homeboy_core::ErrorCode::ValidationInvalidArgument,
+                            "{case}"
+                        ),
+                    }
+                });
+            }
+        }
     }
 
     struct CancellationAdapter(Arc<AtomicUsize>);
