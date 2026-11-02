@@ -220,15 +220,143 @@ fn lab_homeboy_path_shadow_accepts_matching_bare_homeboy() {
 }
 
 #[test]
-fn homeboy_version_skew_check_is_absent_for_matching_build_identities() {
-    assert!(checks::homeboy_version_skew_check(
-        "0.290.0",
-        "homeboy 0.290.0+00d2756ef115",
-        "0.290.0+00d2756ef115",
-        "lab",
-        "lab",
-    )
-    .is_none());
+fn homeboy_version_skew_check_uses_lab_admission() {
+    use super::super::types::RunnerRepairAction;
+    use homeboy_lab_contract::{
+        required_lab_handoff_capabilities, LabCapabilityHandshake, LabRuntimeAncestry,
+        LabRuntimeIdentity, LAB_CONTRACT_VERSION,
+    };
+
+    for (
+        name,
+        remote_build,
+        contract_version,
+        capabilities_match,
+        require_exact,
+        expected,
+        repair,
+    ) in [
+        (
+            "compatible builds",
+            "0.289.0+runner",
+            LAB_CONTRACT_VERSION,
+            true,
+            false,
+            RunnerDoctorStatus::Ok,
+            false,
+        ),
+        (
+            "contract mismatch",
+            "0.289.0+runner",
+            LAB_CONTRACT_VERSION + 1,
+            true,
+            false,
+            RunnerDoctorStatus::Error,
+            true,
+        ),
+        (
+            "capability mismatch",
+            "0.289.0+runner",
+            LAB_CONTRACT_VERSION,
+            false,
+            false,
+            RunnerDoctorStatus::Error,
+            true,
+        ),
+        (
+            "exact build required",
+            "0.289.0+runner",
+            LAB_CONTRACT_VERSION,
+            true,
+            true,
+            RunnerDoctorStatus::Error,
+            true,
+        ),
+        (
+            "runner ahead",
+            "0.291.0+runner",
+            LAB_CONTRACT_VERSION,
+            true,
+            false,
+            RunnerDoctorStatus::Error,
+            false,
+        ),
+        (
+            "matching builds",
+            "0.290.0+controller",
+            LAB_CONTRACT_VERSION,
+            true,
+            false,
+            RunnerDoctorStatus::Ok,
+            false,
+        ),
+    ] {
+        let controller = LabRuntimeIdentity {
+            build_identity: "homeboy 0.290.0+controller".to_string(),
+            lab_contract_version: Some(LAB_CONTRACT_VERSION),
+            source_revision: String::new(),
+            clean: true,
+        };
+        let remote = LabRuntimeIdentity {
+            build_identity: format!("homeboy {remote_build}"),
+            lab_contract_version: Some(contract_version),
+            ..controller.clone()
+        };
+        let capabilities = required_lab_handoff_capabilities();
+        let handshake = LabCapabilityHandshake {
+            controller,
+            required_capabilities: capabilities.clone(),
+            runner_command: remote.clone(),
+            runner_command_capabilities: if capabilities_match {
+                capabilities.clone()
+            } else {
+                Vec::new()
+            },
+            daemon: remote,
+            daemon_capabilities: capabilities,
+            ancestry: LabRuntimeAncestry::Unknown,
+        };
+        let check =
+            checks::homeboy_version_skew_check("0.290.0", &handshake, require_exact, "lab", "lab")
+                .expect(name);
+        assert_eq!(check.status, expected, "{name}");
+        assert_eq!(
+            check.details["local_build_identity"], "0.290.0+controller",
+            "{name}"
+        );
+        assert_eq!(
+            check.details["remote_build_identity"], remote_build,
+            "{name}"
+        );
+        assert_eq!(
+            check.remediation.is_some(),
+            expected == RunnerDoctorStatus::Error,
+            "{name}"
+        );
+        if repair {
+            assert!(
+                check
+                    .remediation
+                    .as_deref()
+                    .unwrap()
+                    .contains("homeboy runner connect"),
+                "{name}"
+            );
+            assert!(
+                matches!(check.remediation_action, Some(RunnerRepairAction::RefreshHomeboy { git_ref: Some(ref git_ref), allow_downgrade: false }) if git_ref == "v0.290.0"),
+                "{name}"
+            );
+        } else {
+            assert!(check.remediation_action.is_none(), "{name}");
+        }
+        if name == "runner ahead" {
+            assert_eq!(check.details["direction"], "runner_ahead");
+            assert!(check
+                .remediation
+                .unwrap()
+                .contains("Upgrade the controller"));
+        }
+    }
 }
 
 /// The prose and the typed action must name the same ref.
@@ -247,16 +375,4 @@ fn a_check_without_an_automatic_repair_carries_no_action() {
     );
     assert!(check.remediation.is_some());
     assert!(check.remediation_action.is_none());
-}
-
-#[test]
-fn homeboy_version_skew_check_warns_for_different_semantic_versions() {
-    assert!(checks::homeboy_version_skew_check(
-        "0.290.0",
-        "homeboy 0.290.0+00d2756ef115",
-        "0.289.0+00d2756ef115",
-        "lab",
-        "lab",
-    )
-    .is_some());
 }

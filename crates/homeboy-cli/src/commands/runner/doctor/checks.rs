@@ -171,18 +171,18 @@ pub(crate) fn path_writable_check(
 
 pub(crate) fn homeboy_version_skew_check(
     local_version: &str,
-    local_build_identity: &str,
-    remote_build_identity: &str,
+    handshake: &homeboy_lab_contract::LabCapabilityHandshake,
+    require_exact: bool,
     runner_id: &str,
     server_id: &str,
 ) -> Option<RunnerCheck> {
-    let local = normalize_homeboy_build_identity(local_build_identity);
-    let remote = normalize_homeboy_build_identity(remote_build_identity);
-    if local.is_empty() || remote.is_empty() || remote == "unknown" || local == remote {
-        return None;
-    }
+    let admission = homeboy_lab_contract::admit_lab_runner(handshake, require_exact);
+    let local = normalize_homeboy_build_identity(&handshake.controller.build_identity);
+    let remote = normalize_homeboy_build_identity(&handshake.runner_command.build_identity);
     let mut details = BTreeMap::new();
     details.insert("local_version".to_string(), local_version.to_string());
+    details.insert("local_build_identity".to_string(), local.to_string());
+    details.insert("remote_build_identity".to_string(), remote.to_string());
     details.insert("remote_version".to_string(), remote.to_string());
     let remote_version = remote
         .split('+')
@@ -196,6 +196,14 @@ pub(crate) fn homeboy_version_skew_check(
         return Some(error("homeboy.version_skew", message,
             Some(format!("Runner `{runner_id}` is ahead of this controller. Upgrade the controller; inspect with `homeboy ssh {server_id} -- homeboy --version`")), details));
     }
+    if admission.compatible {
+        return Some(ok_with_details(
+            "homeboy.version_skew",
+            format!("Local Homeboy {local} is compatible with remote runner Homeboy {remote}"),
+            details,
+        ));
+    }
+    let message = admission.provenance.rejection_reason.unwrap_or(message);
     let reference = format!("v{local_version}");
     Some(error("homeboy.version_skew", message, Some(format!(
         "Align runner with `homeboy runner connect {}`, which installs this controller's release on the runner; use runner dev-sync for unreleased builds",

@@ -22,6 +22,16 @@ pub(crate) fn direct_runner_capability_admission(
     status: &RunnerStatusReport,
     homeboy: &str,
 ) -> Result<LabCapabilityAdmission> {
+    Ok(negotiate_lab_capability_handshake(
+        &direct_runner_capability_handshake(runner, status, homeboy)?,
+    ))
+}
+
+pub(crate) fn direct_runner_capability_handshake(
+    runner: &Runner,
+    status: &RunnerStatusReport,
+    homeboy: &str,
+) -> Result<LabCapabilityHandshake> {
     let controller = homeboy_product_identity::build_identity();
     let controller_identity = LabRuntimeIdentity {
         build_identity: controller.display,
@@ -33,17 +43,15 @@ pub(crate) fn direct_runner_capability_admission(
     let Some(session) = status.session.as_ref() else {
         let (runner_command, runner_command_capabilities) =
             command_evidence.unwrap_or_else(|| (controller_identity.clone(), Vec::new()));
-        return Ok(negotiate_lab_capability_handshake(
-            &LabCapabilityHandshake {
-                controller: controller_identity.clone(),
-                required_capabilities: required_lab_handoff_capabilities(),
-                runner_command,
-                runner_command_capabilities,
-                daemon: controller_identity,
-                daemon_capabilities: Vec::new(),
-                ancestry: LabRuntimeAncestry::Unknown,
-            },
-        ));
+        return Ok(LabCapabilityHandshake {
+            controller: controller_identity.clone(),
+            required_capabilities: required_lab_handoff_capabilities(),
+            runner_command,
+            runner_command_capabilities,
+            daemon: controller_identity,
+            daemon_capabilities: Vec::new(),
+            ancestry: LabRuntimeAncestry::Unknown,
+        });
     };
     let daemon_source = session
         .homeboy_build_identity
@@ -68,33 +76,29 @@ pub(crate) fn direct_runner_capability_admission(
     let command_evidence = command_evidence
         .or_else(|| hash_bound_runner_command_evidence(status, homeboy, &daemon_capabilities));
     let Some((runner_command, runner_command_capabilities)) = command_evidence else {
-        return Ok(negotiate_lab_capability_handshake(
-            &LabCapabilityHandshake {
-                controller: controller_identity.clone(),
-                required_capabilities: required_lab_handoff_capabilities(),
-                runner_command: controller_identity.clone(),
-                runner_command_capabilities: Vec::new(),
-                daemon: controller_identity,
-                daemon_capabilities,
-                ancestry: LabRuntimeAncestry::Unknown,
-            },
-        ));
+        return Ok(LabCapabilityHandshake {
+            controller: controller_identity.clone(),
+            required_capabilities: required_lab_handoff_capabilities(),
+            runner_command: controller_identity.clone(),
+            runner_command_capabilities: Vec::new(),
+            daemon: controller_identity,
+            daemon_capabilities,
+            ancestry: LabRuntimeAncestry::Unknown,
+        });
     };
     let ancestry = runtime_ancestry(
         &controller_identity.source_revision,
         &runner_command.source_revision,
     );
-    Ok(negotiate_lab_capability_handshake(
-        &LabCapabilityHandshake {
-            controller: controller_identity,
-            required_capabilities: required_lab_handoff_capabilities(),
-            runner_command,
-            runner_command_capabilities,
-            daemon,
-            daemon_capabilities,
-            ancestry,
-        },
-    ))
+    Ok(LabCapabilityHandshake {
+        controller: controller_identity,
+        required_capabilities: required_lab_handoff_capabilities(),
+        runner_command,
+        runner_command_capabilities,
+        daemon,
+        daemon_capabilities,
+        ancestry,
+    })
 }
 
 pub(crate) fn capability_admission_has_blocking_drift(

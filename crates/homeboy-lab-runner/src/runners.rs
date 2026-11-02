@@ -105,3 +105,13 @@ pub use crate::{
 // (currently `commands::runs::remote`) compile, but do not expose them as
 // public API.
 pub use crate::daemon_api_get;
+
+/// Collect the same command and daemon contract evidence used by Lab admission.
+/// This is read-only and does not reconnect or rotate the runner.
+pub fn runner_capability_handshake(
+    runner: &Runner,
+    status: &RunnerStatusReport,
+    homeboy: &str,
+) -> homeboy_core::error::Result<homeboy_lab_contract::LabCapabilityHandshake> {
+    crate::lab::offload::metadata::direct_runner_capability_handshake(runner, status, homeboy)
+}
