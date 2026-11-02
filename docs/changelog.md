@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.444.12] - 2026-11-02
+
+### Changed
+- Allow pre-provider Cook recovery with corrected verification gates
+
+### Fixed
+- scope Cook's component lint gate to the candidate's changes
+
 ## [0.444.11] - 2026-11-02
 
 ### Changed
