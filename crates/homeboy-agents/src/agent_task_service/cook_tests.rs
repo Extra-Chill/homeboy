@@ -69,7 +69,7 @@ use homeboy_lab_contract::lab::transport_failure::{
 };
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{mpsc, Arc, Barrier, Condvar, LazyLock, Mutex};
+use std::sync::{mpsc, Arc, Barrier, Condvar, Mutex};
 
 /// The tests below drive the store-rooted entry points. Resolving the store
 /// once here keeps the ambient lookup in one place and lets the ambient
@@ -258,21 +258,8 @@ fn deferred_materialization_binds_nested_component_without_replacing_repository_
     });
 }
 
-static CONFIG_LOCK_STRICT_TEST: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
-
 fn with_strict_config_lock(test: impl FnOnce()) {
-    let _guard = CONFIG_LOCK_STRICT_TEST
-        .lock()
-        .expect("strict lock test guard");
-    std::env::set_var(homeboy_core::config::CONFIG_LOCK_STRICT_ENV, "1");
-    struct StrictLockEnv;
-    impl Drop for StrictLockEnv {
-        fn drop(&mut self) {
-            std::env::remove_var(homeboy_core::config::CONFIG_LOCK_STRICT_ENV);
-        }
-    }
-    let _env = StrictLockEnv;
-    test();
+    homeboy_core::config::with_strict_config_lock_for_test(test);
 }
 
 /// `agent_task_lifecycle::submit_plan` against an explicitly injected store.

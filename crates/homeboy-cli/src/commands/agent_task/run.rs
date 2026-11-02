@@ -535,8 +535,11 @@ fn apply_component_verify_gates(
             component_id
         );
     }
+    let root = homeboy::core::git::repo_root(Path::new(&component.local_path));
+    let component_cwd = durable_component_cwd(component, component_id, root.as_deref())?;
     let gates = component_cook_gates(ComponentCookGateInputs {
         component_id,
+        component_cwd: &component_cwd,
         has_explicit_gate: args.gates.has_deterministic_gate(),
         retained_gate_contract,
         lint_gate_opted_out: args.gates.no_component_lint_gate,
@@ -575,20 +578,22 @@ fn component_declares_lint(component: &homeboy::core::component::Component) -> b
         )
 }
 
-/// The canonical lint gate for a component, run from the component workspace
-/// where Cook executes deterministic gates. It mirrors the component's CI
+/// The canonical lint gate for a component, run from the candidate repository
+/// root with a repository-relative component path. It mirrors the component's CI
 /// `homeboy review lint`, including its declared baseline policy. Cook already
 /// placed this workspace, so the gate runs there instead of re-entering
 /// resource-policy placement from its sanitized gate home (#16517).
-fn component_lint_gate(component_id: &str) -> String {
+fn component_lint_gate(component_id: &str, component_cwd: &str) -> String {
     format!(
-        "homeboy --placement local review lint {} --path .",
-        quote_args(&[component_id.to_string()])
+        "homeboy --placement local review lint {} --path {}",
+        quote_args(&[component_id.to_string()]),
+        quote_args(&[component_cwd.to_string()])
     )
 }
 
 struct ComponentCookGateInputs<'a, I> {
     component_id: &'a str,
+    component_cwd: &'a str,
     has_explicit_gate: bool,
     retained_gate_contract: bool,
     lint_gate_opted_out: bool,
@@ -603,7 +608,19 @@ fn component_cook_gates<'a, I: Iterator<Item = &'a str>>(
 ) -> Vec<String> {
     let mut gates = Vec::new();
     if !inputs.has_explicit_gate {
-        gates.extend(inputs.defaults);
+        gates.extend(inputs.defaults.into_iter().map(|gate| {
+            if inputs.component_cwd == "." {
+                gate
+            } else {
+                // Defaults belong to the component, unlike caller-supplied
+                // repository gates. A subshell scopes compound commands too.
+                format!(
+                    "(cd {} && {})",
+                    quote_args(&[inputs.component_cwd.to_string()]),
+                    gate
+                )
+            }
+        }));
     }
     if inputs.retained_gate_contract || inputs.lint_gate_opted_out || !inputs.declares_lint {
         return gates;
@@ -614,7 +631,10 @@ fn component_cook_gates<'a, I: Iterator<Item = &'a str>>(
         .iter()
         .any(|program| program.contains("review lint") || program.contains("homeboy lint"));
     if !already_linted {
-        gates.push(component_lint_gate(inputs.component_id));
+        gates.push(component_lint_gate(
+            inputs.component_id,
+            inputs.component_cwd,
+        ));
     }
     gates
 }
@@ -11115,6 +11135,7 @@ mod tests {
     ) -> Vec<String> {
         component_cook_gates(ComponentCookGateInputs {
             component_id: "data-machine",
+            component_cwd: ".",
             has_explicit_gate,
             retained_gate_contract,
             lint_gate_opted_out,
@@ -11220,9 +11241,60 @@ mod tests {
     }
 
     #[test]
+    fn nested_component_gates_use_candidate_relative_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(dir.path())
+            .status()
+            .unwrap()
+            .success());
+        let nested = dir.path().join("plugins/users plugin");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("homeboy.json"), r#"{"id":"users"}"#).unwrap();
+        let component = serde_json::from_value(serde_json::json!({
+            "id": "users",
+            "local_path": nested,
+            "scripts": {"lint": ["echo lint"]},
+            "default_verify_gates": ["homeboy review test users --path ."]
+        }))
+        .unwrap();
+        let mut args = parse_cook(&["homeboy", "agent-task", "cook"]);
+        super::apply_component_verify_gates(&mut args, false, Some(&component)).unwrap();
+        assert_eq!(
+            args.gates.verify,
+            [
+                "(cd 'plugins/users plugin' && homeboy review test users --path .)",
+                "homeboy --placement local review lint users --path 'plugins/users plugin'"
+            ]
+        );
+        assert!(!args
+            .gates
+            .verify
+            .join(" ")
+            .contains(dir.path().to_str().unwrap()));
+
+        let mut explicit = parse_cook(&[
+            "homeboy",
+            "agent-task",
+            "cook",
+            "--verify",
+            "echo repository gate",
+        ]);
+        super::apply_component_verify_gates(&mut explicit, false, Some(&component)).unwrap();
+        assert_eq!(
+            explicit.gates.verify,
+            [
+                "echo repository gate",
+                "homeboy --placement local review lint users --path 'plugins/users plugin'"
+            ]
+        );
+    }
+
+    #[test]
     fn component_lint_gate_quotes_component_id() {
         assert_eq!(
-            component_lint_gate("odd id"),
+            component_lint_gate("odd id", "."),
             "homeboy --placement local review lint 'odd id' --path ."
         );
     }
@@ -11241,9 +11313,9 @@ mod tests {
             .snapshot_file_inputs()
             .expect("snapshot inline gates");
         args.gates
-            .push_controller_verify(component_lint_gate("data-machine"));
+            .push_controller_verify(component_lint_gate("data-machine", "."));
         args.gates
-            .push_controller_verify(component_lint_gate("data-machine"));
+            .push_controller_verify(component_lint_gate("data-machine", "."));
         assert_eq!(
             args.gates.verify,
             [
