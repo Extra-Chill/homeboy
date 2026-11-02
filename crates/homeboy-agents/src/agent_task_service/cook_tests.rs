@@ -3649,6 +3649,15 @@ fn moved_base_budget_exhaustion_blocks_with_base_conflict() {
 
 #[test]
 fn normal_cook_promotion_uses_admitted_policy_evidence_after_policy_mutation() {
+    normal_cook_promotion_fixture(false);
+}
+
+#[test]
+fn cook_promotion_cancel_terminates_live_gate() {
+    normal_cook_promotion_fixture(true);
+}
+
+fn normal_cook_promotion_fixture(cancel_gate: bool) {
     use crate::agent_task::{AgentTaskArtifact, AgentTaskOutcome, AgentTaskOutcomeStatus};
     use crate::agent_task_scheduler::{AgentTaskAggregate, AgentTaskAggregateTotals};
     use std::os::unix::fs::PermissionsExt;
@@ -3782,6 +3791,59 @@ fn normal_cook_promotion_uses_admitted_policy_evidence_after_policy_mutation() {
             record.metadata["source_checkout"] = serde_json::to_value(&snapshot).unwrap();
         })
         .unwrap();
+
+        if cancel_gate {
+            options.identity.cook_id = "cook-cancel-live-promotion".to_string();
+            let cook_id = options.identity.cook_id.clone();
+            store
+                .write_cook_index_attempt(
+                    &cook_id,
+                    1,
+                    run_id,
+                    "2026-01-01T00:00:00Z".to_string(),
+                    None,
+                )
+                .unwrap();
+            let started = repository.path().join("gate-pid");
+            options.gates.verify = vec![format!("echo $$ > {}; exec sleep 60", started.display())];
+            std::thread::scope(|scope| {
+                let cancellation = scope.spawn(|| {
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+                    while !started.exists() {
+                        assert!(std::time::Instant::now() < deadline, "gate did not start");
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                    }
+                    let pid = std::fs::read_to_string(&started).unwrap();
+                    agent_task_lifecycle::cancel_run_in_store(
+                        &store,
+                        &cook_id,
+                        Some("stop verification"),
+                    )
+                    .expect("fence Cook");
+                    pid.trim().to_string()
+                });
+                let promotion = promote_attempt_in_store(&store, &options, run_id)
+                    .expect("cancelled promotion report");
+                let pid = cancellation.join().unwrap();
+                assert!(
+                    promotion.deterministic_gates.iter().any(|gate| {
+                        gate.termination
+                            == crate::agent_task_gate::AgentTaskGateTermination::Cancelled
+                    }),
+                    "{promotion:?}"
+                );
+                assert!(
+                    !Command::new("kill")
+                        .args(["-0", &pid])
+                        .stderr(std::process::Stdio::null())
+                        .status()
+                        .unwrap()
+                        .success(),
+                    "cancelled gate process is still alive"
+                );
+            });
+            return;
+        }
 
         let promotion =
             promote_attempt_in_store(&store, &options, run_id).expect("normal promotion");

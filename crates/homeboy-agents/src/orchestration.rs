@@ -2032,17 +2032,31 @@ impl OrchestrationService<LifecycleStoreLookup> {
             )
         } else {
             match request.action {
-                ControlPlaneAction::Cancel if record.state().is_terminal() => (
-                    ControlPlaneActionOutcome::AlreadySatisfied,
-                    project_record(&record, None)?,
-                    cancel_result_payload(cancel_result_for_record(
-                        &record,
-                        Duration::ZERO,
-                        0,
-                        None,
-                    )),
-                    Some("run is already terminal".to_string()),
-                ),
+                ControlPlaneAction::Cancel if record.state().is_terminal() => {
+                    let resource = project_record(&record, None)?;
+                    let verifying = resource.phase.as_deref() == Some(LIVE_GATE_VERIFYING_PHASE);
+                    let mut result = cancel_result_for_record(&record, Duration::ZERO, 0, None);
+                    if verifying {
+                        // The attempt's recoverable latch is terminal, but the
+                        // live verifier still has to observe the mission fence.
+                        result.disposition = ControlPlaneCancelDisposition::Requested;
+                        result.terminal = false;
+                    }
+                    (
+                        if verifying {
+                            ControlPlaneActionOutcome::Succeeded
+                        } else {
+                            ControlPlaneActionOutcome::AlreadySatisfied
+                        },
+                        resource,
+                        cancel_result_payload(result),
+                        Some(if verifying {
+                            "Cook promotion verification cancellation requested".to_string()
+                        } else {
+                            "run is already terminal".to_string()
+                        }),
+                    )
+                }
                 ControlPlaneAction::Cancel => {
                     let parameters: ControlPlaneCancelParameters = serde_json::from_value(
                         request.parameters.data.clone(),
@@ -8648,7 +8662,11 @@ mod tests {
     /// Cancelling the Cook or that attempt must close the mission (#15695).
     #[test]
     fn cancel_of_a_candidate_recoverable_attempt_fences_its_cook_mission() {
-        for (case, target_attempt) in [("alias", false), ("attempt", true)] {
+        for (case, target_attempt, verifying) in [
+            ("alias", false, false),
+            ("attempt", true, false),
+            ("live-verification", false, true),
+        ] {
             with_isolated_home(|_| {
                 let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
                 let cook_id = format!("cook-cancel-fence-{case}");
@@ -8663,6 +8681,13 @@ mod tests {
                     .mutate_record(&attempt_id, |record| {
                         record.set_state_for_test(AgentTaskRunState::CandidateRecoverable);
                         record.metadata["cook_id"] = json!(cook_id);
+                        if verifying {
+                            crate::agent_task_service::set_cook_delivery_artifact_for_test(
+                                &mut record.metadata,
+                                "/promotion/status",
+                                json!("verification_pending"),
+                            );
+                        }
                         true
                     })
                     .expect("gate-failed candidate");
@@ -8695,14 +8720,40 @@ mod tests {
                     &cook_id
                 };
 
-                let cancelled = service
-                    .execute_action(&RunId::new(target).expect("target"), &request)
-                    .expect("cancel");
+                let recipe_store =
+                    crate::agent_task_service::CookRecipeStore::from_current_data_root()
+                        .expect("recipe store");
+                let _driver = verifying.then(|| {
+                    recipe_store
+                        .try_acquire_cook_driver(&cook_id)
+                        .unwrap()
+                        .unwrap()
+                });
+                // Observe the driver from a different thread, as a cancel CLI does.
+                let cancelled = std::thread::scope(|scope| {
+                    scope
+                        .spawn(|| {
+                            service
+                                .execute_action(&RunId::new(target).expect("target"), &request)
+                                .expect("cancel")
+                        })
+                        .join()
+                        .unwrap()
+                });
 
                 assert_eq!(
                     cancelled.outcome,
-                    ControlPlaneActionOutcome::AlreadySatisfied
+                    if verifying {
+                        ControlPlaneActionOutcome::Succeeded
+                    } else {
+                        ControlPlaneActionOutcome::AlreadySatisfied
+                    }
                 );
+                if verifying {
+                    let result = &cancelled.result;
+                    assert_eq!(result.data["disposition"], "requested");
+                    assert_eq!(result.data["terminal"], false);
+                }
                 let fence = store
                     .read_cook_index(&cook_id)
                     .expect("index")
