@@ -74,7 +74,7 @@ fn sparse_clone_uses_exact_shallow_clone_args() {
                 "extensions/wordpress",
                 "extensions/shared",
             ],
-            vec!["checkout", "--quiet", "HEAD"],
+            vec!["checkout", "--quiet", "tip"],
         ];
         let responses = [
             "",
@@ -100,6 +100,50 @@ fn sparse_clone_uses_exact_shallow_clone_args() {
         )
         .unwrap();
         assert_eq!(call, expected.len());
+    }
+}
+
+#[test]
+fn sparse_clone_full_sha_fetches_and_checks_out_resolved_commit() {
+    for length in [40, 64] {
+        let sha = "a".repeat(length);
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("clone");
+        let target_path = target.to_string_lossy();
+        let init = if length == 64 {
+            vec!["init", "--object-format=sha256", &target_path]
+        } else {
+            vec!["init", &target_path]
+        };
+        let manifest = format!("{sha}:extensions/homeboy-extension-root.json");
+        let expected = [
+            init,
+            vec!["remote", "add", "origin", "https://example.com/repo.git"],
+            vec!["fetch", "--depth=1", "--filter=blob:none", "origin", &sha],
+            vec!["rev-parse", "--verify", "FETCH_HEAD"],
+            vec!["ls-tree", "-r", "--name-only", "-z", &sha],
+            vec!["show", &manifest],
+            vec![
+                "sparse-checkout",
+                "set",
+                "--cone",
+                "--",
+                "extensions/wordpress",
+            ],
+            vec!["checkout", "--quiet", &sha],
+        ];
+        let mut calls = Vec::new();
+        clone_with_runner("https://example.com/repo.git", &target, Some(&sha), "wordpress", |cwd, args| {
+            assert_eq!(cwd, if calls.is_empty() { Path::new(".") } else { &target });
+            calls.push(args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>());
+            Ok(match args[0] {
+                "rev-parse" => format!("{sha}\n"),
+                "ls-tree" => "extensions/homeboy-extension-root.json\0extensions/wordpress/wordpress.json\0".into(),
+                "show" => "{}".into(),
+                _ => String::new(),
+            })
+        }).unwrap();
+        assert_eq!(calls, expected);
     }
 }
 
@@ -149,26 +193,45 @@ fn sparse_nested_clone_never_checks_out_unrelated_trees() {
 }
 
 #[test]
-fn sparse_clone_commit_sha_uses_existing_fallback() {
+fn sparse_clone_non_tip_commit_sha_uses_shallow_fetch() {
     let repo = fixture();
     let revision = git_run(repo.path(), &["rev-parse", "HEAD~1"]);
     let temp = tempfile::tempdir().unwrap();
     let target = temp.path().join("clone");
-    let mut calls = 0;
+    let bare = temp.path().join("source.git");
+    git_run(
+        temp.path(),
+        &[
+            "clone",
+            "--bare",
+            repo.path().to_str().unwrap(),
+            bare.to_str().unwrap(),
+        ],
+    );
+    git_run(&bare, &["config", "uploadpack.allowFilter", "true"]);
+    git_run(
+        &bare,
+        &["config", "uploadpack.allowReachableSHA1InWant", "true"],
+    );
     clone_with_runner(
-        &format!("file://{}", repo.path().display()),
+        &format!("file://{}", bare.display()),
         &target,
         Some(revision.trim()),
         "wordpress",
         |cwd, args| {
-            calls += 1;
-            assert_eq!(args[0], "clone");
-            assert_eq!(&args[5..7], &["--branch", revision.trim()]);
-            git::run_git(cwd, args, "test SHA fallback")
+            assert!(!args.contains(&"--branch"));
+            let result = git::run_git(cwd, args, "test SHA fetch");
+            assert!(result.is_ok(), "sparse stage failed: {args:?}: {result:?}");
+            result
         },
     )
     .unwrap();
-    assert_eq!(calls, 1);
+    assert!(!target.join("crates").exists());
+    assert!(!target.join("extensions/other").exists());
+    assert_eq!(
+        git_run(&target, &["rev-parse", "--is-shallow-repository"]).trim(),
+        "true"
+    );
     assert_eq!(git_run(&target, &["rev-parse", "HEAD"]), revision);
     assert!(target.join("extensions/wordpress/wordpress.json").is_file());
     assert!(target.join("extensions/shared/helper.sh").is_file());

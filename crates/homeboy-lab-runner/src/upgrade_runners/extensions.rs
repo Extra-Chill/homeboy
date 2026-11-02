@@ -117,7 +117,7 @@ pub fn sync_runner_extensions(
                     "  {} extension {} synced at {}",
                     runner.id,
                     extension.extension_id,
-                    source_revision
+                    source_revision.chars().take(7).collect::<String>()
                 );
                 synced.push(RunnerExtensionSyncEntry {
                     extension_id: extension.extension_id.clone(),

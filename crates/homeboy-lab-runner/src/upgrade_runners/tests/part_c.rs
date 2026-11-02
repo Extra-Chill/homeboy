@@ -40,11 +40,12 @@ fn matching_runner_extension_revisions_need_only_one_exec() {
 #[test]
 fn runner_extension_sync_installs_only_changed_or_unknown_revisions() {
     let runner = ssh_runner("lab", Some("homeboy"));
+    let full_sha = "123456abcdef123456abcdef123456abcdef1234";
     let updates = vec![
         extension_update("current", "abcdef123456"),
-        extension_update("changed", "123456abcdef"),
-        extension_update("unknown", "123456abcdef"),
-        extension_update("missing", "123456abcdef"),
+        extension_update("changed", full_sha),
+        extension_update("unknown", full_sha),
+        extension_update("missing", full_sha),
     ];
     let mut commands = Vec::new();
     let (synced, skipped, failed) = sync_runner_extensions(
@@ -65,9 +66,14 @@ fn runner_extension_sync_installs_only_changed_or_unknown_revisions() {
     assert!(skipped.is_empty());
     assert!(failed.is_empty());
     assert_eq!(commands.len(), 4);
+    assert!(synced[1..]
+        .iter()
+        .all(|entry| entry.source_revision == full_sha));
     for (command, id) in commands[1..].iter().zip(["changed", "unknown", "missing"]) {
         assert_eq!(command[2], "install");
         assert_eq!(command[5], id);
+        assert_eq!(command[6], "--ref");
+        assert_eq!(command[7], full_sha);
         assert_eq!(command.last().unwrap(), "--replace");
     }
 }

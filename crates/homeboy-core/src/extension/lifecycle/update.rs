@@ -319,7 +319,7 @@ fn update_extracted_extension(
         requested_ref.as_deref(),
         extension_id,
     )?;
-    let source_revision = git::short_head_revision(&clone_dir);
+    let source_revision = git::head_sha(&clone_dir);
 
     let result = resolve_cloned_extension(&clone_dir, extension_id, &staged_dir, source_url);
     if clone_dir.exists() {

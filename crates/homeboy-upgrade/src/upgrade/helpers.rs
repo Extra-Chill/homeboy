@@ -2521,6 +2521,7 @@ fn refresh_installed_extensions(
         .updated
         .into_iter()
         .map(|entry| ExtensionUpgradeEntry {
+            source_revision: lifecycle::read_source_revision(&entry.extension_id),
             extension_id: entry.extension_id,
             old_version: entry.old_version,
             new_version: entry.new_version,
@@ -2528,7 +2529,6 @@ fn refresh_installed_extensions(
             source_path: entry.source_path,
             git_root: entry.git_root,
             source_url: entry.source_url,
-            source_revision: entry.source_update.new_source_revision.clone(),
             source_update: entry.source_update,
         })
         .collect();
