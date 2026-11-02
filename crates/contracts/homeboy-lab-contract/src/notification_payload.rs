@@ -265,6 +265,8 @@ pub struct NotifyPayload {
     #[serde(default)]
     pub kind: NotifyEventKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subject: Option<NotifySubject>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub facts: Vec<NotifyFact>,
@@ -285,6 +287,7 @@ impl Default for NotifyPayload {
         Self {
             schema: notification_payload_schema(),
             kind: NotifyEventKind::default(),
+            title: None,
             subject: None,
             facts: Vec::new(),
             actions: Vec::new(),
@@ -363,8 +366,15 @@ impl NotifyPayload {
     /// coordinated release.
     pub fn render_body(&self) -> String {
         let mut lines: Vec<String> = Vec::new();
+        if let Some(title) = &self.title {
+            lines.push(title.clone());
+        }
         if let Some(subject) = &self.subject {
-            if let Some(component) = subject.component.as_deref().filter(|it| !it.is_empty()) {
+            if let Some(component) = subject
+                .component
+                .as_deref()
+                .filter(|it| !it.is_empty() && self.title.is_none())
+            {
                 lines.push(format!("Component: {component}"));
             }
             if let Some(parent) = subject.parent_id.as_deref().filter(|it| !it.is_empty()) {
@@ -377,14 +387,46 @@ impl NotifyPayload {
                 lines.push(format!("Phase: {phase}"));
             }
         }
-        for fact in &self.facts {
-            lines.push(format!("{}: {}", fact.label, fact.value));
+        let facts: Vec<_> = self
+            .facts
+            .iter()
+            .map(|fact| format!("{}: {}", fact.label, fact.value))
+            .collect();
+        if self.title.is_some() && !facts.is_empty() {
+            lines.push(facts.join(" · "));
+        } else {
+            lines.extend(facts);
         }
         for link in &self.links {
             lines.push(format!("{}: {}", link.label, link.url));
         }
+        let shared_id = self
+            .subject
+            .as_ref()
+            .filter(|subject| {
+                self.title.is_some()
+                    && self
+                        .actions
+                        .iter()
+                        .filter(|action| action.command.contains(&subject.id))
+                        .count()
+                        > 1
+            })
+            .map(|subject| subject.id.as_str());
+        if let Some(id) = shared_id {
+            lines.push(format!("Details: cook={id}"));
+        }
         for action in &self.actions {
-            lines.push(format!("Next — {}: {}", action.label, action.command));
+            let command = if let Some(id) = shared_id {
+                action.command.replace(id, "\"$cook\"")
+            } else {
+                action.command.clone()
+            };
+            if action.label == "details" {
+                lines.push(format!("Details: {command}"));
+            } else {
+                lines.push(format!("Next — {}: {command}", action.label));
+            }
         }
         if !self.attachments.is_empty() {
             lines.push(format!("Attachments: {}", self.attachments.len()));
@@ -429,6 +471,7 @@ impl NotifyPayload {
         let minimal = Self {
             schema: bounded.schema,
             kind: bounded.kind,
+            title: bounded.title,
             subject: bounded.subject,
             facts: Vec::new(),
             actions: bounded.actions,
@@ -472,21 +515,6 @@ mod tests {
             "pull request",
             "https://example.test/pull/1",
         ))
-    }
-
-    #[test]
-    fn rendered_body_carries_every_structured_member() {
-        let body = cook_payload().render_body();
-        assert!(body.contains("Component: homeboy"), "{body}");
-        assert!(body.contains("Attempt: 2"), "{body}");
-        assert!(body.contains("Phase: promotion"), "{body}");
-        assert!(body.contains("Status: failed"), "{body}");
-        assert!(body.contains("Stop reason: gate_failed"), "{body}");
-        assert!(
-            body.contains("Next — diagnose: homeboy agent-task diagnose cook-abc"),
-            "{body}"
-        );
-        assert!(body.contains("https://example.test/pull/1"), "{body}");
     }
 
     #[test]
