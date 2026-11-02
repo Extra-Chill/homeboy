@@ -3464,6 +3464,10 @@ fn capture_declared_base_with_git_and_timeout(
             )
         })?
         .to_string();
+    // Materializing a verified remote tip must also advance its tracking ref.
+    // Otherwise a later Cook transport retry can pin an older tracking commit
+    // and mistake this already-converged base for unique destination work.
+    let refspec = format!("+{sha}:refs/remotes/origin/{base_ref}");
     let fetch = homeboy_core::git::with_remote_tracking_authority_until(
         worktree_path,
         "fetch declared promotion base",
@@ -3477,7 +3481,7 @@ fn capture_declared_base_with_git_and_timeout(
                     "--no-tags",
                     "--no-write-fetch-head",
                     "origin",
-                    &sha,
+                    &refspec,
                 ],
                 environment,
                 base_ref,
