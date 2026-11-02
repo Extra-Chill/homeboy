@@ -111,7 +111,11 @@ NODE
     # Hydration (review/test) must use the same post-install hook as deps install.
     HOMEBOY_NODE_DEPS_RUNNER="${DEPS_RUNNER_DIR}/deps-runner.sh" node <<'NODE'
 const command = ['bash', process.env.HOMEBOY_NODE_DEPS_RUNNER, 'install'];
-process.stdout.write(JSON.stringify({ command }) + '\n');
+process.stdout.write(JSON.stringify({
+  command,
+  outputs: [{ kind: 'directory', path: 'node_modules' }],
+  reusable: { command: ['bash', process.env.HOMEBOY_NODE_DEPS_RUNNER, 'reusable'] },
+}) + '\n');
 NODE
 }
 
@@ -141,6 +145,16 @@ case "$ACTION" in
         ;;
     install-command)
         emit_install_command
+        ;;
+    reusable)
+        # npm writes this witness after completing an install. Without a known
+        # witness (including other managers), conservatively install as before.
+        [ "$HOMEBOY_PROJECT_PACKAGE_MANAGER" = npm ] || exit 1
+        [ "${#LOCKFILES[@]}" -eq 1 ] || exit 1
+        witness="${HOMEBOY_PROJECT_DEPENDENCY_ROOT}/node_modules/.package-lock.json"
+        [ -f "$witness" ] || exit 1
+        [ ! "${HOMEBOY_PROJECT_DEPENDENCY_ROOT}/${LOCKFILES[0]}" -nt "$witness" ] || exit 1
+        [ ! "${HOMEBOY_PROJECT_DEPENDENCY_ROOT}/package.json" -nt "$witness" ] || exit 1
         ;;
     install)
         run_install

@@ -769,7 +769,14 @@ pub(super) fn prepare_attempt_workspace(
             &["checkout", "--detach", &candidate_baseline.candidate_sha],
         )?;
     }
-    let setup = hydrate_attempt_workspace(&attempt_root, &root, attempt_component_id(request));
+    let setup = hydrate_attempt_workspace(
+        &attempt_root,
+        &root,
+        attempt_component_id(request),
+        request.metadata["cook_hydrate_dependencies"]
+            .as_bool()
+            .unwrap_or(true),
+    );
     request.metadata["cook_attempt_workspace_setup"] = setup;
     let attempt_base_sha = git_output(&attempt_root, &["rev-parse", "HEAD"])?;
     Arc::get_mut(&mut workspace)
@@ -815,6 +822,7 @@ fn hydrate_attempt_workspace(
     attempt_root: &Path,
     source_root: &Path,
     component_id: Option<String>,
+    hydrate_dependencies: bool,
 ) -> serde_json::Value {
     let mut outcomes = Vec::new();
     if let Some(outcome) = homeboy_core::deps::hydrate_git_submodules(
@@ -828,7 +836,7 @@ fn hydrate_attempt_workspace(
     let mut error = None;
     match crate::agent_task_gate::hydrate_gate_dependency_roots_for_component(
         attempt_root,
-        true,
+        hydrate_dependencies,
         ATTEMPT_SETUP_WORKSPACE,
         &homeboy_core::deps::DependencyHydrationPolicy::default(),
         component_id.as_deref(),

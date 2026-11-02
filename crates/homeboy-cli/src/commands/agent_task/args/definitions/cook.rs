@@ -605,7 +605,7 @@ impl From<VerifyGateArgs> for VerifyGateOptions {
                 isolate_home: args.isolate_gate_home,
                 isolate_xdg: args.isolate_gate_xdg,
                 hydrate_rust_cache: true,
-                hydrate_dependencies: true,
+                hydrate_dependencies: !crate::commands::skip_deps_hydration(),
                 shared_cargo_target: args
                     .gate_shared_cargo_target
                     .then_some(true)
@@ -624,7 +624,7 @@ impl From<VerifyGateArgs> for VerifyGateOptions {
                 .collect(),
             gate_package_artifacts: args.gate_package_artifacts,
             gate_diagnostic_sidecars: Vec::new(),
-            hydrate_dependencies: true,
+            hydrate_dependencies: !crate::commands::skip_deps_hydration(),
         }
     }
 }

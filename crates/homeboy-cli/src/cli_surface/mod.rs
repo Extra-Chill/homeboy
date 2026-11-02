@@ -92,10 +92,9 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub allow_dirty_lab_workspace: bool,
 
-    /// Skip post-materialization dependency hydration for Lab offloads.
-    /// When set, Homeboy does not run the detected provider install (e.g.
-    /// `composer install`, `npm ci`) in the materialized runner workspace before
-    /// the command starts.
+    /// Skip dependency hydration for Lab offloads and Cook attempt setup and promotion gates.
+    /// When set, Homeboy does not run detected provider installs (e.g.
+    /// `composer install`, `npm ci`) during workspace dependency setup.
     #[arg(long, global = true)]
     pub skip_deps_hydration: bool,
 
