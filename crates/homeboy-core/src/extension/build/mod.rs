@@ -20,6 +20,8 @@ use homeboy_extension_contract::ExtensionCapability;
 use homeboy_extension_contract::ExtensionPhaseTiming;
 
 pub mod cache;
+#[cfg(test)]
+mod dependency_tests;
 mod local_permissions;
 
 const DEFAULT_BUILD_TIMEOUT: Duration = Duration::from_secs(30 * 60);
@@ -298,14 +300,13 @@ fn format_build_error(
     stderr: &str,
     stdout: &str,
 ) -> String {
-    // Get useful output (prefer stderr, fall back to stdout)
-    let output_text = if stderr.trim().is_empty() {
-        stdout
-    } else {
-        stderr
-    };
-
-    let output_tail = bounded_output_tail(output_text);
+    // Bound each stream independently so stderr cannot hide useful stdout.
+    let output_tail = [stdout, stderr]
+        .into_iter()
+        .filter(|text| !text.trim().is_empty())
+        .map(bounded_output_tail)
+        .collect::<Vec<_>>()
+        .join("\n");
 
     // Translate universal POSIX exit codes only (no tool-specific hints)
     let hint = match exit_code {
@@ -571,12 +572,23 @@ fn execute_build_node(
     if build_dependencies {
         let dependencies = cache::dependencies(comp)?;
         if !dependencies.is_empty() {
-            let (_, code) = run_components_with_changed_since(&dependencies, changed_since)?;
-            if code != 0 {
+            let (result, code) = run_components_with_changed_since(&dependencies, changed_since)?;
+            if let BuildResult::Single(output) = result {
                 return Err(Error::validation_invalid_argument(
                     "build.dependencies",
-                    "Dependency build failed",
-                    None,
+                    format!(
+                        "Dependency build failed for parent '{}': {}",
+                        comp.id,
+                        format_build_error(
+                            &output.component_id,
+                            &output.build_command,
+                            "(dependency build)",
+                            code,
+                            &output.output.stderr,
+                            &output.output.stdout,
+                        )
+                    ),
+                    Some(output.component_id),
                     None,
                 ));
             }

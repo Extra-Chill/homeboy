@@ -39,7 +39,15 @@ pub fn content_key(component: &Component) -> Option<String> {
 
 fn key(component: &Component, trail: &mut Vec<PathBuf>) -> Option<String> {
     let root = fs::canonicalize(&component.local_path).ok()?;
-    if trail.contains(&root) || !component.artifact_inputs.is_empty() || !component.env.is_empty() {
+    // Source lifetime is execution metadata, not a build input. All other
+    // component environment overrides still disable reuse conservatively.
+    if trail.contains(&root)
+        || !component.artifact_inputs.is_empty()
+        || component
+            .env
+            .keys()
+            .any(|name| name != "HOMEBOY_BUILD_SOURCE_DISPOSABLE")
+    {
         return None;
     }
     let dirty = output(
@@ -60,6 +68,7 @@ fn key(component: &Component, trail: &mut Vec<PathBuf>) -> Option<String> {
     // Settings, component scripts and artifact configuration are inputs too.
     let mut config = serde_json::to_value(component).ok()?;
     config.as_object_mut()?.remove("local_path");
+    config.as_object_mut()?.remove("env");
     hash.update(serde_json::to_vec(&config).ok()?);
     let resolved = resolve_build_command(component).ok()?;
     trail.push(root.clone());

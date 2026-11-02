@@ -215,7 +215,6 @@
         "limitations": []
       },
       "build": {
-    "cache": {"recipe": "nodejs-package-v1", "toolchains": ["node -p 'process.versions.node.split(\".\")[0]'"], "dependencies_setting": "local_workspace_dependencies"},
         "check_names": ["Build", "build"],
         "command": "build",
         "env": { "CI": "1" },
@@ -227,6 +226,7 @@
     }
   },
   "build": {
+    "cache": {"recipe": "nodejs-package-v1", "toolchains": ["node -p 'process.versions.node.split(\".\")[0]'"], "dependencies_setting": "local_workspace_dependencies"},
     "command_template": "bash {{script}}",
     "extension_script": "scripts/build/build-runner.sh",
     "cleanup_paths": [
