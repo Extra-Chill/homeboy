@@ -697,6 +697,15 @@ fn into_controller_frame(
     mut report: DaemonFreshnessReport,
     runner_id: &str,
 ) -> DaemonFreshnessReport {
+    if let Some(pressure) = report
+        .runtime_paths
+        .as_mut()
+        .and_then(|paths| paths.pressure.as_mut())
+    {
+        if let Ok(runner) = crate::load(runner_id) {
+            pressure.apply_thresholds(&runner.settings.pressure_thresholds);
+        }
+    }
     report.repair_plan = daemon_repair::controller_frame_plan(runner_id, &report);
     // An adoption command is one explicit, operator-confirmed action. A
     // multi-step restart sequence is a plan, not an adoption, so it is exposed

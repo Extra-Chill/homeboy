@@ -1035,8 +1035,12 @@ fn lab_runner_admission_candidate(
             status,
             exact_version,
         ),
-        admission_failure_reason: admission_warning
-            .map(|warning| format!("{}: {}", warning.mismatch_predicate, warning.message)),
+        admission_failure_reason: if status.under_pressure() {
+            Some("pressure".to_string())
+        } else {
+            admission_warning
+                .map(|warning| format!("{}: {}", warning.mismatch_predicate, warning.message))
+        },
         admission_remediation: admission_warning
             .map(|warning| warning.safe_recovery_commands().join(" && ")),
         active_jobs: status.active_job_count.max(status.active_jobs.len()),
@@ -1207,6 +1211,7 @@ impl DefaultLabRunnerCandidate {
         }
         if let Some(reason) = &self.admission_failure_reason {
             availability.reasons.push(reason.clone());
+            availability.accepts_jobs = false;
         }
         if !self.active_jobs_available
             && !availability
@@ -1248,6 +1253,7 @@ impl DefaultLabRunnerCandidate {
             || !self.admission_fresh
             || at_capacity
             || capacity_unknown
+            || self.admission_failure_reason.as_deref() == Some("pressure")
         {
             return DefaultLabRunnerReadiness {
                 eligible: false,

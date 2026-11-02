@@ -647,6 +647,8 @@ pub struct RunnerDaemonLeaseVerdict {
 /// daemon's live job view, so it stays small and fast (#9478/#9522).
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct RunnerAdmissionSummary {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pressure: Option<homeboy_core::runner_pressure::RunnerPressure>,
     pub runner_id: String,
     /// Whether the runner's session is connected.
     pub connected: bool,
@@ -682,6 +684,14 @@ pub struct RunnerAdmissionSummary {
 }
 
 impl RunnerStatusReport {
+    pub fn under_pressure(&self) -> bool {
+        self.daemon_freshness
+            .as_ref()
+            .and_then(|report| report.runtime_paths.as_ref())
+            .and_then(|paths| paths.pressure.as_ref())
+            .is_some_and(|pressure| pressure.admission_reason.is_some())
+    }
+
     /// The session state is the canonical connection view; `connected` is a
     /// serialized compatibility field for command consumers.
     pub fn is_connected(&self) -> bool {
@@ -779,6 +789,10 @@ impl RunnerStatusReport {
             &self.active_job_state,
             capacity,
         );
+        if self.under_pressure() {
+            availability.reasons.push("pressure".to_string());
+            availability.accepts_jobs = false;
+        }
         if !self.daemon_fresh_for_admission() && self.admission_blocking_stale_daemon().is_none() {
             availability
                 .reasons
@@ -802,8 +816,11 @@ impl RunnerStatusReport {
         // current job view is available.
         let active_jobs_available = self.active_job_state == RunnerActiveJobState::Available;
         let active_job_count = self.active_job_count;
-        let accepting_jobs =
-            connected && daemon_fresh && daemon_compatible && active_jobs_available;
+        let accepting_jobs = connected
+            && daemon_fresh
+            && daemon_compatible
+            && active_jobs_available
+            && !self.under_pressure();
         let safe_to_rotate = connected
             && self.rotation_evidence_is_unambiguous()
             && active_jobs_available
@@ -839,6 +856,11 @@ impl RunnerStatusReport {
         daemon_lease_verdict.next_action = next_action.clone();
 
         RunnerAdmissionSummary {
+            pressure: self
+                .daemon_freshness
+                .as_ref()
+                .and_then(|report| report.runtime_paths.as_ref())
+                .and_then(|paths| paths.pressure.clone()),
             runner_id: self.runner_id.clone(),
             connected,
             daemon_fresh,

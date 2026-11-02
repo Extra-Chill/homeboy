@@ -183,6 +183,18 @@ pub fn run(args: RunnerArgs) -> CmdResult<RunnerCommandOutput> {
                 recorded_endpoint,
             },
         )),
+        RunnerCommand::Inventory { id } => map_registry(Ok((
+            RunnerOutput {
+                command: "runner.inventory".to_string(),
+                id: Some(id.clone()),
+                extra: super::types::RunnerExtra {
+                    inventory: Some(runner::disk_inventory(&id)?),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            0,
+        ))),
         RunnerCommand::Status { id, full } => map_registry(status_mod::status(id.as_deref(), full)),
         RunnerCommand::PeerSessions { id, cursor, apply } => map_registry(Ok((
             RunnerOutput {

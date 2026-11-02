@@ -625,6 +625,7 @@ fn disconnected_incompatible_daemon_with_unavailable_ownership_is_terminal() {
         runner: None,
     };
     let summary = homeboy::runner::runners::RunnerAdmissionSummary {
+        pressure: None,
         runner_id: "lab".to_string(),
         connected: false,
         daemon_fresh: false,

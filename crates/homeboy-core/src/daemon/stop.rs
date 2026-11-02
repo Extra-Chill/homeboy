@@ -692,6 +692,7 @@ mod tests {
             build_identity: build_identity::current(),
             binary_sha256: None,
             runtime_paths: DaemonRuntimeSnapshot {
+                pressure: None,
                 loaded_at: "now".to_string(),
                 paths: Vec::new(),
             },

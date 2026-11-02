@@ -753,6 +753,7 @@ pub(crate) fn reserve_daemon_admission(
         "expected_daemon_lease_id": expected_daemon_lease_id,
         "idempotency_key": idempotency_key,
         "admission_lease_protocol": 1,
+        "pressure_thresholds": crate::load(runner_id)?.settings.pressure_thresholds,
     });
     if let Some((workspace, owner_id)) = workspace_owner_registration.as_ref() {
         payload["workspace_owner_request"] = json!({

@@ -726,10 +726,29 @@ its current controller tunnel has disappeared.
 
 ```sh
 homeboy runner status <runner-id>
+homeboy runner inventory <runner-id>
 ```
 
 Shows the persisted tunnel/session state for a runner. Use this to determine
 whether `runner exec` will use a connected daemon or needs an explicit fallback.
+`inventory` (`homeboy runner inventory <runner-id>`) inspects the connected daemon without occupying a
+job slot. It scans only managed workspaces, cargo targets, artifacts, runtime
+scratch (including isolated gate homes), managed Rust package caches, and
+Homeboy's browser cache. A shared two-second scan budget bounds filesystem work;
+results are reused for 60 seconds and concurrent scans are coalesced. `complete:
+false` marks a partial lower-bound total, not an empty root. Symlinks are not
+followed. A blocked filesystem syscall can exceed the cooperative scan deadline;
+the controller request also has a three-second transport timeout.
+
+Admission and status carry CPU/IO/memory pressure in hundredths of a percent.
+Linux PSI uses CPU `some` and IO/memory `full`, all on the sustained `avg300`
+window. Without CPU PSI, loadavg per logical CPU is used; unavailable IO/memory
+readings remain null. `runner.settings.pressure_thresholds` configures integer
+percentage limits (`cpu: 10`, `io: 10`, `memory: 5`, `load_per_cpu: 100` by
+default). Limits block only new admissions; existing work and the concurrency
+ceiling are unchanged. Placement avoids pressured runners and reports `pressure`
+when none are eligible.
+
 The JSON payload uses `command: "runner.status"` and reports whether a saved
 session exists, whether the tunnel still appears live, and the recorded endpoint
 details.
