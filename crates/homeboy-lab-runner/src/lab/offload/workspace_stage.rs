@@ -763,6 +763,21 @@ fn prepare_lab_offload_workspace_stage_inner(
         )?;
         let runner_required_extensions = runner_command_plan.required_extensions.clone();
         let accepted_extension_settings = runner_command_plan.accepted_settings.clone();
+        // Root-based remaps above must remain anchored at the materialized root.
+        // Only the execution cwd preserves the controller's checkout-relative path.
+        let exec_cwd = if sync_mode == RunnerWorkspaceSyncMode::Git {
+            homeboy_core::git::repo_root(source_path)
+                .map(|root| {
+                    let controller_cwd = std::env::current_dir()
+                        .ok()
+                        .filter(|cwd| cwd.starts_with(&root))
+                        .unwrap_or_else(|| source_path.to_path_buf());
+                    project_lab_exec_cwd(&controller_cwd, &root, &remote_cwd)
+                })
+                .unwrap_or_else(|| remote_cwd.clone())
+        } else {
+            remote_cwd.clone()
+        };
         let command = build_lab_offload_remote_command(
             command_prefix_argv,
             &remapped_args,
@@ -784,7 +799,7 @@ fn prepare_lab_offload_workspace_stage_inner(
             sync_mode,
             changed_since_preflight,
             synced,
-            remote_cwd,
+            remote_cwd: exec_cwd,
             workspace_mapping,
             path_materialization_plan,
             source_snapshot,
@@ -1410,6 +1425,21 @@ fn lab_path_materialization_mode(
     sync_mode.as_str().to_string()
 }
 
+/// Project the invocation into the materialized checkout without carrying a
+/// controller absolute path to the runner.
+fn project_lab_exec_cwd(controller_cwd: &Path, checkout_root: &Path, remote_root: &str) -> String {
+    controller_cwd
+        .strip_prefix(checkout_root)
+        .map(|relative| {
+            if relative.as_os_str().is_empty() {
+                remote_root.to_string()
+            } else {
+                Path::new(remote_root).join(relative).display().to_string()
+            }
+        })
+        .unwrap_or_else(|_| remote_root.to_string())
+}
+
 fn rewrite_lab_offload_remote_command_args(
     args: &[String],
     remote_cwd: &str,
@@ -1612,6 +1642,30 @@ mod tests {
     use super::*;
     use std::cell::Cell;
     use std::process::Command;
+
+    #[test]
+    fn lab_exec_cwd_projects_nested_controller_directory() {
+        assert_eq!(
+            project_lab_exec_cwd(
+                Path::new("/controller/root/plugins/x"),
+                Path::new("/controller/root"),
+                "/lab/ws"
+            ),
+            "/lab/ws/plugins/x"
+        );
+    }
+
+    #[test]
+    fn lab_exec_cwd_projects_checkout_root() {
+        assert_eq!(
+            project_lab_exec_cwd(
+                Path::new("/controller/root"),
+                Path::new("/controller/root"),
+                "/lab/ws"
+            ),
+            "/lab/ws"
+        );
+    }
 
     /// A test is the entry point for its own unit of work, so resolving once
     /// here is a boundary resolution (#7505).
