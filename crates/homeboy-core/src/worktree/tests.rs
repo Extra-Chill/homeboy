@@ -1665,6 +1665,7 @@ fn create_pins_worktree_identity_to_the_target_remotes_host_policy() {
             crate::defaults::GitHostConfig {
                 name: "Extra Chill Author".to_string(),
                 email: "author@extrachill.example.test".to_string(),
+                ..Default::default()
             },
         );
         crate::defaults::save_config(&config).expect("save git host identity policy");
