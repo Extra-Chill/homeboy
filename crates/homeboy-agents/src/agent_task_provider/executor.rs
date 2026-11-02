@@ -1,8 +1,3 @@
-fn is_immutable_revision(value: &str) -> bool {
-    let value = value.trim();
-    value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
-}
-
 use super::command_runner::{failure_outcome, run_materialized_provider_command};
 use super::*;
 
@@ -12,39 +7,6 @@ pub(super) fn effective_provider_for_request(
     request: &AgentTaskRequest,
     providers: &[AgentTaskExecutorProvider],
 ) -> std::result::Result<Option<AgentTaskExecutorProvider>, String> {
-    if let Some(identity) = request
-        .metadata
-        .get("resolved_runtime_identity")
-        .filter(|identity| !identity.is_null())
-    {
-        let identity: homeboy_core::agent_task_config::ResolvedAgentTaskRuntimeIdentity =
-            serde_json::from_value(identity.clone())
-                .map_err(|error| format!("invalid controller runtime identity: {error}"))?;
-        if !is_immutable_revision(&identity.source_revision) {
-            return Err(format!(
-                "controller runtime identity for provider '{}' has a non-immutable source revision '{}'",
-                identity.provider_id, identity.source_revision
-            ));
-        }
-        let provider: AgentTaskExecutorProvider = serde_json::from_value(identity.provider)
-            .map_err(|error| format!("invalid controller-selected provider: {error}"))?;
-        if provider.id != identity.provider_id || provider.backend != request.executor.backend {
-            return Err(format!(
-                "controller runtime identity does not match requested provider backend '{}' and id '{}'",
-                request.executor.backend, identity.provider_id
-            ));
-        }
-        let requirements = request.capability_requirements()?;
-        if requirements
-            .provider
-            .iter()
-            .any(|capability| !provider.capabilities.contains(capability))
-        {
-            return Ok(None);
-        }
-        return Ok(Some(provider));
-    }
-
     let requirements = request.capability_requirements()?;
     let capable = providers
         .iter()
@@ -85,7 +47,6 @@ fn provider_capacity_key_with_credentials(
         "runtime_selection": request.executor.runtime_selection(),
         "required_capabilities": request.executor.required_capabilities,
         "effective_config": effective_config,
-        "resolved_runtime_identity": request.metadata.get("resolved_runtime_identity"),
         "credential_identity": credential_env.iter().map(|(name, value)| (
             name,
             homeboy_engine_primitives::content_hash::sha256_hex(value.as_bytes()),
@@ -652,7 +613,7 @@ impl AgentTaskExecutorAdapter for ExtensionProviderAgentTaskExecutor {
                     &request,
                     AgentTaskOutcomeStatus::ProviderError,
                     AgentTaskFailureClassification::Provider,
-                    "agent_task.runtime_identity_invalid",
+                    "agent_task.capability_requirements_invalid",
                     message,
                     Value::Null,
                 )

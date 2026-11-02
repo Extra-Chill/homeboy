@@ -1336,12 +1336,6 @@ impl AgentTaskScheduleSupport {
                 selection.ai_provider_id = Some(provider.to_string());
             }
         }
-        if route_changed {
-            request
-                .metadata
-                .as_object_mut()
-                .map(|metadata| metadata.remove("resolved_runtime_identity"));
-        }
         Self::apply_rotation_policy_limits(request, policy);
     }
 

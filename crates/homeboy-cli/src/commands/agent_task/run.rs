@@ -3207,10 +3207,6 @@ process.stdout.write(JSON.stringify({type:'message_end',message:{role:'assistant
                     task.executor.selector = Some("pi.agent-task-executor".into());
                     task.executor.model = Some("test/model".into());
                     task.executor.config["command"] = fake.config()["command"].clone();
-                    task.metadata
-                        .as_object_mut()
-                        .unwrap()
-                        .remove("resolved_runtime_identity");
                     task.executor.config["evidence_inputs"][0]["provenance"] =
                         serde_json::json!({"private":"DO_NOT_FORWARD"});
                 }
