@@ -2621,7 +2621,7 @@ where
         ("GET", "/workflows") => {
             daemon_endpoint_response("workflows.list", workflow_job::workflow_list(job_store))
         }
-        ("GET", "/workflows/cadences") => match workflow_cadence::http_list() {
+        ("GET", "/workflows/cadences") => match workflow_cadence::http_list(job_store) {
             Ok(body) => daemon_endpoint_response("workflows.cadences.list", body),
             Err(err) => error_response(400, err),
         },

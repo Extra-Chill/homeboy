@@ -97,6 +97,7 @@ struct AutomaticRetentionControllerOutput {
     state_key: String,
     resume_command: &'static str,
     reconciliation: homeboy::agents::agent_task_service::AgentTaskReconcileReport,
+    registry_findings: Vec<homeboy::core::worktree::TaskWorktreeRegistryQuarantine>,
     /// Which phases this pass ran and deferred; the controller record's
     /// cursor is `rotation.next_phase`.
     rotation: AutomaticRetentionRotation,
@@ -1952,6 +1953,8 @@ fn automatic_retention() -> CmdResult<Value> {
         ));
     };
     let retention = defaults::load_config().retention;
+    let registry_findings =
+        homeboy::core::worktree::reconcile_malformed_task_worktree_records(true)?;
     let _residue = homeboy::core::worktree::retire_residue()?;
     let reconciliation = homeboy::agents::agent_task_service::reconcile_stale_active_runs(false)?;
     let args = CleanupArgs {
@@ -2080,6 +2083,7 @@ fn automatic_retention() -> CmdResult<Value> {
         state_key,
         resume_command: "homeboy cleanup automatic-retention",
         reconciliation,
+        registry_findings,
         rotation,
         repo_artifacts,
         cleanup: serde_json::json!({
@@ -6393,6 +6397,51 @@ mod tests {
             automatic_retention_rotation(Some("retired-phase")),
             canonical
         );
+    }
+
+    #[test]
+    fn automatic_retention_reports_missing_identity_and_reclaims_residue() {
+        homeboy::test_support::with_isolated_home(|root| {
+            let registry = homeboy::core::paths::observation_db()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .join("task-worktrees");
+            std::fs::create_dir_all(&registry).unwrap();
+            std::fs::write(
+                registry.join("old.json"),
+                serde_json::to_vec(&serde_json::json!({
+                    "id": "old", "component_id": "fixture", "source_checkout": "/missing",
+                    "worktree_path": "/missing/old", "branch": "task", "base_ref": "HEAD",
+                    "cleanup_policy": "remove_when_safe", "created_at": "2026-06-30T00:00:00Z",
+                    "state": "active"
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            let runtime = root.path().join("retention-tmp");
+            let residue = runtime.join("stale-ownerless");
+            std::fs::create_dir_all(&residue).unwrap();
+            std::fs::write(residue.join("payload"), vec![0_u8; 8192]).unwrap();
+            std::fs::File::open(&residue)
+                .unwrap()
+                .set_modified(SystemTime::now() - Duration::from_secs(90 * 86_400))
+                .unwrap();
+            let previous = std::env::var_os("HOMEBOY_RUNTIME_TMPDIR");
+            std::env::set_var("HOMEBOY_RUNTIME_TMPDIR", &runtime);
+            let result = automatic_retention();
+            match previous {
+                Some(value) => std::env::set_var("HOMEBOY_RUNTIME_TMPDIR", value),
+                None => std::env::remove_var("HOMEBOY_RUNTIME_TMPDIR"),
+            }
+            let (output, code) = result.unwrap();
+            assert_eq!(code, 0, "{output}");
+            assert!(!residue.exists(), "{output}");
+            assert!(output["registry_findings"][0]["reason"]
+                .as_str()
+                .unwrap()
+                .contains("identity"));
+        });
     }
 
     #[test]

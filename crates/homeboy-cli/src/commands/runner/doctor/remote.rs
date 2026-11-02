@@ -65,6 +65,11 @@ pub fn report(
         default_artifact_root(client)
     };
     let mut checks = Vec::new();
+    if let Some(status) = persisted_status {
+        for finding in super::super::status::cadence_failure_hints(status) {
+            checks.push(checks::warning("workflow.cadence", finding, None));
+        }
+    }
     let mut tools = BTreeMap::new();
 
     checks.push(checks::ok_with_details(

@@ -2739,6 +2739,40 @@ fn parse_direct_runner_observation(
     })
 }
 
+/// Read cadence failures through the connected runner's bounded daemon endpoint.
+pub fn runner_cadence_failures(report: &RunnerStatusReport) -> Result<Vec<String>> {
+    let Some(url) = report
+        .session
+        .as_ref()
+        .and_then(|session| session.local_url.as_deref())
+    else {
+        return Ok(Vec::new());
+    };
+    if !report.connected {
+        return Ok(Vec::new());
+    }
+    let client = Client::builder()
+        .timeout(crate::readonly_probe::readonly_probe_timeout())
+        .build()
+        .map_err(|error| Error::internal_unexpected(error.to_string()))?;
+    let data = daemon_get(&client, url, "/workflows/cadences")?;
+    let entities = data
+        .pointer("/body/entities")
+        .and_then(Value::as_array)
+        .ok_or_else(|| Error::internal_unexpected("cadence response missing entities"))?;
+    Ok(entities
+        .iter()
+        .filter_map(|cadence| {
+            let error = cadence["last_error"].as_str()?;
+            let workflow = cadence["workflow"].as_str()?;
+            let slot = cadence["last_fired_slot"]
+                .as_str()
+                .unwrap_or("unknown slot");
+            Some(format!("{workflow} failing since {slot}: {error}"))
+        })
+        .collect())
+}
+
 /// Probe typed jobs through a direct daemon endpoint whose ownership was
 /// already verified by an operation-scoped caller.
 pub(crate) fn probe_verified_direct_daemon_jobs(

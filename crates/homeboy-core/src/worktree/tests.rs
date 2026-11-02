@@ -475,6 +475,27 @@ impl WorktreeReconciliationAuthority for SlowAuthority {
 }
 
 #[test]
+fn retention_missing_identity_is_a_finding_not_a_pass_failure() {
+    crate::test_support::with_isolated_home(|_| {
+        let source = tempfile::tempdir().unwrap();
+        let store = metadata_dir().unwrap();
+        fs::create_dir_all(&store).unwrap();
+        let mut bad = fixture_record(source.path(), &source.path().join("missing"));
+        bad.workspace_identity = None;
+        fs::write(
+            record_path(&store, &bad.id),
+            serde_json::to_vec(&bad).unwrap(),
+        )
+        .unwrap();
+        retire_residue().expect("incomplete record must not abort retention");
+        let findings = reconcile_malformed_task_worktree_records(true).unwrap();
+        assert_eq!(findings.len(), 1);
+        assert!(findings[0].reason.contains("identity"));
+        assert!(!record_path(&store, &bad.id).exists());
+    });
+}
+
+#[test]
 fn task_worktree_identity_is_path_independent_and_rejects_conflicts() {
     let source = tempfile::tempdir().expect("source");
     let first = fixture_record(source.path(), &source.path().join("one"));

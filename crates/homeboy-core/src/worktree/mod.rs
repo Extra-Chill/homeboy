@@ -377,7 +377,7 @@ pub struct TaskWorktreeRegistryQuarantine {
 /// Plan or apply bounded malformed-record quarantine. Every returned record
 /// remains active protection until `clear_task_worktree_registry_quarantine`
 /// records an explicit verified terminal reconciliation.
-pub(crate) fn reconcile_malformed_task_worktree_records(
+pub fn reconcile_malformed_task_worktree_records(
     apply: bool,
 ) -> Result<Vec<TaskWorktreeRegistryQuarantine>> {
     with_task_worktree_registry_write_lock(|| {
