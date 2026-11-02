@@ -33,6 +33,24 @@ pub fn validate_graph(component: &Component) -> Result<()> {
     visit(component, &mut Vec::new())
 }
 
+/// The component configuration a build consumes: identity, settings, scripts
+/// and artifact layout. Deploy-target bindings (remote paths, owners, hooks,
+/// provenance) never reach the build, and callers carry different projections
+/// of them, so including them would split one package across several keys.
+fn build_inputs(component: &Component) -> serde_json::Value {
+    serde_json::json!({
+        "id": component.id,
+        "build_artifact": component.build_artifact,
+        "build_command": component.build_command,
+        "extensions": component.extensions,
+        "capability_extensions": component.capability_extensions,
+        "scopes": component.scopes,
+        "package_artifacts": component.package_artifacts,
+        "scripts": component.scripts,
+        "version_targets": component.version_targets,
+    })
+}
+
 pub fn content_key(component: &Component) -> Option<String> {
     key(component, &mut Vec::new())
 }
@@ -65,11 +83,7 @@ fn key(component: &Component, trail: &mut Vec<PathBuf>) -> Option<String> {
     let mut hash = Sha256::new();
     hash.update(b"homeboy-package-v1\0");
     hash.update(index);
-    // Settings, component scripts and artifact configuration are inputs too.
-    let mut config = serde_json::to_value(component).ok()?;
-    config.as_object_mut()?.remove("local_path");
-    config.as_object_mut()?.remove("env");
-    hash.update(serde_json::to_vec(&config).ok()?);
+    hash.update(serde_json::to_vec(&build_inputs(component)).ok()?);
     let resolved = resolve_build_command(component).ok()?;
     trail.push(root.clone());
     let mut ids: Vec<_> = component.extensions.as_ref()?.keys().collect();
