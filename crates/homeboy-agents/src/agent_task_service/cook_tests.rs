@@ -11886,6 +11886,90 @@ fn cook_base_pin_falls_back_to_the_fetched_tracking_ref_when_origin_is_unreachab
     });
 }
 
+#[test]
+fn cook_workspace_base_readmission_after_sha_fetch_converges() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        use homeboy_test_support::git::output as git;
+
+        let temp = tempfile::tempdir().expect("temporary repository");
+        let origin = temp.path().join("origin");
+        let repository = temp.path().join("repository");
+        let destination = temp.path().join("destination");
+        std::fs::create_dir(&origin).unwrap();
+        git(&origin, &["init", "-b", "main"]);
+        git(&origin, &["config", "user.name", "Test"]);
+        git(&origin, &["config", "user.email", "test@example.com"]);
+        git(&origin, &["commit", "--allow-empty", "-m", "T1"]);
+        git(
+            temp.path(),
+            &[
+                "clone",
+                origin.to_str().unwrap(),
+                repository.to_str().unwrap(),
+            ],
+        );
+        let t1 = git(&repository, &["rev-parse", "origin/main"]);
+        git(
+            &repository,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "fix/issue-16967",
+                destination.to_str().unwrap(),
+            ],
+        );
+        git(&origin, &["commit", "--allow-empty", "-m", "T2"]);
+        let t2 = git(&origin, &["rev-parse", "HEAD"]);
+        assert_eq!(git(&destination, &["rev-parse", "origin/main"]), t1);
+
+        // First Cook captures T2 by SHA and converges the linked destination.
+        let captured =
+            crate::agent_task_promotion::capture_declared_base(&destination, Some("main"))
+                .unwrap()
+                .unwrap();
+        assert_eq!(captured.sha, t2);
+        homeboy_core::worktree::convergence::converge_destination(
+            &destination,
+            &captured.sha,
+            false,
+            true,
+            None,
+        )
+        .unwrap();
+
+        // A retryable transport failure on readmission exercises the local pin,
+        // not a fresh ls-remote that would mask the stale-tracking-ref bug.
+        git(
+            &destination,
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                "https://127.0.0.1:1/repository.git",
+            ],
+        );
+        let mut options = batch_cook_options(
+            "cook-workspace-base-readmission",
+            Arc::new(AcceptedDetachedAttemptDispatcher),
+        );
+        pin_cook_workspace_base_at(&mut options, &destination).unwrap();
+        homeboy_core::worktree::convergence::converge_destination(
+            &destination,
+            options.workspace.task_base_sha.as_deref().unwrap(),
+            false,
+            true,
+            Some("https://github.com/Extra-Chill/homeboy/issues/16967"),
+        )
+        .expect("readmission must not classify an already-converged base as existing PR work");
+        assert_eq!(git(&destination, &["rev-parse", "HEAD"]), t2);
+        assert_eq!(
+            options.workspace.task_base_sha.as_deref(),
+            Some(t2.as_str())
+        );
+    });
+}
+
 /// Without a local base the run has nothing immutable to pin, so it must still
 /// fail before provider execution rather than invent a base.
 #[test]
