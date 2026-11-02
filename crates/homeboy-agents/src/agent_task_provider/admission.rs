@@ -123,26 +123,19 @@ impl AgentTaskProviderAdmissionPlan {
                     )
                 }),
             });
-            let observed_revision = resolved.and_then(runtime_revision);
-            let revision_matches = observed_revision == Some(identity.source_revision.as_str());
             predicates.push(AgentTaskProviderAdmissionPredicate {
                 id: "pinned_runtime_revision".to_string(),
-                satisfied: revision_matches,
-                detail: (!revision_matches).then(|| {
-                    format!(
-                        "controller requires `{}`, observed `{}`",
-                        identity.source_revision,
-                        observed_revision.unwrap_or("missing")
-                    )
-                }),
+                satisfied: false,
+                detail: Some(format!(
+                    "controller requires `{}`, observed `missing`",
+                    identity.source_revision
+                )),
             });
             required_runtime_sources.push(identity.source_revision.clone());
-            if !revision_matches {
-                actions.push(AgentTaskProviderAdmissionAction::MaterializeRuntime {
-                    provider_id: identity.provider_id.clone(),
-                    source_revision: identity.source_revision.clone(),
-                });
-            }
+            actions.push(AgentTaskProviderAdmissionAction::MaterializeRuntime {
+                provider_id: identity.provider_id.clone(),
+                source_revision: identity.source_revision.clone(),
+            });
         }
 
         required_extension_ids.sort();
@@ -185,14 +178,6 @@ impl AgentTaskProviderAdmissionPlan {
     }
 }
 
-fn runtime_revision(provider: &AgentTaskExecutorProvider) -> Option<&str> {
-    provider
-        .extra
-        .get("runtime_materialization_plan")
-        .and_then(|plan| plan.get("source_revision"))
-        .and_then(serde_json::Value::as_str)
-}
-
 fn predicate_for_resolution(
     request: &AgentTaskProviderAdmissionRequest,
     providers: &[AgentTaskExecutorProvider],
@@ -227,17 +212,11 @@ fn predicate_for_resolution(
 mod tests {
     use super::*;
 
-    fn provider(id: &str, backend: &str, revision: Option<&str>) -> AgentTaskExecutorProvider {
-        let mut provider: AgentTaskExecutorProvider = serde_json::from_value(serde_json::json!({
-            "id": id, "backend": backend, "argv": ["provider"]
-        }))
-        .expect("provider");
-        if let Some(revision) = revision {
-            provider.extra.insert(
-                "runtime_materialization_plan".to_string(),
-                serde_json::json!({"source_revision": revision}),
-            );
-        }
+    fn provider(id: &str, backend: &str) -> AgentTaskExecutorProvider {
+        let mut provider =
+            super::super::discovery::discover_agent_task_executor_providers().remove(0);
+        provider.id = id.into();
+        provider.backend = backend.into();
         provider
     }
 
@@ -250,12 +229,12 @@ mod tests {
             runtime_identity: None,
         };
         let plan =
-            AgentTaskProviderAdmissionPlan::compile(request, &[provider("alpha.a", "alpha", None)]);
+            AgentTaskProviderAdmissionPlan::compile(request, &[provider("alpha.a", "alpha")]);
         let encoded = serde_json::to_string(&plan).expect("serialize");
         let decoded: AgentTaskProviderAdmissionPlan =
             serde_json::from_str(&encoded).expect("deserialize");
         assert_eq!(plan.hash, decoded.hash);
-        let drifted = decoded.revalidate(&[provider("alpha.b", "alpha", None)]);
+        let drifted = decoded.revalidate(&[provider("alpha.b", "alpha")]);
         assert_ne!(decoded.hash, drifted.hash);
         assert!(!drifted.is_ready());
     }
@@ -283,7 +262,7 @@ mod tests {
                 model: None,
                 runtime_identity: None,
             },
-            &[provider("alpha.a", "alpha", None)],
+            &[provider("alpha.a", "alpha")],
         );
         assert!(!mismatch.is_ready());
         let pinned = homeboy_core::agent_task_config::ResolvedAgentTaskRuntimeIdentity {
@@ -302,13 +281,16 @@ mod tests {
                 model: None,
                 runtime_identity: Some(pinned),
             },
-            &[provider(
-                "alpha.a",
-                "alpha",
-                Some("ffffffffffffffffffffffffffffffffffffffff"),
-            )],
+            &[provider("alpha.a", "alpha")],
         );
         assert!(!drift.is_ready());
+        let revision = drift
+            .predicates
+            .iter()
+            .find(|p| p.id == "pinned_runtime_revision")
+            .unwrap();
+        assert!(!revision.satisfied);
+        assert_eq!(revision.detail.as_deref(), Some("controller requires `0123456789abcdef0123456789abcdef01234567`, observed `missing`"));
         assert!(drift.actions.iter().any(|action| matches!(
             action,
             AgentTaskProviderAdmissionAction::MaterializeRuntime { .. }
@@ -324,19 +306,20 @@ mod tests {
             runtime_identity: None,
         };
         let planned = AgentTaskProviderAdmissionPlan::compile_unobserved(request);
-        let ready = planned.revalidate(&[provider("alpha.a", "alpha", None)]);
+        let ready = planned.revalidate(&[provider("alpha.a", "alpha")]);
         assert!(ready.is_ready());
-        assert_eq!(
-            ready,
-            ready.revalidate(&[provider("alpha.a", "alpha", None)])
-        );
+        assert!(!ready
+            .predicates
+            .iter()
+            .any(|p| p.id == "pinned_runtime_revision"));
+        assert_eq!(ready, ready.revalidate(&[provider("alpha.a", "alpha")]));
         assert_ne!(planned.hash, ready.hash);
     }
 
     #[test]
     fn catalog_permutations_preserve_admission_identity() {
-        let first = provider("alpha.a", "alpha", None);
-        let second = provider("alpha.b", "alpha", None);
+        let first = provider("alpha.a", "alpha");
+        let second = provider("alpha.b", "alpha");
         for request in [
             AgentTaskProviderAdmissionRequest {
                 backend: "alpha".to_string(),

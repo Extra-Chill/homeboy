@@ -1804,18 +1804,6 @@ mod placement_readiness_tests {
         serde_json::from_value(serde_json::json!({ "id": id, "backend": "sol" })).expect("provider")
     }
 
-    fn provider_with_runtime(
-        id: &str,
-        source_revision: &str,
-    ) -> homeboy_agents::agent_tasks::provider::AgentTaskExecutorProvider {
-        let mut provider = provider(id);
-        provider.extra.insert(
-            "runtime_materialization_plan".to_string(),
-            serde_json::json!({ "source_revision": source_revision }),
-        );
-        provider
-    }
-
     fn cook_request(selector: Option<&str>) -> PlacementReadinessRequest {
         PlacementReadinessRequest {
             schema: "homeboy/placement-readiness/v2".to_string(),
@@ -1915,27 +1903,6 @@ mod placement_readiness_tests {
         })
         .expect("readiness");
         assert!(!readiness.provider_admission.expect("admission").is_ready());
-    }
-
-    #[test]
-    fn placement_readiness_transport_accepts_matching_materialized_pinned_runtime() {
-        let mut request = cook_request(Some("provider-11"));
-        if let PlacementReadinessInvocation::AgentTaskCook {
-            runtime_identity, ..
-        } = &mut request.invocation
-        {
-            *runtime_identity = Box::new(Some(serde_json::from_value(serde_json::json!({
-                "runtime_id": "runtime-11", "provider_id": "provider-11", "source_selector": "catalog",
-                "source_revision": "abc", "freshness": "pinned", "provider": {}, "materialization_plan": null
-            }))
-            .expect("runtime pin")));
-        }
-        let readiness = placement_readiness_with_transport(&request, |_, _| {
-            Ok(observed(vec![provider_with_runtime("provider-11", "abc")]))
-        })
-        .expect("readiness");
-        assert_eq!(readiness.state, PlacementReadinessState::Ready);
-        assert!(readiness.provider_admission.expect("admission").is_ready());
     }
 
     #[test]
