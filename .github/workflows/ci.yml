@@ -42,15 +42,15 @@ jobs:
 
   homeboy:
     name: homeboy
-    uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@bfc6d009c899b27c5fb2778742c8b85590d42d5a
+    uses: Extra-Chill/homeboy-action/.github/workflows/ci.yml@b89cc50767e9e0c46865f20bf2cd5d0c43b5a71c
     with:
       # Lint and Test share the prepared candidate binary and retain separate
       # checks/comment sections via the workflow's per-command defaults.
       # Keep --skip-lint test-local; shared args would pass it to review lint.
       commands: review lint,review test --skip-lint
       component: homeboy
-      # Scoped differential baseline (homeboy-action#541-#544); source cache lock fallback (#547).
-      action-ref: bfc6d009c899b27c5fb2778742c8b85590d42d5a
+      # homeboy-action v2.25.6: source cache key ignores release version bumps (#17294).
+      action-ref: b89cc50767e9e0c46865f20bf2cd5d0c43b5a71c
       extension-ref: 5417472dc7ad50a0dc67530fccef315f4dad637a
       source: .
       scope: auto
