@@ -3083,6 +3083,35 @@ fn upgrade_admission_allows_unmaterialized_cook_blocked_on_runner_convergence() 
 }
 
 #[test]
+fn fleet_reconcile_removed_runner_with_real_attempt_id() {
+    with_isolated_home(|_| {
+        let run_id = "agent-task-b9b30a3d-e8b7-4e2b-806b-5e1bd0d2aa7e-attempt-1-f99b31c4";
+        let _runner = agent_task_lifecycle::RunnerContinuationTestGuard::install(Box::new(
+            RunnerAuthorityFixture::removed(),
+        ));
+        record_stale_accepted_lab_handoff(run_id, "fixture-lab");
+        agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+            record.updated_at = Some("2000-01-01T00:00:00.123456789+00:00".to_string());
+        })
+        .expect("real-length timestamp");
+        let report = reconcile_stale_active_runs(false).expect("fleet reconciliation");
+        assert_eq!(report.failed, 0, "{report:?}");
+        assert_eq!(report.reconciled, 1, "{report:?}");
+        assert_eq!(
+            report.runs[0].stale_reason.as_deref(),
+            Some("runner_removed")
+        );
+        assert!(agent_task_lifecycle::exact_record(run_id)
+            .expect("record")
+            .state()
+            .is_terminal());
+        let replay = reconcile_stale_active_runs(false).expect("repeat sweep");
+        assert_eq!(replay.failed, 0);
+        assert_eq!(replay.reconciled, 0);
+    });
+}
+
+#[test]
 fn upgrade_admission_inspects_an_ambiguous_removed_runner_record_locally() {
     with_isolated_home(|_| {
         let cook_id = "concurrent-first-cook-run";

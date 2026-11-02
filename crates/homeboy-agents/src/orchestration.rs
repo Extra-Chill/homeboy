@@ -2135,6 +2135,7 @@ impl OrchestrationService<LifecycleStoreLookup> {
                             } else {
                                 ControlPlaneActionOutcome::Succeeded
                             };
+                            let message = report.failure_summary();
                             (
                                 outcome,
                                 project_record(&current, None)?,
@@ -2142,7 +2143,7 @@ impl OrchestrationService<LifecycleStoreLookup> {
                                     schema: report.schema.to_string(),
                                     data: serde_json::to_value(report).unwrap_or_default(),
                                 },
-                                None,
+                                message,
                             )
                         }
                         Err(error) => (

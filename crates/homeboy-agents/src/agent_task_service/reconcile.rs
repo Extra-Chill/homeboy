@@ -41,6 +41,30 @@ pub struct AgentTaskReconcileReport {
     pub runs: Vec<AgentTaskReconcileRun>,
 }
 
+impl AgentTaskReconcileReport {
+    /// Summarize item failures even when the sweep itself returned successfully.
+    pub fn failure_summary(&self) -> Option<String> {
+        if self.failed == 0 {
+            return None;
+        }
+        let reasons: std::collections::BTreeSet<&str> = self
+            .runs
+            .iter()
+            .filter(|run| run.action == "failed")
+            .filter_map(|run| run.error.as_deref())
+            .collect();
+        Some(format!(
+            "{} runs failed to reconcile: {}",
+            self.failed,
+            if reasons.is_empty() {
+                "no item failure cause reported".to_string()
+            } else {
+                reasons.into_iter().collect::<Vec<_>>().join("; ")
+            }
+        ))
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct AgentTaskReconcileRun {
     pub run_id: String,
@@ -135,8 +159,10 @@ fn verified_reconciled_status(
     // requiring an Idle report would make it permanently unreconcilable.
     let runner_projection_resolved = record.runner_job_id().is_none()
         || record.runner_id().is_none_or(|runner_id| {
-            agent_task_lifecycle::runner_live_job_authority(runner_id)
-                == agent_task_lifecycle::RunnerLiveJobAuthority::Idle
+            agent_task_lifecycle::runner_authority(runner_id)
+                == agent_task_lifecycle::RunnerAuthority::Removed
+                || agent_task_lifecycle::runner_live_job_authority(runner_id)
+                    == agent_task_lifecycle::RunnerLiveJobAuthority::Idle
         });
     verify_reconciled_postcondition(&record, remains_active, runner_projection_resolved)?;
     Ok(record)
@@ -314,19 +340,17 @@ pub fn reconcile_stale_active_runs(dry_run: bool) -> Result<AgentTaskReconcileRe
         // audit record for this fleet member.
         // The observed runner evidence is part of the decision identity, so a
         // changed observation is a new decision rather than a replay.
-        let idempotency_key = match runner_evidence.as_ref() {
-            Some(evidence) => format!(
-                "fleet-reconcile:{}:{}:{}",
-                run.run_id,
-                record.updated_at.as_deref().unwrap_or(&record.submitted_at),
-                evidence.reason
-            ),
-            None => format!(
-                "fleet-reconcile:{}:{}",
-                run.run_id,
-                record.updated_at.as_deref().unwrap_or(&record.submitted_at)
-            ),
-        };
+        let idempotency_key =
+            homeboy_control_plane_contract::identity::derived_control_plane_identity(
+                "fleet-reconcile",
+                &[
+                    &run.run_id,
+                    record.updated_at.as_deref().unwrap_or(&record.submitted_at),
+                    runner_evidence
+                        .as_ref()
+                        .map_or("", |evidence| evidence.reason),
+                ],
+            );
         let request = ControlPlaneActionRequest {
             schema: CONTROL_PLANE_ACTION_REQUEST_SCHEMA.to_string(),
             effect_id: homeboy_control_plane_contract::EffectId(format!(
@@ -787,6 +811,38 @@ mod tests {
             record.metadata["runner_pid"] = serde_json::json!(999_999u32);
         })
         .expect("orphaned owner");
+    }
+
+    #[test]
+    fn reconcile_item_failures_have_an_aggregate_cause() {
+        let mut report = AgentTaskReconcileReport {
+            schema: "homeboy/agent-task-reconcile/v1",
+            scope: "fleet".to_string(),
+            requested_run_id: None,
+            resolved_run_ids: Vec::new(),
+            authorization: "explicit-apply",
+            dry_run: false,
+            considered: 34,
+            reconciled: 0,
+            failed: 34,
+            runs: (0..34)
+                .map(|index| AgentTaskReconcileRun {
+                    run_id: format!("run-{index}"),
+                    liveness: AgentTaskLiveness::Stale,
+                    source: "runner:removed".to_string(),
+                    authoritative_state: agent_task_lifecycle::AgentTaskRunState::Running,
+                    stale_reason: Some("runner_removed".to_string()),
+                    action: "failed",
+                    error: Some("idempotency_key too long".to_string()),
+                })
+                .collect(),
+        };
+        assert_eq!(
+            report.failure_summary().as_deref(),
+            Some("34 runs failed to reconcile: idempotency_key too long")
+        );
+        report.failed = 0;
+        assert_eq!(report.failure_summary(), None);
     }
 
     #[test]
