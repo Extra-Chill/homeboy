@@ -297,19 +297,7 @@ pub fn verify_staged_workspace_materialization(
     workspace: &crate::runner_staging_operation::ControllerWorkspaceMaterialization,
 ) -> Result<()> {
     workspace.validate()?;
-    let state: StagingStoreState =
-        serde_json::from_slice(&fs::read(store_path.as_ref()).map_err(|error| {
-            Error::internal_io(
-                error.to_string(),
-                Some(store_path.as_ref().display().to_string()),
-            )
-        })?)
-        .map_err(|error| {
-            Error::internal_json(
-                error.to_string(),
-                Some(format!("parse {}", store_path.as_ref().display())),
-            )
-        })?;
+    let state = load_stage(&stage_record_path(store_path.as_ref(), &workspace.run_id))?;
     let stage = state.stages.get(&workspace.run_id).ok_or_else(|| {
         Error::validation_invalid_argument(
             "staged_workspace_materialization",
@@ -432,15 +420,8 @@ impl<M: RunnerStagingMaterializer> RunnerStagingStore<M> {
             runner_id: runner_id.into(),
             materializer,
         };
-        let state = store.load()?;
-        if state.schema != STORE_SCHEMA {
-            return Err(Error::validation_invalid_argument(
-                "staging_store",
-                "unsupported remote runner staging store schema",
-                Some(store.path.display().to_string()),
-                None,
-            ));
-        }
+        let _lock = store.admission_lock()?;
+        store.migrate_ledger()?;
         Ok(store)
     }
 
@@ -487,8 +468,8 @@ impl<M: RunnerStagingMaterializer> RunnerStagingStore<M> {
             })
             .transpose()?;
         let _lock = self.admission_lock()?;
-        let mut state = self.load()?;
         let key = &envelope.handoff.idempotency_key;
+        let mut state = load_stage(&stage_record_path(&self.path, key))?;
         if let Some(existing) = state.stages.get(key) {
             if existing.envelope != *envelope {
                 return Err(Error::validation_invalid_argument(
@@ -515,7 +496,7 @@ impl<M: RunnerStagingMaterializer> RunnerStagingStore<M> {
                 state: "intent_created".to_string(),
                 runner_job_id: None,
             });
-        self.persist(&state)?;
+        self.persist(key, &state)?;
 
         // The lock covers materialization and receipt publication. Concurrent
         // requests therefore observe one durable admission, not two writes.
@@ -524,7 +505,7 @@ impl<M: RunnerStagingMaterializer> RunnerStagingStore<M> {
         }
         // Source bytes are now durable before any queue entry can become claimable.
         state.intents.get_mut(key).expect("intent").state = "source_ready".to_string();
-        self.persist(&state)?;
+        self.persist(key, &state)?;
         let runner_job_id = match state
             .intents
             .get(key)
@@ -536,7 +517,7 @@ impl<M: RunnerStagingMaterializer> RunnerStagingStore<M> {
                 let intent = state.intents.get_mut(key).expect("intent");
                 intent.runner_job_id = Some(job_id.clone());
                 intent.state = "job_submitted".to_string();
-                self.persist(&state)?;
+                self.persist(key, &state)?;
                 job_id
             }
         };
@@ -558,80 +539,201 @@ impl<M: RunnerStagingMaterializer> RunnerStagingStore<M> {
             },
         );
         state.intents.remove(key);
-        self.persist(&state)?;
+        self.persist(key, &state)?;
         Ok(receipt)
     }
 
-    fn load(&self) -> Result<StagingStoreState> {
+    /// Split the retired ledger once. Strict decoding is scoped to the selected
+    /// record; an obsolete envelope never poisons unrelated admission.
+    fn migrate_ledger(&self) -> Result<()> {
         if !self.path.exists() {
-            return Ok(StagingStoreState::default());
+            return Ok(());
         }
-        serde_json::from_slice(&fs::read(&self.path).map_err(|error| {
-            Error::internal_io(
-                error.to_string(),
-                Some(format!("read {}", self.path.display())),
-            )
-        })?)
-        .map_err(|error| {
-            Error::internal_json(
-                error.to_string(),
-                Some(format!("parse {}", self.path.display())),
-            )
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Ledger {
+            schema: String,
+            stages: BTreeMap<String, serde_json::Value>,
+            #[serde(default)]
+            intents: BTreeMap<String, serde_json::Value>,
+        }
+        let bytes = fs::read(&self.path).map_err(|error| {
+            Error::internal_io(error.to_string(), Some(self.path.display().to_string()))
+        })?;
+        let ledger: Ledger = serde_json::from_slice(&bytes)
+            .map_err(|error| incompatible_stage(&self.path, error))?;
+        if ledger.schema != STORE_SCHEMA {
+            return Err(incompatible_stage(&self.path, "unsupported schema"));
+        }
+        let keys: std::collections::BTreeSet<_> =
+            ledger.stages.keys().chain(ledger.intents.keys()).collect();
+        for key in keys {
+            let mut stages = BTreeMap::new();
+            let mut intents = BTreeMap::new();
+            if let Some(stage) = ledger.stages.get(key) {
+                stages.insert(key, stage);
+            }
+            if let Some(intent) = ledger.intents.get(key) {
+                intents.insert(key, intent);
+            }
+            let path = stage_record_path(&self.path, key);
+            if !path.exists() {
+                persist_stage(
+                    &path,
+                    &serde_json::json!({
+                        "schema": STORE_SCHEMA, "stages": stages, "intents": intents,
+                    }),
+                )?;
+            }
+        }
+        // Persist an operator-facing migration report rather than silently
+        // accepting obsolete contracts. The record remains isolated and strict.
+        let mut incompatible = Vec::new();
+        for key in ledger.stages.keys().chain(ledger.intents.keys()) {
+            let path = stage_record_path(&self.path, key);
+            if let Err(error) = load_stage(&path) {
+                incompatible.push(serde_json::json!({
+                    "record": path, "message": error.message,
+                    "repair": error.hints,
+                }));
+            }
+        }
+        persist_stage(
+            &self.path.with_extension("migration-report.json"),
+            &serde_json::json!({
+                "schema": "homeboy/runner-staging-migration-report/v1",
+                "incompatible_records": incompatible,
+            }),
+        )?;
+        fs::remove_file(&self.path).map_err(|error| {
+            Error::internal_io(error.to_string(), Some(self.path.display().to_string()))
         })
     }
 
-    fn persist(&self, state: &StagingStoreState) -> Result<()> {
-        let parent = self.path.parent().unwrap_or_else(|| Path::new("."));
-        fs::create_dir_all(parent).map_err(|error| {
-            Error::internal_io(
-                error.to_string(),
-                Some(format!("create {}", parent.display())),
-            )
-        })?;
-        let bytes = serde_json::to_vec(state).map_err(|error| {
-            Error::internal_json(
-                error.to_string(),
-                Some("serialize remote runner staging store".to_string()),
-            )
-        })?;
-        let mut temporary = NamedTempFile::new_in(parent).map_err(|error| {
-            Error::internal_io(
-                error.to_string(),
-                Some(format!("create staging temporary in {}", parent.display())),
-            )
-        })?;
-        temporary.write_all(&bytes).map_err(|error| {
-            Error::internal_io(
-                error.to_string(),
-                Some(format!(
-                    "write staging temporary for {}",
-                    self.path.display()
-                )),
-            )
-        })?;
-        temporary.as_file().sync_all().map_err(|error| {
-            Error::internal_io(
-                error.to_string(),
-                Some(format!(
-                    "sync staging temporary for {}",
-                    self.path.display()
-                )),
-            )
-        })?;
-        temporary.persist(&self.path).map_err(|error| {
-            Error::internal_io(
-                error.error.to_string(),
-                Some(format!("publish {}", self.path.display())),
-            )
-        })?;
-        File::open(parent)
-            .and_then(|directory| directory.sync_all())
-            .map_err(|error| {
-                Error::internal_io(
+    /// Reclaim only records whose runner job is durably terminal. Unknown jobs
+    /// and undecodable records retain their evidence for operator repair.
+    fn reclaim_terminal(&self, jobs: &homeboy_core::api_jobs::JobStore) -> Result<()> {
+        let _lock = self.admission_lock()?;
+        let directory = self.path.with_extension("stages");
+        let entries = match fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(Error::internal_io(
                     error.to_string(),
-                    Some(format!("sync {}", parent.display())),
-                )
-            })
+                    Some(directory.display().to_string()),
+                ))
+            }
+        };
+        let mut retained_artifacts = std::collections::BTreeSet::new();
+        let mut retired_artifacts = BTreeMap::new();
+        let mut unknown_references = false;
+        for entry in entries {
+            let entry = entry.map_err(|error| Error::internal_io(error.to_string(), None))?;
+            if !entry
+                .file_type()
+                .map_err(|error| Error::internal_io(error.to_string(), None))?
+                .is_file()
+            {
+                continue;
+            }
+            let path = entry.path();
+            let Ok(state) = load_stage(&path) else {
+                unknown_references = true;
+                continue;
+            };
+            let terminal = !state.stages.is_empty()
+                && state.intents.is_empty()
+                && state.stages.values().all(|stage| {
+                    uuid::Uuid::parse_str(&stage.receipt.handoff.runner_job_id)
+                        .ok()
+                        .and_then(|id| jobs.get(id).ok())
+                        .is_some_and(|job| job.status.is_terminal())
+                });
+            if !terminal {
+                for artifact in state
+                    .stages
+                    .values()
+                    .filter_map(|stage| stage.receipt.artifacts.source_artifact.as_ref())
+                    .chain(
+                        state
+                            .intents
+                            .values()
+                            .filter_map(|intent| intent.source_artifact.as_ref()),
+                    )
+                {
+                    retained_artifacts.insert(artifact.artifact_id.clone());
+                }
+                continue;
+            }
+            for stage in state.stages.values() {
+                if let Some(artifact) = &stage.receipt.artifacts.source_artifact {
+                    retired_artifacts.insert(artifact.artifact_id.clone(), artifact.clone());
+                }
+                let authority = &stage.envelope.materialization.authority_id;
+                // Never follow a persisted path outside the runner-owned root.
+                if authority.starts_with("staging-")
+                    && Path::new(authority).components().count() == 1
+                {
+                    let root = self
+                        .path
+                        .parent()
+                        .unwrap_or_else(|| Path::new("."))
+                        .join(authority);
+                    match fs::symlink_metadata(&root) {
+                        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+                            fs::remove_dir_all(&root).map_err(|error| {
+                                Error::internal_io(
+                                    error.to_string(),
+                                    Some(root.display().to_string()),
+                                )
+                            })?;
+                        }
+                        Err(error) if error.kind() == ErrorKind::NotFound => {}
+                        Ok(_) => {
+                            return Err(incompatible_stage(
+                                &root,
+                                "staging directory is not a directory",
+                            ))
+                        }
+                        Err(error) => {
+                            return Err(Error::internal_io(
+                                error.to_string(),
+                                Some(root.display().to_string()),
+                            ))
+                        }
+                    }
+                }
+            }
+            fs::remove_file(&path).map_err(|error| {
+                Error::internal_io(error.to_string(), Some(path.display().to_string()))
+            })?;
+        }
+        // Artifacts are content-addressed and may be shared. Never delete a
+        // blob still referenced by an active or incompatible record.
+        if !unknown_references {
+            for (id, artifact) in retired_artifacts {
+                if retained_artifacts.contains(&id) {
+                    continue;
+                }
+                let path = self.source_artifact_path(&artifact)?;
+                match fs::remove_file(&path) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == ErrorKind::NotFound => {}
+                    Err(error) => {
+                        return Err(Error::internal_io(
+                            error.to_string(),
+                            Some(path.display().to_string()),
+                        ))
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn persist(&self, key: &str, state: &StagingStoreState) -> Result<()> {
+        persist_stage(&stage_record_path(&self.path, key), state)
     }
 
     fn source_artifact_path(&self, artifact: &RunnerSourceArtifact) -> Result<PathBuf> {
@@ -653,102 +755,160 @@ impl<M: RunnerStagingMaterializer> RunnerStagingStore<M> {
         if path.exists() {
             return self.verify_source_artifact(artifact);
         }
-        let parent = path.parent().expect("source artifact has parent");
+        persist_bytes(&path, bytes)
+    }
+
+    fn admission_lock(&self) -> Result<File> {
+        staging_lock(&self.path, &self.runner_id)
+    }
+}
+
+fn stage_record_path(ledger: &Path, key: &str) -> PathBuf {
+    ledger
+        .with_extension("stages")
+        .join(format!("{:x}.json", Sha256::digest(key.as_bytes())))
+}
+
+fn incompatible_stage(path: &Path, reason: impl std::fmt::Display) -> Error {
+    Error::validation_invalid_argument(
+        "runner_staging_state",
+        format!("incompatible runner staging state: {reason}"),
+        Some(path.display().to_string()),
+        None,
+    )
+    .with_hint(format!(
+        "Remove the incompatible record while the runner is stopped: rm -- '{}'",
+        path.display()
+    ))
+}
+
+fn load_stage(path: &Path) -> Result<StagingStoreState> {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            return Ok(StagingStoreState::default())
+        }
+        Err(error) => {
+            return Err(Error::internal_io(
+                error.to_string(),
+                Some(path.display().to_string()),
+            ))
+        }
+    };
+    let state: StagingStoreState =
+        serde_json::from_slice(&bytes).map_err(|error| incompatible_stage(path, error))?;
+    if state.schema != STORE_SCHEMA {
+        return Err(incompatible_stage(path, "unsupported schema"));
+    }
+    Ok(state)
+}
+
+fn persist_stage(path: &Path, state: &impl Serialize) -> Result<()> {
+    let bytes = serde_json::to_vec(state).map_err(|error| {
+        Error::internal_json(
+            error.to_string(),
+            Some("serialize staging record".to_string()),
+        )
+    })?;
+    persist_bytes(path, &bytes)
+}
+
+fn persist_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!("create {}", parent.display())),
+        )
+    })?;
+    let mut temporary = NamedTempFile::new_in(parent).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!("create staging temporary in {}", parent.display())),
+        )
+    })?;
+    temporary.write_all(&bytes).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!("write staging temporary for {}", path.display())),
+        )
+    })?;
+    temporary.as_file().sync_all().map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!("sync staging temporary for {}", path.display())),
+        )
+    })?;
+    temporary.persist(path).map_err(|error| {
+        Error::internal_io(
+            error.error.to_string(),
+            Some(format!("publish {}", path.display())),
+        )
+    })?;
+    File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(format!("sync {}", parent.display())),
+            )
+        })
+}
+
+fn staging_lock(path: &Path, runner_id: &str) -> Result<File> {
+    const LOCK_TIMEOUT: Duration = Duration::from_secs(30);
+    const LOCK_RETRY: Duration = Duration::from_millis(25);
+    let lock_path = path.with_extension("lock");
+    if let Some(parent) = lock_path.parent() {
         fs::create_dir_all(parent).map_err(|error| {
             Error::internal_io(
                 error.to_string(),
                 Some(format!("create {}", parent.display())),
             )
         })?;
-        let mut temporary = NamedTempFile::new_in(parent).map_err(|error| {
-            Error::internal_io(
-                error.to_string(),
-                Some(format!("create source artifact in {}", parent.display())),
-            )
-        })?;
-        temporary.write_all(bytes).map_err(|error| {
-            Error::internal_io(
-                error.to_string(),
-                Some(format!("write source artifact {}", artifact.artifact_id)),
-            )
-        })?;
-        temporary.as_file().sync_all().map_err(|error| {
-            Error::internal_io(
-                error.to_string(),
-                Some(format!("sync source artifact {}", artifact.artifact_id)),
-            )
-        })?;
-        temporary.persist_noclobber(&path).map_err(|error| {
-            Error::internal_io(
-                error.error.to_string(),
-                Some(format!("publish source artifact {}", artifact.artifact_id)),
-            )
-        })?;
-        File::open(parent)
-            .and_then(|directory| directory.sync_all())
-            .map_err(|error| {
-                Error::internal_io(
-                    error.to_string(),
-                    Some(format!("sync {}", parent.display())),
-                )
-            })
     }
-
-    fn admission_lock(&self) -> Result<File> {
-        const LOCK_TIMEOUT: Duration = Duration::from_secs(30);
-        const LOCK_RETRY: Duration = Duration::from_millis(25);
-        let lock_path = self.path.with_extension("lock");
-        if let Some(parent) = lock_path.parent() {
-            fs::create_dir_all(parent).map_err(|error| {
-                Error::internal_io(
+    let lock = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)
+        .map_err(|error| {
+            Error::internal_io(
+                error.to_string(),
+                Some(format!("open {}", lock_path.display())),
+            )
+        })?;
+    let deadline = Instant::now() + LOCK_TIMEOUT;
+    loop {
+        match lock.try_lock_exclusive() {
+            Ok(true) => return Ok(lock),
+            Ok(false) => {}
+            Err(error) if error.kind() == ErrorKind::WouldBlock => {}
+            Err(error) => {
+                return Err(Error::internal_io(
                     error.to_string(),
-                    Some(format!("create {}", parent.display())),
-                )
-            })?;
-        }
-        let lock = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(false)
-            .open(&lock_path)
-            .map_err(|error| {
-                Error::internal_io(
-                    error.to_string(),
-                    Some(format!("open {}", lock_path.display())),
-                )
-            })?;
-        let deadline = Instant::now() + LOCK_TIMEOUT;
-        loop {
-            match lock.try_lock_exclusive() {
-                Ok(true) => return Ok(lock),
-                Ok(false) => {}
-                Err(error) if error.kind() == ErrorKind::WouldBlock => {}
-                Err(error) => {
-                    return Err(Error::internal_io(
-                        error.to_string(),
-                        Some(format!("lock {}", lock_path.display())),
-                    ));
-                }
-            }
-            if Instant::now() >= deadline {
-                let mut error = Error::internal_io(
-                    format!(
-                        "timed out after {}ms waiting for staging admission lock",
-                        LOCK_TIMEOUT.as_millis()
-                    ),
                     Some(format!("lock {}", lock_path.display())),
-                );
-                error.details = serde_json::json!({
-                    "kind": "runner_staging_lock_timeout",
-                    "runner_id": self.runner_id,
-                    "timeout_ms": LOCK_TIMEOUT.as_millis(),
-                });
-                error.retryable = Some(true);
-                return Err(error);
+                ));
             }
-            std::thread::sleep(LOCK_RETRY);
         }
+        if Instant::now() >= deadline {
+            let mut error = Error::internal_io(
+                format!(
+                    "timed out after {}ms waiting for staging admission lock",
+                    LOCK_TIMEOUT.as_millis()
+                ),
+                Some(format!("lock {}", lock_path.display())),
+            );
+            error.details = serde_json::json!({
+                "kind": "runner_staging_lock_timeout",
+                "runner_id": runner_id,
+                "timeout_ms": LOCK_TIMEOUT.as_millis(),
+            });
+            error.retryable = Some(true);
+            return Err(error);
+        }
+        std::thread::sleep(LOCK_RETRY);
     }
 }
 
@@ -1074,6 +1234,7 @@ impl ProductionStagingProvider {
             request.envelope.handoff.runner_id.clone(),
             SealedPayloadMaterializer { root },
         )?;
+        store.reclaim_terminal(jobs)?;
         let mut transport = RunnerStagingTransport {
             connected: true,
             compatible: true,
@@ -1200,6 +1361,74 @@ mod tests {
     }
 
     #[test]
+    fn staging_retired_record_does_not_block_new_run() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("store.json");
+        let mut initial = transport(&path);
+        let request = envelope();
+        initial.store.stage_durable(&request).unwrap();
+        let record = stage_record_path(&path, &request.handoff.run_id);
+        let mut stored: serde_json::Value =
+            serde_json::from_slice(&fs::read(&record).unwrap()).unwrap();
+        fs::remove_file(&record).unwrap();
+        let stage = stored["stages"]
+            .as_object_mut()
+            .unwrap()
+            .values_mut()
+            .next()
+            .unwrap();
+        stage["envelope"]["handoff"]["reuse_compatible_snapshot"] = true.into();
+        fs::write(&path, serde_json::to_vec(&stored).unwrap()).unwrap();
+        let mut restarted = transport(&path);
+        let new_run = crate::runner_staging_operation::tests_support::envelope_for_run("new-run");
+        restarted.store.stage_durable(&new_run).unwrap();
+        let error = restarted.store.stage_durable(&request).unwrap_err();
+        assert_ne!(error.code, homeboy_core::ErrorCode::InternalJsonError);
+        assert!(error.message.contains("incompatible runner staging state"));
+        assert!(!error.hints.is_empty());
+        assert!(!path.exists());
+        let report: serde_json::Value = serde_json::from_slice(
+            &fs::read(path.with_extension("migration-report.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(report["incompatible_records"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn staging_terminal_retention_preserves_active_records_and_reclaims_directories() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("store.json");
+        let jobs = homeboy_core::api_jobs::JobStore::open_without_reconciliation(
+            temp.path().join("jobs.json"),
+        )
+        .unwrap();
+        let terminal = jobs.create("test");
+        let active = jobs.create("test");
+        let mut store = transport(&path).store;
+        let mut request = envelope();
+        request.materialization.authority_id = "staging-terminal".to_string();
+        store
+            .stage_durable_with_job_id(&request, terminal.id.to_string())
+            .unwrap();
+        let directory = temp.path().join("staging-terminal");
+        fs::create_dir(&directory).unwrap();
+        fs::write(directory.join("source.sealed"), "payload").unwrap();
+        let active_request =
+            crate::runner_staging_operation::tests_support::envelope_for_run("active");
+        store
+            .stage_durable_with_job_id(&active_request, active.id.to_string())
+            .unwrap();
+        store.reclaim_terminal(&jobs).unwrap();
+        assert!(directory.exists());
+        jobs.cancel(terminal.id, "done").unwrap();
+        store.reclaim_terminal(&jobs).unwrap();
+        assert!(!directory.exists());
+        assert!(!stage_record_path(&path, &request.handoff.run_id).exists());
+        assert!(stage_record_path(&path, &active_request.handoff.run_id).exists());
+        store.reclaim_terminal(&jobs).unwrap();
+    }
+
+    #[test]
     fn reconnected_transport_replays_one_runner_owned_receipt() {
         let temp = tempfile::tempdir().expect("temp");
         let path = temp.path().join("staging.json");
@@ -1247,6 +1476,7 @@ mod tests {
             request.handoff.recipe.delete_workspace_on_failure = delete;
             let mut initial = transport(&path);
             let receipt = initial.store.stage_durable(&request).unwrap();
+            let path = stage_record_path(&path, &request.handoff.run_id);
             let mut stored: serde_json::Value =
                 serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
             let recipe = &mut stored["stages"]
@@ -1263,11 +1493,11 @@ mod tests {
             }
             let before = serde_json::to_vec_pretty(&stored).unwrap();
             fs::write(&path, &before).unwrap();
-            let mut restarted = transport(&path);
+            let mut restarted = transport(&temp.path().join("staging.json"));
             assert_eq!(restarted.store.stage_durable(&request).unwrap(), receipt);
             assert_eq!(restarted.store.materializer.calls, 0);
             assert_eq!(fs::read(&path).unwrap(), before);
-            let state = restarted.store.load().unwrap();
+            let state = load_stage(&path).unwrap();
             assert_eq!(
                 state
                     .stages
@@ -1290,9 +1520,9 @@ mod tests {
         let request = envelope();
         let mut initial = transport(&path);
         initial.store.stage_durable(&request).expect("stage");
-
+        let record = stage_record_path(&path, &request.handoff.run_id);
         let mut stored: serde_json::Value =
-            serde_json::from_slice(&fs::read(&path).expect("stored state")).expect("json");
+            serde_json::from_slice(&fs::read(&record).expect("stored state")).expect("json");
         let staged_envelope = stored["stages"]
             .as_object()
             .expect("stages")
@@ -1339,8 +1569,8 @@ mod tests {
             };
             invalid[other] = serde_json::json!({});
             let before = serde_json::to_vec(&invalid).unwrap();
-            fs::write(&path, &before).unwrap();
-            assert!(RunnerStagingStore::open(&path, "runner-1", Materializer::default()).is_err());
+            fs::write(&record, &before).unwrap();
+            assert!(RunnerStagingStore::open(&path, "runner-1", Materializer::default()).is_ok());
             let mut live_store = transport(&temp.path().join("unused.json"));
             live_store.store.path = path.clone();
             live_store
@@ -1348,11 +1578,12 @@ mod tests {
                 .stage_durable(&request)
                 .expect_err("retired recipe refused");
             assert_eq!(live_store.store.materializer.calls, 0);
-            assert_eq!(fs::read(&path).unwrap(), before);
+            assert_eq!(fs::read(&record).unwrap(), before);
         }
-        fs::write(&path, &bytes).unwrap();
-        assert!(RunnerStagingStore::open(&path, "runner-1", Materializer::default()).is_err());
-        assert_eq!(fs::read(&path).unwrap(), bytes);
+        fs::write(&record, &bytes).unwrap();
+        assert!(RunnerStagingStore::open(&path, "runner-1", Materializer::default()).is_ok());
+        assert!(load_stage(&record).is_err());
+        assert_eq!(fs::read(&record).unwrap(), bytes);
     }
 
     #[test]
@@ -1362,8 +1593,9 @@ mod tests {
         let request = envelope();
         let mut initial = transport(&path);
         initial.store.stage_durable(&request).expect("stage");
+        let record = stage_record_path(&path, &request.handoff.run_id);
         let mut stored: serde_json::Value =
-            serde_json::from_slice(&fs::read(&path).expect("stored state")).expect("json");
+            serde_json::from_slice(&fs::read(&record).expect("stored state")).expect("json");
         let recipe = stored["stages"]
             .as_object_mut()
             .expect("stages")
@@ -1386,15 +1618,12 @@ mod tests {
             .expect_err("conflicting retention fields must fail");
         assert!(parse_error.to_string().contains("unknown field"));
         fs::write(
-            &path,
+            &record,
             serde_json::to_vec(&stored).expect("conflicting bytes"),
         )
         .expect("conflicting store");
-        let error = match RunnerStagingStore::open(path, "runner-1", Materializer::default()) {
-            Ok(_) => panic!("conflicting retention fields must fail"),
-            Err(error) => error,
-        };
-        assert_eq!(error.code, homeboy_core::ErrorCode::InternalJsonError);
+        let error = load_stage(&record).expect_err("conflicting retention fields must fail");
+        assert_ne!(error.code, homeboy_core::ErrorCode::InternalJsonError);
 
         let mut unknown_recipe = conflicting_recipe;
         unknown_recipe
@@ -1438,8 +1667,9 @@ mod tests {
         let request = envelope();
         let mut seed = transport(&path);
         seed.store.stage_durable(&request).expect("seed stage");
+        let record = stage_record_path(&path, &request.handoff.run_id);
         let mut stored: serde_json::Value =
-            serde_json::from_slice(&fs::read(&path).expect("seed state")).expect("json");
+            serde_json::from_slice(&fs::read(&record).expect("seed state")).expect("json");
         let stage_key = stored["stages"]
             .as_object()
             .expect("stages")
@@ -1460,7 +1690,7 @@ mod tests {
             }),
         );
         stored["intents"] = serde_json::Value::Object(intents);
-        fs::write(&path, serde_json::to_vec(&stored).expect("pending state"))
+        fs::write(&record, serde_json::to_vec(&stored).expect("pending state"))
             .expect("write intent");
         let calls = Arc::new(AtomicUsize::new(0));
         let barrier = Arc::new(Barrier::new(2));
@@ -1483,7 +1713,7 @@ mod tests {
         assert_eq!(first, second);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         let state: serde_json::Value =
-            serde_json::from_slice(&fs::read(&path).expect("final state")).expect("json");
+            serde_json::from_slice(&fs::read(&record).expect("final state")).expect("json");
         assert_eq!(state["stages"].as_object().expect("stages").len(), 1);
         assert!(state["intents"].as_object().unwrap().is_empty());
     }
