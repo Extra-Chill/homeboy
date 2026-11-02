@@ -360,6 +360,8 @@ fn ensure_extraction_parent(root: &Path, entry_path: &str) -> Result<()> {
 struct StoredStage {
     envelope: RemoteRunnerStagingEnvelope,
     receipt: RemoteRunnerStagingReceipt,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    enqueued_at: Option<u64>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -536,6 +538,7 @@ impl<M: RunnerStagingMaterializer> RunnerStagingStore<M> {
             StoredStage {
                 envelope: envelope.clone(),
                 receipt: receipt.clone(),
+                enqueued_at: None,
             },
         );
         state.intents.remove(key);
@@ -588,8 +591,27 @@ impl<M: RunnerStagingMaterializer> RunnerStagingStore<M> {
         )
     }
 
-    /// Missing jobs have already been compacted. Undecodable records cannot
-    /// execute on this runner and are retired rather than pinning artifacts.
+    /// Called under the admission lock only after direct enqueue succeeds.
+    fn mark_enqueued(&self, receipt: &RemoteRunnerStagingReceipt) -> Result<()> {
+        let key = &receipt.handoff.idempotency_key;
+        let mut state = load_stage(&stage_record_path(&self.path, key))?;
+        let stage = state.stages.get_mut(key).ok_or_else(|| {
+            Error::internal_unexpected("enqueued stage record is missing".to_string())
+        })?;
+        if stage.enqueued_at.is_none() {
+            stage.enqueued_at = Some(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
+            );
+            self.persist(key, &state)?;
+        }
+        Ok(())
+    }
+
+    /// Missing jobs are compacted only after a recorded enqueue. Unenqueued
+    /// stages are in-flight. Undecodable records are retired instead of pinning artifacts.
     fn reclaim_terminal(&self, jobs: &homeboy_core::api_jobs::JobStore) -> Result<()> {
         let _lock = self.admission_lock()?;
         let directory = self.path.with_extension("stages");
@@ -639,7 +661,10 @@ impl<M: RunnerStagingMaterializer> RunnerStagingStore<M> {
                 && state.stages.values().all(|stage| {
                     uuid::Uuid::parse_str(&stage.receipt.handoff.runner_job_id)
                         .ok()
-                        .is_some_and(|id| jobs.get(id).map_or(true, |job| job.status.is_terminal()))
+                        .is_some_and(|id| {
+                            jobs.get(id)
+                                .map_or(stage.enqueued_at.is_some(), |job| job.status.is_terminal())
+                        })
                 });
             if !terminal {
                 for artifact in state
@@ -1180,6 +1205,7 @@ impl homeboy_core::daemon::runner_staging::RunnerStagingProvider for ProductionS
                 envelope,
                 None,
             )?;
+            store.mark_enqueued(&receipt)?;
         }
         Ok(response)
     }
@@ -1357,6 +1383,61 @@ mod tests {
     }
 
     #[test]
+    fn staging_unenqueued_stage_survives_next_admission() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("store.json");
+        let jobs = homeboy_core::api_jobs::JobStore::open_without_reconciliation(
+            temp.path().join("jobs.json"),
+        )
+        .unwrap();
+        let mut store = RunnerStagingStore::open(
+            &path,
+            "runner-1",
+            SealedPayloadMaterializer {
+                root: temp.path().to_path_buf(),
+            },
+        )
+        .unwrap();
+        let mut first = envelope();
+        first.materialization.authority_id = "staging-in-flight".to_string();
+        let receipt = store
+            .stage_durable_with_job_id(&first, uuid::Uuid::new_v4().to_string())
+            .unwrap();
+        let record = stage_record_path(&path, &first.handoff.idempotency_key);
+        let record_bytes = fs::read(&record).unwrap();
+        let directory = temp.path().join(&first.materialization.authority_id);
+        let artifact = receipt.artifacts.source_artifact.as_ref().unwrap();
+        let artifact_path = store.source_artifact_path(artifact).unwrap();
+        let artifact_bytes = fs::read(&artifact_path).unwrap();
+
+        // The next production admission reclaims before staging its own source.
+        store.reclaim_terminal(&jobs).unwrap();
+        assert!(
+            artifact_path.exists(),
+            "in-flight source artifact must survive reclaim"
+        );
+        let second = crate::runner_staging_operation::tests_support::envelope_for_run("second");
+        store.stage_durable(&second).unwrap();
+
+        assert!(record.exists(), "unenqueued stage record must survive");
+        assert_eq!(fs::read(&record).unwrap(), record_bytes);
+        assert!(directory.join("source.sealed").exists());
+        assert_eq!(fs::read(&artifact_path).unwrap(), artifact_bytes);
+
+        // Once enqueue is recorded, a missing (compacted) job permits reclaim.
+        fs::remove_file(stage_record_path(&path, &second.handoff.idempotency_key)).unwrap();
+        {
+            let _lock = store.admission_lock().unwrap();
+            store.mark_enqueued(&receipt).unwrap();
+            store.mark_enqueued(&receipt).unwrap();
+        }
+        store.reclaim_terminal(&jobs).unwrap();
+        assert!(!record.exists());
+        assert!(!directory.exists());
+        assert!(!artifact_path.exists());
+    }
+
+    #[test]
     fn staging_retired_record_does_not_block_new_run() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("store.json");
@@ -1414,6 +1495,7 @@ mod tests {
             .store
             .stage_durable_with_job_id(&compacted, uuid::Uuid::new_v4().to_string())
             .unwrap();
+        restarted.store.mark_enqueued(&receipt).unwrap();
         let artifact = receipt.artifacts.source_artifact.unwrap();
         let artifact_path = restarted.store.source_artifact_path(&artifact).unwrap();
         let directory = temp.path().join("staging-compacted");
