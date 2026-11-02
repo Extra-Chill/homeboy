@@ -313,15 +313,20 @@ pub fn installable_tags(
 
 #[cfg(test)]
 thread_local! {
-    static TEST_CATALOG_URL: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+    static TEST_RELEASE_URL: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(super) fn test_release_url(default: &str) -> String {
+    TEST_RELEASE_URL
+        .with_borrow(Clone::clone)
+        .unwrap_or_else(|| default.to_string())
 }
 
 pub(crate) fn fetch_release_catalog() -> Result<Vec<ReleaseEntry>> {
     let url = GITHUB_RELEASES_LIST_API;
     #[cfg(test)]
-    let url = TEST_CATALOG_URL
-        .with_borrow(Clone::clone)
-        .unwrap_or_else(|| url.to_string());
+    let url = test_release_url(url);
     let client = reqwest::blocking::Client::builder()
         .user_agent(format!("homeboy/{}", VERSION))
         .timeout(RELEASE_CATALOG_TIMEOUT)
@@ -394,9 +399,9 @@ pub(super) mod tests {
                 }
             })
         };
-        TEST_CATALOG_URL.with_borrow_mut(|slot| *slot = Some(url.clone()));
+        TEST_RELEASE_URL.with_borrow_mut(|slot| *slot = Some(url.clone()));
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| test(&url)));
-        TEST_CATALOG_URL.with_borrow_mut(|slot| *slot = None);
+        TEST_RELEASE_URL.with_borrow_mut(|slot| *slot = None);
         stopped.store(true, Ordering::SeqCst);
         server.join().unwrap();
         if let Err(panic) = result {

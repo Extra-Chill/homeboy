@@ -438,6 +438,47 @@ mod tests {
 
     use homeboy_core::test_support::with_isolated_home;
 
+    #[test]
+    fn failed_release_fetches_do_not_cache_a_no_update_verdict() {
+        use super::super::helpers::TEST_INSTALL_METHOD;
+        use super::super::release_catalog::tests::with_catalog_server;
+        use super::super::InstallMethod;
+
+        struct ResetInstallMethod;
+        impl Drop for ResetInstallMethod {
+            fn drop(&mut self) {
+                TEST_INSTALL_METHOD.set(None);
+            }
+        }
+
+        with_isolated_home(|_home| {
+            let _disable = homeboy_core::test_support::EnvVarGuard::unset(ENV_VAR_DISABLE);
+            TEST_INSTALL_METHOD.set(Some(InstallMethod::Binary));
+            let _reset = ResetInstallMethod;
+            let path = update_check_cache::cache_path(CACHE_FILENAME).unwrap();
+            assert!(!path.exists());
+
+            let count = with_catalog_server("503 Service Unavailable", "unavailable", |_| {
+                let error = upgrade::check_for_updates().unwrap_err();
+                assert!(
+                    error
+                        .details
+                        .to_string()
+                        .contains("parse GitHub release response"),
+                    "{error:?}"
+                );
+                assert!(upgrade::check_for_updates_with_runners(&[], false).is_err());
+                assert!(refresh_verdict().is_err());
+                assert!(!path.exists(), "failed refresh must not write a cache");
+                assert!(prefetch_release().is_err());
+                assert!(!path.exists(), "failed prefetch must not write a cache");
+                run_startup_check();
+                assert!(!path.exists(), "startup failure must not write a cache");
+            });
+            assert_eq!(count, 10, "each check must try both release endpoints");
+        });
+    }
+
     /// Write a cache fixture the way the daily check would.
     ///
     /// `write_cache` swallows I/O errors by design (the update check must never

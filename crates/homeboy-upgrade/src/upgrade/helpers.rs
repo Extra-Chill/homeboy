@@ -63,7 +63,10 @@ fn fetch_latest_github_version_at(url: &str) -> Result<String> {
 }
 
 pub fn fetch_latest_version() -> Result<String> {
-    fetch_latest_github_version_at(GITHUB_RELEASES_API)
+    let url = GITHUB_RELEASES_API;
+    #[cfg(test)]
+    let url = &release_catalog::test_release_url(url);
+    fetch_latest_github_version_at(url)
 }
 
 /// Read release-declared durable compatibility from the same daily update
@@ -114,7 +117,7 @@ fn runtime_compatibility_from_release_notes(body: &str) -> Result<Option<Runtime
 
 #[cfg(test)]
 thread_local! {
-    static TEST_INSTALL_METHOD: std::cell::Cell<Option<InstallMethod>> = const { std::cell::Cell::new(None) };
+    pub(super) static TEST_INSTALL_METHOD: std::cell::Cell<Option<InstallMethod>> = const { std::cell::Cell::new(None) };
 }
 
 pub fn detect_install_method() -> InstallMethod {
