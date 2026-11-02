@@ -7140,6 +7140,9 @@ fn substantive_candidate_in_store(
         Some(store) => store.read_record_bounded(run_id).ok()?,
         None => store::read_record_bounded(&sanitize_run_id(run_id)).ok()?,
     };
+    if record.metadata.get("superseded_by_run_id").is_some() {
+        return None;
+    }
     let aggregate_path = record.aggregate_path?;
     if !std::path::Path::new(&aggregate_path).exists() {
         return None;

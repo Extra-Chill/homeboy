@@ -6109,6 +6109,113 @@ fn cook_promotion_recovers_legacy_stale_base_from_attempt_snapshot() {
 }
 
 #[test]
+fn supersede_previous_candidate_exact_and_fail_closed() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let repo = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            homeboy_core::git::run_git(repo.path(), args, "test supersession").unwrap()
+        };
+        git(&["init", "--initial-branch=main"]);
+        git(&["config", "user.name", "Test"]);
+        git(&["config", "user.email", "test@example.com"]);
+        std::fs::write(repo.path().join("source"), "base\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-m", "base"]);
+        std::fs::write(repo.path().join("source"), "candidate\n").unwrap();
+        std::fs::write(repo.path().join("added"), "evidence\n").unwrap();
+        git(&["add", "."]);
+        let candidate = candidate_fingerprint(repo.path().to_str().unwrap()).unwrap();
+        let mut options = batch_cook_options(
+            "supersede-new",
+            Arc::new(RecordingDetachedAttemptDispatcher {
+                dispatches: Arc::new(AtomicUsize::new(0)),
+            }),
+        );
+        options.identity.initial_run_id = "supersede-new".to_string();
+        let store = test_lifecycle_store();
+        let mut old_plan = options.identity.initial_plan.clone();
+        old_plan.plan_id = "supersede-old-plan".to_string();
+        agent_task_lifecycle::submit_plan(&old_plan, Some("supersede-old")).unwrap();
+        agent_task_lifecycle::submit_plan(&options.identity.initial_plan, Some("supersede-new"))
+            .unwrap();
+        let promotion = serde_json::json!({
+            "schema": "homeboy/agent-task-promotion-report/v1",
+            "status": "applied",
+            "source": {"kind": "aggregate", "task_id": "provider", "run_id": "supersede-old"},
+            "to_worktree": repo.path(),
+            "target": {"worktree": "test", "path": repo.path()},
+            "candidate": {"base_sha": "base", "candidate_sha": "candidate", "tree_sha": "tree"},
+            "changed_files": ["source", "added"],
+            "deterministic_gates": [],
+            "gate_results": [],
+            "provenance": {"worktree_path": repo.path(), "candidate": candidate},
+            "operator_notification": {"status": "completed", "message": "green"}
+        });
+        agent_task_lifecycle::record_promotion("supersede-old", promotion).unwrap();
+        agent_task_lifecycle::rewrite_record_for_test("supersede-old", |record| {
+            record
+                .set_state_for_test(agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable);
+            record.lifecycle.execution.state = record.state().into();
+        })
+        .unwrap();
+        // Extra human edits, including partial overlap with candidate paths,
+        // must leave both index and working tree untouched.
+        std::fs::write(repo.path().join("source"), "human\n").unwrap();
+        let dirty = git(&["status", "--porcelain"]);
+        supersede_previous_cook_candidate(&store, &options, repo.path()).unwrap();
+        assert_eq!(git(&["status", "--porcelain"]), dirty);
+        assert!(preflight_cook_workspace_resolved_base_ancestry(
+            repo.path(),
+            repo.path(),
+            "main",
+            "main",
+            "HEAD",
+            false,
+            None,
+        )
+        .is_err());
+        git(&["checkout", "--", "source"]);
+        std::fs::remove_file(repo.path().join("added")).unwrap();
+        let dirty = git(&["status", "--porcelain"]);
+        supersede_previous_cook_candidate(&store, &options, repo.path()).unwrap();
+        assert_eq!(git(&["status", "--porcelain"]), dirty);
+        assert!(preflight_cook_workspace_resolved_base_ancestry(
+            repo.path(),
+            repo.path(),
+            "main",
+            "main",
+            "HEAD",
+            false,
+            None,
+        )
+        .is_err());
+        git(&["checkout", "--", "added"]);
+        supersede_previous_cook_candidate(&store, &options, repo.path()).unwrap();
+        assert!(git(&["status", "--porcelain"]).is_empty());
+        let new = store.read_record("supersede-new").unwrap();
+        assert_eq!(
+            new.metadata["superseded_candidate"]["superseded_run_id"],
+            "supersede-old"
+        );
+        let oid = new.metadata["superseded_candidate"]["stash_oid"]
+            .as_str()
+            .unwrap();
+        assert_eq!(git(&["show", &format!("{oid}:source")]).trim(), "candidate");
+        assert_eq!(git(&["show", &format!("{oid}:added")]).trim(), "evidence");
+        assert_eq!(
+            store.read_record("supersede-old").unwrap().metadata["superseded_by_run_id"],
+            "supersede-new"
+        );
+        options.identity.initial_run_id = "supersede-old".to_string();
+        assert!(tracked_promotion_continuation_in_store(&store, &options)
+            .err()
+            .unwrap()
+            .message
+            .contains("superseded"));
+    });
+}
+
+#[test]
 fn workspace_base_ancestry_preflight_preserves_provider_owned_non_origin_targets() {
     let workspace = tempfile::tempdir().expect("provider-owned Git workspace");
     let git = |args: &[&str]| {

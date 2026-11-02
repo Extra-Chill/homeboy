@@ -3422,6 +3422,14 @@ pub fn prepare_manual_finalization_identity(requested_id: &str) -> Result<String
 
 fn require_manual_finalization_run(run_id: &str) -> Result<String> {
     let record = crate::agent_task_lifecycle::status(run_id)?;
+    if record.metadata.get("superseded_by_run_id").is_some() {
+        return Err(Error::validation_invalid_argument(
+            "run_id",
+            "This candidate was superseded by a newer Cook; it cannot be published from this run",
+            Some(run_id.to_string()),
+            None,
+        ));
+    }
     if persisted_manual_finalization_identity(&record.metadata) == Some(&Value::Bool(true)) {
         return Ok(run_id.to_string());
     }
@@ -6256,7 +6264,15 @@ fn provider_route_notes_for_run(
     let Ok(plan) = agent_task_lifecycle::load_plan_in_store(store, run_id) else {
         return Vec::new();
     };
-    crate::agent_task_route_notes::provider_route_notes(&record, Some(&plan))
+    let mut notes = crate::agent_task_route_notes::provider_route_notes(&record, Some(&plan));
+    if let Some(evidence) = record.metadata.get("superseded_candidate") {
+        notes.push(format!(
+            "Superseded candidate of {}; preserved in Git stash {}.",
+            evidence["superseded_run_id"].as_str().unwrap_or("unknown"),
+            evidence["stash_oid"].as_str().unwrap_or("unknown"),
+        ));
+    }
+    notes
 }
 
 /// `select_cook_candidate` deliberately selects across the whole Cook index
@@ -6401,7 +6417,9 @@ pub(crate) fn cook_failure_context_with_stores(
         .as_ref()
         .map(|record| format!("{:?}", record.state()))
         .unwrap_or_else(|| "recipe_persisted_without_lifecycle_record".to_string());
-    let recovery_legal = record.is_some();
+    let recovery_legal = record
+        .as_ref()
+        .is_some_and(|record| record.metadata.get("superseded_by_run_id").is_none());
     let promotion_claim = lifecycle_store
         .map(|store| store.operation_claim(record_run_id, &format!("promote:{record_run_id}")))
         .unwrap_or_else(|| {
