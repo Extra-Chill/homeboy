@@ -705,6 +705,21 @@ fn prefer_cwd_for_component(
         return Ok(None);
     };
     let registered_path = PathBuf::from(shellexpand::tilde(&registered.local_path).into_owned());
+    if let Some(snapshot_root) = materialized_snapshot_root(&cwd) {
+        let checkout_path = rebase_registered_path_to_checkout(&registered_path, &snapshot_root);
+        for checkout in [checkout_path, snapshot_root] {
+            if try_discover_from_portable(&checkout)?.is_some_and(|found| found.id == component_id)
+            {
+                return portable_component_for_checkout(
+                    config_root,
+                    component_id,
+                    &checkout,
+                    &registered,
+                )
+                .map(Some);
+            }
+        }
+    }
     let Some(cwd_git_root) = detect_git_root(&cwd) else {
         return Ok(None);
     };
@@ -734,6 +749,21 @@ fn prefer_cwd_for_component(
     }
 
     Ok(None)
+}
+
+/// The root of the Homeboy-materialized source snapshot containing `cwd`.
+///
+/// A runner job executes in a snapshot synced from the controller, which has no
+/// Git metadata to prove which repository it checks out. Homeboy attests the
+/// materialization itself in the job environment, so a registered component
+/// whose manifest that snapshot carries resolves there rather than to the
+/// runner's registered checkout (#16959).
+fn materialized_snapshot_root(cwd: &Path) -> Option<PathBuf> {
+    let snapshot = crate::observation::env_json(crate::observation::SOURCE_SNAPSHOT_METADATA_ENV)?;
+    let root = PathBuf::from(snapshot.get("remote_path")?.as_str()?);
+    let root = root.canonicalize().ok()?;
+    let cwd = cwd.canonicalize().ok()?;
+    cwd.starts_with(&root).then_some(root)
 }
 
 /// Project a canonical component contract onto a distinct checkout.
@@ -2685,6 +2715,55 @@ mod tests {
             .expect_err("registry lookup should be disabled");
 
             assert!(err.to_string().contains("registry lookup is disabled"));
+        });
+    }
+
+    #[test]
+    fn registered_component_resolves_to_the_materialized_snapshot_it_runs_in() {
+        crate::test_support::with_isolated_home(|home| {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let primary = dir.path().join("primary");
+            let snapshot = dir.path().join("snapshot");
+            let foreign = dir.path().join("foreign");
+            for (checkout, id) in [
+                (&primary, "fixture"),
+                (&snapshot, "fixture"),
+                (&foreign, "other"),
+            ] {
+                std::fs::create_dir_all(checkout.join("src")).expect("checkout dir");
+                write_portable_with_env(checkout, id, None);
+            }
+            git(&primary, &["init"]);
+            write_standalone_registration(home.path(), "fixture", &primary);
+            let canonical = |path: &Path| path.canonicalize().expect("canonical");
+
+            // (cwd, attested snapshot root, expected checkout)
+            let cases = [
+                (snapshot.join("src"), None, &primary),
+                (snapshot.join("src"), Some(&snapshot), &snapshot),
+                (foreign.clone(), Some(&foreign), &primary),
+                (dir.path().to_path_buf(), Some(&snapshot), &primary),
+            ];
+            for (cwd, attested, expected) in cases {
+                let _snapshot = match attested {
+                    Some(root) => crate::test_support::EnvVarGuard::set(
+                        crate::observation::SOURCE_SNAPSHOT_METADATA_ENV,
+                        serde_json::json!({ "remote_path": root }).to_string(),
+                    ),
+                    None => crate::test_support::EnvVarGuard::unset(
+                        crate::observation::SOURCE_SNAPSHOT_METADATA_ENV,
+                    ),
+                };
+                let component = with_cwd(&cwd, || resolve_effective(Some("fixture"), None, None))
+                    .expect("registered component resolves");
+                assert_eq!(
+                    canonical(Path::new(&component.local_path)),
+                    canonical(expected),
+                    "cwd {} with snapshot {:?}",
+                    cwd.display(),
+                    attested
+                );
+            }
         });
     }
 
