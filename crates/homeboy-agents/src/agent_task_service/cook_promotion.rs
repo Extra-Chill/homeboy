@@ -643,6 +643,7 @@ pub(crate) fn promote_attempt_in_store(
     let observation_store = lifecycle_store.open_observation_initialized()?;
     let run_id = run_id.to_string();
     let gate_store = lifecycle_store.clone();
+    let cook_id = options.identity.cook_id.clone();
     crate::agent_task_promotion::with_gate_supervision(
         crate::agent_task_gate::GateSupervision {
             timeout: options.gates.gate_timeout(),
@@ -680,7 +681,14 @@ pub(crate) fn promote_attempt_in_store(
                     )
                 }
             }),
-            is_cancelled: Arc::new(|| false),
+            is_cancelled: Arc::new({
+                let gate_store = gate_store.clone();
+                move || {
+                    gate_store
+                        .read_cook_index(&cook_id)
+                        .is_ok_and(|index| index.cancellation_fence.is_some())
+                }
+            }),
         },
         || {
             promote_with_checkpoint_in_observation_store(
