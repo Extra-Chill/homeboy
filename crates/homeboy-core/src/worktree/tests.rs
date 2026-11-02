@@ -158,6 +158,14 @@ fn fixture_record(source: &Path, worktree: &Path) -> TaskWorktreeRecord {
     }
 }
 
+/// Give `record` the stable handle `id`, with the persisted identity that handle
+/// and its component derive.
+fn rebind_handle(record: &mut TaskWorktreeRecord, id: impl Into<String>) {
+    record.id = id.into();
+    record.workspace_identity =
+        Some(task_worktree_workspace_identity(&record.component_id, &record.id).unwrap());
+}
+
 fn succeeded_record(source: &Path, worktree: &Path) -> TaskWorktreeRecord {
     let mut record = fixture_record(source, worktree);
     record.run_id = Some("completed-owner".to_string());
@@ -2254,11 +2262,11 @@ fn tombstoned_missing_worktree_is_retired_and_live_path_is_not() {
     let store = dir.path().join("store");
 
     let mut live = fixture_record(source.path(), &live_path);
-    live.id = "fixture@live".to_string();
+    rebind_handle(&mut live, "fixture@live".to_string());
     write_record(&store, &live).unwrap();
 
     let mut tombstone = fixture_record(source.path(), &dir.path().join("gone"));
-    tombstone.id = "fixture@gone".to_string();
+    rebind_handle(&mut tombstone, "fixture@gone".to_string());
     tombstone.state = TaskWorktreeState::Removed;
     write_record(&store, &tombstone).unwrap();
 
@@ -2298,10 +2306,10 @@ fn listing_and_cleanup_inventory_count_live_records_not_residue() {
     );
     let store = dir.path().join("store");
     let mut live = succeeded_record(source.path(), &live_path);
-    live.id = "fixture@live-inventory".to_string();
+    rebind_handle(&mut live, "fixture@live-inventory".to_string());
     write_record(&store, &live).unwrap();
     let mut tombstone = fixture_record(source.path(), &dir.path().join("gone-inventory"));
-    tombstone.id = "fixture@gone-inventory".to_string();
+    rebind_handle(&mut tombstone, "fixture@gone-inventory".to_string());
     tombstone.state = TaskWorktreeState::Removed;
     write_record(&store, &tombstone).unwrap();
 
@@ -2434,7 +2442,7 @@ fn cleanup_reports_missing_active_records_as_reconciliation_blockers() {
             source.path(),
             &sibling_worktree_path(source.path(), &format!("missing-{index}")),
         );
-        record.id = format!("fixture@missing-{index}");
+        rebind_handle(&mut record, format!("fixture@missing-{index}"));
         write_record(&store, &record).unwrap();
     }
 
@@ -2536,14 +2544,14 @@ fn inventory_skips_authority_for_locally_blocked_missing_records() {
         &sibling_worktree_path(source.path(), "preserve"),
     );
     preserve.cleanup_policy = CleanupPolicy::PreserveOnFailure;
-    preserve.id = "fixture@preserve".to_string();
+    rebind_handle(&mut preserve, "fixture@preserve".to_string());
     write_record(&store, &preserve).unwrap();
 
     let mut unavailable = fixture_record(
         dir.path().join("missing-source").as_path(),
         &dir.path().join("gone"),
     );
-    unavailable.id = "fixture@unavailable".to_string();
+    rebind_handle(&mut unavailable, "fixture@unavailable".to_string());
     write_record(&store, &unavailable).unwrap();
 
     let dirty_source = git_repo();
@@ -2553,14 +2561,14 @@ fn inventory_skips_authority_for_locally_blocked_missing_records() {
         dirty_source.path(),
         &sibling_worktree_path(dirty_source.path(), "dirty"),
     );
-    dirty.id = "fixture@dirty".to_string();
+    rebind_handle(&mut dirty, "fixture@dirty".to_string());
     write_record(&store, &dirty).unwrap();
 
     let unpushed_source = git_repo();
     let unpushed_path = sibling_worktree_path(unpushed_source.path(), "unpushed");
     merged_task_branch_with_stale_upstream(unpushed_source.path(), &unpushed_path);
     let mut unpushed = fixture_record(unpushed_source.path(), &unpushed_path);
-    unpushed.id = "fixture@unpushed".to_string();
+    rebind_handle(&mut unpushed, "fixture@unpushed".to_string());
     write_record(&store, &unpushed).unwrap();
 
     let authority = CountingAuthority(std::sync::atomic::AtomicUsize::new(0));
@@ -2638,7 +2646,7 @@ fn mixed_remote_claim_page(store: &Path, source: &Path) -> Vec<TaskWorktreeRecor
         .iter()
         .map(|id| {
             let mut record = fixture_record(source, &sibling_worktree_path(source, id));
-            record.id = id.to_string();
+            rebind_handle(&mut record, id.to_string());
             write_record(store, &record).unwrap();
             record
         })
@@ -2875,9 +2883,9 @@ fn inventory_preserves_a_workspace_with_a_second_active_owner() {
     run_git(source.path(), &["branch", "task"]);
     let path = sibling_worktree_path(source.path(), "shared");
     let mut first = fixture_record(source.path(), &path);
-    first.id = "fixture@first".to_string();
+    rebind_handle(&mut first, "fixture@first".to_string());
     let mut second = fixture_record(source.path(), &path);
-    second.id = "fixture@second".to_string();
+    rebind_handle(&mut second, "fixture@second".to_string());
     write_record(&store, &first).unwrap();
     write_record(&store, &second).unwrap();
     let authority = FixedLivenessAuthority(WorktreeLivenessAuthority::Terminal {
@@ -3094,11 +3102,11 @@ fn cleanup_keeps_branch_when_worktree_removal_fails_and_continues() {
     );
     let store = dir.path().join("store");
     let mut locked_record = succeeded_record(source.path(), &locked_worktree);
-    locked_record.id = "fixture@locked".to_string();
+    rebind_handle(&mut locked_record, "fixture@locked".to_string());
     locked_record.branch = "locked-task".to_string();
     let removable_worktree = sibling_worktree_path(source.path(), "cleanup-continues");
     let mut removable_record = succeeded_record(source.path(), &removable_worktree);
-    removable_record.id = "fixture@removable".to_string();
+    rebind_handle(&mut removable_record, "fixture@removable".to_string());
     write_record(&store, &locked_record).unwrap();
     write_record(&store, &removable_record).unwrap();
 
@@ -3154,7 +3162,7 @@ fn cleanup_separates_actionable_candidates_from_reconciliation_blockers() {
         source.path(),
         &sibling_worktree_path(source.path(), "mixed-missing"),
     );
-    missing_record.id = "fixture@mixed-missing".to_string();
+    rebind_handle(&mut missing_record, "fixture@mixed-missing".to_string());
     write_record(&store, &removable_record).unwrap();
     write_record(&store, &missing_record).unwrap();
 
@@ -3300,7 +3308,7 @@ fn list_page_walks_opaque_manifest_keysets_without_parsing_the_remainder() {
     let store = dir.path().join("store");
     for id in ["fixture@a", "fixture@b", "fixture@c"] {
         let mut record = fixture_record(source.path(), &dir.path().join(id));
-        record.id = id.to_string();
+        rebind_handle(&mut record, id.to_string());
         fs::create_dir_all(&store).unwrap();
         fs::write(
             store.join(format!("{id}.json")),
@@ -3400,12 +3408,12 @@ fn cleanup_skips_unrepairable_missing_source_and_continues() {
             &dir.path().join("removed-source"),
             &dir.path().join("unrepairable@task"),
         );
-        unrepairable.id = "unrepairable@task".to_string();
         unrepairable.component_id = "unrepairable".to_string();
+        rebind_handle(&mut unrepairable, "unrepairable@task".to_string());
         write_record(&store, &unrepairable).unwrap();
         let removable_worktree = sibling_worktree_path(source.path(), "cleanup-continues");
         let mut removable = fixture_record(source.path(), &removable_worktree);
-        removable.id = "fixture@cleanup-continues".to_string();
+        rebind_handle(&mut removable, "fixture@cleanup-continues".to_string());
         write_record(&store, &removable).unwrap();
 
         let output = cleanup_with_store(
@@ -3449,12 +3457,12 @@ fn cleanup_skips_dirty_worktree_without_force() {
     fs::write(worktree.join("dirty.txt"), "dirty\n").unwrap();
     let store = dir.path().join("store");
     let mut dirty_record = fixture_record(source.path(), &worktree);
-    dirty_record.id = "fixture@dirty".to_string();
+    rebind_handle(&mut dirty_record, "fixture@dirty".to_string());
     let mut safe_record = fixture_record(
         source.path(),
         &sibling_worktree_path(source.path(), "missing-after-dirty"),
     );
-    safe_record.id = "fixture@missing".to_string();
+    rebind_handle(&mut safe_record, "fixture@missing".to_string());
     write_record(&store, &dirty_record).unwrap();
     write_record(&store, &safe_record).unwrap();
 
@@ -3587,10 +3595,10 @@ fn cleanup_page_paginates_real_candidates_and_preserves_page_options_in_continua
     );
     let store = dir.path().join("store");
     let mut first = succeeded_record(source.path(), &first_path);
-    first.id = "fixture@page-first".to_string();
+    rebind_handle(&mut first, "fixture@page-first".to_string());
     first.branch = "page-first".to_string();
     let mut second = succeeded_record(source.path(), &second_path);
-    second.id = "fixture@page-second".to_string();
+    rebind_handle(&mut second, "fixture@page-second".to_string());
     second.branch = "page-second".to_string();
     write_record(&store, &first).unwrap();
     write_record(&store, &second).unwrap();
@@ -4217,7 +4225,7 @@ fn reaping_audit_requires_removal_not_a_plan() {
 fn reaping_audit_rows_live_in_the_coordination_audit_and_survive_reopen() {
     let (data_root, _source, _worktree, record) = reclaim_fixture();
     let mut second = record.clone();
-    second.id = "second-record".to_string();
+    rebind_handle(&mut second, "second-record".to_string());
     second.worktree_path = format!("{}-second", record.worktree_path);
     for (index, entry) in [&record, &second].into_iter().enumerate() {
         reaping::append_reaping_audit_in_root(
@@ -4709,7 +4717,7 @@ fn cleanup_nominates_squash_merged_clean_owned_worktree_without_succeeded_finali
         "the squash rewrite must actually defeat plain ancestry, or this test proves nothing"
     );
     let mut merged_record = fixture_record(source.path(), &merged_worktree);
-    merged_record.id = "fixture@task-merged".to_string();
+    rebind_handle(&mut merged_record, "fixture@task-merged".to_string());
     merged_record.branch = "task-merged".to_string();
     merged_record.base_ref = main.to_string();
     merged_record.run_id = Some("cook-owner-1".to_string());
@@ -4736,7 +4744,7 @@ fn cleanup_nominates_squash_merged_clean_owned_worktree_without_succeeded_finali
         &["commit", "-q", "-m", "unmerged task work"],
     );
     let mut unmerged_record = fixture_record(source.path(), &unmerged_worktree);
-    unmerged_record.id = "fixture@task-unmerged".to_string();
+    rebind_handle(&mut unmerged_record, "fixture@task-unmerged".to_string());
     unmerged_record.branch = "task-unmerged".to_string();
     unmerged_record.base_ref = main.to_string();
     unmerged_record.run_id = Some("cook-owner-2".to_string());
@@ -4766,7 +4774,7 @@ fn cleanup_nominates_squash_merged_clean_owned_worktree_without_succeeded_finali
     );
     fs::write(dirty_worktree.join("scratch.txt"), "not committed\n").unwrap();
     let mut dirty_record = fixture_record(source.path(), &dirty_worktree);
-    dirty_record.id = "fixture@task-dirty".to_string();
+    rebind_handle(&mut dirty_record, "fixture@task-dirty".to_string());
     dirty_record.branch = "task-dirty".to_string();
     dirty_record.base_ref = main.to_string();
     dirty_record.run_id = Some("cook-owner-3".to_string());
