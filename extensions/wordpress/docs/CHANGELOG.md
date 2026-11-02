@@ -2,6 +2,11 @@
 
 All notable changes to the **wordpress** extension will be documented in this file.
 
+## [3.54.3] - 2026-11-02
+
+### Fixed
+- fail lint when PHP toolchain binaries are missing
+
 ## [3.54.2] - 2026-11-02
 
 ### Fixed
