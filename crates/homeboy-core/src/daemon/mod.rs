@@ -180,10 +180,8 @@ fn heartbeat_only_stall_reason(timeout: Duration) -> String {
 pub struct LocalControllerJobClient {
     endpoint: String,
     client: reqwest::blocking::Client,
-    // Keep the shared side until this client has durably handed off the job.
-    // Recovery takes the exclusive side before proving zero active jobs, so a
-    // different build cannot replace this daemon after preflight.
-    _admission_guard: Option<DaemonAdmissionGuard>,
+    // Fence recovery from exact-build preflight through durable handoff only.
+    admission_guard: Mutex<Option<DaemonAdmissionGuard>>,
 }
 
 /// Direct controller-job operations for code already running in this daemon.
@@ -291,8 +289,11 @@ impl LocalControllerJobClient {
         }
         let admission_guard = acquire_daemon_admission_lock()?;
         let prior = read_status()?;
-        match Self::connect_with_admission_guard(Some(admission_guard)) {
-            Ok(client) => Ok(client),
+        match Self::connect() {
+            Ok(mut client) => {
+                client.admission_guard = Mutex::new(Some(admission_guard));
+                Ok(client)
+            }
             Err(error) if prior.reachable && !prior.fresh => {
                 let daemon_identity = prior
                     .state
@@ -338,10 +339,6 @@ impl LocalControllerJobClient {
         Self::connect_current_build()
     }
 
-    pub fn connect() -> Result<Self> {
-        Self::connect_with_admission_guard(None)
-    }
-
     /// Connect to the daemon serving the store that holds `job_id`.
     ///
     /// Observation and cancellation read the serving lease rather than calling
@@ -380,11 +377,11 @@ impl LocalControllerJobClient {
         Ok(Self {
             endpoint: format!("http://{}", state.address),
             client,
-            _admission_guard: None,
+            admission_guard: Mutex::new(None),
         })
     }
 
-    fn connect_with_admission_guard(admission_guard: Option<DaemonAdmissionGuard>) -> Result<Self> {
+    pub fn connect() -> Result<Self> {
         let daemon = ensure_running(DEFAULT_ADDR)?;
         let client = reqwest::blocking::Client::builder()
             .no_proxy()
@@ -396,7 +393,7 @@ impl LocalControllerJobClient {
         Ok(Self {
             endpoint: format!("http://{}", daemon.address),
             client,
-            _admission_guard: admission_guard,
+            admission_guard: Mutex::new(None),
         })
     }
 
@@ -453,6 +450,7 @@ impl LocalControllerJobClient {
         &self,
         request: serde_json::Value,
     ) -> Result<ControllerJobSubmission> {
+        let _admission_guard = self.admission_guard.lock().unwrap().take();
         let response = self
             .client
             .post(format!("{}/controller/jobs", self.endpoint))
@@ -582,7 +580,10 @@ impl LocalControllerJobClient {
             .get(format!("{}{path}", self.endpoint))
             .send()
             .map_err(|error| Error::internal_unexpected(format!("read {path}: {error}")))?;
-        self.workflow_payload(response, &path)
+        let payload = self.workflow_payload(response, &path)?;
+        // An existing durable instance binds this client without a submission.
+        self.admission_guard.lock().unwrap().take();
+        Ok(payload)
     }
 
     /// `GET /workflows`.
@@ -624,6 +625,7 @@ impl LocalControllerJobClient {
         &self,
         request: &workflow_job::WorkflowJobRequest,
     ) -> Result<serde_json::Value> {
+        let _admission_guard = self.admission_guard.lock().unwrap().take();
         let path = "/workflows/cadences";
         let response = self
             .client
@@ -5322,6 +5324,50 @@ mod tests {
             controller_job_response(&wire).expect("reader recovers the written job")["id"],
             "written-by-the-daemon"
         );
+    }
+
+    #[test]
+    fn handed_off_client_does_not_fence_recovery_while_observing() {
+        crate::test_support::with_isolated_home(|_| {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let job_id = Uuid::new_v4();
+            let server = std::thread::spawn(move || {
+                for _ in 0..3 {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    let mut request = [0_u8; 8192];
+                    stream.read(&mut request).unwrap();
+                    let body = json!({
+                        "success": true,
+                        "data": { "body": {
+                            "job": {
+                                "id": job_id, "operation": "test", "status": "running",
+                                "created_at_ms": 1, "updated_at_ms": 1,
+                                "event_count": 0, "artifacts": [], "daemon_lease_id": "serving"
+                            },
+                            "submission": { "disposition": "created" }
+                        }}
+                    })
+                    .to_string();
+                    write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
+                }
+            });
+            let client = LocalControllerJobClient {
+                endpoint: format!("http://{address}"),
+                client: reqwest::blocking::Client::builder()
+                    .no_proxy()
+                    .build()
+                    .unwrap(),
+                admission_guard: Mutex::new(Some(acquire_daemon_admission_lock().unwrap())),
+            };
+            assert!(try_acquire_daemon_job_admission_fence().unwrap().is_none());
+            client.submit(json!({})).unwrap();
+            let fence = acquire_daemon_job_admission_fence_with_wait(Duration::ZERO)
+                .expect("durable handoff releases the client's admission guard");
+            assert_eq!(client.status(&job_id.to_string()).unwrap().id, job_id);
+            drop(fence);
+            server.join().unwrap();
+        });
     }
 
     #[test]
