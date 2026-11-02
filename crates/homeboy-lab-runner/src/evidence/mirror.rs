@@ -1,8 +1,6 @@
-use std::io::Write;
 use std::ops::Deref;
 use std::time::Instant;
 
-use base64::Engine;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -174,7 +172,6 @@ pub fn controller_artifact_metadata(runs: &[RunRecord]) -> Result<Vec<JobArtifac
                     .size_bytes
                     .and_then(|size| u64::try_from(size).ok()),
                 sha256: artifact.sha256,
-                content_base64: None,
                 metadata: Some(metadata),
             })
         })
@@ -292,12 +289,6 @@ pub(crate) fn mirror_daemon_evidence(
             controller_owned_run_id(request),
             request.notification_route,
         )?;
-        if request.job.status.is_terminal()
-            && (remote_runs.is_empty() || request.job.status == JobStatus::Failed)
-            && !request.job.artifacts.is_empty()
-        {
-            mirror_terminal_job_artifacts(&store, request.runner, request.job, &local_job_run)?;
-        }
         let patch = mirrored_patch_result(
             &store,
             request.runner,
@@ -548,13 +539,6 @@ pub(super) fn refresh_mirrored_daemon_evidence_with(
             controller_owned_run_id(request),
             request.notification_route,
         )?;
-        let terminal = matches!(
-            request.job.status,
-            JobStatus::Succeeded | JobStatus::Failed | JobStatus::Cancelled
-        );
-        if terminal && (remote_runs.is_empty() || request.job.status == JobStatus::Failed) {
-            mirror_terminal_job_artifacts(store, request.runner, request.job, &local_job_run)?;
-        }
         let mut runs = if remote_runs.is_empty() {
             vec![local_job_run.run.clone()]
         } else {
@@ -1300,145 +1284,6 @@ fn controller_owned_run_id(request: MirrorEvidenceRequest<'_>) -> Option<&str> {
     request.run_id
 }
 
-/// Legacy terminal producers may advertise artifacts without a durable
-/// observation run. Their controller-owned runner-exec mirror is the stable
-/// terminal identity, and every advertised job artifact must be materialized
-/// before that terminal response can be returned.
-fn mirror_terminal_job_artifacts(
-    store: &ObservationStore,
-    runner: &Runner,
-    job: &Job,
-    run: &RunRecord,
-) -> Result<Vec<ArtifactRecord>> {
-    mirror_terminal_job_artifacts_with(store, runner, job, run, |artifact_id| {
-        terminal_artifact_bytes(
-            crate::runner_artifact_content(&runner.id, &job.id.to_string(), artifact_id)?,
-            artifact_id,
-        )
-    })
-}
-
-fn terminal_artifact_bytes(response: Value, artifact_id: &str) -> Result<Vec<u8>> {
-    let content = response
-        .get("content_base64")
-        .and_then(Value::as_str)
-        .ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "artifact.content_base64",
-                "terminal artifact retrieval did not return bytes",
-                Some(artifact_id.to_string()),
-                None,
-            )
-        })?;
-    base64::engine::general_purpose::STANDARD
-        .decode(content)
-        .map_err(|error| {
-            Error::validation_invalid_argument(
-                "artifact.content_base64",
-                format!("terminal artifact bytes are not valid base64: {error}"),
-                Some(artifact_id.to_string()),
-                None,
-            )
-        })
-}
-
-pub(super) fn mirror_terminal_job_artifacts_with<F>(
-    store: &ObservationStore,
-    runner: &Runner,
-    job: &Job,
-    run: &RunRecord,
-    mut fetch: F,
-) -> Result<Vec<ArtifactRecord>>
-where
-    F: FnMut(&str) -> Result<Vec<u8>>,
-{
-    let mut staged = Vec::with_capacity(job.artifacts.len());
-    let mut publications = Vec::with_capacity(job.artifacts.len());
-    for artifact in &job.artifacts {
-        let size_bytes = artifact
-            .size_bytes
-            .and_then(|size| i64::try_from(size).ok());
-        let sha256 = artifact.sha256.clone().filter(|sha| !sha.is_empty());
-        if size_bytes.is_none() || sha256.is_none() {
-            return Err(artifact_projection_error(
-                runner,
-                job,
-                &run.id,
-                Error::validation_invalid_argument(
-                    "artifact.provenance",
-                    "terminal artifact is missing required size_bytes or sha256 provenance",
-                    Some(artifact.id.clone()),
-                    None,
-                ),
-            ));
-        }
-        if artifact.mime.as_deref().is_none_or(str::is_empty) {
-            return Err(artifact_projection_error(
-                runner,
-                job,
-                &run.id,
-                Error::validation_invalid_argument(
-                    "artifact.mime",
-                    "terminal artifact is missing controller media type metadata",
-                    Some(artifact.id.clone()),
-                    None,
-                ),
-            ));
-        }
-        let mut file = tempfile::NamedTempFile::new().map_err(|error| {
-            artifact_projection_error(
-                runner,
-                job,
-                &run.id,
-                Error::internal_io(
-                    error.to_string(),
-                    Some("stage terminal artifact".to_string()),
-                ),
-            )
-        })?;
-        file.write_all(
-            &fetch(&artifact.id)
-                .map_err(|error| artifact_projection_error(runner, job, &run.id, error))?,
-        )
-        .map_err(|error| {
-            artifact_projection_error(
-                runner,
-                job,
-                &run.id,
-                Error::internal_io(
-                    error.to_string(),
-                    Some("write terminal artifact".to_string()),
-                ),
-            )
-        })?;
-        publications.push(ArtifactPublication {
-            id: artifact.id.clone(),
-            kind: artifact
-                .metadata
-                .as_ref()
-                .and_then(|metadata| metadata.get("kind"))
-                .and_then(Value::as_str)
-                .unwrap_or("runner_job_artifact")
-                .to_string(),
-            source_path: file.path().to_path_buf(),
-            mime: artifact.mime.clone(),
-            metadata_json: json!({
-                "runner_id": runner.id,
-                "runner_job_id": job.id.to_string(),
-                "name": artifact.name,
-                "terminal_artifact": true,
-            }),
-            expected_size_bytes: size_bytes,
-            expected_sha256: sha256,
-            artifact_type: ArtifactPublicationType::File,
-        });
-        staged.push(file);
-    }
-    store
-        .publish_run_artifacts_atomically(run, &publications)
-        .map_err(|error| artifact_projection_error(runner, job, &run.id, error))
-}
-
 fn mirror_remote_observation_runs_by_id(
     store: &ObservationStore,
     runner: &Runner,
@@ -1655,7 +1500,6 @@ fn permanent_artifact_provenance_error(error: &Error) -> bool {
                 | Some("artifact.size_bytes")
                 | Some("artifact.sha256")
                 | Some("artifact.mime")
-                | Some("artifact.content_base64")
         )
 }
 

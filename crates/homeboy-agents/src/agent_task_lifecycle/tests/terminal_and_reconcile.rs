@@ -2700,9 +2700,6 @@ fn timed_out_recoverable_lab_candidate_hydrates_a_pathless_patch_idempotently() 
             fn daemon_api_get(&self, _: &str, _: &str) -> Result<Value> {
                 Ok(Value::Null)
             }
-            fn runner_artifact_content(&self, _: &str, _: &str, _: &str) -> Result<Value> {
-                Ok(Value::Null)
-            }
             fn mirrored_runner_job_identity(
                 &self,
                 _: &homeboy_core::observation::RunRecord,

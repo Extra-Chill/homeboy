@@ -51,7 +51,6 @@ impl AgentTaskTerminalRecoveryProvider for AgentTaskTerminalRecoveryProviderImpl
                 mime: None,
                 size_bytes: None,
                 sha256: binding.sha256.clone(),
-                content_base64: None,
                 metadata: Some(serde_json::json!({
                     "kind": binding.kind,
                     "task_id": binding.task_id,

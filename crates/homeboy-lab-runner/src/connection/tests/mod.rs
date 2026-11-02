@@ -625,19 +625,6 @@ pub(super) fn controller_session() -> RunnerSession {
     }
 }
 
-#[test]
-fn artifact_content_endpoint_accepts_direct_sessions_with_a_daemon_url() {
-    ensure_artifact_content_endpoint(&controller_session()).expect("direct endpoint");
-}
-
-#[test]
-fn artifact_content_endpoint_rejects_sessions_without_a_managed_endpoint() {
-    let mut session = controller_session();
-    session.local_url = None;
-    let error = ensure_artifact_content_endpoint(&session).expect_err("missing endpoint");
-    assert!(error.message.contains("no managed daemon endpoint"));
-}
-
 pub(super) fn sample_run_summary(id: &str) -> RunSummary {
     RunSummary {
         id: id.to_string(),

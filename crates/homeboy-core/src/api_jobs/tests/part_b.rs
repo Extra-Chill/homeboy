@@ -765,7 +765,6 @@ fn dead_child_recovers_linked_terminal_result_and_artifacts() {
                         mime: None,
                         size_bytes: None,
                         sha256: None,
-                        content_base64: None,
                         metadata: None,
                     }],
                 ))

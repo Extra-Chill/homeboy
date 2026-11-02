@@ -553,15 +553,6 @@ fn require_run_reads_terminal_lab_review_alias_while_runner_probe_is_stalled() {
             unreachable!("local lookup must not query the daemon")
         }
 
-        fn runner_artifact_content(
-            &self,
-            _runner_id: &str,
-            _job_id: &str,
-            _artifact_id: &str,
-        ) -> Result<Value> {
-            unreachable!("local lookup must not hydrate artifacts")
-        }
-
         fn refresh_run(
             &self,
             _: &ObservationStore,

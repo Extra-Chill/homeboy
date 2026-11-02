@@ -294,7 +294,6 @@ mod tests {
                 mime: Some("application/json".to_string()),
                 size_bytes: Some(42),
                 sha256: Some("abc123".to_string()),
-                content_base64: None,
                 metadata: Some(json!({
                     "kind": "run_summary",
                     "role": "summary",
@@ -332,7 +331,6 @@ mod tests {
                 mime: None,
                 size_bytes: None,
                 sha256: None,
-                content_base64: None,
                 metadata: None,
             }],
         );
@@ -441,7 +439,6 @@ mod tests {
             mime: None,
             size_bytes: None,
             sha256: None,
-            content_base64: None,
             metadata,
         }
     }
