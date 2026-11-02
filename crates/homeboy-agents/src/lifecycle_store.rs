@@ -2596,7 +2596,7 @@ fn agent_task_record_write_projection(
 /// observation store atomically persists it beside the run projection so action
 /// admission can never observe a lifecycle version from another write.
 fn agent_task_resource_projection(
-    _lifecycle_store: &AgentTaskLifecycleStore,
+    lifecycle_store: &AgentTaskLifecycleStore,
     record: &AgentTaskRunRecord,
     cook_index: Option<&AgentTaskCookIndex>,
 ) -> Result<ControlPlaneResourceProjection> {
@@ -2631,7 +2631,11 @@ fn agent_task_resource_projection(
             .to_string(),
         aliases,
         eligibility: serde_json::to_value(
-            crate::agent_task_lifecycle::lifecycle_action_eligibility(record, None),
+            crate::agent_task_lifecycle::lifecycle_action_eligibility_with_roots(
+                record,
+                None,
+                Some(lifecycle_store.roots()),
+            ),
         )
         .map_err(|error| Error::internal_json(error.to_string(), None))?,
         provenance: json!({

@@ -840,6 +840,19 @@ pub fn liveness_for_record(
     classify_liveness(record, now, &live_supervisor_jobs())
 }
 
+pub(crate) fn liveness_for_record_in_roots(
+    record: &AgentTaskRunRecord,
+    now: chrono::DateTime<chrono::Utc>,
+    roots: &homeboy_core::paths::PathRoots,
+) -> AgentTaskLiveness {
+    let jobs_path = homeboy_core::paths::observation_db_in_root(roots.data());
+    let status = homeboy_core::daemon::read_status_at_paths(
+        homeboy_core::paths::daemon_state_file_in_root(roots.config()),
+        jobs_path.clone(),
+    );
+    classify_liveness(record, now, &live_supervisor_jobs_at(status, Ok(jobs_path)))
+}
+
 /// Read-only controller-upgrade admission derived from the same liveness model
 /// as `agent-task active`. A stale local record is retained for audit and later
 /// explicit reconciliation, not treated as a live controller owner. A stale
@@ -1237,11 +1250,21 @@ fn durable_queued_retry_is_live(record: &AgentTaskRunRecord) -> bool {
 
 /// Queued or running controller step jobs of a fresh daemon's current lease.
 fn live_supervisor_jobs() -> BTreeSet<Uuid> {
-    let lease = homeboy_core::daemon::read_status()
+    live_supervisor_jobs_at(
+        homeboy_core::daemon::read_status(),
+        homeboy_core::paths::observation_db(),
+    )
+}
+
+fn live_supervisor_jobs_at(
+    status: homeboy_core::error::Result<homeboy_core::daemon::DaemonStatus>,
+    path: homeboy_core::error::Result<std::path::PathBuf>,
+) -> BTreeSet<Uuid> {
+    let lease = status
         .ok()
         .filter(|daemon| daemon.reachable && daemon.fresh)
         .and_then(|daemon| daemon.state.map(|state| state.lease_id));
-    let store = homeboy_core::paths::observation_db()
+    let store = path
         .ok()
         .and_then(|path| JobStore::open_without_reconciliation(path).ok());
     let operation = ["controller.", homeboy_core::daemon::step_job::STEP_JOB_TYPE].concat();

@@ -390,8 +390,43 @@ pub fn observation_db_in_root(data_root: &Path) -> PathBuf {
     data_root.join(OBSERVATION_DB_FILENAME)
 }
 
+thread_local! {
+    static HERMETIC_CONTEXTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Test-isolation lifetime; default observation stores must not escape injection.
+#[doc(hidden)]
+pub struct ObservationStoreIsolation(std::marker::PhantomData<std::rc::Rc<()>>);
+
+impl ObservationStoreIsolation {
+    pub fn enter() -> Self {
+        HERMETIC_CONTEXTS.with(|count| count.set(count.get() + 1));
+        Self(std::marker::PhantomData)
+    }
+}
+
+impl Drop for ObservationStoreIsolation {
+    fn drop(&mut self) {
+        HERMETIC_CONTEXTS.with(|count| count.set(count.get() - 1));
+    }
+}
+
 /// Local SQLite observation-store path.
+#[track_caller]
 pub fn observation_db() -> Result<PathBuf> {
+    let caller = std::panic::Location::caller();
+    // Legacy HomeGuard explicitly injects a process-wide home root.
+    let explicit_home = home_root_override()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .is_some();
+    HERMETIC_CONTEXTS.with(|count| {
+        assert!(
+            count.get() == 0 || explicit_home,
+            "default observation store resolved under test isolation at {}; inject a store/root instead",
+            caller
+        );
+    });
     Ok(observation_db_in_root(&homeboy_data()?))
 }
 
