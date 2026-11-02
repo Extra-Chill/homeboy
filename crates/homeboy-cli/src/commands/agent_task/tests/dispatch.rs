@@ -213,6 +213,22 @@ fn existing_pr_cook_resolution_uses_canonical_refs_for_preview_and_update() {
         git(&["add", "tracked"]);
         git(&["commit", "-qm", "base"]);
         git(&["branch", "release"]);
+        git(&[
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/example/repo.git",
+        ]);
+        std::fs::write(
+            repository.join("homeboy.json"),
+            r#"{"id":"fixture","scripts":{"lint":["echo lint"]}}"#,
+        )
+        .expect("portable lint declaration");
+        register_component(
+            "fixture",
+            &repository,
+            "https://github.com/example/repo.git",
+        );
         let linked = root.path().join("linked");
         git(&[
             "worktree",
@@ -259,13 +275,21 @@ fn existing_pr_cook_resolution_uses_canonical_refs_for_preview_and_update() {
             ]);
             match crate::commands::agent_task::run::resolve_cook_repository(&mut input) {
                 Ok(repository) => {
-                    super::super::run::resolve_cook_destination(input, repository.as_ref())
+                    super::super::run::resolve_cook_destination_with_component_lint_gate(
+                        input,
+                        repository.as_ref(),
+                        false,
+                    )
                 }
                 Err(error) => Err(error),
             }
         }
         .expect("resolve existing PR Cook request");
 
+        assert_eq!(
+            resolved.gates.verify,
+            ["homeboy --placement local review lint fixture --path . --changed-since origin/release"]
+        );
         assert_eq!(resolved.base.as_deref(), Some("release"));
         assert_eq!(resolved.head.as_deref(), Some("feature"));
         assert_eq!(
@@ -3923,7 +3947,9 @@ fn component_lint_gate_is_added_after_file_gates_are_snapshotted() {
         let gates = serde_json::to_string(&recipe.attempts[0].plan).expect("plan json");
         assert!(gates.contains("cargo test"), "file gate retained: {gates}");
         assert!(
-            gates.contains("homeboy --placement local review lint linted --path ."),
+            gates.contains(
+                "homeboy --placement local review lint linted --path . --changed-since origin/main"
+            ),
             "component lint gate added: {gates}"
         );
     });
