@@ -169,6 +169,62 @@ fn multi_attempt_candidate_recoverable_recover_publishes_candidate_sha() {
 }
 
 #[test]
+fn publication_failure_recover_publishes_same_candidate_without_provider_execution() {
+    with_own_green_gates(|options, target| {
+        let run = &options.identity.initial_run_id;
+        let promotion = persisted_promotion_for_attempt(run).unwrap().unwrap();
+        let sha = promotion.provenance["candidate_commit"]["candidate_sha"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let before_head = git_output(&target, &["rev-parse", "HEAD"]).unwrap();
+        let before_runtime = test_lifecycle_store()
+            .read_record(run)
+            .unwrap()
+            .lifecycle
+            .provider_runtime;
+        let mut failed = CaptureBackend {
+            hydrate_run_id: Some(run.clone()),
+            commit_error: true,
+            ..Default::default()
+        };
+        recover_cook_pr_with_backend(run, Vec::new(), false, &mut failed)
+            .expect_err("injected publication failure");
+        assert!(!failed.created);
+        let performer = PublishCandidate(std::sync::Mutex::new(CaptureBackend {
+            hydrate_run_id: Some(run.clone()),
+            committed_sha: Some(sha.clone()),
+            ..Default::default()
+        }));
+        let (report, exit) =
+            crate::agent_task_service::recover_cook(run, Default::default(), &performer).unwrap();
+        assert_eq!(exit, 0, "{report:#?}");
+        assert_eq!(
+            report.step,
+            crate::agent_task_service::CookRecoveryStep::Publish
+        );
+        assert!(performer.0.lock().unwrap().created);
+        assert_eq!(
+            git_output(&target, &["rev-parse", "HEAD"]).unwrap(),
+            before_head
+        );
+        let after = persisted_promotion_for_attempt(run).unwrap().unwrap();
+        assert_eq!(after.provenance["candidate_commit"]["candidate_sha"], sha);
+        assert_eq!(
+            serde_json::to_value(
+                test_lifecycle_store()
+                    .read_record(run)
+                    .unwrap()
+                    .lifecycle
+                    .provider_runtime
+            )
+            .unwrap(),
+            serde_json::to_value(before_runtime).unwrap()
+        );
+    });
+}
+
+#[test]
 fn multi_attempt_substantive_adopt_uses_terminal_execution_lineage() {
     with_corrected_gate_candidate(|options, target, promotion| {
         let (options, promotion) = make_multi_attempt(&options, &promotion, &target, true);
