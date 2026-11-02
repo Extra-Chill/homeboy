@@ -35,8 +35,26 @@ for directory in root.parents:
     files.extend([directory / '.cargo/config', directory / '.cargo/config.toml'])
 files.extend([pathlib.Path(os.environ.get('CARGO_HOME', str(pathlib.Path.home() / '.cargo'))) / name
               for name in ('config', 'config.toml')])
+
+def manifest_digest(path):
+    # Release bumps rewrite the package version on every merge. The version
+    # cannot invalidate compiled dependencies, so it must not move the
+    # compatibility prefix that PR restores fall back to.
+    if path.name != 'Cargo.toml':
+        return digest(path.read_bytes())
+    kept, section = [], ''
+    for line in path.read_text().splitlines():
+        stripped = line.strip()
+        if stripped.startswith('['):
+            section = stripped
+        elif section in ('[package]', '[workspace.package]') and stripped.split('=', 1)[0].strip() == 'version':
+            continue
+        kept.append(line)
+    return digest('\n'.join(kept).encode())
+
+
 configuration['files'] = [(str(path.relative_to(root)) if path.is_relative_to(root) else str(path),
-                           digest(path.read_bytes())) for path in files if path.is_file()]
+                           manifest_digest(path)) for path in files if path.is_file()]
 compatibility = digest(json.dumps([compiler, profile, configuration], sort_keys=True).encode())
 lock = digest((root / 'Cargo.lock').read_bytes())
 revision = subprocess.run(['git', '-C', str(root), 'rev-parse', 'HEAD^{tree}'],
