@@ -380,7 +380,13 @@ pub fn resolve_secret_env_with_fallbacks(
 pub fn resolve_configured_secret_env(
     names: &[String],
 ) -> Result<Vec<(String, String)>, AgentTaskSecretResolutionError> {
-    let config = AgentTaskSecretConfig::load();
+    // A long-lived daemon must see secrets changed by other processes.
+    let config = AgentTaskSecretConfig {
+        secrets: defaults::load_config_for_read()
+            .unwrap_or_default()
+            .agent_task
+            .secrets,
+    };
     let mut bundle_cache = HashMap::new();
     resolve_secret_env_names(
         names.iter().cloned(),
@@ -922,6 +928,38 @@ mod tests {
             assert_eq!(
                 resolved,
                 vec![(status.name, "stored-secret-value".to_string())]
+            );
+        });
+    }
+
+    #[test]
+    fn configured_secret_resolution_sees_external_config_changes() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let name = unique_env("ROTATED_CONFIG_SECRET");
+            // Saving primes the process cache with the original value.
+            set_config_secret(&name, "original-value").expect("secret config saved");
+            let names = std::slice::from_ref(&name);
+            assert_eq!(
+                resolve_configured_secret_env(names).expect("original secret resolves"),
+                vec![(name.clone(), "original-value".to_string())]
+            );
+
+            // Simulate another process: bypass save_config and its cache refresh.
+            let path = defaults::config_path().expect("config path");
+            let mut config: Value =
+                serde_json::from_str(&fs::read_to_string(&path).expect("read config"))
+                    .expect("parse config");
+            config["agent_task"]["secrets"][&name]["value"] =
+                Value::String("rotated-value".to_string());
+            fs::write(
+                &path,
+                serde_json::to_string(&config).expect("serialize config"),
+            )
+            .expect("write external config change");
+
+            assert_eq!(
+                resolve_configured_secret_env(names).expect("rotated secret resolves"),
+                vec![(name.clone(), "rotated-value".to_string())]
             );
         });
     }
