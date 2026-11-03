@@ -104,17 +104,27 @@ fn safe_quarantine_capability<B: AgentTaskPrFinalizationBackend>(
 /// publication is not itself a draft.
 fn update_existing_pr<B: AgentTaskPrFinalizationBackend>(
     backend: &mut B,
-    options: &AgentTaskPrFinalizationOptions,
-    body: &str,
+    options: &mut AgentTaskPrFinalizationOptions,
     existing: &AgentTaskPrRef,
     ready_transitioned: &mut bool,
 ) -> Result<(&'static str, AgentTaskPrRef)> {
+    let existing_body = backend.open_pr_body(
+        options.component_id.as_deref(),
+        &options.path,
+        existing.number,
+    )?;
+    crate::agent_task_review_dossier::reconcile_existing_pr_relationships(
+        &mut options.review_dossier.source_relationships,
+        &existing.url,
+        existing_body.as_deref().unwrap_or_default(),
+    );
+    let body = render_review_dossier(&options.review_dossier, &options.review_profile);
     let updated = backend.update_pr(
         options.component_id.as_deref(),
         &options.path,
         existing.number,
         &options.title,
-        body,
+        &body,
     )?;
     if existing.is_draft && !options.draft_pr {
         *ready_transitioned = true;
@@ -646,7 +656,7 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
     let mut ready_transitioned = false;
     let (action, pr) = match existing {
         Some(existing) => {
-            update_existing_pr(backend, &options, &body, &existing, &mut ready_transitioned)?
+            update_existing_pr(backend, &mut options, &existing, &mut ready_transitioned)?
         }
         None => match backend.create_pr(
             options.component_id.as_deref(),
@@ -678,7 +688,7 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
                 newly_created = false;
                 draft = adopted.is_draft;
                 quarantine_capability = safe_quarantine_capability(backend, newly_created, draft)?;
-                update_existing_pr(backend, &options, &body, &adopted, &mut ready_transitioned)?
+                update_existing_pr(backend, &mut options, &adopted, &mut ready_transitioned)?
             }
             Err(error) => return Err(error),
         },
