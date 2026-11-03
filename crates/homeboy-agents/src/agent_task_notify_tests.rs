@@ -81,21 +81,21 @@ fn terminal_outcomes_lead_with_work_and_offer_only_useful_actions() {
                 0,
                 "homeboy#42: Fix notifications",
                 vec!["Closes", "Model", "Gates"],
-                vec!["review", "details"],
+                vec![],
             ),
             (
                 "gate_failed",
                 1,
                 "homeboy: Cook task — needs attention",
-                vec!["Stop reason", "Failure classification", "Gates"],
-                vec!["diagnose", "continue"],
+                vec!["Stop reason", "Gates"],
+                vec!["diagnose"],
             ),
             (
                 "cancelled",
                 1,
                 "homeboy: Cook task — cancelled",
                 vec!["Stop reason"],
-                vec!["details"],
+                vec![],
             ),
         ] {
             let success = status == "succeeded";
@@ -170,9 +170,9 @@ fn terminal_outcomes_lead_with_work_and_offer_only_useful_actions() {
             assert!(!body.contains("run-1"), "{body}");
             if success {
                 assert!(
-                    body.contains("Next — review: https://github.com/Extra-Chill/homeboy/pull/42")
+                    body.contains("Pull request: https://github.com/Extra-Chill/homeboy/pull/42")
                 );
-                assert!(body.contains("lint passed"));
+                assert!(body.contains("1/1 passed"));
                 assert!(!labels.contains(&"Failure classification"));
                 assert!(!labels.contains(&"Stop reason"));
             }
@@ -200,7 +200,6 @@ fn non_recoverable_failure_never_offers_recover() {
         .actions
         .iter()
         .all(|action| !action.command.contains("agent-task recover")));
-    assert!(payload.render_body().contains("run a new Cook"));
 }
 
 #[test]
@@ -260,34 +259,9 @@ fn rotation_exhaustion_notification_preserves_the_terminal_cause() {
 
     let payload = terminal_payload(&report, None, 1);
     let body = payload.render_body();
-    assert!(body.contains("Failure classification: provider_rotation_exhausted"));
+
     assert!(body.contains("xai/grok-4.6: provider_account_blocked"));
     assert!(body.contains("zai-coding-plan/glm-5.3: rate_limited"));
-    assert!(body.contains("pi-go/kimi-k3: stalled"));
-}
-
-#[test]
-fn failed_cook_forwards_its_own_legal_recovery_commands() {
-    let mut failed = report("durable_failure", None);
-    failed.failure_context = Some(failure_context());
-    let payload = terminal_payload(&failed, None, 1);
-    assert_eq!(payload.kind, NotifyEventKind::NeedsAttention);
-    let commands: Vec<_> = payload
-        .actions
-        .iter()
-        .map(|action| action.command.as_str())
-        .collect();
-    assert!(
-        commands.contains(&"homeboy agent-task diagnose cook-abc"),
-        "{commands:?}"
-    );
-    assert!(
-        commands.contains(&"homeboy agent-task recover cook-abc"),
-        "{commands:?}"
-    );
-    assert!(payload
-        .render_body()
-        .contains("Reason code: validation_invalid_argument"));
 }
 
 #[test]
@@ -306,14 +280,14 @@ fn reserve_pressure_notification_names_the_filesystem_and_scoped_inventory() {
             "homeboy cleanup artifacts --path /worktrees/repository --all-worktrees --merged-only"
                 .to_string(),
     }];
+    context.next_actions = context.legal_actions.clone();
     failed.failure_context = Some(context);
 
     let payload = terminal_payload(&failed, None, 1);
     let body = payload.render_body();
 
     assert!(body.contains("Filesystem reserve shortfall at /worktrees/new-task"));
-    assert!(body.contains("Failure classification: capacity"));
-    assert!(body.contains("Reason code: resource.capacity_reserve"));
+
     assert!(payload.actions.iter().any(|action| {
         action.command
             == "homeboy cleanup artifacts --path /worktrees/repository --all-worktrees --merged-only"
@@ -321,27 +295,45 @@ fn reserve_pressure_notification_names_the_filesystem_and_scoped_inventory() {
 }
 
 #[test]
-fn failed_cook_forwards_a_recovery_action_once_when_report_sections_overlap() {
-    let mut failed = report("pre_execution_failure", None);
-    let recovery = AgentTaskCookRecoveryAction {
-        action: "refresh_lab_runtime".to_string(),
-        command: "homeboy runner refresh-homeboy homeboy-lab --ref required --reconnect"
-            .to_string(),
-    };
-    let mut context = failure_context();
-    context.legal_actions = vec![recovery.clone()];
-    context.next_actions = vec![recovery.clone()];
-    failed.failure_context = Some(context);
-
-    let payload = terminal_payload(&failed, None, 1);
-    assert_eq!(
-        payload
-            .actions
-            .iter()
-            .filter(|action| action.label == recovery.action && action.command == recovery.command)
-            .count(),
-        1
-    );
+fn failure_recommends_only_the_first_legal_next_action() {
+    for (next, legal, recovery_legal, expected) in [
+        (
+            vec!["diagnose", "recover"],
+            vec!["recover"],
+            true,
+            "diagnose",
+        ),
+        (vec![], vec!["recover", "diagnose"], true, "recover"),
+        (
+            vec!["recover", "diagnose"],
+            vec!["recover"],
+            false,
+            "diagnose",
+        ),
+        (vec!["watch"], vec![], true, "diagnose"),
+    ] {
+        let actions = |names: Vec<&str>| {
+            names
+                .into_iter()
+                .map(|name| AgentTaskCookRecoveryAction {
+                    action: name.to_string(),
+                    command: format!("homeboy agent-task {name} cook-abc"),
+                })
+                .collect()
+        };
+        let mut context = failure_context();
+        context.next_actions = actions(next);
+        context.legal_actions = actions(legal);
+        context.recovery_legal = recovery_legal;
+        let mut failed = report("durable_failure", None);
+        failed.failure_context = Some(context);
+        let payload = terminal_payload(&failed, None, 1);
+        assert_eq!(payload.actions.len(), 1);
+        assert_eq!(payload.actions[0].label, expected);
+        for label in ["Phase", "Reason code", "Recovery"] {
+            assert!(!payload.facts.iter().any(|fact| fact.label == label));
+        }
+    }
 }
 
 #[test]
@@ -386,20 +378,21 @@ fn started_payload_answers_what_did_i_just_start() {
     assert_eq!(subject.parent_id.as_deref(), Some("run-1"));
     assert_eq!(subject.phase.as_deref(), Some("durable_identity"));
     let body = payload.render_body();
-    assert!(body.contains("Task: fix the notifier"), "{body}");
-    assert!(body.contains("Attempt budget: 3"), "{body}");
     assert!(
-        body.contains("homeboy agent-task status cook-abc --watch"),
+        body.contains("homeboy: fix the notifier — started"),
         "{body}"
     );
+    assert!(body.contains("Attempt budget: 3"), "{body}");
+    assert!(payload.actions.is_empty());
 }
 
 #[test]
 fn retry_payload_names_the_attempt_and_the_budget() {
     let payload = retry_payload("cook-abc", "run-1", None, 2, 3);
     assert_eq!(payload.kind, NotifyEventKind::Progress);
-    assert_eq!(payload.subject.clone().unwrap().attempt, Some(2));
-    assert!(payload.render_body().contains("Attempt: 2 of 3"));
+    assert_eq!(payload.subject.clone().unwrap().attempt, None);
+    assert!(payload.title.as_deref().unwrap().contains("attempt 2 of 3"));
+    assert!(!payload.render_body().contains("Attempt:"));
 }
 
 #[test]
@@ -928,7 +921,7 @@ fn continuation_failed_payload_names_the_stop_and_the_rearm_command() {
     );
     assert_eq!(payload.kind, NotifyEventKind::NeedsAttention);
     let body = payload.render_body();
-    assert!(body.contains("continuation_failed"));
+
     assert!(body.contains("cook continuation retry budget exhausted"));
     assert!(payload.actions.iter().any(|action| action
         .command
@@ -1144,6 +1137,36 @@ fn pull_request_link_reads_every_tolerated_receipt_identity() {
         })),
     );
     let payload = terminal_payload(&report, None, 0);
-    assert_eq!(payload.actions[0].label, "review");
-    assert_eq!(payload.actions[0].command, "https://example.test/pull/44");
+    assert_eq!(payload.links[0].label, "Pull request");
+    assert_eq!(payload.links[0].url, "https://example.test/pull/44");
+}
+
+#[test]
+fn notification_text_bounds_preserve_words_and_first_sentence() {
+    for (input, max, expected) in [
+        ("A short title".to_string(), 80, "A short title".to_string()),
+        (
+            "word ".repeat(30),
+            80,
+            format!("{}…", "word ".repeat(15).trim()),
+        ),
+        (
+            "First sentence. Unneeded detail.".to_string(),
+            200,
+            "First sentence.".to_string(),
+        ),
+        (
+            "reason ".repeat(100),
+            200,
+            format!("{}…", "reason ".repeat(28).trim()),
+        ),
+    ] {
+        let actual = if max == 80 {
+            terminal_work::short_title(&input)
+        } else {
+            terminal_work::stop_reason(&input)
+        };
+        assert_eq!(actual, expected);
+        assert!(actual.chars().count() <= max);
+    }
 }

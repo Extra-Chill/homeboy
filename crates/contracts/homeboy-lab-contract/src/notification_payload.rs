@@ -383,14 +383,15 @@ impl NotifyPayload {
             {
                 lines.push(format!("Component: {component}"));
             }
-            if let Some(parent) = subject.parent_id.as_deref().filter(|it| !it.is_empty()) {
+            if let Some(parent) = subject
+                .parent_id
+                .as_deref()
+                .filter(|it| !it.is_empty() && self.title.is_none())
+            {
                 lines.push(format!("Batch: {parent}"));
             }
-            if let Some(attempt) = subject.attempt {
+            if let Some(attempt) = subject.attempt.filter(|_| self.title.is_none()) {
                 lines.push(format!("Attempt: {attempt}"));
-            }
-            if let Some(phase) = subject.phase.as_deref().filter(|it| !it.is_empty()) {
-                lines.push(format!("Phase: {phase}"));
             }
         }
         let facts: Vec<_> = self
@@ -503,7 +504,7 @@ mod tests {
         let body = cook_payload().render_body();
         assert!(body.contains("Component: homeboy"), "{body}");
         assert!(body.contains("Attempt: 2"), "{body}");
-        assert!(body.contains("Phase: promotion"), "{body}");
+        assert!(!body.contains("Phase:"), "{body}");
         assert!(body.contains("Status: failed"), "{body}");
         assert!(body.contains("Stop reason: gate_failed"), "{body}");
         assert!(

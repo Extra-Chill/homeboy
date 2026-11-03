@@ -18,7 +18,7 @@ impl Work {
     pub fn title(&self, kind: NotifyEventKind) -> String {
         if !self.cancelled && kind == NotifyEventKind::Completed {
             if let Some(pr) = &self.pr {
-                return format!("{pr}: {}", self.task);
+                return format!("{pr}: {}", short_title(&self.task));
             }
         }
         let outcome = if self.cancelled {
@@ -28,10 +28,7 @@ impl Work {
         } else {
             "needs attention"
         };
-        match &self.component {
-            Some(component) => format!("{component}: {} — {outcome}", self.task),
-            None => format!("{} — {outcome}", self.task),
-        }
+        work_title(self.component.as_deref(), &self.task, outcome)
     }
 }
 
@@ -90,7 +87,27 @@ pub(super) fn metadata(report: &AgentTaskCookReport, component: Option<&str>) ->
                 } else {
                     "Related issue"
                 };
-                facts.push((label.to_string(), reference.to_string()));
+                let url = if reference.starts_with("https://") {
+                    Some(reference.to_string())
+                } else if let Some((repo, number)) = reference
+                    .split_once('#')
+                    .filter(|(repo, _)| !repo.is_empty())
+                {
+                    Some(format!("https://github.com/{repo}/issues/{number}"))
+                } else {
+                    pr_url
+                        .as_deref()
+                        .and_then(|pr| pr.split_once("/pull/"))
+                        .map(|(repo, _)| {
+                            format!("{repo}/issues/{}", reference.trim_start_matches('#'))
+                        })
+                };
+                if let Some(url) = url {
+                    if let Some((repo, number)) = url.split_once("/issues/") {
+                        let repo = repo.rsplit('/').next().unwrap_or(repo);
+                        facts.push((label.to_string(), format!("[{repo}#{number}]({url})")));
+                    }
+                }
             }
         }
     }
@@ -133,4 +150,66 @@ pub(super) fn metadata(report: &AgentTaskCookReport, component: Option<&str>) ->
         pr,
         facts,
     }
+}
+
+fn bounded(text: &str, max: usize) -> String {
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if text.chars().count() <= max {
+        return text;
+    }
+    let prefix: String = text.chars().take(max - 1).collect();
+    let end = prefix.rfind(' ').unwrap_or(prefix.len());
+    format!("{}…", &prefix[..end])
+}
+
+pub(super) fn short_title(text: &str) -> String {
+    bounded(text, 80)
+}
+
+pub(super) fn stop_reason(text: &str) -> String {
+    let end = text
+        .char_indices()
+        .find_map(|(index, ch)| {
+            (matches!(ch, '.' | '!' | '?')
+                && text[index + ch.len_utf8()..].starts_with(char::is_whitespace))
+            .then_some(index + ch.len_utf8())
+        })
+        .unwrap_or(text.len());
+    bounded(&text[..end], 200)
+}
+
+pub(super) fn work_title(component: Option<&str>, task: &str, outcome: &str) -> String {
+    let task = short_title(task);
+    match component {
+        Some(component) => format!("{component}: {task} — {outcome}"),
+        None => format!("{task} — {outcome}"),
+    }
+}
+
+pub(super) fn retry_title(
+    cook_id: &str,
+    component: Option<&str>,
+    attempt: u32,
+    max: u32,
+) -> String {
+    let recipe = crate::agent_task_service::CookRecipeStore::from_current_data_root()
+        .ok()
+        .and_then(|store| store.load_recipe(cook_id).ok());
+    let title = recipe
+        .as_ref()
+        .and_then(|recipe| recipe.finalization["title"].as_str())
+        .or_else(|| {
+            recipe
+                .as_ref()?
+                .attempts
+                .first()?
+                .plan
+                .tasks
+                .first()?
+                .instructions
+                .lines()
+                .next()
+        })
+        .unwrap_or("Cook task");
+    work_title(component, title, &format!("attempt {attempt} of {max}"))
 }

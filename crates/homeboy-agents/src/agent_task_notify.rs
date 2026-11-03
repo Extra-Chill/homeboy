@@ -28,7 +28,6 @@ use homeboy_core::notification_route::{self, NotificationRoute};
 use homeboy_core::notify::{terminal_rejection_result, NotifyDelivery, NotifyEvent, NotifyOutcome};
 use homeboy_core::notify_outbox::{self, NotifyOnceMarker, NotifyOutboxDisposition};
 use serde_json::{json, Map, Value};
-use std::collections::HashSet;
 
 use crate::agent_task_service::AgentTaskCookReport;
 
@@ -242,17 +241,6 @@ fn cook_subject(cook_id: &str, run_id: &str, component: Option<&str>) -> NotifyS
     subject
 }
 
-/// Non-terminal cooks have one useful next step: watch.
-fn cook_actions(payload: NotifyPayload, cook_id: &str) -> NotifyPayload {
-    payload.with_action(
-        NotifyAction::new(
-            "watch",
-            format!("homeboy agent-task status {cook_id} --watch"),
-        )
-        .with_kind("watch"),
-    )
-}
-
 /// Build the started payload. Separated from delivery so its content is
 /// assertable without spawning a transport.
 fn started_payload(
@@ -264,17 +252,15 @@ fn started_payload(
     max_attempts: u32,
     provider: &str,
 ) -> NotifyPayload {
-    cook_actions(
-        NotifyPayload::new(
-            NotifyEventKind::Started,
-            cook_subject(cook_id, run_id, component).with_phase("durable_identity"),
-        )
-        .with_fact("Task", title)
-        .with_fact("Base", base)
-        .with_fact("Provider", provider)
-        .with_fact("Attempt budget", max_attempts.to_string()),
-        cook_id,
+    let mut payload = NotifyPayload::new(
+        NotifyEventKind::Started,
+        cook_subject(cook_id, run_id, component).with_phase("durable_identity"),
     )
+    .with_fact("Base", base)
+    .with_fact("Provider", provider)
+    .with_fact("Attempt budget", max_attempts.to_string());
+    payload.title = Some(terminal_work::work_title(component, title, "started"));
+    payload
 }
 
 /// The cook now has a durable identity and is addressable.
@@ -322,7 +308,7 @@ pub(crate) fn cook_started(
         provider,
     );
     let event = NotifyEvent::lifecycle(NotifyEventKind::Started, cook_id, "started")
-        .with_title(format!("cook started — {title}"))
+        .with_title(payload.title.clone().unwrap_or_default())
         .with_payload(payload);
     let dispatch = notify_outbox::dispatch_with_outbox(
         &event.with_route(Some(&route)),
@@ -349,17 +335,18 @@ fn retry_payload(
     attempt: u32,
     max_attempts: u32,
 ) -> NotifyPayload {
-    cook_actions(
-        NotifyPayload::new(
-            NotifyEventKind::Progress,
-            cook_subject(cook_id, run_id, component)
-                .with_phase("retry")
-                .with_attempt(attempt),
-        )
-        .with_fact("Attempt", format!("{attempt} of {max_attempts}"))
-        .with_fact("Reason", "the previous attempt did not pass its gates"),
-        cook_id,
+    let mut payload = NotifyPayload::new(
+        NotifyEventKind::Progress,
+        cook_subject(cook_id, run_id, component).with_phase("retry"),
     )
+    .with_fact("Reason", "the previous attempt did not pass its gates");
+    payload.title = Some(terminal_work::retry_title(
+        cook_id,
+        component,
+        attempt,
+        max_attempts,
+    ));
+    payload
 }
 
 /// A gate-feedback retry is consuming the attempt budget.
@@ -373,7 +360,7 @@ pub(crate) fn cook_retrying(
     let payload = retry_payload(cook_id, run_id, component, attempt, max_attempts);
     deliver(
         NotifyEvent::lifecycle(NotifyEventKind::Progress, cook_id, "retrying")
-            .with_title(format!("cook attempt {attempt} of {max_attempts}"))
+            .with_title(payload.title.clone().unwrap_or_default())
             .with_payload(payload),
         run_id,
     );
@@ -409,12 +396,15 @@ fn terminal_payload(
     if cancelled {
         payload = payload.with_fact("Stop reason", "cancelled by operator");
     } else if kind == NotifyEventKind::NeedsAttention {
-        payload = payload
-            .with_optional_fact("Stop reason", report.stop_reason.clone())
-            .with_optional_fact(
-                "Failure classification",
-                report.terminal_failure_classification.clone(),
-            );
+        payload = payload.with_fact(
+            "Stop reason",
+            terminal_work::stop_reason(
+                report
+                    .stop_reason
+                    .as_deref()
+                    .unwrap_or("Cook stopped before completion"),
+            ),
+        );
     } else {
         for (label, value) in metadata.facts {
             payload = payload.with_fact(label, value);
@@ -433,60 +423,33 @@ fn terminal_payload(
         .find_map(|attempt| attempt.promotion.as_ref())
         .filter(|_| !cancelled)
     {
-        let gate_status = if promotion.deterministic_gates.is_empty() {
-            "not_run"
-        } else if promotion.finalization_eligible(false) {
-            "passed"
-        } else if promotion
-            .deterministic_gates
-            .iter()
-            .any(|gate| gate.status == crate::agent_task_gate::AgentTaskGateStatus::Failed)
-        {
-            "failed"
-        } else {
-            "unverified"
-        };
-        let named = promotion
+        let gates = promotion
             .deterministic_gates
             .iter()
             .map(|gate| {
-                format!(
-                    "{} {}",
-                    gate.id,
-                    serde_json::to_value(&gate.status)
-                        .unwrap_or_default()
-                        .as_str()
-                        .unwrap_or("unknown")
+                (
+                    gate.id.as_str(),
+                    gate.status == crate::agent_task_gate::AgentTaskGateStatus::Succeeded,
                 )
             })
             .collect::<Vec<_>>();
-        payload = payload.with_fact(
-            "Gates",
-            if named.is_empty() {
-                gate_status.to_string()
-            } else {
-                named.join(", ")
-            },
-        );
+        payload = payload.with_fact("Gates", gate_summary(&gates));
     } else if !cancelled {
         if let Some(gates) = report
             .finalization
             .as_ref()
             .and_then(|value| value["gate_results"].as_array())
         {
-            let named = gates
+            let gates = gates
                 .iter()
                 .filter_map(|gate| {
-                    Some(format!(
-                        "{} {}",
+                    Some((
                         gate["name"].as_str()?,
-                        gate["status"].as_str()?
+                        matches!(gate["status"].as_str(), Some("passed" | "succeeded")),
                     ))
                 })
                 .collect::<Vec<_>>();
-            if !named.is_empty() {
-                payload = payload.with_fact("Gates", named.join(", "));
-            }
+            payload = payload.with_fact("Gates", gate_summary(&gates));
         }
         let status = homeboy_core::cook_status::CookStatus::from_status(&report.status);
         if status.is_gate_failure() && !payload.facts.iter().any(|fact| fact.label == "Gates") {
@@ -504,41 +467,38 @@ fn terminal_payload(
         if publication.published {
             if let Some(url) = publication.pr_url.as_deref() {
                 if kind == NotifyEventKind::Completed {
-                    payload =
-                        payload.with_action(NotifyAction::new("review", url).with_kind("review"));
+                    payload = payload.with_link(
+                        homeboy_core::notification_payload::NotifyLink::new("Pull request", url),
+                    );
                 }
             }
         }
     }
 
-    // A failed cook already computed its own legal recovery commands. Forward
-    // them verbatim instead of restating the failure in English.
+    // Recommend only the Cook's first legal next action.
     if let Some(context) = report
         .failure_context
         .as_ref()
         .filter(|_| kind == NotifyEventKind::NeedsAttention)
     {
-        payload = payload
-            .with_fact("Phase", context.phase.clone())
-            .with_fact("Reason code", context.reason_code.clone())
-            .with_fact("Recovery", context.recovery_reason.clone());
-        let mut forwarded = HashSet::new();
-        for action in context.next_actions.iter().chain(&context.legal_actions) {
+        let actions = if context.next_actions.is_empty() {
+            &context.legal_actions
+        } else {
+            &context.next_actions
+        };
+        for action in actions {
             if matches!(action.action.as_str(), "status" | "watch") {
                 continue;
             }
-            // A non-recoverable state names its own next step in `Recovery`;
-            // offering `recover` there only invites a command that must fail.
+            // Never recommend recovery when the Cook says it is illegal.
             if !context.recovery_legal && action.command.contains("agent-task recover") {
-                continue;
-            }
-            if !forwarded.insert((action.action.as_str(), action.command.as_str())) {
                 continue;
             }
             payload = payload.with_action(
                 NotifyAction::new(action.action.clone(), action.command.clone())
                     .with_kind("repair"),
             );
+            break;
         }
     }
 
@@ -554,13 +514,20 @@ fn terminal_payload(
         }
         payload
     } else {
-        payload.with_action(
-            NotifyAction::new(
-                "details",
-                format!("homeboy agent-task status {}", report.cook_id),
-            )
-            .with_kind("show"),
-        )
+        payload
+    }
+}
+
+fn gate_summary(gates: &[(&str, bool)]) -> String {
+    let failed = gates
+        .iter()
+        .filter(|(_, passed)| !passed)
+        .map(|(name, _)| format!("{name} failed"))
+        .collect::<Vec<_>>();
+    if failed.is_empty() {
+        format!("{0}/{0} passed", gates.len())
+    } else {
+        failed.join(", ")
     }
 }
 
@@ -727,9 +694,7 @@ fn continuation_failed_payload(cook_id: &str, run_id: &str, diagnostic: &str) ->
     let mut subject = cook_subject(cook_id, run_id, None);
     subject.phase = Some("terminal_continuation".to_string());
     let payload = NotifyPayload::new(NotifyEventKind::NeedsAttention, subject)
-        .with_fact("Status", "continuation_failed")
-        .with_fact("Attempt", run_id.to_string())
-        .with_fact("Reason", diagnostic.to_string())
+        .with_fact("Stop reason", terminal_work::stop_reason(diagnostic))
         .with_action(
             NotifyAction::new(
                 "continue",
@@ -737,7 +702,7 @@ fn continuation_failed_payload(cook_id: &str, run_id: &str, diagnostic: &str) ->
             )
             .with_kind("repair"),
         );
-    cook_actions(payload, cook_id)
+    payload
 }
 
 /// The daemon's automatic terminal continuation for a Cook attempt stopped
@@ -835,10 +800,6 @@ fn run_reconciled_payload(
     .with_fact("State", state)
     .with_fact("Liveness", liveness)
     .with_optional_fact("Reason", reason.map(str::to_string))
-    .with_action(
-        NotifyAction::new("status", format!("homeboy agent-task status {run_id}"))
-            .with_kind("show"),
-    )
     .with_action(
         NotifyAction::new("diagnose", format!("homeboy agent-task diagnose {run_id}"))
             .with_kind("repair"),
