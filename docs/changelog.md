@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.444.18] - 2026-11-03
+
+### Changed
+- cap live-daemon tests in a nextest group so the full suite stops starving them
+
+### Fixed
+- Fix stale daemon secret resolution
+
 ## [0.444.17] - 2026-11-03
 
 ### Changed
