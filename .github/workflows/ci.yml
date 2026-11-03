@@ -59,8 +59,8 @@ jobs:
       # and dev compiles them ~6x faster than release (#17294).
       source-build-profile: dev
       scope: auto
-      differential-gating: 'true'
-      baseline-commands: review lint,review test --skip-lint
+      # No differential gating: main is expected green, so a failing test or
+      # lint finding fails the PR directly, with no base rerun (#13755).
       test-shards: '1'
       execution-timeout-seconds: '2100'
       test-timeout-seconds: '1800'
