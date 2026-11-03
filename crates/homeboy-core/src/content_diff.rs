@@ -160,6 +160,12 @@ pub fn executable_mode_tag(mode: u32) -> String {
     format!("{:o}", mode & 0o111)
 }
 
+/// Whether `tag` is a canonical executable mode tag produced by
+/// [`executable_mode_tag`], with no other permission bits or leading zeros.
+pub fn is_executable_mode_tag(tag: &str) -> bool {
+    u32::from_str_radix(tag, 8).is_ok_and(|mode| executable_mode_tag(mode) == tag)
+}
+
 /// Whether a relative path is one of this product's own transport scratch
 /// files, at any depth.
 pub fn runtime_artifact(path: &str) -> bool {
@@ -460,6 +466,16 @@ mod tests {
             kind: TreeEntryKind::Symlink,
             ..walked.clone()
         }));
+    }
+
+    #[test]
+    fn executable_mode_tag_is_canonical() {
+        for tag in ["0", "1", "10", "11", "100", "101", "110", "111"] {
+            assert!(is_executable_mode_tag(tag), "rejected {tag:?}");
+        }
+        for tag in ["2", "644", "0111", "abc", "", "+1", "8", "100000000000"] {
+            assert!(!is_executable_mode_tag(tag), "accepted {tag:?}");
+        }
     }
 
     #[test]
