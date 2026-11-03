@@ -108,6 +108,8 @@ impl Default for RunsHotspotsArgs {
 pub struct RunsHotspotsOutput {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub coverage: Vec<homeboy::core::observation::PhaseCoverage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cohort_coverage: Option<CohortCoverage>,
     pub command: &'static str,
     pub run_ids: Vec<String>,
     pub inspected_artifact_count: usize,
@@ -120,6 +122,21 @@ pub struct RunsHotspotsOutput {
     pub phase_hotspots: Option<homeboy::core::performance_hotspots::PhaseHotspots>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cohort_comparison: Option<FuzzHotspotCohortComparison>,
+}
+
+#[derive(Serialize, Debug, Clone, PartialEq)]
+pub struct CohortCoverage {
+    pub wall_ms: f64,
+    pub unattributed_ms: f64,
+    pub unattributed_percentage: f64,
+    pub largest_gaps: Vec<CohortCoverageGap>,
+}
+
+#[derive(Serialize, Debug, Clone, PartialEq)]
+pub struct CohortCoverageGap {
+    pub run_id: String,
+    #[serde(flatten)]
+    pub gap: homeboy::core::observation::PhaseCoverageGap,
 }
 
 #[derive(Serialize, Debug, Clone, PartialEq)]
@@ -200,8 +217,40 @@ pub(crate) fn runs_hotspots(
             .iter()
             .map(|id| store.phase_coverage(id, limit))
             .collect::<homeboy::core::Result<Vec<_>>>()?;
+        let wall_ms = coverage.iter().map(|run| run.wall_ms).sum::<f64>();
+        let unattributed_ms = coverage
+            .iter()
+            .map(|run| run.wall_ms - run.covered_ms)
+            .sum::<f64>();
+        let mut largest_gaps = coverage
+            .iter()
+            .flat_map(|run| {
+                run.gaps.iter().cloned().map(|gap| CohortCoverageGap {
+                    run_id: run.run_id.clone(),
+                    gap,
+                })
+            })
+            .collect::<Vec<_>>();
+        largest_gaps.sort_by(|a, b| {
+            b.gap
+                .duration_ms
+                .total_cmp(&a.gap.duration_ms)
+                .then(a.run_id.cmp(&b.run_id))
+                .then(a.gap.started_at.cmp(&b.gap.started_at))
+        });
+        largest_gaps.truncate(limit);
         return Ok((
             RunsOutput::Hotspots(RunsHotspotsOutput {
+                cohort_coverage: Some(CohortCoverage {
+                    wall_ms,
+                    unattributed_ms,
+                    unattributed_percentage: if wall_ms > 0.0 {
+                        unattributed_ms / wall_ms * 100.0
+                    } else {
+                        0.0
+                    },
+                    largest_gaps,
+                }),
                 coverage,
                 command: "runs.hotspots",
                 run_ids,
@@ -298,6 +347,7 @@ pub(crate) fn runs_hotspots(
         return Ok((
             RunsOutput::Hotspots(RunsHotspotsOutput {
                 command: "runs.hotspots",
+                cohort_coverage: None,
                 run_ids: phases.run_ids.clone(),
                 inspected_artifact_count: 0,
                 matched_artifact_count: 0,
@@ -324,6 +374,7 @@ pub(crate) fn runs_hotspots(
     Ok((
         RunsOutput::Hotspots(RunsHotspotsOutput {
             command: "runs.hotspots",
+            cohort_coverage: None,
             run_ids: ranking_run_ids,
             inspected_artifact_count: loaded.inspected_artifact_count,
             matched_artifact_count: loaded.artifacts.len(),
@@ -1079,6 +1130,48 @@ mod tests {
             output.coverage,
             vec![store.phase_coverage(&run.id, 20).unwrap()]
         );
+    }
+
+    #[test]
+    fn coverage_cohort_weights_wall_time_and_ranks_gaps_across_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let store =
+            ObservationStore::open_initialized_at(dir.path().join("coverage.sqlite")).unwrap();
+        let mut ids = Vec::new();
+        for (wall, covered) in [(100, 80), (300, 100)] {
+            let mut run = store
+                .start_run(NewRunRecord::builder("agent-task").build())
+                .unwrap();
+            run.started_at = "2026-01-01T00:00:00.000Z".into();
+            run.finished_at = Some(format!("2026-01-01T00:00:00.{wall:03}Z"));
+            store.upsert_imported_run(&run).unwrap();
+            let mut timer = homeboy_engine_primitives::phase_timing::PhaseTimer::new();
+            timer.record_ok("work", std::time::Duration::from_millis(covered));
+            let mut report = timer.into_report();
+            report.spans[0].started_at = run.started_at.clone();
+            store.record_phase_spans(&run.id, "work", &report).unwrap();
+            ids.push(run.id);
+        }
+        let (RunsOutput::Hotspots(output), _) = runs_hotspots(
+            &store,
+            RunsHotspotsArgs {
+                coverage: true,
+                kind: Some("agent-task".into()),
+                limit: 1,
+                ..Default::default()
+            },
+        )
+        .unwrap() else {
+            panic!("hotspots expected")
+        };
+        let summary = output.cohort_coverage.unwrap();
+        assert_eq!(summary.wall_ms, 400.0);
+        assert_eq!(summary.unattributed_ms, 220.0);
+        assert!((summary.unattributed_percentage - 55.0).abs() < 1e-9);
+        assert_eq!(summary.largest_gaps.len(), 1);
+        assert_eq!(summary.largest_gaps[0].run_id, ids[1]);
+        assert_eq!(summary.largest_gaps[0].gap.duration_ms, 200.0);
+        assert_eq!(output.coverage.len(), 2);
     }
 
     #[test]
