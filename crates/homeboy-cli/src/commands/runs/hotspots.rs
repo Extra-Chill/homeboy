@@ -1093,7 +1093,9 @@ mod tests {
         assert_eq!(output.coverage.len(), 2);
         assert_eq!(output.coverage[0].run_id, mission.id);
         assert!(output.coverage[0].covered_ms >= 4.0);
-        assert_eq!(output.coverage[0].covered_ms, expected_attempt.covered_ms);
+        // Run timestamps have millisecond resolution and coverage is clipped to
+        // each run's own window, so the attempt can lose a sub-millisecond tail.
+        assert!((output.coverage[0].covered_ms - expected_attempt.covered_ms).abs() < 1.0);
         assert_eq!(output.coverage[1], expected_attempt);
         assert!(store.phase_spans(&mission.id).unwrap().spans.is_empty());
         assert_eq!(output.inspected_artifact_count, 0);
