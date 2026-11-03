@@ -590,10 +590,12 @@ fn run_with_scheduler(
     let scheduler = AgentTaskScheduler::new_controller(executor)
         .with_harvest_context(harvest_context)
         .with_lifecycle_store(store.clone());
+    // Each executor attempt records its own `provider` span inside the
+    // scheduler; this span is the scheduler pass around them.
     let observation = store.open_observation_initialized()?;
     observation.time_run_phase_with_outcome(
         run_id,
-        "provider",
+        "schedule",
         || {
             Ok(scheduler
                 .with_run_id(run_id.to_string())
