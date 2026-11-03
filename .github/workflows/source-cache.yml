@@ -34,8 +34,8 @@ jobs:
         with:
           fetch-depth: 0
 
-      # Keep in step with action-ref in ci.yml: the cache key must match the
-      # one CI's Binary setup resolves.
+      # Keep in step with action-ref and source-build-profile in ci.yml: the
+      # cache key must match the one CI's Binary setup resolves.
       - name: Check out Homeboy Action
         uses: actions/checkout@v6
         with:
@@ -50,5 +50,7 @@ jobs:
           prepare-only: 'true'
           component: homeboy
           source: .
+          # Must match ci.yml: the profile is part of the cache key.
+          source-build-profile: dev
           setup-timeout-seconds: '2400'
           auto-setup: 'false'

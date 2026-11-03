@@ -53,6 +53,9 @@ jobs:
       action-ref: b89cc50767e9e0c46865f20bf2cd5d0c43b5a71c
       extension-ref: 5417472dc7ad50a0dc67530fccef315f4dad637a
       source: .
+      # The candidate only drives `review`; its own crates rebuild on every PR,
+      # and dev compiles them ~6x faster than release (#17294).
+      source-build-profile: dev
       scope: auto
       differential-gating: 'true'
       baseline-commands: review lint,review test --skip-lint
