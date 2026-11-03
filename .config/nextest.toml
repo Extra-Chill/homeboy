@@ -1,5 +1,15 @@
+[test-groups]
+# Tests that run real Homeboy daemons, cooks, and SIGKILL chaos. Each owns
+# process trees and bounded recovery probes, so unbounded parallelism starves
+# them into timeouts. Cap them instead of loosening their deadlines.
+live-daemons = { max-threads = 4 }
+
 [profile.default]
 slow-timeout = { period = "30s", terminate-after = 4 }
+
+[[profile.default.overrides]]
+filter = 'binary(cook_lab_handoff_test) | binary(execution_step_chaos) | binary(daemon_ensure_running_cli) | test(repository_cleanliness_fixture_cook_leaves_only_the_provider_edit)'
+test-group = "live-daemons"
 
 # The same-child recovery proof owns two local Cook daemons, a live provider,
 # and a real Cargo gate. Reserve the runner while it observes the lock/lease
