@@ -248,14 +248,6 @@ function notificationPayload(env) {
   }
 }
 
-function bounded(text, max) {
-  const clean = compact(text);
-  if ([...clean].length <= max) return clean;
-  const prefix = [...clean].slice(0, max - 1).join('');
-  const space = prefix.lastIndexOf(' ');
-  return `${space > 0 ? prefix.slice(0, space) : prefix}…`;
-}
-
 function discordLink(label, url) {
   return `[${compact(label).replace(/[\[\]]/g, '')}](<${compact(url)}>)`;
 }
@@ -268,30 +260,13 @@ export function renderContent(args, env = process.env) {
   const payload = notificationPayload(env);
   const kind = payload?.kind || env.HOMEBOY_NOTIFY_KIND;
   const marker = { completed: '✅', needs_attention: '⚠️', cancelled: '⏹', queued: '⏳', started: '⏳', progress: '⏳' }[kind] || 'ℹ️';
-  const references = [...(payload?.links || []).map((link) => ({ label: link.label, url: link.url })),
+  const references = [...(payload?.links || []),
     ...(payload?.actions || []).filter((action) => isUrl(action.command)).map((action) => ({ label: action.label, url: action.command }))];
-  const primary = references.find((link) => /\/pull\/\d+/.test(link.url));
-  let title = compact(payload?.title || args.title);
-  if (primary) {
-    const match = /\/([^/]+)\/pull\/(\d+)/.exec(primary.url);
-    const identity = `${match[1]}#${match[2]}`;
-    if (title.startsWith(`${identity}:`)) title = title.slice(identity.length + 1).trim();
-    title = `${discordLink(identity, primary.url)} ${bounded(title, 80)}`;
-  } else {
-    title = bounded(title, 80);
-    if (!payload?.title) title = `${compact(payload?.subject?.component || args.runId)}: ${title}`;
-  }
-  const lines = [`${marker} ${title}`];
-  const facts = payload ? (payload.facts || []).map((fact) => {
-    const label = compact(fact.label);
-    const value = compact(fact.value);
-    if (label === 'Stop reason' || label === 'Reason') return bounded(value.match(/^.*?[.!?](?:\s|$)/)?.[0] || value, 200);
-    if (label === 'Gates') return `gates ${value}`;
-    if (label === 'Model' || label === 'Duration') return value;
-    if (label === 'Closes' || label === 'Related issue') return `${label} ${value}`;
-    return `${label}: ${value}`;
-  }) : [compact(args.body)];
-  facts.push(...references.filter((link) => link !== primary).map((link) => discordLink(link.label, link.url)));
+  const primary = references.find((link) => link.primary);
+  const title = payload?.title || `${args.runId}: ${args.title}`;
+  const lines = [`${marker} ${primary ? `${discordLink(primary.label, primary.url)} ` : ''}${title}`];
+  const facts = payload ? (payload.facts || []).map((fact) => fact.value) : [args.body];
+  facts.unshift(...references.filter((link) => link !== primary).map((link) => discordLink(link.label, link.url)));
   if (facts.length) lines.push(facts.join(' · '));
   const action = kind === 'needs_attention' && payload?.actions?.find((entry) => !isUrl(entry.command));
   if (action) lines.push(`next: \`${compact(action.command)}\``);

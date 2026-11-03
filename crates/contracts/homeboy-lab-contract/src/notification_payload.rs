@@ -137,8 +137,8 @@ impl NotifySubject {
     }
 }
 
-/// One ordered label/value fact. Producers put the facts an operator would
-/// otherwise have to re-gather by hand here.
+/// One ordered fact. `label` identifies it for structured consumers; `value`
+/// contains its final, transport-neutral wording and is rendered verbatim.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NotifyFact {
     pub label: String,
@@ -184,6 +184,9 @@ impl NotifyAction {
 pub struct NotifyLink {
     pub label: String,
     pub url: String,
+    /// The subject link is rendered beside the title; other links are references.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub primary: bool,
 }
 
 impl NotifyLink {
@@ -191,7 +194,13 @@ impl NotifyLink {
         Self {
             label: label.into(),
             url: url.into(),
+            primary: false,
         }
+    }
+
+    pub fn as_primary(mut self) -> Self {
+        self.primary = true;
+        self
     }
 }
 
@@ -394,11 +403,7 @@ impl NotifyPayload {
                 lines.push(format!("Attempt: {attempt}"));
             }
         }
-        let facts: Vec<_> = self
-            .facts
-            .iter()
-            .map(|fact| format!("{}: {}", fact.label, fact.value))
-            .collect();
+        let facts: Vec<_> = self.facts.iter().map(|fact| fact.value.clone()).collect();
         if self.title.is_some() && !facts.is_empty() {
             lines.push(facts.join(" · "));
         } else {
@@ -505,8 +510,8 @@ mod tests {
         assert!(body.contains("Component: homeboy"), "{body}");
         assert!(body.contains("Attempt: 2"), "{body}");
         assert!(!body.contains("Phase:"), "{body}");
-        assert!(body.contains("Status: failed"), "{body}");
-        assert!(body.contains("Stop reason: gate_failed"), "{body}");
+        assert!(body.contains("failed"), "{body}");
+        assert!(body.contains("gate_failed"), "{body}");
         assert!(
             body.contains("Next — diagnose: homeboy agent-task diagnose cook-abc"),
             "{body}"

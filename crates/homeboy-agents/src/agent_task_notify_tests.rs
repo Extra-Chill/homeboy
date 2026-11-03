@@ -79,8 +79,8 @@ fn terminal_outcomes_lead_with_work_and_offer_only_useful_actions() {
             (
                 "succeeded",
                 0,
-                "homeboy#42: Fix notifications",
-                vec!["Closes", "Model", "Gates"],
+                "Fix notifications",
+                vec!["Model", "Gates"],
                 vec![],
             ),
             (
@@ -169,9 +169,7 @@ fn terminal_outcomes_lead_with_work_and_offer_only_useful_actions() {
             assert!(!body.contains("--watch"), "{body}");
             assert!(!body.contains("run-1"), "{body}");
             if success {
-                assert!(
-                    body.contains("Pull request: https://github.com/Extra-Chill/homeboy/pull/42")
-                );
+                assert!(body.contains("homeboy#42: https://github.com/Extra-Chill/homeboy/pull/42"));
                 assert!(body.contains("1/1 passed"));
                 assert!(!labels.contains(&"Failure classification"));
                 assert!(!labels.contains(&"Stop reason"));
@@ -235,11 +233,13 @@ fn terminal_notification_names_skipped_provider_routes() {
     let payload = terminal_payload(&route_note_report, None, 1);
     let body = payload.render_body();
     assert!(
-        body.contains("Skipped route: Ran on openai/gpt-6-luna; anthropic/claude-sonnet-5-5 skipped: credentials_unusable"),
+        body.contains(
+            "Ran on openai/gpt-6-luna; anthropic/claude-sonnet-5-5 skipped: credentials_unusable"
+        ),
         "{body}"
     );
     assert!(
-        body.contains("Skipped route: xai/grok-4.7 skipped: usage_capped"),
+        body.contains("xai/grok-4.7 skipped: usage_capped"),
         "{body}"
     );
 
@@ -382,7 +382,7 @@ fn started_payload_answers_what_did_i_just_start() {
         body.contains("homeboy: fix the notifier — started"),
         "{body}"
     );
-    assert!(body.contains("Attempt budget: 3"), "{body}");
+    assert!(body.contains("3"), "{body}");
     assert!(payload.actions.is_empty());
 }
 
@@ -637,7 +637,7 @@ fn pending_gate_fix_and_finalization_rejection_do_not_announce_success() {
     pending.stop_reason = Some("gate fix pending".to_string());
     let gate = terminal_payload(&pending, None, 1);
     assert_eq!(gate.kind, NotifyEventKind::NeedsAttention);
-    assert!(gate.render_body().contains("Gates: failed"));
+    assert!(gate.render_body().contains("gates failed"));
     assert!(gate.render_body().contains("gate fix pending"));
 
     let mut rejected = report(
@@ -1137,7 +1137,7 @@ fn pull_request_link_reads_every_tolerated_receipt_identity() {
         })),
     );
     let payload = terminal_payload(&report, None, 0);
-    assert_eq!(payload.links[0].label, "Pull request");
+    assert_eq!(payload.links[0].label, "example.test#44");
     assert_eq!(payload.links[0].url, "https://example.test/pull/44");
 }
 
@@ -1169,4 +1169,42 @@ fn notification_text_bounds_preserve_words_and_first_sentence() {
         assert_eq!(actual, expected);
         assert!(actual.chars().count() <= max);
     }
+}
+
+#[test]
+fn discord_notification_payload_fixtures() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let mut cases = Vec::new();
+        for (name, status, title) in [
+            ("success", "succeeded", "Fix notifications".to_string()),
+            ("attention", "gate_failed", "Work on Studio draft PR and resolve all of the outstanding publication and validation concerns ".repeat(3)),
+            ("cancelled", "cancelled", "Fix notifications".to_string()),
+        ] {
+            let mut report = report(status, Some(json!({
+                "status": "review_ready", "title": title,
+                "pr_url": "https://github.example/Extra-Chill/homeboy/pull/123",
+                "pr_action": "created pull request", "ai_model": "gpt-6.1-sol",
+                "gate_results": [{"name": "lint", "status": if status == "succeeded" {"passed"} else {"failed"}}],
+                "review_dossier": {"source_relationships": [{"kind": "closes", "reference": "#100"}]}
+            })));
+            report.stop_reason = Some("Lint failed. Internal detail follows.".to_string());
+            report.failure_context = Some(failure_context());
+            cases.push(json!({"name": name, "payload": terminal_payload(&report, Some("studio"), if status == "succeeded" {0} else {1})}));
+        }
+        let mut retry = NotifyPayload::new(
+            NotifyEventKind::Progress,
+            NotifySubject::new("agent_task_cook", "cook-abc"),
+        )
+        .with_fact("Reason", "the previous attempt did not pass its gates");
+        retry.title = Some(terminal_work::retry_title("cook-abc", Some("studio"), 2, 3));
+        cases.push(json!({"name": "retry", "payload": retry}));
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../extensions/discord/tests/fixtures/notify-payloads.json");
+        let json = format!("{}\n", serde_json::to_string_pretty(&cases).unwrap());
+        if std::env::var_os("UPDATE_NOTIFY_FIXTURES").is_some() {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, &json).unwrap();
+        }
+        assert_eq!(std::fs::read_to_string(path).unwrap(), json);
+    });
 }
