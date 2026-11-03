@@ -106,12 +106,27 @@ pub(crate) fn validation_dependency_workspaces(
         return Ok(Vec::new());
     };
 
-    unique_dependency_ids(dependency_ids)
-        .into_iter()
-        .map(|dependency_id| {
-            prepare_validation_dependency_workspace(parent, &dependency_id, excludes)
-        })
-        .collect()
+    let mut workspaces = Vec::new();
+    for dependency_id in unique_dependency_ids(dependency_ids) {
+        let in_source =
+            homeboy_core::hygiene::resolve_validation_dependency_path(local_path, &dependency_id)
+                .is_ok_and(|path| {
+                    homeboy_core::hygiene::validation_dependency_is_in_source_repository(
+                        local_path, &path,
+                    )
+                });
+        if in_source {
+            // The primary source sync already carries this dependency at its
+            // repository-relative location; never prepare a second checkout.
+            continue;
+        }
+        workspaces.push(prepare_validation_dependency_workspace(
+            parent,
+            &dependency_id,
+            excludes,
+        )?);
+    }
+    Ok(workspaces)
 }
 
 /// Excludes for copying a validation dependency checkout.
@@ -665,6 +680,74 @@ mod tests {
         git(path, &["commit", "-m", "initial"]);
         git(path, &["push", "-u", "origin", "main"]);
         remote
+    }
+
+    #[test]
+    fn monorepo_dependency_stays_inside_the_synced_source_tree() {
+        with_isolated_home(|_| {
+            let repo = tempfile::tempdir().expect("repo");
+            let a = repo.path().join("plugins/a");
+            let b = repo.path().join("plugins/b");
+            fs::create_dir_all(&a).unwrap();
+            fs::create_dir_all(&b).unwrap();
+            fs::write(
+                a.join("homeboy.json"),
+                r#"{"id":"a","validation_dependencies":["b"]}"#,
+            )
+            .unwrap();
+            fs::write(b.join("homeboy.json"), r#"{"id":"b"}"#).unwrap();
+            let _upstream = init_checkout_with_upstream(repo.path());
+            let selected = vec!["b".to_string()];
+            for source in [a.as_path(), repo.path()] {
+                assert!(
+                    validation_dependency_workspaces(source, &[], Some(&selected))
+                        .unwrap()
+                        .is_empty()
+                );
+                assert!(
+                    crate::lab_workspaces_deps::discovered_validation_dependency_workspaces(
+                        source,
+                        &[("validation_dependencies".into(), serde_json::json!(["b"]))],
+                    )
+                    .unwrap()
+                    .is_empty()
+                );
+            }
+            let runner_root = tempfile::tempdir().expect("runner root");
+            super::super::create(
+                &serde_json::json!({"id":"monorepo-lab", "kind":"local", "workspace_root":runner_root.path()}).to_string(),
+                false,
+            ).unwrap();
+            let (output, code) = sync_workspace(
+                "monorepo-lab",
+                RunnerWorkspaceSyncOptions {
+                    path: repo.path().display().to_string(),
+                    mode: RunnerWorkspaceSyncMode::SnapshotGit,
+                    controller_routed_git: false,
+                    changed_since_base: None,
+                    git_fetch_refs: Vec::new(),
+                    snapshot_includes: Vec::new(),
+                    allow_dirty_lab_workspace: false,
+                    validation_dependency_ids: Some(selected),
+                    run_isolation_token: None,
+                },
+            )
+            .unwrap();
+            assert_eq!(code, 0);
+            assert!(output.validation_dependencies.is_empty());
+            let remote = Path::new(&output.remote_path);
+            assert!(remote.join("plugins/b/homeboy.json").is_file());
+            assert!(!remote.join("plugins/b/.git").exists());
+            for source in [remote.join("plugins/a"), remote.to_path_buf()] {
+                homeboy_core::hygiene::require_dependency_hygiene_for_source_with_settings(
+                    &source,
+                    None,
+                    &[("validation_dependencies".into(), serde_json::json!(["b"]))],
+                    homeboy_core::hygiene::DependencyHygieneOptions { allow_stale: false },
+                )
+                .expect("Lab-side preflight uses the primary checkout");
+            }
+        });
     }
 
     #[test]

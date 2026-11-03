@@ -267,16 +267,32 @@ fn dependency_checkouts_for_settings(
 ) -> Result<Vec<DependencyCheckout>> {
     let ids = effective_validation_dependency_ids(source_path, settings)?;
 
-    ids.into_iter()
-        .map(|id| {
-            let path = resolve_validation_dependency_path(source_path, &id)?;
-            Ok(DependencyCheckout {
-                id,
-                role: "validation_dependency".to_string(),
-                path,
-            })
-        })
-        .collect()
+    let mut checkouts = Vec::new();
+    for id in ids {
+        let path = resolve_validation_dependency_path(source_path, &id)?;
+        // The primary checkout owns hygiene and lifecycle for its repository.
+        if validation_dependency_is_in_source_repository(source_path, &path) {
+            continue;
+        }
+        checkouts.push(DependencyCheckout {
+            id,
+            role: "validation_dependency".to_string(),
+            path,
+        });
+    }
+    Ok(checkouts)
+}
+
+/// Compare enclosing Git roots, not ancestry: nested independent repositories
+/// still need their own hygiene and Lab source evidence.
+pub fn validation_dependency_is_in_source_repository(source: &Path, dependency: &Path) -> bool {
+    match (
+        crate::git::repo_root(source),
+        crate::git::repo_root(dependency),
+    ) {
+        (Some(source_root), Some(dependency_root)) => source_root == dependency_root,
+        _ => false,
+    }
 }
 
 /// Select validation dependencies for one invocation. An explicit setting
@@ -409,6 +425,31 @@ pub fn resolve_validation_dependency_path(source_path: &Path, dependency: &str) 
         }
     }
 
+    // A Lab source workspace can be rooted at the repository rather than the
+    // component directory. Resolve declared component IDs inside that tree
+    // before considering unrelated registered controller checkouts.
+    if let Some(root) = crate::git::repo_root(source_path) {
+        if let Some(manifests) = crate::git::output_allow_empty(
+            &root,
+            &["ls-files", "-z", "--", "homeboy.json", "**/homeboy.json"],
+        ) {
+            for manifest in manifests.split('\0').filter(|path| !path.is_empty()) {
+                let manifest_path = root.join(manifest);
+                let matches = fs::read_to_string(&manifest_path)
+                    .ok()
+                    .and_then(|content| serde_json::from_str::<Value>(&content).ok())
+                    .is_some_and(|value| {
+                        value.get("id").and_then(Value::as_str) == Some(dependency)
+                    });
+                if matches {
+                    if let Some(parent) = manifest_path.parent() {
+                        return canonical_existing_dir(parent, dependency);
+                    }
+                }
+            }
+        }
+    }
+
     // A path-like declaration that is not materialized next to this checkout
     // (a Cook attempt workspace, a Lab staging root) still names a component:
     // its final segment. Resolve that registered component instead of
@@ -469,8 +510,11 @@ fn checkout_hygiene_snapshot(
     checkout: DependencyCheckout,
     allowed: bool,
 ) -> Result<CheckoutHygieneSnapshot> {
-    let path = checkout.path;
-    let managed_snapshot = is_managed_extension_snapshot(&path);
+    let checkout_path = checkout.path;
+    let managed_snapshot = is_managed_extension_snapshot(&checkout_path);
+    // Git metadata and refresh operations belong to the enclosing repository,
+    // even when the dependency is only a component directory within it.
+    let path = crate::git::repo_root(&checkout_path).unwrap_or_else(|| checkout_path.clone());
     let mut head = crate::git::output_allow_empty(&path, &["rev-parse", "HEAD"]);
     let branch = crate::git::output_allow_empty(&path, &["rev-parse", "--abbrev-ref", "HEAD"]);
     let upstream =
@@ -505,7 +549,7 @@ fn checkout_hygiene_snapshot(
     let mut snapshot = CheckoutHygieneSnapshot {
         id: checkout.id,
         role: checkout.role,
-        path: path.to_string_lossy().to_string(),
+        path: checkout_path.to_string_lossy().to_string(),
         head,
         branch,
         upstream,
@@ -1086,6 +1130,59 @@ mod tests {
         );
         git(path, &["push", "-u", "origin", "main"]);
         remote
+    }
+
+    #[test]
+    fn monorepo_validation_dependencies_are_covered_by_the_source_checkout() {
+        let repo = tempfile::tempdir().unwrap();
+        let a = repo.path().join("plugins/a");
+        let b = repo.path().join("plugins/b");
+        fs::create_dir_all(&a).unwrap();
+        fs::create_dir_all(&b).unwrap();
+        fs::write(
+            a.join("homeboy.json"),
+            r#"{"id":"a","validation_dependencies":["b"]}"#,
+        )
+        .unwrap();
+        fs::write(b.join("homeboy.json"), r#"{"id":"b"}"#).unwrap();
+        let _remote = init_repo_with_upstream(repo.path());
+        assert!(!b.join(".git").exists());
+
+        // Controller component preflight and Lab repository-root preflight
+        // (with the selected component's settings) share the same ownership.
+        for source in [a.as_path(), repo.path()] {
+            assert_eq!(
+                resolve_validation_dependency_path(source, "b").unwrap(),
+                b.canonicalize().unwrap()
+            );
+            let snapshots = require_dependency_hygiene_for_source_with_settings(
+                source,
+                None,
+                &[("validation_dependencies".into(), serde_json::json!(["b"]))],
+                DependencyHygieneOptions { allow_stale: false },
+            )
+            .unwrap();
+            assert!(
+                snapshots.is_empty(),
+                "primary checkout owns in-repo hygiene"
+            );
+        }
+
+        // When used by a different source repository, a component still proves
+        // its metadata from its enclosing checkout, not plugins/b/.git.
+        let snapshot = checkout_hygiene_snapshot(
+            DependencyCheckout {
+                id: "b".into(),
+                role: "validation_dependency".into(),
+                path: b.clone(),
+            },
+            false,
+        )
+        .unwrap();
+        assert!(!snapshot.is_stale_or_dirty(), "{snapshot:?}");
+        assert!(snapshot.head.is_some());
+        assert_eq!(snapshot.upstream.as_deref(), Some("origin/main"));
+        assert_eq!(snapshot.path, b.display().to_string());
     }
 
     #[test]
