@@ -137,8 +137,8 @@ impl NotifySubject {
     }
 }
 
-/// One ordered label/value fact. Producers put the facts an operator would
-/// otherwise have to re-gather by hand here.
+/// One ordered fact. `label` identifies it for structured consumers; `value`
+/// contains its final, transport-neutral wording and is rendered verbatim.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NotifyFact {
     pub label: String,
@@ -184,6 +184,9 @@ impl NotifyAction {
 pub struct NotifyLink {
     pub label: String,
     pub url: String,
+    /// The subject link is rendered beside the title; other links are references.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub primary: bool,
 }
 
 impl NotifyLink {
@@ -191,7 +194,13 @@ impl NotifyLink {
         Self {
             label: label.into(),
             url: url.into(),
+            primary: false,
         }
+    }
+
+    pub fn as_primary(mut self) -> Self {
+        self.primary = true;
+        self
     }
 }
 
@@ -383,14 +392,15 @@ impl NotifyPayload {
             {
                 lines.push(format!("Component: {component}"));
             }
-            if let Some(parent) = subject.parent_id.as_deref().filter(|it| !it.is_empty()) {
+            if let Some(parent) = subject
+                .parent_id
+                .as_deref()
+                .filter(|it| !it.is_empty() && self.title.is_none())
+            {
                 lines.push(format!("Batch: {parent}"));
             }
-            if let Some(attempt) = subject.attempt {
+            if let Some(attempt) = subject.attempt.filter(|_| self.title.is_none()) {
                 lines.push(format!("Attempt: {attempt}"));
-            }
-            if let Some(phase) = subject.phase.as_deref().filter(|it| !it.is_empty()) {
-                lines.push(format!("Phase: {phase}"));
             }
         }
         let facts: Vec<_> = self
@@ -503,7 +513,7 @@ mod tests {
         let body = cook_payload().render_body();
         assert!(body.contains("Component: homeboy"), "{body}");
         assert!(body.contains("Attempt: 2"), "{body}");
-        assert!(body.contains("Phase: promotion"), "{body}");
+        assert!(!body.contains("Phase:"), "{body}");
         assert!(body.contains("Status: failed"), "{body}");
         assert!(body.contains("Stop reason: gate_failed"), "{body}");
         assert!(
@@ -511,6 +521,22 @@ mod tests {
             "{body}"
         );
         assert!(body.contains("https://example.test/pull/1"), "{body}");
+    }
+
+    #[test]
+    fn titled_run_body_preserves_fact_labels() {
+        let mut payload = NotifyPayload::new(
+            NotifyEventKind::Completed,
+            NotifySubject::new("run", "run-1"),
+        )
+        .with_fact("Status", "pass")
+        .with_fact("Command", "homeboy cleanup artifacts")
+        .with_fact("Finished", "2026-11-02T18:28:16Z");
+        payload.title = Some("homeboy run pass".to_string());
+        assert_eq!(
+            payload.render_body(),
+            "homeboy run pass\nStatus: pass · Command: homeboy cleanup artifacts · Finished: 2026-11-02T18:28:16Z"
+        );
     }
 
     #[test]

@@ -103,6 +103,7 @@ async function testOwningSessionThreadDeliversThroughCommandSender() {
         DISCORD_BOT_TOKEN: secretToken,
         HOMEBOY_SESSION_THREAD_ID: threadOneId,
         HOMEBOY_SESSION_SEND_COMMAND: stub,
+        HOMEBOY_NOTIFY_KIND: 'started',
         DISCORD_API_BASE_URL: `${baseUrl}/api/v10`,
       },
       { route: threadRoute(threadOneId), status: 'started' },
@@ -119,6 +120,7 @@ async function testOwningSessionThreadDeliversThroughCommandSender() {
       {
         HOMEBOY_SESSION_THREAD_ID: threadOneId,
         HOMEBOY_SESSION_SEND_COMMAND: stub,
+        HOMEBOY_NOTIFY_KIND: 'needs_attention',
         DISCORD_API_BASE_URL: `${baseUrl}/api/v10`,
       },
       { route: threadRoute(threadTwoId), status: 'durable_failure', body: 'cook needs attention' },
@@ -245,7 +247,7 @@ async function testSessionWithoutSenderUsesRest() {
 async function testProgressOnlyWithoutPostDestinationSkips() {
   const { stub, cleanup } = argvStub();
   const run = await notifyRaw(
-    { HOMEBOY_SESSION_SEND_COMMAND: stub },
+    { HOMEBOY_SESSION_SEND_COMMAND: stub, HOMEBOY_NOTIFY_KIND: 'started' },
     { route: threadRoute(threadOneId), status: 'started' },
   );
   assert.equal(run.code, 0);
@@ -530,67 +532,35 @@ async function testTruncation() {
 }
 
 async function testRenderingFidelity() {
-  const runId = 'agent-task-render-test';
   const schema = 'homeboy/notification-payload/v1';
-  const payload = {
-    schema,
-    kind: 'completed',
-    subject: { kind: 'agent_task_cook', id: runId, component: 'homeboy', attempt: 1 },
-    facts: [{ label: 'Gates', value: 'passed' }, { label: 'Attempts', value: '1' }],
-    links: [{ label: 'Pull request', url: 'https://github.com/Extra-Chill/homeboy/pull/123' }],
-    actions: [{ label: 'Details', command: `homeboy agent-task status ${runId}`, kind: 'show' }],
-    attachments: [{ id: 'ignored', kind: 'artifact', uri: 'file:///tmp/proof', fetch_command: 'ignored' }],
-  };
-  // Real LF and CRLF input: do not mirror rendering with escaped backslash-n.
-  const body = '  Gates:   passed\r\n\n Attempts:  1\n  Fallback only  ';
-  const structuredLines = [
-    'Gates: passed · Attempts: 1',
-    'Pull request: https://github.com/Extra-Chill/homeboy/pull/123',
-    `Details: \`homeboy agent-task status ${runId}\``,
-  ];
-  const fallbackLines = [`Run: ${runId}`, 'Gates: passed', 'Attempts: 1', 'Fallback only'];
+  const fixtures = JSON.parse(fs.readFileSync(path.join(extensionPath, 'tests/fixtures/notify-payloads.json'), 'utf8'));
+  const expectedOutput = {
+  "success": "✅ [homeboy#123](<https://github.example/Extra-Chill/homeboy/pull/123>) Fix notifications\n[Closes homeboy#100](<https://github.example/Extra-Chill/homeboy/issues/100>) · Model: gpt-6.1-sol · Gates: 1/1 passed",
+  "attention": "⚠️ studio: Work on Studio draft PR and resolve all of the… — needs attention\nStop reason: Lint failed. · Gates: lint failed\nnext: `homeboy agent-task diagnose cook-abc`",
+  "cancelled": "⏹ studio: Fix notifications — cancelled\nStop reason: cancelled by operator",
+  "retry": "⏳ studio: Cook task — attempt 2 of 3\nReason: the previous attempt did not pass its gates"
+};
   const cases = [
-    { name: 'payload', env: { HOMEBOY_NOTIFY_PAYLOAD_SCHEMA: schema, HOMEBOY_NOTIFY_PAYLOAD: JSON.stringify(payload) }, lines: structuredLines },
-    { name: 'no payload', env: {}, lines: fallbackLines },
-    { name: 'unknown schema', env: { HOMEBOY_NOTIFY_PAYLOAD_SCHEMA: 'homeboy/notification-payload/v2', HOMEBOY_NOTIFY_PAYLOAD: JSON.stringify(payload) }, lines: fallbackLines },
-    { name: 'missing schema', env: { HOMEBOY_NOTIFY_PAYLOAD: JSON.stringify(payload) }, lines: fallbackLines },
-    { name: 'invalid JSON', env: { HOMEBOY_NOTIFY_PAYLOAD_SCHEMA: schema, HOMEBOY_NOTIFY_PAYLOAD: '{' }, lines: fallbackLines },
-    { name: 'malformed fields', env: { HOMEBOY_NOTIFY_PAYLOAD_SCHEMA: schema, HOMEBOY_NOTIFY_PAYLOAD: JSON.stringify({ actions: [{}] }) }, lines: fallbackLines },
-    { name: 'payload without actions', env: { HOMEBOY_NOTIFY_PAYLOAD_SCHEMA: schema, HOMEBOY_NOTIFY_PAYLOAD: JSON.stringify({ ...payload, actions: [] }) }, lines: [`Run: ${runId}`, ...structuredLines.slice(0, 2)] },
+    ...fixtures.map((entry) => ({ ...entry, expected: expectedOutput[entry.name] })),
+    { name: 'run facts preserve their labels', payload: { kind: 'completed', title: 'homeboy run pass', subject: { kind: 'run', id: 'run-1' }, facts: [{ label: 'Status', value: 'pass' }, { label: 'Command', value: 'homeboy cleanup artifacts' }, { label: 'Finished', value: '2026-11-02T18:28:16Z' }] }, expected: '✅ homeboy run pass\nStatus: pass · Command: homeboy cleanup artifacts · Finished: 2026-11-02T18:28:16Z' },
+    { name: 'URL action remains a reference', payload: { kind: 'completed', title: 'Done', actions: [{ label: 'review', command: 'https://forge.test/review/1' }] }, expected: '✅ Done\n[review](<https://forge.test/review/1>)' },
+    { name: 'no title or URL parsing', payload: { kind: 'started', title: 'repo#1: Start', links: [{ label: 'subject', url: 'https://forge.test/ticket/1', primary: true }, { label: 'PR', url: 'https://forge.test/repo/pull/1' }] }, expected: '⏳ [subject](<https://forge.test/ticket/1>) repo#1: Start\n[PR](<https://forge.test/repo/pull/1>)' },
+    { name: 'facts are label independent and text is not bounded', payload: { kind: 'needs_attention', title: 'long '.repeat(30), facts: ['Model', 'Duration', 'Gates', 'Closes', 'Stop reason', 'Reason', 'custom'].map((label) => ({ label, value: 'First sentence. Second sentence.' })) }, expected: `⚠️ ${'long '.repeat(30)}\n${['Model', 'Duration', 'Gates', 'Closes', 'Stop reason', 'Reason', 'custom'].map((label) => `${label}: First sentence. Second sentence.`).join(' · ')}` },
   ];
-  for (const { name, env, lines } of cases) {
-    await withServer(async ({ baseUrl, requests }) => {
-      await notify(
-        { DISCORD_BOT_TOKEN: secretToken, DISCORD_API_BASE_URL: `${baseUrl}/api/v10`, ...env },
-        { route: threadRoute(threadOneId), runId, status: 'review_ready', body },
-      );
-      const content = requests[0].body.content;
-      assert.ok(content.includes(String.fromCharCode(10)), name);
-      assert.deepEqual(content.split(String.fromCharCode(10)), ['✅ **homeboy run pass**', ...lines], name);
-      assert.doesNotMatch(content, /\[object Object\]|\\\\n/, name);
-      assert.equal(content.split(runId).length - 1, 1, name);
-      assert.ok(content.length <= 2000, name);
-    });
+  for (const { name, payload, expected } of cases) {
+    for (const mode of ['bot', 'webhook']) {
+      await withServer(async ({ baseUrl, requests }) => {
+        await notify({
+          ...(mode === 'bot' ? { DISCORD_BOT_TOKEN: secretToken, DISCORD_API_BASE_URL: `${baseUrl}/api/v10` } : { DISCORD_WEBHOOK_URL: `${baseUrl}${secretWebhook}` }),
+          HOMEBOY_NOTIFY_PAYLOAD_SCHEMA: schema,
+          HOMEBOY_NOTIFY_PAYLOAD: JSON.stringify(payload),
+        }, mode === 'bot' ? { route: channelRoute(channelId) } : {});
+        assert.equal(requests[0].body.content, expected, name);
+        assert.equal(requests[0].body.flags, 4, name);
+        assert.ok(requests[0].body.content.split('\n').length <= 3, name);
+      });
+    }
   }
-  for (const [status, marker] of [
-    ['succeeded', '✅'], ['passed', '✅'], ['completed', '✅'], ['cancelled', '⏹'],
-    ['failed', '⚠️'], ['not_completed', '⚠️'], ['unsucceeded', '⚠️'],
-  ]) {
-    await withServer(async ({ baseUrl, requests }) => {
-      await notify({ DISCORD_WEBHOOK_URL: `${baseUrl}${secretWebhook}` }, { status, body });
-      assert.ok(requests[0].body.content.startsWith(`${marker} **`), status);
-    });
-  }
-  await withServer(async ({ baseUrl, requests }) => {
-    const result = await notify({
-      DISCORD_WEBHOOK_URL: `${baseUrl}${secretWebhook}`,
-      HOMEBOY_NOTIFY_PAYLOAD_SCHEMA: schema,
-      HOMEBOY_NOTIFY_PAYLOAD: JSON.stringify({ ...payload, facts: [{ label: 'Detail', value: '😀'.repeat(2000) }] }),
-    }, { body });
-    assert.ok(requests[0].body.content.length <= 2000);
-    assert.equal(result.delivery.truncated, true);
-    assert.ok(requests[0].body.content.endsWith('...'));
-  });
 }
 
 async function testRedactionAndDryRun() {
