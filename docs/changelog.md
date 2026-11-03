@@ -4,6 +4,17 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.444.16] - 2026-11-03
+
+### Changed
+- seed the candidate source cache from main so PRs restore it
+- pin homeboy-action v2.25.6 so PR builds restore the main source cache
+- Attribute runner execution time and summarize cohort coverage
+
+### Fixed
+- Fix validation dependency hygiene for monorepo components
+- accept executable mode tags in receipt manifest validation
+
 ## [0.444.15] - 2026-11-02
 
 ### Fixed
