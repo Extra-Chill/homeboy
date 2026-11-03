@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.444.17] - 2026-11-03
+
+### Changed
+- build the CI candidate binary with the dev profile
+- let the main source-cache build finish instead of cancelling on each release push
+
+### Fixed
+- restore one run per runner execution and one provider span per attempt
+
 ## [0.444.16] - 2026-11-03
 
 ### Changed
