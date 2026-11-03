@@ -695,6 +695,24 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
         .title)
     }
 
+    fn open_pr_body(
+        &mut self,
+        component_id: Option<&str>,
+        path: &str,
+        number: u64,
+    ) -> Result<Option<String>> {
+        let credential = publication_credential(path)?;
+        Ok(pr_view_with_token(
+            component_id,
+            number,
+            Some(path.to_string()),
+            credential
+                .as_ref()
+                .map(|(_, credential)| credential.token()),
+        )?
+        .body)
+    }
+
     fn verify_remote_candidate(
         &mut self,
         path: &str,

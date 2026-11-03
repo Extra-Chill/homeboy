@@ -94,6 +94,7 @@ mod outputs {
 
     #[derive(Debug, Clone, Serialize)]
     pub struct GithubPrView {
+        pub body: Option<String>,
         pub component_id: String,
         pub owner: String,
         pub repo: String,

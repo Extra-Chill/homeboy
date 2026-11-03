@@ -16,7 +16,7 @@ use serde_json::Value;
 use crate::error::{Error, Result};
 
 /// The union of every field the `gh pr view` consumers request.
-pub const PR_VIEW_JSON_FIELDS: &str = "author,baseRefName,headRefName,headRepository,headRefOid,isDraft,mergedAt,mergeStateStatus,number,reviewDecision,state,statusCheckRollup,title,url";
+pub const PR_VIEW_JSON_FIELDS: &str = "author,body,baseRefName,headRefName,headRepository,headRefOid,isDraft,mergedAt,mergeStateStatus,number,reviewDecision,state,statusCheckRollup,title,url";
 
 /// Build the `gh` argument list for one `pr view` invocation.
 ///
@@ -49,6 +49,8 @@ pub struct PrViewRecord {
     pub url: String,
     #[serde(default)]
     pub title: Option<String>,
+    #[serde(default)]
+    pub body: Option<String>,
     #[serde(default, deserialize_with = "null_as_default")]
     pub state: String,
     #[serde(default, deserialize_with = "null_as_default", rename = "isDraft")]

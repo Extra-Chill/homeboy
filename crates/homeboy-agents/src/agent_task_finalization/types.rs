@@ -556,6 +556,15 @@ pub trait AgentTaskPrFinalizationBackend {
     ) -> Result<Option<String>> {
         Ok(None)
     }
+    /// Existing body, used to preserve closing relationships when regenerating a PR.
+    fn open_pr_body(
+        &mut self,
+        _component_id: Option<&str>,
+        _path: &str,
+        _number: u64,
+    ) -> Result<Option<String>> {
+        Ok(None)
+    }
     /// Finds a prior merged publication for this exact base/head tuple.
     fn find_merged_pr(
         &mut self,

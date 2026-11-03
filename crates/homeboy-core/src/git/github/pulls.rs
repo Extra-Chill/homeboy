@@ -395,6 +395,7 @@ pub fn pr_view_with_token(
     );
 
     Ok(GithubPrView {
+        body: record.body,
         component_id: id,
         owner: repo.owner,
         repo: repo.repo,

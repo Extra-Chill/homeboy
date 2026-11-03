@@ -1741,6 +1741,35 @@ pub fn task_issue_relationship(
     Some(relationship)
 }
 
+/// Reconcile source relationships with the PR being updated. Its own source
+/// reference is not a relationship; closing references from its body survive.
+pub fn reconcile_existing_pr_relationships(
+    relationships: &mut Vec<AgentTaskReviewIssueRelationship>,
+    target_url: &str,
+    existing_body: &str,
+) {
+    let destination = homeboy_core::git::release_download::parse_github_url(target_url);
+    if let Some(target) = task_issue_relationship(target_url, destination.as_ref()) {
+        relationships.retain(|relationship| {
+            relationship.reference != target.reference && relationship.reference != target_url
+        });
+    }
+    let closing = Regex::new(
+        r"(?i)\b(?:close[sd]?|fix(?:es|ed)?|resolve[sd]?)\s+(#[0-9]+|[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[0-9]+|https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/issues/[0-9]+)\b",
+    ).expect("valid closing reference regex");
+    for captures in closing.captures_iter(existing_body) {
+        let relationship = AgentTaskReviewIssueRelationship {
+            kind: AgentTaskReviewIssueRelationshipKind::Closes,
+            reference: captures[1].to_string(),
+        };
+        if validate_issue_relationship(&relationship).is_ok()
+            && !relationships.contains(&relationship)
+        {
+            relationships.push(relationship);
+        }
+    }
+}
+
 fn is_reviewer_url(value: &str) -> bool {
     value.starts_with("https://") && !operator_only_reference(value)
 }
@@ -1917,6 +1946,41 @@ mod tests {
                 .map(|value| value.kind),
             Some(AgentTaskReviewIssueRelationshipKind::Closes)
         );
+    }
+
+    #[test]
+    fn existing_pr_relationships_render_without_self_reference() {
+        let dest = destination("github.com", "Extra-Chill", "homeboy");
+        let target = "https://github.com/Extra-Chill/homeboy/pull/9";
+        for (source, existing_body, expected) in [
+            (target, "Original work.\n\nCloses #7", "Closes #7"),
+            (
+                "https://github.com/Extra-Chill/homeboy/pull/10",
+                "",
+                "Relates to #10",
+            ),
+            (
+                "https://github.com/Extra-Chill/homeboy/issues/7",
+                "",
+                "Closes #7",
+            ),
+        ] {
+            let mut value = dossier();
+            value.source_relationships = task_issue_relationship(source, Some(&dest))
+                .into_iter()
+                .collect();
+            reconcile_existing_pr_relationships(
+                &mut value.source_relationships,
+                target,
+                existing_body,
+            );
+            enrich_dossier(&mut value, &[], &[]);
+            value.validate(&default_profile()).unwrap();
+            let body = render_review_dossier(&value, &default_profile());
+            assert!(body.contains(expected), "{body}");
+            assert!(!body.contains("Relates to #9"), "{body}");
+            assert!(!body.contains(target), "{body}");
+        }
     }
 
     #[test]
