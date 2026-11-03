@@ -393,6 +393,9 @@ fn terminal_payload(
 
     let mut payload = NotifyPayload::new(kind, subject);
     payload.title = Some(metadata.title(kind));
+    if kind == NotifyEventKind::Completed {
+        payload.links.extend(metadata.links.clone());
+    }
     if cancelled {
         payload = payload.with_fact("Stop reason", "cancelled by operator");
     } else if kind == NotifyEventKind::NeedsAttention {
@@ -433,7 +436,7 @@ fn terminal_payload(
                 )
             })
             .collect::<Vec<_>>();
-        payload = payload.with_fact("Gates", gate_summary(&gates));
+        payload = payload.with_fact("Gates", format!("gates {}", gate_summary(&gates)));
     } else if !cancelled {
         if let Some(gates) = report
             .finalization
@@ -449,13 +452,13 @@ fn terminal_payload(
                     ))
                 })
                 .collect::<Vec<_>>();
-            payload = payload.with_fact("Gates", gate_summary(&gates));
+            payload = payload.with_fact("Gates", format!("gates {}", gate_summary(&gates)));
         }
         let status = homeboy_core::cook_status::CookStatus::from_status(&report.status);
         if status.is_gate_failure() && !payload.facts.iter().any(|fact| fact.label == "Gates") {
-            payload = payload.with_fact("Gates", "failed");
+            payload = payload.with_fact("Gates", "gates failed");
         } else if status == homeboy_core::cook_status::CookStatus::GatesDeferred {
-            payload = payload.with_fact("Gates", "deferred");
+            payload = payload.with_fact("Gates", "gates deferred");
         }
     }
 
@@ -468,7 +471,14 @@ fn terminal_payload(
             if let Some(url) = publication.pr_url.as_deref() {
                 if kind == NotifyEventKind::Completed {
                     payload = payload.with_link(
-                        homeboy_core::notification_payload::NotifyLink::new("Pull request", url),
+                        homeboy_core::notification_payload::NotifyLink::new(
+                            metadata
+                                .pr
+                                .clone()
+                                .unwrap_or_else(|| "Pull request".to_string()),
+                            url,
+                        )
+                        .as_primary(),
                     );
                 }
             }

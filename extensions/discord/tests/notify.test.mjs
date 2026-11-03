@@ -533,17 +533,18 @@ async function testTruncation() {
 
 async function testRenderingFidelity() {
   const schema = 'homeboy/notification-payload/v1';
-  const pr = 'https://github.com/Extra-Chill/homeboy/pull/123';
-  const command = 'homeboy agent-task diagnose cook-abc';
+  const fixtures = JSON.parse(fs.readFileSync(path.join(extensionPath, 'tests/fixtures/notify-payloads.json'), 'utf8'));
+  const expectedOutput = {
+  "success": "✅ [homeboy#123](<https://github.example/Extra-Chill/homeboy/pull/123>) Fix notifications\n[Closes homeboy#100](<https://github.example/Extra-Chill/homeboy/issues/100>) · gpt-6.1-sol · gates 1/1 passed",
+  "attention": "⚠️ studio: Work on Studio draft PR and resolve all of the… — needs attention\nLint failed. · gates lint failed\nnext: `homeboy agent-task diagnose cook-abc`",
+  "cancelled": "⏹ studio: Fix notifications — cancelled\ncancelled by operator",
+  "retry": "⏳ studio: Cook task — attempt 2 of 3\nthe previous attempt did not pass its gates"
+};
   const cases = [
-    { name: 'success', payload: { kind: 'completed', title: 'homeboy#123: Fix notifications', links: [{ label: 'PR', url: pr }], facts: [{ label: 'Closes', value: '[homeboy#100](https://github.com/Extra-Chill/homeboy/issues/100)' }, { label: 'Gates', value: '2/2 passed' }] }, expected: `✅ [homeboy#123](<${pr}>) Fix notifications\nCloses [homeboy#100](https://github.com/Extra-Chill/homeboy/issues/100) · gates 2/2 passed` },
-    { name: 'attention uses only first command', payload: { kind: 'needs_attention', title: 'homeboy: Fix notifications — needs attention', facts: [{ label: 'Stop reason', value: 'Lint failed. Internal detail follows.' }], actions: [{ label: 'diagnose', command }, { label: 'recover', command: 'not recommended' }] }, expected: `⚠️ homeboy: Fix notifications — needs attention\nLint failed.\nnext: \`${command}\`` },
-    { name: 'cancelled needs no action', payload: { kind: 'cancelled', title: 'homeboy: Fix notifications — cancelled', facts: [{ label: 'Stop reason', value: 'cancelled by operator' }], actions: [{ label: 'details', command }] }, expected: '⏹ homeboy: Fix notifications — cancelled\ncancelled by operator' },
-    { name: 'retry', payload: { kind: 'progress', title: 'homeboy: Fix notifications — attempt 2 of 3', facts: [{ label: 'Reason', value: 'the previous attempt did not pass its gates' }] }, expected: '⏳ homeboy: Fix notifications — attempt 2 of 3\nthe previous attempt did not pass its gates' },
-    { name: 'URL action is clickable and not a command', payload: { kind: 'completed', actions: [{ label: 'review', command: pr }] }, expected: `✅ [homeboy#123](<${pr}>) homeboy run pass` },
-    { name: 'other links stay clickable', payload: { kind: 'started', title: 'Start', links: [{ label: 'CI', url: 'https://example.test/ci' }] }, expected: '⏳ Start\n[CI](<https://example.test/ci>)' },
-    { name: 'word bounded title', payload: { kind: 'queued', title: 'word '.repeat(30) }, expected: `⏳ ${'word '.repeat(15).trim()}…` },
-    { name: 'bounded stop reason', payload: { kind: 'needs_attention', title: 'Stopped', facts: [{ label: 'Stop reason', value: 'reason '.repeat(100) }] }, expected: `⚠️ Stopped\n${'reason '.repeat(28).trim()}…` },
+    ...fixtures.map((entry) => ({ ...entry, expected: expectedOutput[entry.name] })),
+    { name: 'URL action remains a reference', payload: { kind: 'completed', title: 'Done', actions: [{ label: 'review', command: 'https://forge.test/review/1' }] }, expected: '✅ Done\n[review](<https://forge.test/review/1>)' },
+    { name: 'no title or URL parsing', payload: { kind: 'started', title: 'repo#1: Start', links: [{ label: 'subject', url: 'https://forge.test/ticket/1', primary: true }, { label: 'PR', url: 'https://forge.test/repo/pull/1' }] }, expected: '⏳ [subject](<https://forge.test/ticket/1>) repo#1: Start\n[PR](<https://forge.test/repo/pull/1>)' },
+    { name: 'facts are label independent and text is not bounded', payload: { kind: 'needs_attention', title: 'long '.repeat(30), facts: ['Model', 'Duration', 'Gates', 'Closes', 'Stop reason', 'Reason', 'custom'].map((label) => ({ label, value: 'First sentence. Second sentence.' })) }, expected: `⚠️ ${'long '.repeat(30)}\n${Array(7).fill('First sentence. Second sentence.').join(' · ')}` },
   ];
   for (const { name, payload, expected } of cases) {
     for (const mode of ['bot', 'webhook']) {

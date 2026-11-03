@@ -9,7 +9,8 @@ pub(super) struct Work {
     pub component: Option<String>,
     pub cancelled: bool,
     task: String,
-    pr: Option<String>,
+    pub pr: Option<String>,
+    pub links: Vec<homeboy_core::notification_payload::NotifyLink>,
     pub facts: Vec<(String, String)>,
 }
 
@@ -17,8 +18,8 @@ impl Work {
     /// The headline names the work. Outcome markers belong to the transport.
     pub fn title(&self, kind: NotifyEventKind) -> String {
         if !self.cancelled && kind == NotifyEventKind::Completed {
-            if let Some(pr) = &self.pr {
-                return format!("{pr}: {}", short_title(&self.task));
+            if self.pr.is_some() {
+                return short_title(&self.task);
             }
         }
         let outcome = if self.cancelled {
@@ -53,18 +54,7 @@ pub(super) fn metadata(report: &AgentTaskCookReport, component: Option<&str>) ->
         Some(format!("{}#{number}", repository.rsplit('/').next()?))
     });
     let component = component.map(str::to_string);
-    let task_title = finalization
-        .and_then(|value| value["title"].as_str())
-        .or_else(|| {
-            recipe
-                .as_ref()
-                .and_then(|recipe| recipe.finalization["title"].as_str())
-        })
-        .filter(|title| !title.is_empty())
-        .map(str::to_string)
-        .or_else(|| task.and_then(|task| task.instructions.lines().next().map(str::to_string)))
-        .filter(|title| !title.trim().is_empty())
-        .unwrap_or_else(|| "Cook task".to_string());
+    let task_title = resolve_title(finalization, recipe.as_ref());
     let record_id = report.latest_run_id.as_deref().unwrap_or(&report.cook_id);
     let record = match &report.report_stores {
         Some((_, store)) => crate::agent_task_lifecycle::status_in_store(store, record_id).ok(),
@@ -76,6 +66,7 @@ pub(super) fn metadata(report: &AgentTaskCookReport, component: Option<&str>) ->
         });
 
     let mut facts = Vec::new();
+    let mut links = Vec::new();
     if let Some(relationships) = finalization
         .and_then(|value| value.pointer("/review_dossier/source_relationships"))
         .and_then(Value::as_array)
@@ -87,26 +78,14 @@ pub(super) fn metadata(report: &AgentTaskCookReport, component: Option<&str>) ->
                 } else {
                     "Related issue"
                 };
-                let url = if reference.starts_with("https://") {
-                    Some(reference.to_string())
-                } else if let Some((repo, number)) = reference
-                    .split_once('#')
-                    .filter(|(repo, _)| !repo.is_empty())
-                {
-                    Some(format!("https://github.com/{repo}/issues/{number}"))
-                } else {
-                    pr_url
-                        .as_deref()
-                        .and_then(|pr| pr.split_once("/pull/"))
-                        .map(|(repo, _)| {
-                            format!("{repo}/issues/{}", reference.trim_start_matches('#'))
-                        })
-                };
+                let (text, url) = issue_reference(reference, pr_url.as_deref());
+                let text = format!("{label} {text}");
                 if let Some(url) = url {
-                    if let Some((repo, number)) = url.split_once("/issues/") {
-                        let repo = repo.rsplit('/').next().unwrap_or(repo);
-                        facts.push((label.to_string(), format!("[{repo}#{number}]({url})")));
-                    }
+                    links.push(homeboy_core::notification_payload::NotifyLink::new(
+                        text, url,
+                    ));
+                } else {
+                    facts.push((label.to_string(), text));
                 }
             }
         }
@@ -148,6 +127,7 @@ pub(super) fn metadata(report: &AgentTaskCookReport, component: Option<&str>) ->
         cancelled,
         task: task_title,
         pr,
+        links,
         facts,
     }
 }
@@ -179,11 +159,12 @@ pub(super) fn stop_reason(text: &str) -> String {
 }
 
 pub(super) fn work_title(component: Option<&str>, task: &str, outcome: &str) -> String {
-    let task = short_title(task);
-    match component {
-        Some(component) => format!("{component}: {task} — {outcome}"),
-        None => format!("{task} — {outcome}"),
-    }
+    let prefix = component
+        .map(|value| format!("{value}: "))
+        .unwrap_or_default();
+    let suffix = format!(" — {outcome}");
+    let budget = 80usize.saturating_sub(suffix.chars().count());
+    format!("{}{suffix}", bounded(&format!("{prefix}{task}"), budget))
 }
 
 pub(super) fn retry_title(
@@ -195,12 +176,24 @@ pub(super) fn retry_title(
     let recipe = crate::agent_task_service::CookRecipeStore::from_current_data_root()
         .ok()
         .and_then(|store| store.load_recipe(cook_id).ok());
-    let title = recipe
-        .as_ref()
-        .and_then(|recipe| recipe.finalization["title"].as_str())
+    let title = resolve_title(None, recipe.as_ref());
+    work_title(component, &title, &format!("attempt {attempt} of {max}"))
+}
+
+fn resolve_title(
+    finalization: Option<&Value>,
+    recipe: Option<&crate::agent_task_service::AgentTaskCookRecipe>,
+) -> String {
+    finalization
+        .and_then(|value| value["title"].as_str())
+        .filter(|title| !title.trim().is_empty())
         .or_else(|| {
             recipe
-                .as_ref()?
+                .and_then(|recipe| recipe.finalization["title"].as_str())
+                .filter(|title| !title.trim().is_empty())
+        })
+        .or_else(|| {
+            recipe?
                 .attempts
                 .first()?
                 .plan
@@ -209,7 +202,102 @@ pub(super) fn retry_title(
                 .instructions
                 .lines()
                 .next()
+                .filter(|title| !title.trim().is_empty())
         })
-        .unwrap_or("Cook task");
-    work_title(component, title, &format!("attempt {attempt} of {max}"))
+        .unwrap_or("Cook task")
+        .to_string()
+}
+
+fn issue_reference(reference: &str, pr: Option<&str>) -> (String, Option<String>) {
+    if reference.starts_with("https://") || reference.starts_with("http://") {
+        let text = reference
+            .split_once("/issues/")
+            .or_else(|| reference.split_once("/pull/"))
+            .map(|(repo, number)| format!("{}#{number}", repo.rsplit('/').next().unwrap_or(repo)))
+            .unwrap_or_else(|| reference.to_string());
+        return (text, Some(reference.to_string()));
+    }
+    let Some((base, _)) = pr.and_then(|url| url.split_once("/pull/")) else {
+        return (reference.to_string(), None);
+    };
+    let (repo, number) = reference.split_once('#').unwrap_or(("", reference));
+    let target = if repo.is_empty() {
+        base.to_string()
+    } else if repo.contains('/') {
+        let Some((scheme, rest)) = base.split_once("://") else {
+            return (reference.to_string(), None);
+        };
+        format!(
+            "{scheme}://{}/{repo}",
+            rest.split('/').next().unwrap_or(rest)
+        )
+    } else {
+        format!(
+            "{}/{repo}",
+            base.rsplit_once('/')
+                .map(|(owner, _)| owner)
+                .unwrap_or(base)
+        )
+    };
+    (
+        format!("{}#{number}", target.rsplit('/').next().unwrap_or(&target)),
+        Some(format!("{target}/issues/{number}")),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn linked_references_preserve_recorded_hosts_and_plain_fallbacks() {
+        for (reference, pr, text, url) in [
+            (
+                "#7",
+                Some("https://forge.test/team/repo/pull/1"),
+                "repo#7",
+                Some("https://forge.test/team/repo/issues/7"),
+            ),
+            (
+                "other#8",
+                Some("https://forge.test/team/repo/pull/1"),
+                "other#8",
+                Some("https://forge.test/team/other/issues/8"),
+            ),
+            (
+                "owner/other#9",
+                Some("https://forge.test/team/repo/pull/1"),
+                "other#9",
+                Some("https://forge.test/owner/other/issues/9"),
+            ),
+            (
+                "https://elsewhere.test/team/other/issues/10",
+                None,
+                "other#10",
+                Some("https://elsewhere.test/team/other/issues/10"),
+            ),
+            (
+                "https://elsewhere.test/tickets/11",
+                None,
+                "https://elsewhere.test/tickets/11",
+                Some("https://elsewhere.test/tickets/11"),
+            ),
+            ("#12", None, "#12", None),
+            ("owner/repo#13", None, "owner/repo#13", None),
+        ] {
+            assert_eq!(
+                issue_reference(reference, pr),
+                (text.to_string(), url.map(str::to_string))
+            );
+        }
+    }
+
+    #[test]
+    fn outcome_survives_title_bounding() {
+        for outcome in ["needs attention", "cancelled", "attempt 2 of 3", "started"] {
+            let title = work_title(Some("studio"), &"long task title ".repeat(30), outcome);
+            assert!(title.chars().count() <= 80, "{title}");
+            assert!(title.ends_with(&format!(" — {outcome}")), "{title}");
+        }
+    }
 }

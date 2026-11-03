@@ -1,0 +1,103 @@
+[
+  {
+    "name": "success",
+    "payload": {
+      "facts": [
+        {
+          "label": "Model",
+          "value": "gpt-6.1-sol"
+        },
+        {
+          "label": "Gates",
+          "value": "gates 1/1 passed"
+        }
+      ],
+      "kind": "completed",
+      "links": [
+        {
+          "label": "Closes homeboy#100",
+          "url": "https://github.example/Extra-Chill/homeboy/issues/100"
+        },
+        {
+          "label": "homeboy#123",
+          "primary": true,
+          "url": "https://github.example/Extra-Chill/homeboy/pull/123"
+        }
+      ],
+      "schema": "homeboy/notification-payload/v1",
+      "subject": {
+        "component": "studio",
+        "id": "cook-abc",
+        "kind": "agent_task_cook"
+      },
+      "title": "Fix notifications"
+    }
+  },
+  {
+    "name": "attention",
+    "payload": {
+      "actions": [
+        {
+          "command": "homeboy agent-task diagnose cook-abc",
+          "kind": "repair",
+          "label": "diagnose"
+        }
+      ],
+      "facts": [
+        {
+          "label": "Stop reason",
+          "value": "Lint failed."
+        },
+        {
+          "label": "Gates",
+          "value": "gates lint failed"
+        }
+      ],
+      "kind": "needs_attention",
+      "schema": "homeboy/notification-payload/v1",
+      "subject": {
+        "component": "studio",
+        "id": "cook-abc",
+        "kind": "agent_task_cook"
+      },
+      "title": "studio: Work on Studio draft PR and resolve all of the… — needs attention"
+    }
+  },
+  {
+    "name": "cancelled",
+    "payload": {
+      "facts": [
+        {
+          "label": "Stop reason",
+          "value": "cancelled by operator"
+        }
+      ],
+      "kind": "cancelled",
+      "schema": "homeboy/notification-payload/v1",
+      "subject": {
+        "component": "studio",
+        "id": "cook-abc",
+        "kind": "agent_task_cook"
+      },
+      "title": "studio: Fix notifications — cancelled"
+    }
+  },
+  {
+    "name": "retry",
+    "payload": {
+      "facts": [
+        {
+          "label": "Reason",
+          "value": "the previous attempt did not pass its gates"
+        }
+      ],
+      "kind": "progress",
+      "schema": "homeboy/notification-payload/v1",
+      "subject": {
+        "id": "cook-abc",
+        "kind": "agent_task_cook"
+      },
+      "title": "studio: Cook task — attempt 2 of 3"
+    }
+  }
+]
