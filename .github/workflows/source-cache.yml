@@ -1,0 +1,52 @@
+# Seeds the candidate source-build cache from main.
+#
+# CI runs on pull_request only, so its Binary setup saves the source Cargo
+# cache under refs/pull/<n>/merge, which no other PR may restore. GitHub lets
+# a PR restore caches from its base branch, so this job builds the candidate
+# exactly as CI's Binary setup does and saves it under refs/heads/main (#17294).
+name: Source cache
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'extensions/**'
+      - 'desktop/**'
+      - 'action/**'
+  workflow_dispatch:
+
+concurrency:
+  group: source-cache-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  seed:
+    name: Seed candidate source cache
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      # Keep in step with action-ref in ci.yml: the cache key must match the
+      # one CI's Binary setup resolves.
+      - name: Check out Homeboy Action
+        uses: actions/checkout@v6
+        with:
+          repository: Extra-Chill/homeboy-action
+          ref: b89cc50767e9e0c46865f20bf2cd5d0c43b5a71c
+          path: .homeboy-action
+
+      - name: Build candidate and save source cache
+        uses: ./.homeboy-action
+        with:
+          commands: __prepare__
+          prepare-only: 'true'
+          component: homeboy
+          source: .
+          setup-timeout-seconds: '2400'
+          auto-setup: 'false'
