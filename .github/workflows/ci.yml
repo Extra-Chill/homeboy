@@ -48,7 +48,9 @@ jobs:
       # checks/comment sections via the workflow's per-command defaults.
       # Keep --skip-lint test-local; shared args would pass it to review lint.
       commands: review lint,review test --skip-lint
-      component: homeboy
+      # No `component`: the reusable workflow treats it as a subdirectory, and
+      # the root homeboy.json already resolves the `homeboy` ID. Passing it made
+      # the baseline request its Test inventory under ./homeboy/ (#17294).
       # homeboy-action v2.25.6: source cache key ignores release version bumps (#17294).
       action-ref: b89cc50767e9e0c46865f20bf2cd5d0c43b5a71c
       extension-ref: 5417472dc7ad50a0dc67530fccef315f4dad637a

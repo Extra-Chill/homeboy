@@ -48,7 +48,6 @@ jobs:
         with:
           commands: __prepare__
           prepare-only: 'true'
-          component: homeboy
           source: .
           # Must match ci.yml: the profile is part of the cache key.
           source-build-profile: dev
