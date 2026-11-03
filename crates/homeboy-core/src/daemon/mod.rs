@@ -3931,25 +3931,6 @@ fn validate_staged_materialization(
     Ok(())
 }
 
-/// Publish the runner execution's spans on the job stream so the controller
-/// can link them under its own run (`ObservationStore::record_runner_phase_spans`).
-fn publish_runner_phase_spans(
-    job: &crate::api_jobs::JobHandle,
-    store: &crate::observation::ObservationStore,
-    run_id: &str,
-    succeeded: bool,
-) -> crate::Result<()> {
-    let status = if succeeded {
-        crate::observation::RunStatus::Pass
-    } else {
-        crate::observation::RunStatus::Fail
-    };
-    let run = store.finish_run(run_id, status, None)?;
-    let report = store.phase_spans(&run.id)?;
-    job.progress(json!({ "phase_spans": report, "phase_run": run }))?;
-    Ok(())
-}
-
 fn enqueue_exec_request(
     request: ExecRequest,
     job_store: &JobStore,
@@ -4371,20 +4352,13 @@ fn enqueue_exec_request(
                 job.progress(json!({ "phase": "local_child_driver_execution_started" }))?;
                 job.progress(json!({ "phase": "local_child_command_spawn_attempted" }))?;
                 let driver_cancellation = Arc::clone(&cancellation_requested);
-                // Timing is evidence about the execution, never a condition of it.
-                let timing = crate::observation::ObservationStore::open_initialized()
-                    .and_then(|store| {
-                        let run = store.start_run(
-                            crate::observation::NewRunRecord::builder("runner_execution").build(),
-                        )?;
-                        Ok((store, run.id))
-                    })
-                    .map_err(|error| {
-                        crate::log_status!("observe", "runner timing persistence failed: {}", error)
-                    })
-                    .ok();
-                let execute = || {
-                    runner_exec_driver::execute_exec(
+                // Timed in memory: the submitter already owns this execution's
+                // one run, and the controller links the published spans to it.
+                let mut timer = homeboy_engine_primitives::phase_timing::PhaseTimer::with_version(
+                    env!("CARGO_PKG_VERSION"),
+                );
+                let execute_started = std::time::Instant::now();
+                let process_output = runner_exec_driver::execute_exec(
                         &plan,
                         &execution_context,
                         Box::new(move || {
@@ -4393,24 +4367,14 @@ fn enqueue_exec_request(
                         Some(progress_sink),
                         true,
                         Some(child_started),
-                    )
-                };
-                let process_output = match &timing {
-                    Some((store, run_id)) => store.time_run_phase_with_outcome(
-                        run_id,
-                        "stage.lab.observe.runner.execute",
-                        execute,
-                        |output| output.exit_code != 0,
-                    ),
-                    None => execute(),
-                };
-                if let Some((store, run_id)) = &timing {
-                    let succeeded = process_output
-                        .as_ref()
-                        .is_ok_and(|output| output.exit_code == 0);
-                    if let Err(error) = publish_runner_phase_spans(&job, store, run_id, succeeded) {
-                        crate::log_status!("observe", "runner timing persistence failed: {}", error);
-                    }
+                    );
+                if process_output.as_ref().is_ok_and(|output| output.exit_code == 0) {
+                    timer.record_ok("stage.lab.observe.runner.execute", execute_started.elapsed());
+                } else {
+                    timer.record_failed("stage.lab.observe.runner.execute", execute_started.elapsed());
+                }
+                if let Err(error) = job.progress(json!({ "phase_spans": timer.into_report() })) {
+                    crate::log_status!("observe", "runner timing publication failed: {}", error);
                 }
                 let _ = watchdog_stop.send(());
                 let _ = watchdog.join();
@@ -7206,7 +7170,7 @@ mod tests {
     }
 
     #[test]
-    fn daemon_exec_records_runner_spans_and_publishes_them_for_controller_linking() {
+    fn daemon_exec_publishes_runner_spans_that_link_under_the_controller_run() {
         with_isolated_home(|_| {
             runner_exec_driver::register_runner_exec_driver(Arc::new(EnqueueTestDriver));
             let store = JobStore::default();
@@ -7225,27 +7189,14 @@ mod tests {
             let job_id = response["job"]["id"].as_str().unwrap().parse().unwrap();
             wait_for_daemon_job_status(&store, job_id, JobStatus::Succeeded);
             let events = store.events(job_id).unwrap();
-            let evidence = events
-                .iter()
-                .filter_map(|event| event.data.as_ref())
-                .find(|data| data.get("phase_spans").is_some())
-                .unwrap();
-            let run_id = evidence["phase_run"]["id"].as_str().unwrap();
             let observation = crate::observation::ObservationStore::open_initialized().unwrap();
-            assert_eq!(
-                serde_json::to_value(observation.phase_spans(run_id).unwrap()).unwrap(),
-                evidence["phase_spans"]
+            assert!(
+                observation
+                    .list_runs(crate::observation::RunListFilter::default())
+                    .unwrap()
+                    .is_empty(),
+                "the daemon opens no run of its own"
             );
-            let summary = crate::performance_hotspots::phase_hotspots(
-                &observation,
-                &crate::performance_hotspots::PhaseHotspotQuery {
-                    kind: Some("runner_execution".into()),
-                    ..Default::default()
-                },
-            )
-            .unwrap();
-            assert_eq!(summary.runs_with_spans, 1);
-            assert_eq!(summary.phases[0].phase, "stage.lab.observe.runner.execute");
             let controller_dir = tempfile::tempdir().unwrap();
             let controller = crate::observation::ObservationStore::open_initialized_at(
                 controller_dir.path().join("controller.sqlite"),
@@ -7254,7 +7205,13 @@ mod tests {
             let owner = controller
                 .start_run(crate::observation::NewRunRecord::builder("agent-task").build())
                 .unwrap();
-            let mut parent = observation.phase_spans(run_id).unwrap();
+            let runner = events
+                .iter()
+                .filter_map(|event| event.data.as_ref()?.get("phase_spans"))
+                .next()
+                .unwrap();
+            let mut parent: homeboy_engine_primitives::phase_timing::PhaseTimingReport =
+                serde_json::from_value(runner.clone()).unwrap();
             parent.spans[0].id = "stage.lab.observe".into();
             parent.spans[0].duration_ms = parent.spans[0].duration_ms.map(|ms| ms + 10.0);
             controller
@@ -7266,10 +7223,6 @@ mod tests {
                     .unwrap();
             }
             assert_eq!(controller.phase_spans(&owner.id).unwrap().spans.len(), 2);
-            assert_eq!(
-                controller.phase_spans(run_id).unwrap(),
-                observation.phase_spans(run_id).unwrap()
-            );
             let summary = crate::performance_hotspots::phase_hotspots(
                 &controller,
                 &crate::performance_hotspots::PhaseHotspotQuery {
