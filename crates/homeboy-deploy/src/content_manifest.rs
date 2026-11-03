@@ -159,7 +159,7 @@ impl Manifest {
                 ));
             }
             if entry.kind == TreeEntryKind::File
-                && (entry.mode != "0" && entry.mode != "1"
+                && (!content_diff::is_executable_mode_tag(&entry.mode)
                     || entry.value.len() != 64
                     || !entry.value.bytes().all(|byte| byte.is_ascii_hexdigit()))
             {
@@ -1296,6 +1296,52 @@ mod tests {
     use super::*;
     use homeboy_core::server::CommandObservation;
     use std::process::Command;
+
+    #[test]
+    fn receipt_manifest_validates_canonical_executable_mode_tags() {
+        let mut manifest = Manifest {
+            entries: BTreeMap::from([(
+                "script.sh".to_string(),
+                TreeEntry {
+                    kind: TreeEntryKind::File,
+                    mode: String::new(),
+                    value: "a".repeat(64),
+                    bytes: 0,
+                },
+            )]),
+        };
+        for mode in ["0", "1", "10", "11", "100", "101", "110", "111"] {
+            manifest.entries.get_mut("script.sh").unwrap().mode = mode.to_string();
+            assert!(manifest.validate().is_ok(), "rejected {mode:?}");
+        }
+        for mode in ["2", "644", "0111", "abc", ""] {
+            manifest.entries.get_mut("script.sh").unwrap().mode = mode.to_string();
+            assert!(manifest.validate().is_err(), "accepted {mode:?}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn executable_tree_manifest_survives_receipt_round_trip() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("temp");
+        for mode in [0o755, 0o775] {
+            let script = temp.path().join("deploy.sh");
+            fs::write(&script, "#!/bin/sh\nexit 0\n").expect("script");
+            fs::set_permissions(&script, fs::Permissions::from_mode(mode)).expect("mode");
+            let manifest = local_manifest(temp.path()).expect("local manifest");
+            assert_eq!(manifest.entries["deploy.sh"].mode, "111");
+            let digest = manifest.digest();
+
+            let serialized = serde_json::to_string(&manifest).expect("serialize receipt manifest");
+            let restored: Manifest =
+                serde_json::from_str(&serialized).expect("deserialize receipt manifest");
+            restored.validate().expect("validate receipt manifest");
+            assert_eq!(restored, manifest);
+            assert_eq!(restored.digest(), digest);
+        }
+    }
 
     #[test]
     fn local_manifest_detects_content_add_delete_mode_symlink_and_ignores_runtime() {
