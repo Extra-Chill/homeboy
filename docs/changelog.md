@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.444.19] - 2026-11-03
+
+### Changed
+- gate PRs on their own result, drop the base-commit rerun
+- Simplify Discord notifications to three lines with clickable links
+
 ## [0.444.18] - 2026-11-03
 
 ### Changed
