@@ -63,7 +63,7 @@ async function main() {
       response = await fetch(validation.url, {
         method: 'POST',
         headers: validation.headers,
-        body: JSON.stringify({ content: rendered.content }),
+        body: JSON.stringify({ content: rendered.content, flags: 4 }),
       });
     } catch {
       return finish(failure('delivery_error', 'Discord request could not be completed.', proof, attempts));
@@ -149,7 +149,7 @@ function validate(args, env) {
     const configured = sessionSender(env);
     if (configured.error) return invalid('invalid_configuration', 'session_sender', configured.error);
     deprecations.push(...configured.deprecations);
-    sessionOnlyProgress = Boolean(configured.sender) && isProgressOnlyStatus(args.status);
+    sessionOnlyProgress = Boolean(configured.sender) && ['queued', 'started', 'progress'].includes(notificationPayload(env)?.kind || env.HOMEBOY_NOTIFY_KIND);
     if (configured.sender && !sessionOnlyProgress) {
       return {
         ok: true,
@@ -248,33 +248,61 @@ function notificationPayload(env) {
   }
 }
 
-function statusMarker(status) {
-  if (['review_ready', 'succeeded', 'passed', 'completed'].includes(status)) return '✅';
-  return status === 'cancelled' ? '⏹' : '⚠️';
+function bounded(text, max) {
+  const clean = compact(text);
+  if ([...clean].length <= max) return clean;
+  const prefix = [...clean].slice(0, max - 1).join('');
+  const space = prefix.lastIndexOf(' ');
+  return `${space > 0 ? prefix.slice(0, space) : prefix}…`;
 }
 
-function renderContent(args) {
-  const payload = notificationPayload(process.env);
-  const lines = [`${statusMarker(args.status)} **${compact(args.title)}**`];
-  if (!(payload?.actions || []).some((action) => action.command.includes(args.runId))) {
-    lines.push(`Run: ${compact(args.runId)}`);
-  }
-  if (payload) {
-    const facts = (payload.facts || []).map((fact) => `${compact(fact.label)}: ${compact(fact.value)}`);
-    if (facts.length) lines.push(facts.join(' · '));
-    for (const link of payload.links || []) lines.push(`${compact(link.label)}: ${compact(link.url)}`);
-    for (const action of payload.actions || []) lines.push(`${compact(action.label)}: \`${compact(action.command)}\``);
+function discordLink(label, url) {
+  return `[${compact(label).replace(/[\[\]]/g, '')}](<${compact(url)}>)`;
+}
+
+function isUrl(text) {
+  return /^https?:\/\/\S+$/.test(text);
+}
+
+export function renderContent(args, env = process.env) {
+  const payload = notificationPayload(env);
+  const kind = payload?.kind || env.HOMEBOY_NOTIFY_KIND;
+  const marker = { completed: '✅', needs_attention: '⚠️', cancelled: '⏹', queued: '⏳', started: '⏳', progress: '⏳' }[kind] || 'ℹ️';
+  const references = [...(payload?.links || []).map((link) => ({ label: link.label, url: link.url })),
+    ...(payload?.actions || []).filter((action) => isUrl(action.command)).map((action) => ({ label: action.label, url: action.command }))];
+  const primary = references.find((link) => /\/pull\/\d+/.test(link.url));
+  let title = compact(payload?.title || args.title);
+  if (primary) {
+    const match = /\/([^/]+)\/pull\/(\d+)/.exec(primary.url);
+    const identity = `${match[1]}#${match[2]}`;
+    if (title.startsWith(`${identity}:`)) title = title.slice(identity.length + 1).trim();
+    title = `${discordLink(identity, primary.url)} ${bounded(title, 80)}`;
   } else {
-    lines.push(...args.body.split(/\r?\n/).map(compact).filter(Boolean));
+    title = bounded(title, 80);
+    if (!payload?.title) title = `${compact(payload?.subject?.component || args.runId)}: ${title}`;
   }
+  const lines = [`${marker} ${title}`];
+  const facts = payload ? (payload.facts || []).map((fact) => {
+    const label = compact(fact.label);
+    const value = compact(fact.value);
+    if (label === 'Stop reason' || label === 'Reason') return bounded(value.match(/^.*?[.!?](?:\s|$)/)?.[0] || value, 200);
+    if (label === 'Gates') return `gates ${value}`;
+    if (label === 'Model' || label === 'Duration') return value;
+    if (label === 'Closes' || label === 'Related issue') return `${label} ${value}`;
+    return `${label}: ${value}`;
+  }) : [compact(args.body)];
+  facts.push(...references.filter((link) => link !== primary).map((link) => discordLink(link.label, link.url)));
+  if (facts.length) lines.push(facts.join(' · '));
+  const action = kind === 'needs_attention' && payload?.actions?.find((entry) => !isUrl(entry.command));
+  if (action) lines.push(`next: \`${compact(action.command)}\``);
   const content = lines.join('\n');
   if (content.length <= DISCORD_CONTENT_LIMIT) return { content, truncated: false };
-  let bounded = '';
+  let prefix = '';
   for (const character of content) {
-    if (bounded.length + character.length > DISCORD_CONTENT_LIMIT - 3) break;
-    bounded += character;
+    if (prefix.length + character.length > DISCORD_CONTENT_LIMIT - 3) break;
+    prefix += character;
   }
-  return { content: `${bounded}...`, truncated: true };
+  return { content: `${prefix}...`, truncated: true };
 }
 
 async function retryAfter(response) {
@@ -334,14 +362,6 @@ function rejection(validation) {
 function finish(result) {
   process.stdout.write(`${JSON.stringify(result)}\n`);
   process.exitCode = result.status === 'failed' || result.status === 'rejected' ? 1 : 0;
-}
-
-// Statuses that announce progress rather than an outcome. Homeboy emits one of
-// these when a run begins, before any result exists to act on.
-const PROGRESS_ONLY_STATUSES = new Set(['started', 'running', 'queued']);
-
-function isProgressOnlyStatus(status) {
-  return PROGRESS_ONLY_STATUSES.has(String(status || '').trim().toLowerCase());
 }
 
 function sendToSession(validation, content) {
@@ -431,4 +451,4 @@ function sleep(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
-await main();
+if (process.argv[1] && new URL(import.meta.url).pathname === process.argv[1]) await main();

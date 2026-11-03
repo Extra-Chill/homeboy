@@ -103,6 +103,7 @@ async function testOwningSessionThreadDeliversThroughCommandSender() {
         DISCORD_BOT_TOKEN: secretToken,
         HOMEBOY_SESSION_THREAD_ID: threadOneId,
         HOMEBOY_SESSION_SEND_COMMAND: stub,
+        HOMEBOY_NOTIFY_KIND: 'started',
         DISCORD_API_BASE_URL: `${baseUrl}/api/v10`,
       },
       { route: threadRoute(threadOneId), status: 'started' },
@@ -119,6 +120,7 @@ async function testOwningSessionThreadDeliversThroughCommandSender() {
       {
         HOMEBOY_SESSION_THREAD_ID: threadOneId,
         HOMEBOY_SESSION_SEND_COMMAND: stub,
+        HOMEBOY_NOTIFY_KIND: 'needs_attention',
         DISCORD_API_BASE_URL: `${baseUrl}/api/v10`,
       },
       { route: threadRoute(threadTwoId), status: 'durable_failure', body: 'cook needs attention' },
@@ -245,7 +247,7 @@ async function testSessionWithoutSenderUsesRest() {
 async function testProgressOnlyWithoutPostDestinationSkips() {
   const { stub, cleanup } = argvStub();
   const run = await notifyRaw(
-    { HOMEBOY_SESSION_SEND_COMMAND: stub },
+    { HOMEBOY_SESSION_SEND_COMMAND: stub, HOMEBOY_NOTIFY_KIND: 'started' },
     { route: threadRoute(threadOneId), status: 'started' },
   );
   assert.equal(run.code, 0);
@@ -530,67 +532,33 @@ async function testTruncation() {
 }
 
 async function testRenderingFidelity() {
-  const runId = 'agent-task-render-test';
   const schema = 'homeboy/notification-payload/v1';
-  const payload = {
-    schema,
-    kind: 'completed',
-    subject: { kind: 'agent_task_cook', id: runId, component: 'homeboy', attempt: 1 },
-    facts: [{ label: 'Gates', value: 'passed' }, { label: 'Attempts', value: '1' }],
-    links: [{ label: 'Pull request', url: 'https://github.com/Extra-Chill/homeboy/pull/123' }],
-    actions: [{ label: 'Details', command: `homeboy agent-task status ${runId}`, kind: 'show' }],
-    attachments: [{ id: 'ignored', kind: 'artifact', uri: 'file:///tmp/proof', fetch_command: 'ignored' }],
-  };
-  // Real LF and CRLF input: do not mirror rendering with escaped backslash-n.
-  const body = '  Gates:   passed\r\n\n Attempts:  1\n  Fallback only  ';
-  const structuredLines = [
-    'Gates: passed · Attempts: 1',
-    'Pull request: https://github.com/Extra-Chill/homeboy/pull/123',
-    `Details: \`homeboy agent-task status ${runId}\``,
-  ];
-  const fallbackLines = [`Run: ${runId}`, 'Gates: passed', 'Attempts: 1', 'Fallback only'];
+  const pr = 'https://github.com/Extra-Chill/homeboy/pull/123';
+  const command = 'homeboy agent-task diagnose cook-abc';
   const cases = [
-    { name: 'payload', env: { HOMEBOY_NOTIFY_PAYLOAD_SCHEMA: schema, HOMEBOY_NOTIFY_PAYLOAD: JSON.stringify(payload) }, lines: structuredLines },
-    { name: 'no payload', env: {}, lines: fallbackLines },
-    { name: 'unknown schema', env: { HOMEBOY_NOTIFY_PAYLOAD_SCHEMA: 'homeboy/notification-payload/v2', HOMEBOY_NOTIFY_PAYLOAD: JSON.stringify(payload) }, lines: fallbackLines },
-    { name: 'missing schema', env: { HOMEBOY_NOTIFY_PAYLOAD: JSON.stringify(payload) }, lines: fallbackLines },
-    { name: 'invalid JSON', env: { HOMEBOY_NOTIFY_PAYLOAD_SCHEMA: schema, HOMEBOY_NOTIFY_PAYLOAD: '{' }, lines: fallbackLines },
-    { name: 'malformed fields', env: { HOMEBOY_NOTIFY_PAYLOAD_SCHEMA: schema, HOMEBOY_NOTIFY_PAYLOAD: JSON.stringify({ actions: [{}] }) }, lines: fallbackLines },
-    { name: 'payload without actions', env: { HOMEBOY_NOTIFY_PAYLOAD_SCHEMA: schema, HOMEBOY_NOTIFY_PAYLOAD: JSON.stringify({ ...payload, actions: [] }) }, lines: [`Run: ${runId}`, ...structuredLines.slice(0, 2)] },
+    { name: 'success', payload: { kind: 'completed', title: 'homeboy#123: Fix notifications', links: [{ label: 'PR', url: pr }], facts: [{ label: 'Closes', value: '[homeboy#100](https://github.com/Extra-Chill/homeboy/issues/100)' }, { label: 'Gates', value: '2/2 passed' }] }, expected: `✅ [homeboy#123](<${pr}>) Fix notifications\nCloses [homeboy#100](https://github.com/Extra-Chill/homeboy/issues/100) · gates 2/2 passed` },
+    { name: 'attention uses only first command', payload: { kind: 'needs_attention', title: 'homeboy: Fix notifications — needs attention', facts: [{ label: 'Stop reason', value: 'Lint failed. Internal detail follows.' }], actions: [{ label: 'diagnose', command }, { label: 'recover', command: 'not recommended' }] }, expected: `⚠️ homeboy: Fix notifications — needs attention\nLint failed.\nnext: \`${command}\`` },
+    { name: 'cancelled needs no action', payload: { kind: 'cancelled', title: 'homeboy: Fix notifications — cancelled', facts: [{ label: 'Stop reason', value: 'cancelled by operator' }], actions: [{ label: 'details', command }] }, expected: '⏹ homeboy: Fix notifications — cancelled\ncancelled by operator' },
+    { name: 'retry', payload: { kind: 'progress', title: 'homeboy: Fix notifications — attempt 2 of 3', facts: [{ label: 'Reason', value: 'the previous attempt did not pass its gates' }] }, expected: '⏳ homeboy: Fix notifications — attempt 2 of 3\nthe previous attempt did not pass its gates' },
+    { name: 'URL action is clickable and not a command', payload: { kind: 'completed', actions: [{ label: 'review', command: pr }] }, expected: `✅ [homeboy#123](<${pr}>) homeboy run pass` },
+    { name: 'other links stay clickable', payload: { kind: 'started', title: 'Start', links: [{ label: 'CI', url: 'https://example.test/ci' }] }, expected: '⏳ Start\n[CI](<https://example.test/ci>)' },
+    { name: 'word bounded title', payload: { kind: 'queued', title: 'word '.repeat(30) }, expected: `⏳ ${'word '.repeat(15).trim()}…` },
+    { name: 'bounded stop reason', payload: { kind: 'needs_attention', title: 'Stopped', facts: [{ label: 'Stop reason', value: 'reason '.repeat(100) }] }, expected: `⚠️ Stopped\n${'reason '.repeat(28).trim()}…` },
   ];
-  for (const { name, env, lines } of cases) {
-    await withServer(async ({ baseUrl, requests }) => {
-      await notify(
-        { DISCORD_BOT_TOKEN: secretToken, DISCORD_API_BASE_URL: `${baseUrl}/api/v10`, ...env },
-        { route: threadRoute(threadOneId), runId, status: 'review_ready', body },
-      );
-      const content = requests[0].body.content;
-      assert.ok(content.includes(String.fromCharCode(10)), name);
-      assert.deepEqual(content.split(String.fromCharCode(10)), ['✅ **homeboy run pass**', ...lines], name);
-      assert.doesNotMatch(content, /\[object Object\]|\\\\n/, name);
-      assert.equal(content.split(runId).length - 1, 1, name);
-      assert.ok(content.length <= 2000, name);
-    });
+  for (const { name, payload, expected } of cases) {
+    for (const mode of ['bot', 'webhook']) {
+      await withServer(async ({ baseUrl, requests }) => {
+        await notify({
+          ...(mode === 'bot' ? { DISCORD_BOT_TOKEN: secretToken, DISCORD_API_BASE_URL: `${baseUrl}/api/v10` } : { DISCORD_WEBHOOK_URL: `${baseUrl}${secretWebhook}` }),
+          HOMEBOY_NOTIFY_PAYLOAD_SCHEMA: schema,
+          HOMEBOY_NOTIFY_PAYLOAD: JSON.stringify(payload),
+        }, mode === 'bot' ? { route: channelRoute(channelId) } : {});
+        assert.equal(requests[0].body.content, expected, name);
+        assert.equal(requests[0].body.flags, 4, name);
+        assert.ok(requests[0].body.content.split('\n').length <= 3, name);
+      });
+    }
   }
-  for (const [status, marker] of [
-    ['succeeded', '✅'], ['passed', '✅'], ['completed', '✅'], ['cancelled', '⏹'],
-    ['failed', '⚠️'], ['not_completed', '⚠️'], ['unsucceeded', '⚠️'],
-  ]) {
-    await withServer(async ({ baseUrl, requests }) => {
-      await notify({ DISCORD_WEBHOOK_URL: `${baseUrl}${secretWebhook}` }, { status, body });
-      assert.ok(requests[0].body.content.startsWith(`${marker} **`), status);
-    });
-  }
-  await withServer(async ({ baseUrl, requests }) => {
-    const result = await notify({
-      DISCORD_WEBHOOK_URL: `${baseUrl}${secretWebhook}`,
-      HOMEBOY_NOTIFY_PAYLOAD_SCHEMA: schema,
-      HOMEBOY_NOTIFY_PAYLOAD: JSON.stringify({ ...payload, facts: [{ label: 'Detail', value: '😀'.repeat(2000) }] }),
-    }, { body });
-    assert.ok(requests[0].body.content.length <= 2000);
-    assert.equal(result.delivery.truncated, true);
-    assert.ok(requests[0].body.content.endsWith('...'));
-  });
 }
 
 async function testRedactionAndDryRun() {
