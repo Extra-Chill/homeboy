@@ -436,7 +436,7 @@ fn terminal_payload(
                 )
             })
             .collect::<Vec<_>>();
-        payload = payload.with_fact("Gates", format!("gates {}", gate_summary(&gates)));
+        payload = payload.with_fact("Gates", gate_summary(&gates));
     } else if !cancelled {
         if let Some(gates) = report
             .finalization
@@ -452,13 +452,13 @@ fn terminal_payload(
                     ))
                 })
                 .collect::<Vec<_>>();
-            payload = payload.with_fact("Gates", format!("gates {}", gate_summary(&gates)));
+            payload = payload.with_fact("Gates", gate_summary(&gates));
         }
         let status = homeboy_core::cook_status::CookStatus::from_status(&report.status);
         if status.is_gate_failure() && !payload.facts.iter().any(|fact| fact.label == "Gates") {
-            payload = payload.with_fact("Gates", "gates failed");
+            payload = payload.with_fact("Gates", "failed");
         } else if status == homeboy_core::cook_status::CookStatus::GatesDeferred {
-            payload = payload.with_fact("Gates", "gates deferred");
+            payload = payload.with_fact("Gates", "deferred");
         }
     }
 

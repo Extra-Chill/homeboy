@@ -403,7 +403,11 @@ impl NotifyPayload {
                 lines.push(format!("Attempt: {attempt}"));
             }
         }
-        let facts: Vec<_> = self.facts.iter().map(|fact| fact.value.clone()).collect();
+        let facts: Vec<_> = self
+            .facts
+            .iter()
+            .map(|fact| format!("{}: {}", fact.label, fact.value))
+            .collect();
         if self.title.is_some() && !facts.is_empty() {
             lines.push(facts.join(" · "));
         } else {
@@ -510,13 +514,29 @@ mod tests {
         assert!(body.contains("Component: homeboy"), "{body}");
         assert!(body.contains("Attempt: 2"), "{body}");
         assert!(!body.contains("Phase:"), "{body}");
-        assert!(body.contains("failed"), "{body}");
-        assert!(body.contains("gate_failed"), "{body}");
+        assert!(body.contains("Status: failed"), "{body}");
+        assert!(body.contains("Stop reason: gate_failed"), "{body}");
         assert!(
             body.contains("Next — diagnose: homeboy agent-task diagnose cook-abc"),
             "{body}"
         );
         assert!(body.contains("https://example.test/pull/1"), "{body}");
+    }
+
+    #[test]
+    fn titled_run_body_preserves_fact_labels() {
+        let mut payload = NotifyPayload::new(
+            NotifyEventKind::Completed,
+            NotifySubject::new("run", "run-1"),
+        )
+        .with_fact("Status", "pass")
+        .with_fact("Command", "homeboy cleanup artifacts")
+        .with_fact("Finished", "2026-11-02T18:28:16Z");
+        payload.title = Some("homeboy run pass".to_string());
+        assert_eq!(
+            payload.render_body(),
+            "homeboy run pass\nStatus: pass · Command: homeboy cleanup artifacts · Finished: 2026-11-02T18:28:16Z"
+        );
     }
 
     #[test]

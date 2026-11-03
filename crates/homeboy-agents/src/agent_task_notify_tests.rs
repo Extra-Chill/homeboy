@@ -637,7 +637,7 @@ fn pending_gate_fix_and_finalization_rejection_do_not_announce_success() {
     pending.stop_reason = Some("gate fix pending".to_string());
     let gate = terminal_payload(&pending, None, 1);
     assert_eq!(gate.kind, NotifyEventKind::NeedsAttention);
-    assert!(gate.render_body().contains("gates failed"));
+    assert!(gate.render_body().contains("Gates: failed"));
     assert!(gate.render_body().contains("gate fix pending"));
 
     let mut rejected = report(

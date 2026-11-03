@@ -9,7 +9,7 @@
         },
         {
           "label": "Gates",
-          "value": "gates 1/1 passed"
+          "value": "1/1 passed"
         }
       ],
       "kind": "completed",
@@ -50,7 +50,7 @@
         },
         {
           "label": "Gates",
-          "value": "gates lint failed"
+          "value": "lint failed"
         }
       ],
       "kind": "needs_attention",

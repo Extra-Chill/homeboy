@@ -265,7 +265,7 @@ export function renderContent(args, env = process.env) {
   const primary = references.find((link) => link.primary);
   const title = payload?.title || `${args.runId}: ${args.title}`;
   const lines = [`${marker} ${primary ? `${discordLink(primary.label, primary.url)} ` : ''}${title}`];
-  const facts = payload ? (payload.facts || []).map((fact) => fact.value) : [args.body];
+  const facts = payload ? (payload.facts || []).map((fact) => `${fact.label}: ${fact.value}`) : [args.body];
   facts.unshift(...references.filter((link) => link !== primary).map((link) => discordLink(link.label, link.url)));
   if (facts.length) lines.push(facts.join(' · '));
   const action = kind === 'needs_attention' && payload?.actions?.find((entry) => !isUrl(entry.command));

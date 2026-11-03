@@ -535,16 +535,17 @@ async function testRenderingFidelity() {
   const schema = 'homeboy/notification-payload/v1';
   const fixtures = JSON.parse(fs.readFileSync(path.join(extensionPath, 'tests/fixtures/notify-payloads.json'), 'utf8'));
   const expectedOutput = {
-  "success": "✅ [homeboy#123](<https://github.example/Extra-Chill/homeboy/pull/123>) Fix notifications\n[Closes homeboy#100](<https://github.example/Extra-Chill/homeboy/issues/100>) · gpt-6.1-sol · gates 1/1 passed",
-  "attention": "⚠️ studio: Work on Studio draft PR and resolve all of the… — needs attention\nLint failed. · gates lint failed\nnext: `homeboy agent-task diagnose cook-abc`",
-  "cancelled": "⏹ studio: Fix notifications — cancelled\ncancelled by operator",
-  "retry": "⏳ studio: Cook task — attempt 2 of 3\nthe previous attempt did not pass its gates"
+  "success": "✅ [homeboy#123](<https://github.example/Extra-Chill/homeboy/pull/123>) Fix notifications\n[Closes homeboy#100](<https://github.example/Extra-Chill/homeboy/issues/100>) · Model: gpt-6.1-sol · Gates: 1/1 passed",
+  "attention": "⚠️ studio: Work on Studio draft PR and resolve all of the… — needs attention\nStop reason: Lint failed. · Gates: lint failed\nnext: `homeboy agent-task diagnose cook-abc`",
+  "cancelled": "⏹ studio: Fix notifications — cancelled\nStop reason: cancelled by operator",
+  "retry": "⏳ studio: Cook task — attempt 2 of 3\nReason: the previous attempt did not pass its gates"
 };
   const cases = [
     ...fixtures.map((entry) => ({ ...entry, expected: expectedOutput[entry.name] })),
+    { name: 'run facts preserve their labels', payload: { kind: 'completed', title: 'homeboy run pass', subject: { kind: 'run', id: 'run-1' }, facts: [{ label: 'Status', value: 'pass' }, { label: 'Command', value: 'homeboy cleanup artifacts' }, { label: 'Finished', value: '2026-11-02T18:28:16Z' }] }, expected: '✅ homeboy run pass\nStatus: pass · Command: homeboy cleanup artifacts · Finished: 2026-11-02T18:28:16Z' },
     { name: 'URL action remains a reference', payload: { kind: 'completed', title: 'Done', actions: [{ label: 'review', command: 'https://forge.test/review/1' }] }, expected: '✅ Done\n[review](<https://forge.test/review/1>)' },
     { name: 'no title or URL parsing', payload: { kind: 'started', title: 'repo#1: Start', links: [{ label: 'subject', url: 'https://forge.test/ticket/1', primary: true }, { label: 'PR', url: 'https://forge.test/repo/pull/1' }] }, expected: '⏳ [subject](<https://forge.test/ticket/1>) repo#1: Start\n[PR](<https://forge.test/repo/pull/1>)' },
-    { name: 'facts are label independent and text is not bounded', payload: { kind: 'needs_attention', title: 'long '.repeat(30), facts: ['Model', 'Duration', 'Gates', 'Closes', 'Stop reason', 'Reason', 'custom'].map((label) => ({ label, value: 'First sentence. Second sentence.' })) }, expected: `⚠️ ${'long '.repeat(30)}\n${Array(7).fill('First sentence. Second sentence.').join(' · ')}` },
+    { name: 'facts are label independent and text is not bounded', payload: { kind: 'needs_attention', title: 'long '.repeat(30), facts: ['Model', 'Duration', 'Gates', 'Closes', 'Stop reason', 'Reason', 'custom'].map((label) => ({ label, value: 'First sentence. Second sentence.' })) }, expected: `⚠️ ${'long '.repeat(30)}\n${['Model', 'Duration', 'Gates', 'Closes', 'Stop reason', 'Reason', 'custom'].map((label) => `${label}: First sentence. Second sentence.`).join(' · ')}` },
   ];
   for (const { name, payload, expected } of cases) {
     for (const mode of ['bot', 'webhook']) {
