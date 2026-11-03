@@ -17,7 +17,9 @@ on:
 
 concurrency:
   group: source-cache-${{ github.ref }}
-  cancel-in-progress: true
+  # Release commits land every few minutes; cancelling would kill each build
+  # before it saves. A running build finishes; newer pushes replace the queue.
+  cancel-in-progress: false
 
 permissions:
   contents: read
