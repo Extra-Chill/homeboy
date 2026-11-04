@@ -189,7 +189,10 @@ fn evidence(context: &HermeticTestContext) -> String {
 }
 
 fn wait(context: &HermeticTestContext, what: &str, mut predicate: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(40);
+    // A deadline, not a duration: a passing run returns as soon as the state
+    // converges. Loaded CI runners take ~60s to settle a fixture Cook after a
+    // daemon SIGKILL, so 40s failed runs that had converged (#17355).
+    let deadline = Instant::now() + Duration::from_secs(120);
     while !predicate() {
         assert!(Instant::now() < deadline, "{what}\n{}", evidence(context));
         std::thread::sleep(Duration::from_millis(50));
