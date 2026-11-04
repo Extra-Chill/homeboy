@@ -3950,7 +3950,7 @@ process.stdout.write(JSON.stringify({type:'message_end',message:{role:'assistant
     }
 
     #[test]
-    fn preview_and_execution_reject_missing_task_url_for_absent_provider_worktree() {
+    fn preview_and_execution_plan_absent_provider_worktree_without_task_url() {
         crate::test_support::with_isolated_home(|home| {
             let (_root, repository) =
                 homeboy::core::test_support::shared_committed_git_repo_fixture("fixture");
@@ -3959,7 +3959,7 @@ process.stdout.write(JSON.stringify({type:'message_end',message:{role:'assistant
                 "fixture",
                 &repository,
             );
-            let handle = "fixture@feature-missing-task-url";
+            let handle = "fixture@feature-no-tracker";
             let args = cook(&[
                 "homeboy",
                 "agent-task",
@@ -3975,7 +3975,7 @@ process.stdout.write(JSON.stringify({type:'message_end',message:{role:'assistant
                 "--base",
                 "main",
                 "--head",
-                "feature/missing-task-url",
+                "feature/no-tracker",
                 "--to-worktree",
                 &handle,
                 "--no-finalize",
@@ -3999,7 +3999,7 @@ process.stdout.write(JSON.stringify({type:'message_end',message:{role:'assistant
                     Err(error) => Err(error),
                 }
             }
-            .expect_err("preview rejects the missing creation requirement");
+            .expect("preview plans the worktree from repo, base and head");
             let execution = provision_cook_destination(
                 &args,
                 crate::commands::agent_task::run::resolve_cook_repository(&mut args.clone())
@@ -4007,21 +4007,17 @@ process.stdout.write(JSON.stringify({type:'message_end',message:{role:'assistant
                     .as_ref(),
                 false,
             )
-            .expect_err("execution rejects before durable Cook admission");
+            .expect("execution defers creation to durable Cook admission");
 
+            let (_, preview) = preview;
+            assert_eq!(preview["action"], "planned_create", "preview: {preview}");
+            assert_eq!(preview["handle"], handle);
             assert_eq!(
-                preview.code, execution.code,
-                "preview: {preview:?}; execution: {execution:?}"
+                execution["action"], "lookup_pending",
+                "execution: {execution}"
             );
-            assert_eq!(preview.message, execution.message);
-            let missing = preview.details["args"]
-                .as_array()
-                .expect("missing-argument details");
-            assert!(missing.iter().any(|value| {
-                value
-                    .as_str()
-                    .is_some_and(|value| value.contains("--task-url") && value.contains(handle))
-            }));
+            assert_eq!(execution["provision_intent"]["head"], "feature/no-tracker");
+            assert!(execution["provision_intent"]["task_url"].is_null());
             assert!(
                 homeboy::agents::agent_task_lifecycle::list_records_in_store(
                     &agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
@@ -5356,20 +5352,12 @@ pub(crate) fn provision_cook_destination(
 }
 
 /// Resolve the native provider identity without creating a worktree. Preview
-/// and execution both use this check, so a field required only for creation is
-/// rejected before either reports a viable deferred destination.
+/// and execution both use this check. Repository, base and head identify the
+/// worktree; a task URL is recorded when given but is not needed to create it.
 fn preflight_missing_cook_provider_workspace(
     intent: &homeboy::core::worktree_provider::WorktreeProvisionIntent,
     repository: Option<&ResolvedCookRepository>,
 ) -> homeboy::core::Result<homeboy::core::worktree_provider::WorktreeProvisionPlan> {
-    if intent.task_url.is_none() {
-        return Err(homeboy::core::Error::validation_missing_argument(vec![
-            format!(
-                "--task-url is required to create missing provider worktree `{}`",
-                intent.handle
-            ),
-        ]));
-    }
     match repository {
         Some(repo) => homeboy::core::worktree_provider::plan_worktree_provision(
             intent,
@@ -5580,13 +5568,19 @@ pub(crate) fn resolve_cook_destination(
             "--repo <repo> is required when --to-worktree is omitted".to_string(),
         ])
     })?;
-    let task_url = args.dispatch.task_url.as_deref().ok_or_else(|| {
-        homeboy::core::Error::validation_missing_argument(vec![
-            "--task-url <url> is required when --to-worktree is omitted".to_string(),
-        ])
-    })?;
-    let task_url = normalize_cook_task_url(task_url);
-    args.dispatch.task_url = Some(task_url.clone());
+    // The task URL names the branch only when --head is omitted.
+    let task_url = args
+        .dispatch
+        .task_url
+        .as_deref()
+        .map(normalize_cook_task_url);
+    if task_url.is_none() && args.head.is_none() {
+        return Err(homeboy::core::Error::validation_missing_argument(vec![
+            "--task-url <url> or --head <branch> is required when --to-worktree is omitted"
+                .to_string(),
+        ]));
+    }
+    args.dispatch.task_url = task_url.clone();
     // Resolve the requested branch before task discovery. An explicit --head is
     // authoritative through candidate reuse, provisioning, and finalization.
     let handle_repository = cook_component_id(&args).unwrap_or(repo).to_string();
@@ -5605,7 +5599,11 @@ pub(crate) fn resolve_cook_destination(
         Some(head) => (head, None),
         None => next_live_derived_cook_branch(
             &handle_repository,
-            &derived_cook_branch(&task_url)?,
+            &derived_cook_branch(
+                task_url
+                    .as_deref()
+                    .expect("task URL checked when --head is omitted"),
+            )?,
             source_checkout,
             args.attempt_run_id
                 .as_deref()

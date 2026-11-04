@@ -9517,7 +9517,11 @@ fn provision_pending_cook_workspace(
         repo: required("repo")?.to_string(),
         base: required("base")?.to_string(),
         head: required("head")?.to_string(),
-        task_url: Some(required("task_url")?.to_string()),
+        task_url: intent
+            .get("task_url")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_string),
     };
     let lifecycle = options
         .identity
