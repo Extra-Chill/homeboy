@@ -72,6 +72,8 @@ pub enum StepPhase {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StepState {
+    #[serde(default)]
+    pub reused: bool,
     pub phase: StepPhase,
     /// Attempts submitted for the step.
     #[serde(default)]
@@ -143,6 +145,7 @@ impl ItemState {
 impl StepState {
     fn pending() -> Self {
         Self {
+            reused: false,
             phase: StepPhase::Pending,
             attempt: 0,
             key: None,

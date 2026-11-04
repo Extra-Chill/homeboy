@@ -2,7 +2,7 @@
 
 ```text
 homeboy workflow validate <file|id|->
-homeboy workflow run <file|id|-> [--input NAME=VALUE]... [--instance NAME] [--on RUNNER] [--wait]
+homeboy workflow run <file|id|-> [--input NAME=VALUE]... [--instance NAME] [--resume-from INSTANCE] [--on RUNNER] [--wait]
 homeboy workflow status [<instance>] [--watch]
 homeboy workflow cancel <instance|cadence-workflow-id>
 homeboy workflow approve <instance> <step>
@@ -27,6 +27,12 @@ Statuses:
 |---|---|
 | Step | `succeeded`, `failed`, `timed_out`, `cancelled`, `skipped`; a `cook` step reports its Cook's run state (`succeeded`, `candidate_recoverable`, `partial_failure`, `failed`, `cancelled`) |
 | Instance | `succeeded`, `failed`, `cancelled`, `budget_exhausted` |
+
+## Resume after fixing a definition
+
+`homeboy workflow run <file|id|-> --resume-from <instance>` admits the current definition and inputs as a new instance. The source must be terminal and belong to the same workflow on the selected daemon. A succeeded step is reused only when its complete templated step-definition digest matches and all its `needs` were reused. Changing a step therefore reruns its downstream steps. Failed, skipped, and unfinished steps run normally.
+
+Reused steps retain their recorded outputs, run ids, item records, and original job keys (the references to their artifacts); artifacts are not copied or recreated. `workflow status` includes `resumed_from` and each step's `reused` and `launched` flags. Pending steps have both flags false. Resume provenance participates in the deterministic instance id; omitting the flag preserves existing identity and pinning semantics. Cadences do not accept `--resume-from`.
 
 ## The `homeboy/workflow/v1` format
 
