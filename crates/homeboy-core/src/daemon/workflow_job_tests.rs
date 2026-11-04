@@ -24,6 +24,7 @@ fn request(definition: Value, cwd: &Path) -> WorkflowJobRequest {
         schema: WORKFLOW_JOB_REQUEST_SCHEMA.to_string(),
         instance: definition.instance_id(&inputs, None),
         instance_name: None,
+        resumed_from: None,
         definition_digest: definition.digest(),
         definition,
         inputs,
@@ -90,6 +91,105 @@ fn instance_of(store: &JobStore, job_id: Uuid) -> String {
 
 fn sh(script: &str) -> Value {
     json!({ "program": "sh", "args": ["-c", script] })
+}
+
+#[test]
+fn resume_digest_uses_resolved_inputs_and_requires_success() {
+    let old = request(
+        json!({
+            "schema": "homeboy/workflow/v1", "id": "resume-inputs",
+            "inputs": {"value": {"default": "one"}, "unused": {"default": "x"}},
+            "steps": [
+                {"id": "a", "exec": sh("echo {{inputs.value}}")},
+                {"id": "b", "needs": ["a"], "exec": sh("echo b")},
+                {"id": "c", "exec": sh("echo c")}
+            ]
+        }),
+        Path::new("/tmp"),
+    );
+    let mut source = old.initial_state();
+    for id in ["a", "b"] {
+        source.steps.get_mut(id).unwrap().phase = StepPhase::Done;
+        source.steps.get_mut(id).unwrap().outcome = Some("succeeded".into());
+    }
+    source.steps.get_mut("c").unwrap().phase = StepPhase::Done;
+    source.steps.get_mut("c").unwrap().outcome = Some("skipped".into());
+    for (input, expected) in [("unused", true), ("value", false)] {
+        let mut new = old.clone();
+        new.inputs.insert(input.into(), json!("changed"));
+        let mut target = new.initial_state();
+        reuse_steps(&new, &old, &source, &mut target).unwrap();
+        assert_eq!(target.steps["a"].reused, expected);
+        assert_eq!(target.steps["b"].reused, expected);
+        assert!(!target.steps["c"].reused);
+    }
+    // Equivalent templated definitions compare after substitution.
+    let mut literal = old.clone();
+    literal.definition.steps[0].exec.as_mut().unwrap().args[1] = "echo one".into();
+    let mut target = literal.initial_state();
+    reuse_steps(&literal, &old, &source, &mut target).unwrap();
+    assert!(target.steps["a"].reused);
+}
+
+#[test]
+fn resume_reuses_only_unchanged_succeeded_dependency_chains() {
+    with_isolated_home(|home| {
+        let store = JobStore::open_without_reconciliation(
+            home.path().join(crate::paths::OBSERVATION_DB_FILENAME),
+        )
+        .unwrap()
+        .with_daemon_lease("workflow-resume-test".to_string());
+        let definition = json!({
+            "schema": "homeboy/workflow/v1", "id": "resume-chain",
+            "steps": [
+                {"id": "a", "exec": sh("touch a; printf '{\"value\":42}' > \"$HOMEBOY_STEP_OUTPUT\"")},
+                {"id": "b", "needs": ["a"], "exec": sh("touch b")},
+                {"id": "c", "needs": ["b"], "exec": sh("exit 7")}
+            ]
+        });
+        let original = request(definition.clone(), home.path());
+        let job = admit(&store, &original);
+        crate::daemon::start_controller_job(job, &store).unwrap();
+        assert_eq!(wait_terminal(&store, job, 30).status, JobStatus::Failed);
+        std::fs::remove_file(home.path().join("a")).unwrap();
+        std::fs::remove_file(home.path().join("b")).unwrap();
+
+        for change_b in [false, true] {
+            let mut fixed = definition.clone();
+            fixed["steps"][2]["exec"] = sh("touch c");
+            if change_b {
+                fixed["steps"][1]["exec"] = sh("touch b; echo changed");
+            }
+            let mut resumed = request(fixed, home.path());
+            resumed.resumed_from = Some(original.instance.clone());
+            resumed.instance = resumed.definition.instance_id_with_resume(
+                &resumed.inputs,
+                None,
+                resumed.resumed_from.as_deref(),
+            );
+            assert_ne!(
+                resumed.instance,
+                resumed.definition.instance_id(&resumed.inputs, None)
+            );
+            let job = admit(&store, &resumed);
+            crate::daemon::start_controller_job(job, &store).unwrap();
+            assert_eq!(wait_terminal(&store, job, 30).status, JobStatus::Succeeded);
+            let view = workflow_status(&store, &resumed.instance).unwrap();
+            assert_eq!(view["resumed_from"], original.instance);
+            assert_eq!(view["steps"]["a"]["reused"], true);
+            assert_eq!(view["steps"]["b"]["reused"], !change_b);
+            assert_eq!(view["steps"]["c"]["launched"], true);
+            assert!(!home.path().join("a").exists());
+            assert_eq!(home.path().join("b").exists(), change_b);
+            assert!(home.path().join("c").exists());
+            let controller = store.controller_job_state(job).unwrap();
+            let state: InstanceState =
+                serde_json::from_value(controller.checkpoint.unwrap()).unwrap();
+            assert_eq!(state.steps["a"].output, Some(json!({"value": 42})));
+            assert_eq!(state.step_runs, if change_b { 2 } else { 1 });
+            std::fs::remove_file(home.path().join("c")).unwrap();
+        }
+    });
 }
 
 #[test]

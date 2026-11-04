@@ -682,11 +682,24 @@ impl WorkflowDefinition {
     /// `wf-<id>-<sha256(definition digest, inputs, instance name)[..12]>`.
     /// The same definition and inputs name the same instance.
     pub fn instance_id(&self, inputs: &BTreeMap<String, Value>, name: Option<&str>) -> String {
-        let identity = serde_json::json!({
+        self.instance_id_with_resume(inputs, name, None)
+    }
+
+    /// Resume provenance participates in identity only when explicitly supplied.
+    pub fn instance_id_with_resume(
+        &self,
+        inputs: &BTreeMap<String, Value>,
+        name: Option<&str>,
+        resumed_from: Option<&str>,
+    ) -> String {
+        let mut identity = serde_json::json!({
             "definition": self.digest(),
             "inputs": inputs,
             "instance": name,
         });
+        if let Some(source) = resumed_from {
+            identity["resumed_from"] = Value::String(source.to_string());
+        }
         let hash = homeboy_engine_primitives::content_hash::sha256_hex(
             canonical_json(&identity).as_bytes(),
         );
