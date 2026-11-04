@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.445.1] - 2026-11-04
+
+### Changed
+- Give chaos-test settle waits a 120s deadline
+
+### Fixed
+- Fix workflow test module formatting
+
 ## [0.445.0] - 2026-11-04
 
 ### Added
