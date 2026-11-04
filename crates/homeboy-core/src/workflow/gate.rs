@@ -73,6 +73,35 @@ impl Gate {
         }
     }
 
+    /// A passing positive predicate explicitly handles a rejected decision.
+    pub fn matches_rejection(&self, id: &str, facts: &dyn GateFacts) -> bool {
+        if !self.evaluate(facts) {
+            return false;
+        }
+        match self {
+            Gate::Outcome { step, outcome } => {
+                step == id && outcome.iter().any(|v| v == "rejected")
+            }
+            Gate::Output {
+                step,
+                pointer,
+                test,
+            } => {
+                step == id
+                    && pointer == "/decision"
+                    && match test {
+                        OutputTest::Equals(value) => value == "rejected",
+                        OutputTest::In(values) => values.iter().any(|v| v == "rejected"),
+                        _ => false,
+                    }
+            }
+            Gate::All(gates) | Gate::Any(gates) => {
+                gates.iter().any(|g| g.matches_rejection(id, facts))
+            }
+            Gate::Not(_) => false,
+        }
+    }
+
     /// Every step this gate reads.
     pub fn referenced_steps(&self) -> BTreeSet<&str> {
         let mut steps = BTreeSet::new();

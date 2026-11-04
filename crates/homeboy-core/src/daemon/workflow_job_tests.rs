@@ -458,6 +458,74 @@ fn approval_waits_for_a_recorded_approval() {
 }
 
 #[test]
+fn approval_decisions_route_branches_and_template_feedback() {
+    for decision in ["approved", "rejected"] {
+        with_isolated_home(|home| {
+            let runs = home.path().join("decision.log");
+            let definition = json!({
+                "schema": "homeboy/workflow/v1", "id": "decision",
+                "steps": [
+                    {"id": "review", "approval": {"prompt": "ship?"}},
+                    {"id": "merge", "needs": ["review"],
+                     "when": {"step": "review", "output": "/decision", "equals": "approved"},
+                     "exec": sh(&format!("echo merge >> {}", runs.display()))},
+                    {"id": "revise", "needs": ["review"],
+                     "when": {"step": "review", "output": "/decision", "equals": "rejected"},
+                     "exec": sh(&format!("echo '{{{{steps.review.output/reason}}}}' >> {}", runs.display()))},
+                    {"id": "default", "needs": ["review"],
+                     "exec": sh(&format!("echo default >> {}", runs.display()))}
+                ]
+            });
+            let store = JobStore::open_without_reconciliation(
+                home.path().join(crate::paths::OBSERVATION_DB_FILENAME),
+            )
+            .unwrap()
+            .with_daemon_lease("workflow-test".to_string());
+            let request = request(definition, home.path());
+            let job_id = admit(&store, &request);
+            crate::daemon::start_controller_job(job_id, &store).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                let status = workflow_status(&store, &request.instance).unwrap();
+                if status["steps"]["review"]["phase"] == "awaiting_approval" {
+                    break;
+                }
+                assert!(Instant::now() < deadline, "{status}");
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            let mut body =
+                json!({"step": "review", "reason": "fix projection", "actor": "reviewer"});
+            // The existing approval API defaults to approved for compatibility.
+            if decision == "rejected" {
+                body["decision"] = json!(decision);
+            }
+            workflow_approve(&store, &request.instance, Some(body)).unwrap();
+            assert_eq!(
+                wait_terminal(&store, job_id, 15).status,
+                JobStatus::Succeeded
+            );
+            let status = workflow_status(&store, &request.instance).unwrap();
+            assert_eq!(status["steps"]["review"]["output"]["decision"], decision);
+            assert_eq!(
+                status["steps"]["review"]["output"]["reason"],
+                "fix projection"
+            );
+            assert_eq!(status["steps"]["review"]["output"]["actor"], "reviewer");
+            if decision == "rejected" {
+                assert_eq!(status["steps"]["review"]["outcome"], "rejected");
+                assert_eq!(status["steps"]["merge"]["outcome"], "skipped");
+                assert_eq!(status["steps"]["default"]["outcome"], "skipped");
+                assert_eq!(std::fs::read_to_string(&runs).unwrap(), "fix projection\n");
+            } else {
+                assert_eq!(status["steps"]["revise"]["outcome"], "skipped");
+                let output = std::fs::read_to_string(&runs).unwrap();
+                assert!(output.contains("merge\n") && output.contains("default\n"));
+            }
+        });
+    }
+}
+
+#[test]
 fn cancelling_the_instance_cancels_its_running_step() {
     with_isolated_home(|home| {
         let definition = json!({
