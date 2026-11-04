@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.445.0] - 2026-11-04
+
+### Added
+- resume instances by reusing unchanged succeeded steps
+
+### Changed
+- Add workflow rejection decisions and feedback-driven branching
+
 ## [0.444.20] - 2026-11-03
 
 ### Fixed
