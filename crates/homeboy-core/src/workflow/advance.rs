@@ -72,6 +72,8 @@ pub enum StepPhase {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StepState {
+    #[serde(default)]
+    pub reused: bool,
     pub phase: StepPhase,
     /// Attempts submitted for the step.
     #[serde(default)]
@@ -143,6 +145,7 @@ impl ItemState {
 impl StepState {
     fn pending() -> Self {
         Self {
+            reused: false,
             phase: StepPhase::Pending,
             attempt: 0,
             key: None,
@@ -289,6 +292,12 @@ pub enum Event {
         step: String,
         iteration: u32,
     },
+    ApprovalDecided {
+        step: String,
+        iteration: u32,
+        rejected: bool,
+        output: Value,
+    },
     /// The operator cancelled the instance: stop every step job it awaits.
     Cancel {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -363,7 +372,20 @@ pub fn advance(
         }
         Event::Tick => {}
         Event::StepFinished(result) => machine.finish(result),
-        Event::Approved { step, iteration } => machine.approve(step, *iteration),
+        Event::Approved { step, iteration } => machine.decide_approval(
+            step,
+            *iteration,
+            false,
+            serde_json::json!({"decision": "approved"}),
+        ),
+        Event::ApprovalDecided {
+            step,
+            iteration,
+            rejected,
+            output,
+        } => {
+            machine.decide_approval(step, *iteration, *rejected, output.clone());
+        }
         Event::Cancel { reason } => {
             machine.cancel(reason.as_deref().unwrap_or("the workflow was cancelled"));
         }
@@ -485,7 +507,7 @@ impl Machine<'_> {
         self.settle(&id, outcome);
     }
 
-    fn approve(&mut self, id: &str, iteration: u32) {
+    fn decide_approval(&mut self, id: &str, iteration: u32, rejected: bool, output: Value) {
         if iteration != self.state.iteration {
             return;
         }
@@ -495,7 +517,11 @@ impl Machine<'_> {
             .get(id)
             .is_some_and(|step| step.phase == StepPhase::AwaitingApproval)
         {
-            self.settle(id, "succeeded".to_string());
+            self.step(id).output = Some(output);
+            self.settle(
+                id,
+                if rejected { "rejected" } else { "succeeded" }.to_string(),
+            );
         }
     }
 
@@ -903,7 +929,16 @@ impl Machine<'_> {
                 if !needs.iter().all(|need| need.settled()) {
                     continue;
                 }
-                let needs_succeeded = needs.iter().all(|need| need.succeeded());
+                // Rejection is not an instance failure. An explicit passing gate
+                // that reads the rejected dependency can route its feedback.
+                let needs_succeeded = needs.iter().zip(&definition.needs).all(|(need, name)| {
+                    need.succeeded()
+                        || (need.outcome.as_deref() == Some("rejected")
+                            && definition
+                                .when
+                                .as_ref()
+                                .is_some_and(|gate| gate.matches_rejection(name, &self.state)))
+                });
                 if (!needs_succeeded || self.state.failing) && !definition.always {
                     self.skip(id);
                     changed = true;

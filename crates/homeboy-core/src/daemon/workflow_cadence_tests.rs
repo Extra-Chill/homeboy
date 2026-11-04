@@ -35,6 +35,7 @@ fn template(every: Value, script: &str, cwd: &Path) -> WorkflowJobRequest {
         schema: WORKFLOW_JOB_REQUEST_SCHEMA.to_string(),
         instance: definition.instance_id(&inputs, None),
         instance_name: None,
+        resumed_from: None,
         definition_digest: definition.digest(),
         definition,
         inputs,

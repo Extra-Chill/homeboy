@@ -2,7 +2,7 @@
 
 ```text
 homeboy workflow validate <file|id|->
-homeboy workflow run <file|id|-> [--input NAME=VALUE]... [--instance NAME] [--on RUNNER] [--wait]
+homeboy workflow run <file|id|-> [--input NAME=VALUE]... [--instance NAME] [--resume-from INSTANCE] [--on RUNNER] [--wait]
 homeboy workflow status [<instance>] [--watch]
 homeboy workflow cancel <instance|cadence-workflow-id>
 homeboy workflow approve <instance> <step>
@@ -27,6 +27,12 @@ Statuses:
 |---|---|
 | Step | `succeeded`, `failed`, `timed_out`, `cancelled`, `skipped`; a `cook` step reports its Cook's run state (`succeeded`, `candidate_recoverable`, `partial_failure`, `failed`, `cancelled`) |
 | Instance | `succeeded`, `failed`, `cancelled`, `budget_exhausted` |
+
+## Resume after fixing a definition
+
+`homeboy workflow run <file|id|-> --resume-from <instance>` admits the current definition and inputs as a new instance. The source must be terminal and belong to the same workflow on the selected daemon. A succeeded step is reused only when its complete templated step-definition digest matches and all its `needs` were reused. Changing a step therefore reruns its downstream steps. Failed, skipped, and unfinished steps run normally.
+
+Reused steps retain their recorded outputs, run ids, item records, and original job keys (the references to their artifacts); artifacts are not copied or recreated. `workflow status` includes `resumed_from` and each step's `reused` and `launched` flags. Pending steps have both flags false. Resume provenance participates in the deterministic instance id; omitting the flag preserves existing identity and pinning semantics. Cadences do not accept `--resume-from`.
 
 ## The `homeboy/workflow/v1` format
 
@@ -78,9 +84,21 @@ A step with `foreach` expands, once its `needs` and `when` pass, into one step j
 - **`exec`** runs a program directly, never through a shell. The program is resolved to an absolute path when the workflow is admitted. Its output is the JSON it writes to the file named by `$HOMEBOY_STEP_OUTPUT`.
 - **`homeboy`** runs `homeboy <argv>` with this Homeboy build. Its output is the `data` of the command's JSON envelope.
 - **`cook`** runs `homeboy agent-task cook <flags> --wait --cook-id <id>`. Every key must be a real `agent-task cook` flag; this is checked against the live command tree, so there is no second Cook contract. A string becomes `--key value`, `true` becomes `--key`, and an array repeats the flag. `wait`, `cook-id`, `run-id`, `output`, and `preview` belong to the workflow. The step's outcome is the Cook's terminal run state, read from its run record; `{{steps.<id>.run_id}}` is the Cook id.
-- **`approval`** waits for `homeboy workflow approve <instance> <step>`. It runs no job. When the instance has a notification route, entering this gate sends an `awaiting_approval` announcement with the rendered prompt, upstream output artifact links, and the approve command. Delivered or queued announcements are deduplicated per instance, step, and iteration across recovery; status projections never send notifications.
+- **`approval`** waits for `homeboy workflow approve <instance> <step>` or `homeboy workflow reject <instance> <step> [--reason <text>]`. It runs no job. Approval settles `succeeded`; rejection settles `rejected` (not an instance failure). Both write output with `decision` (`approved` or `rejected`), `reason` (text or null), and `actor` (the submitting user's name, or `local-operator`). `workflow status` includes this output.
 
-Pass the global `--notification-transport TRANSPORT --notification-route ROUTE` flags to `workflow run` to bind a destination. Explicit flags win over `HOMEBOY_NOTIFICATION_TRANSPORT` / `HOMEBOY_NOTIFICATION_ROUTE`. The resolved route is persisted with the instance (or cadence template), propagated to all step processes, and inherited by workflows admitted from those steps. Recovery uses the persisted route rather than the daemon's ambient destination.
+  Rejected dependencies skip their dependents by default. A passing `when` that explicitly matches the rejected dependency's `/decision` to `rejected` (using `equals` or `in`), or its `outcome` to `rejected`, permits that branch to run. For example:
+
+  ```json
+  {"id":"revise","needs":["approve_merge"],
+   "when":{"step":"approve_merge","output":"/decision","equals":"rejected"},
+   "cook":{"prompt":"Rework the candidate: {{steps.approve_merge.output/reason}}"}}
+  ```
+
+  Gate the merge branch on `{"step":"approve_merge","output":"/decision","equals":"approved"}`. `always` retains its usual dependency override.
+
+  When the instance has a notification route, entering this gate sends an `awaiting_approval` announcement with the rendered prompt, upstream output artifact links, and the approve and reject commands. Delivered or queued announcements are deduplicated per instance, step, and iteration across recovery; status projections never send notifications.
+
+  Pass the global `--notification-transport TRANSPORT --notification-route ROUTE` flags to `workflow run` to bind a destination. Explicit flags win over `HOMEBOY_NOTIFICATION_TRANSPORT` / `HOMEBOY_NOTIFICATION_ROUTE`. The resolved route is persisted with the instance (or cadence template), propagated to all step processes, and inherited by workflows admitted from those steps. Recovery uses the persisted route rather than the daemon's ambient destination.
 
 ### Gates
 
@@ -162,6 +180,7 @@ When the daemon that owns an instance dies or is stopped, the instance resumes o
 - **`workflow status`** is a pure projection of the job ledger: the instance status, its `parent` and `children`, each step's phase, outcome, attempt, key, and step job, each `foreach` item with its step job, Cook run id, and the live state of a running Cook. `--watch` polls until the instance — and any chain it admits — is terminal.
 - **`workflow cancel`** cancels the instance; the daemon cancels every step job it is running. Once the cancellation is durable the instance admits no more steps. Given a workflow id that is not an instance, it stops that cadence.
 - **`workflow approve`** records an approval for a step that is awaiting one.
+- **`workflow reject <instance> <step> [--reason <text>]`** records a rejection for an awaiting approval, with optional feedback for downstream steps.
 - **`workflow list`** lists instances in the daemon; `--registered` lists the definitions in `~/.config/homeboy/workflows/`, the built-ins, and every registered cadence.
 
 ## Examples

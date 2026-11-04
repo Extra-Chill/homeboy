@@ -66,6 +66,9 @@ pub struct WorkflowJobRequest {
     pub instance: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instance_name: Option<String>,
+    /// Explicit source of reusable succeeded steps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resumed_from: Option<String>,
     /// The definition, pinned at admission.
     pub definition: WorkflowDefinition,
     pub definition_digest: String,
@@ -116,10 +119,11 @@ impl WorkflowJobRequest {
                 "workflow definition digest does not match its body",
             ));
         }
-        if self
-            .definition
-            .instance_id(&self.inputs, self.instance_name.as_deref())
-            != self.instance
+        if self.definition.instance_id_with_resume(
+            &self.inputs,
+            self.instance_name.as_deref(),
+            self.resumed_from.as_deref(),
+        ) != self.instance
         {
             return Err(invalid(
                 "workflow instance id does not match its definition and inputs",
@@ -242,6 +246,7 @@ impl ControllerJobDriver for WorkflowJobDriver {
             "schema": request.schema,
             "instance": request.instance,
             "parent": request.parent,
+            "resumed_from": request.resumed_from,
             "workflow": request.definition.id,
             "definition_digest": request.definition_digest,
             "inputs": request.inputs.keys().collect::<Vec<_>>(),
@@ -316,6 +321,102 @@ impl ControllerJobDriver for WorkflowJobDriver {
     }
 }
 
+/// Compare the complete templated step, not just its executable arguments.
+fn step_digest(
+    step: &crate::workflow::definition::StepDefinition,
+    state: &InstanceState,
+) -> Option<String> {
+    fn render(value: &mut Value, state: &InstanceState) -> Option<()> {
+        match value {
+            Value::String(text) => {
+                // Item templates are identical code applied to the identical
+                // foreach expansion; resolve the other references normally.
+                let mut rendered = String::new();
+                let mut rest = text.as_str();
+                while let Some(start) = rest.find("{{") {
+                    rendered.push_str(&rest[..start]);
+                    let end = start + rest[start..].find("}}")? + 2;
+                    let reference = &rest[start..end];
+                    let parsed = crate::workflow::template::references(reference).ok()?;
+                    if matches!(
+                        parsed.as_slice(),
+                        [crate::workflow::template::Reference::Item(_)]
+                    ) {
+                        rendered.push_str(reference);
+                    } else {
+                        rendered
+                            .push_str(&crate::workflow::template::render(reference, state).ok()?);
+                    }
+                    rest = &rest[end..];
+                }
+                rendered.push_str(rest);
+                *text = rendered;
+            }
+            Value::Array(items) => {
+                for item in items {
+                    render(item, state)?;
+                }
+            }
+            Value::Object(fields) => {
+                for value in fields.values_mut() {
+                    render(value, state)?;
+                }
+            }
+            _ => {}
+        }
+        Some(())
+    }
+    let mut value = serde_json::to_value(step).ok()?;
+    render(&mut value, state)?;
+    Some(homeboy_engine_primitives::content_hash::sha256_hex(
+        serde_json::to_string(&value).ok()?.as_bytes(),
+    ))
+}
+
+fn reuse_steps(
+    request: &WorkflowJobRequest,
+    old: &WorkflowJobRequest,
+    source: &InstanceState,
+    target: &mut InstanceState,
+) -> Result<()> {
+    if old.definition.id != request.definition.id {
+        return Err(invalid("resume source belongs to a different workflow"));
+    }
+    // Definitions need not be topologically ordered. Iterate to a fixed point.
+    loop {
+        let mut changed = false;
+        for step in &request.definition.steps {
+            if target.steps[&step.id].reused || !step.needs.iter().all(|id| target.steps[id].reused)
+            {
+                continue;
+            }
+            let Some(recorded) = source.steps.get(&step.id).filter(|state| {
+                state.phase == StepPhase::Done && state.outcome.as_deref() == Some("succeeded")
+            }) else {
+                continue;
+            };
+            let Some(previous) = old.definition.steps.iter().find(|old| old.id == step.id) else {
+                continue;
+            };
+            let Some(digest) = step_digest(step, target) else {
+                continue;
+            };
+            if step_digest(previous, source).as_ref() != Some(&digest) {
+                continue;
+            }
+            // Keep output, run ids, item records and original job keys: those
+            // keys are the durable references to the source's artifacts.
+            let mut reused = recorded.clone();
+            reused.reused = true;
+            target.steps.insert(step.id.clone(), reused);
+            changed = true;
+        }
+        if !changed {
+            return Ok(());
+        }
+    }
+}
+
 fn run_instance(
     request: &WorkflowJobRequest,
     mut state: InstanceState,
@@ -323,6 +424,22 @@ fn run_instance(
     store: &JobStore,
 ) -> Result<Value> {
     let job_id = job.job().job_id();
+    if state.started_at_ms.is_none() {
+        if let Some(source) = &request.resumed_from {
+            let (source_job, controller) = instance_job(store, source)?;
+            if !source_job.status.is_terminal() {
+                return Err(invalid("resume source must be terminal"));
+            }
+            let old_request = WorkflowJobRequest::parse(&controller.request)?;
+            let old_state: InstanceState = serde_json::from_value(
+                controller
+                    .checkpoint
+                    .ok_or_else(|| invalid("resume source has no checkpoint"))?,
+            )
+            .map_err(|error| invalid(format!("invalid resume checkpoint: {error}")))?;
+            reuse_steps(request, &old_request, &old_state, &mut state)?;
+        }
+    }
     job.progress(projection(&state, Some(store)))?;
     loop {
         if job.is_cancelled() {
@@ -443,9 +560,16 @@ fn observe(
                 continue;
             };
             if awaiting.contains(&step) && iteration == u64::from(state.iteration) {
-                events.push(Event::Approved {
+                let rejected = approval["decision"] == "rejected";
+                events.push(Event::ApprovalDecided {
                     step: step.to_string(),
                     iteration: state.iteration,
+                    rejected,
+                    output: json!({
+                        "decision": if rejected { "rejected" } else { "approved" },
+                        "reason": approval["reason"],
+                        "actor": approval["actor"],
+                    }),
                 });
             }
         }
@@ -766,8 +890,11 @@ pub fn projection(state: &InstanceState, store: Option<&JobStore>) -> Value {
         "steps": state.steps.iter().map(|(id, step)| {
             (id.clone(), json!({
                 "phase": step.phase,
+                "reused": step.reused,
+                "launched": !step.reused && step.attempt > 0,
                 "attempt": step.attempt,
                 "outcome": step.outcome,
+                "output": step.output,
                 "key": step.key,
                 "job": step.key.as_deref().map(job_of).unwrap_or(Value::Null),
                 "run_id": step.run_id,
@@ -853,6 +980,7 @@ fn instance_view(
     if let Some(request) = request {
         view["instance"] = json!(request.instance);
         view["workflow"] = json!(request.definition.id);
+        view["resumed_from"] = json!(request.resumed_from);
         view["definition_digest"] = json!(request.definition_digest);
         view["inputs"] = json!(request.inputs);
         view["parent"] = json!(request.parent);
@@ -933,6 +1061,18 @@ pub(crate) fn workflow_approve(
     instance: &str,
     body: Option<Value>,
 ) -> Result<Value> {
+    let decision = body
+        .as_ref()
+        .and_then(|body| body.get("decision"))
+        .and_then(Value::as_str)
+        .unwrap_or("approved");
+    if !matches!(decision, "approved" | "rejected") {
+        return Err(invalid("decision must be approved or rejected"));
+    }
+    let reason = body.as_ref().and_then(|body| body.get("reason"));
+    if reason.is_some_and(|value| !value.is_null() && !value.is_string()) {
+        return Err(invalid("reason must be a string"));
+    }
     let step = body
         .as_ref()
         .and_then(|body| body.get("step"))
@@ -967,11 +1107,15 @@ pub(crate) fn workflow_approve(
         "step": step,
         "iteration": state.iteration,
         "approved_at": chrono::Utc::now().to_rfc3339(),
+        "decision": decision,
+        "reason": reason,
+        "actor": body.as_ref().and_then(|body| body.get("actor"))
+            .and_then(Value::as_str).unwrap_or("local-operator"),
     });
     store.append_event(
         job.id,
         JobEventKind::Progress,
-        Some(format!("workflow step `{step}` approved")),
+        Some(format!("workflow step `{step}` {decision}")),
         Some(json!({ "workflow_approval": approval })),
     )?;
     Ok(json!({ "instance": instance, "approval": approval }))

@@ -60,6 +60,13 @@ enum WorkflowCommand {
         /// Step id
         step: String,
     },
+    /// Reject an awaiting approval, optionally providing feedback
+    Reject {
+        instance: String,
+        step: String,
+        #[arg(long)]
+        reason: Option<String>,
+    },
     /// List instances, or registered definitions and cadences with `--registered`
     List {
         /// List registry definitions, built-ins, and daemon cadences instead of instances
@@ -78,6 +85,9 @@ pub struct RunArgs {
     /// Instance name; distinct names run the same definition and inputs separately
     #[arg(long, value_name = "NAME")]
     instance: Option<String>,
+    /// Reuse unchanged succeeded steps from a terminal instance
+    #[arg(long, value_name = "INSTANCE")]
+    resume_from: Option<String>,
     /// Admit the workflow on this runner's daemon instead of the local one
     #[arg(long = "on", value_name = "RUNNER")]
     on: Option<String>,
@@ -154,6 +164,17 @@ pub fn run(args: WorkflowArgs) -> CmdResult<Value> {
             let client = LocalControllerJobClient::connect()?;
             Ok((client.approve_workflow_step(&instance, &step)?, 0))
         }
+        WorkflowCommand::Reject {
+            instance,
+            step,
+            reason,
+        } => {
+            let client = LocalControllerJobClient::connect()?;
+            Ok((
+                client.reject_workflow_step(&instance, &step, reason.as_deref())?,
+                0,
+            ))
+        }
         WorkflowCommand::List { registered } => {
             if registered {
                 let mut listed = registered_workflows()?;
@@ -169,10 +190,12 @@ pub fn run(args: WorkflowArgs) -> CmdResult<Value> {
 fn run_workflow(args: RunArgs) -> CmdResult<Value> {
     let (definition, source) = load(&args.workflow)?;
     validate(&definition)?;
-    if definition.every.is_some() && (args.wait || args.instance.is_some()) {
+    if definition.every.is_some()
+        && (args.wait || args.instance.is_some() || args.resume_from.is_some())
+    {
         return Err(Error::validation_invalid_argument(
             "every",
-            "a workflow with `every` is registered as a cadence; each slot names its own instance, so `--wait` and `--instance` do not apply",
+            "a workflow with `every` is registered as a cadence; each slot names its own instance, so `--wait`, `--instance`, and `--resume-from` do not apply",
             None,
             None,
         ));
@@ -188,12 +211,13 @@ fn run_workflow(args: RunArgs) -> CmdResult<Value> {
         .iter()
         .map(|(name, value)| (name.clone(), Value::String(value.clone())))
         .collect::<BTreeMap<_, _>>();
-    admit(
+    admit_with_resume(
         &definition,
         &provided,
         args.instance.as_deref(),
         args.wait,
         &source,
+        args.resume_from.as_deref(),
     )
 }
 
@@ -206,14 +230,39 @@ pub(crate) fn admit(
     wait: bool,
     source: &str,
 ) -> CmdResult<Value> {
+    admit_with_resume(definition, provided, instance_name, wait, source, None)
+}
+
+fn admit_with_resume(
+    definition: &WorkflowDefinition,
+    provided: &BTreeMap<String, Value>,
+    instance_name: Option<&str>,
+    wait: bool,
+    source: &str,
+    resumed_from: Option<&str>,
+) -> CmdResult<Value> {
     let inputs = definition.resolve_inputs(provided)?;
-    let instance = definition.instance_id(&inputs, instance_name);
+    let instance = definition.instance_id_with_resume(&inputs, instance_name, resumed_from);
     let client = LocalControllerJobClient::connect_current_build()?;
     // The same definition and inputs name the same instance: report it.
     let disposition = match client.workflow(&instance) {
         Ok(_) => "reused",
         Err(_) => {
-            let request = admission_request(
+            if let Some(source) = resumed_from {
+                let view = client.workflow(source)?;
+                if !matches!(
+                    view["status"].as_str(),
+                    Some("succeeded" | "failed" | "cancelled" | "budget_exhausted")
+                ) {
+                    return Err(Error::validation_invalid_argument(
+                        "resume-from",
+                        "resume source must be terminal",
+                        None,
+                        None,
+                    ));
+                }
+            }
+            let mut request = admission_request(
                 definition,
                 inputs,
                 &instance,
@@ -221,6 +270,7 @@ pub(crate) fn admit(
                 parent_from_env(),
                 current_dir()?,
             )?;
+            request.resumed_from = resumed_from.map(str::to_string);
             client.submit(request.submission()?)?;
             "created"
         }
@@ -349,6 +399,7 @@ fn admission_request(
         schema: WORKFLOW_JOB_REQUEST_SCHEMA.to_string(),
         instance: instance.to_string(),
         instance_name: instance_name.map(str::to_string),
+        resumed_from: None,
         definition_digest: definition.digest(),
         definition: definition.clone(),
         inputs,
@@ -422,6 +473,10 @@ fn run_on_runner(
     if let Some(instance) = &args.instance {
         remote.push("--instance".to_string());
         remote.push(instance.clone());
+    }
+    if let Some(source) = &args.resume_from {
+        remote.push("--resume-from".to_string());
+        remote.push(source.clone());
     }
     if let Some(route) = homeboy::core::notification_route::current() {
         remote.extend([

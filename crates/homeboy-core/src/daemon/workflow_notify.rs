@@ -69,6 +69,13 @@ pub(super) fn awaiting_approvals(request: &WorkflowJobRequest, state: &InstanceS
         .with_action(NotifyAction::new(
             "approve",
             format!("homeboy workflow approve {} {id}", state.instance),
+        ))
+        .with_action(NotifyAction::new(
+            "reject",
+            format!(
+                "homeboy workflow reject {} {id} --reason <feedback>",
+                state.instance
+            ),
         ));
         // Link complete artifacts instead of embedding potentially very large
         // upstream outputs in a bounded transport environment.
