@@ -78,7 +78,9 @@ A step with `foreach` expands, once its `needs` and `when` pass, into one step j
 - **`exec`** runs a program directly, never through a shell. The program is resolved to an absolute path when the workflow is admitted. Its output is the JSON it writes to the file named by `$HOMEBOY_STEP_OUTPUT`.
 - **`homeboy`** runs `homeboy <argv>` with this Homeboy build. Its output is the `data` of the command's JSON envelope.
 - **`cook`** runs `homeboy agent-task cook <flags> --wait --cook-id <id>`. Every key must be a real `agent-task cook` flag; this is checked against the live command tree, so there is no second Cook contract. A string becomes `--key value`, `true` becomes `--key`, and an array repeats the flag. `wait`, `cook-id`, `run-id`, `output`, and `preview` belong to the workflow. The step's outcome is the Cook's terminal run state, read from its run record; `{{steps.<id>.run_id}}` is the Cook id.
-- **`approval`** waits for `homeboy workflow approve <instance> <step>`. It runs no job.
+- **`approval`** waits for `homeboy workflow approve <instance> <step>`. It runs no job. When the instance has a notification route, entering this gate sends an `awaiting_approval` announcement with the rendered prompt, upstream output artifact links, and the approve command. Delivered or queued announcements are deduplicated per instance, step, and iteration across recovery; status projections never send notifications.
+
+Pass the global `--notification-transport TRANSPORT --notification-route ROUTE` flags to `workflow run` to bind a destination. Explicit flags win over `HOMEBOY_NOTIFICATION_TRANSPORT` / `HOMEBOY_NOTIFICATION_ROUTE`. The resolved route is persisted with the instance (or cadence template), propagated to all step processes, and inherited by workflows admitted from those steps. Recovery uses the persisted route rather than the daemon's ambient destination.
 
 ### Gates
 

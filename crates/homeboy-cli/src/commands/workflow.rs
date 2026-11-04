@@ -358,6 +358,7 @@ fn admission_request(
         env,
         homeboy_env,
         programs,
+        notification_route: homeboy::core::notification_route::current(),
     })
 }
 
@@ -421,6 +422,14 @@ fn run_on_runner(
     if let Some(instance) = &args.instance {
         remote.push("--instance".to_string());
         remote.push(instance.clone());
+    }
+    if let Some(route) = homeboy::core::notification_route::current() {
+        remote.extend([
+            "--notification-transport".to_string(),
+            route.transport,
+            "--notification-route".to_string(),
+            route.route,
+        ]);
     }
     if args.wait {
         remote.push("--wait".to_string());

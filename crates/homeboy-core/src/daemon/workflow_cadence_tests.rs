@@ -41,6 +41,7 @@ fn template(every: Value, script: &str, cwd: &Path) -> WorkflowJobRequest {
         homeboy_program: "/bin/sh".to_string(),
         cwd: cwd.display().to_string(),
         parent: None,
+        notification_route: None,
         env,
         homeboy_env: EnvMaterializationPlan::default(),
         programs: BTreeMap::from([("sh".to_string(), "/bin/sh".to_string())]),

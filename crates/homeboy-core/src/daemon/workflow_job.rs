@@ -87,6 +87,9 @@ pub struct WorkflowJobRequest {
     /// `exec` and command-gate programs resolved to absolute paths at admission.
     #[serde(default)]
     pub programs: BTreeMap<String, String>,
+    /// Resolved at admission, independent of the daemon's environment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notification_route: Option<crate::notification_route::NotificationRoute>,
 }
 
 impl WorkflowJobRequest {
@@ -102,6 +105,9 @@ impl WorkflowJobRequest {
             return Err(invalid(format!(
                 "workflow requests require schema `{WORKFLOW_JOB_REQUEST_SCHEMA}`"
             )));
+        }
+        if let Some(route) = &self.notification_route {
+            route.validate()?;
         }
         // Cook flags were checked against the CLI's clap tree at admission.
         self.definition.validate(&|_| true)?;
@@ -325,6 +331,7 @@ fn run_instance(
         if state.status.is_terminal() {
             return finish(request, &state, store);
         }
+        super::workflow_notify::awaiting_approvals(request, &state);
         let now_ms = now_ms();
         for event in observe(request, &state, job_id, store) {
             let (next, commands) = advance(&request.definition, &state, &event, now_ms);
@@ -339,6 +346,7 @@ fn run_instance(
                 Err(error) => return Err(error),
             }
             state = next;
+            super::workflow_notify::awaiting_approvals(request, &state);
             job.progress(projection(&state, Some(store)))?;
             if state.status.is_terminal() {
                 break;
@@ -638,10 +646,16 @@ pub fn step_request(
         })?;
     }
     let output = output.display().to_string();
+    let route_env = || {
+        crate::notification_route::child_env(request.notification_route.as_ref())
+            .into_iter()
+            .map(|(name, value)| (name.to_string(), value))
+    };
     let homeboy_env = || {
         let mut env = request.homeboy_env.clone();
         env.public_env.extend(request.env.public_env.clone());
         env.secret_refs.extend(request.env.secret_refs.clone());
+        env.public_env.extend(route_env());
         env.public_env
             .insert(WORKFLOW_INSTANCE_ENV.to_string(), request.instance.clone());
         env.normalize();
@@ -649,6 +663,7 @@ pub fn step_request(
     };
     let exec_env = || {
         let mut env = request.env.clone();
+        env.public_env.extend(route_env());
         env.public_env
             .insert(STEP_OUTPUT_ENV.to_string(), output.clone());
         env.public_env
