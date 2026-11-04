@@ -96,6 +96,10 @@ A step with `foreach` expands, once its `needs` and `when` pass, into one step j
 
   Gate the merge branch on `{"step":"approve_merge","output":"/decision","equals":"approved"}`. `always` retains its usual dependency override.
 
+  When the instance has a notification route, entering this gate sends an `awaiting_approval` announcement with the rendered prompt, upstream output artifact links, and the approve and reject commands. Delivered or queued announcements are deduplicated per instance, step, and iteration across recovery; status projections never send notifications.
+
+  Pass the global `--notification-transport TRANSPORT --notification-route ROUTE` flags to `workflow run` to bind a destination. Explicit flags win over `HOMEBOY_NOTIFICATION_TRANSPORT` / `HOMEBOY_NOTIFICATION_ROUTE`. The resolved route is persisted with the instance (or cadence template), propagated to all step processes, and inherited by workflows admitted from those steps. Recovery uses the persisted route rather than the daemon's ambient destination.
+
 ### Gates
 
 A gate is a closed, deterministic predicate: a pure read of the outcomes and outputs of the steps in the same instance. There is no expression language and no side effect.

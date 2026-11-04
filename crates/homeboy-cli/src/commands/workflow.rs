@@ -409,6 +409,7 @@ fn admission_request(
         env,
         homeboy_env,
         programs,
+        notification_route: homeboy::core::notification_route::current(),
     })
 }
 
@@ -476,6 +477,14 @@ fn run_on_runner(
     if let Some(source) = &args.resume_from {
         remote.push("--resume-from".to_string());
         remote.push(source.clone());
+    }
+    if let Some(route) = homeboy::core::notification_route::current() {
+        remote.extend([
+            "--notification-transport".to_string(),
+            route.transport,
+            "--notification-route".to_string(),
+            route.route,
+        ]);
     }
     if args.wait {
         remote.push("--wait".to_string());

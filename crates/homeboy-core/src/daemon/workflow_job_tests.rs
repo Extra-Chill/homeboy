@@ -12,6 +12,11 @@ use super::*;
 use crate::api_jobs::JobStore;
 use crate::test_support::with_isolated_home;
 
+#[path = "workflow_notify_queue_tests.rs"]
+mod notification_queue_tests;
+#[path = "workflow_notify_tests.rs"]
+mod notification_tests;
+
 fn request(definition: Value, cwd: &Path) -> WorkflowJobRequest {
     register_workflow_step_terminal_consumer(crate::daemon::step_job::STEP_RECEIPT_CONSUMER);
     let definition = WorkflowDefinition::from_value(definition).unwrap();
@@ -31,6 +36,7 @@ fn request(definition: Value, cwd: &Path) -> WorkflowJobRequest {
         homeboy_program: "/bin/sh".to_string(),
         cwd: cwd.display().to_string(),
         parent: None,
+        notification_route: None,
         env,
         homeboy_env: EnvMaterializationPlan::default(),
         programs: BTreeMap::from([("sh".to_string(), "/bin/sh".to_string())]),

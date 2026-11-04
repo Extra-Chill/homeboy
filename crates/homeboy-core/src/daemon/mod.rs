@@ -55,6 +55,7 @@ pub mod step_job;
 mod stop;
 pub mod workflow_cadence;
 pub mod workflow_job;
+mod workflow_notify;
 pub use artifact_download::ArtifactDownload;
 pub use control::{
     adopt_orphaned_lease, artifact_content_url, ensure_running,
