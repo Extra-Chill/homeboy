@@ -599,11 +599,31 @@ impl LocalControllerJobClient {
 
     /// `POST /workflows/<instance>/approvals`.
     pub fn approve_workflow_step(&self, instance: &str, step: &str) -> Result<serde_json::Value> {
+        self.decide_workflow_step(instance, step, "approved", None)
+    }
+
+    pub fn reject_workflow_step(
+        &self,
+        instance: &str,
+        step: &str,
+        reason: Option<&str>,
+    ) -> Result<serde_json::Value> {
+        self.decide_workflow_step(instance, step, "rejected", reason)
+    }
+
+    fn decide_workflow_step(
+        &self,
+        instance: &str,
+        step: &str,
+        decision: &str,
+        reason: Option<&str>,
+    ) -> Result<serde_json::Value> {
         let path = format!("/workflows/{instance}/approvals");
+        let actor = std::env::var("USER").unwrap_or_else(|_| "local-operator".to_string());
         let response = self
             .client
             .post(format!("{}{path}", self.endpoint))
-            .json(&json!({ "step": step }))
+            .json(&json!({ "step": step, "decision": decision, "reason": reason, "actor": actor }))
             .send()
             .map_err(|error| Error::internal_unexpected(format!("post {path}: {error}")))?;
         self.workflow_payload(response, &path)

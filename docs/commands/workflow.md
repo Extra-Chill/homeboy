@@ -78,7 +78,17 @@ A step with `foreach` expands, once its `needs` and `when` pass, into one step j
 - **`exec`** runs a program directly, never through a shell. The program is resolved to an absolute path when the workflow is admitted. Its output is the JSON it writes to the file named by `$HOMEBOY_STEP_OUTPUT`.
 - **`homeboy`** runs `homeboy <argv>` with this Homeboy build. Its output is the `data` of the command's JSON envelope.
 - **`cook`** runs `homeboy agent-task cook <flags> --wait --cook-id <id>`. Every key must be a real `agent-task cook` flag; this is checked against the live command tree, so there is no second Cook contract. A string becomes `--key value`, `true` becomes `--key`, and an array repeats the flag. `wait`, `cook-id`, `run-id`, `output`, and `preview` belong to the workflow. The step's outcome is the Cook's terminal run state, read from its run record; `{{steps.<id>.run_id}}` is the Cook id.
-- **`approval`** waits for `homeboy workflow approve <instance> <step>`. It runs no job.
+- **`approval`** waits for `homeboy workflow approve <instance> <step>` or `homeboy workflow reject <instance> <step> [--reason <text>]`. It runs no job. Approval settles `succeeded`; rejection settles `rejected` (not an instance failure). Both write output with `decision` (`approved` or `rejected`), `reason` (text or null), and `actor` (the submitting user's name, or `local-operator`). `workflow status` includes this output.
+
+  Rejected dependencies skip their dependents by default. A passing `when` that explicitly matches the rejected dependency's `/decision` to `rejected` (using `equals` or `in`), or its `outcome` to `rejected`, permits that branch to run. For example:
+
+  ```json
+  {"id":"revise","needs":["approve_merge"],
+   "when":{"step":"approve_merge","output":"/decision","equals":"rejected"},
+   "cook":{"prompt":"Rework the candidate: {{steps.approve_merge.output/reason}}"}}
+  ```
+
+  Gate the merge branch on `{"step":"approve_merge","output":"/decision","equals":"approved"}`. `always` retains its usual dependency override.
 
 ### Gates
 
@@ -160,6 +170,7 @@ When the daemon that owns an instance dies or is stopped, the instance resumes o
 - **`workflow status`** is a pure projection of the job ledger: the instance status, its `parent` and `children`, each step's phase, outcome, attempt, key, and step job, each `foreach` item with its step job, Cook run id, and the live state of a running Cook. `--watch` polls until the instance — and any chain it admits — is terminal.
 - **`workflow cancel`** cancels the instance; the daemon cancels every step job it is running. Once the cancellation is durable the instance admits no more steps. Given a workflow id that is not an instance, it stops that cadence.
 - **`workflow approve`** records an approval for a step that is awaiting one.
+- **`workflow reject <instance> <step> [--reason <text>]`** records a rejection for an awaiting approval, with optional feedback for downstream steps.
 - **`workflow list`** lists instances in the daemon; `--registered` lists the definitions in `~/.config/homeboy/workflows/`, the built-ins, and every registered cadence.
 
 ## Examples

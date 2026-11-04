@@ -435,9 +435,16 @@ fn observe(
                 continue;
             };
             if awaiting.contains(&step) && iteration == u64::from(state.iteration) {
-                events.push(Event::Approved {
+                let rejected = approval["decision"] == "rejected";
+                events.push(Event::ApprovalDecided {
                     step: step.to_string(),
                     iteration: state.iteration,
+                    rejected,
+                    output: json!({
+                        "decision": if rejected { "rejected" } else { "approved" },
+                        "reason": approval["reason"],
+                        "actor": approval["actor"],
+                    }),
                 });
             }
         }
@@ -753,6 +760,7 @@ pub fn projection(state: &InstanceState, store: Option<&JobStore>) -> Value {
                 "phase": step.phase,
                 "attempt": step.attempt,
                 "outcome": step.outcome,
+                "output": step.output,
                 "key": step.key,
                 "job": step.key.as_deref().map(job_of).unwrap_or(Value::Null),
                 "run_id": step.run_id,
@@ -918,6 +926,18 @@ pub(crate) fn workflow_approve(
     instance: &str,
     body: Option<Value>,
 ) -> Result<Value> {
+    let decision = body
+        .as_ref()
+        .and_then(|body| body.get("decision"))
+        .and_then(Value::as_str)
+        .unwrap_or("approved");
+    if !matches!(decision, "approved" | "rejected") {
+        return Err(invalid("decision must be approved or rejected"));
+    }
+    let reason = body.as_ref().and_then(|body| body.get("reason"));
+    if reason.is_some_and(|value| !value.is_null() && !value.is_string()) {
+        return Err(invalid("reason must be a string"));
+    }
     let step = body
         .as_ref()
         .and_then(|body| body.get("step"))
@@ -952,11 +972,15 @@ pub(crate) fn workflow_approve(
         "step": step,
         "iteration": state.iteration,
         "approved_at": chrono::Utc::now().to_rfc3339(),
+        "decision": decision,
+        "reason": reason,
+        "actor": body.as_ref().and_then(|body| body.get("actor"))
+            .and_then(Value::as_str).unwrap_or("local-operator"),
     });
     store.append_event(
         job.id,
         JobEventKind::Progress,
-        Some(format!("workflow step `{step}` approved")),
+        Some(format!("workflow step `{step}` {decision}")),
         Some(json!({ "workflow_approval": approval })),
     )?;
     Ok(json!({ "instance": instance, "approval": approval }))

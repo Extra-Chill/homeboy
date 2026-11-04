@@ -60,6 +60,13 @@ enum WorkflowCommand {
         /// Step id
         step: String,
     },
+    /// Reject an awaiting approval, optionally providing feedback
+    Reject {
+        instance: String,
+        step: String,
+        #[arg(long)]
+        reason: Option<String>,
+    },
     /// List instances, or registered definitions and cadences with `--registered`
     List {
         /// List registry definitions, built-ins, and daemon cadences instead of instances
@@ -153,6 +160,17 @@ pub fn run(args: WorkflowArgs) -> CmdResult<Value> {
         WorkflowCommand::Approve { instance, step } => {
             let client = LocalControllerJobClient::connect()?;
             Ok((client.approve_workflow_step(&instance, &step)?, 0))
+        }
+        WorkflowCommand::Reject {
+            instance,
+            step,
+            reason,
+        } => {
+            let client = LocalControllerJobClient::connect()?;
+            Ok((
+                client.reject_workflow_step(&instance, &step, reason.as_deref())?,
+                0,
+            ))
         }
         WorkflowCommand::List { registered } => {
             if registered {
