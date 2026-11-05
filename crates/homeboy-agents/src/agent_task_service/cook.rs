@@ -8188,17 +8188,39 @@ fn publish_incomplete_draft(
         },
         Some(path),
     )?;
-    git::pr_create(
+    let existing = git::pr_find(
         None,
-        git::PrCreateOptions {
+        git::PrFindOptions {
+            head: Some(head.clone()),
+            state: git::PrState::Open,
+            limit: 1,
             path: Some(path.to_string()),
-            base: options.finalization.base.clone(),
-            head,
-            title,
-            body,
-            draft: true,
+            ..Default::default()
         },
     )?;
+    if let Some(pr) = existing.items.first() {
+        git::pr_comment(
+            None,
+            git::PrCommentOptions {
+                number: pr.number,
+                body,
+                path: Some(path.to_string()),
+                ..Default::default()
+            },
+        )?;
+    } else {
+        git::pr_create(
+            None,
+            git::PrCreateOptions {
+                path: Some(path.to_string()),
+                base: options.finalization.base.clone(),
+                head,
+                title,
+                body,
+                draft: true,
+            },
+        )?;
+    }
     Ok(())
 }
 

@@ -26762,7 +26762,7 @@ fn gates_deferred_stop_reason_names_the_non_execution_cause_and_next_step() {
 
 #[test]
 fn exhausted_gate_failure_publishes_incomplete_draft_but_still_fails() {
-    for timeout_after_failure in [false, true] {
+    for (timeout_after_failure, existing_pr) in [(false, false), (true, false), (false, true)] {
         homeboy_core::test_support::with_isolated_home(|home| {
             use homeboy_core::test_support::EnvVarGuard;
             let remote = tempfile::tempdir().unwrap();
@@ -26840,6 +26840,14 @@ fn exhausted_gate_failure_publishes_incomplete_draft_but_still_fails() {
                 &bin.join("gh"),
                 r#"#!/bin/sh
 printf '%s\n' "$*" >> "$HOMEBOY_FAKE_GH_LOG"
+if [ "$1 $2" = "pr list" ]; then
+  if [ "$HOMEBOY_FAKE_EXISTING_PR" = "true" ]; then
+    echo '[{"number":1,"title":"Existing draft","url":"https://github.com/example/fixture/pull/1","state":"OPEN","isDraft":true,"baseRefName":"main","headRefName":"candidate"}]'
+  else
+    echo '[]'
+  fi
+  exit 0
+fi
 while [ "$#" -gt 0 ]; do
   if [ "$1" = "--body-file" ]; then shift; cat "$1" >> "$HOMEBOY_FAKE_GH_LOG"; fi
   shift
@@ -26854,6 +26862,7 @@ echo https://github.com/example/fixture/pull/1
                 format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
             );
             let _log = EnvVarGuard::set("HOMEBOY_FAKE_GH_LOG", &log);
+            let _existing = EnvVarGuard::set("HOMEBOY_FAKE_EXISTING_PR", existing_pr.to_string());
             let cook_id = "incomplete-draft";
             let run_id = "incomplete-draft-attempt-1";
             let (mut options, mut failed) = seed_moving_base_attempt(cook_id, run_id);
@@ -26944,9 +26953,21 @@ echo https://github.com/example/fixture/pull/1
                 git(path, &["rev-parse", "HEAD"])
             );
             let requested = std::fs::read_to_string(log).unwrap();
+            assert!(requested.contains("pr list"), "{requested}");
+            assert!(requested.contains("--head candidate"), "{requested}");
+            if existing_pr {
+                assert!(!requested.contains("pr create"), "{requested}");
+                assert!(requested.contains("pr comment 1"), "{requested}");
+                assert!(
+                    requested.contains("incomplete_reason: Two cells still need work"),
+                    "{requested}"
+                );
+            } else {
+                assert!(requested.contains("pr create"), "{requested}");
+                assert!(requested.contains("--draft"), "{requested}");
+                assert!(!requested.contains("pr comment"), "{requested}");
+            }
             for expected in [
-                "pr create",
-                "--draft",
                 &gate_id,
                 "last gate output: two cells failed",
                 "Two cells still need work",
