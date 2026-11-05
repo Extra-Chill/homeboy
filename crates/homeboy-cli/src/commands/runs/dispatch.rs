@@ -336,6 +336,13 @@ mod presentation_tests {
             .err()
             .expect("projections must conflict");
         assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+        for projection in ["--proof", "--dossier"] {
+            let error =
+                RunsCli::try_parse_from(["runs", "evidence", "run-1", projection, "--full"])
+                    .err()
+                    .expect("--full applies only to plain evidence");
+            assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+        }
         for verb in ["proof", "dossier"] {
             assert!(RunsCli::try_parse_from(["runs", verb, "run-1"]).is_err());
         }

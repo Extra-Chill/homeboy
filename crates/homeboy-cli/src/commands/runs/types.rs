@@ -120,10 +120,10 @@ pub(super) enum RunsCommand {
     Evidence {
         run_id: String,
         /// Show only compact proof signals: verdict, gate failures, and declared signals.
-        #[arg(long, conflicts_with = "dossier")]
+        #[arg(long, conflicts_with_all = ["dossier", "full"])]
         proof: bool,
         /// Aggregate the actionable read-only dossier for the run.
-        #[arg(long, conflicts_with = "proof")]
+        #[arg(long, conflicts_with_all = ["proof", "full"])]
         dossier: bool,
         /// Print the full projection JSON instead of its compact human summary.
         /// Equivalent to `--format json`; plain evidence output is unchanged.
