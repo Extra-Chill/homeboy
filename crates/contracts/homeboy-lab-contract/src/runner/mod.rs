@@ -258,6 +258,7 @@ pub struct LabCapabilityNegotiationProvenance {
 pub enum LabAdmissionRejection {
     LabContractVersionMismatch,
     CapabilityIncompatible,
+    AdmissionProbeUnavailable,
     ExactBuildMismatch,
 }
 

@@ -483,7 +483,26 @@ pub(super) fn daemon_http_version(local_url: &str) -> std::result::Result<String
 pub(crate) fn daemon_http_lab_handoff_capabilities(
     local_url: &str,
 ) -> std::result::Result<(Vec<LabCapabilityVersion>, Option<u32>), String> {
-    let response = daemon_http_body(local_url)?;
+    // Match the health-observation budget, but tolerate a briefly overloaded
+    // daemon/tunnel before refusing admission. Only failed observations retry;
+    // a successful response missing capabilities is a contract mismatch.
+    let mut response = daemon_http_body_at_with_timeout(
+        local_url,
+        "version",
+        crate::readonly_probe::DEFAULT_READONLY_PROBE_TIMEOUT,
+    );
+    for backoff_ms in [100, 200] {
+        if response.is_ok() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(backoff_ms));
+        response = daemon_http_body_at_with_timeout(
+            local_url,
+            "version",
+            crate::readonly_probe::DEFAULT_READONLY_PROBE_TIMEOUT,
+        );
+    }
+    let response = response?;
     let data = response.body.get("data").unwrap_or(&response.body);
     let version = serde_json::from_value(data["lab_contract_version"].clone()).unwrap_or(None);
     Ok((
@@ -498,10 +517,9 @@ pub(super) fn daemon_lab_handoff_capabilities_from_body(
     let capabilities = body
         .get("lab_handoff_capabilities")
         .or_else(|| body.pointer("/data/lab_handoff_capabilities"))
-        .ok_or_else(|| {
-            "remote daemon version response did not include Lab handoff capabilities".to_string()
-        })?;
-    serde_json::from_value(capabilities.clone()).map_err(|_| {
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!([]));
+    serde_json::from_value(capabilities).map_err(|_| {
         "remote daemon version response included malformed Lab handoff capabilities".to_string()
     })
 }

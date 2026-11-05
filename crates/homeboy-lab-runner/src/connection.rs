@@ -2334,11 +2334,27 @@ pub(crate) fn configured_runner_homeboy_handshake_evidence(
     let Some((_server_id, _server, client)) = resolve_ssh_runner(runner)? else {
         return Ok(None);
     };
-    Ok(
-        bounded_remote_homeboy_identity(&client, homeboy, Some(&runner.id))
-            .ok()
-            .and_then(|identity| identity.handoff),
+    bounded_remote_homeboy_identity(&client, homeboy, Some(&runner.id))
+        .map(|identity| identity.handoff)
+        .map_err(|error| admission_probe_unavailable("runner_command", error))
+}
+
+/// Probe failures are transport/observation failures, not evidence of an
+/// incompatible capability contract. Cook retries these before provider work.
+pub(crate) fn admission_probe_unavailable(probe: &str, error: impl std::fmt::Display) -> Error {
+    let probe_error = error.to_string();
+    Error::new(
+        homeboy_core::error::ErrorCode::RunnerCapabilityMissing,
+        format!("Lab admission {probe} probe unavailable: {probe_error}"),
+        serde_json::json!({
+            "admission_cause_class": "admission_probe_unavailable",
+            "rejection_code": homeboy_lab_contract::LabAdmissionRejection::AdmissionProbeUnavailable,
+            "probe": probe,
+            "probe_error": probe_error,
+        }),
     )
+    .with_retryable(true)
+    .with_hint("Retry Lab admission when the runner transport is available.")
 }
 
 pub(crate) fn daemon_lab_handoff_capabilities(

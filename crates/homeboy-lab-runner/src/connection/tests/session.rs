@@ -630,13 +630,13 @@ fn extracts_daemon_lab_capabilities_from_supported_response_shapes() {
 }
 
 #[test]
-fn rejects_missing_or_malformed_daemon_lab_capabilities() {
+fn missing_daemon_capabilities_are_empty_and_malformed_capabilities_fail() {
     let missing = daemon_lab_handoff_capabilities_from_body(&serde_json::json!({
         "success": true,
         "data": {}
     }))
-    .expect_err("missing capabilities must fail closed");
-    assert!(missing.contains("did not include"));
+    .expect("a successful observation can omit capabilities");
+    assert!(missing.is_empty());
 
     let malformed = daemon_lab_handoff_capabilities_from_body(&serde_json::json!({
         "success": true,
