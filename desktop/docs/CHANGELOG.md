@@ -6,6 +6,11 @@ The desktop app currently shells out to the standalone Rust CLI (`homeboy`) for 
 
 For current behavior, prefer the code and other documentation (for example `docs/CLI.md`).
 
+## [0.12.1] - 2026-11-05
+
+### Changed
+- fold proof and dossier into evidence flags
+
 ## [0.12.0] - 2026-11-01
 
 ### Added
