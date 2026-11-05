@@ -1972,10 +1972,9 @@ fn lab_transport_repair_action_for_receipt(
 /// Snapshot construction happens before a provider or runner owns work. The
 /// recovery marker is compatibility-tolerant because persisted failures from
 /// before lifecycle projection carried the producer's stale command string.
-fn lab_snapshot_recovery_projection(
-    record: &AgentTaskRunRecord,
-    retry: &RetryReplayAction,
-) -> Option<Value> {
+/// The recovery marker of a Lab snapshot-construction failure, when the
+/// record carries one.
+fn lab_snapshot_recovery(record: &AgentTaskRunRecord) -> Option<&Value> {
     let recovery = record
         .metadata
         .pointer("/pre_execution_failure/details/recovery")?;
@@ -1997,9 +1996,14 @@ fn lab_snapshot_recovery_projection(
             Some("rebuild_snapshot_staging_and_replay_cook")
         )
     );
-    if !snapshot_construction || !lifecycle_marker {
-        return None;
-    }
+    (snapshot_construction && lifecycle_marker).then_some(recovery)
+}
+
+fn lab_snapshot_recovery_projection(
+    record: &AgentTaskRunRecord,
+    retry: &RetryReplayAction,
+) -> Option<Value> {
+    let recovery = lab_snapshot_recovery(record)?;
     let remediation = recovery
         .get("remediation")
         .and_then(Value::as_str)
@@ -2031,6 +2035,12 @@ fn lab_snapshot_recovery_projection(
 }
 
 fn attach_lab_snapshot_failure_projection(value: &mut Value, record: &AgentTaskRunRecord) {
+    // Every watch poll reads status. Deriving the retry action loads the
+    // replay plan, recipe and retry admission, so derive it only for records
+    // that project a snapshot failure.
+    if lab_snapshot_recovery(record).is_none() {
+        return;
+    }
     let retry = retry_replay_action(record);
     if let Some(projection) = lab_snapshot_recovery_projection(record, &retry) {
         value["lab_snapshot_failure"] = projection;
