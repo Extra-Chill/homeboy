@@ -1889,6 +1889,9 @@ where
     let work_intent_deliverer =
         spawn_work_intent_deliverer(job_store.clone(), work_intent_shutdown_rx);
     let (lifetime_shutdown_tx, lifetime_shutdown_rx) = mpsc::channel();
+    // Dropped when this function returns, after the lease is released: an idle
+    // self-stop keeps lifecycle commands and admissions out until then.
+    let self_stop_guards = lifetime::SelfStopGuards::default();
     let lifetime_monitor = match (owned_lifetime, shutdown.as_ref()) {
         (Some(idle), Some(flag)) => Some(lifetime::spawn_lifetime_monitor(
             idle,
@@ -1896,6 +1899,7 @@ where
             state.lease_id.clone(),
             paths::observation_db()?,
             Arc::clone(flag),
+            Arc::clone(&self_stop_guards),
             lifetime_shutdown_rx,
         )),
         _ => None,

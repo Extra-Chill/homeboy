@@ -279,6 +279,7 @@ pub(super) fn spawn_lifetime_monitor(
     lease_id: String,
     jobs: PathBuf,
     shutdown: Arc<AtomicBool>,
+    held: SelfStopGuards,
     stop: mpsc::Receiver<()>,
 ) -> std::thread::JoinHandle<()> {
     let launcher = LauncherIdentity::inherited();
@@ -297,7 +298,9 @@ pub(super) fn spawn_lifetime_monitor(
                         shutdown.store(true, Ordering::Release);
                         true
                     }
-                    LifetimeDecision::StopIfStillIdle => stop_if_still_idle(&shutdown, observe),
+                    LifetimeDecision::StopIfStillIdle => {
+                        stop_if_still_idle(&shutdown, &held, observe)
+                    }
                 };
                 if stopped {
                     return;
@@ -328,20 +331,35 @@ fn observe_lifetime(
     }
 }
 
+/// The lifecycle lock and admission fence an idle self-stop holds until
+/// `serve` has drained and released its lease.
+pub(super) type SelfStopGuards =
+    Arc<std::sync::Mutex<Option<(super::DaemonOperationLock, super::DaemonAdmissionFence)>>>;
+
 /// Serialize an idle self-stop with lifecycle commands, as `daemon stop` does.
 /// A busy lock or admission fence means a lifecycle command or an admission
 /// owns this moment; the caller retries after another idle window.
-fn stop_if_still_idle(shutdown: &AtomicBool, observe: impl Fn() -> LifetimeObservation) -> bool {
-    let Ok(Some(_lock)) = super::try_acquire_daemon_operation_lock() else {
+///
+/// On success the guards move into `held`, which `serve` drops only after its
+/// teardown. Like `daemon stop`, which holds both until the daemon exits, this
+/// keeps a concurrent `ensure-running` or admission from finding the draining
+/// daemon's still-published lease.
+fn stop_if_still_idle(
+    shutdown: &AtomicBool,
+    held: &SelfStopGuards,
+    observe: impl Fn() -> LifetimeObservation,
+) -> bool {
+    let Ok(Some(lock)) = super::try_acquire_daemon_operation_lock() else {
         return false;
     };
-    let Ok(Some(_fence)) = super::try_acquire_daemon_job_admission_fence() else {
+    let Ok(Some(fence)) = super::try_acquire_daemon_job_admission_fence() else {
         return false;
     };
     let observation = observe();
     if observation.state_dir_removed || !observation.own_lease || observation.busy {
         return false;
     }
+    *held.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some((lock, fence));
     shutdown.store(true, Ordering::Release);
     true
 }
@@ -510,6 +528,7 @@ mod tests {
             "lease".to_string(),
             temp.path().join("jobs.sqlite"),
             Arc::clone(&shutdown),
+            SelfStopGuards::default(),
             stop_rx,
         );
         std::thread::sleep(LIFETIME_POLL * 2);
@@ -540,6 +559,7 @@ mod tests {
             "lease".to_string(),
             temp.path().join("jobs.sqlite"),
             Arc::clone(&shutdown),
+            SelfStopGuards::default(),
             stop_rx,
         );
         stop_tx.send(()).unwrap();
