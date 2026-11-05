@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.445.7] - 2026-11-05
+
+### Changed
+- move agent-task logs to runs logs
+
 ## [0.445.6] - 2026-11-05
 
 ### Changed
