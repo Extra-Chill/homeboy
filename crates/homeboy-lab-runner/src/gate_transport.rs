@@ -177,6 +177,20 @@ fn lab_gate_exec_options(
     }
 }
 
+/// Losing sight of an admitted gate job is not evidence against it: the job
+/// keeps running on the Lab, and cancelling it needs the same transport that
+/// was just lost. Cancel only for a supervisor cancellation, a heartbeat
+/// failure, an overrun budget, or an authoritative observation failure.
+fn observation_failure_cancels_job(
+    error: &Error,
+    supervisor_cancelled: bool,
+    heartbeat_failed: bool,
+) -> bool {
+    supervisor_cancelled
+        || heartbeat_failed
+        || !crate::execution::daemon_observation_was_lost(error)
+}
+
 /// One Lab workspace a gate materializes (its declared resource package or
 /// its candidate snapshot).
 ///
@@ -436,6 +450,26 @@ fn execute_owned(
     );
     let terminal = match terminal {
         Ok(terminal) => terminal,
+        Err(error)
+            if !observation_failure_cancels_job(
+                &error,
+                supervision.is_some_and(|policy| (policy.is_cancelled)()),
+                heartbeat_error.borrow().is_some(),
+            ) =>
+        {
+            // The job is still the runner's to finish. Both workspaces stay
+            // retained for reconciliation (see `GateWorkspace::admitted`), and
+            // the gate is deferred, not failed.
+            let mut error = error;
+            error.retryable = Some(true);
+            error.details["job_id"] = serde_json::json!(job_id);
+            error.details["stage"] = serde_json::json!("terminal_wait");
+            error.details["gate_disposition"] = serde_json::json!("unavailable");
+            return Err(error.with_hint(format!(
+                "Lab gate job `{job_id}` was left running after the controller lost its daemon transport. Reconnect with `homeboy runner connect {}` and recover the run to read its result.",
+                request.runner_id
+            )));
+        }
         Err(error) => {
             // Cancellation goes through the admitted job owner, then wait
             // for its authoritative terminal state before releasing gates.
@@ -742,6 +776,57 @@ mod secret_env_tests {
             dir.path()
         )
         .is_empty());
+    }
+}
+
+#[cfg(test)]
+mod observation_failure_tests {
+    use super::*;
+    use crate::daemon_http_get::{daemon_transport_error, DaemonHttpErrorKind};
+
+    #[test]
+    fn only_a_decisive_observation_failure_cancels_the_gate_job() {
+        let lost = || {
+            daemon_transport_error(
+                DaemonHttpErrorKind::Connect,
+                "/jobs/x",
+                None,
+                "query runner daemon",
+                "refused",
+            )
+        };
+        let mut overran =
+            Error::internal_unexpected("runner job `x` did not reach a terminal status");
+        overran.details =
+            serde_json::json!({"daemon_terminal_wait_timeout": {"runner_job_id": "x"}});
+        overran.retryable = Some(true);
+        let cases = [
+            ("lost transport", lost(), false, false, false),
+            (
+                "no current session",
+                crate::connection::no_current_daemon_session_error("lab"),
+                false,
+                false,
+                false,
+            ),
+            ("budget overrun", overran, false, false, true),
+            (
+                "unknown job",
+                Error::validation_invalid_argument("job", "job not found", None, None),
+                false,
+                false,
+                true,
+            ),
+            ("supervisor cancelled", lost(), true, false, true),
+            ("heartbeat failed", lost(), false, true, true),
+        ];
+        for (name, error, supervisor_cancelled, heartbeat_failed, cancels) in cases {
+            assert_eq!(
+                observation_failure_cancels_job(&error, supervisor_cancelled, heartbeat_failed),
+                cancels,
+                "{name}"
+            );
+        }
     }
 }
 

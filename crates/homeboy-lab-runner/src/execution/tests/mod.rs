@@ -10,6 +10,7 @@ use homeboy_core::server::{self, RunnerPolicy, RunnerSecretEnvRef, RunnerSetting
 mod daemon_exec;
 mod exec;
 mod handoff;
+mod observation;
 mod policy;
 mod prepare;
 mod redaction;

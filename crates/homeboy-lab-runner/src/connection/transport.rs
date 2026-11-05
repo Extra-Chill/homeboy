@@ -131,20 +131,27 @@ pub(super) trait TransportOperations {
     fn close(&self, session: &RunnerSession);
 }
 
+/// Retryable: a concurrent connect or recovery can be replacing the session,
+/// and an observer of an admitted job reattaches once it is back (#17376).
+pub(crate) fn no_current_daemon_session_error(runner_id: &str) -> Error {
+    Error::validation_invalid_argument(
+        "runner",
+        "runner has no current daemon session; run `homeboy runner connect <runner-id>` first",
+        Some(runner_id.to_string()),
+        None,
+    )
+    .with_retryable(true)
+}
+
 pub(super) fn ensure_transport_with(
     runner_id: &str,
     lifetime: TransportLifetime,
     operations: &impl TransportOperations,
 ) -> Result<RunnerSession> {
     let owner = || {
-        operations.current_session(runner_id)?.ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "runner",
-                "runner has no current daemon session; run `homeboy runner connect <runner-id>` first",
-                Some(runner_id.to_string()),
-                None,
-            )
-        })
+        operations
+            .current_session(runner_id)?
+            .ok_or_else(|| no_current_daemon_session_error(runner_id))
     };
     match lifetime {
         // A temporary tunnel never reuses the current session's tunnel: the
