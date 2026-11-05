@@ -754,7 +754,27 @@ fn runs_dossier_aggregates_failure_env_refs_artifacts_and_commands() {
             .record_url_artifact(&run.id, "review", "https://example.test/evidence")
             .expect("record url");
 
-        let (output, _) = runs_dossier_in_store(&store, &run.id).expect("dossier");
+        // Evidence flags retain the exact projection payloads, including schema.
+        for (proof, dossier) in [(true, false), (false, true), (false, false)] {
+            let (actual, actual_exit) =
+                super::evidence::project(&store, &run.id, false, proof, dossier)
+                    .expect("evidence projection");
+            let (expected, expected_exit) = if proof {
+                super::proof::proof(&store, &run.id).expect("proof")
+            } else if dossier {
+                runs_dossier_in_store(&store, &run.id).expect("dossier")
+            } else {
+                super::evidence::evidence_projection(&store, &run.id, false)
+                    .expect("plain evidence")
+            };
+            assert_eq!(actual_exit, expected_exit);
+            assert_eq!(
+                serde_json::to_value(actual).unwrap(),
+                serde_json::to_value(expected).unwrap()
+            );
+        }
+        let (output, _) =
+            super::evidence::project(&store, &run.id, false, false, true).expect("dossier");
         let RunsOutput::Dossier(output) = output else {
             panic!("expected dossier output");
         };

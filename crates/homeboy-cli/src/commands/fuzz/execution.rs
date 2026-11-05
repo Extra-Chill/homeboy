@@ -115,7 +115,7 @@ pub(super) fn run_run(mut args: FuzzRunArgs) -> homeboy::core::Result<(FuzzRunOu
         homeboy::fuzz::persist_fuzz_execution_request(&run_dir, &execution_request)?;
     let workload_path = selected_workload.and_then(|workload| workload.manifest_path.clone());
     // The component revision was always available from the resolved execution
-    // context; fuzz simply never recorded it, which is why `runs dossier`
+    // context; fuzz simply never recorded it, which is why `runs evidence <id> --dossier`
     // reported `git_sha: null` for a campaign whose product revision was known
     // (#10514).
     let component_revision = homeboy::core::git::short_head_revision_at(&ctx.source_path);

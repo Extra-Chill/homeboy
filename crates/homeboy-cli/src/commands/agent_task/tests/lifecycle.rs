@@ -6982,8 +6982,9 @@ fn every_cook_read_surface_reports_the_same_canonical_verdict() {
             assert_eq!(cook.reason.as_deref(), Some(reason.as_str()));
             assert_eq!(cook.candidate.as_deref(), Some("verification_pending"));
 
-            // runs dossier: same state, never `stale_running_record` from the row.
-            let (dossier, _) = runs_dossier_in_store(&store, run_id).expect("runs dossier");
+            // runs evidence --dossier: same state, never `stale_running_record` from the row.
+            let (dossier, _) =
+                runs_dossier_in_store(&store, run_id).expect("runs evidence --dossier");
             let RunsOutput::Dossier(dossier) = dossier else {
                 panic!("expected dossier output");
             };

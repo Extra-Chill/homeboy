@@ -1,11 +1,11 @@
-//! Compact, signal-only projection for `homeboy runs proof <run-id>`.
+//! Compact, signal-only projection for `homeboy runs evidence <run-id> --proof`.
 //!
 //! Verifying a bench/recipe run otherwise forces reading the full evidence or
 //! `runs show` payload (tens of KB) to extract a handful of signals. This
 //! projection returns only the verdict (status + passed/failed), gate
 //! failures, and the run's declared proof/scorecard signal fields flattened to
 //! scalar `key:value` pairs. The full JSON stays behind `runs show --json` and
-//! `runs evidence`; `runs proof --json` returns this same compact payload.
+//! `runs evidence`; `runs evidence <id> --proof --json` returns this same compact payload.
 //!
 //! Generic across run kinds: it reuses the shared
 //! [`evidence_failure_summary`](homeboy::core::observation::evidence_report::evidence_failure_summary)

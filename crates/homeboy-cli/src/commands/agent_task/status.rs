@@ -309,7 +309,7 @@ fn status_once(args: StatusArgs) -> CmdResult<Value> {
     } else {
         0
     };
-    // The same verdict `runs show`, `runs dossier` and `diagnose` report
+    // The same verdict `runs show`, `runs evidence <id> --dossier` and `diagnose` report
     // (#15885): status names why a Cook has not completed, not just its state.
     let verdict = crate::commands::cook_verdict::cook_verdict(&run);
     let mut value = serde_json::to_value(run).unwrap_or(Value::Null);

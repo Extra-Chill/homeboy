@@ -286,7 +286,7 @@ pub fn fuzz_campaign_finding_totals(campaign: &FuzzCampaign) -> FuzzProofFinding
 /// Derive the reviewer proof for a fuzz run from its persisted record.
 ///
 /// Returns `None` for runs that are not fuzz runs, so the generic
-/// `runs proof` projection stays generic.
+/// `runs evidence <id> --proof` projection stays generic.
 pub fn derive_fuzz_proof(run: &RunRecord) -> homeboy_core::Result<Option<FuzzProof>> {
     if run.kind != "fuzz" {
         return Ok(None);
@@ -712,7 +712,7 @@ fn render_markdown(proof: &FuzzProof) -> String {
 
     lines.push(String::new());
     lines.push(format!(
-        "<sub>Generated from retained run `{}` by `homeboy runs proof {} --json`.</sub>",
+        "<sub>Generated from retained run `{}` by `homeboy runs evidence {} --proof --json`.</sub>",
         proof.run_id, proof.run_id
     ));
 
@@ -827,7 +827,7 @@ mod tests {
         assert_eq!(proof.verdict.evidence, FuzzEvidenceVerdict::Complete);
         assert!(proof.verdict.failure_domain.is_none());
 
-        // Exact component identity — the fact `runs dossier` reported as null.
+        // Exact component identity — the fact `runs evidence <id> --dossier` reported as null.
         assert_eq!(
             proof.component.revision.as_deref(),
             Some("0bb440eddd8ebe53c15fe826a30c5ec13b2f58b0")

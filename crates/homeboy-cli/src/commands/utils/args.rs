@@ -1300,7 +1300,7 @@ impl LintSniffArgs {
 /// this enum owns only the first of them — the *output format* sense:
 ///
 /// 1. **Output format** (a bool): `bench --json`, `runs show --json`,
-///    `runs proof --json`, `runs dossier --json`.
+///    `runs evidence <id> --proof --json`, `runs evidence <id> --dossier --json`.
 /// 2. **A bulk input spec** (a string): `git --json`, `deploy --json`,
 ///    `build --json`, and `DynamicSetArgs --json` — *"JSON input spec for
 ///    bulk operations. Use `-` for stdin"*.
@@ -1365,7 +1365,7 @@ pub enum DetailLevel {
 /// alone is enough. Nothing is removed.
 ///
 /// The output-format sense of `--json` (sense 1 above) is fully migrated:
-/// `bench`, `runs show`, `runs proof`, and `runs dossier` all route through
+/// `bench`, `runs show`, and the proof/dossier flags on `runs evidence` all route through
 /// this group.
 ///
 /// Still on their own vocabulary, and why:
@@ -1417,8 +1417,8 @@ impl PresentationArgs {
 
     /// Fold a command's boolean `--json` flag into this group.
     ///
-    /// `bench --json`, `runs show --json`, `runs proof --json`, and
-    /// `runs dossier --json` all mean *"print the full JSON payload instead
+    /// `bench --json`, `runs show --json`, `runs evidence <id> --proof --json`, and
+    /// `runs evidence <id> --dossier --json` all mean *"print the full JSON payload instead
     /// of the compact human summary"*. A migrated command keeps declaring
     /// that boolean and asks this helper instead of reading the field
     /// directly, which makes `--json` and `--format json` interchangeable
