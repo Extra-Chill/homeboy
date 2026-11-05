@@ -1216,23 +1216,6 @@ fn status_run_state(status: &Value) -> Option<&Value> {
     status.get("state")
 }
 
-pub(super) fn parse_event_cursor(
-    cursor: Option<&str>,
-    field: &'static str,
-) -> homeboy::core::Result<Option<homeboy_control_plane_contract::EventCursor>> {
-    cursor
-        .map(homeboy_control_plane_contract::EventCursor::new)
-        .transpose()
-        .map_err(|error| {
-            homeboy::core::Error::validation_invalid_argument(
-                field,
-                error.to_string(),
-                cursor.map(str::to_string),
-                None,
-            )
-        })
-}
-
 /// Status is a read-only diagnostic. A recipe-only Cook is recoverable through
 /// its exact attempt id, but only `agent-task recover` may materialize that attempt.
 fn recipe_only_status(run_or_cook_id: &str, exact: bool) -> homeboy::core::Result<Option<Value>> {
