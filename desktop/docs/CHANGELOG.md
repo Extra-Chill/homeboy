@@ -6,6 +6,11 @@ The desktop app currently shells out to the standalone Rust CLI (`homeboy`) for 
 
 For current behavior, prefer the code and other documentation (for example `docs/CLI.md`).
 
+## [0.12.3] - 2026-11-05
+
+### Changed
+- serve Cook artifacts and evidence from lifecycle readers
+
 ## [0.12.2] - 2026-11-05
 
 ### Changed
