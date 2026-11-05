@@ -86,6 +86,10 @@ pub const DEFAULT_ADDR: &str = "127.0.0.1:0";
 
 const HEARTBEAT_ONLY_STALL_POLL: Duration = Duration::from_secs(1);
 const HELPER_DRAIN_DEADLINE: Duration = Duration::from_secs(10);
+/// How long a connection worker waits for a client to finish sending its
+/// request. A client that connects and stalls is dropped after this, instead of
+/// holding one of the bounded connection workers indefinitely (#15483).
+const REQUEST_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Separates transport liveness from child work. A wrapper heartbeat is useful
 /// evidence that the supervisor is alive, but it cannot extend a child's lease.
@@ -1951,13 +1955,34 @@ where
         }
     }
 
-    // Bounded TCP fixtures need all responses drained before their server
-    // thread returns. Production listeners remain alive and simply retain the
-    // connection workers until the process is stopped.
     drop(connection_tx);
-    for connection in connection_threads {
-        if let Err(error) = connection
-            .join()
+    let shutdown_requested = shutdown
+        .as_ref()
+        .is_some_and(|flag| flag.load(Ordering::Acquire));
+    // One budget covers the connection workers and the helpers, so a stop
+    // never waits on back-to-back drains.
+    let drain_deadline = Instant::now() + HELPER_DRAIN_DEADLINE;
+    let connection_results = if shutdown_requested {
+        // A requested stop must not wait on a request still in flight; it ends
+        // with the process and durable state is already crash-safe (#15483).
+        join_with_deadline(
+            connection_threads
+                .into_iter()
+                .map(|handle| ("connection-worker", handle))
+                .collect(),
+            drain_deadline,
+        )
+    } else {
+        // Bounded TCP fixtures need all responses drained before their server
+        // thread returns. Production listeners remain alive and simply retain
+        // the connection workers until the process is stopped.
+        connection_threads
+            .into_iter()
+            .map(|handle| handle.join())
+            .collect()
+    };
+    for result in connection_results {
+        if let Err(error) = result
             .unwrap_or_else(|_| Err(std::io::Error::other("daemon connection thread panicked")))
         {
             if serve_result.is_ok() {
@@ -1973,14 +1998,14 @@ where
     let _ = completion_shutdown_tx.send(());
     let _ = orchestration_shutdown_tx.send(());
     let _ = work_intent_shutdown_tx.send(());
-    join_helpers_with_deadline(
+    join_with_deadline(
         vec![
             ("local-child-reservation-reconciler", local_child_reconciler),
             ("completion-notifier", completion_notifier),
             ("orchestration-reconciler", orchestration_reconciler),
             ("work-intent-deliverer", work_intent_deliverer),
         ],
-        HELPER_DRAIN_DEADLINE,
+        drain_deadline,
     );
     if shutdown
         .as_ref()
@@ -2021,34 +2046,34 @@ where
     serve_result.map(|()| state)
 }
 
-fn join_helpers_with_deadline(
-    helpers: Vec<(&'static str, std::thread::JoinHandle<()>)>,
-    timeout: Duration,
-) {
-    let deadline = Instant::now() + timeout;
-    let mut helpers = helpers.into_iter();
-    while let Some((name, handle)) = helpers.next() {
-        while !handle.is_finished() && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(10));
-        }
+/// Join `threads` until `deadline`, returning the results of those that
+/// finished. Threads still running at the deadline are detached and reported
+/// in a single warning; they end with the process.
+fn join_with_deadline<T>(
+    threads: Vec<(&'static str, std::thread::JoinHandle<T>)>,
+    deadline: Instant,
+) -> Vec<std::thread::Result<T>> {
+    while threads.iter().any(|(_, handle)| !handle.is_finished()) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let mut results = Vec::new();
+    let mut busy: Vec<&'static str> = Vec::new();
+    for (name, handle) in threads {
         if handle.is_finished() {
-            let _ = handle.join();
+            results.push(handle.join());
         } else {
-            eprintln!("Warning: daemon helper `{name}` did not stop before the drain deadline");
-            drop(handle);
-            for (name, handle) in helpers {
-                if handle.is_finished() {
-                    let _ = handle.join();
-                } else {
-                    eprintln!(
-                        "Warning: daemon helper `{name}` did not stop before the drain deadline"
-                    );
-                    drop(handle);
-                }
-            }
-            break;
+            busy.push(name);
         }
     }
+    if !busy.is_empty() {
+        let count = busy.len();
+        busy.dedup();
+        eprintln!(
+            "Warning: {count} daemon thread(s) did not stop before the drain deadline: {}",
+            busy.join(", ")
+        );
+    }
+    results
 }
 
 #[cfg(test)]
@@ -2062,11 +2087,38 @@ mod helper_drain_tests {
             let _ = release_rx.recv();
         });
         let started = Instant::now();
-        join_helpers_with_deadline(
+        join_with_deadline(
             vec![("stuck-test-helper", helper)],
-            Duration::from_millis(40),
+            Instant::now() + Duration::from_millis(40),
         );
         assert!(started.elapsed() < Duration::from_secs(1));
+        let _ = release_tx.send(());
+    }
+
+    #[test]
+    fn deadline_join_returns_finished_results_and_detaches_busy_threads() {
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let finished = std::thread::spawn(|| -> std::io::Result<()> {
+            Err(std::io::Error::other("finished worker error"))
+        });
+        let busy = std::thread::spawn(move || -> std::io::Result<()> {
+            let _ = release_rx.recv();
+            Ok(())
+        });
+        let started = Instant::now();
+        let results = join_with_deadline(
+            vec![("finished-worker", finished), ("busy-worker", busy)],
+            Instant::now() + Duration::from_millis(40),
+        );
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert_eq!(results.len(), 1);
+        let error = results
+            .into_iter()
+            .next()
+            .expect("finished result")
+            .expect("finished worker did not panic")
+            .expect_err("finished worker error is preserved");
+        assert_eq!(error.to_string(), "finished worker error");
         let _ = release_tx.send(());
     }
 }
@@ -7037,6 +7089,36 @@ mod tests {
     }
 
     #[test]
+    fn requested_shutdown_does_not_wait_on_a_busy_connection_worker() {
+        with_isolated_home(|_| {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+            let address = listener.local_addr().expect("listener address");
+            let shutdown = Arc::new(AtomicBool::new(false));
+            let server_shutdown = Arc::clone(&shutdown);
+            let server = std::thread::spawn(move || {
+                serve_listener_until_shutdown(listener, server_shutdown)
+            });
+            // A client that connects and never sends its request keeps one
+            // connection worker busy reading for the whole drain deadline.
+            let stalled = TcpStream::connect(address).expect("stalled client");
+            std::thread::sleep(Duration::from_millis(300));
+            let started = Instant::now();
+            shutdown.store(true, Ordering::SeqCst);
+            let _ = TcpStream::connect(address);
+            server
+                .join()
+                .expect("join daemon")
+                .expect("daemon stopped despite the busy worker");
+            let elapsed = started.elapsed();
+            assert!(
+                elapsed < HELPER_DRAIN_DEADLINE + Duration::from_secs(5),
+                "shutdown waited {elapsed:?} on a busy connection worker"
+            );
+            drop(stalled);
+        });
+    }
+
+    #[test]
     fn malformed_connections_do_not_retire_bounded_workers() {
         with_isolated_home(|_| {
             let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
@@ -8582,6 +8664,9 @@ fn handle_connection<R>(
 where
     R: AnalysisJobRunner,
 {
+    // Bound only the request read so a stalled client cannot pin a worker;
+    // the response and the request handling stay unbounded.
+    stream.set_read_timeout(Some(REQUEST_READ_TIMEOUT))?;
     let request_bytes = read_http_request(&mut stream)?;
     let request = String::from_utf8_lossy(&request_bytes);
     let mut headers_and_body = request.splitn(2, "\r\n\r\n");
