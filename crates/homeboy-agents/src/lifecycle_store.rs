@@ -1022,13 +1022,17 @@ impl AgentTaskLifecycleStore {
     /// Whether this store holds a durable agent-task record for `run_id`.
     ///
     /// The observation database is shared with every other run kind, so a bare
-    /// row lookup is not an agent-task existence check: a rig or bench run id
-    /// would otherwise claim lifecycle ownership.
+    /// row lookup is not an agent-task existence check: a rig or bench run id,
+    /// or an `agent-task` observation row that never carried a lifecycle
+    /// snapshot, would otherwise claim lifecycle ownership. A record exists
+    /// exactly when [`parse_record_from_run`] has something to decode.
     pub fn record_exists_readonly(&self, run_id: &str) -> Result<bool> {
         Ok(self
             .open_observation_readonly()?
             .get_run(run_id)?
-            .is_some_and(|run| run.kind == "agent-task"))
+            .is_some_and(|run| {
+                run.kind == "agent-task" && run.metadata_json.get("agent_task_run").is_some()
+            }))
     }
 
     /// This store's bounded page of raw durable agent-task observation rows.
