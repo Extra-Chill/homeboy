@@ -32,7 +32,7 @@ use super::{
     read_status, stop_unlocked, try_acquire_daemon_owner_lock, DaemonCandidateReconciliationResult,
     DaemonExactOrphanRecoveryResult, DaemonLeaselessRecoveryResult, DaemonOrphanAdoptionResult,
     DaemonProcessCandidate, DaemonProcessOwnership, DaemonStaleReasonCode, DaemonStartResult,
-    DaemonTerminationClassification, DaemonTerminationEvidence, DAEMON_STARTUP_TOKEN_ENV,
+    DaemonTerminationClassification, DAEMON_STARTUP_TOKEN_ENV,
 };
 
 const TEST_KEEP_DAEMON_IN_PROCESS_GROUP_ENV: &str = "HOMEBOY_TEST_KEEP_DAEMON_IN_PROCESS_GROUP";
@@ -170,59 +170,6 @@ fn attribute_scanned_candidate(
     Some(candidate)
 }
 
-/// Supervise one daemon child and persist its bounded termination evidence.
-/// This is shared by local and SSH launches because SSH invokes the same CLI.
-pub fn supervise(addr: &str, startup_token: &str, state_dir: Option<&Path>) -> Result<()> {
-    // The child inherits this environment, including the idle window and the
-    // launcher identity: `serve` enforces its own lifetime (#17412).
-    let exe = super::lifetime::launchable_executable().map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some("record current executable".to_string()),
-        )
-    })?;
-    let state_dir = match state_dir {
-        Some(state_dir) => state_dir.to_path_buf(),
-        None => crate::paths::daemon_state_file()?
-            .parent()
-            .ok_or_else(|| Error::internal_unexpected("daemon state file has no parent"))?
-            .to_path_buf(),
-    };
-    let child = Command::new(exe)
-        // The argument is the portable, exact ownership proof used when a
-        // platform cannot inspect a process environment. Keep it aligned with
-        // the persisted admission token for the lifetime of this daemon.
-        .args([
-            "daemon",
-            "serve",
-            "--addr",
-            addr,
-            "--startup-token",
-            startup_token,
-            "--state-dir",
-        ])
-        .arg(&state_dir)
-        .env(DAEMON_STARTUP_TOKEN_ENV, startup_token)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| {
-            Error::internal_io(
-                error.to_string(),
-                Some("spawn supervised daemon".to_string()),
-            )
-        })?;
-    supervise_child_at(child, &state_dir.join("state.json"))
-}
-
-/// Own the post-spawn supervisor lifecycle. Kept separate so the real child
-/// pipes and persisted evidence can be exercised without replacing the CLI.
-#[cfg(test)]
-fn supervise_child(child: std::process::Child) -> Result<()> {
-    supervise_child_at(child, &crate::paths::daemon_state_file()?)
-}
-
 #[cfg(all(test, unix))]
 #[test]
 fn failed_startup_guard_reaps_its_exact_launcher_even_with_a_corrupt_lease() {
@@ -268,127 +215,10 @@ fn failed_startup_guard_reaps_its_exact_launcher_even_with_a_corrupt_lease() {
     });
 }
 
-#[cfg(all(test, unix))]
-#[test]
-fn supervisor_stops_its_daemon_once_the_state_directory_is_removed() {
-    crate::test_support::with_isolated_home(|_| {
-        let scratch = tempfile::tempdir().unwrap();
-        let state_dir = scratch.path().join("daemon");
-        std::fs::create_dir_all(&state_dir).unwrap();
-        let state_path = state_dir.join("state.json");
-        let mut child = Command::new("sh")
-            .args(["-c", "trap 'exit 0' TERM; while :; do sleep 0.1; done"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
-        let pid = child.id();
-        let (done_tx, done_rx) = std::sync::mpsc::channel();
-        let waiter_path = state_path.clone();
-        let waiter = thread::spawn(move || {
-            let status = wait_for_daemon(&mut child, &waiter_path);
-            done_tx.send(()).unwrap();
-            status
-        });
-
-        // Directory present, lease not yet published: the startup window.
-        // The supervisor must keep the daemon alive here.
-        assert!(
-            done_rx.recv_timeout(Duration::from_secs(3)).is_err(),
-            "supervisor must not stop a daemon whose lease is merely unpublished"
-        );
-        assert!(pid_is_running(pid));
-
-        std::fs::remove_dir_all(&state_dir).unwrap();
-        done_rx
-            .recv_timeout(Duration::from_secs(15))
-            .expect("supervisor must stop its daemon once the state directory is gone");
-        waiter.join().unwrap().unwrap();
-        assert!(!pid_is_running(pid), "orphaned daemon child must be reaped");
-    });
-}
-
-fn supervise_child_at(mut child: std::process::Child, state_path: &Path) -> Result<()> {
-    let pid = child.id();
-    // A daemon can run indefinitely. Drain both pipes while it runs, retaining
-    // only a diagnostic tail so supervisor RSS cannot grow with child output.
-    let child_stdout = child.stdout.take().expect("piped stdout");
-    let child_stderr = child.stderr.take().expect("piped stderr");
-    let stdout = thread::spawn(move || bounded_redacted_reader(child_stdout));
-    let stderr = thread::spawn(move || bounded_redacted_reader(child_stderr));
-    let status = wait_for_daemon(&mut child, state_path);
-    let stdout = join_output_reader(stdout, "stdout");
-    let stderr = join_output_reader(stderr, "stderr");
-    let status = status.map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some("wait for supervised daemon".to_string()),
-        )
-    })?;
-    if super::lifetime::state_dir_removed(state_path) {
-        // Termination evidence lives in the removed directory; there is no
-        // reader left for it and writing it would fail.
-        return Ok(());
-    }
-    let state = super::validate_lease_file(&crate::paths::daemon_state_file()?)
-        .ok()
-        .and_then(|validation| validation.state);
-    let prior = super::read_termination_evidence()?;
-    let stop_requested = prior
-        .as_ref()
-        .is_some_and(|evidence| evidence.stop_requested && evidence.pid == Some(pid));
-    let (exit_code, signal) = exit_details(&status);
-    let evidence = DaemonTerminationEvidence {
-        classification: if stop_requested { DaemonTerminationClassification::CleanStop } else { DaemonTerminationClassification::UnexpectedExit },
-        observed_at: chrono::Utc::now().to_rfc3339(),
-        lease_id: state.as_ref().map(|state| state.lease_id.clone()).or_else(|| prior.and_then(|evidence| evidence.lease_id)),
-        pid: Some(pid),
-        binary_identity: state.as_ref().map(|state| state.build_identity.display.clone()),
-        active_jobs: super::JobStore::active_count_at_path(
-            crate::paths::observation_db()?,
-            Some(&super::daemon_scope_for_state_path(state_path)),
-        )?,
-        resource_evidence: "unavailable: launcher does not collect OS resource snapshots".to_string(),
-        os_evidence: "unavailable: no OS evidence collected; exit status and signal are launcher observations only".to_string(),
-        exit_code, signal,
-        supervisor_signal: None,
-        stdout, stderr, stop_requested,
-    };
-    super::write_termination_evidence(&evidence)
-}
-
-/// Wait for the serving child, which owns its own lifetime (#17412). The one
-/// duty kept here is the backstop for a wedged child: once its state directory
-/// is removed nothing can reach the daemon any more (#15590). The child stops
-/// itself on that too; this handle is the only kill that cannot hit a reused
-/// PID.
-fn wait_for_daemon(
-    child: &mut std::process::Child,
-    state_path: &Path,
-) -> std::io::Result<std::process::ExitStatus> {
-    loop {
-        if let Some(status) = child.try_wait()? {
-            return Ok(status);
-        }
-        if super::lifetime::state_dir_removed(state_path) {
-            child.kill()?;
-            return child.wait();
-        }
-        thread::sleep(Duration::from_secs(1));
-    }
-}
-
-fn join_output_reader(reader: thread::JoinHandle<Option<String>>, stream: &str) -> Option<String> {
-    reader
-        .join()
-        .unwrap_or_else(|_| Some(format!("[{stream} reader panicked after child reaped]")))
-}
-
 /// Redact complete, bounded records before retaining them. An overlong record
 /// is discarded rather than retaining an unredacted suffix whose key occurred
 /// before the retention boundary.
-pub fn bounded_redacted_reader(mut reader: impl Read) -> Option<String> {
+fn bounded_redacted_reader(mut reader: impl Read) -> Option<String> {
     const LIMIT: usize = 4096;
     const RECORD_LIMIT: usize = 4096;
     let mut tail = VecDeque::with_capacity(LIMIT);
@@ -461,17 +291,6 @@ fn append_redacted_tail(tail: &mut VecDeque<u8>, limit: usize, record: &str) {
         tail.drain(..overflow);
     }
     tail.extend(bytes);
-}
-
-#[cfg(unix)]
-fn exit_details(status: &std::process::ExitStatus) -> (Option<i32>, Option<i32>) {
-    use std::os::unix::process::ExitStatusExt;
-    (status.code(), status.signal())
-}
-
-#[cfg(not(unix))]
-fn exit_details(status: &std::process::ExitStatus) -> (Option<i32>, Option<i32>) {
-    (status.code(), None)
 }
 
 /// Whether the image `pid` is executing is the current binary. On Linux the
@@ -706,7 +525,7 @@ fn command_state_dir(cmdline: &str) -> CommandStateDir<'_> {
         return CommandStateDir::Ambiguous;
     };
 
-    // Linux `ps -e` appends environment assignments after argv. Supervised
+    // Linux `ps -e` appends environment assignments after argv. Launched
     // daemons put state-dir last, so the first valid assignment also proves the
     // argv boundary without treating ordinary trailing arguments as exact.
     let value_end = index + if *argument == "--state-dir" { 2 } else { 1 };
@@ -1798,7 +1617,7 @@ where
 }
 
 /// SIGTERM the exact service-managed daemon recorded by `state`. It carries
-/// no supervisor and possibly no startup token, so the proof that the PID is
+/// no Homeboy launcher and possibly no startup token, so the proof that the PID is
 /// still that daemon is the unchanged lease plus the held owner lock.
 fn terminate_service_managed_daemon(state: &super::DaemonState) -> Result<()> {
     let path = crate::paths::daemon_state_file()?;
@@ -2317,7 +2136,7 @@ pub fn reconcile_leaseless_orphans(
 /// candidate cleanup is valid only when the durable store has no active work.
 ///
 /// A same-store process is never inferred to be disposable. It must prove the
-/// current executable, its exact supervised startup token, and an unreachable
+/// current executable, its exact startup token, and an unreachable
 /// advertised endpoint before `apply` can signal it. Candidates for another
 /// durable store are retained as evidence but never signaled by this store.
 #[cfg(target_os = "linux")]
@@ -2900,8 +2719,8 @@ struct StartupLeaseObservation {
 }
 
 /// A launch token is an attempt identity, never a general daemon readiness
-/// signal. The spawned `supervise` launcher and its `serve` child have distinct
-/// PIDs, so the live child lease is identified by its unique token.
+/// signal. The spawned process is the daemon itself, but a PID alone can be
+/// reused, so the live lease is identified by its unique token.
 fn observe_startup_lease<ReadStatus, Sleep>(
     _launcher_pid: u32,
     startup_token: &str,
@@ -3214,16 +3033,17 @@ where
 
 /// Build the timeout report from what startup observation actually saw.
 ///
-/// `observe_startup_lease` admits on token only because the `supervise`
-/// launcher and its `serve` child have distinct PIDs, so the common cause of a
-/// timeout is the daemon never becoming work-admitting (`running && fresh &&
+/// `observe_startup_lease` admits on the startup token, so the common cause of
+/// a timeout is the daemon never becoming work-admitting (`running && fresh &&
 /// reachable`) — usually because the process exited. A token or PID mismatch is
-/// asserted only when one was actually observed.
+/// asserted only when one was actually observed. `daemon_log` is the bounded,
+/// redacted tail of what this launch wrote to `daemon.log`.
 fn startup_timeout_error(
     pid: u32,
     startup_token: &str,
     observation: StartupLeaseObservation,
     cleanup: Vec<String>,
+    daemon_log: Option<String>,
 ) -> Error {
     let token_mismatch = observation
         .observed_token
@@ -3247,26 +3067,6 @@ fn startup_timeout_error(
     } else {
         failed.join("; ")
     };
-    // The `supervise` launcher durably records the serve child's exit status and
-    // a bounded, redacted output tail. Residual evidence from an unrelated
-    // daemon is filtered out by its recorded PID.
-    let child_exit = super::read_termination_evidence()
-        .ok()
-        .flatten()
-        .filter(|evidence| {
-            let Some(recorded) = evidence.pid else {
-                return false;
-            };
-            Some(recorded) == observation.observed_pid
-                && observation.observed_running == Some(false)
-        })
-        .map(|evidence| {
-            serde_json::json!({
-                "exit_code": evidence.exit_code,
-                "signal": evidence.signal,
-                "stderr": evidence.stderr,
-            })
-        });
     let mut error = Error::internal_unexpected(format!(
         "daemon startup did not reach a work-admitting lease before timeout: {breakdown}"
     ))
@@ -3279,7 +3079,7 @@ fn startup_timeout_error(
             "reachable": observation.observed_reachable,
             "startup_token_mismatch": token_mismatch,
         },
-        "child_exit": child_exit,
+        "daemon_log": daemon_log,
         "expected": { "pid": pid, "startup_token": startup_token },
         "observed": {
             "pid": observation.observed_pid,
@@ -3318,29 +3118,48 @@ fn spawn_and_wait_for_lease_attempt(
     mut cleanup_evidence: Vec<String>,
 ) -> Result<DaemonStartResult> {
     let state_path = crate::paths::daemon_state_file()?;
-    let exe = std::env::current_exe().map_err(|e| {
+    let state_dir = state_path.parent().expect("daemon state parent");
+    // `serve` records its startup path as the binary to relaunch after an
+    // upgrade replaces it, so launch from this process's recorded startup path.
+    let exe = super::lifetime::launchable_executable().map_err(|e| {
         Error::internal_io(
             e.to_string(),
             Some("resolve current executable".to_string()),
         )
     })?;
+    let (log, daemon_log) = DaemonLog::open(state_dir)?;
+    let log_stderr = log.try_clone().map_err(|e| {
+        Error::internal_io(
+            e.to_string(),
+            Some(format!("open {}", daemon_log.path.display())),
+        )
+    })?;
     let mut command = Command::new(exe);
+    // The spawned process is the daemon itself: its PID is the lease PID. The
+    // startup token in argv is the portable, exact ownership proof used when a
+    // platform cannot inspect a process environment.
     command
         .args([
             "daemon",
-            "supervise",
+            "serve",
             "--addr",
             addr,
             "--startup-token",
             startup_token,
             "--state-dir",
         ])
-        .arg(state_path.parent().expect("daemon state parent"))
+        .arg(state_dir)
         .env(DAEMON_STARTUP_TOKEN_ENV, startup_token)
         .env(super::lifetime::IDLE_TIMEOUT_ENV, idle_timeout.to_string())
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stdout(log)
+        .stderr(log_stderr);
+    // A service manager's variables leak into this launcher when it runs under
+    // a unit. Once the launcher exits the detached daemon is reparented, which
+    // can be to that manager; it must still never read as service-managed.
+    for name in super::service_manager::DaemonServiceManager::ENV_VARS {
+        command.env_remove(name);
+    }
     super::lifetime::LauncherIdentity::configure(&mut command);
     detach_from_launcher_session(&mut command);
     let child = command
@@ -3385,11 +3204,71 @@ fn spawn_and_wait_for_lease_attempt(
                     startup_token,
                     observation,
                     cleanup_evidence,
+                    daemon_log.tail(),
                 ))
             }
         }
     })();
     attempt.finish(result)
+}
+
+/// File in the state directory that receives the detached daemon's stdout and
+/// stderr, appended across launches.
+pub(super) const DAEMON_LOG_FILE: &str = "daemon.log";
+/// `daemon.log` is not rotated; a launch truncates it once it exceeds this.
+const DAEMON_LOG_TRUNCATE_BYTES: u64 = 4 * 1024 * 1024;
+/// How far back from its end startup diagnostics read `daemon.log`.
+const DAEMON_LOG_TAIL_READ_BYTES: u64 = 64 * 1024;
+
+/// The part of `daemon.log` written by one launch.
+struct DaemonLog {
+    path: PathBuf,
+    start: u64,
+}
+
+impl DaemonLog {
+    /// Open `daemon.log` for appending, truncating it first when it has grown
+    /// past [`DAEMON_LOG_TRUNCATE_BYTES`].
+    fn open(state_dir: &Path) -> Result<(std::fs::File, Self)> {
+        let path = state_dir.join(DAEMON_LOG_FILE);
+        let io_error = |error: std::io::Error| {
+            Error::internal_io(error.to_string(), Some(format!("open {}", path.display())))
+        };
+        std::fs::create_dir_all(state_dir).map_err(io_error)?;
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .map_err(io_error)?;
+        let mut start = file.metadata().map_err(io_error)?.len();
+        if start > DAEMON_LOG_TRUNCATE_BYTES {
+            file.set_len(0).map_err(io_error)?;
+            start = 0;
+        }
+        Ok((file, Self { path, start }))
+    }
+
+    /// Bounded, redacted tail of what this launch wrote, or `None` when it
+    /// wrote nothing readable.
+    fn tail(&self) -> Option<String> {
+        use std::io::{BufRead, Seek};
+        let mut file = std::fs::File::open(&self.path).ok()?;
+        let end = file.metadata().ok()?.len();
+        let from = self
+            .start
+            .max(end.saturating_sub(DAEMON_LOG_TAIL_READ_BYTES));
+        if from >= end {
+            return None;
+        }
+        file.seek(std::io::SeekFrom::Start(from)).ok()?;
+        let mut reader = std::io::BufReader::new(file.take(end - from));
+        if from > self.start {
+            // The read began inside a record; its key may be cut off, so the
+            // record cannot be redacted reliably. Drop it.
+            reader.read_until(b'\n', &mut Vec::new()).ok()?;
+        }
+        bounded_redacted_reader(reader)
+    }
 }
 
 /// Keep the daemon and its workload children alive when a transient launcher
@@ -3617,63 +3496,61 @@ mod termination_tests {
         assert!(!output.contains("read-secret"));
     }
 
-    #[cfg(unix)]
     #[test]
-    fn supervise_child_persists_bounded_redacted_concurrent_pipe_output() {
-        crate::test_support::with_isolated_home(|_| {
-            let child = Command::new("sh")
-                .args([
-                    "-c",
-                    "(i=0; while [ $i -lt 4096 ]; do printf 'stdout-%s token=stdout-secret\\n' \"$i\"; i=$((i + 1)); done) & (i=0; while [ $i -lt 4096 ]; do printf 'stderr-%s token=stderr-secret\\n' \"$i\" >&2; i=$((i + 1)); done) & wait",
-                ])
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-                .expect("concurrent output fixture");
+    fn daemon_log_tail_reads_only_this_launch_and_redacts_it() {
+        let dir = tempfile::tempdir().expect("state dir");
+        std::fs::write(
+            dir.path().join(DAEMON_LOG_FILE),
+            b"token=previous-launch-secret\n",
+        )
+        .expect("prior log");
+        let (mut log, daemon_log) = DaemonLog::open(dir.path()).expect("open log");
+        assert_eq!(
+            daemon_log.tail(),
+            None,
+            "a launch that wrote nothing has no tail"
+        );
+        std::io::Write::write_all(&mut log, b"error: bind failed token=launch-secret\n")
+            .expect("write log");
 
-            supervise_child(child).expect("supervise fixture");
-
-            let evidence = super::super::read_termination_evidence()
-                .expect("read evidence")
-                .expect("termination evidence");
-            for output in [evidence.stdout, evidence.stderr] {
-                let output = output.expect("stream evidence");
-                assert!(output.len() < 4_200);
-                assert!(output.contains("token=[REDACTED]"));
-                assert!(!output.contains("secret"));
-            }
-        });
+        let tail = daemon_log.tail().expect("tail");
+        assert!(tail.contains("error: bind failed"));
+        assert!(tail.contains("token=[REDACTED]"));
+        assert!(!tail.contains("secret"));
     }
 
-    #[cfg(unix)]
     #[test]
-    fn nonzero_fixture_exit_preserves_exit_status_without_os_cause_inference() {
-        let status = Command::new("sh")
-            .args(["-c", "exit 23"])
-            .status()
-            .expect("fixture process");
-        assert_eq!(exit_details(&status), (Some(23), None));
-        let evidence = DaemonTerminationEvidence {
-            classification: DaemonTerminationClassification::UnexpectedExit,
-            observed_at: "2026-01-01T00:00:00Z".to_string(),
-            lease_id: Some("lease".to_string()),
-            pid: Some(1),
-            binary_identity: Some("fixture".to_string()),
-            active_jobs: 1,
-            resource_evidence: "unavailable: fixture has no OS resource snapshot".to_string(),
-            os_evidence: "unavailable: fixture has no OS evidence".to_string(),
-            exit_code: Some(23),
-            signal: None,
-            supervisor_signal: None,
-            stdout: None,
-            stderr: Some("panic: fixture".to_string()),
-            stop_requested: false,
-        };
+    fn daemon_log_tail_drops_a_record_cut_by_its_read_window() {
+        let dir = tempfile::tempdir().expect("state dir");
+        let (mut log, daemon_log) = DaemonLog::open(dir.path()).expect("open log");
+        let mut bytes = b"token=".to_vec();
+        bytes.extend(std::iter::repeat_n(
+            b'x',
+            DAEMON_LOG_TAIL_READ_BYTES as usize,
+        ));
+        bytes.extend_from_slice(b"\nfinal diagnostic\n");
+        std::io::Write::write_all(&mut log, &bytes).expect("write log");
+
+        let tail = daemon_log.tail().expect("tail");
+        assert!(tail.contains("final diagnostic"));
+        assert!(!tail.contains("xxx"), "a record without its key is dropped");
+    }
+
+    #[test]
+    fn daemon_log_is_truncated_at_launch_once_it_exceeds_its_bound() {
+        let dir = tempfile::tempdir().expect("state dir");
+        let path = dir.path().join(DAEMON_LOG_FILE);
+        std::fs::write(&path, vec![b'x'; DAEMON_LOG_TRUNCATE_BYTES as usize]).expect("log");
+        DaemonLog::open(dir.path()).expect("open bounded log");
         assert_eq!(
-            evidence.classification,
-            DaemonTerminationClassification::UnexpectedExit
+            std::fs::metadata(&path).unwrap().len(),
+            DAEMON_LOG_TRUNCATE_BYTES,
+            "a log at its bound is kept"
         );
-        assert!(evidence.os_evidence.starts_with("unavailable:"));
+        std::fs::write(&path, vec![b'x'; DAEMON_LOG_TRUNCATE_BYTES as usize + 1]).expect("log");
+        let (_, daemon_log) = DaemonLog::open(dir.path()).expect("open oversized log");
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
+        assert_eq!(daemon_log.start, 0);
     }
 
     #[test]

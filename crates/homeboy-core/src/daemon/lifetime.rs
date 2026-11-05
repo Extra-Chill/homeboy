@@ -129,8 +129,8 @@ fn file_id(_metadata: &std::fs::Metadata) -> (u64, u64) {
 
 static RUNNING_EXECUTABLE: std::sync::OnceLock<ExecutableIdentity> = std::sync::OnceLock::new();
 
-/// This process's executable identity, recorded on first use. Daemon and
-/// supervisor startup call this before serving, so the record names the
+/// This process's executable identity, recorded on first use. The launching
+/// CLI and daemon startup call this before spawning or serving, so the record names the
 /// binary they started from even after an upgrade replaces it.
 pub(super) fn running_executable() -> std::io::Result<&'static ExecutableIdentity> {
     if let Some(identity) = RUNNING_EXECUTABLE.get() {
@@ -162,7 +162,7 @@ pub(super) fn running_executable_replaced() -> bool {
         .is_some_and(ExecutableIdentity::replaced)
 }
 
-/// How often a supervised `serve` re-evaluates its own lifetime.
+/// How often a CLI-launched `serve` re-evaluates its own lifetime.
 const LIFETIME_POLL: Duration = Duration::from_secs(1);
 
 /// True only when the daemon's state directory is provably gone.
@@ -177,7 +177,7 @@ pub(super) fn state_dir_removed(state_path: &Path) -> bool {
         .is_some_and(|dir| matches!(dir.try_exists(), Ok(false)))
 }
 
-/// A `serve` owns its lifetime exactly when a supervisor launched it: the
+/// A `serve` owns its lifetime exactly when the Homeboy CLI launched it: the
 /// launch carries a startup token. A hand-started foreground `serve` has no
 /// token and stays resident. A service-managed `serve` may carry a token but
 /// its manager owns its lifetime; an idle exit under `Restart=always` would
@@ -568,7 +568,7 @@ mod tests {
     }
 
     #[test]
-    fn only_a_supervised_unmanaged_serve_owns_its_lifetime() {
+    fn only_a_cli_launched_unmanaged_serve_owns_its_lifetime() {
         use crate::daemon::DaemonServiceManager;
         assert!(owns_lifetime("token", None));
         // A hand-started foreground serve has no startup token.

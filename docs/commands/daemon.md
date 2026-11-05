@@ -29,20 +29,38 @@ When it lapses, the daemon takes the lifecycle lock and admission fence that
 and drains through the same path as SIGTERM. If a lifecycle command holds the
 lock, it retries after another idle window. An idle daemon whose binary was
 replaced stops after 30 seconds instead, and a daemon whose state directory
-was removed stops at once. Its supervisor only waits for it and records its
-termination, killing it only if the state directory is removed. A subsequent
-command starts a new daemon using the retained durable store. Disposable clients do not need to leave a resident process behind.
+was removed stops at once. A subsequent command starts a new daemon using the retained durable store. Disposable clients do not need to leave a resident process behind.
 
 `homeboy daemon start` and `serve` are explicitly resident launches,
 appropriate for workflow cadences and services. Set
 `HOMEBOY_DAEMON_IDLE_TIMEOUT_SECS` to a positive number to select another idle
-window for a supervised launch, or `0` for a resident automatic launch. A
+window for a CLI-launched daemon, or `0` for a resident automatic launch. A
 `serve` started directly by a service manager lives as long as that manager
 keeps it, and runs none of the self-stop checks above. A `serve` started by
 hand with no startup token stays resident too.
 
 Every `serve` drains on SIGINT and SIGTERM: it finishes the responses it owns,
 releases its lease, and records a `clean_stop` termination.
+
+## One process, `daemon.log`, and termination evidence
+
+A daemon is one process. The CLI launches `homeboy daemon serve` directly,
+detached, with a startup token in argv and environment; the launched PID is
+the lease PID, and nothing else waits on it. Stopping signals that exact PID
+after revalidating its lease and startup token, escalating from SIGTERM to
+SIGKILL.
+
+The daemon's stdout and stderr are appended to `<state-dir>/daemon.log`, which
+the launching CLI opens. A launch truncates the file first once it has grown
+past 4 MiB; it is never rotated. When a launch fails, the startup error's
+`daemon_log` detail carries a bounded, redacted tail of what that launch wrote.
+
+`termination.json` holds the last termination evidence: `classification`
+(`clean_stop` or `unexpected_exit`), `observed_at`, `lease_id`, `pid`,
+`binary_identity`, `active_jobs`, `resource_evidence`, `os_evidence`, and
+`stop_requested`. `serve` records its own clean stop and `daemon stop` records
+the stop it requested. An unexpected exit is a dead PID behind a stale lease;
+no exit status or output is recorded, so look in `daemon.log`.
 
 ## Service-managed daemons
 
@@ -201,8 +219,8 @@ operator can use a lease-bound local force stop. It never uses the daemon HTTP
 endpoint, revalidates the exact persisted lease and zero-job state before every
 signal, and refuses while durable jobs are active. It uses Linux `/proc` token
 evidence on Linux and the explicit startup-token command argument on other Unix
-controllers, with bounded SIGTERM-to-SIGKILL escalation for the exact supervised
-daemon pair:
+controllers, with bounded SIGTERM-to-SIGKILL escalation for the exact daemon
+PID:
 
 ```sh
 homeboy daemon stop --force --lease-id <exact-live-lease>

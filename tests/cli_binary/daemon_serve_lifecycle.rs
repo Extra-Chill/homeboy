@@ -1,6 +1,5 @@
 //! `homeboy daemon serve` is how external supervisors (systemd, launchd,
-//! containers) run the daemon, and what Homeboy's own `daemon supervise`
-//! launches. Every serve must stop cleanly on SIGTERM (#15436, #17387), and a
+//! containers) run the daemon, and the process the Homeboy CLI launches. Every serve must stop cleanly on SIGTERM (#15436, #17387), and a
 //! lease-bound stop must work against one that records no startup token.
 
 use std::path::{Path, PathBuf};
@@ -43,9 +42,9 @@ fn serve(home: &Path) -> (Child, String) {
     )
 }
 
-/// The exact shape `daemon supervise` launches: a startup token in argv and
-/// environment and an explicit store. It used to get no drain handler.
-fn supervised_shape_serve(home: &Path) -> (Child, String) {
+/// The exact shape the CLI launches: a startup token in argv and environment
+/// and an explicit store. It used to get no drain handler.
+fn cli_launched_shape_serve(home: &Path) -> (Child, String) {
     let token = "sigterm-drain-token";
     serve_with(
         home,
@@ -100,9 +99,9 @@ fn sigterm_stops_a_foreground_daemon_cleanly_and_releases_its_lease() {
 
 #[cfg(unix)]
 #[test]
-fn sigterm_drains_a_supervised_shape_daemon_too() {
+fn sigterm_drains_a_cli_launched_shape_daemon_too() {
     let home = tempfile::tempdir().expect("temporary home");
-    let (child, _lease) = supervised_shape_serve(home.path());
+    let (child, _lease) = cli_launched_shape_serve(home.path());
     assert_sigterm_drains(home.path(), child);
 }
 
