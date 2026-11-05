@@ -545,20 +545,24 @@ fn apply_component_lint_gate(
     let Some(component) = component else {
         return Ok(());
     };
+    let siblings = lint_components_in_checkout(
+        component,
+        homeboy::core::component::inventory::registered_base()?,
+    );
     let component_id = &component.id;
     let repository_level = homeboy::core::component::resolution::is_repository_level_checkout(
         Path::new(&component.local_path),
     );
-    if repository_level {
+    if repository_level && siblings.len() == 1 {
         eprintln!(
             "cook: skipping default component lint gate for repository-level task '{}' (nested manifests, no root homeboy.json); explicit verification gates are unchanged",
             component_id
         );
     }
-    let declares_lint = !repository_level
+    let declares_lint = (!repository_level || siblings.len() > 1)
         && !retained_gate_contract
         && !args.gates.no_component_lint_gate
-        && component_declares_lint(component);
+        && siblings.iter().any(component_declares_lint);
     let already_linted = args
         .gates
         .verify
@@ -573,9 +577,60 @@ fn apply_component_lint_gate(
             "Cook base must be resolved before inferring the component lint gate",
         )
     })?;
-    let gate = component_lint_gate(component_id, &component_gate_cwd(component)?, base);
+    let gate = changed_component_lint_gate(&siblings, base)?;
     args.gates.push_controller_verify(gate);
     Ok(())
+}
+
+/// Remote identity alone cannot select a component in a monorepo. Keep all
+/// registrations in the same checkout so the candidate diff can select owners.
+fn lint_components_in_checkout(
+    selected: &homeboy::core::component::Component,
+    registered: Vec<homeboy::core::component::Component>,
+) -> Vec<homeboy::core::component::Component> {
+    let root = homeboy::core::git::repo_root(Path::new(&selected.local_path));
+    let mut components = vec![selected.clone()];
+    if let Some(root) = root {
+        for component in registered {
+            if component.id != selected.id
+                && homeboy::core::git::repo_root(Path::new(&component.local_path)).as_ref()
+                    == Some(&root)
+            {
+                components.push(component);
+            }
+        }
+    }
+    components.sort_by(|a, b| a.id.cmp(&b.id));
+    components
+}
+
+/// Resolve scope in the candidate workspace, not the controller checkout:
+/// before the provider runs there may be no changed paths to inspect. Snapshot
+/// registration paths into the gate so Lab does not need the controller registry.
+fn changed_component_lint_gate(
+    components: &[homeboy::core::component::Component],
+    base: &str,
+) -> homeboy::core::Result<String> {
+    if let [component] = components {
+        return Ok(component_lint_gate(
+            &component.id,
+            &component_gate_cwd(component)?,
+            base,
+        ));
+    }
+    let mut gates = vec![];
+    for component in components.iter().filter(|c| component_declares_lint(c)) {
+        let path = component_gate_cwd(component)?;
+        // A failed diff (for example a missing base ref) is infrastructure
+        // failure, never evidence that a component has no changes.
+        gates.push(format!(
+            "if git diff --quiet --no-renames {} -- {}; then :; else changed=$?; if [ \"$changed\" -gt 1 ]; then exit \"$changed\"; fi; {} || exit $?; fi",
+            quote_args(&[format!("origin/{base}")]),
+            quote_args(&[format!(":(literal){path}")]),
+            component_lint_gate(&component.id, &path, base),
+        ));
+    }
+    Ok(format!("( {} )", gates.join("; ")))
 }
 
 fn component_gate_cwd(
@@ -11369,6 +11424,89 @@ mod tests {
                 "homeboy --placement local review lint users --path 'plugins/users plugin' --changed-since origin/main"
             ]
         );
+    }
+
+    #[test]
+    fn component_lint_gate_selects_changed_monorepo_sibling_at_gate_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            assert!(std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir.path())
+                .status()
+                .unwrap()
+                .success());
+        };
+        git(&["init", "-q"]);
+        let components: Vec<homeboy::core::component::Component> =
+            ["data-machine", "data-machine-events"]
+                .into_iter()
+                .map(|id| {
+                    let path = dir.path().join("plugins").join(id);
+                    std::fs::create_dir_all(&path).unwrap();
+                    std::fs::write(path.join("homeboy.json"), "{}").unwrap();
+                    serde_json::from_value(serde_json::json!({
+                        "id": id, "local_path": path,
+                        "scripts": {"lint": ["echo lint"]}
+                    }))
+                    .unwrap()
+                })
+                .collect();
+        git(&["add", "."]);
+        git(&[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-qm",
+            "base",
+        ]);
+        git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        let siblings = super::lint_components_in_checkout(&components[0], components.clone());
+        assert_eq!(siblings.len(), 2);
+        let gate = super::changed_component_lint_gate(&siblings, "main").unwrap();
+        assert!(!gate.contains(dir.path().to_str().unwrap()));
+        // A shell function stands in for homeboy and records exactly which
+        // component/path was linted. Run with -e like a strict gate runner.
+        let run = || {
+            std::process::Command::new("sh")
+                .args([
+                    "-ec",
+                    &format!("homeboy() {{ printf '%s\\n' \"$*\"; }}; {gate}"),
+                ])
+                .current_dir(dir.path())
+                .output()
+                .unwrap()
+        };
+        assert!(
+            run().stdout.is_empty(),
+            "unchanged siblings must not be linted"
+        );
+        std::fs::write(
+            dir.path().join("plugins/data-machine-events/homeboy.json"),
+            "{ }\n",
+        )
+        .unwrap();
+        let output = run();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8(output.stdout).unwrap(),
+            "--placement local review lint data-machine-events --path plugins/data-machine-events --changed-since origin/main\n");
+        let failed = std::process::Command::new("sh")
+            .args(["-ec", &format!("homeboy() {{ return 23; }}; {gate}")])
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+        assert_eq!(failed.code(), Some(23), "lint failures must propagate");
+        // Once both components change both gates must execute.
+        std::fs::write(
+            dir.path().join("plugins/data-machine/homeboy.json"),
+            "{ }\n",
+        )
+        .unwrap();
+        assert_eq!(String::from_utf8(run().stdout).unwrap().lines().count(), 2);
+        git(&["update-ref", "-d", "refs/remotes/origin/main"]);
+        assert!(!run().status.success(), "missing base must fail closed");
     }
 
     #[test]
