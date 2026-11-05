@@ -1546,6 +1546,8 @@ pub struct CookFinalization {
     pub no_finalize: bool,
     /// Publish a newly created PR as a draft while retaining normal finalization.
     pub draft_pr: bool,
+    /// Preserve an exhausted, gate-failed candidate as a draft PR.
+    pub publish_incomplete_draft: bool,
     pub base: String,
     pub head: Option<String>,
     pub title: String,
@@ -8021,6 +8023,22 @@ fn run_cook_spine(
                 }
             }
             AgentTaskCookLoopStatus::RetriesExhausted => {
+                if options.finalization.publish_incomplete_draft
+                    && !options.finalization.no_finalize
+                    && !promotion.changed_files.is_empty()
+                    && delivery.attempts.iter().all(|attempt| {
+                        attempt.promotion.as_ref().is_some_and(|promotion| {
+                            promotion.status
+                                == crate::agent_task_promotion::AgentTaskPromotionStatus::GateFailed
+                                && promotion.deterministic_gates.iter().any(|gate| {
+                                    gate.status
+                                        == crate::agent_task_gate::AgentTaskGateStatus::Failed
+                                })
+                        })
+                    })
+                {
+                    publish_incomplete_draft(&options, &promotion, review_form.as_ref())?;
+                }
                 return Ok(cook_report(CookReportInput {
                     cook_id,
                     status: "retries_exhausted",
@@ -8048,6 +8066,87 @@ fn run_cook_spine(
         exit_code: 1,
         invocation_latest_run_id: Some(&run_id),
     }))
+}
+
+fn publish_incomplete_draft(
+    options: &CookRequest,
+    promotion: &AgentTaskPromotionReport,
+    form: Option<&crate::agent_task_review_dossier::AiFilledReviewForm>,
+) -> Result<()> {
+    use homeboy_core::git;
+    let path = promotion
+        .provenance
+        .get("worktree_path")
+        .and_then(Value::as_str)
+        .ok_or_else(|| Error::git_command_failed("candidate worktree path is missing"))?;
+    let root = Path::new(path);
+    let head = match options.finalization.head.as_ref() {
+        Some(head) => head.clone(),
+        None => git::run_git(
+            root,
+            &["branch", "--show-current"],
+            "resolve candidate branch",
+        )?
+        .trim()
+        .to_string(),
+    };
+    let title = if options.finalization.title.is_empty() {
+        format!("Incomplete: {}", options.identity.cook_id)
+    } else {
+        options.finalization.title.clone()
+    };
+    let mut body = format!("Incomplete candidate; deterministic verification failed.\n\nTask: {}\n\nincomplete_reason: {}\n",
+        options.workspace.source_refs.join("\n"),
+        form.map(|form| form.incomplete_reason.as_str()).unwrap_or("not recorded"));
+    for gate in promotion
+        .deterministic_gates
+        .iter()
+        .filter(|gate| gate.status == crate::agent_task_gate::AgentTaskGateStatus::Failed)
+    {
+        let output = format!("{}\n{}", gate.stdout, gate.stderr);
+        let tail = output
+            .lines()
+            .rev()
+            .take(40)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>()
+            .join("\n");
+        body.push_str(&format!(
+            "\nFailed gate: {}\n\n```text\n{}\n```\n",
+            gate.id, tail
+        ));
+    }
+    git::stage_all(root)?;
+    if git::has_staged_changes(root)? {
+        git::run_git(
+            root,
+            &["commit", "-m", &title],
+            "commit incomplete candidate",
+        )?;
+    }
+    git::push_at(
+        None,
+        git::PushOptions {
+            refspec: Some(format!("HEAD:refs/heads/{head}")),
+            non_interactive: true,
+            ..Default::default()
+        },
+        Some(path),
+    )?;
+    git::pr_create(
+        None,
+        git::PrCreateOptions {
+            path: Some(path.to_string()),
+            base: options.finalization.base.clone(),
+            head,
+            title,
+            body,
+            draft: true,
+        },
+    )?;
+    Ok(())
 }
 
 /// A deferred gate never executed, so the stop reason names each typed cause

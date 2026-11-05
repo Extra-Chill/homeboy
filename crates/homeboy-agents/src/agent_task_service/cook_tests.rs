@@ -5464,6 +5464,7 @@ fn batch_cook_options(
         },
         retry_policy: CookRetryPolicy { max_attempts: 1 },
         finalization: CookFinalization {
+            publish_incomplete_draft: false,
             no_finalize: true,
             draft_pr: false,
             base: "main".to_string(),
@@ -14523,6 +14524,7 @@ fn cook_returns_after_accepted_detached_attempt_without_waiting_for_daemon_compl
                 },
                 retry_policy: CookRetryPolicy { max_attempts: 1 },
                 finalization: CookFinalization {
+                    publish_incomplete_draft: false,
                     no_finalize: true,
                     draft_pr: false,
                     base: "main".to_string(),
@@ -20383,6 +20385,7 @@ fn promotion_claim_options(cook_id: &str, run_id: &str) -> CookRequest {
         },
         retry_policy: CookRetryPolicy { max_attempts: 1 },
         finalization: CookFinalization {
+            publish_incomplete_draft: false,
             no_finalize: true,
             draft_pr: false,
             base: "main".to_string(),
@@ -21209,6 +21212,7 @@ fn cook_real_pi_response_persists_served_model_through_published_body() {
             },
             retry_policy: CookRetryPolicy { max_attempts: 1 },
             finalization: CookFinalization {
+                publish_incomplete_draft: false,
                 no_finalize: false,
                 draft_pr: false,
                 base: "main".to_string(),
@@ -24349,6 +24353,7 @@ fn cook_rejects_test_claim_without_matching_durable_gate() {
         },
         retry_policy: CookRetryPolicy { max_attempts: 1 },
         finalization: CookFinalization {
+            publish_incomplete_draft: false,
             no_finalize: false,
             draft_pr: false,
             base: "main".to_string(),
@@ -26599,4 +26604,174 @@ fn gates_deferred_stop_reason_names_the_non_execution_cause_and_next_step() {
         "private gate commands stay withheld"
     );
     assert!(!reason.contains("stayed red"));
+}
+
+#[test]
+fn exhausted_gate_failure_publishes_incomplete_draft_but_still_fails() {
+    homeboy_core::test_support::with_isolated_home(|home| {
+        use homeboy_core::test_support::EnvVarGuard;
+        let remote = tempfile::tempdir().unwrap();
+        let repository = tempfile::tempdir().unwrap();
+        let path = repository.path();
+        let git = |cwd: &Path, args: &[&str]| {
+            let output = Command::new("git")
+                .current_dir(cwd)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        };
+        git(remote.path(), &["init", "--bare", "-b", "main"]);
+        git(path, &["init", "-b", "candidate"]);
+        git(path, &["config", "user.name", "Test"]);
+        git(path, &["config", "user.email", "test@example.com"]);
+        git(
+            path,
+            &["remote", "add", "origin", remote.path().to_str().unwrap()],
+        );
+        git(path, &["commit", "--allow-empty", "-m", "base"]);
+        let base_sha = git(path, &["rev-parse", "HEAD"]);
+        std::fs::write(path.join("candidate.txt"), "partial progress\n").unwrap();
+        git(path, &["add", "."]);
+        git(path, &["commit", "-m", "candidate"]);
+        git(path, &["push", "origin", "HEAD:main"]);
+        git(
+            path,
+            &[
+                "remote",
+                "set-url",
+                "--push",
+                "origin",
+                remote.path().to_str().unwrap(),
+            ],
+        );
+        git(
+            path,
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                "https://github.com/example/fixture.git",
+            ],
+        );
+        git(
+            path,
+            &[
+                "config",
+                &format!("url.{}.insteadOf", remote.path().display()),
+                "https://github.com/example/fixture.git",
+            ],
+        );
+        std::fs::write(
+            path.join("homeboy.json"),
+            r#"{"id":"fixture","remote_url":"https://github.com/example/fixture.git"}"#,
+        )
+        .unwrap();
+        let registrations = home.path().join(".config/homeboy/components");
+        std::fs::create_dir_all(&registrations).unwrap();
+        std::fs::write(
+            registrations.join("fixture.json"),
+            serde_json::json!({
+                "local_path": path, "remote_url": "https://github.com/example/fixture.git"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let bin = home.path().join("fake-gh-bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let log = home.path().join("gh.log");
+        homeboy_test_support::write_executable(
+            &bin.join("gh"),
+            r#"#!/bin/sh
+printf '%s\n' "$*" >> "$HOMEBOY_FAKE_GH_LOG"
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--body-file" ]; then shift; cat "$1" >> "$HOMEBOY_FAKE_GH_LOG"; fi
+  shift
+done
+echo https://github.com/example/fixture/pull/1
+"#,
+            0o755,
+        )
+        .unwrap();
+        let _path = EnvVarGuard::set(
+            "PATH",
+            format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+        );
+        let _log = EnvVarGuard::set("HOMEBOY_FAKE_GH_LOG", &log);
+        let cook_id = "incomplete-draft";
+        let run_id = "incomplete-draft-attempt-1";
+        let (mut options, mut failed) = seed_moving_base_attempt(cook_id, run_id);
+        options.finalization.publish_incomplete_draft = true;
+        options.gates.verify =
+            vec!["echo 'last gate output: two cells failed'; exit 1".to_string()];
+        options.gates.private_verify.clear();
+        options.finalization.head = Some("candidate".to_string());
+        options.workspace.to_worktree = path.display().to_string();
+        options.workspace.source_worktree_path = Some(path.to_path_buf());
+        options.workspace.source_refs =
+            vec!["https://github.com/example/fixture/issues/42".to_string()];
+        let recipes = super::super::cook_recipe::CookRecipeStore::from_environment().unwrap();
+        let mut recipe = recipes.load_recipe(cook_id).unwrap();
+        recipe.finalization["publish_incomplete_draft"] = serde_json::json!(true);
+        recipe.finalization["head"] = serde_json::json!("candidate");
+        recipe.source_refs = options.workspace.source_refs.clone();
+        recipe.finalization["to_worktree"] = serde_json::json!(options.workspace.to_worktree);
+        recipe.finalization["source_worktree_path"] = serde_json::json!(path);
+        recipes.persist_recipe(&recipe).unwrap();
+        let lifecycle = test_lifecycle_store();
+        let mut aggregate = lifecycle.read_aggregate(run_id).unwrap();
+        aggregate.outcomes[0].outputs["review_form"]["completion"] =
+            serde_json::json!("incomplete");
+        aggregate.outcomes[0].outputs["review_form"]["incomplete_reason"] =
+            serde_json::json!("Two cells still need work");
+        agent_task_lifecycle::record_run_aggregate(
+            run_id,
+            &options.identity.initial_plan,
+            &aggregate,
+        )
+        .unwrap();
+        failed.status = AgentTaskPromotionStatus::GateFailed;
+        failed.target.path = Some(path.display().to_string());
+        failed.verified_base.as_mut().unwrap().sha = base_sha;
+        failed.deterministic_gates[0].command = vec![
+            "sh".into(),
+            "-c".into(),
+            "test ! -f candidate.txt || { echo 'last gate output: two cells failed'; exit 1; }"
+                .into(),
+        ];
+        failed.provenance["worktree_path"] = serde_json::json!(path);
+        failed.deterministic_gates[0].status = crate::agent_task_gate::AgentTaskGateStatus::Failed;
+        failed.deterministic_gates[0].exit_code = 1;
+        failed.deterministic_gates[0].stdout = "last gate output: two cells failed".to_string();
+        let gate_id = failed.deterministic_gates[0].id.clone();
+        agent_task_lifecycle::record_promotion(run_id, serde_json::to_value(&failed).unwrap())
+            .unwrap();
+        let report = CookService::run(
+            options,
+            CookRuntime::production(Arc::new(UnusedExecutor), &recipes, &lifecycle),
+            CookMode::Resume,
+        )
+        .unwrap();
+        assert_ne!(report.exit_code, 0, "{report:#?}");
+        assert_eq!(report.value.status, "retries_exhausted", "{report:#?}");
+        assert_eq!(
+            git(remote.path(), &["rev-parse", "refs/heads/candidate"]),
+            git(path, &["rev-parse", "HEAD"])
+        );
+        let requested = std::fs::read_to_string(log).unwrap();
+        for expected in [
+            "pr create",
+            "--draft",
+            &gate_id,
+            "last gate output: two cells failed",
+            "Two cells still need work",
+            "https://github.com/example/fixture/issues/42",
+        ] {
+            assert!(
+                requested.contains(expected),
+                "missing {expected}: {requested}"
+            );
+        }
+    });
 }

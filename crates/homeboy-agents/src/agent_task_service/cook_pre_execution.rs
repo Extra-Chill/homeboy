@@ -1136,6 +1136,7 @@ mod tests {
             },
             retry_policy: CookRetryPolicy { max_attempts: 1 },
             finalization: CookFinalization {
+                publish_incomplete_draft: false,
                 no_finalize: true,
                 draft_pr: false,
                 base: "main".to_string(),
