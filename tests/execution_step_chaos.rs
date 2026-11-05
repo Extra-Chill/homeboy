@@ -93,6 +93,12 @@ fn start_daemon(context: &HermeticTestContext, delivery_gate: bool) -> i32 {
     let mut start = command(context);
     start
         .args(["daemon", "start"])
+        // The fault signals the daemon's whole group, so it must be the
+        // launcher's private group, never libtest's.
+        .env(
+            homeboy::core::test_support::TEST_KEEP_DAEMON_IN_PROCESS_GROUP_ENV,
+            homeboy::core::test_support::TEST_KEEP_DAEMON_IN_LAUNCHER_GROUP,
+        )
         .process_group(0)
         .stdin(Stdio::null())
         .stdout(Stdio::from(std::fs::File::create(&stdout).unwrap()))
