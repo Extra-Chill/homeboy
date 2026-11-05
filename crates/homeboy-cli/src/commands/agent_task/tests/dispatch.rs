@@ -3236,10 +3236,12 @@ fn list_sparse_scope_fills_matching_pages_without_duplicates_or_skips() {
             &cursor,
         ])
         .expect("scope-changing command parses");
-        let Commands::AgentTask(agent_task) = changed_scope.command else {
-            panic!("expected agent-task command");
+        let Commands::Runs(runs) = changed_scope.command else {
+            panic!("expected runs command");
         };
-        let error = super::super::run(agent_task).expect_err("scope mismatch is rejected");
+        let Err(error) = crate::commands::runs::run(runs) else {
+            panic!("scope mismatch is rejected");
+        };
         assert_eq!(error.details["field"], "cursor");
 
         let malformed = Cli::try_parse_from([
@@ -3252,10 +3254,12 @@ fn list_sparse_scope_fills_matching_pages_without_duplicates_or_skips() {
             "not-an-agent-task-cursor",
         ])
         .expect("malformed cursor reaches command validation");
-        let Commands::AgentTask(agent_task) = malformed.command else {
-            panic!("expected agent-task command");
+        let Commands::Runs(runs) = malformed.command else {
+            panic!("expected runs command");
         };
-        let error = super::super::run(agent_task).expect_err("malformed cursor is rejected");
+        let Err(error) = crate::commands::runs::run(runs) else {
+            panic!("malformed cursor is rejected");
+        };
         assert_eq!(error.details["field"], "cursor");
     });
 }

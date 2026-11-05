@@ -92,7 +92,10 @@ pub enum AgentTaskCommand {
     Status(StatusArgs),
     /// Read the indexed active checkout ownership for an opaque caller context.
     ActiveScope(ActiveScopeArgs),
-    /// Preview or apply durable run reconciliation.
+    /// Reconcile one durable agent-task run or explicit Cook group, or the whole
+    /// active fleet with `--all`. This is a preview by default; use `--apply`
+    /// only after reviewing the authoritative provider state. Success leaves
+    /// every selected durable record reconciled to that state.
     Reconcile(ReconcileArgs),
     /// Discover or attach selected outputs retained in a terminal Lab Cook workspace.
     RetainedArtifacts(RetainedArtifactsArgs),
