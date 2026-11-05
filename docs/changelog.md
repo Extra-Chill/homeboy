@@ -4,6 +4,19 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.445.6] - 2026-11-05
+
+### Changed
+- Reuse slow but healthy persisted runner tunnels instead of replacing them
+- Keep Lab gate jobs alive when the controller loses its daemon transport
+- fold proof and dossier into evidence flags
+
+### Fixed
+- Cook base capture pins only the base onto the frozen attempt plan
+- bound the connection-worker drain at shutdown
+- detect a replaced binary on every platform
+- never compete with a service-managed controller daemon
+
 ## [0.445.5] - 2026-11-05
 
 ### Fixed
