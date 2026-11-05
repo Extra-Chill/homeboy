@@ -170,16 +170,8 @@ pub fn runner_job_cancel(
 ) -> Result<(Job, Vec<JobEvent>)> {
     let runner = load(runner_id)?;
     // The runner's one current session owns every job it runs.
-    let session = ensure_transport(runner_id, TransportLifetime::Persisted).map_err(|_| {
-        Error::validation_invalid_argument(
-            "runner",
-            "runner is not connected; run `homeboy runner connect <runner-id>` first",
-            Some(runner.id.clone()),
-            Some(vec![
-                "Runner job cancellation requires an active direct daemon transport.".to_string(),
-            ]),
-        )
-    })?;
+    let session = ensure_transport(runner_id, TransportLifetime::Persisted)
+        .map_err(|_| runner_job_cancel_not_connected(&runner.id))?;
     let client = Client::builder()
         .timeout(Duration::from_secs(10))
         .build()
@@ -197,6 +189,21 @@ pub fn runner_job_cancel(
         ));
     };
     parse_runner_job_cancel_body(body)
+}
+
+/// A missing transport is not a refusal: the cancel can succeed once the
+/// runner reconnects, so it stays retryable.
+pub(crate) fn runner_job_cancel_not_connected(runner_id: &str) -> Error {
+    let mut error = Error::validation_invalid_argument(
+        "runner",
+        "runner is not connected; run `homeboy runner connect <runner-id>` first",
+        Some(runner_id.to_string()),
+        Some(vec![
+            "Runner job cancellation requires an active direct daemon transport.".to_string(),
+        ]),
+    );
+    error.retryable = Some(true);
+    error
 }
 
 /// Cancel through a freshly authenticated direct daemon session. Used when a
