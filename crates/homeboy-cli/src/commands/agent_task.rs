@@ -42,6 +42,17 @@ pub use args::{
     ReviewArgs, RunPlanArgs, StatusArgs, ValidatePlanArgs, VerifyGateArgs,
 };
 
+/// Shallow-merge rotation route overrides over the materialized base config,
+/// matching the scheduler's executor config merge before dispatch.
+fn merge_route_provider_config(base: &Value, overrides: &Value) -> Value {
+    let Some(overrides) = overrides.as_object() else {
+        return base.clone();
+    };
+    let mut merged = base.as_object().cloned().unwrap_or_default();
+    merged.extend(overrides.clone());
+    Value::Object(merged)
+}
+
 pub(crate) type CookProgressCallback<'a> = dyn Fn(&str, Option<&str>, Option<&str>, Option<&str>, Option<&str>) -> homeboy::core::Result<()>
     + Send
     + Sync

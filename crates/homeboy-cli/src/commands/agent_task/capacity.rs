@@ -28,7 +28,7 @@ use homeboy::agents::agent_tasks::provider::{
 };
 
 use super::super::CmdResult;
-use super::AgentTaskCapacityArgs;
+use super::{merge_route_provider_config, AgentTaskCapacityArgs};
 
 /// Bounded per-route probe budget. Each readiness invocation carries its own
 /// `timeout_ms`; this deadline additionally bounds the whole per-route probe
@@ -262,18 +262,6 @@ fn rotation_capacity_routes(args: &AgentTaskCapacityArgs) -> Vec<CapacityRoute> 
                     .is_none_or(|model| route.model.as_deref() == Some(model))
         })
         .collect()
-}
-
-/// Shallow-merge one rotation entry's `provider_config` overrides over the
-/// materialized base provider config, the same merge the rotation scheduler
-/// applies to an executor's config before dispatch.
-fn merge_route_provider_config(base: &Value, overrides: &Value) -> Value {
-    let Some(overrides) = overrides.as_object() else {
-        return base.clone();
-    };
-    let mut merged = base.as_object().cloned().unwrap_or_default();
-    merged.extend(overrides.clone());
-    Value::Object(merged)
 }
 
 fn bounded_route_deadline_unix_ms() -> u64 {

@@ -2640,6 +2640,29 @@ struct ReadinessOutputCapture {
     truncated: bool,
 }
 
+/// Why a Pi readiness probe failed. A missing executable is deterministic;
+/// everything else is treated as an interrupted, retryable probe.
+#[derive(Debug)]
+pub(super) enum PiReadinessProbeError {
+    ExecutableNotFound(String),
+    Interrupted(String),
+}
+
+impl From<String> for PiReadinessProbeError {
+    fn from(message: String) -> Self {
+        Self::Interrupted(message)
+    }
+}
+
+impl std::fmt::Display for PiReadinessProbeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ExecutableNotFound(program) => write!(f, "Pi executable not found: {program}"),
+            Self::Interrupted(message) => f.write_str(message),
+        }
+    }
+}
+
 /// Use the same containment and bounded output readers as provider readiness.
 pub(super) fn run_pi_readiness_probe(
     program: &str,
@@ -2647,7 +2670,7 @@ pub(super) fn run_pi_readiness_probe(
     agent_dir: &str,
     env: &[(String, String)],
     timeout: Duration,
-) -> Result<String, String> {
+) -> Result<String, PiReadinessProbeError> {
     let started = Instant::now();
     let mut command = Command::new(program);
     command.arg(flag).env_clear().envs(env.iter().cloned());
@@ -2663,7 +2686,13 @@ pub(super) fn run_pi_readiness_probe(
         .stderr(Stdio::piped());
     let containment =
         AgentTaskProcessContainment::prepare(&mut command).map_err(|e| e.to_string())?;
-    let child = command.spawn().map_err(|e| e.to_string())?;
+    let child = command.spawn().map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            PiReadinessProbeError::ExecutableNotFound(program.to_string())
+        } else {
+            PiReadinessProbeError::Interrupted(error.to_string())
+        }
+    })?;
     let mut child = containment.supervise(child).map_err(|e| e.to_string())?;
     let stdout = child
         .take_stdout()
@@ -2697,7 +2726,9 @@ pub(super) fn run_pi_readiness_probe(
     let status = terminal?;
     let stdout = stdout?;
     if !status.success() || stdout.truncated {
-        return Err("Pi readiness probe failed".into());
+        return Err(PiReadinessProbeError::Interrupted(
+            "Pi readiness probe failed".into(),
+        ));
     }
     Ok(String::from_utf8_lossy(&stdout.bytes).into_owned())
 }

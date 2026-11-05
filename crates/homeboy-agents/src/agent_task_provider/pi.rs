@@ -644,6 +644,11 @@ pub(super) fn readiness(
             "The selected provider publishes no plan usage endpoint; run the full readiness probe."
                 .into(),
         )
+    } else if let Some(super::command_runner::PiReadinessProbeError::ExecutableNotFound(
+        executable,
+    )) = &probe_error
+    {
+        ("deterministic_incompatibility", "executable_not_found", false, format!("Pi executable `{executable}` was not found; install it or set provider_config.command to an existing executable."))
     } else if let Some(error) = probe_error {
         ("transient_failure", "model_list_probe_interrupted", true, format!("Retry the bounded Pi model catalog probe; the local runtime process was temporarily unavailable. {error}"))
     } else if listing.to_ascii_lowercase().contains("no models available") || routes.is_empty() {
