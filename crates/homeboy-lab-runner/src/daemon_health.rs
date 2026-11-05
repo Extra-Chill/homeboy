@@ -19,7 +19,12 @@ pub(crate) fn runner_daemon_health_failure(err: &Error) -> Option<RunnerDaemonHe
         .details
         .pointer("/daemon_transport_error/kind")
         .and_then(|value| value.as_str())
-        .is_some_and(|kind| matches!(kind, "connect" | "timeout" | "status" | "body_decode"));
+        .is_some_and(|kind| {
+            matches!(
+                kind,
+                "connect" | "timeout" | "status" | "request" | "body_decode"
+            )
+        });
     if daemon_transport_failure {
         Some(RunnerDaemonHealthFailure {
             reason: format!("runner daemon health check failed: {}", err.message),

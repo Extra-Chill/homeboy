@@ -10,6 +10,9 @@ pub(crate) enum DaemonHttpErrorKind {
     Connect,
     Timeout,
     Status,
+    /// The request failed after connecting and no response arrived, such as a
+    /// pooled connection the daemon closed or reset mid-request.
+    Request,
     BodyDecode,
 }
 
@@ -19,6 +22,7 @@ impl DaemonHttpErrorKind {
             Self::Connect => "connect",
             Self::Timeout => "timeout",
             Self::Status => "status",
+            Self::Request => "request",
             Self::BodyDecode => "body_decode",
         }
     }
@@ -50,8 +54,10 @@ pub(crate) fn classify_reqwest_error(err: &reqwest::Error) -> DaemonHttpErrorKin
         DaemonHttpErrorKind::Timeout
     } else if err.is_connect() {
         DaemonHttpErrorKind::Connect
-    } else {
+    } else if err.is_status() {
         DaemonHttpErrorKind::Status
+    } else {
+        DaemonHttpErrorKind::Request
     }
 }
 
