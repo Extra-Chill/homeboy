@@ -4,6 +4,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.445.9] - 2026-11-05
+
+### Changed
+- serve owns its own lifetime; the supervisor only waits
+- the group-SIGKILL chaos daemon stays in its launcher's private group
+- serve Cook artifacts and evidence from lifecycle readers
+
 ## [0.445.8] - 2026-11-05
 
 ### Changed
