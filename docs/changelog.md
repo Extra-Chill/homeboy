@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.445.5] - 2026-11-05
+
+### Fixed
+- avoid component rediscovery when publishing Cook candidates
+- probe rotation routes with their provider_config
+
 ## [0.445.4] - 2026-11-05
 
 ### Fixed
