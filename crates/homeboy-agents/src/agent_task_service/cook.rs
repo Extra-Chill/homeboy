@@ -8570,7 +8570,11 @@ fn pin_and_persist_initial_cook_workspace_base(
                     None,
                 )
             })?;
-        attempt.plan = options.identity.initial_plan.clone();
+        // Only the pinned base joins the frozen attempt. The initial plan may be
+        // a run's materialized continuation, and copying it would rewrite the
+        // work a retry preparation validates against.
+        attempt.plan.metadata["cook_workspace_base"] =
+            options.identity.initial_plan.metadata["cook_workspace_base"].clone();
         // The recipe's sensitive mapping projection is derived from its attempt
         // plans. Replacing a plan must recompute it, as every other recipe write
         // does, or the recipe fails validation the next time it is persisted or
@@ -8593,6 +8597,7 @@ fn pin_and_persist_initial_cook_workspace_base(
                 "test interruption after Cook recipe base persistence",
             ));
         }
+        apply_persisted_task_base(options, &recipe)?;
         reconcile_persisted_task_base_plan(lifecycle_store, options, &recipe)
     })
 }

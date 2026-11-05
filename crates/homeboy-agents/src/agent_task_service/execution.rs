@@ -1020,6 +1020,7 @@ pub(super) fn prepare_reserved_cook_retry(
             .find(|attempt| attempt.run_id == run_id)
             .map(|attempt| attempt.plan);
         let plan_path_exists = lifecycle_store.controller_plan_path(run_id).exists();
+        let already_bound = bound.is_some();
         let frozen = match bound {
             Some(plan) => Some(plan),
             None if plan_path_exists => Some(lifecycle_store.read_controller_plan(run_id)?),
@@ -1039,6 +1040,11 @@ pub(super) fn prepare_reserved_cook_retry(
                 run_id,
                 &preparation.plan,
             )?;
+        }
+        // A bound attempt may since carry the Cook's pinned base; binding it
+        // again would compare that against the unpinned preparation.
+        if already_bound {
+            return Ok(());
         }
         if preparation.replaces_source_attempt {
             recipes.record_recipe_attempt_replacement_with_plan(
@@ -2843,6 +2849,13 @@ pub(super) fn cook_retry_plans_match(expected: &AgentTaskPlan, observed: &AgentT
     let mut normalized = observed.clone();
     normalized.workspace_owner_lease = expected.workspace_owner_lease.clone();
     normalized.workspace_lifecycle_revision = expected.workspace_lifecycle_revision;
+    // Base capture pins the Cook's base onto its bound attempt once, after the
+    // preparation froze. The pin is execution evidence, not work.
+    if expected.metadata.get("cook_workspace_base").is_none() {
+        if let Some(metadata) = normalized.metadata.as_object_mut() {
+            metadata.remove("cook_workspace_base");
+        }
+    }
     match (
         expected.metadata.get("client_context"),
         normalized.metadata.as_object_mut(),
@@ -4122,6 +4135,17 @@ mod tests {
             store
                 .write_controller_plan(&reserved.run_id, &materialized)
                 .unwrap();
+            prepare_reserved_cook_retry(&store, &reserved.run_id, &preparation).unwrap();
+            assert!(prepare_reserved_cook_retry(&store, &reserved.run_id, &conflicting).is_err());
+            // Base capture then pins the Cook's base onto the bound attempt.
+            let mut recipe = recipe_store.load_recipe(cook_id).unwrap();
+            let bound = recipe
+                .attempts
+                .iter_mut()
+                .find(|attempt| attempt.run_id == reserved.run_id)
+                .unwrap();
+            bound.plan.metadata["cook_workspace_base"] = serde_json::json!({"sha": "abc123"});
+            recipe_store.persist_recipe(&recipe).unwrap();
             prepare_reserved_cook_retry(&store, &reserved.run_id, &preparation).unwrap();
             assert!(prepare_reserved_cook_retry(&store, &reserved.run_id, &conflicting).is_err());
         });
