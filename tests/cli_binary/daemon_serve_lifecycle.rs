@@ -1,7 +1,7 @@
-//! A foreground `homeboy daemon serve` is how external supervisors (systemd,
-//! launchd, containers) run the daemon. It must stop cleanly on SIGTERM, and
-//! a lease-bound stop must work against it even though it records no startup
-//! token (#15436).
+//! `homeboy daemon serve` is how external supervisors (systemd, launchd,
+//! containers) run the daemon, and what Homeboy's own `daemon supervise`
+//! launches. Every serve must stop cleanly on SIGTERM (#15436, #17387), and a
+//! lease-bound stop must work against one that records no startup token.
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -37,8 +37,28 @@ fn daemon_status(home: &Path) -> serde_json::Value {
 }
 
 fn serve(home: &Path) -> (Child, String) {
-    let child = homeboy(home)
-        .args(["daemon", "serve", "--addr", "127.0.0.1:0"])
+    serve_with(
+        home,
+        homeboy(home).args(["daemon", "serve", "--addr", "127.0.0.1:0"]),
+    )
+}
+
+/// The exact shape `daemon supervise` launches: a startup token in argv and
+/// environment and an explicit store. It used to get no drain handler.
+fn supervised_shape_serve(home: &Path) -> (Child, String) {
+    let token = "sigterm-drain-token";
+    serve_with(
+        home,
+        homeboy(home)
+            .args(["daemon", "serve", "--addr", "127.0.0.1:0"])
+            .args(["--startup-token", token, "--state-dir"])
+            .arg(home.join(".config/homeboy/daemon"))
+            .env("HOMEBOY_DAEMON_STARTUP_TOKEN", token),
+    )
+}
+
+fn serve_with(home: &Path, command: &mut Command) -> (Child, String) {
+    let child = command
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -74,8 +94,20 @@ fn wait_exit(child: &mut Child, bound: Duration) -> Option<std::process::ExitSta
 #[test]
 fn sigterm_stops_a_foreground_daemon_cleanly_and_releases_its_lease() {
     let home = tempfile::tempdir().expect("temporary home");
-    let (mut child, _lease) = serve(home.path());
+    let (child, _lease) = serve(home.path());
+    assert_sigterm_drains(home.path(), child);
+}
 
+#[cfg(unix)]
+#[test]
+fn sigterm_drains_a_supervised_shape_daemon_too() {
+    let home = tempfile::tempdir().expect("temporary home");
+    let (child, _lease) = supervised_shape_serve(home.path());
+    assert_sigterm_drains(home.path(), child);
+}
+
+#[cfg(unix)]
+fn assert_sigterm_drains(home: &Path, mut child: Child) {
     // SAFETY: signalling the child we spawned.
     assert_eq!(
         unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGTERM) },
@@ -90,7 +122,7 @@ fn sigterm_stops_a_foreground_daemon_cleanly_and_releases_its_lease() {
         "graceful SIGTERM exit should be 0: {status}"
     );
 
-    let daemon_dir = home.path().join(".config/homeboy/daemon");
+    let daemon_dir = home.join(".config/homeboy/daemon");
     assert!(
         !daemon_dir.join("state.json").exists(),
         "a clean stop releases the lease"
@@ -100,6 +132,10 @@ fn sigterm_stops_a_foreground_daemon_cleanly_and_releases_its_lease() {
     )
     .expect("termination evidence JSON");
     assert_eq!(evidence["classification"], "clean_stop", "{evidence}");
+    assert_eq!(
+        evidence["os_evidence"], "graceful shutdown requested by SIGINT or SIGTERM",
+        "{evidence}"
+    );
 }
 
 #[cfg(unix)]

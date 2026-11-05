@@ -11,7 +11,7 @@ homeboy daemon <COMMAND>
 ## Subcommands
 
 - `start` — start the local daemon in the background
-- `serve` — run the daemon in the foreground
+- `serve` — run the daemon in this process (what a service manager's unit runs)
 - `stop` — gracefully stop the background daemon recorded in the state file
 - `status` — show bounded daemon health, active jobs, blockers, and recovery actions; use `--full` for complete evidence
 - `recover` — resolve and run the right recovery from the current status report
@@ -26,11 +26,39 @@ active work prevent shutdown, and every signal is tied to the exact lease and
 startup token. A subsequent command starts a new daemon using the retained
 durable store. Disposable clients do not need to leave a resident process behind.
 
-`homeboy daemon start` and foreground `serve` are explicitly resident launches,
+`homeboy daemon start` and `serve` are explicitly resident launches,
 appropriate for workflow cadences and services. Set
 `HOMEBOY_DAEMON_IDLE_TIMEOUT_SECS` to a positive number to select another idle
-window for a supervised launch, or `0` for a resident automatic launch. Foreground
-`serve` lifetime is owned by its calling service manager.
+window for a supervised launch, or `0` for a resident automatic launch. A
+`serve` started directly by a service manager lives as long as that manager
+keeps it.
+
+Every `serve` drains on SIGINT and SIGTERM: it finishes the responses it owns,
+releases its lease, and records a `clean_stop` termination.
+
+## Service-managed daemons
+
+A `serve` whose parent is systemd with `INVOCATION_ID` set, or launchd with
+`XPC_SERVICE_NAME` set, records that manager in its lease (`service_manager`:
+`systemd` or `launchd`). No configuration is involved. Leases written before
+this field existed read as unmanaged.
+
+Only the manager starts or replaces a service-managed daemon. Homeboy never
+spawns another daemon beside it:
+
+- `daemon start` reports which manager owns the running daemon and does
+  nothing.
+- `daemon ensure-running` and `homeboy upgrade` restart a stale managed daemon
+  in place. They send SIGTERM to the exact leased process and wait for the
+  manager's replacement lease to report the expected build. If no replacement
+  appears, the command fails instead of starting one. The unit must restart on
+  exit (for example `Restart=always`).
+- `daemon status` and `daemon plan` name the owning manager. If another
+  `daemon serve` process targets the same store, they report it as a
+  conflict, and recovery stays blocked until one of the processes is gone.
+
+On any host, while a live or starting daemon holds `owner.lock`, every start
+path refuses to spawn another daemon.
 
 ## One daemon store
 

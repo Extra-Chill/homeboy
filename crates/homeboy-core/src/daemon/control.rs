@@ -1761,15 +1761,136 @@ pub fn start_background(addr: &str) -> Result<DaemonStartResult> {
 /// replacement resumes that work from the same store (#15936).
 pub fn ensure_running(addr: &str) -> Result<DaemonStartResult> {
     let status = read_status()?;
-    if let Some(lease_id) = status
+    if let Some(state) = status
         .state
         .as_ref()
         .filter(|_| status.running && !status.fresh)
-        .map(|state| state.lease_id.clone())
     {
-        restart_in_place(&lease_id)?;
+        // A service manager starts the replacement itself; spawning one here
+        // would race it for the owner lock (#17387).
+        if state.service_manager.is_some() {
+            return restart_service_managed(&state.lease_id, super::DaemonStatus::admits_work);
+        }
+        restart_in_place(&state.lease_id)?;
     }
     ensure_running_with_wait(addr, ENSURE_RUNNING_STARTUP_WAIT)
+}
+
+const SERVICE_MANAGED_RESTART_POLL: Duration = Duration::from_millis(250);
+/// Covers the old daemon's drain (helpers join within 10s) plus the
+/// manager's restart delay and the replacement's startup recovery.
+const SERVICE_MANAGED_RESTART_POLLS: usize = 360;
+
+/// Restart the live service-managed daemon `lease_id` without competing with
+/// its manager: SIGTERM the exact leased process, which drains gracefully,
+/// then wait for the manager to start the replacement and for the
+/// replacement's status to satisfy `replaced` (for example, report the new
+/// build). Never spawns a daemon (#17387).
+pub fn restart_service_managed(
+    lease_id: &str,
+    replaced: impl Fn(&super::DaemonStatus) -> bool,
+) -> Result<DaemonStartResult> {
+    // Held throughout, so a concurrent `ensure-running` waits for the
+    // replacement instead of spawning into the restart window.
+    let _lock = acquire_daemon_operation_lock()?;
+    restart_service_managed_with(
+        lease_id,
+        replaced,
+        read_status,
+        terminate_service_managed_daemon,
+        || thread::sleep(SERVICE_MANAGED_RESTART_POLL),
+        SERVICE_MANAGED_RESTART_POLLS,
+    )
+}
+
+fn restart_service_managed_with<ReadStatus, Terminate, Sleep>(
+    lease_id: &str,
+    replaced: impl Fn(&super::DaemonStatus) -> bool,
+    mut read_status: ReadStatus,
+    terminate: Terminate,
+    mut sleep: Sleep,
+    polls: usize,
+) -> Result<DaemonStartResult>
+where
+    ReadStatus: FnMut() -> Result<super::DaemonStatus>,
+    Terminate: FnOnce(&super::DaemonState) -> Result<()>,
+    Sleep: FnMut(),
+{
+    let status = read_status()?;
+    let state = status
+        .state
+        .clone()
+        .filter(|state| status.running && state.lease_id == lease_id)
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "lease_id",
+                format!("no live daemon holds lease `{lease_id}`; nothing to restart"),
+                Some(lease_id.to_string()),
+                None,
+            )
+        })?;
+    let manager = state.service_manager.ok_or_else(|| {
+        Error::internal_unexpected(format!(
+            "daemon lease `{lease_id}` is not owned by a service manager"
+        ))
+    })?;
+    terminate(&state)?;
+    let mut last = status;
+    for _ in 0..polls {
+        sleep();
+        last = read_status()?;
+        if let Some(current) = last
+            .state
+            .as_ref()
+            .filter(|current| last.running && current.lease_id != lease_id && replaced(&last))
+        {
+            return Ok(DaemonStartResult {
+                pid: current.pid,
+                address: current.address.clone(),
+                state_path: current.state_path.clone(),
+                lease_id: current.lease_id.clone(),
+            });
+        }
+    }
+    let observed = match last.state.as_ref() {
+        Some(current) if current.lease_id == lease_id && last.running => {
+            format!("pid {} is still serving lease `{lease_id}`", current.pid)
+        }
+        Some(current) if last.running => format!(
+            "its replacement lease `{}` runs {}, which is not the expected build",
+            current.lease_id, current.build_identity.display
+        ),
+        _ => "no replacement daemon lease was published".to_string(),
+    };
+    Err(Error::internal_unexpected(format!(
+        "service manager {} did not bring up a replacement daemon: {observed}; Homeboy does not start one beside it",
+        manager.as_str()
+    ))
+    .with_hint(format!(
+        "Inspect the {} service for the daemon (it must restart on exit, e.g. `Restart=always`) and the binary it runs.",
+        manager.as_str()
+    )))
+}
+
+/// SIGTERM the exact service-managed daemon recorded by `state`. It carries
+/// no supervisor and possibly no startup token, so the proof that the PID is
+/// still that daemon is the unchanged lease plus the held owner lock.
+fn terminate_service_managed_daemon(state: &super::DaemonState) -> Result<()> {
+    let path = crate::paths::daemon_state_file()?;
+    let current = super::read_lease_if_identity_matches(
+        &path,
+        &super::DaemonLeaseIdentity::from_state(state),
+    )?;
+    if current.pid != state.pid
+        || !pid_is_running(state.pid)
+        || !super::daemon_owner_lock_is_held_at(&path)?
+    {
+        return Err(Error::internal_unexpected(format!(
+            "daemon lease `{}` changed before its service-managed restart; refusing to signal pid {}",
+            state.lease_id, state.pid
+        )));
+    }
+    crate::process::signal_pid(state.pid, crate::process::SIGNAL_TERMINATE)
 }
 
 /// Stop the exact stale lease. A concurrent caller may already have replaced
@@ -2770,6 +2891,7 @@ fn reattach_exact_live_owner() -> Result<()> {
         last_seen_at: now,
         build_identity: crate::build_identity::current(),
         binary_sha256: super::current_binary_sha256()?,
+        service_manager: None,
         runtime_paths: super::capture_daemon_runtime_snapshot(),
     };
     super::write_lease(&state_path, &state)
@@ -2801,17 +2923,32 @@ where
             });
         }
     }
+    // A held owner lock is a live or starting daemon, whatever the lease says:
+    // for example a service manager restarting its own. Spawning beside it
+    // would only contend for the lock, so no path starts one (#17387).
+    let owner_lock = acquire_owner()?.ok_or_else(|| owner_held_error(&existing))?;
     if existing.state.is_some() || existing.stale_reason.is_some() {
-        let owner_lock = acquire_owner()?.ok_or_else(|| {
-            Error::internal_unexpected(
-                "daemon owner is live or starting; refusing stale lease cleanup",
-            )
-        })?;
         cleanup()?;
-        drop(owner_lock);
     }
+    drop(owner_lock);
 
     spawn_and_wait()
+}
+
+fn owner_held_error(status: &super::DaemonStatus) -> Error {
+    match status.service_manager() {
+        Some(manager) => Error::internal_unexpected(format!(
+            "the daemon is owned by service manager {}; refusing to start another daemon beside it",
+            manager.as_str()
+        ))
+        .with_hint(
+            "Restart it through its service manager, or run `homeboy daemon ensure-running`, which waits for the manager's replacement."
+                .to_string(),
+        ),
+        None => Error::internal_unexpected(
+            "daemon owner lock is held by a live or starting daemon; refusing to start another daemon",
+        ),
+    }
 }
 
 const STARTUP_LEASE_OBSERVATIONS: usize = 100;
@@ -3326,11 +3463,42 @@ fn detach_from_launcher_session(command: &mut Command) {
     // The hermetic Cargo runner owns the test binary's process group and reaps
     // it on cancellation. Test daemons must remain in that group; a `setsid`
     // here would reparent a cancelled fixture to PID 1 and leak it forever.
-    if cfg!(debug_assertions) && std::env::var_os(TEST_KEEP_DAEMON_IN_PROCESS_GROUP_ENV).is_some() {
-        return;
+    // The value names that group; rejoin it rather than staying in the
+    // launching CLI's own group, which its test harness reaps when the CLI
+    // exits (#17387).
+    if cfg!(debug_assertions) {
+        if let Some(group) = std::env::var_os(TEST_KEEP_DAEMON_IN_PROCESS_GROUP_ENV) {
+            join_test_runner_process_group(command, &group);
+            return;
+        }
     }
     crate::process::detach_from_caller_session(command);
 }
+
+#[cfg(unix)]
+fn join_test_runner_process_group(command: &mut Command, group: &std::ffi::OsStr) {
+    use std::os::unix::process::CommandExt;
+    let Some(group) = group
+        .to_str()
+        .and_then(|group| group.parse::<libc::pid_t>().ok())
+        .filter(|group| *group > 0)
+    else {
+        return;
+    };
+    // SAFETY: `pre_exec` runs in the forked child immediately before exec;
+    // `setpgid` only moves that child and reports failure through errno.
+    unsafe {
+        command.pre_exec(move || {
+            if libc::setpgid(0, group) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
+#[cfg(not(unix))]
+fn join_test_runner_process_group(_command: &mut Command, _group: &std::ffi::OsStr) {}
 
 /// Resolve the daemon base URL, falling back to the running daemon's address.
 fn resolve_daemon_url(daemon_url: Option<String>) -> Result<String> {
