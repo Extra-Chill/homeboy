@@ -444,7 +444,7 @@ fn probe_daemon_endpoint_identity(
     let matches = identity.get("protocol").and_then(Value::as_str) == Some(PROTOCOL)
         && identity.get("nonce").and_then(Value::as_str) == Some(nonce.as_str())
         && identity.pointer("/daemon/schema").and_then(Value::as_str)
-            == Some("homeboy.daemon.session_lease.v1")
+            == Some(homeboy_core::daemon::DAEMON_LEASE_SCHEMA)
         && identity.pointer("/daemon/lease_id").and_then(Value::as_str) == Some(expected_lease)
         && identity.pointer("/daemon/pid").and_then(Value::as_u64) == Some(expected_pid.into())
         && !session.runner_id.trim().is_empty();
@@ -975,7 +975,7 @@ mod tests {
                                     .and_then(|value| value.split_whitespace().next())
                                     .expect("identity nonce");
                                 let body = format!(
-                                    r#"{{"protocol":"homeboy.daemon.endpoint-identity.v1","nonce":"{nonce}","daemon":{{"schema":"homeboy.daemon.session_lease.v1","lease_id":"lease-live","pid":4242}}}}"#
+                                    r#"{{"protocol":"homeboy.daemon.endpoint-identity.v1","nonce":"{nonce}","daemon":{{"schema":"homeboy.daemon.session_lease.v2","lease_id":"lease-live","pid":4242}}}}"#
                                 );
                                 stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).expect("identity response");
                                 identity_served = true;

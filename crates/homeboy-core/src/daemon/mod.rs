@@ -70,6 +70,7 @@ use daemon_lease::{daemon_state_identity, freshness_report_from_validation, vali
 /// build-specific durable store, so runner drivers launch Homeboy children
 /// from this path rather than from configuration or `PATH`.
 pub use lifetime::launchable_executable as daemon_launchable_executable;
+pub use lifetime::ExecutableIdentity;
 /// Idle window, in seconds, for automatically launched daemons; `0` selects a
 /// resident launch. See `lifetime::launch_idle_timeout`.
 pub use lifetime::IDLE_TIMEOUT_ENV as DAEMON_IDLE_TIMEOUT_ENV;
@@ -841,7 +842,7 @@ fn controller_job_runtimes(
     RUNTIMES.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-pub const DAEMON_LEASE_SCHEMA: &str = "homeboy.daemon.session_lease.v1";
+pub const DAEMON_LEASE_SCHEMA: &str = "homeboy.daemon.session_lease.v2";
 const DAEMON_ENDPOINT_IDENTITY_PROTOCOL: &str = "homeboy.daemon.endpoint-identity.v1";
 // Shared with non-daemon launchers (the lab-runner systemd unit renderer) that
 // must set this exact variable without depending on this module tree (#15087).
@@ -862,6 +863,9 @@ pub struct DaemonState {
     pub last_seen_at: String,
     pub build_identity: build_identity::BuildIdentity,
     pub binary_sha256: Option<String>,
+    /// The executable the daemon started from, so any reader can tell when
+    /// an upgrade has since replaced it on disk.
+    pub executable: ExecutableIdentity,
     pub runtime_paths: DaemonRuntimeSnapshot,
     /// The service manager that runs and restarts this daemon. Homeboy never
     /// spawns a daemon beside it; restarts go through the manager (#17387).
@@ -7105,6 +7109,9 @@ mod tests {
             last_seen_at: now,
             build_identity: build_identity::current(),
             binary_sha256: current_binary_sha256().expect("binary hash"),
+            executable: lifetime::running_executable()
+                .expect("test executable identity")
+                .clone(),
             runtime_paths: capture_daemon_runtime_snapshot(),
             service_manager: None,
         };
@@ -7638,6 +7645,14 @@ fn write_state(
         last_seen_at: now,
         build_identity: build_identity::current(),
         binary_sha256: current_binary_sha256()?,
+        executable: lifetime::running_executable()
+            .map_err(|e| {
+                Error::internal_io(
+                    e.to_string(),
+                    Some("record daemon executable identity".to_string()),
+                )
+            })?
+            .clone(),
         runtime_paths: capture_daemon_runtime_snapshot(),
         service_manager,
     };
