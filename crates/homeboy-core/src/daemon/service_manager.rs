@@ -11,8 +11,9 @@
 //! `XPC_SERVICE_NAME`. Both are inherited by descendants (a shell in a
 //! terminal that runs as a user service, a test harness running in a CI
 //! unit), so the variable only counts when the manager is also the serving
-//! process's direct parent. Homeboy's own `daemon supervise` launcher is the
-//! parent of every daemon it spawns, so those are never mistaken for managed.
+//! process's direct parent. A daemon Homeboy's CLI launches has the CLI as
+//! its parent at startup, and is launched without these variables, so it is
+//! never mistaken for managed even after it is reparented.
 
 use serde::{Deserialize, Serialize};
 
@@ -24,6 +25,9 @@ pub enum DaemonServiceManager {
 }
 
 impl DaemonServiceManager {
+    /// The variables each manager sets for the processes it starts.
+    pub(super) const ENV_VARS: [&'static str; 2] = ["INVOCATION_ID", "XPC_SERVICE_NAME"];
+
     /// The manager that started this process directly, if any.
     pub fn detect() -> Option<Self> {
         Self::detect_from(
@@ -106,8 +110,8 @@ mod tests {
     }
 
     /// The manager variables leak into descendants; only a direct child of the
-    /// manager is owned by it. A daemon under `daemon supervise`, a shell, or a
-    /// test harness is not.
+    /// manager is owned by it. A daemon launched by the Homeboy CLI, a shell,
+    /// or a test harness is not.
     #[test]
     fn an_inherited_manager_variable_without_the_manager_as_parent_is_unmanaged() {
         let vars = [("INVOCATION_ID", "abc"), ("XPC_SERVICE_NAME", "com.x")];

@@ -120,18 +120,6 @@ impl Drop for Reaper {
     }
 }
 
-fn parent_pid(pid: i64) -> i64 {
-    std::fs::read_to_string(format!("/proc/{pid}/stat"))
-        .ok()
-        .and_then(|stat| {
-            stat.rsplit(')')
-                .next()
-                .and_then(|rest| rest.split_whitespace().nth(1))
-                .and_then(|ppid| ppid.parse().ok())
-        })
-        .unwrap_or_default()
-}
-
 /// Reap these exact PIDs if this process is their (sub)reaper. Never waits on
 /// arbitrary children: other tests in the same process own theirs.
 fn reap_exact(pids: &[i64]) {
@@ -279,7 +267,7 @@ fn restart_in_place_takes_admission_from_a_dead_generation() {
 }
 
 /// Case 9 (wp-coding-agents#659): the host service is stopped with
-/// `KillMode=control-group`, so the supervisor and daemon die together with
+/// `KillMode=control-group`, so the daemon's whole process group dies with
 /// SIGKILL. The next recovery must converge without hand-edited state.
 #[cfg(unix)]
 #[test]
@@ -290,7 +278,6 @@ fn whole_daemon_process_group_killed_recovers_without_edits() {
 
     let current = start_on_demand(&bin, home.path(), &mut reaper);
     let pid = daemon_pid(&current["data"]);
-    let supervisor = parent_pid(pid);
     // SAFETY: getpgid/kill on the daemon this test started.
     let pgid = unsafe { libc::getpgid(pid as libc::pid_t) };
     assert!(pgid > 0);
@@ -305,7 +292,7 @@ fn whole_daemon_process_group_killed_recovers_without_edits() {
     // test binary can be their subreaper (nextest runs each test as its own
     // process), so reap exactly what was killed; otherwise the zombies read
     // as live unleased daemon candidates and recovery rightly refuses.
-    reap_exact(&[pid, supervisor]);
+    reap_exact(&[pid]);
     assert!(
         !pid_alive(pid),
         "daemon {pid} (pgid {pgid}) survived group SIGKILL: {}",

@@ -2224,10 +2224,10 @@ fn force_stop_matching_zero_job_stale_daemon_is_terminated_and_verified() {
     let evidence = result.termination_evidence.expect("termination evidence");
     assert_eq!(evidence.lease_id.as_deref(), Some(state.lease_id.as_str()));
     assert_eq!(evidence.pid, Some(pid));
-    assert_eq!(evidence.signal, Some(libc::SIGTERM));
     assert!(evidence
         .os_evidence
         .contains("startup-token ownership revalidated"));
+    assert!(evidence.os_evidence.contains("stopped with SIGTERM"));
     assert!(!pid_is_running(pid));
     assert!(!state_path().expect("state path").exists());
 }
@@ -2237,7 +2237,25 @@ fn force_stop_matching_zero_job_stale_daemon_is_terminated_and_verified() {
 fn force_stop_escalates_when_a_token_owned_daemon_ignores_sigterm() {
     let _home = HomeGuard::new();
     let startup_token = "force-stop-ignores-term";
-    let child = Command::new("sh")
+    let pid = spawn_term_resistant_daemon(startup_token);
+    let mut state = daemon_state_for_test(pid, "127.0.0.1:1");
+    state.binary_sha256 = Some("stale-binary-hash".to_string());
+    state.startup_token = startup_token.to_string();
+    write_daemon_state_for_test(&state);
+
+    let result = force_stop_for_lease(&state.lease_id).expect("bounded forced stop");
+
+    assert!(result.stopped);
+    let evidence = result.termination_evidence.expect("termination evidence");
+    assert!(evidence.os_evidence.contains("stopped with SIGKILL"));
+    assert!(!pid_is_running(pid));
+}
+
+/// A TERM-resistant daemon fixture: the exact single-process shape the CLI
+/// launches, a token-owned `daemon serve` with nothing above it to signal.
+#[cfg(unix)]
+fn spawn_term_resistant_daemon(startup_token: &str) -> u32 {
+    Command::new("sh")
         .args([
             "-c",
             "trap '' TERM; while :; do sleep 1; done",
@@ -2249,57 +2267,16 @@ fn force_stop_escalates_when_a_token_owned_daemon_ignores_sigterm() {
         ])
         .env(DAEMON_STARTUP_TOKEN_ENV, startup_token)
         .spawn()
-        .expect("start TERM-resistant daemon fixture");
-    let pid = child.id();
-    let mut state = daemon_state_for_test(pid, "127.0.0.1:1");
-    state.binary_sha256 = Some("stale-binary-hash".to_string());
-    state.startup_token = startup_token.to_string();
-    write_daemon_state_for_test(&state);
-
-    let result = force_stop_for_lease(&state.lease_id).expect("bounded forced stop");
-
-    assert!(result.stopped);
-    let evidence = result.termination_evidence.expect("termination evidence");
-    assert!(evidence.os_evidence.contains("SIGKILL"));
-    assert_eq!(evidence.signal, Some(libc::SIGKILL));
-    assert_eq!(evidence.supervisor_signal, None);
-    assert!(!pid_is_running(pid));
+        .expect("start TERM-resistant daemon fixture")
+        .id()
 }
 
 #[cfg(unix)]
 #[test]
-fn lease_bound_stop_converges_term_resistant_mixed_version_supervisor_and_daemon() {
+fn ordinary_stop_converges_a_term_resistant_mixed_version_daemon() {
     let _home = HomeGuard::new();
-    let startup_token = "mixed-version-supervised-daemon";
-    let marker = tempfile::NamedTempFile::new().expect("child PID marker");
-    let marker_path = marker.path().to_string_lossy().into_owned();
-    let supervisor = Command::new("sh")
-        .args([
-            "-c",
-            ": daemon supervise; trap '' TERM; sh -c 'trap \"\" TERM; while :; do sleep 1; done' homeboy daemon serve --startup-token \"$2\" & echo $! > \"$3\"; child=$!; while kill -0 \"$child\" 2>/dev/null; do sleep 1; done; while :; do sleep 1; done",
-            "homeboy",
-            "--startup-token",
-            startup_token,
-            marker_path.as_str(),
-        ])
-        .env(DAEMON_STARTUP_TOKEN_ENV, startup_token)
-        .spawn()
-        .expect("start TERM-resistant mixed-version supervisor");
-    let supervisor_pid = supervisor.id();
-    let deadline = Instant::now() + Duration::from_secs(2);
-    let daemon_pid = loop {
-        if let Some(pid) = std::fs::read_to_string(&marker_path)
-            .ok()
-            .and_then(|pid| pid.trim().parse::<u32>().ok())
-        {
-            break pid;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "supervisor did not start daemon child"
-        );
-        std::thread::sleep(Duration::from_millis(10));
-    };
+    let startup_token = "mixed-version-daemon";
+    let daemon_pid = spawn_term_resistant_daemon(startup_token);
     let mut state = daemon_state_for_test(daemon_pid, "127.0.0.1:1");
     state.build_identity.version = "0.321.1".to_string();
     state.build_identity.display = "homeboy 0.321.1+92323a8adef6".to_string();
@@ -2308,70 +2285,38 @@ fn lease_bound_stop_converges_term_resistant_mixed_version_supervisor_and_daemon
     write_daemon_state_for_test(&state);
 
     let started = Instant::now();
-    let result = stop().expect("ordinary stop converges stale supervised pair");
+    let result = stop().expect("ordinary stop converges a stale daemon");
 
     assert!(result.stopped);
     assert!(started.elapsed() < Duration::from_secs(10));
     let evidence = result.termination_evidence.expect("termination evidence");
-    assert!(evidence.os_evidence.contains("daemon pid"));
-    assert!(evidence.os_evidence.contains("supervisor SIGKILL"));
-    assert_eq!(evidence.signal, Some(libc::SIGKILL));
-    assert_eq!(evidence.supervisor_signal, Some(libc::SIGKILL));
+    assert!(evidence
+        .os_evidence
+        .contains(&format!("daemon pid {daemon_pid} stopped with SIGKILL")));
     assert!(!pid_is_running(daemon_pid));
-    assert!(!pid_is_running(supervisor_pid));
     assert!(!state_path().expect("state path").exists());
 }
 
 #[cfg(unix)]
 #[test]
-fn ordinary_stop_escalates_a_fresh_term_resistant_supervised_daemon() {
+fn ordinary_stop_escalates_a_fresh_term_resistant_daemon() {
     let _home = HomeGuard::new();
-    let startup_token = "fresh-supervised-daemon";
-    let marker = tempfile::NamedTempFile::new().expect("child PID marker");
-    let marker_path = marker.path().to_string_lossy().into_owned();
-    let supervisor = Command::new("sh")
-        .args([
-            "-c",
-            ": daemon supervise; trap '' TERM; sh -c 'trap \"\" TERM; while :; do sleep 1; done' homeboy daemon serve --startup-token \"$2\" & echo $! > \"$3\"; child=$!; while kill -0 \"$child\" 2>/dev/null; do sleep 1; done; while :; do sleep 1; done",
-            "homeboy",
-            "--startup-token",
-            startup_token,
-            marker_path.as_str(),
-        ])
-        .env(DAEMON_STARTUP_TOKEN_ENV, startup_token)
-        .spawn()
-        .expect("start TERM-resistant fresh supervisor");
-    let supervisor_pid = supervisor.id();
-    let deadline = Instant::now() + Duration::from_secs(2);
-    let daemon_pid = loop {
-        if let Some(pid) = std::fs::read_to_string(&marker_path)
-            .ok()
-            .and_then(|pid| pid.trim().parse::<u32>().ok())
-        {
-            break pid;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "supervisor did not start daemon child"
-        );
-        std::thread::sleep(Duration::from_millis(10));
-    };
+    let startup_token = "fresh-daemon";
+    let daemon_pid = spawn_term_resistant_daemon(startup_token);
     let mut state = daemon_state_for_test(daemon_pid, "127.0.0.1:1");
     state.startup_token = startup_token.to_string();
     write_daemon_state_for_test(&state);
 
     let started = Instant::now();
-    let result = stop().expect("ordinary fresh stop converges pair");
+    let result = stop().expect("ordinary fresh stop converges");
 
     assert!(result.stopped);
     assert!(started.elapsed() < Duration::from_secs(10));
     let evidence = result.termination_evidence.expect("termination evidence");
-    assert!(evidence.os_evidence.contains("daemon pid"));
-    assert!(evidence.os_evidence.contains("supervisor SIGKILL"));
-    assert_eq!(evidence.signal, Some(libc::SIGKILL));
-    assert_eq!(evidence.supervisor_signal, Some(libc::SIGKILL));
+    assert!(evidence
+        .os_evidence
+        .contains(&format!("daemon pid {daemon_pid} stopped with SIGKILL")));
     assert!(!pid_is_running(daemon_pid));
-    assert!(!pid_is_running(supervisor_pid));
 }
 
 #[cfg(target_os = "linux")]

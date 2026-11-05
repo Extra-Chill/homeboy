@@ -322,7 +322,7 @@ fn async_shared_cargo_apply_does_not_reuse_a_historical_terminal_job() {
 
 #[test]
 #[cfg(unix)]
-fn hermetic_daemon_guard_reaps_supervisor_and_server_after_panic() {
+fn hermetic_daemon_guard_reaps_the_daemon_after_panic() {
     let record = std::sync::Mutex::new(None);
     let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let fixture = HermeticTestContext::new();
@@ -345,6 +345,11 @@ fn hermetic_daemon_guard_reaps_supervisor_and_server_after_panic() {
             .as_str()
             .expect("daemon startup token");
         let pids = daemon_pids_for_token(token);
+        assert_eq!(
+            pids,
+            vec![state["pid"].as_u64().expect("lease pid") as u32],
+            "the daemon is the one process holding its token"
+        );
         *record.lock().expect("daemon process record") = Some((token.to_string(), pids));
         panic!("exercise daemon teardown during assertion unwinding");
     }));
@@ -354,16 +359,12 @@ fn hermetic_daemon_guard_reaps_supervisor_and_server_after_panic() {
         .into_inner()
         .expect("daemon process record")
         .expect("daemon processes were recorded");
-    assert!(
-        pids.len() >= 2,
-        "record both supervisor and server: {pids:?}"
-    );
 
     // Ownership here is proven by the exact `--startup-token` argv value the
     // daemon publishes for itself (`daemon_pid_owns_token`), not by reading a
-    // foreign process's environment. The supervisor and server are orphaned by
-    // the double-fork that detaches them, so they are neither this test's nor
-    // its `HomeboyFixture` child's direct descendants; reading their
+    // foreign process's environment. The daemon is orphaned once its launcher
+    // exits, so it is neither this test's nor its `HomeboyFixture` child's
+    // direct descendant; reading its
     // `/proc/<pid>/environ` depends on host ptrace policy this test never
     // establishes and cannot assume (#14751). The command-line evidence is
     // published by the same process and requires no such permission.
@@ -507,9 +508,8 @@ fn daemon_pids_for_token(token: &str) -> Vec<u32> {
 ///
 /// This is deliberately evidence the daemon process itself owns and exposes
 /// through its own command line, not a read of a foreign process's live
-/// environment table. The daemon supervisor and server are detached from this
-/// test's process tree (double-forked so cleanup survives the fixture's own
-/// exit), so a `/proc/<pid>/environ` read depends on host ptrace policy this
+/// environment table. The daemon is detached from this test's process tree
+/// (orphaned when its launcher exits), so a `/proc/<pid>/environ` read depends on host ptrace policy this
 /// test does not establish; `ps` command-line evidence carries no such
 /// dependency (#14751).
 #[cfg(unix)]

@@ -688,8 +688,8 @@ impl Default for HermeticTestContext {
 /// Stops daemons created by an isolated test context during unwinding as well
 /// as on the passing path.
 ///
-/// Fixture subprocesses may launch a detached daemon supervisor. The test
-/// process cannot reap that supervisor itself, so teardown goes through the
+/// Fixture subprocesses may launch a detached daemon. The test process cannot
+/// reap that daemon itself, so teardown goes through the
 /// daemon's ownership-checked stop protocol rather than signaling by name.
 pub struct HermeticDaemonGuard<'a> {
     context: &'a HermeticTestContext,
@@ -711,7 +711,7 @@ impl Drop for HermeticDaemonGuard<'_> {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             // `output()` waits for EOF on captured pipes. A daemon descendant
-            // can inherit those descriptors while its supervisor is stopping,
+            // can inherit those descriptors while the daemon is stopping,
             // so wait only for this stop command's exit status.
             .status();
         if let Err(error) = output {

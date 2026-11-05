@@ -2312,7 +2312,7 @@ mod ownership_token_tests {
 
     #[test]
     fn non_linux_ownership_checks_require_the_exact_startup_token_argument() {
-        let command = "homeboy daemon supervise --startup-token lease-token --addr 127.0.0.1:0";
+        let command = "homeboy daemon serve --startup-token lease-token --addr 127.0.0.1:0";
 
         assert!(command_has_option_value(
             command,
@@ -2325,7 +2325,7 @@ mod ownership_token_tests {
             "lease"
         ));
         assert!(!command_has_option_value(
-            "homeboy daemon supervise --startup-token=lease-token",
+            "homeboy daemon serve --startup-token=lease-token",
             "--startup-token",
             "lease-token"
         ));

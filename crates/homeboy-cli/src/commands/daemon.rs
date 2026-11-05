@@ -148,20 +148,10 @@ enum DaemonCommand {
         /// Local bind address. Defaults to an OS-selected loopback port.
         #[arg(long, default_value = daemon::DEFAULT_ADDR)]
         addr: String,
-        /// Exact startup admission identity, forwarded by the supervisor.
+        /// Exact startup admission identity, passed by the launching CLI.
         #[arg(long, hide = true)]
         startup_token: Option<String>,
-        /// Durable store identity forwarded by the supervisor for process discovery.
-        #[arg(long, hide = true)]
-        state_dir: Option<PathBuf>,
-    },
-    /// Supervise one daemon child and persist its termination evidence.
-    #[command(hide = true)]
-    Supervise {
-        #[arg(long, default_value = daemon::DEFAULT_ADDR)]
-        addr: String,
-        #[arg(long)]
-        startup_token: String,
+        /// Durable store identity, passed by the launching CLI for process discovery.
         #[arg(long, hide = true)]
         state_dir: Option<PathBuf>,
     },
@@ -562,29 +552,13 @@ pub fn run(args: DaemonArgs) -> CmdResult<DaemonOutput> {
             startup_token,
             state_dir,
         } => {
-            // Supervision supplies the token through the environment; the
+            // The launcher supplies the token through the environment; the
             // hidden arguments retain portable process ownership evidence.
             let _ = startup_token;
             if let Some(state_dir) = state_dir {
                 std::env::set_var(homeboy::core::paths::DAEMON_STATE_DIR_ENV, state_dir);
             }
             serve(&addr)
-        }
-        DaemonCommand::Supervise {
-            addr,
-            startup_token,
-            state_dir,
-        } => {
-            daemon::supervise(&addr, &startup_token, state_dir.as_deref())?;
-            Ok((
-                DaemonOutput::Serve(DaemonStartResult {
-                    pid: std::process::id(),
-                    address: addr,
-                    state_path: String::new(),
-                    lease_id: String::new(),
-                }),
-                0,
-            ))
         }
         DaemonCommand::Stop { lease_id, force } => {
             let lease_bound = lease_id.is_some();
@@ -1388,8 +1362,8 @@ fn serve(addr: &str) -> CmdResult<DaemonOutput> {
     ))
 }
 
-/// Every `daemon serve`, supervised or run by a service manager, drains on
-/// SIGINT (Ctrl-C) and SIGTERM (a supervisor or service-manager stop): it
+/// Every `daemon serve`, CLI-launched or run by a service manager, drains on
+/// SIGINT (Ctrl-C) and SIGTERM (`daemon stop` or a service-manager stop): it
 /// finishes owned responses and releases its lease (#15436, #17387).
 fn install_drain_handlers() -> homeboy::core::Result<std::sync::Arc<std::sync::atomic::AtomicBool>>
 {

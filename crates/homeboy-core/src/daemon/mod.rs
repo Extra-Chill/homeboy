@@ -29,12 +29,10 @@ use homeboy_runner_contract::{
 const VERSION: &str = homeboy_product_identity::product_version();
 
 mod artifact_download;
-mod completion_tracker;
-mod control;
-#[doc(hidden)]
-pub use control::bounded_redacted_reader;
 #[cfg(test)]
 mod completion_notify_tests;
+mod completion_tracker;
+mod control;
 #[cfg(test)]
 mod controller_completion_tests;
 pub mod controller_job_driver;
@@ -62,8 +60,7 @@ pub use control::{
     adopt_orphaned_lease, artifact_content_url, ensure_running,
     ensure_running_with_replacement_operation, fetch_artifact_to_path,
     reconcile_dead_lease_orphans, reconcile_leaseless_orphans, reconcile_unleased_candidates,
-    recover_missing_lease_state, restart_service_managed, start_background, supervise,
-    ArtifactFetchOutcome,
+    recover_missing_lease_state, restart_service_managed, start_background, ArtifactFetchOutcome,
 };
 use daemon_lease::{daemon_state_identity, freshness_report_from_validation, validate_lease_file};
 /// The daemon's own executable. A direct daemon child shares the daemon's
@@ -1025,7 +1022,10 @@ pub enum DaemonTerminationClassification {
     UnexpectedExit,
 }
 
-/// Durable, bounded evidence from the process that launched the daemon.
+/// Durable, bounded evidence about how a daemon stopped. `serve` records its
+/// own clean stop; an unexpected exit is a dead PID behind a stale lease. The
+/// daemon is one process, so nothing outside it observes an exit status or
+/// output; its stdout and stderr go to `<state-dir>/daemon.log`.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct DaemonTerminationEvidence {
     pub classification: DaemonTerminationClassification,
@@ -1039,19 +1039,6 @@ pub struct DaemonTerminationEvidence {
     pub active_jobs: usize,
     pub resource_evidence: String,
     pub os_evidence: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub exit_code: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub signal: Option<i32>,
-    /// Signal used to terminate the supervising process, if escalation needs
-    /// one. This is additive: older evidence deserializes without it and `None`
-    /// remains omitted from serialized evidence.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub supervisor_signal: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub stdout: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub stderr: Option<String>,
     #[serde(default)]
     pub stop_requested: bool,
 }
@@ -1075,7 +1062,7 @@ pub struct DaemonProcessCandidate {
     pub state_dir: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub build_identity: Option<String>,
-    /// Exact startup identity carried by the supervised daemon argv, when its
+    /// Exact startup identity carried by the daemon argv, when its
     /// process command line preserves an unambiguous value.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub startup_token: Option<String>,
@@ -1691,7 +1678,7 @@ pub(crate) fn write_termination_evidence(evidence: &DaemonTerminationEvidence) -
 }
 
 /// Serve the persistent daemon until `shutdown` is set. Every `daemon serve`
-/// drains through this flag on SIGINT/SIGTERM, supervised or not, and records
+/// drains through this flag on SIGINT/SIGTERM, CLI-launched or not, and records
 /// the service manager that started it, if any (#17387).
 pub fn serve_with_analysis_runner_and_shutdown<R>(
     addr: SocketAddr,
@@ -1830,7 +1817,7 @@ where
     } else {
         None
     };
-    // A supervised serve enforces its own lifetime; it needs the shutdown flag
+    // A CLI-launched serve enforces its own lifetime; it needs the shutdown flag
     // to end itself through the same drain SIGTERM uses.
     let owned_lifetime = match shutdown.as_ref() {
         Some(_) => lifetime::owned_idle_lifetime(service_manager)?,
@@ -2054,11 +2041,6 @@ where
                 "unavailable: foreground shutdown does not collect OS resource snapshots"
                     .to_string(),
             os_evidence: "graceful shutdown requested by SIGINT or SIGTERM".to_string(),
-            exit_code: Some(0),
-            signal: None,
-            supervisor_signal: None,
-            stdout: None,
-            stderr: None,
             stop_requested: true,
         })?;
         if clean {
@@ -7862,7 +7844,7 @@ fn daemon_operation_lock_wait() -> Duration {
 fn open_daemon_operation_lock_file(path: &Path) -> Result<File> {
     let mut options = OpenOptions::new();
     options.read(true).write(true).create(true).truncate(false);
-    // The daemon supervisor is detached from this launcher. It must not inherit
+    // The daemon is detached from this launcher. It must not inherit
     // the lifecycle lock and strand later recovery after the launcher exits.
     #[cfg(unix)]
     {

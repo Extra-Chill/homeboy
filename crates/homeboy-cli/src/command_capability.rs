@@ -265,29 +265,17 @@ mod tests {
 
     #[test]
     fn other_mutations_do_not_own_runner_recovery() {
-        for command in [
-            args(&[
-                "homeboy",
-                "daemon",
-                "supervise",
-                "--addr",
-                "127.0.0.1:0",
-                "--startup-token",
-                "token",
-            ]),
-            args(&[
-                "homeboy",
-                "daemon",
-                "serve",
-                "--addr",
-                "127.0.0.1:0",
-                "--startup-token",
-                "token",
-            ]),
-        ] {
-            assert_eq!(classify(&command), CommandCapability::Mutation);
-            assert!(!requires_startup_reconciliation(&command));
-        }
+        let command = args(&[
+            "homeboy",
+            "daemon",
+            "serve",
+            "--addr",
+            "127.0.0.1:0",
+            "--startup-token",
+            "token",
+        ]);
+        assert_eq!(classify(&command), CommandCapability::Mutation);
+        assert!(!requires_startup_reconciliation(&command));
 
         for command in [
             args(&["homeboy", "daemon", "start"]),
