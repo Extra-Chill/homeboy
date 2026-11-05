@@ -6,6 +6,17 @@ Homeboy owns durable orchestration and provider-neutral outcomes. Runtime
 providers own backend-specific execution. For the provider fanout ownership seam,
 see [`docs/architecture/provider-fanout-boundary.md`](../architecture/provider-fanout-boundary.md).
 
+## Incomplete Cook drafts
+
+`agent-task cook --publish-incomplete-draft` opts into preserving a non-empty
+candidate when the attempt budget is exhausted and every attempt failed a
+deterministic gate. Cook pushes the candidate branch and requests a **draft** PR
+linked to the task URL (source refs). Its body names the failed gates, includes
+the last 40 lines of their output, and records the review form's
+`incomplete_reason`. Cook still reports failure; no failed gate is accepted.
+The default is off, including for historical recipes. `--no-finalize` suppresses
+publication.
+
 ## Boundaries
 
 `agent-task` is split into four operator-facing seams:

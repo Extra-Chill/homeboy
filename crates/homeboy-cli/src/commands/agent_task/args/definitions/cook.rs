@@ -54,6 +54,10 @@ pub struct CookOptionValues {
     /// --acknowledge-model-override to confirm pinning it (default 3).
     #[arg(long = "max-attempts", default_value_t = 3, value_parser = clap::value_parser!(u32).range(1..), value_name = "N")]
     pub max_attempts: u32,
+
+    /// Publish a non-empty candidate as a draft PR when every attempt fails a deterministic gate.
+    #[arg(long)]
+    pub publish_incomplete_draft: bool,
     #[command(flatten)]
     pub gates: VerifyGateArgs,
 }

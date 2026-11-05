@@ -1400,6 +1400,9 @@ pub(crate) fn cook_replay_argv(args: &AgentTaskCookArgs) -> Vec<String> {
     if args.draft_pr {
         argv.push("--draft-pr".to_string());
     }
+    if args.publish_incomplete_draft {
+        argv.push("--publish-incomplete-draft".to_string());
+    }
     argv
 }
 
@@ -7811,6 +7814,7 @@ fn run_preflight_cook_execution(
                 max_attempts: args.dispatch.cook.values.max_attempts,
             },
             finalization: homeboy::agents::agent_task_service::CookFinalization {
+                publish_incomplete_draft: args.dispatch.cook.values.publish_incomplete_draft,
                 no_finalize: args.no_finalize,
                 draft_pr: args.draft_pr,
                 base: args.base.expect("Cook base is resolved before execution"),

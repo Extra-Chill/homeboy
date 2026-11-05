@@ -1057,6 +1057,7 @@ fn initial_recipe(options: &CookRequest) -> Result<AgentTaskCookRecipe> {
         finalization: serde_json::json!({
             "no_finalize": options.finalization.no_finalize,
             "draft_pr": options.finalization.draft_pr,
+            "publish_incomplete_draft": options.finalization.publish_incomplete_draft,
             "base": options.finalization.base,
             "head": options.finalization.head,
             "title": options.finalization.title,
@@ -1389,7 +1390,16 @@ fn recipe_mismatch_fields(
     if !retry_budgets_match(&left.retry_budget, &right.retry_budget) {
         fields.push("retry_budget");
     }
-    if left.finalization != right.finalization {
+    let normalize_finalization = |value: &Value| {
+        let mut value = value.clone();
+        if let Some(object) = value.as_object_mut() {
+            object
+                .entry("publish_incomplete_draft")
+                .or_insert(Value::Bool(false));
+        }
+        value
+    };
+    if normalize_finalization(&left.finalization) != normalize_finalization(&right.finalization) {
         for field in ["to_worktree", "source_worktree_path", "task_base_sha"] {
             if left.finalization.get(field) != right.finalization.get(field) {
                 fields.push(match field {
@@ -3069,6 +3079,11 @@ fn reconstruct_recipe_options(
                 })? as u32,
         },
         finalization: CookFinalization {
+            publish_incomplete_draft: recipe
+                .finalization
+                .get("publish_incomplete_draft")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
             no_finalize: serde_json::from_value(field("no_finalize")?)
                 .map_err(recipe_value_error("no_finalize"))?,
             // Recipes persisted before draft publication existed retain ready-PR behavior.

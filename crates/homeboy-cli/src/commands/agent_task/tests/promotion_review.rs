@@ -114,6 +114,7 @@ fn promotion_recipe_reference_hydrates_exact_private_gate_contract() {
             gates: gates.clone(),
             retry_policy: homeboy::agents::agent_task_service::CookRetryPolicy { max_attempts: 1 },
             finalization: homeboy::agents::agent_task_service::CookFinalization {
+                publish_incomplete_draft: false,
                 no_finalize: true,
                 draft_pr: false,
                 base: "main".to_string(),
@@ -863,6 +864,7 @@ fn run_direct_cook_promotion_resolves_recovered_patch_from_run_id_and_aggregate_
             gates: Default::default(),
             retry_policy: homeboy::agents::agent_task_service::CookRetryPolicy { max_attempts: 2 },
             finalization: homeboy::agents::agent_task_service::CookFinalization {
+                publish_incomplete_draft: false,
                 no_finalize: true,
                 draft_pr: false,
                 base: "main".to_string(),

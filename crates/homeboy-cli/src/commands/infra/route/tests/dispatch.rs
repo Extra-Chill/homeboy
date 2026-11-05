@@ -1897,6 +1897,7 @@ fn lab_run_retry_leaves_a_cook_child_for_controller_lifecycle() {
             gates: Default::default(),
             retry_policy: crate::agents::agent_task_service::CookRetryPolicy { max_attempts: 2 },
             finalization: crate::agents::agent_task_service::CookFinalization {
+                publish_incomplete_draft: false,
                 no_finalize: true,
                 draft_pr: false,
                 base: "main".to_string(),
@@ -1990,6 +1991,7 @@ fn recovered_terminal_work_waits_for_an_existing_claim_instead_of_reporting_comp
             gates: Default::default(),
             retry_policy: crate::agents::agent_task_service::CookRetryPolicy { max_attempts: 1 },
             finalization: crate::agents::agent_task_service::CookFinalization {
+                publish_incomplete_draft: false,
                 no_finalize: true,
                 draft_pr: false,
                 base: "main".to_string(),
