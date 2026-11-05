@@ -175,6 +175,23 @@ pub(super) enum RunsCommand {
 
 #[derive(Args, Clone, Default)]
 pub struct RunsListArgs {
+    /// Active Cook triage, including liveness buckets.
+    #[arg(long, requires = "kind", conflicts_with_all = ["repo", "task_url", "run_placement", "parent_id", "workspace", "since", "status", "runner", "component_id", "rig", "scenario_id", "running", "until", "id", "command_contains", "correlation", "include_mirrors", "include_active_runner_jobs"])]
+    pub active: bool,
+    #[arg(long, requires = "kind")]
+    pub repo: Option<String>,
+    #[arg(long, requires = "kind")]
+    pub task_url: Option<String>,
+    #[arg(long, requires = "kind", value_parser = ["local", "remote", "runner"])]
+    pub run_placement: Option<String>,
+    #[arg(long, requires = "kind")]
+    pub parent_id: Option<String>,
+    #[arg(long, requires = "kind")]
+    pub branch: Option<String>,
+    #[arg(long, requires = "kind", conflicts_with = "full")]
+    pub cursor: Option<String>,
+    #[arg(long, requires = "kind", conflicts_with = "limit")]
+    pub full: bool,
     /// Query runs from a connected execution runner daemon
     #[arg(long)]
     pub runner: Option<String>,

@@ -29,10 +29,6 @@ const ENTITY_LIST_COMMANDS: &[&str] = &[
 /// `list` subcommands deliberately left on their own payload shape.
 const EXEMPT_LIST_COMMANDS: &[(&str, &str)] = &[
     (
-        "agent-task list",
-        "schema-versioned discovery report; `runs` shared with active and list --latest",
-    ),
-    (
         "agent-task prompts list",
         "schema-versioned prompt-store report with prompt_dir",
     ),
@@ -83,7 +79,7 @@ const EXEMPT_LIST_COMMANDS: &[(&str, &str)] = &[
     ),
     (
         "runs list",
-        "report-shaped: counts, search provenance, and degradations alongside runs",
+        "report-shaped observation runs, or schema-versioned lifecycle discovery with --kind agent-task",
     ),
     (
         "ssh list",

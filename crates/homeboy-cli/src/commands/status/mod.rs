@@ -433,7 +433,7 @@ fn status_probe_replay_commands(
         return vec![
             "homeboy daemon status".to_string(),
             "homeboy runner status --full".to_string(),
-            "homeboy agent-task list".to_string(),
+            "homeboy runs list --kind agent-task".to_string(),
             "homeboy runs list --limit 100".to_string(),
             "homeboy component list".to_string(),
         ];
@@ -702,7 +702,7 @@ fn global_status(
             drill_down: vec![
                 "homeboy daemon status",
                 "homeboy runner status --full",
-                "homeboy agent-task list",
+                "homeboy runs list --kind agent-task",
                 "homeboy runs list --limit 100",
                 "homeboy component list",
             ],
@@ -1754,7 +1754,7 @@ mod tests {
             [
                 "homeboy daemon status",
                 "homeboy runner status --full",
-                "homeboy agent-task list",
+                "homeboy runs list --kind agent-task",
                 "homeboy runs list --limit 100",
                 "homeboy component list",
             ]

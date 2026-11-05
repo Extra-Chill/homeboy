@@ -75,8 +75,7 @@ pub const DEFAULT_LAB_UNSUPPORTED_NOTES: &str =
     "not declared as Lab-routable in the command registry";
 pub(crate) const AGENT_TASK_RUN_LAB_LABEL: &str = "agent-task cook/run-plan/retry --run";
 pub(crate) const AGENT_TASK_PROMOTE_LAB_LABEL: &str = "agent-task promote";
-pub(crate) const AGENT_TASK_STATUS_LAB_LABEL: &str =
-    "runs logs; agent-task run/status/artifacts/review/list/active";
+pub(crate) const AGENT_TASK_STATUS_LAB_LABEL: &str = "runs logs/list; agent-task run/status/review";
 pub(crate) const AGENT_TASK_PROVIDERS_LAB_LABEL: &str = "agent-task providers";
 pub(crate) const AGENT_TASK_FANOUT_COOK_BATCH_LAB_LABEL: &str = "agent-task fanout cook-batch";
 pub(crate) const AGENT_TASK_AUTH_STATUS_LAB_LABEL: &str = "agent-task auth status";
@@ -247,8 +246,8 @@ const AGENT_TASK_LAB_SUPPORT: &[CommandLabSupportSummary] = &[
     },
     CommandLabSupportSummary {
         contract_labels: &[AGENT_TASK_STATUS_LAB_LABEL, AGENT_TASK_PROVIDERS_LAB_LABEL],
-        message_label: "runs logs; agent-task run/status/artifacts/review/list/active/providers",
-        hint_label: "runs logs; agent-task run/status/artifacts/review/list/active/providers",
+        message_label: "runs logs/list; agent-task run/status/review/providers",
+        hint_label: "runs logs/list; agent-task run/status/review/providers",
     },
     CommandLabSupportSummary {
         contract_labels: &[AGENT_TASK_FANOUT_COOK_BATCH_LAB_LABEL],

@@ -69,7 +69,8 @@ fn agent_task_status_leaves_record_revision_events_and_work_intents_unchanged() 
         // The Cook fixtures were not inert: the explicit owner admits their
         // continuation, which status above did not.
         let (_, exit) = reconcile_run(ReconcileArgs {
-            run_id: "purity-cook-recoverable-attempt".to_string(),
+            all: false,
+            run_id: Some("purity-cook-recoverable-attempt".to_string()),
             dry_run: false,
             apply: true,
             idempotency_key: Some("status-purity".to_string()),

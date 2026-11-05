@@ -10,7 +10,7 @@ use homeboy_core::observation::RunCursor;
 use homeboy_engine_primitives::content_hash;
 use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
-// `agent-task active` treats a `Running` record that has gone this long without
+// `runs list --kind agent-task --active` treats a `Running` record that has gone this long without
 // an `updated_at` heartbeat as suspect even when its owner process/runner-job
 // liveness cannot be disproven (#5682).
 use homeboy_core::observation::RUNNING_HEARTBEAT_STALE_MINUTES;
@@ -813,7 +813,7 @@ fn liveness_summary_for_records(
     live: &BTreeSet<Uuid>,
 ) -> AgentTaskLivenessSummary {
     let mut summary = AgentTaskLivenessSummary {
-        reconcile_command: "homeboy agent-task active --reconcile --dry-run",
+        reconcile_command: "homeboy agent-task reconcile --all",
         ..Default::default()
     };
     for record in records {
@@ -854,7 +854,7 @@ pub(crate) fn liveness_for_record_in_roots(
 }
 
 /// Read-only controller-upgrade admission derived from the same liveness model
-/// as `agent-task active`. A stale local record is retained for audit and later
+/// as `runs list --kind agent-task --active`. A stale local record is retained for audit and later
 /// explicit reconciliation, not treated as a live controller owner. A stale
 /// runner-backed record remains fail-closed because its remote owner is not
 /// disproven by a local read.

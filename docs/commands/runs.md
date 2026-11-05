@@ -5,9 +5,9 @@ Inspect and maintain persisted observation-store runs and artifacts.
 ## Synopsis
 
 ```bash
-homeboy runs list [--runner <runner-id>] [--kind bench|rig|trace] [--component <id>] [--rig <id>] [--scenario <id>] [--status <status>] [--limit 20] [--include-active-runner-jobs]
+homeboy runs list [--runner <runner-id>] [--kind bench|rig|trace|agent-task] [--component <id>] [--rig <id>] [--scenario <id>] [--status <status>] [--limit 20] [--include-active-runner-jobs]
 homeboy runs distribution --field <metadata.path> [--kind bench] [--component <id>] [--rig <id>] [--scenario <id>] [--status <status>] [--limit 20]
-homeboy runs latest-run [--kind bench|rig|trace] [--component <id>] [--rig <id>] [--status <status>]
+homeboy runs latest-run [--kind bench|rig|trace|agent-task] [--component <id>] [--rig <id>] [--status <status>]
 homeboy runs compare [--kind bench] [--component <id>] [--rig <id>] [--scenario <id>] [--metric <name>] [--limit 20] [--format table|json]
 homeboy runs compare --kind bench --from-run <run-id> --to-run <run-id> [--metric <name>]
 homeboy runs compare --kind fuzz --from-run <run-id> --to-run <run-id> [--hotspot-policy <advisory|blocking|off>]
@@ -51,7 +51,7 @@ homeboy runs report failure-digest --output-dir <dir> --results <json>
 
 `homeboy runs list` reads only the local observation store by default. Pass `--include-active-runner-jobs` to also append active jobs from connected runner daemons, which may inspect runner sessions. `homeboy runs list --runner <runner-id>` queries a connected runner daemon instead of the local observation store, preserving the normal `runs.list` JSON payload while returning evidence from the runner machine. For benchmark records, `--scenario <id>` filters to runs whose stored metadata includes that scenario.
 
-Use `homeboy runs list --running` for in-flight observation runs, `homeboy agent-task list` for durable cooks and attempts, and `homeboy runner status` for runner-resident work.
+Use `homeboy runs list --running` for in-flight observation runs, `homeboy runs list --kind agent-task` for durable cooks and attempts, and `homeboy runner status` for runner-resident work.
 
 The JSON output includes stable run fields: run id, kind, status, timestamps, component id, rig id, git SHA, command, cwd, metadata, and artifact records where relevant.
 
@@ -305,3 +305,13 @@ homeboy runs import --from-gh-actions \
   --run-id 26731420339 \
   --artifact-glob 'php-transformer-iterator-transcript-*'
 ```
+
+### Durable Cook discovery
+
+`homeboy runs list --kind agent-task` returns the lifecycle discovery payload unchanged (not observation run records). `--active` adds liveness triage buckets, record health, and per-record reconciliation guidance.
+
+Both modes default to 20 newest rows; `--limit 1` selects the newest match. Bounded pages inspect at most 100 physical rows and return at most 100 matches. `requested_limit` preserves a supplied limit above 100; `limit` reports the effective ceiling. Continue incomplete searches using `--cursor <next_cursor>` and the same filters. `--full` opts out of bounded pagination and conflicts with `--limit` and `--cursor`.
+
+Cook list filters: `--repo`, `--task-url`, `--run-placement`, `--parent-id`, `--branch`, `--workspace`, `--status` (queued/running/succeeded/failed/cancelled), and `--since` (RFC3339 or relative age). Active mode accepts only `--limit`, `--cursor`, `--branch`, and `--full`. Cook-only flags are rejected without `--kind agent-task`. Observation-only filters are rejected for Cook discovery.
+
+Fleet repair is `homeboy agent-task reconcile --all`: preview by default, mutation only with `--apply`. Use `agent-task reconcile <run-id>` for one run/group.

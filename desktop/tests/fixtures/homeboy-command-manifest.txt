@@ -4,7 +4,6 @@ activity show
 activity watch
 agent-task
 agent-task accept
-agent-task active
 agent-task active-scope
 agent-task adopt
 agent-task auth
@@ -30,7 +29,6 @@ agent-task finalize-pr
 agent-task gate-execute
 agent-task gate-feedback
 agent-task latest
-agent-task list
 agent-task placement-update
 agent-task promote
 agent-task promotion-provider

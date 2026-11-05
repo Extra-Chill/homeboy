@@ -195,6 +195,15 @@ impl RunsArgs {
 }
 
 pub fn run(args: RunsArgs) -> CmdResult<RunsOutput> {
+    if let RunsCommand::List(list) = &args.command {
+        super::cook::validate_discovery(list)?;
+    }
+    if args.cook_discovery() {
+        let RunsCommand::List(list) = args.command else {
+            unreachable!()
+        };
+        return super::cook::discover(list).map(|(value, code)| (RunsOutput::Cook(value), code));
+    }
     // Durable events must not depend on opening the observation store.
     if let RunsCommand::Logs(args) = args.command {
         return super::logs(args).map(|(events, code)| (RunsOutput::Cook(events), code));

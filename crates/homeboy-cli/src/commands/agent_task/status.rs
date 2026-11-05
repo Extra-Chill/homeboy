@@ -32,8 +32,8 @@ use homeboy_lab_contract::lab::transport_failure::LabTransportAttemptReceipt;
 
 use super::super::CmdResult;
 use super::args::{
-    ActiveArgs, CancelArgs, DiagnoseArgs, ListArgs, QuarantineArgs, RearmArgs, ReconcileArgs,
-    ReplayProviderBoundaryArgs, StatusArgs,
+    CancelArgs, DiagnoseArgs, QuarantineArgs, RearmArgs, ReconcileArgs, ReplayProviderBoundaryArgs,
+    StatusArgs,
 };
 use super::candidate::classify_candidates;
 use crate::commands::utils::response::{
@@ -1645,7 +1645,7 @@ fn project_heavy_collection(
     }
 }
 
-pub(super) fn list_runs(
+pub(crate) fn list_runs(
     filter: agent_task_service::AgentTaskDiscoveryFilter,
     options: agent_task_service_direct::AgentTaskDiscoveryOptions,
 ) -> CmdResult<Value> {
@@ -1655,23 +1655,23 @@ pub(super) fn list_runs(
     Ok((value, 0))
 }
 
-pub(super) fn list_runs_page(
+pub(crate) fn list_runs_page(
     filter: agent_task_service::AgentTaskDiscoveryFilter,
-    args: ListArgs,
+    args: crate::commands::runs::RunsListArgs,
 ) -> CmdResult<Value> {
     let command = list_continuation_prefix(&args);
     let branch_scoped = args.branch.is_some();
-    let limit = args.limit.unwrap_or(20);
+    let limit = args.limit as usize;
     let report = agent_task_service_direct::discover_runs_page(
         filter,
         agent_task_service_direct::AgentTaskDiscoveryPageOptions {
             limit,
             cursor: args.cursor,
             repo: args.repo,
-            workspace: args.worktree,
+            workspace: args.workspace,
             task_url: args.task_url,
-            submitted_after: args.submitted_after,
-            state: args.state,
+            submitted_after: args.since,
+            state: args.status,
             placement: args.run_placement,
             parent_id: args.parent_id,
             branch: args.branch,
@@ -1682,16 +1682,7 @@ pub(super) fn list_runs_page(
     Ok((value, 0))
 }
 
-pub(super) fn list_filtered_latest_runs(
-    options: agent_task_service_direct::AgentTaskDiscoveryOptions,
-) -> CmdResult<Value> {
-    let report = agent_task_service_direct::discover_filtered_latest_run(options)?;
-    let mut value = serde_json::to_value(report).unwrap_or(Value::Null);
-    attach_agent_task_discovery_actionable(&mut value, None, false);
-    Ok((value, 0))
-}
-
-/// `agent-task active`: list queued + running runs, but SEPARATE them into
+/// `runs list --kind agent-task --active`: list queued + running runs, but SEPARATE them into
 /// active / stale / suspect / unreconciled buckets so a stale or orphaned
 /// `running` record (especially a Lab/offloaded run whose runner process died)
 /// is never silently treated as genuinely-active (#5682).
@@ -1699,7 +1690,7 @@ pub(super) fn list_filtered_latest_runs(
 /// The base discovery report (with per-run liveness, source, last-update age,
 /// and a per-run safe reconcile command) is preserved under `report`, and a
 /// `buckets` view groups run ids by classification for an at-a-glance triage.
-pub(super) fn list_active(
+pub(crate) fn list_active(
     options: agent_task_service_direct::AgentTaskDiscoveryOptions,
 ) -> CmdResult<Value> {
     let branch_scoped = options.branch.is_some();
@@ -1719,16 +1710,16 @@ pub(super) fn list_active(
     }
     attach_agent_task_discovery_actionable(
         &mut value,
-        Some("homeboy agent-task active"),
+        Some("homeboy runs list --kind agent-task --active"),
         branch_scoped,
     );
     Ok((value, 0))
 }
 
-pub(super) fn list_active_page(args: ActiveArgs) -> CmdResult<Value> {
+pub(crate) fn list_active_page(args: crate::commands::runs::RunsListArgs) -> CmdResult<Value> {
     let command = active_continuation_prefix(&args);
     let branch_scoped = args.branch.is_some();
-    let limit = args.limit.unwrap_or(20);
+    let limit = args.limit as usize;
     let report = agent_task_service_direct::discover_runs_page(
         agent_task_service::AgentTaskDiscoveryFilter::Active,
         agent_task_service_direct::AgentTaskDiscoveryPageOptions {
@@ -1750,16 +1741,16 @@ pub(super) fn list_active_page(args: ActiveArgs) -> CmdResult<Value> {
     Ok((value, 0))
 }
 
-fn list_continuation_prefix(args: &ListArgs) -> String {
-    let mut command = "homeboy agent-task list".to_string();
+fn list_continuation_prefix(args: &crate::commands::runs::RunsListArgs) -> String {
+    let mut command = "homeboy runs list --kind agent-task".to_string();
     append_discovery_scope(
         &mut command,
         [
             ("repo", args.repo.as_deref()),
-            ("worktree", args.worktree.as_deref()),
+            ("workspace", args.workspace.as_deref()),
             ("task-url", args.task_url.as_deref()),
-            ("submitted-after", args.submitted_after.as_deref()),
-            ("state", args.state.as_deref()),
+            ("since", args.since.as_deref()),
+            ("status", args.status.as_deref()),
             ("run-placement", args.run_placement.as_deref()),
             ("parent-id", args.parent_id.as_deref()),
             ("branch", args.branch.as_deref()),
@@ -1768,8 +1759,8 @@ fn list_continuation_prefix(args: &ListArgs) -> String {
     command
 }
 
-fn active_continuation_prefix(args: &ActiveArgs) -> String {
-    let mut command = "homeboy agent-task active".to_string();
+fn active_continuation_prefix(args: &crate::commands::runs::RunsListArgs) -> String {
+    let mut command = "homeboy runs list --kind agent-task --active".to_string();
     append_discovery_scope(&mut command, [("branch", args.branch.as_deref())]);
     command
 }
@@ -1782,7 +1773,7 @@ fn append_discovery_scope<const N: usize>(command: &mut String, fields: [(&str, 
     }
 }
 
-/// `agent-task active --reconcile`: preview stale/suspect/unreconciled records
+/// `agent-task reconcile --all`: preview stale/suspect/unreconciled records
 /// across the fleet. `--apply` is required to mutate the previewed set (#10001).
 pub(super) fn reconcile_active(dry_run: bool) -> CmdResult<Value> {
     let report = agent_task_service_direct::reconcile_stale_active_runs(dry_run)?;
@@ -1794,7 +1785,10 @@ pub(super) fn reconcile_active(dry_run: bool) -> CmdResult<Value> {
 /// parent/attempt group named by a logical Cook ID. It previews by default;
 /// `--apply` is the explicit operator authorization.
 pub(super) fn reconcile_run(args: ReconcileArgs) -> CmdResult<Value> {
-    let run_id = args.run_id;
+    if args.all {
+        return reconcile_active(!args.apply);
+    }
+    let run_id = args.run_id.expect("clap requires run_id or --all");
     if args.apply {
         let lifecycle_store =
             agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
@@ -2063,7 +2057,7 @@ fn attach_agent_task_discovery_actionable(
         metadata.next_actions.push(
             CommandNextAction::new(
                 "preview stale record reconciliation",
-                "homeboy agent-task active --reconcile --dry-run",
+                "homeboy agent-task reconcile --all",
             )
             .with_kind(CommandNextActionKind::Repair),
         );

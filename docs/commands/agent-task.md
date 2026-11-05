@@ -35,9 +35,7 @@ publication.
 | `run-plan` | Run an `AgentTaskPlan` through the built-in Pi executor. |
 | `run <run-id>` | Execute one exact durable run id, bypassing older queued work. |
 | `status <run-id> [--exact] [--watch]` | Read durable run status; `--exact` bypasses Cook alias resolution to inspect that concrete lifecycle record. `--watch` emits changed snapshots and exits when terminal or timed out. |
-| `list [--latest] [--limit <n>] [--cursor <cursor>] [--branch <branch>]` | List durable runs, newest first; `--latest` returns the newest record matching the supplied filters. |
-| `active [--limit <n>] [--cursor <cursor>] [--branch <branch>] [--reconcile [--dry-run\|--apply]]` | List queued and running durable runs, newest first, or preview/reconcile the explicit fleet mutation set. |
-| `reconcile <run-id> [--dry-run\|--apply]` | Preview or reconcile one durable run after refreshing its authoritative provider state. |
+| `reconcile <run-id>\|--all [--dry-run\|--apply]` | Preview one durable run/group or the active fleet; mutate only with `--apply`. |
 | `artifacts <run-id>` | List artifacts and evidence refs recorded for a completed run. |
 | `replay-provider-boundary <run-id> [--task <task-id>]` | Hydrate the latest raw executor input and print provider-boundary fields without relaunching a provider. |
 | `cancel <run-id>` | Mark a queued or stale-running durable run as cancelled. |
@@ -47,9 +45,13 @@ publication.
 | `retry <run-id>` | Submit a fresh durable run from an existing run's plan. A stopped Cook is recovered with `recover <cook-or-attempt-id>`, which owns the Cook's next-attempt provider-route overrides; `retry <cook-id> --run` performs the Cook's recovery step through `recover`, and any other retry of a Cook ID is refused toward it (pass the exact attempt ID for a plain retry). |
 | `prompts save\|list\|show\|remove` | Manage markdown prompts in Homeboy-owned storage. |
 
-`agent-task list` and `agent-task active` accept `--limit <n>` to cap discovery output. `list` and `active` default to 20 newest rows and return `next_cursor` when another page exists; continue active discovery with `agent-task active --limit <n> --cursor <next_cursor>`. `list` and `active` also accept `--branch <branch>`, matching the branch scope persisted from the submitted plan's first task workspace; older records without that submitted scope do not match. The opaque cursor binds every effective filter, including `--branch`, and rejects mismatched continuations. `agent-task list --latest` walks durable history newest-first in keyset pages, stopping at the first match, and returns the newest record matching the same `--task-url`, `--repo`, `--worktree`, `--submitted-after`, `--state`, `--run-placement`, `--parent-id`, and `--branch` filters. Its `global_record_health` describes only the pages read. Active discovery emits at most eight prioritized `next_actions`: fleet reconciliation when stale records exist, page continuation when truncated, and focused per-run inspection actions. `list --full` and `active --full` return every matching row. `list --latest` rejects `--limit`, `--cursor`, and `--full` because a one-record result cannot continue, expand, or cap a page. `agent-task reconcile <run-id>` is the recovery path emitted by status: it previews only that run by default, refreshes runner/provider state before classification, and requires `--apply` to mutate it. Applied reconciliation returns the canonical `ControlPlaneActionAcknowledgement` used by the HTTP action endpoint; the workflow-specific reconcile report remains nested under `result`. If ownership or provider state changes before apply, it reports a no-op. `agent-task active --reconcile` is an explicit fleet operation: it previews every candidate by default and requires `--apply` to reconcile the fleet-wide candidate set. Its `--limit`, `--cursor`, and `--full` selectors are rejected so discovery pagination cannot imply a reconciliation scope.
+`homeboy runs list --kind agent-task` reads durable Cook discovery directly; `--active` adds the existing liveness buckets and per-record reconcile guidance. Both default to 20 newest rows. Use `--limit 1` for the newest match, `--cursor <next_cursor>` to continue a bounded page, or `--full` for all matching records. `--full` conflicts with `--limit` and `--cursor`.
 
-Paged `agent-task list` and `agent-task active` inspect at most 100 physical lifecycle rows per request and return at most 100 matching rows. A supplied `--limit` above 100 is retained as `requested_limit`; `limit` reports the effective 100-row ceiling. `search_status: "complete"` means the scoped history was exhausted. `"matching_limit_reached"` means the matching output cap was reached. `"search_window_exhausted"` means discovery stopped at its bounded physical window, so an empty `runs` array is incomplete rather than proof of no matches; resume with the returned opaque `next_cursor`.
+List filters are `--repo`, `--workspace`, `--task-url`, `--since` (RFC3339 or relative age), `--status` (queued, running, succeeded, failed, cancelled), `--run-placement`, `--parent-id`, and `--branch`. Active mode accepts only `--limit`, `--cursor`, `--branch`, and `--full`; list-only filters conflict with it. Cook-specific flags require `--kind agent-task`. Opaque cursors bind the effective filters, including branch. Older records without a submitted branch do not match branch-scoped discovery.
+
+`agent-task reconcile <run-id>` previews one run/group; `agent-task reconcile --all` previews the active fleet. Exactly one selector is required. Both mutate only with `--apply`; `--dry-run` explicitly selects preview. **Fleet reconciliation is preview-only by default**, unlike the former fleet read/mutation entrypoint. Pagination flags cannot scope fleet mutation. Applied per-run reconciliation returns the canonical control-plane acknowledgement with the workflow report under `result`.
+
+Paged `runs list --kind agent-task` and `runs list --kind agent-task --active` inspect at most 100 physical lifecycle rows per request and return at most 100 matching rows. A supplied `--limit` above 100 is retained as `requested_limit`; `limit` reports the effective 100-row ceiling. `search_status: "complete"` means the scoped history was exhausted. `"matching_limit_reached"` means the matching output cap was reached. `"search_window_exhausted"` means discovery stopped at its bounded physical window, so an empty `runs` array is incomplete rather than proof of no matches; resume with the returned opaque `next_cursor`.
 
 `agent-task status <run-id>` returns the canonical `ControlPlaneRun` resource (`homeboy/control-plane-run/v1`). Human summaries read that resource directly; they do not reconstruct `homeboy/agent-task-status-scope/v1` or wrap the run under `control_plane_run`. It is a bounded, non-reconciling read; use `runs logs <run-id> [--cursor <cursor>]` for canonical `ControlPlaneEventPage`s, `agent-task diagnose <run-id> --full` for detailed failure evidence, and `agent-task reconcile <run-id> --apply` for explicit state repair.
 
@@ -71,12 +73,12 @@ credential-bearing fragments or arbitrary URLs.
 ### Resource Behavior
 
 Resource admission follows command capability rather than command names. Bounded
-controller metadata reads (`status`, `runs logs`, metadata-only `artifacts`, `list`,
-`active`, `list --latest`, and their loop/controller equivalents) run locally by
+controller metadata reads (`status`, `runs logs`, metadata-only `runs artifacts`,
+`runs list --kind agent-task`, and their loop/controller equivalents) run locally by
 default and produce no hot-machine or Lab-routing guidance. This keeps recovery
 inspection available when a runner is disconnected, stale, or reports conflicting
 readiness. An explicit `--runner` retains runner-resident polling for status,
-`runs logs`, artifacts, list, active, and other state reads when the durable
+`runs logs`, `runs artifacts`, `runs list --kind agent-task`, and other state reads when the durable
 state lives there. Provider execution, deterministic gates, explicit evidence or
 provider-boundary hydration, and review remain subject to their admission and
 routing contracts. Reconciliation is an explicit workload even when it begins

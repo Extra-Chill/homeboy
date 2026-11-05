@@ -88,6 +88,7 @@ fn runs_list_rig_filter_surfaces_compact_artifact_index() {
                 include_mirrors: false,
                 limit: 20,
                 include_active_runner_jobs: false,
+                ..Default::default()
             },
             "runs.list",
         )

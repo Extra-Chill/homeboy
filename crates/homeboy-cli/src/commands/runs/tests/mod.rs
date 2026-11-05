@@ -66,6 +66,7 @@ fn run_list_filters_kind_component_rig_and_status() {
                 include_mirrors: false,
                 limit: 20,
                 include_active_runner_jobs: false,
+                ..Default::default()
             },
             "runs.list",
         )
@@ -107,6 +108,7 @@ fn run_list_reads_durable_record_without_reconciliation() {
                 include_mirrors: false,
                 limit: 20,
                 include_active_runner_jobs: false,
+                ..Default::default()
             },
             "runs.list",
         )
@@ -207,6 +209,7 @@ fn list_args() -> RunsListArgs {
         include_mirrors: false,
         limit: 50,
         include_active_runner_jobs: false,
+        ..Default::default()
     }
 }
 
@@ -2214,6 +2217,7 @@ fn bench_history_orders_and_filters_by_scenario() {
                 include_mirrors: false,
                 limit: 20,
                 include_active_runner_jobs: false,
+                ..Default::default()
             },
             "runs.list",
         )

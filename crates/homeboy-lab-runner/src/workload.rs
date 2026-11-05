@@ -778,7 +778,7 @@ mod tests {
             [_, "extension", "update", ..] => "extension update",
             [_, "runtime", "refresh", ..] => "runtime refresh",
             [_, "agent-task", "status", ..] => {
-                "agent-task run/run-next/status/logs/artifacts/review/list/active"
+                "runs logs/list/artifacts; agent-task run/run-next/status/review"
             }
             _ => return None,
         };
@@ -890,7 +890,7 @@ mod tests {
             Case {
                 name: "resident-path command",
                 argv: vec!["/srv/homeboy/bin/homeboy", "agent-task", "status", "run-1"],
-                expected_label: "agent-task run/run-next/status/logs/artifacts/review/list/active",
+                expected_label: "runs logs/list/artifacts; agent-task run/run-next/status/review",
                 expected_family: LabRunnerWorkloadCommandFamily::AgentTask,
             },
         ];

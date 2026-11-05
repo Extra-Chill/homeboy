@@ -1,19 +1,3 @@
-use clap::{Args, Subcommand, ValueEnum};
-use homeboy::agents::agent_task_service::AgentTaskDiscoveryOptions;
-
-/// Agent-facing discovery defaults to a finite page. A caller can request a
-/// different page with `--limit`; full durable records remain available through
-/// focused status/artifact commands and `--output` artifacts.
-const DEFAULT_DISCOVERY_LIMIT: usize = 20;
-
-fn positive_discovery_limit(value: &str) -> std::result::Result<usize, String> {
-    let limit = value.parse::<usize>().map_err(|error| error.to_string())?;
-    if limit == 0 {
-        return Err("must be greater than zero".to_string());
-    }
-    Ok(limit)
-}
-
 use super::super::super::prompts::AgentTaskPromptsArgs;
 use super::super::super::tool::AgentTaskToolArgs;
 use super::cook::{AgentTaskCookArgs, PromotionProviderArgs};
@@ -23,6 +7,7 @@ use super::lifecycle::{
     PromoteArgs, QuarantineArgs, RearmArgs, RecoverArgs, ReplayProviderBoundaryArgs, ResumeArgs,
     RetryArgs, ReviewArgs, RunArgs, RunPlanArgs, StatusArgs, ValidatePlanArgs,
 };
+use clap::{Args, Subcommand, ValueEnum};
 
 pub use super::super::auth::{
     AgentTaskAuthCommand, AgentTaskAuthMapEnvArgs, AgentTaskAuthMapKeychainBundleArgs,
@@ -105,24 +90,9 @@ pub enum AgentTaskCommand {
     ValidatePlan(ValidatePlanArgs),
     /// Read durable run status.
     Status(StatusArgs),
-    /// List durable runs, newest first.
-    ///
-    /// Discovery returns a finite agent-facing page by default; use `--limit` for
-    /// a different page or `--full` for every matching record. Use `--latest` to
-    /// search complete durable history and return the newest record matching the
-    /// supplied list filters.
-    List(ListArgs),
     /// Read the indexed active checkout ownership for an opaque caller context.
     ActiveScope(ActiveScopeArgs),
-    /// List queued and running durable runs, newest first.
-    ///
-    /// `--reconcile` turns this into an explicit fleet operation: it previews
-    /// every candidate by default and requires `--apply` to mutate the set.
-    Active(ActiveArgs),
-    /// Reconcile one durable agent-task run or explicit Cook group. This is a
-    /// preview by default; use `--apply` only after reviewing the authoritative
-    /// provider state. Success leaves every selected durable record reconciled
-    /// to that state.
+    /// Preview or apply durable run reconciliation.
     Reconcile(ReconcileArgs),
     /// Discover or attach selected outputs retained in a terminal Lab Cook workspace.
     RetainedArtifacts(RetainedArtifactsArgs),
@@ -382,89 +352,13 @@ mod command_parse_tests {
 }
 
 #[derive(Args, Debug)]
-pub struct ListArgs {
-    /// Maximum matching durable runs to return (effective maximum: 100; output
-    /// reports both the requested and effective limits).
-    #[arg(
-        long = "limit",
-        value_name = "N",
-        value_parser = positive_discovery_limit,
-        conflicts_with = "full"
-    )]
-    pub limit: Option<usize>,
-    /// Opaque continuation from the preceding page. Reuse every filter from the prior page.
-    #[arg(long, value_name = "CURSOR", conflicts_with = "full")]
-    pub cursor: Option<String>,
-    /// Restrict results to this repository identity.
-    #[arg(long)]
-    pub repo: Option<String>,
-    /// Restrict results to this workspace handle or path.
-    #[arg(long)]
-    pub worktree: Option<String>,
-    /// Restrict results to this task URL.
-    #[arg(long = "task-url")]
-    pub task_url: Option<String>,
-    /// RFC3339 submission timestamp; excludes older records.
-    #[arg(long = "submitted-after", value_name = "RFC3339")]
-    pub submitted_after: Option<String>,
-    /// Restrict results to this durable lifecycle state.
-    #[arg(long, value_parser = ["queued", "running", "succeeded", "failed", "cancelled"])]
-    pub state: Option<String>,
-    /// Filter by recorded execution placement, not the global routing policy.
-    #[arg(long = "run-placement", value_parser = ["local", "remote", "runner"])]
-    pub run_placement: Option<String>,
-    /// Restrict results to records owned by this parent run or group.
-    #[arg(long = "parent-id")]
-    pub parent_id: Option<String>,
-    /// Restrict results to the recorded worktree branch.
-    #[arg(long)]
-    pub branch: Option<String>,
-    /// Return every matching record. This is intentionally explicit because
-    /// discovery defaults to a finite agent-facing page.
-    #[arg(long)]
-    pub full: bool,
-    /// Return only the newest record matching the supplied list filters.
-    #[arg(long, conflicts_with_all = ["limit", "cursor", "full"])]
-    pub latest: bool,
-}
-#[derive(Args, Debug)]
-pub struct ActiveArgs {
-    /// Cap active discovery to a positive page size (effective maximum: 100;
-    /// output reports both the requested and effective limits). Cannot be
-    /// combined with `--full` or fleet-wide `--reconcile`.
-    #[arg(
-        long = "limit",
-        value_name = "N",
-        value_parser = positive_discovery_limit,
-        conflicts_with_all = ["full", "reconcile"]
-    )]
-    pub limit: Option<usize>,
-    /// Opaque continuation from the prior active page. Cannot be
-    /// combined with `--full` or fleet-wide `--reconcile`.
-    #[arg(long, value_name = "CURSOR", conflicts_with_all = ["full", "reconcile"])]
-    pub cursor: Option<String>,
-    /// Restrict active runs to the recorded worktree branch.
-    #[arg(long, conflicts_with = "reconcile")]
-    pub branch: Option<String>,
-    /// Return every matching record. This is intentionally explicit because
-    /// discovery defaults to a finite agent-facing page and cannot scope
-    /// fleet-wide `--reconcile`.
-    #[arg(long, conflicts_with = "reconcile")]
-    pub full: bool,
-    /// Preview reconciliation for every active record in the selected scope.
-    #[arg(long = "reconcile")]
-    pub reconcile: bool,
-    /// Explicitly retain preview-only reconciliation mode.
-    #[arg(long = "dry-run", requires = "reconcile", conflicts_with = "apply")]
-    pub dry_run: bool,
-    /// Apply reconciliation to every selected active record.
-    #[arg(long = "apply", requires = "reconcile", conflicts_with = "dry_run")]
-    pub apply: bool,
-}
-#[derive(Args, Debug)]
 pub struct ReconcileArgs {
     /// Durable run ID or Cook group ID to reconcile.
-    pub run_id: String,
+    #[arg(required_unless_present = "all", conflicts_with = "all")]
+    pub run_id: Option<String>,
+    /// Reconcile the entire active fleet (preview unless --apply).
+    #[arg(long, conflicts_with_all = ["run_id", "idempotency_key"])]
+    pub all: bool,
     /// Preview the selected durable run/group without persisted mutation. This
     /// is the default when `--apply` is omitted.
     #[arg(long = "dry-run", conflicts_with = "apply")]
@@ -475,32 +369,6 @@ pub struct ReconcileArgs {
     /// Stable caller key for safely replaying an applied reconciliation.
     #[arg(long, value_name = "KEY", requires = "apply")]
     pub idempotency_key: Option<String>,
-}
-impl From<ListArgs> for AgentTaskDiscoveryOptions {
-    fn from(args: ListArgs) -> Self {
-        Self {
-            limit: (!args.full).then(|| args.limit.unwrap_or(DEFAULT_DISCOVERY_LIMIT)),
-            cursor: 0,
-            repo: args.repo,
-            workspace: args.worktree,
-            task_url: args.task_url,
-            submitted_after: args.submitted_after,
-            state: args.state,
-            placement: args.run_placement,
-            parent_id: args.parent_id,
-            branch: args.branch,
-        }
-    }
-}
-impl From<ActiveArgs> for AgentTaskDiscoveryOptions {
-    fn from(args: ActiveArgs) -> Self {
-        Self {
-            limit: (!args.full).then(|| args.limit.unwrap_or(DEFAULT_DISCOVERY_LIMIT)),
-            cursor: 0,
-            branch: args.branch,
-            ..Default::default()
-        }
-    }
 }
 #[derive(Args, Debug)]
 pub struct AgentTaskAuthArgs {

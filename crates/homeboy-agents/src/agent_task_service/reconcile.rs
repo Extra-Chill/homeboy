@@ -737,7 +737,7 @@ pub(crate) fn reconcile_run_in_store(
 /// The agent-task half of the daemon's orchestration tick.
 ///
 /// `reconcile_stale_active_runs` used to have exactly two callers — `cleanup`
-/// and `agent-task active --reconcile --apply` — both of which require a human
+/// and `agent-task reconcile --all --apply` — both of which require a human
 /// to type them. A detached cook whose owner died therefore stayed `running`
 /// forever. Loop Work jobs now own controller wait advancement.
 struct AgentTaskOrchestrationDriver;
