@@ -463,7 +463,24 @@ const TEST_DAEMON_NAMESPACE_ENV: &str = "HOMEBOY_TEST_DAEMON_NAMESPACE";
 /// Test-only contract between the hermetic context and the Cargo test runner.
 /// The runner owns and reaps this process group when the test binary is
 /// cancelled, so a daemon must not create a detached session that escapes it.
+/// The value is that group's id: a daemon spawned by a CLI subprocess rejoins
+/// it, because `bounded_output` puts the CLI in a group of its own and reaps
+/// that group as soon as the CLI exits, which would stop the daemon the CLI
+/// just started (#17387).
 pub const TEST_KEEP_DAEMON_IN_PROCESS_GROUP_ENV: &str = "HOMEBOY_TEST_KEEP_DAEMON_IN_PROCESS_GROUP";
+
+/// This test process's group: the one the Cargo test runner reaps.
+pub fn test_runner_process_group() -> String {
+    #[cfg(unix)]
+    {
+        // SAFETY: getpgrp has no preconditions and cannot fail.
+        unsafe { libc::getpgrp() }.to_string()
+    }
+    #[cfg(not(unix))]
+    {
+        "0".to_string()
+    }
+}
 
 static EXEC_CAPABLE_TEMP_BASE: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
 static SHORT_EXEC_CAPABLE_TEMP_BASE: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
@@ -614,7 +631,10 @@ impl HermeticTestContext {
             .env(crate::paths::HOMEBOY_DATA_DIR_ENV, self.data_dir())
             .env(crate::paths::DAEMON_STATE_DIR_ENV, self.daemon_dir())
             .env(TEST_DAEMON_NAMESPACE_ENV, self.daemon_dir())
-            .env(TEST_KEEP_DAEMON_IN_PROCESS_GROUP_ENV, "1")
+            .env(
+                TEST_KEEP_DAEMON_IN_PROCESS_GROUP_ENV,
+                test_runner_process_group(),
+            )
             .env("HOMEBOY_ARTIFACT_ROOT", self.artifact_dir())
             .env("HOMEBOY_RUNTIME_TMPDIR", self.runtime_dir())
             .env("TMPDIR", self.temp_dir())
@@ -1040,7 +1060,10 @@ impl HomeGuard {
         }
         std::env::set_var(crate::paths::DAEMON_STATE_DIR_ENV, context.daemon_dir());
         std::env::set_var(TEST_DAEMON_NAMESPACE_ENV, context.daemon_dir());
-        std::env::set_var(TEST_KEEP_DAEMON_IN_PROCESS_GROUP_ENV, "1");
+        std::env::set_var(
+            TEST_KEEP_DAEMON_IN_PROCESS_GROUP_ENV,
+            test_runner_process_group(),
+        );
         std::env::set_var("HOMEBOY_NO_UPDATE_CHECK", "1");
         std::env::set_var("HOMEBOY_RUNTIME_TMPDIR", context.runtime_dir());
         crate::set_artifact_root_override(None);
@@ -2132,7 +2155,7 @@ mod tests {
         let command = HermeticTestContext::new().command(TestBinary::CurrentTest);
         assert_eq!(
             command_env(&command, TEST_KEEP_DAEMON_IN_PROCESS_GROUP_ENV),
-            Some(Some("1".into()))
+            Some(Some(test_runner_process_group().into()))
         );
     }
 

@@ -279,7 +279,10 @@ fn exercise_historical_runtime_retry(compatible_binary: &str, expected_identity_
             context.daemon_dir(),
         )
         .env("HOMEBOY_TEST_DAEMON_NAMESPACE", context.daemon_dir())
-        .env("HOMEBOY_TEST_KEEP_DAEMON_IN_PROCESS_GROUP", "1")
+        .env(
+            "HOMEBOY_TEST_KEEP_DAEMON_IN_PROCESS_GROUP",
+            homeboy::core::test_support::test_runner_process_group(),
+        )
         .env("HOMEBOY_ARTIFACT_ROOT", context.artifact_dir())
         .env("HOMEBOY_RUNTIME_TMPDIR", context.runtime_dir())
         .env("TMPDIR", context.temp_dir())
@@ -358,7 +361,10 @@ fn exercise_historical_runtime_retry(compatible_binary: &str, expected_identity_
                 context.daemon_dir(),
             )
             .env("HOMEBOY_TEST_DAEMON_NAMESPACE", context.daemon_dir())
-            .env("HOMEBOY_TEST_KEEP_DAEMON_IN_PROCESS_GROUP", "1")
+            .env(
+                "HOMEBOY_TEST_KEEP_DAEMON_IN_PROCESS_GROUP",
+                homeboy::core::test_support::test_runner_process_group(),
+            )
             .env("HOMEBOY_ARTIFACT_ROOT", context.artifact_dir())
             .env("HOMEBOY_RUNTIME_TMPDIR", context.runtime_dir())
             .env("TMPDIR", context.temp_dir())
@@ -432,7 +438,10 @@ fn exercise_historical_runtime_retry(compatible_binary: &str, expected_identity_
                 context.daemon_dir(),
             )
             .env("HOMEBOY_TEST_DAEMON_NAMESPACE", context.daemon_dir())
-            .env("HOMEBOY_TEST_KEEP_DAEMON_IN_PROCESS_GROUP", "1")
+            .env(
+                "HOMEBOY_TEST_KEEP_DAEMON_IN_PROCESS_GROUP",
+                homeboy::core::test_support::test_runner_process_group(),
+            )
             .env("HOMEBOY_ARTIFACT_ROOT", context.artifact_dir())
             .env("HOMEBOY_RUNTIME_TMPDIR", context.runtime_dir())
             .env("TMPDIR", context.temp_dir())

@@ -3463,11 +3463,42 @@ fn detach_from_launcher_session(command: &mut Command) {
     // The hermetic Cargo runner owns the test binary's process group and reaps
     // it on cancellation. Test daemons must remain in that group; a `setsid`
     // here would reparent a cancelled fixture to PID 1 and leak it forever.
-    if cfg!(debug_assertions) && std::env::var_os(TEST_KEEP_DAEMON_IN_PROCESS_GROUP_ENV).is_some() {
-        return;
+    // The value names that group; rejoin it rather than staying in the
+    // launching CLI's own group, which its test harness reaps when the CLI
+    // exits (#17387).
+    if cfg!(debug_assertions) {
+        if let Some(group) = std::env::var_os(TEST_KEEP_DAEMON_IN_PROCESS_GROUP_ENV) {
+            join_test_runner_process_group(command, &group);
+            return;
+        }
     }
     crate::process::detach_from_caller_session(command);
 }
+
+#[cfg(unix)]
+fn join_test_runner_process_group(command: &mut Command, group: &std::ffi::OsStr) {
+    use std::os::unix::process::CommandExt;
+    let Some(group) = group
+        .to_str()
+        .and_then(|group| group.parse::<libc::pid_t>().ok())
+        .filter(|group| *group > 0)
+    else {
+        return;
+    };
+    // SAFETY: `pre_exec` runs in the forked child immediately before exec;
+    // `setpgid` only moves that child and reports failure through errno.
+    unsafe {
+        command.pre_exec(move || {
+            if libc::setpgid(0, group) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
+#[cfg(not(unix))]
+fn join_test_runner_process_group(_command: &mut Command, _group: &std::ffi::OsStr) {}
 
 /// Resolve the daemon base URL, falling back to the running daemon's address.
 fn resolve_daemon_url(daemon_url: Option<String>) -> Result<String> {
