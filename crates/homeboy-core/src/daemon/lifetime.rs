@@ -1,5 +1,8 @@
 //! On-demand daemons own durable work, not an indefinite detached process.
 
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 use crate::error::Result;
@@ -140,9 +143,9 @@ pub(super) fn running_executable() -> std::io::Result<&'static ExecutableIdentit
 /// The executable path to launch Homeboy subcommands from this process.
 ///
 /// After an upgrade replaces the running binary, `current_exe()` can name a
-/// path that no longer exists (Linux reports `<path> (deleted)`), so a
-/// supervisor could never spawn its own `daemon stop` (#15403). The recorded
-/// startup path is where the installed binary lives.
+/// path that no longer exists (Linux reports `<path> (deleted)`), so nothing
+/// could be launched from it (#15403). The recorded startup path is where the
+/// installed binary lives.
 pub fn launchable_executable() -> std::io::Result<std::path::PathBuf> {
     Ok(running_executable()?.path.clone())
 }
@@ -159,34 +162,206 @@ pub(super) fn running_executable_replaced() -> bool {
         .is_some_and(ExecutableIdentity::replaced)
 }
 
+/// How often a supervised `serve` re-evaluates its own lifetime.
+const LIFETIME_POLL: Duration = Duration::from_secs(1);
+
+/// True only when the daemon's state directory is provably gone.
+///
+/// A missing or unreadable `state.json` is normal during startup, before the
+/// daemon publishes its lease, so only the directory's absence counts. An
+/// existence check that errors (permissions, I/O) is not proof of removal and
+/// keeps the daemon alive.
+pub(super) fn state_dir_removed(state_path: &Path) -> bool {
+    state_path
+        .parent()
+        .is_some_and(|dir| matches!(dir.try_exists(), Ok(false)))
+}
+
+/// A `serve` owns its lifetime exactly when a supervisor launched it: the
+/// launch carries a startup token. A hand-started foreground `serve` has no
+/// token and stays resident. A service-managed `serve` may carry a token but
+/// its manager owns its lifetime; an idle exit under `Restart=always` would
+/// only loop.
+pub(super) fn owns_lifetime(
+    startup_token: &str,
+    service_manager: Option<super::DaemonServiceManager>,
+) -> bool {
+    service_manager.is_none() && !startup_token.is_empty()
+}
+
+/// The idle policy this `serve` enforces on itself, or `None` when it does not
+/// own its lifetime. Read before the lease is published, so an invalid idle
+/// window fails startup instead of leaving a lease behind.
+pub(super) fn owned_idle_lifetime(
+    service_manager: Option<super::DaemonServiceManager>,
+) -> Result<Option<IdleLifetime>> {
+    let startup_token = std::env::var(super::DAEMON_STARTUP_TOKEN_ENV).unwrap_or_default();
+    if !owns_lifetime(&startup_token, service_manager) {
+        return Ok(None);
+    }
+    Ok(Some(IdleLifetime::new(
+        configured_idle_timeout()?,
+        Instant::now(),
+    )))
+}
+
+/// One poll's view of this daemon's lifetime inputs.
+#[derive(Debug, Clone, Copy, Default)]
+pub(super) struct LifetimeObservation {
+    /// Nothing can reach this daemon any more: no client can discover its
+    /// lease, read its jobs, or run a lease-scoped stop (#15590).
+    pub(super) state_dir_removed: bool,
+    /// The published lease is this process's own.
+    pub(super) own_lease: bool,
+    /// Active jobs in this daemon's scope (or an unreadable count), or a live
+    /// launcher still returning the startup handoff.
+    pub(super) busy: bool,
+    /// The executable this daemon started from was replaced (#15403).
+    pub(super) binary_replaced: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum LifetimeDecision {
+    Continue,
+    /// Stop without the lifecycle lock, which lived in the removed directory.
+    StopNow,
+    /// Stop only if the lifecycle lock is free and the daemon is still idle.
+    StopIfStillIdle,
+}
+
 pub(super) struct IdleLifetime {
     timeout: Option<Duration>,
     last_activity: Instant,
 }
 
 impl IdleLifetime {
-    pub(super) fn new(timeout: Option<Duration>) -> Self {
+    pub(super) fn new(timeout: Option<Duration>, now: Instant) -> Self {
         Self {
             timeout,
-            last_activity: Instant::now(),
+            last_activity: now,
         }
     }
 
-    pub(super) fn touch(&mut self) {
-        self.last_activity = Instant::now();
+    pub(super) fn decide(
+        &mut self,
+        now: Instant,
+        observation: &LifetimeObservation,
+    ) -> LifetimeDecision {
+        if observation.state_dir_removed {
+            return LifetimeDecision::StopNow;
+        }
+        // An unpublished or foreign lease is not this daemon idling.
+        if !observation.own_lease || observation.busy {
+            self.last_activity = now;
+            return LifetimeDecision::Continue;
+        }
+        let idle_for = now.saturating_duration_since(self.last_activity);
+        let expired = self.timeout.is_some_and(|timeout| idle_for >= timeout);
+        // An idle daemon whose binary was replaced stops after a short settle
+        // instead of serving stale code until its idle window lapses; the next
+        // command starts the installed binary (#15403).
+        let replaced = observation.binary_replaced && idle_for >= REPLACED_BINARY_STOP_AFTER;
+        if !expired && !replaced {
+            return LifetimeDecision::Continue;
+        }
+        // A stop that cannot proceed now is retried after another complete
+        // idle window, not on every poll.
+        self.last_activity = now;
+        LifetimeDecision::StopIfStillIdle
     }
+}
 
-    /// True once a daemon on a replaced binary has been idle long enough to
-    /// stop. The short bound still spaces out retries of a fenced stop, which
-    /// re-touches this lifetime, instead of spawning one every poll.
-    pub(super) fn replaced_and_settled(&self, replaced: bool) -> bool {
-        replaced && self.last_activity.elapsed() >= REPLACED_BINARY_STOP_AFTER
-    }
+/// Enforce this daemon's own lifetime until `stop` fires, ending the daemon
+/// through `shutdown`, the same graceful drain SIGTERM uses.
+pub(super) fn spawn_lifetime_monitor(
+    mut idle: IdleLifetime,
+    state_path: PathBuf,
+    lease_id: String,
+    jobs: PathBuf,
+    shutdown: Arc<AtomicBool>,
+    held: SelfStopGuards,
+    stop: mpsc::Receiver<()>,
+) -> std::thread::JoinHandle<()> {
+    let launcher = LauncherIdentity::inherited();
+    std::thread::Builder::new()
+        .name("daemon-lifetime".to_string())
+        .spawn(move || {
+            let observe = || observe_lifetime(&state_path, &lease_id, &jobs, launcher.as_ref());
+            loop {
+                match stop.recv_timeout(LIFETIME_POLL) {
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    _ => return,
+                }
+                let stopped = match idle.decide(Instant::now(), &observe()) {
+                    LifetimeDecision::Continue => false,
+                    LifetimeDecision::StopNow => {
+                        shutdown.store(true, Ordering::Release);
+                        true
+                    }
+                    LifetimeDecision::StopIfStillIdle => {
+                        stop_if_still_idle(&shutdown, &held, observe)
+                    }
+                };
+                if stopped {
+                    return;
+                }
+            }
+        })
+        .expect("spawn daemon lifetime monitor")
+}
 
-    pub(super) fn expired(&self) -> bool {
-        self.timeout
-            .is_some_and(|timeout| self.last_activity.elapsed() >= timeout)
+fn observe_lifetime(
+    state_path: &Path,
+    lease_id: &str,
+    jobs: &Path,
+    launcher: Option<&LauncherIdentity>,
+) -> LifetimeObservation {
+    let own_lease = super::validate_lease_file(state_path)
+        .ok()
+        .and_then(|validation| validation.state)
+        .is_some_and(|state| state.lease_id == lease_id && state.pid == std::process::id());
+    let scope = super::daemon_scope_for_state_path(state_path);
+    let active_jobs =
+        super::JobStore::active_count_at_path(jobs, Some(&scope)).map_or(true, |count| count > 0);
+    LifetimeObservation {
+        state_dir_removed: state_dir_removed(state_path),
+        own_lease,
+        busy: active_jobs || launcher.is_some_and(LauncherIdentity::is_live),
+        binary_replaced: running_executable_replaced(),
     }
+}
+
+/// The lifecycle lock and admission fence an idle self-stop holds until
+/// `serve` has drained and released its lease.
+pub(super) type SelfStopGuards =
+    Arc<std::sync::Mutex<Option<(super::DaemonOperationLock, super::DaemonAdmissionFence)>>>;
+
+/// Serialize an idle self-stop with lifecycle commands, as `daemon stop` does.
+/// A busy lock or admission fence means a lifecycle command or an admission
+/// owns this moment; the caller retries after another idle window.
+///
+/// On success the guards move into `held`, which `serve` drops only after its
+/// teardown. Like `daemon stop`, which holds both until the daemon exits, this
+/// keeps a concurrent `ensure-running` or admission from finding the draining
+/// daemon's still-published lease.
+fn stop_if_still_idle(
+    shutdown: &AtomicBool,
+    held: &SelfStopGuards,
+    observe: impl Fn() -> LifetimeObservation,
+) -> bool {
+    let Ok(Some(lock)) = super::try_acquire_daemon_operation_lock() else {
+        return false;
+    };
+    let Ok(Some(fence)) = super::try_acquire_daemon_job_admission_fence() else {
+        return false;
+    };
+    let observation = observe();
+    if observation.state_dir_removed || !observation.own_lease || observation.busy {
+        return false;
+    }
+    *held.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some((lock, fence));
+    shutdown.store(true, Ordering::Release);
+    true
 }
 
 #[cfg(all(test, unix))]
@@ -216,6 +391,193 @@ mod tests {
         let recorded = ExecutableIdentity::of(&installed).unwrap();
         std::fs::remove_file(&installed).unwrap();
         assert!(!recorded.replaced());
+    }
+
+    const IDLE: LifetimeObservation = LifetimeObservation {
+        state_dir_removed: false,
+        own_lease: true,
+        busy: false,
+        binary_replaced: false,
+    };
+
+    #[test]
+    fn an_idle_daemon_with_no_launcher_and_no_jobs_stops_after_its_idle_window() {
+        let start = Instant::now();
+        let mut idle = IdleLifetime::new(Some(Duration::from_secs(300)), start);
+        assert_eq!(
+            idle.decide(start + Duration::from_secs(299), &IDLE),
+            LifetimeDecision::Continue
+        );
+        assert_eq!(
+            idle.decide(start + Duration::from_secs(300), &IDLE),
+            LifetimeDecision::StopIfStillIdle
+        );
+        // A stop that could not take the lifecycle lock retries only after
+        // another complete idle window.
+        assert_eq!(
+            idle.decide(start + Duration::from_secs(301), &IDLE),
+            LifetimeDecision::Continue
+        );
+        assert_eq!(
+            idle.decide(start + Duration::from_secs(600), &IDLE),
+            LifetimeDecision::StopIfStillIdle
+        );
+    }
+
+    #[test]
+    fn active_jobs_or_a_live_launcher_keep_the_daemon_alive() {
+        let start = Instant::now();
+        let mut idle = IdleLifetime::new(Some(Duration::from_secs(10)), start);
+        let busy = LifetimeObservation { busy: true, ..IDLE };
+        for seconds in [10, 100, 1000] {
+            assert_eq!(
+                idle.decide(start + Duration::from_secs(seconds), &busy),
+                LifetimeDecision::Continue
+            );
+        }
+        // The idle window restarts from the last busy observation.
+        assert_eq!(
+            idle.decide(start + Duration::from_secs(1009), &IDLE),
+            LifetimeDecision::Continue
+        );
+        assert_eq!(
+            idle.decide(start + Duration::from_secs(1010), &IDLE),
+            LifetimeDecision::StopIfStillIdle
+        );
+    }
+
+    #[test]
+    fn an_unpublished_or_foreign_lease_is_not_idle_time() {
+        let start = Instant::now();
+        let mut idle = IdleLifetime::new(Some(Duration::from_secs(10)), start);
+        let foreign = LifetimeObservation {
+            own_lease: false,
+            binary_replaced: true,
+            ..IDLE
+        };
+        assert_eq!(
+            idle.decide(start + Duration::from_secs(100), &foreign),
+            LifetimeDecision::Continue
+        );
+    }
+
+    #[test]
+    fn a_replaced_binary_stops_an_idle_daemon_early_but_waits_for_work() {
+        let start = Instant::now();
+        let mut idle = IdleLifetime::new(None, start);
+        let replaced = LifetimeObservation {
+            binary_replaced: true,
+            ..IDLE
+        };
+        assert_eq!(
+            idle.decide(start + REPLACED_BINARY_STOP_AFTER / 2, &replaced),
+            LifetimeDecision::Continue
+        );
+        assert_eq!(
+            idle.decide(start + REPLACED_BINARY_STOP_AFTER, &replaced),
+            LifetimeDecision::StopIfStillIdle
+        );
+        let busy = LifetimeObservation {
+            busy: true,
+            ..replaced
+        };
+        let later = start + REPLACED_BINARY_STOP_AFTER * 10;
+        assert_eq!(idle.decide(later, &busy), LifetimeDecision::Continue);
+        // A resident daemon (no idle window) never stops for idleness alone.
+        assert_eq!(
+            idle.decide(later + REPLACED_BINARY_STOP_AFTER * 10, &IDLE),
+            LifetimeDecision::Continue
+        );
+    }
+
+    #[test]
+    fn a_removed_state_directory_stops_the_daemon_even_with_work() {
+        let start = Instant::now();
+        let mut idle = IdleLifetime::new(None, start);
+        let removed = LifetimeObservation {
+            state_dir_removed: true,
+            own_lease: false,
+            busy: true,
+            binary_replaced: false,
+        };
+        assert_eq!(idle.decide(start, &removed), LifetimeDecision::StopNow);
+    }
+
+    #[test]
+    fn only_a_present_state_directory_is_not_removed() {
+        let temp = tempfile::tempdir().unwrap();
+        let state_dir = temp.path().join("daemon");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        let state_path = state_dir.join("state.json");
+        // An unpublished lease is the startup window, not removal.
+        assert!(!state_dir_removed(&state_path));
+        std::fs::remove_dir_all(&state_dir).unwrap();
+        assert!(state_dir_removed(&state_path));
+    }
+
+    #[test]
+    fn the_monitor_ends_its_daemon_through_the_shutdown_flag_once_its_state_dir_is_removed() {
+        let temp = tempfile::tempdir().unwrap();
+        let state_dir = temp.path().join("daemon");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let (stop_tx, stop_rx) = mpsc::channel();
+        let monitor = spawn_lifetime_monitor(
+            IdleLifetime::new(Some(Duration::from_secs(300)), Instant::now()),
+            state_dir.join("state.json"),
+            "lease".to_string(),
+            temp.path().join("jobs.sqlite"),
+            Arc::clone(&shutdown),
+            SelfStopGuards::default(),
+            stop_rx,
+        );
+        std::thread::sleep(LIFETIME_POLL * 2);
+        assert!(
+            !shutdown.load(Ordering::Acquire),
+            "an unpublished lease in a present directory keeps the daemon"
+        );
+        std::fs::remove_dir_all(&state_dir).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !monitor.is_finished() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(shutdown.load(Ordering::Acquire));
+        assert!(monitor.is_finished());
+        drop(stop_tx);
+    }
+
+    #[test]
+    fn the_monitor_stops_when_serve_drains() {
+        let temp = tempfile::tempdir().unwrap();
+        let state_dir = temp.path().join("daemon");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let (stop_tx, stop_rx) = mpsc::channel();
+        let monitor = spawn_lifetime_monitor(
+            IdleLifetime::new(None, Instant::now()),
+            state_dir.join("state.json"),
+            "lease".to_string(),
+            temp.path().join("jobs.sqlite"),
+            Arc::clone(&shutdown),
+            SelfStopGuards::default(),
+            stop_rx,
+        );
+        stop_tx.send(()).unwrap();
+        monitor.join().unwrap();
+        assert!(!shutdown.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn only_a_supervised_unmanaged_serve_owns_its_lifetime() {
+        use crate::daemon::DaemonServiceManager;
+        assert!(owns_lifetime("token", None));
+        // A hand-started foreground serve has no startup token.
+        assert!(!owns_lifetime("", None));
+        // A service-managed serve runs no lifetime monitor, token or not.
+        for manager in [DaemonServiceManager::Systemd, DaemonServiceManager::Launchd] {
+            assert!(!owns_lifetime("token", Some(manager)));
+            assert!(!owns_lifetime("", Some(manager)));
+        }
     }
 
     #[test]
