@@ -357,7 +357,6 @@ runs artifacts
 runs cancel
 runs compare
 runs distribution
-runs dossier
 runs env
 runs evidence
 runs export
@@ -366,7 +365,6 @@ runs hotspots
 runs import
 runs latest-run
 runs list
-runs proof
 runs reconcile
 runs refs
 runs report

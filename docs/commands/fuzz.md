@@ -621,7 +621,7 @@ can check a candidate contract before attaching it with
 Fuzz producers persist this current structured contract as the evidence authority.
 The schema is required on the contract and each violation, `complete` must agree
 with the violation list, and each violation carries a non-empty message. The
-producer, normal `fuzz inspect` diagnosis, `runs proof`, and `contract validate`
+producer, normal `fuzz inspect` diagnosis, `runs evidence <id> --proof`, and `contract validate`
 use the same validation. Missing, unsupported, or contradictory evidence is a
 validation error; retired `results_error` and `missing_artifact_refs` metadata is not
 reconstructed. `fuzz inspect <run-id> --raw` retrieves bytes without deriving a
@@ -630,7 +630,7 @@ diagnosis or evidence verdict. Retained raw artifacts also remain available thro
 
 ## Reviewer Proof
 
-`homeboy runs proof <run-id>` projects a bounded reviewer view for a fuzz run
+`homeboy runs evidence <run-id> --proof` projects a bounded reviewer view for a fuzz run
 under `fuzz` (`homeboy/fuzz-proof/v1`). It answers what was fuzzed, at what
 commit, with what inputs, and against what pass criteria:
 
@@ -651,7 +651,7 @@ nothing. `source` is stamped by the reader, so a payload cannot claim Homeboy
 derived something it did not.
 
 ```bash
-homeboy runs proof <run-id> --json -q '$.fuzz.markdown'
+homeboy runs evidence <run-id> --proof --json -q '$.fuzz.markdown'
 ```
 
 ## Portable Fuzz Evidence Bundles

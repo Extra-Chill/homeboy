@@ -13,8 +13,8 @@ use super::types::{
 };
 use super::CmdResult;
 use super::{
-    compare, distribution, dossier, evidence, findings, handlers, hotspots, latest, proof,
-    reconcile, refs, report, resources, watch,
+    compare, distribution, evidence, findings, handlers, hotspots, latest, reconcile, refs, report,
+    resources, watch,
 };
 
 impl RunsArgs {
@@ -33,26 +33,34 @@ impl RunsArgs {
         }
     }
 
-    /// Whether this is a `runs dossier <id>` invocation eligible for the
+    /// Whether this is a `runs evidence <id> --dossier` invocation eligible for the
     /// compact human dossier (i.e. the caller asked for neither `--json`
     /// nor `--format json`).
     pub(crate) fn dossier_summary_eligible(&self) -> bool {
         match &self.command {
-            RunsCommand::Dossier {
-                json, presentation, ..
-            } => !presentation.json_or_flag(*json),
+            RunsCommand::Evidence {
+                dossier: true,
+                json,
+                presentation,
+                field,
+                ..
+            } => field.is_empty() && !presentation.json_or_flag(*json),
             _ => false,
         }
     }
 
-    /// Whether this is a `runs proof <id>` invocation eligible for the compact
+    /// Whether this is a `runs evidence <id> --proof` invocation eligible for the compact
     /// human summary (i.e. the caller asked for neither `--json` nor
     /// `--format json`).
     pub(crate) fn proof_summary_eligible(&self) -> bool {
         match &self.command {
-            RunsCommand::Proof {
-                json, presentation, ..
-            } => !presentation.json_or_flag(*json),
+            RunsCommand::Evidence {
+                proof: true,
+                json,
+                presentation,
+                field,
+                ..
+            } => field.is_empty() && !presentation.json_or_flag(*json),
             _ => false,
         }
     }
@@ -150,8 +158,6 @@ impl RunsArgs {
                 ],
             ),
             RunsCommand::Show { run_id, .. }
-            | RunsCommand::Proof { run_id, .. }
-            | RunsCommand::Dossier { run_id, .. }
             | RunsCommand::Evidence { run_id, .. }
             | RunsCommand::Env { run_id } => (
                 format!(
@@ -212,22 +218,16 @@ pub fn run(args: RunsArgs) -> CmdResult<RunsOutput> {
                 handlers::apply_field_selection(output, &field)
             }
         }
-        RunsCommand::Proof {
-            run_id,
-            json: _,
-            presentation: _,
-        } => proof::proof(&store, &run_id),
-        RunsCommand::Dossier {
-            run_id,
-            json: _,
-            presentation: _,
-        } => dossier::runs_dossier_in_store(&store, &run_id),
         RunsCommand::Evidence {
             run_id,
             full,
             field,
+            proof,
+            dossier,
+            json: _,
+            presentation: _,
         } => {
-            let (output, exit_code) = evidence::evidence_projection(&store, &run_id, full)?;
+            let (output, exit_code) = evidence::project(&store, &run_id, full, proof, dossier)?;
             if field.is_empty() {
                 Ok((output, exit_code))
             } else {
@@ -294,23 +294,32 @@ mod presentation_tests {
     #[test]
     fn bare_show_proof_and_dossier_are_summary_eligible() {
         assert!(parse(&["runs", "show", "run-1"]).show_summary_eligible());
-        assert!(parse(&["runs", "proof", "run-1"]).proof_summary_eligible());
-        assert!(parse(&["runs", "dossier", "run-1"]).dossier_summary_eligible());
+        assert!(parse(&["runs", "evidence", "run-1", "--proof"]).proof_summary_eligible());
+        assert!(parse(&["runs", "evidence", "run-1", "--dossier"]).dossier_summary_eligible());
     }
 
     #[test]
     fn legacy_json_flag_still_suppresses_the_compact_summary() {
         assert!(!parse(&["runs", "show", "run-1", "--json"]).show_summary_eligible());
-        assert!(!parse(&["runs", "proof", "run-1", "--json"]).proof_summary_eligible());
-        assert!(!parse(&["runs", "dossier", "run-1", "--json"]).dossier_summary_eligible());
+        assert!(
+            !parse(&["runs", "evidence", "run-1", "--proof", "--json"]).proof_summary_eligible()
+        );
+        assert!(
+            !parse(&["runs", "evidence", "run-1", "--dossier", "--json"])
+                .dossier_summary_eligible()
+        );
     }
 
     #[test]
     fn format_json_suppresses_the_compact_summary_identically() {
         assert!(!parse(&["runs", "show", "run-1", "--format", "json"]).show_summary_eligible());
-        assert!(!parse(&["runs", "proof", "run-1", "--format", "json"]).proof_summary_eligible());
         assert!(
-            !parse(&["runs", "dossier", "run-1", "--format", "json"]).dossier_summary_eligible()
+            !parse(&["runs", "evidence", "run-1", "--proof", "--format", "json"])
+                .proof_summary_eligible()
+        );
+        assert!(
+            !parse(&["runs", "evidence", "run-1", "--dossier", "--format", "json"])
+                .dossier_summary_eligible()
         );
     }
 
@@ -319,6 +328,20 @@ mod presentation_tests {
         assert!(
             !parse(&["runs", "show", "run-1", "--json", "--format=json"]).show_summary_eligible()
         );
+    }
+
+    #[test]
+    fn evidence_projections_conflict_and_old_verbs_are_rejected() {
+        let error = RunsCli::try_parse_from(["runs", "evidence", "run-1", "--proof", "--dossier"])
+            .err()
+            .expect("projections must conflict");
+        assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+        for verb in ["proof", "dossier"] {
+            assert!(RunsCli::try_parse_from(["runs", verb, "run-1"]).is_err());
+        }
+        let evidence = parse(&["runs", "evidence", "run-1"]);
+        assert!(!evidence.proof_summary_eligible());
+        assert!(!evidence.dossier_summary_eligible());
     }
 
     #[test]

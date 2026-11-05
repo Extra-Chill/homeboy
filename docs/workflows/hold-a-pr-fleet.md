@@ -67,7 +67,7 @@ homeboy --output /tmp/homeboy-results/<branch>-review.json review <component-id>
 When a branch has a recorded `run_id`, read the stable proof and evidence registry before rerunning expensive checks:
 
 ```bash
-homeboy runs proof <run-id>
+homeboy runs evidence <run-id> --proof
 homeboy runs evidence <run-id>
 homeboy runs artifacts <run-id>
 ```

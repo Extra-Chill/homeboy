@@ -57,7 +57,7 @@ pub(crate) fn parse_key_json(s: &str) -> Result<(String, serde_json::Value), Str
 /// operator passes a non-integer.
 ///
 /// `--runs` is a numeric repetition count, but operators frequently confuse
-/// it with wanting a stable proof label (e.g. `--runs proof-2026-06`). Clap's
+/// it with wanting a stable proof label (e.g. `--runs release-2026-06`). Clap's
 /// default `u64` parser would emit a raw `invalid digit found in string`
 /// error that gives no guidance. This parser points them at `--run-id`
 /// instead.

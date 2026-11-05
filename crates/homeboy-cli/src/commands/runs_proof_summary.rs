@@ -1,9 +1,9 @@
-//! Compact human-readable summary for `homeboy runs proof`.
+//! Compact human-readable summary for `homeboy runs evidence <id> --proof`.
 //!
-//! `runs proof` already returns a small signal-only payload. This renderer
+//! `runs evidence <id> --proof` already returns a small signal-only payload. This renderer
 //! presents it as ~10 lines of `key: value` text so an agent verifying a run
 //! reads the verdict and declared proof/scorecard signals without parsing
-//! JSON. The full payload remains available via `runs proof <id> --json`.
+//! JSON. The full payload remains available via `runs evidence <id> --proof --json`.
 
 use serde_json::Value;
 
@@ -66,7 +66,9 @@ fn render(proof: &Value) -> String {
         _ => lines.push("Signals: none declared".to_string()),
     }
 
-    lines.push(format!("Full output: homeboy runs proof {run_id} --json"));
+    lines.push(format!(
+        "Full output: homeboy runs evidence {run_id} --proof --json"
+    ));
 
     let mut output = lines.join("\n");
     output.push('\n');
@@ -211,7 +213,9 @@ mod tests {
         assert!(summary.contains("  cold.p95_ms: 42.0\n"));
         assert!(summary.contains("  proof.opfs_resume: false\n"));
         assert!(summary.contains("  observation_status: failed\n"));
-        assert!(summary.contains("Full output: homeboy runs proof bench-run-42 --json\n"));
+        assert!(
+            summary.contains("Full output: homeboy runs evidence bench-run-42 --proof --json\n")
+        );
         // Compact: no raw JSON braces.
         assert!(!summary.contains("{\n"));
     }

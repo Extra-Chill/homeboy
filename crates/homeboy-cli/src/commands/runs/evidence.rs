@@ -31,6 +31,23 @@ const MAX_STRING_BYTES: usize = 64;
 /// the command-local [`RunSummary`] as the report's `run` field.
 pub type RunsEvidenceOutput = RunEvidenceReport<RunSummary>;
 
+/// Select a read-only projection without changing its payload or schema.
+pub(super) fn project(
+    store: &ObservationStore,
+    run_id: &str,
+    full: bool,
+    proof: bool,
+    dossier: bool,
+) -> CmdResult<RunsOutput> {
+    if proof {
+        super::proof::proof(store, run_id)
+    } else if dossier {
+        super::dossier::runs_dossier_in_store(store, run_id)
+    } else {
+        evidence_projection(store, run_id, full)
+    }
+}
+
 pub fn evidence(run_id: &str) -> CmdResult<RunsOutput> {
     let store = ObservationStore::open_initialized()?;
     let (run, mut artifacts) = runs_service::load_run_with_artifacts(&store, run_id)?;

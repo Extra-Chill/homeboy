@@ -1,8 +1,8 @@
 //! The one Cook verdict every read surface projects (#15885).
 //!
-//! `runs show`, `runs dossier`, `agent-task status` and `agent-task diagnose`
+//! `runs show`, `runs evidence <id> --dossier`, `agent-task status` and `agent-task diagnose`
 //! used to classify the same Cook independently: `runs show` reported the
-//! observation row's `pass`, `runs dossier` derived `stale_running_record`
+//! observation row's `pass`, `runs evidence <id> --dossier` derived `stale_running_record`
 //! from that same row, `diagnose` printed the raw lifecycle record state
 //! (`Succeeded`), and only `agent-task status` read the canonical
 //! control-plane projection (`candidate_recoverable`). Four classifiers over

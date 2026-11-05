@@ -116,33 +116,21 @@ pub(super) enum RunsCommand {
         #[arg(long = "field", short = 'q', value_delimiter = ',')]
         field: Vec<String>,
     },
-    /// Show only the compact proof signals for one run: verdict, gate
-    /// failures, and declared proof/scorecard signal fields. Full evidence
-    /// stays behind `runs show --json` / `runs evidence`.
-    Proof {
-        run_id: String,
-        /// Print the full JSON output instead of the compact human summary.
-        /// Equivalent to `--format json`; both spellings keep working.
-        #[arg(long)]
-        json: bool,
-        // Canonical presentation vocabulary (#11138).
-        #[command(flatten)]
-        presentation: PresentationArgs,
-    },
-    /// Aggregate the actionable read-only dossier for one persisted run
-    Dossier {
-        run_id: String,
-        /// Print the full JSON output instead of the compact human dossier.
-        /// Equivalent to `--format json`; both spellings keep working.
-        #[arg(long)]
-        json: bool,
-        // Canonical presentation vocabulary (#11138).
-        #[command(flatten)]
-        presentation: PresentationArgs,
-    },
     /// Show bounded, actionable evidence for one run; use --full for the complete registry report
     Evidence {
         run_id: String,
+        /// Show only compact proof signals: verdict, gate failures, and declared signals.
+        #[arg(long, conflicts_with = "dossier")]
+        proof: bool,
+        /// Aggregate the actionable read-only dossier for the run.
+        #[arg(long, conflicts_with = "proof")]
+        dossier: bool,
+        /// Print the full projection JSON instead of its compact human summary.
+        /// Equivalent to `--format json`; plain evidence output is unchanged.
+        #[arg(long)]
+        json: bool,
+        #[command(flatten)]
+        presentation: PresentationArgs,
         /// Emit the complete lossless evidence report, including every artifact and evidence link.
         #[arg(long)]
         full: bool,

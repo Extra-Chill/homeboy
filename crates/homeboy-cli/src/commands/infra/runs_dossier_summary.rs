@@ -1,4 +1,4 @@
-//! Compact human-readable summary for `homeboy runs dossier`.
+//! Compact human-readable summary for `homeboy runs evidence <id> --dossier`.
 
 use serde_json::Value;
 
@@ -52,7 +52,9 @@ fn render_dossier(dossier: &Value) -> String {
     lines.extend(command_lines(dossier, "Inspection", "inspection_commands"));
     lines.extend(command_lines(dossier, "Repair", "repair_commands"));
     lines.extend(command_lines(dossier, "Next", "next_commands"));
-    lines.push(format!("Full output: homeboy runs dossier {run_id} --json"));
+    lines.push(format!(
+        "Full output: homeboy runs evidence {run_id} --dossier --json"
+    ));
 
     let mut output = lines.join("\n");
     output.push('\n');
@@ -179,6 +181,6 @@ mod tests {
         assert!(
             summary.contains("Artifacts: 1 recorded, 0 reviewer-visible, 1 fetchable, 0 missing\n")
         );
-        assert!(summary.contains("Full output: homeboy runs dossier run-1 --json\n"));
+        assert!(summary.contains("Full output: homeboy runs evidence run-1 --dossier --json\n"));
     }
 }
