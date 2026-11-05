@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.445.8] - 2026-11-05
+
+### Changed
+- make the mixed-route deadline test deterministic
+- Preserve transient Lab admission probe failures and retry bounded observations
+
 ## [0.445.7] - 2026-11-05
 
 ### Changed
