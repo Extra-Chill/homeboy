@@ -1738,7 +1738,7 @@ pub(crate) fn observe_daemon_job_until_terminal(
         .map_err(|error| {
             Error::internal_unexpected(format!("build daemon observer client: {error}"))
         })?;
-    let mut endpoint = initial_observation_endpoint(
+    let endpoint = initial_observation_endpoint(
         runner_id,
         runner_job_id,
         cancelled,
@@ -1751,23 +1751,73 @@ pub(crate) fn observe_daemon_job_until_terminal(
         },
         || refreshed_daemon_endpoint(runner_id),
     )?;
+    let (job, endpoint) = follow_daemon_job_to_terminal(
+        endpoint,
+        runner_job_id,
+        budget,
+        cancelled,
+        |endpoint| fetch_daemon_job(&client, endpoint, runner_job_id),
+        || refreshed_daemon_endpoint(runner_id),
+    )?;
+    let events = fetch_daemon_events(&client, &endpoint, runner_job_id)?;
+    Ok(DaemonTerminalObservation { job, events })
+}
+
+/// Poll a known job until it reaches a terminal status within `budget`.
+///
+/// A lost daemon transport does not end the wait. The daemon persists the
+/// job, so the observer reattaches through `reload_endpoint` and keeps polling
+/// the same job id until the caller's budget runs out (#17376). The caller's
+/// budget bounds the wait, not a fixed reconnect window, because a gate job
+/// can run far longer than any reconnect gap. Authoritative answers, such as
+/// an unknown job or a refused reattach, still end it at once.
+pub(crate) fn follow_daemon_job_to_terminal<Read, Reload>(
+    mut endpoint: String,
+    runner_job_id: &str,
+    budget: Duration,
+    cancelled: &dyn Fn() -> bool,
+    mut read: Read,
+    reload_endpoint: Reload,
+) -> Result<(Job, String)>
+where
+    Read: FnMut(&str) -> Result<Job>,
+    Reload: Fn() -> Result<Option<String>>,
+{
     let started = Instant::now();
     let deadline = started + budget;
     let mut backoff = DAEMON_TERMINAL_WAIT_INITIAL_BACKOFF;
-    let job = loop {
+    loop {
         if cancelled() {
             return Err(daemon_terminal_wait_cancelled_error(runner_job_id));
         }
-        let (job, refreshed_endpoint) = fetch_daemon_job_resilient_with_endpoint_reload(
-            &client,
-            &endpoint,
-            runner_job_id,
-            || refreshed_daemon_endpoint(runner_id),
-        )?;
-        endpoint = refreshed_endpoint;
-        if job.status.is_terminal() {
-            break job;
-        }
+        let interval = match read(&endpoint) {
+            Ok(job) if job.status.is_terminal() => return Ok((job, endpoint)),
+            Ok(_) => {
+                let interval = backoff;
+                backoff = backoff
+                    .saturating_mul(2)
+                    .min(DAEMON_TERMINAL_WAIT_MAX_BACKOFF);
+                interval
+            }
+            Err(error) if daemon_poll_transport_was_lost(&error) => {
+                if Instant::now() >= deadline {
+                    let mut surfaced = error;
+                    surfaced.retryable = Some(true);
+                    return Err(surfaced.with_hint(format!(
+                        "Lost contact with the runner daemon while polling job `{runner_job_id}` until the {:.0}s budget ran out; the remote job may still be in flight. Reconnect with `homeboy runner connect <runner-id>` and inspect `homeboy runner job logs <runner-id> {runner_job_id}`.",
+                        budget.as_secs_f64()
+                    )));
+                }
+                match reload_endpoint() {
+                    Ok(Some(refreshed)) => endpoint = refreshed,
+                    Ok(None) => {}
+                    Err(reload_error) if reattach_failure_is_transient(&reload_error) => {}
+                    Err(reload_error) => return Err(reload_error),
+                }
+                DAEMON_POLL_RETRY_BACKOFF
+            }
+            Err(error) => return Err(error),
+        };
         let now = Instant::now();
         if now >= deadline {
             return Err(daemon_terminal_wait_deadline_error(
@@ -1779,16 +1829,18 @@ pub(crate) fn observe_daemon_job_until_terminal(
         // Never sleep past the deadline, and never sleep longer than the
         // cancellation slice in one go, so growing backoff cannot delay a
         // cancellation response.
-        let interval = backoff.min(deadline - now);
-        if sleep_daemon_wait_unless_cancelled(interval, cancelled) {
+        if sleep_daemon_wait_unless_cancelled(interval.min(deadline - now), cancelled) {
             return Err(daemon_terminal_wait_cancelled_error(runner_job_id));
         }
-        backoff = backoff
-            .saturating_mul(2)
-            .min(DAEMON_TERMINAL_WAIT_MAX_BACKOFF);
-    };
-    let events = fetch_daemon_events(&client, &endpoint, runner_job_id)?;
-    Ok(DaemonTerminalObservation { job, events })
+    }
+}
+
+/// Whether a failed observation only lost sight of the job, so the job may
+/// still be running on the runner. Running out of the wait budget is not a
+/// lost observation: the job overran.
+pub(crate) fn daemon_observation_was_lost(error: &Error) -> bool {
+    reattach_failure_is_transient(error)
+        && error.details.get("daemon_terminal_wait_timeout").is_none()
 }
 
 /// Resolve the daemon endpoint an observation starts from.

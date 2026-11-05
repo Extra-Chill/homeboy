@@ -3433,6 +3433,7 @@ mod restart_recovery;
 mod service;
 mod session_store;
 mod transport;
+pub(crate) use transport::no_current_daemon_session_error;
 
 #[cfg(test)]
 pub(crate) use remote_daemon::parse_json_from_mixed_stdout;
