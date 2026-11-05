@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.445.3] - 2026-11-05
+
+### Fixed
+- scope monorepo lint gates to changed components
+
 ## [0.445.2] - 2026-11-04
 
 ### Fixed
