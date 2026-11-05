@@ -143,7 +143,7 @@ enum DaemonCommand {
         #[arg(long)]
         replacement_operation_id: Option<String>,
     },
-    /// Run the local daemon in the foreground
+    /// Run the local daemon in this process (what a service manager runs)
     Serve {
         /// Local bind address. Defaults to an OS-selected loopback port.
         #[arg(long, default_value = daemon::DEFAULT_ADDR)]
@@ -288,6 +288,8 @@ pub struct DaemonPlanOutput {
 pub enum DaemonOutput {
     Plan(DaemonPlanOutput),
     Start(DaemonStartResult),
+    /// `daemon start` found a daemon its service manager owns and did nothing.
+    ServiceManaged(DaemonServiceManagedOutput),
     EnsureRunning(DaemonStartResult),
     Recover(DaemonRecoverOutput),
     AdoptOrphan(DaemonOrphanAdoptionResult),
@@ -303,6 +305,42 @@ pub enum DaemonOutput {
     JobsShow(DaemonJobsShowOutput),
     JobsWatch(DaemonJobsWatchOutput),
     JobsPrune(DaemonJobsPruneOutput),
+}
+
+#[derive(Debug, Serialize)]
+pub struct DaemonServiceManagedOutput {
+    pub service_manager: daemon::DaemonServiceManager,
+    pub pid: u32,
+    pub lease_id: String,
+    pub address: String,
+    pub fresh: bool,
+    pub message: String,
+}
+
+/// A live daemon its service manager owns is never started beside or replaced
+/// by `daemon start`; report the owner instead (#17387).
+fn service_managed_start(status: &DaemonStatus) -> Option<DaemonServiceManagedOutput> {
+    let manager = status.service_manager()?;
+    let state = status.state.as_ref()?;
+    let message = if status.admits_work() {
+        format!(
+            "service manager {} owns the running daemon; nothing was started",
+            manager.as_str()
+        )
+    } else {
+        format!(
+            "service manager {} owns the running daemon, which is stale; nothing was started. Run `homeboy daemon ensure-running` to restart it through the manager",
+            manager.as_str()
+        )
+    };
+    Some(DaemonServiceManagedOutput {
+        service_manager: manager,
+        pid: state.pid,
+        lease_id: state.lease_id.clone(),
+        address: state.address.clone(),
+        fresh: status.admits_work(),
+        message,
+    })
 }
 
 #[derive(Debug, Serialize)]
@@ -405,6 +443,10 @@ pub struct DaemonArtifactGetOutput {
 pub fn run(args: DaemonArgs) -> CmdResult<DaemonOutput> {
     match args.command {
         DaemonCommand::Start { addr } => {
+            let status = daemon::read_status()?;
+            if let Some(owned) = service_managed_start(&status) {
+                return Ok((DaemonOutput::ServiceManaged(owned), 0));
+            }
             Ok((DaemonOutput::Start(daemon::start_background(&addr)?), 0))
         }
         DaemonCommand::EnsureRunning {
@@ -526,10 +568,7 @@ pub fn run(args: DaemonArgs) -> CmdResult<DaemonOutput> {
             if let Some(state_dir) = state_dir {
                 std::env::set_var(homeboy::core::paths::DAEMON_STATE_DIR_ENV, state_dir);
             }
-            // A supervised child (token forwarded) keeps the supervisor's
-            // existing lifecycle. Only a foreground serve owned by an external
-            // supervisor needs its own graceful SIGTERM handling (#15436).
-            serve(&addr, startup_token.is_none())
+            serve(&addr)
         }
         DaemonCommand::Supervise {
             addr,
@@ -883,7 +922,9 @@ fn bounded_status_projection(status: &DaemonStatus) -> Value {
             "active_build": status.freshness.daemon_build_identity.as_deref().map(bounded_text),
             "active_version": status.freshness.daemon_version.as_deref().map(bounded_text),
             "desired_build": bounded_text(&homeboy::core::build_identity::current().display),
+            "service_manager": status.service_manager(),
         },
+        "competing_serve_pids": status.competing_serve_pids(),
         "recovery": {
             "stale_reason_code": status.freshness.stale_reason_code,
             "restartable": status.freshness.restartable,
@@ -1312,7 +1353,7 @@ fn artifact_get(args: DaemonArtifactGetArgs) -> CmdResult<DaemonOutput> {
     ))
 }
 
-fn serve(addr: &str, foreground: bool) -> CmdResult<DaemonOutput> {
+fn serve(addr: &str) -> CmdResult<DaemonOutput> {
     register_daemon_controller_job_providers();
     let parsed = daemon::parse_bind_addr(addr)?;
     if !is_runner_hosted_daemon() {
@@ -1330,16 +1371,12 @@ fn serve(addr: &str, foreground: bool) -> CmdResult<DaemonOutput> {
             homeboy::core::log_status!("update", "Could not start release prefetch: {}", error);
         }
     }
-    let state = if foreground {
-        let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        // SIGINT (Ctrl-C) and SIGTERM (supervisor stop) both request a
-        // graceful drain: finish owned responses, release the lease (#15436).
-        homeboy::core::process::install_shutdown_handler(shutdown.clone(), "daemon")?;
-        homeboy::core::process::install_terminate_handler(shutdown.clone())?;
-        daemon::serve_with_analysis_runner_and_shutdown(parsed, CommandAnalysisJobRunner, shutdown)?
-    } else {
-        daemon::serve_with_analysis_runner(parsed, CommandAnalysisJobRunner)?
-    };
+    let shutdown = install_drain_handlers()?;
+    let state = daemon::serve_with_analysis_runner_and_shutdown(
+        parsed,
+        CommandAnalysisJobRunner,
+        shutdown,
+    )?;
     Ok((
         DaemonOutput::Serve(DaemonStartResult {
             pid: state.pid,
@@ -1349,6 +1386,17 @@ fn serve(addr: &str, foreground: bool) -> CmdResult<DaemonOutput> {
         }),
         0,
     ))
+}
+
+/// Every `daemon serve`, supervised or run by a service manager, drains on
+/// SIGINT (Ctrl-C) and SIGTERM (a supervisor or service-manager stop): it
+/// finishes owned responses and releases its lease (#15436, #17387).
+fn install_drain_handlers() -> homeboy::core::Result<std::sync::Arc<std::sync::atomic::AtomicBool>>
+{
+    let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    homeboy::core::process::install_shutdown_handler(shutdown.clone(), "daemon")?;
+    homeboy::core::process::install_terminate_handler(shutdown.clone())?;
+    Ok(shutdown)
 }
 
 fn is_runner_hosted_daemon() -> bool {

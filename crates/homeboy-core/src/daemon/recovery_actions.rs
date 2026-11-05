@@ -290,6 +290,26 @@ pub fn plan_recovery(status: &DaemonStatus) -> DaemonRecoveryPlan {
 
 fn plan_recovery_steps(status: &DaemonStatus) -> DaemonRecoveryPlan {
     let freshness = &status.freshness;
+    // A second daemon process competing with the live lease for this store is
+    // a conflict however healthy the lease looks (#17387): nothing is started
+    // or replaced until one of them is gone.
+    let competing = status.competing_serve_pids();
+    if !competing.is_empty() {
+        let pids = competing
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        return DaemonRecoveryPlan::diagnose(
+            format!(
+                "daemon serve process(es) {pids} compete with the live lease for this store; stop the one its service manager does not own"
+            ),
+            |reason| Plan::Blocked {
+                cause: BlockCause::UnleasedProcess,
+                reason,
+            },
+        );
+    }
     if freshness.fresh && freshness.stale_reason_code.is_none() {
         return DaemonRecoveryPlan::nothing(
             "daemon lease is fresh; there is nothing to recover".to_string(),
