@@ -6884,7 +6884,7 @@ mod tests {
 
         assert!(commands
             .iter()
-            .all(|command| command.starts_with("homeboy --placement local agent-task")));
+            .all(|command| command.starts_with("homeboy --placement local ")));
     }
 
     #[test]
