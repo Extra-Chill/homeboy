@@ -197,7 +197,7 @@ impl RunsArgs {
 pub fn run(args: RunsArgs) -> CmdResult<RunsOutput> {
     // Durable events must not depend on opening the observation store.
     if let RunsCommand::Logs(args) = args.command {
-        return super::logs(args).map(|(events, code)| (RunsOutput::Logs(events), code));
+        return super::logs(args).map(|(events, code)| (RunsOutput::Cook(events), code));
     }
     // Boundary: one `homeboy runs` invocation is one unit of work, so the
     // observation store is opened exactly once here and handed to the handlers
@@ -233,13 +233,29 @@ pub fn run(args: RunsArgs) -> CmdResult<RunsOutput> {
         RunsCommand::Evidence {
             run_id,
             full,
+            kind,
+            task,
+            failure_only,
             field,
             proof,
             dossier,
             json: _,
             presentation: _,
         } => {
-            let (output, exit_code) = evidence::project(&store, &run_id, full, proof, dossier)?;
+            let (output, exit_code) = if proof || dossier {
+                evidence::project(&store, &run_id, full, proof, dossier)?
+            } else {
+                evidence::evidence_from_args(
+                    &store,
+                    super::cook::EvidenceArgs {
+                        run_id,
+                        full,
+                        kind,
+                        task,
+                        failure_only,
+                    },
+                )?
+            };
             if field.is_empty() {
                 Ok((output, exit_code))
             } else {
@@ -315,7 +331,7 @@ mod presentation_tests {
         let page =
             serde_json::json!({"schema": "homeboy/control-plane-event-page/v1", "events": []});
         assert_eq!(
-            serde_json::to_value(super::RunsOutput::Logs(page.clone())).unwrap(),
+            serde_json::to_value(super::RunsOutput::Cook(page.clone())).unwrap(),
             page,
         );
     }

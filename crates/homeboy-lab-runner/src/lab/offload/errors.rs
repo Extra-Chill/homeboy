@@ -239,7 +239,7 @@ pub(crate) fn in_flight_daemon_disconnect_outcome(
         "retrieval_commands": {
             "status": format!("homeboy agent-task status {run_id}"),
             "logs": format!("homeboy runs logs {run_id}"),
-            "artifacts": format!("homeboy agent-task artifacts {run_id}"),
+            "artifacts": format!("homeboy runs artifacts {run_id}"),
             "runner_job_logs": format!("homeboy runner job logs {runner_id} {job_id} --follow")
         }
     });
@@ -258,7 +258,7 @@ pub(crate) fn in_flight_daemon_disconnect_outcome(
     stderr.push_str(&format!("Reason: {reason}\n"));
     stderr.push_str(&format!("Next: homeboy agent-task status {run_id}\n"));
     stderr.push_str(&format!("Next: homeboy runs logs {run_id}\n"));
-    stderr.push_str(&format!("Next: homeboy agent-task artifacts {run_id}\n"));
+    stderr.push_str(&format!("Next: homeboy runs artifacts {run_id}\n"));
     stderr.push_str(&format!(
         "Runner job: homeboy runner job logs {runner_id} {job_id} --follow\n"
     ));

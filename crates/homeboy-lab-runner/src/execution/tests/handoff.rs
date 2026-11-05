@@ -1485,8 +1485,7 @@ fn detached_handoff_output_includes_runner_job_and_agent_task_followups() {
             .next_commands
             .iter()
             .any(|command| command.label == "run_artifacts"
-                && command.command
-                    == ["homeboy", "agent-task", "artifacts", "agent-task-run-6454"]));
+                && command.command == ["homeboy", "runs", "artifacts", "agent-task-run-6454"]));
         assert_eq!(
             envelope.durable_run_id.as_deref(),
             Some("agent-task-run-6454")
@@ -1517,7 +1516,7 @@ fn detached_handoff_output_includes_runner_job_and_agent_task_followups() {
         );
         assert_eq!(
             json["run_location_index"]["follow_commands"]["artifacts"],
-            "homeboy agent-task artifacts agent-task-run-6454"
+            "homeboy runs artifacts agent-task-run-6454"
         );
         assert_eq!(json["evidence"]["runner_id"], "lab");
         assert_eq!(json["evidence"]["runner_job_id"], job_id);

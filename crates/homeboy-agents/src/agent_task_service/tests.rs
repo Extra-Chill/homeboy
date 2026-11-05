@@ -2378,7 +2378,7 @@ fn discovery_lists_durable_runs_with_operator_commands() {
         assert!(run
             .commands
             .artifacts
-            .ends_with("agent-task artifacts run-discovery-list"));
+            .ends_with("runs artifacts run-discovery-list"));
         assert!(run
             .commands
             .review

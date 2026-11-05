@@ -1434,7 +1434,7 @@ fn discovery_run(
         commands: AgentTaskDiscoveryCommands {
             status: format!("{command_prefix} status {run_id}"),
             logs: format!("{homeboy_prefix} runs logs {run_id}"),
-            artifacts: format!("{command_prefix} artifacts {run_id}"),
+            artifacts: format!("{homeboy_prefix} runs artifacts {run_id}"),
             review: format!("{command_prefix} review {run_id}"),
             retry: format!("{command_prefix} retry {run_id} --run"),
             run_plan: format!(

@@ -16,7 +16,7 @@ homeboy runs hotspots --coverage <run-id>... [--limit <count>]
 homeboy runs hotspots --baseline-run <run-id> --candidate-run <run-id> [--limit <count>]
 homeboy runs logs <run-id> [--cursor <cursor>]
 homeboy runs show <run-id> [--format json|--json]
-homeboy runs evidence <run-id> [--proof|--dossier] [--full] [--format json|--json] [-q <jsonpath>...]
+homeboy runs evidence <run-id> [--proof|--dossier] [--full] [--kind <kind>] [--task <task-id>] [--failure-only] [--format json|--json] [-q <jsonpath>...]
 homeboy runs artifacts <run-id> [--runner <runner-id>] [--pull] [--pull-dir <dir>] [--limit <count>] [--offset <count>] [--full]
 homeboy runs refs [--kind bench] [--component <id>] [--rig <id>] [--status <status>] [--since 24h] [--artifact-kind <kind>] [--aggregate-artifact-kind <kind>]
 homeboy runs artifact attach <run-id> --runner <runner-id> --path <runner-path> --name <artifact-name>
@@ -46,6 +46,8 @@ homeboy runs report failure-digest --output-dir <dir> --results <json>
 ### Failure digest
 
 `homeboy runs report failure-digest --output-dir <dir> --results <json>` renders a Markdown failure digest from Homeboy command output JSON files and prints it directly.
+
+`homeboy runs artifacts` and `homeboy runs evidence` also accept durable agent-task mission and attempt IDs. Mission IDs select the current Cook candidate using the lifecycle resolver. These reads use lifecycle-owned artifacts and evidence (not observation-store copies), preserve the Cook payload schemas, and include `source: "agent_task_lifecycle"`. Use `artifacts --show <artifact-id> [--tail <lines>]` for artifact contents; `evidence --kind <kind>`, `--task <task-id>`, and `--failure-only` select Cook evidence. `--full` disables the bounded collection preview. Non-agent-task run projections are unchanged.
 
 `homeboy runs list` reads only the local observation store by default. Pass `--include-active-runner-jobs` to also append active jobs from connected runner daemons, which may inspect runner sessions. `homeboy runs list --runner <runner-id>` queries a connected runner daemon instead of the local observation store, preserving the normal `runs.list` JSON payload while returning evidence from the runner machine. For benchmark records, `--scenario <id>` filters to runs whose stored metadata includes that scenario.
 

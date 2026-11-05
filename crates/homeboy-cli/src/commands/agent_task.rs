@@ -35,11 +35,11 @@ pub use args::{
     AcceptArgs, ActiveArgs, AdoptArgs, AgentTaskArgs, AgentTaskAuthArgs, AgentTaskAuthCommand,
     AgentTaskBatchPrepareArgs, AgentTaskCapacityArgs, AgentTaskCommand, AgentTaskCookArgs,
     AgentTaskDoctorArgs, AgentTaskFanoutArgs, AgentTaskFanoutCommand, AgentTaskFanoutCookBatchArgs,
-    CancelArgs, ContractArgs, ContractFormat, CookFeedbackArgs, DiagnoseArgs, EvidenceArgs,
-    FinalizePrArgs, GateFeedbackArgs, ListArgs, PlacementUpdateArgs, PromoteArgs,
-    PromotionProviderArgs, ProvidersArgs, QuarantineArgs, RearmArgs, RecoverArgs,
-    ReplayProviderBoundaryArgs, RetainedArtifactsArgs, RetainedArtifactsCommand, RetryArgs,
-    ReviewArgs, RunPlanArgs, StatusArgs, ValidatePlanArgs, VerifyGateArgs,
+    CancelArgs, ContractArgs, ContractFormat, CookFeedbackArgs, DiagnoseArgs, FinalizePrArgs,
+    GateFeedbackArgs, ListArgs, PlacementUpdateArgs, PromoteArgs, PromotionProviderArgs,
+    ProvidersArgs, QuarantineArgs, RearmArgs, RecoverArgs, ReplayProviderBoundaryArgs,
+    RetainedArtifactsArgs, RetainedArtifactsCommand, RetryArgs, ReviewArgs, RunPlanArgs,
+    StatusArgs, ValidatePlanArgs, VerifyGateArgs,
 };
 
 /// Shallow-merge rotation route overrides over the materialized base config,
@@ -112,7 +112,7 @@ fn cook_progress_message(phase: &str, cook_id: Option<&str>, run_id: Option<&str
     };
     match run_id {
         Some(run_id) => format!(
-            "Cook {phase}: durable run `{run_id}`. Follow: `homeboy agent-task status {run_id} --watch`. Status: `homeboy agent-task status {run_id}`. Evidence: `homeboy agent-task evidence {run_id} --full`."
+            "Cook {phase}: durable run `{run_id}`. Follow: `homeboy agent-task status {run_id} --watch`. Status: `homeboy agent-task status {run_id}`. Evidence: `homeboy runs evidence {run_id} --full`."
         ),
         None => format!("Cook {phase}{identity}."),
     }
@@ -385,9 +385,7 @@ pub(crate) fn run_with_cook_progress_and_provenance(
             }
         }
         AgentTaskCommand::Reconcile(args) => status::reconcile_run(args),
-        AgentTaskCommand::Artifacts(status_args) => status::artifacts(status_args),
         AgentTaskCommand::RetainedArtifacts(args) => retained_artifacts::run(args),
-        AgentTaskCommand::Evidence(evidence_args) => status::evidence(evidence_args),
         AgentTaskCommand::Diagnose(diagnose_args) => status::diagnose(diagnose_args),
         AgentTaskCommand::ReplayProviderBoundary(replay_args) => {
             status::replay_provider_boundary(replay_args)
@@ -549,7 +547,7 @@ mod progress_tests {
         let message = cook_progress_message("provider_ready", None, Some("run-123"));
         assert!(message.contains("agent-task status run-123"));
         assert!(message.contains("agent-task status run-123 --watch"));
-        assert!(message.contains("agent-task evidence run-123 --full"));
+        assert!(message.contains("runs evidence run-123 --full"));
     }
 
     #[test]
@@ -880,7 +878,7 @@ mod output_projection_tests {
                     "raw_events": vec![json!({ "body": "event".repeat(512) }); 100],
                 },
             }],
-            "next_commands": ["homeboy agent-task evidence run-diagnosis --full"],
+            "next_commands": ["homeboy runs evidence run-diagnosis --full"],
         });
         let full = value.clone();
 
@@ -895,7 +893,7 @@ mod output_projection_tests {
             .starts_with("[omitted"));
         assert_eq!(
             value["next_commands"][0],
-            "homeboy agent-task evidence run-diagnosis --full"
+            "homeboy runs evidence run-diagnosis --full"
         );
         assert_eq!(
             full["hydrated_evidence"][0]["content"]["body"]

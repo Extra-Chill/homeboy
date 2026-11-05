@@ -103,6 +103,17 @@ pub fn evidence(run_id: &str) -> CmdResult<RunsOutput> {
     Ok((RunsOutput::Evidence(Box::new(report)), 0))
 }
 
+pub(crate) fn evidence_from_args(
+    store: &ObservationStore,
+    args: super::cook::EvidenceArgs,
+) -> CmdResult<RunsOutput> {
+    if super::cook::owns(&args.run_id)? {
+        return crate::commands::agent_task::status::evidence(args)
+            .map(|(value, code)| (RunsOutput::Cook(value), code));
+    }
+    evidence_projection(store, &args.run_id, args.full)
+}
+
 /// Render the full core report or a bounded CLI projection without changing the
 /// reusable report schema used by non-CLI consumers.
 pub(crate) fn evidence_projection(

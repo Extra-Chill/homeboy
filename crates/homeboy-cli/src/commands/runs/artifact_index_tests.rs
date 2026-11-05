@@ -236,6 +236,8 @@ fn runs_artifacts_pages_large_inventory_and_filters_before_rendering() {
         let (output, _) = handlers::artifacts_from_args(
             &test_store(),
             RunsArtifactsArgs {
+                show: None,
+                tail: None,
                 run_id: run.id.clone(),
                 runner: None,
                 pull: false,
@@ -266,6 +268,8 @@ fn runs_artifacts_pages_large_inventory_and_filters_before_rendering() {
         let (output, _) = handlers::artifacts_from_args(
             &test_store(),
             RunsArtifactsArgs {
+                show: None,
+                tail: None,
                 run_id: run.id,
                 runner: None,
                 pull: false,

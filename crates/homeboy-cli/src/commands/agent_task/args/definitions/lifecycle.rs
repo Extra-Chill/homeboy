@@ -31,21 +31,6 @@ pub struct ValidatePlanArgs {
     pub plan: String,
 }
 #[derive(Args, Debug)]
-pub struct LifecycleReadArgs {
-    /// Durable run or Cook ID to inspect.
-    pub run_id: String,
-    /// Return complete lifecycle details instead of the bounded summary.
-    #[arg(long)]
-    pub full: bool,
-    /// Display the contents of a specific artifact by id.
-    #[arg(long, value_name = "ARTIFACT_ID", conflicts_with = "full")]
-    pub show: Option<String>,
-    /// Display only the final N lines of the selected artifact.
-    #[arg(long, value_name = "N", requires = "show")]
-    pub tail: Option<usize>,
-}
-
-#[derive(Args, Debug)]
 pub struct ResumeArgs {
     /// Durable run or Cook ID to resume.
     pub run_id: String,
@@ -108,23 +93,6 @@ pub struct StatusArgs {
     pub timeout: String,
 }
 
-#[derive(Args, Debug)]
-pub struct EvidenceArgs {
-    /// Durable run or Cook ID whose evidence to retrieve.
-    pub run_id: String,
-    /// Restrict results to this evidence kind.
-    #[arg(long = "kind", value_name = "KIND")]
-    pub kind: Option<String>,
-    /// Restrict results to this task ID.
-    #[arg(long = "task", value_name = "TASK_ID")]
-    pub task: Option<String>,
-    /// Return only evidence associated with failures.
-    #[arg(long = "failure-only")]
-    pub failure_only: bool,
-    /// Return every matching evidence record rather than the bounded preview.
-    #[arg(long)]
-    pub full: bool,
-}
 #[derive(Args, Debug)]
 pub struct DiagnoseArgs {
     /// Durable run or Cook ID to diagnose.
@@ -344,10 +312,34 @@ mod tests {
     }
 
     #[test]
+    fn runs_evidence_accepts_cook_selectors() {
+        assert!(Cli::try_parse_from([
+            "homeboy",
+            "runs",
+            "evidence",
+            "agent-task-123-attempt-1",
+            "--kind",
+            "executor-result",
+            "--task",
+            "task-a",
+            "--failure-only",
+            "--full",
+        ])
+        .is_ok());
+    }
+
+    #[test]
+    fn removed_cook_read_verbs_are_rejected() {
+        for verb in ["artifacts", "evidence"] {
+            assert!(Cli::try_parse_from(["homeboy", "agent-task", verb, "run-a"]).is_err());
+        }
+    }
+
+    #[test]
     fn artifacts_can_show_a_selected_artifact_and_tail_its_lines() {
         let cli = Cli::try_parse_from([
             "homeboy",
-            "agent-task",
+            "runs",
             "artifacts",
             "run-a",
             "--show",
@@ -356,23 +348,10 @@ mod tests {
             "12",
         ])
         .expect("artifact show and tail parse");
-        let Commands::AgentTask(agent_task) = cli.command else {
-            panic!("agent-task")
-        };
-        let AgentTaskCommand::Artifacts(args) = agent_task.command else {
-            panic!("artifacts")
-        };
-        assert_eq!(args.show.as_deref(), Some("transcript"));
-        assert_eq!(args.tail, Some(12));
-        assert!(Cli::try_parse_from([
-            "homeboy",
-            "agent-task",
-            "artifacts",
-            "run-a",
-            "--tail",
-            "12"
-        ])
-        .is_err());
+        assert!(matches!(cli.command, Commands::Runs(_)));
+        assert!(
+            Cli::try_parse_from(["homeboy", "runs", "artifacts", "run-a", "--tail", "12"]).is_err()
+        );
     }
 
     #[test]

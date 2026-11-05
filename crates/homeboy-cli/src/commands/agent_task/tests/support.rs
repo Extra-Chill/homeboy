@@ -3,13 +3,15 @@
 //! Re-exports the command surface and fixtures so each concern submodule can
 //! `use super::support::*` and stay focused on a single behavioral area.
 
+pub(in crate::commands::agent_task) use crate::commands::runs::cook::EvidenceArgs;
 pub(crate) use crate::commands::runs::{logs, RunsLogsArgs};
+
 pub(crate) use std::process::Command;
 
 pub(in crate::commands::agent_task) use super::super::args::ReconcileArgs;
 pub(in crate::commands::agent_task) use super::super::args::{
-    AgentTaskCookArgs, DiagnoseArgs, EvidenceArgs, ReplayProviderBoundaryArgs, ResumeArgs,
-    ReviewArgs, RunArgs, StatusArgs, ValidatePlanArgs,
+    AgentTaskCookArgs, DiagnoseArgs, ReplayProviderBoundaryArgs, ResumeArgs, ReviewArgs, RunArgs,
+    StatusArgs, ValidatePlanArgs,
 };
 pub(in crate::commands::agent_task) use super::super::run::CookContinueArgs;
 pub(in crate::commands::agent_task) use super::super::run::{

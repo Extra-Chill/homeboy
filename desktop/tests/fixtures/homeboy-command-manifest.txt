@@ -7,7 +7,6 @@ agent-task accept
 agent-task active
 agent-task active-scope
 agent-task adopt
-agent-task artifacts
 agent-task auth
 agent-task auth map-env
 agent-task auth map-keychain-bundle
@@ -25,7 +24,6 @@ agent-task cook-continue
 agent-task cook-feedback
 agent-task diagnose
 agent-task doctor
-agent-task evidence
 agent-task fanout
 agent-task fanout cook-batch
 agent-task finalize-pr

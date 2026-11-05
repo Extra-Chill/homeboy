@@ -1051,7 +1051,7 @@ fn foreground_local_cook_survives_client_termination_with_artifacts() {
         .and_then(serde_json::Value::as_str)
         .expect("completed run id");
     let mut artifacts = context.command(TestBinary::HomeboyFixture);
-    artifacts.args(["agent-task", "artifacts", completed_run_id]);
+    artifacts.args(["runs", "artifacts", completed_run_id]);
     let artifacts = bounded_output(artifacts);
     assert!(
         artifacts.status.success()

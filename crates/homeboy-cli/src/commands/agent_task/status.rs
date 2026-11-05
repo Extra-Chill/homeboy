@@ -5,6 +5,7 @@
 //! references, and a prominent risk-flag section (#4398). The full verbose
 //! payload is available behind `--full`.
 
+use crate::commands::runs::cook::{EvidenceArgs, LifecycleReadArgs};
 use homeboy_engine_primitives::content_hash;
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -31,8 +32,8 @@ use homeboy_lab_contract::lab::transport_failure::LabTransportAttemptReceipt;
 
 use super::super::CmdResult;
 use super::args::{
-    ActiveArgs, CancelArgs, DiagnoseArgs, EvidenceArgs, LifecycleReadArgs, ListArgs,
-    QuarantineArgs, RearmArgs, ReconcileArgs, ReplayProviderBoundaryArgs, StatusArgs,
+    ActiveArgs, CancelArgs, DiagnoseArgs, ListArgs, QuarantineArgs, RearmArgs, ReconcileArgs,
+    ReplayProviderBoundaryArgs, StatusArgs,
 };
 use super::candidate::classify_candidates;
 use crate::commands::utils::response::{
@@ -163,7 +164,7 @@ pub(crate) fn bounded_full_operation_report(value: Value, operation: &str) -> Va
         })
         .cloned()
         .unwrap_or(Value::Null);
-    let evidence_command = format!("homeboy agent-task evidence {} --full", quote_arg(run_id));
+    let evidence_command = format!("homeboy runs evidence {} --full", quote_arg(run_id));
     let mut evidence_refs = stable_evidence_refs(&value);
     if evidence_refs.is_empty() {
         evidence_refs.push(json!({
@@ -390,7 +391,7 @@ fn compact_control_plane_status(value: Value) -> Value {
     let next_action = if next_action.len() <= COMPACT_TEXT_LIMIT {
         next_action
     } else {
-        "homeboy agent-task evidence <run-id>".to_string()
+        "homeboy runs evidence <run-id>".to_string()
     };
     let next_action_name = next_action
         .split_whitespace()
@@ -687,7 +688,7 @@ mod compact_status_tests {
         assert_eq!(compact["evidence_refs"].as_array().unwrap().len(), 1);
         assert_eq!(
             compact["next_action"]["command"],
-            "homeboy agent-task evidence retry-1"
+            "homeboy runs evidence retry-1"
         );
         assert_eq!(compact["action_eligibility"]["available_action_count"], 0);
         assert_eq!(
@@ -719,7 +720,7 @@ mod compact_status_tests {
         assert_eq!(oversized["blocker"]["code"], "provider.failed");
         assert!(oversized
             .to_string()
-            .contains("homeboy agent-task evidence durable-oversized-fixture"));
+            .contains("homeboy runs evidence durable-oversized-fixture"));
 
         let retryable = compact_control_plane_status(json!({
             "run": "retry-eligible",
@@ -749,7 +750,7 @@ mod compact_status_tests {
         }));
         assert_eq!(
             needs_input["next_action"]["command"],
-            "homeboy agent-task evidence candidate-run"
+            "homeboy runs evidence candidate-run"
         );
         assert_eq!(
             needs_input["action_eligibility"]["actions"]
@@ -2211,25 +2212,28 @@ fn preserve_controller_owner_placement_with_prefix(
     }
 }
 
-pub(super) fn artifacts(args: LifecycleReadArgs) -> CmdResult<Value> {
+pub(crate) fn artifacts(mut args: LifecycleReadArgs) -> CmdResult<Value> {
+    let target = resolve_cook_reader_target(&args.run_id, false)?;
+    args.run_id = target.run_id;
     if let Some(artifact_id) = args.show.as_deref() {
         return show_artifact(&args.run_id, artifact_id, args.tail);
     }
     let artifacts = agent_task_service::artifacts(&args.run_id)?;
     let mut value = serde_json::to_value(artifacts).unwrap_or(Value::Null);
-    if !false {
+    if !args.full {
         attach_collection_budget(
             &mut value,
             "artifacts",
+            &format!("homeboy runs artifacts {} --full", quote_arg(&args.run_id)),
             &format!(
-                "homeboy agent-task artifacts {} --full",
-                quote_arg(&args.run_id)
-            ),
-            &format!(
-                "homeboy agent-task artifacts {} --full --output <path>",
+                "homeboy runs artifacts {} --full --output <path>",
                 quote_arg(&args.run_id)
             ),
         );
+    }
+    value["source"] = json!("agent_task_lifecycle");
+    if let Some(selection) = target.selection {
+        value["candidate_selection"] = json!(selection);
     }
     preserve_controller_owner_placement(&mut value, &args.run_id);
     Ok((value, 0))
@@ -2315,7 +2319,7 @@ fn show_artifact(run_id: &str, artifact_id: &str, tail: Option<usize>) -> CmdRes
         content = tail_lines(&content, lines);
     }
     Ok((
-        json!({"schema":"homeboy/agent-task-artifact-content/v1", "run_id":run_id, "artifact_id":artifact_id, "content":content}),
+        json!({"schema":"homeboy/agent-task-artifact-content/v1", "source":"agent_task_lifecycle", "run_id":run_id, "artifact_id":artifact_id, "content":content}),
         0,
     ))
 }
@@ -2341,7 +2345,7 @@ mod artifact_content_tests {
     }
 }
 
-pub(super) fn evidence(args: EvidenceArgs) -> CmdResult<Value> {
+pub(crate) fn evidence(args: EvidenceArgs) -> CmdResult<Value> {
     let target = resolve_cook_reader_target(&args.run_id, false)?;
     let run_id = &target.run_id;
     let durable_read = agent_task_lifecycle::durable_local_read(run_id)?;
@@ -2408,17 +2412,15 @@ pub(super) fn evidence(args: EvidenceArgs) -> CmdResult<Value> {
     if let Some(selection) = target.selection {
         value["candidate_selection"] = json!(selection);
     }
+    value["source"] = json!("agent_task_lifecycle");
     attach_durable_read_availability(&mut value, &durable_read.unavailable_sources);
     if !args.full {
         attach_collection_budget(
             &mut value,
             "evidence",
+            &format!("homeboy runs evidence {} --full", quote_arg(&args.run_id)),
             &format!(
-                "homeboy agent-task evidence {} --full",
-                quote_arg(&args.run_id)
-            ),
-            &format!(
-                "homeboy agent-task evidence {} --full --output <path>",
+                "homeboy runs evidence {} --full --output <path>",
                 quote_arg(&args.run_id)
             ),
         );
@@ -2935,7 +2937,7 @@ fn classification_next_actions(
     let task = quote_arg(&failure.task_id);
     let failure_evidence = CommandNextAction::new(
         format!("show failure evidence for {}", failure.task_id),
-        format!("homeboy agent-task evidence {run} --task {task} --failure-only"),
+        format!("homeboy runs evidence {run} --task {task} --failure-only"),
     )
     .with_kind(CommandNextActionKind::Show);
     let retry = retry_action.cloned();
@@ -3102,7 +3104,7 @@ fn classification_next_actions(
                 review,
                 CommandNextAction::new(
                     "list the artifacts the run produced",
-                    format!("homeboy agent-task artifacts {run} --full"),
+                    format!("homeboy runs artifacts {run} --full"),
                 )
                 .with_kind(CommandNextActionKind::Artifacts),
             ];
@@ -3167,7 +3169,7 @@ fn missing_artifact_next_actions(
     let run = quote_arg(run_id);
     let mut actions = vec![CommandNextAction::new(
         "list the artifacts the run actually produced",
-        format!("homeboy agent-task artifacts {run} --full"),
+        format!("homeboy runs artifacts {run} --full"),
     )
     .with_kind(CommandNextActionKind::Artifacts)];
     for entry in missing_artifacts.iter().take(COMPACT_REF_LIMIT) {
@@ -3199,7 +3201,7 @@ fn missing_artifact_next_actions(
         actions.push(
             CommandNextAction::new(
                 format!("show failure evidence for {task_id}"),
-                format!("homeboy agent-task evidence {run} --task {task} --failure-only"),
+                format!("homeboy runs evidence {run} --task {task} --failure-only"),
             )
             .with_kind(CommandNextActionKind::Show),
         );
@@ -3222,7 +3224,7 @@ fn generic_diagnose_next_actions(
         .with_kind(CommandNextActionKind::Show),
         CommandNextAction::new(
             "list the artifacts the run produced",
-            format!("homeboy agent-task artifacts {run}"),
+            format!("homeboy runs artifacts {run}"),
         )
         .with_kind(CommandNextActionKind::Artifacts),
         CommandNextAction::new("review run", format!("homeboy agent-task review {run}"))
@@ -3808,7 +3810,7 @@ mod diagnose_actionable_tests {
         assert_eq!(
             commands(&actions),
             vec![
-                "homeboy agent-task evidence run-1 --task task-a --failure-only",
+                "homeboy runs evidence run-1 --task task-a --failure-only",
                 "homeboy agent-task providers",
                 "homeboy --placement local agent-task retry run-1 --run",
             ]
@@ -3827,7 +3829,7 @@ mod diagnose_actionable_tests {
             commands(&actions),
             vec![
                 "homeboy --placement local agent-task retry run-1 --run",
-                "homeboy agent-task evidence run-1 --task task-a --failure-only",
+                "homeboy runs evidence run-1 --task task-a --failure-only",
             ]
         );
     }
@@ -3839,7 +3841,7 @@ mod diagnose_actionable_tests {
         assert_eq!(
             commands(&actions),
             vec![
-                "homeboy agent-task evidence run-1 --task task-a --failure-only",
+                "homeboy runs evidence run-1 --task task-a --failure-only",
                 "homeboy agent-task review run-1",
                 "homeboy --placement local agent-task retry run-1 --run",
             ]
@@ -3856,7 +3858,7 @@ mod diagnose_actionable_tests {
                 "homeboy agent-task reconcile run-1 --dry-run",
                 "homeboy runner status homeboy-lab",
                 "homeboy runner doctor homeboy-lab --scope lab-offload --repair",
-                "homeboy agent-task evidence run-1 --task task-a --failure-only",
+                "homeboy runs evidence run-1 --task task-a --failure-only",
                 "homeboy --placement local agent-task retry run-1 --run",
             ]
         );
@@ -3886,7 +3888,7 @@ mod diagnose_actionable_tests {
         assert_eq!(
             commands(&actions),
             vec![
-                "homeboy agent-task evidence run-1 --task task-a --failure-only",
+                "homeboy runs evidence run-1 --task task-a --failure-only",
                 "homeboy agent-task providers",
                 "homeboy --placement local agent-task retry run-1 --run",
             ]
@@ -3900,7 +3902,7 @@ mod diagnose_actionable_tests {
         assert_eq!(
             commands(&actions),
             vec![
-                "homeboy agent-task evidence run-1 --task task-a --failure-only",
+                "homeboy runs evidence run-1 --task task-a --failure-only",
                 "homeboy agent-task status run-1",
             ]
         );
@@ -3917,7 +3919,7 @@ mod diagnose_actionable_tests {
         assert_eq!(
             commands(&actions),
             vec![
-                "homeboy agent-task evidence run-1 --task task-a --failure-only",
+                "homeboy runs evidence run-1 --task task-a --failure-only",
                 "homeboy agent-task providers --full",
                 "homeboy agent-task doctor --runner homeboy-lab",
                 "homeboy agent-task doctor --runner homeboy-lab --repair",
@@ -3936,7 +3938,7 @@ mod diagnose_actionable_tests {
         assert_eq!(
             commands(&actions),
             vec![
-                "homeboy agent-task evidence run-1 --task task-a --failure-only",
+                "homeboy runs evidence run-1 --task task-a --failure-only",
                 "homeboy agent-task replay-provider-boundary run-1 --task task-a",
             ]
         );
@@ -3960,7 +3962,7 @@ mod diagnose_actionable_tests {
         assert_eq!(basis, DIAGNOSE_ACTION_BASIS_DIAGNOSIS);
         assert_eq!(
             commands(&actions),
-            vec!["homeboy agent-task evidence run-1 --task task-a --failure-only"]
+            vec!["homeboy runs evidence run-1 --task task-a --failure-only"]
         );
     }
 
@@ -3971,9 +3973,9 @@ mod diagnose_actionable_tests {
         assert_eq!(
             commands(&actions),
             vec![
-                "homeboy agent-task evidence run-1 --task task-a --failure-only",
+                "homeboy runs evidence run-1 --task task-a --failure-only",
                 "homeboy agent-task review run-1",
-                "homeboy agent-task artifacts run-1 --full",
+                "homeboy runs artifacts run-1 --full",
                 "homeboy --placement local agent-task retry run-1 --run",
             ]
         );
@@ -3996,7 +3998,7 @@ mod diagnose_actionable_tests {
             commands(&actions),
             vec![
                 "homeboy agent-task status run-1",
-                "homeboy agent-task artifacts run-1",
+                "homeboy runs artifacts run-1",
                 "homeboy agent-task review run-1",
             ]
         );
@@ -4024,9 +4026,9 @@ mod diagnose_actionable_tests {
         assert_eq!(
             commands(&actions),
             vec![
-                "homeboy agent-task artifacts run-1 --full",
+                "homeboy runs artifacts run-1 --full",
                 "homeboy agent-task replay-provider-boundary run-1 --task task-b",
-                "homeboy agent-task evidence run-1 --task task-b --failure-only",
+                "homeboy runs evidence run-1 --task task-b --failure-only",
             ]
         );
         assert!(actions[1].label.contains("concept_packet, design_packet"));
@@ -4051,14 +4053,14 @@ mod diagnose_actionable_tests {
             commands
                 .iter()
                 .filter(|command| **command
-                    == "homeboy agent-task evidence run-1 --task task-a --failure-only")
+                    == "homeboy runs evidence run-1 --task task-a --failure-only")
                 .count(),
             1
         );
         assert_eq!(
             commands
                 .iter()
-                .filter(|command| **command == "homeboy agent-task artifacts run-1 --full")
+                .filter(|command| **command == "homeboy runs artifacts run-1 --full")
                 .count(),
             1
         );
@@ -4085,7 +4087,7 @@ mod diagnose_actionable_tests {
         assert_eq!(
             commands(&actions),
             vec![
-                "homeboy agent-task evidence 'run with spaces' --task 'task with spaces' --failure-only",
+                "homeboy runs evidence 'run with spaces' --task 'task with spaces' --failure-only",
                 "homeboy agent-task replay-provider-boundary 'run with spaces' --task 'task with spaces'",
             ]
         );
@@ -5084,7 +5086,7 @@ pub(crate) fn compact_aggregate_summary(
     if let Some(run_id) = run_id {
         summary["run_id"] = json!(run_id);
         summary["full_command"] = json!(format!("homeboy agent-task status {run_id}"));
-        summary["evidence_command"] = json!(format!("homeboy agent-task evidence {run_id}"));
+        summary["evidence_command"] = json!(format!("homeboy runs evidence {run_id}"));
     }
     enforce_compact_status_budget(summary)
 }
@@ -5365,7 +5367,7 @@ pub(crate) fn compact_cook_report(value: Value, full: bool) -> Value {
     }
     if let Some(run_id) = latest_run_id {
         summary["full_command"] = json!(format!("homeboy agent-task status {run_id}"));
-        summary["evidence_command"] = json!(format!("homeboy agent-task evidence {run_id}"));
+        summary["evidence_command"] = json!(format!("homeboy runs evidence {run_id}"));
     }
     for field in ["provider", "remaining_phases", "continuation_command"] {
         if let Some(value) = value.get(field) {
@@ -6306,7 +6308,7 @@ fn diagnose_next_commands(
     }
     let mut commands = vec![
         format!("homeboy {owner} agent-task diagnose {run_id} --full"),
-        format!("homeboy {owner} agent-task artifacts {run_id}"),
+        format!("homeboy {owner} runs artifacts {run_id}"),
         format!("homeboy {owner} agent-task review {run_id}"),
     ];
     commands.extend(
@@ -6337,7 +6339,7 @@ mod tests {
         assert_eq!(compact.as_array().unwrap().len(), 3);
         assert_eq!(compact_duplicate_count(Some(&repeated_retry_fixture)), 2);
         // Full evidence remains available from the unmodified source through
-        // `agent-task artifacts`; compacting is a presentation-only projection.
+        // `runs artifacts`; compacting is a presentation-only projection.
         assert_eq!(repeated_retry_fixture.as_array().unwrap().len(), 5);
         assert_eq!(compact[0]["id"], "transcript-1");
         assert_eq!(compact[1]["id"], "patch-1");

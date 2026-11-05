@@ -338,7 +338,7 @@ impl LabRunnerHandoffEnvelope {
                     label: "run_artifacts".to_string(),
                     command: vec![
                         "homeboy".to_string(),
-                        "agent-task".to_string(),
+                        "runs".to_string(),
                         "artifacts".to_string(),
                         run_id.clone(),
                     ],
@@ -358,7 +358,7 @@ impl LabRunnerHandoffEnvelope {
                 .map(|run_id| format!("homeboy runs logs {run_id}")),
             artifacts: actionable_run_id
                 .as_ref()
-                .map(|run_id| format!("homeboy agent-task artifacts {run_id}")),
+                .map(|run_id| format!("homeboy runs artifacts {run_id}")),
         };
         let run_location_index = RunLocationIndex {
             schema: RUN_LOCATION_INDEX_SCHEMA.to_string(),

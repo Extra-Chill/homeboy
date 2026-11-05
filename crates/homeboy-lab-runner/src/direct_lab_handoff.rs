@@ -103,7 +103,7 @@ impl DirectLabHandoffReceipt {
             // the status, cancellation, and evidence authority.
             status_command: format!("homeboy agent-task status {}", envelope.run_id),
             cancel_command: format!("homeboy agent-task cancel {}", envelope.run_id),
-            evidence_command: format!("homeboy agent-task evidence {} --full", envelope.run_id),
+            evidence_command: format!("homeboy runs evidence {} --full", envelope.run_id),
         }
     }
 
@@ -243,10 +243,7 @@ mod tests {
         assert_eq!(first.controller_projection, "deferred");
         assert_eq!(first.status_command, "homeboy agent-task status run-1");
         assert_eq!(first.cancel_command, "homeboy agent-task cancel run-1");
-        assert_eq!(
-            first.evidence_command,
-            "homeboy agent-task evidence run-1 --full"
-        );
+        assert_eq!(first.evidence_command, "homeboy runs evidence run-1 --full");
     }
 
     #[test]

@@ -30,7 +30,7 @@ fn deferred_staging_emits_only_durable_run_commands() {
                 controller_projection: "deferred".to_string(),
                 status_command: "homeboy agent-task status run-1".to_string(),
                 cancel_command: "homeboy agent-task cancel run-1".to_string(),
-                evidence_command: "homeboy agent-task evidence run-1 --full".to_string(),
+                evidence_command: "homeboy runs evidence run-1 --full".to_string(),
             },
             artifacts: crate::runner_staging_operation::RunnerStagingArtifacts {
                 lifecycle_id: "staging-run-1".to_string(),

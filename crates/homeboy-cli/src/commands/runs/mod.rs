@@ -17,6 +17,7 @@ mod bundle;
 mod bundle_import_tests;
 mod common;
 mod compare;
+pub(crate) mod cook;
 #[cfg(test)]
 mod corpus_tests;
 mod dispatch;

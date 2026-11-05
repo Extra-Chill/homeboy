@@ -906,7 +906,7 @@ fn controller_local_lifecycle_reads_never_acquire_a_default_lab_runner() {
         ["homeboy", "agent-task", "status", OWNER_LOCAL_RUN_ID].as_slice(),
         ["homeboy", "runs", "logs", OWNER_LOCAL_RUN_ID].as_slice(),
         ["homeboy", "agent-task", "diagnose", OWNER_LOCAL_RUN_ID].as_slice(),
-        ["homeboy", "agent-task", "evidence", OWNER_LOCAL_RUN_ID].as_slice(),
+        ["homeboy", "runs", "evidence", OWNER_LOCAL_RUN_ID].as_slice(),
     ] {
         assert_eq!(
             route_runner_for(args, &inferred),
@@ -935,7 +935,7 @@ fn controller_local_record_owns_lifecycle_reads_and_cook_retries_before_lab_sele
         for args in [
             ["homeboy", "agent-task", "status", OWNER_LOCAL_RUN_ID].as_slice(),
             ["homeboy", "runs", "logs", OWNER_LOCAL_RUN_ID].as_slice(),
-            ["homeboy", "agent-task", "evidence", OWNER_LOCAL_RUN_ID].as_slice(),
+            ["homeboy", "runs", "evidence", OWNER_LOCAL_RUN_ID].as_slice(),
             ["homeboy", "agent-task", "diagnose", OWNER_LOCAL_RUN_ID].as_slice(),
             ["homeboy", "agent-task", "review", OWNER_LOCAL_RUN_ID].as_slice(),
             ["homeboy", "agent-task", "reconcile", OWNER_LOCAL_RUN_ID].as_slice(),
@@ -1027,7 +1027,7 @@ fn every_generated_next_action_command_round_trips_to_the_record_owner() {
         format!("homeboy runs logs {OWNER_LOCAL_RUN_ID}"),
         format!("homeboy agent-task diagnose {OWNER_LOCAL_RUN_ID}"),
         format!("homeboy agent-task diagnose {OWNER_LOCAL_RUN_ID} --full"),
-        format!("homeboy agent-task evidence {OWNER_LOCAL_RUN_ID}"),
+        format!("homeboy runs evidence {OWNER_LOCAL_RUN_ID}"),
     ] {
         let args: Vec<&str> = generated.split_whitespace().collect();
         assert_eq!(
