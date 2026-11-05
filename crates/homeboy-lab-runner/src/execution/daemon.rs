@@ -1919,7 +1919,7 @@ pub(super) fn daemon_poll_transport_was_lost(error: &Error) -> bool {
             .details
             .pointer("/daemon_transport_error/kind")
             .and_then(Value::as_str),
-        Some("connect" | "timeout" | "body_decode")
+        Some("connect" | "timeout" | "request" | "body_decode")
     )
 }
 

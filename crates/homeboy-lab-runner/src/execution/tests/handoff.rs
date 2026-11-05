@@ -2137,6 +2137,34 @@ fn daemon_polling_keeps_its_grace_window_when_a_reattach_waits_out_a_contended_r
 }
 
 #[test]
+fn daemon_polling_retries_a_request_the_daemon_dropped_without_responding() {
+    // A pooled connection the daemon closes mid-request fails `send()` with no
+    // response. That is a lost transport, not an authoritative answer, so the
+    // poll retries it inside its grace window instead of ending the Cook.
+    let job = running_job();
+    let job_id = job.id.to_string();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+    let endpoint = format!("http://{}", listener.local_addr().expect("address"));
+    let server = std::thread::spawn(move || {
+        let (mut dropped, _) = listener.accept().expect("dropped request");
+        let mut request = [0; 4096];
+        let _ = std::io::Read::read(&mut dropped, &mut request).expect("read request");
+        drop(dropped);
+        serve_one_job_poll(listener, job)
+            .join()
+            .expect("served poll");
+    });
+    let client = Client::builder().no_proxy().build().expect("client");
+
+    let (fetched, _) =
+        fetch_daemon_job_resilient_with_endpoint_reload(&client, &endpoint, &job_id, || Ok(None))
+            .expect("a dropped request must not end the poll grace window");
+
+    assert_eq!(fetched.id.to_string(), job_id);
+    server.join().expect("server");
+}
+
+#[test]
 fn daemon_polling_returns_an_authoritative_reattach_refusal_immediately() {
     let stale_endpoint = closed_endpoint();
     let job_id = running_job().id.to_string();
