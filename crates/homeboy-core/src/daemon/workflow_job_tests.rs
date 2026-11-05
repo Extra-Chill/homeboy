@@ -199,6 +199,112 @@ fn resume_reuses_only_unchanged_succeeded_dependency_chains() {
 }
 
 #[test]
+fn workflow_history_survives_unrelated_terminal_byte_budget_churn() {
+    with_isolated_home(|home| {
+        let path = home.path().join(crate::paths::OBSERVATION_DB_FILENAME);
+        let store = JobStore::open_without_reconciliation(&path)
+            .unwrap()
+            .with_daemon_lease("workflow-retention-test".to_string());
+        let original = request(
+            json!({
+                "schema": "homeboy/workflow/v1", "id": "retained",
+                "steps": [{"id": "a", "exec": sh("echo done")}]
+            }),
+            home.path(),
+        );
+        let job = admit(&store, &original);
+        crate::daemon::start_controller_job(job, &store).unwrap();
+        assert_eq!(wait_terminal(&store, job, 30).status, JobStatus::Succeeded);
+
+        // Each unrelated result exceeds the default 1 MiB budget. Multiple
+        // completions must evict old jobs, never the workflow checkpoint.
+        let mut first = None;
+        for _ in 0..3 {
+            let unrelated = store.create("unrelated");
+            first.get_or_insert(unrelated.id);
+            store.start(unrelated.id).unwrap();
+            store
+                .complete(
+                    unrelated.id,
+                    Some(json!({"payload": "x".repeat(1_100_000)})),
+                )
+                .unwrap();
+        }
+        assert!(store.get(first.unwrap()).is_err());
+        drop(store);
+        let store = JobStore::open_without_reconciliation(&path)
+            .unwrap()
+            .with_daemon_lease("workflow-retention-test".to_string());
+        assert_eq!(
+            workflow_status(&store, &original.instance).unwrap()["status"],
+            "succeeded"
+        );
+
+        let mut resumed = original.clone();
+        resumed.resumed_from = Some(original.instance.clone());
+        resumed.instance = resumed.definition.instance_id_with_resume(
+            &resumed.inputs,
+            None,
+            resumed.resumed_from.as_deref(),
+        );
+        let job = admit(&store, &resumed);
+        crate::daemon::start_controller_job(job, &store).unwrap();
+        assert_eq!(wait_terminal(&store, job, 30).status, JobStatus::Succeeded);
+        assert_eq!(
+            workflow_status(&store, &resumed.instance).unwrap()["steps"]["a"]["reused"],
+            true
+        );
+    });
+}
+
+#[test]
+fn workflow_expiry_reports_when_and_persists_a_small_marker() {
+    with_isolated_home(|home| {
+        let path = home.path().join(crate::paths::OBSERVATION_DB_FILENAME);
+        let store = JobStore::open_without_reconciliation(&path)
+            .unwrap()
+            .with_daemon_lease("workflow-expiry-test".to_string());
+        let original = request(
+            json!({
+                "schema": "homeboy/workflow/v1", "id": "expires",
+                "steps": [{"id": "a", "exec": sh("echo done")}]
+            }),
+            home.path(),
+        );
+        let job = admit(&store, &original);
+        crate::daemon::start_controller_job(job, &store).unwrap();
+        let terminal = wait_terminal(&store, job, 30);
+        assert!(workflow_status(&store, &original.instance).is_ok());
+        let mut config = crate::defaults::load_config();
+        config.retention.workflow_instance_days = 0;
+        crate::defaults::save_config(&config).unwrap();
+        // A read enforces the deadline even without a compaction write.
+        let error = workflow_status(&store, &original.instance)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("expired at"), "{error}");
+        assert!(
+            error.contains(&terminal.finished_at_ms.unwrap().to_string()),
+            "{error}"
+        );
+        store.create("trigger-expiry-compaction");
+        drop(store);
+        let store = JobStore::open_without_reconciliation(&path).unwrap();
+        let marker = store.controller_job_state(job).unwrap();
+        assert_eq!(
+            marker.request,
+            json!({"expired_at_ms": terminal.finished_at_ms.unwrap()})
+        );
+        assert!(marker.checkpoint.is_none());
+        assert!(store.events(job).unwrap().is_empty());
+        assert!(workflow_status(&store, &original.instance)
+            .unwrap_err()
+            .to_string()
+            .contains("expired at"));
+    });
+}
+
+#[test]
 fn failed_step_cause_reaches_the_workflow_status() {
     with_isolated_home(|home| {
         let store = JobStore::open_without_reconciliation(

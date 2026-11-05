@@ -111,6 +111,7 @@ rejected on every entry point rather than only on the ones that re-check their
 own arguments.
 
 - `terminal_run_days` — Age threshold before terminal persisted-run artifacts are eligible for cleanup (default: 30). Active and unknown run states remain protected.
+- `workflow_instance_days` — Retain terminal workflow instance records for status and `--resume-from` (default: 7 days from completion). These records are exempt from daemon job count/byte compaction. After the window, status reports the expiry timestamp; subsequent store writes discard the instance payload but retain a small expiry identity marker. Configure with `homeboy config set retention.workflow_instance_days 14`. This does not change artifact retention.
 - `runtime_tmp_days` — Age threshold for Homeboy runtime temporary entries (default: 7).
 - `runtime_run_max_bytes` — Maximum aggregate failed runtime-run evidence retained (default: 1 GiB).
 - `runtime_run_max_count` — Maximum failed runtime-run directories retained (default: 100).

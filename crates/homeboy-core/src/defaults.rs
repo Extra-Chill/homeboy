@@ -211,6 +211,11 @@ pub struct GitHostConfig {
 pub struct RetentionConfig {
     #[serde(default = "default_terminal_run_retention_days")]
     pub terminal_run_days: i64,
+    /// Terminal workflow instance history is age-retained, independently of
+    /// the daemon job count and byte budgets. Expired identities remain small
+    /// markers so status can distinguish expiry from an unknown instance.
+    #[serde(default = "default_workflow_instance_days")]
+    pub workflow_instance_days: u64,
     #[serde(default = "default_runtime_tmp_retention_days")]
     pub runtime_tmp_days: u64,
     #[serde(default = "default_runtime_run_max_bytes")]
@@ -289,6 +294,7 @@ impl Default for RetentionConfig {
     fn default() -> Self {
         Self {
             terminal_run_days: default_terminal_run_retention_days(),
+            workflow_instance_days: default_workflow_instance_days(),
             runtime_tmp_days: default_runtime_tmp_retention_days(),
             runtime_run_max_bytes: default_runtime_run_max_bytes(),
             runtime_run_max_count: default_runtime_run_max_count(),
@@ -312,6 +318,10 @@ impl Default for RetentionConfig {
             cleanup_aggregate_max_seconds: default_cleanup_aggregate_max_seconds(),
         }
     }
+}
+
+fn default_workflow_instance_days() -> u64 {
+    7
 }
 
 fn default_terminal_run_retention_days() -> i64 {

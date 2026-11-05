@@ -272,14 +272,46 @@ pub(super) fn compact_terminal_jobs(
     terminal_job_retention_limit: usize,
     terminal_job_retention_bytes: usize,
 ) -> Option<JobStoreCompactionEvidence> {
+    let now = timestamp_ms();
+    let workflow_retention_ms = crate::defaults::load_config()
+        .retention
+        .workflow_instance_days
+        .saturating_mul(86_400_000);
     for stored in &mut durable.jobs {
+        // Workflow checkpoints carry resume state and approval decisions, not
+        // disposable job history. Keep them outside both compaction budgets.
+        // After expiry keep only an identity marker; do not retain inputs,
+        // definitions, checkpoints or output payloads indefinitely.
+        if stored.job.status.is_terminal() {
+            if let Some(controller) = stored.controller_job.as_mut().filter(|controller| {
+                controller.job_type == crate::daemon::workflow_job::WORKFLOW_JOB_TYPE
+            }) {
+                let expires_at = stored
+                    .job
+                    .finished_at_ms
+                    .unwrap_or(stored.job.updated_at_ms)
+                    .saturating_add(workflow_retention_ms);
+                if now >= expires_at && controller.request.get("expired_at_ms").is_none() {
+                    controller.request = serde_json::json!({"expired_at_ms": expires_at});
+                    controller.public_request = Value::Null;
+                    controller.checkpoint = None;
+                    stored.events.clear();
+                    stored.job.artifacts.clear();
+                }
+            }
+        }
         apply_event_retention(&mut stored.events, event_retention_limit);
         stored.job.event_count = stored.events.len();
     }
     let mut terminal = durable
         .jobs
         .iter()
-        .filter(|stored| stored.job.status.is_terminal())
+        .filter(|stored| {
+            stored.job.status.is_terminal()
+                && !stored.controller_job.as_ref().is_some_and(|controller| {
+                    controller.job_type == crate::daemon::workflow_job::WORKFLOW_JOB_TYPE
+                })
+        })
         .map(|stored| {
             let serialized_len = serde_json::to_vec(stored)
                 .expect("stored daemon job must serialize")
@@ -348,7 +380,11 @@ pub(super) fn compact_terminal_jobs(
         removed_terminal_jobs,
         retained_terminal_jobs,
         retained_terminal_bytes,
-        active_jobs: durable.jobs.len() - retained_terminal_jobs,
+        active_jobs: durable
+            .jobs
+            .iter()
+            .filter(|stored| !stored.job.status.is_terminal())
+            .count(),
     };
     durable.compaction = Some(evidence.clone());
     eprintln!(
