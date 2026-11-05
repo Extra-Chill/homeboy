@@ -12272,6 +12272,83 @@ fn workspace_base_capture_repairs_controller_plan_after_recipe_write_interruptio
 }
 
 #[test]
+fn workspace_base_capture_pins_only_the_base_onto_the_frozen_attempt_plan() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let temp = tempfile::tempdir().expect("temporary repository");
+        let repository = temp.path().join("repository");
+        std::fs::create_dir(&repository).expect("create repository");
+        let git = |args: &[&str]| {
+            assert!(Command::new("git")
+                .args(args)
+                .current_dir(&repository)
+                .status()
+                .expect("run git")
+                .success());
+        };
+        git(&["init", "-b", "main"]);
+        std::fs::write(repository.join("fixture.txt"), "base\n").expect("write base");
+        git(&["add", "fixture.txt"]);
+        git(&[
+            "-c",
+            "user.name=Homeboy Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-m",
+            "base",
+        ]);
+        git(&[
+            "remote",
+            "add",
+            "origin",
+            repository.to_str().expect("repository path"),
+        ]);
+
+        let roots = homeboy_core::paths::PathRoots::from_environment().expect("isolated roots");
+        let store = CookRecipeStore::new(roots.clone());
+        let lifecycle_store = AgentTaskLifecycleStore::new(roots);
+        let mut options = batch_cook_options(
+            "cook-base-frozen-attempt",
+            Arc::new(AcceptedDetachedAttemptDispatcher),
+        );
+        options.workspace.source_worktree_path = Some(repository);
+        store
+            .persist_initial_recipe(&options)
+            .expect("persist recipe");
+        materialize_initial_cook_attempt_with_stores(&store, &lifecycle_store, &options)
+            .expect("materialize initial attempt");
+        let frozen = store
+            .load_recipe(&options.identity.cook_id)
+            .unwrap()
+            .attempts[0]
+            .plan
+            .clone();
+        // A re-entered run starts from its materialized continuation plan.
+        options.identity.initial_plan.tasks[0].metadata["cook_provision"] =
+            serde_json::json!({"action": "existing", "provider_identity": "native"});
+
+        pin_and_persist_initial_cook_workspace_base(&store, &lifecycle_store, &mut options)
+            .expect("pin base");
+
+        let pinned = store
+            .load_recipe(&options.identity.cook_id)
+            .unwrap()
+            .attempts[0]
+            .plan
+            .clone();
+        let mut expected = frozen;
+        expected.metadata["cook_workspace_base"] =
+            options.identity.initial_plan.metadata["cook_workspace_base"].clone();
+        assert!(expected.metadata["cook_workspace_base"]["sha"].is_string());
+        assert_eq!(
+            serde_json::to_value(&pinned).unwrap(),
+            serde_json::to_value(&expected).unwrap(),
+            "base capture must not rewrite the frozen work"
+        );
+    });
+}
+
+#[test]
 fn recipe_only_initial_attempt_recovers_once_without_provider_dispatch() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let cook_id = "cook-recipe-only-initial";
