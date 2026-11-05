@@ -348,7 +348,7 @@ fn is_failure_status(status: AgentTaskOutcomeStatus) -> bool {
 /// runtime_id,runtime_status}, refs{logs,transcripts,artifact_bundles,...}}`.
 ///
 /// Before this fix a FAILED run-result could be preserved verbatim while
-/// homeboy surfaced nothing actionable — `agent-task logs/artifacts/review`
+/// homeboy surfaced nothing actionable — `runs logs/artifacts/review`
 /// showed only the generic "agent task failed" summary even though the
 /// run-result carried (or conspicuously lacked) provider error codes, a run /
 /// runtime id, and log / transcript refs.

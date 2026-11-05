@@ -121,11 +121,14 @@ pub(crate) fn route_after_parse_with_provenance(
     }
 
     if let (Some(runner_id), Commands::Runs(args)) = (cli.runner.as_deref(), &cli.command) {
-        if !is_runs_list_runner_option(normalized_args) && !args.has_command_local_runner_option() {
-            return Err(crate::commands::runs::global_runner_error(args, runner_id));
+        if args.logs_run_id().is_none() {
+            if !is_runs_list_runner_option(normalized_args)
+                && !args.has_command_local_runner_option()
+            {
+                return Err(crate::commands::runs::global_runner_error(args, runner_id));
+            }
+            return Ok(None);
         }
-
-        return Ok(None);
     }
 
     if is_command_local_runner_option(&cli.command) {
@@ -4917,6 +4920,12 @@ fn unscoped_provider_discovery_is_controller_local(cli: &Cli) -> bool {
 fn controller_owns_agent_task_lifecycle_command(cli: &Cli) -> homeboy::core::Result<bool> {
     use crate::commands::agent_task::AgentTaskCommand;
 
+    if let Commands::Runs(args) = &cli.command {
+        if let Some(run_id) = args.logs_run_id() {
+            let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+            return agent_task_lifecycle::run_record_exists_resolved_in_store(&store, run_id);
+        }
+    }
     let Commands::AgentTask(agent_task) = &cli.command else {
         return Ok(false);
     };
@@ -4931,7 +4940,6 @@ fn controller_owns_agent_task_lifecycle_command(cli: &Cli) -> homeboy::core::Res
             Some(&args.run_id)
         }
         AgentTaskCommand::Status(args) => Some(&args.run_id),
-        AgentTaskCommand::Logs(args) => Some(&args.run_id),
         AgentTaskCommand::Evidence(args) => Some(&args.run_id),
         AgentTaskCommand::Diagnose(args) => Some(&args.run_id),
         AgentTaskCommand::Review(args) => Some(&args.run_id),

@@ -287,6 +287,7 @@ pub(crate) fn run_command_output(
         }
         Commands::Runs(args) => {
             let operator_output = !homeboy::core::lab_routing::is_lab_offload_subprocess();
+            let summarize_logs = args.logs_run_id().is_some() && operator_output;
             let summarize_show = args.show_summary_eligible() && operator_output;
             let summarize_dossier = args.dossier_summary_eligible() && operator_output;
             let summarize_proof = args.proof_summary_eligible() && operator_output;
@@ -299,6 +300,11 @@ pub(crate) fn run_command_output(
                         super::runs_summary::render_runs_field_selection(payload)
                     {
                         Some(rendered)
+                    } else if summarize_logs {
+                        render_agent_task_summary(
+                            super::agent_task_summary::AgentTaskSummaryKind::Logs,
+                            payload,
+                        )
                     } else if summarize_show {
                         super::runs_summary::render_runs_show_summary(payload)
                     } else if summarize_dossier {

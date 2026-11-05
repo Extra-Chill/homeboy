@@ -18,6 +18,13 @@ use super::{
 };
 
 impl RunsArgs {
+    pub(crate) fn logs_run_id(&self) -> Option<&str> {
+        match &self.command {
+            RunsCommand::Logs(args) => Some(&args.run_id),
+            _ => None,
+        }
+    }
+
     /// Whether this is a `runs show <id>` invocation eligible for the
     /// compact human summary (i.e. the caller asked for neither `--json`
     /// nor `--format json`).
@@ -188,6 +195,10 @@ impl RunsArgs {
 }
 
 pub fn run(args: RunsArgs) -> CmdResult<RunsOutput> {
+    // Durable events must not depend on opening the observation store.
+    if let RunsCommand::Logs(args) = args.command {
+        return super::logs(args).map(|(events, code)| (RunsOutput::Logs(events), code));
+    }
     // Boundary: one `homeboy runs` invocation is one unit of work, so the
     // observation store is opened exactly once here and handed to the handlers
     // below. Each of those used to open its own, which made a single command
@@ -195,6 +206,7 @@ pub fn run(args: RunsArgs) -> CmdResult<RunsOutput> {
     let roots = PathRoots::from_environment()?;
     let store = ObservationStore::open_initialized_in_roots(&roots)?;
     match args.command {
+        RunsCommand::Logs(_) => unreachable!("durable logs dispatched before opening the store"),
         RunsCommand::List(args) => handlers::list_runs(&store, args, "runs.list"),
         RunsCommand::Distribution(args) => {
             distribution::runs_distribution(&store, args, "runs.distribution")
@@ -289,6 +301,23 @@ mod presentation_tests {
         RunsCli::try_parse_from(args)
             .expect("runs args should parse")
             .runs
+    }
+
+    #[test]
+    fn logs_preserves_cursor_and_canonical_payload() {
+        let args = parse(&["runs", "logs", "run-1", "--cursor", "event-page-2"]);
+        let super::RunsCommand::Logs(logs) = args.command else {
+            panic!("expected logs");
+        };
+        assert_eq!(logs.run_id, "run-1");
+        assert_eq!(logs.cursor.as_deref(), Some("event-page-2"));
+        assert!(RunsCli::try_parse_from(["runs", "logs", "run-1", "--limit", "10"]).is_err());
+        let page =
+            serde_json::json!({"schema": "homeboy/control-plane-event-page/v1", "events": []});
+        assert_eq!(
+            serde_json::to_value(super::RunsOutput::Logs(page.clone())).unwrap(),
+            page,
+        );
     }
 
     #[test]

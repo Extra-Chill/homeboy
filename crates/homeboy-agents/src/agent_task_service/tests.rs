@@ -2374,10 +2374,7 @@ fn discovery_lists_durable_runs_with_operator_commands() {
             .commands
             .status
             .ends_with("agent-task status run-discovery-list"));
-        assert!(run
-            .commands
-            .logs
-            .ends_with("agent-task logs run-discovery-list"));
+        assert!(run.commands.logs.ends_with("runs logs run-discovery-list"));
         assert!(run
             .commands
             .artifacts
@@ -4871,7 +4868,7 @@ fn discovery_runner_backed_run_emits_runner_scoped_commands() {
         );
         assert_eq!(
             run.commands.logs,
-            "homeboy runner exec homeboy-lab -- homeboy agent-task logs run-runner-commands"
+            "homeboy runner exec homeboy-lab -- homeboy runs logs run-runner-commands"
         );
         assert_eq!(
             run.commands.review,
@@ -4935,7 +4932,7 @@ fn discovery_keeps_controller_handoff_commands_resolvable_after_runner_reconnect
         );
         assert_eq!(
             run.commands.logs,
-            "homeboy --placement local agent-task logs controller-handoff-reconnect"
+            "homeboy --placement local runs logs controller-handoff-reconnect"
         );
         assert!(agent_task_lifecycle::reconcile_status(&run.run_id).is_ok());
         assert!(agent_task_lifecycle::logs(&run.run_id).is_ok());

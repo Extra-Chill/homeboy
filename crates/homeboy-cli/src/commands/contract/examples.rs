@@ -211,7 +211,7 @@ pub(super) fn lab_runner_handoff_example() -> Value {
             "job_logs": "homeboy runner job logs runner-1 job-1 --follow",
             "job_cancel": "homeboy runner job cancel runner-1 job-1",
             "status": "homeboy agent-task status run-1",
-            "logs": "homeboy agent-task logs run-1",
+            "logs": "homeboy runs logs run-1",
             "artifacts": "homeboy agent-task artifacts run-1"
         }
     })
@@ -235,7 +235,7 @@ pub(super) fn run_location_index_example() -> Value {
             "job_logs": "homeboy runner job logs runner-1 job-1 --follow",
             "job_cancel": "homeboy runner job cancel runner-1 job-1",
             "status": "homeboy agent-task status run-1",
-            "logs": "homeboy agent-task logs run-1",
+            "logs": "homeboy runs logs run-1",
             "artifacts": "homeboy agent-task artifacts run-1"
         }
     })

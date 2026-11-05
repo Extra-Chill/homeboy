@@ -778,7 +778,7 @@ fn provider_timeout_persists_bounded_redacted_last_activity() {
     assert!(diagnostic.data.to_string().contains("[redacted]"));
     assert_eq!(
         diagnostic.data["log_lookup"],
-        json!("homeboy agent-task logs run-timeout-evidence --task task-timeout-evidence")
+        json!("homeboy runs logs run-timeout-evidence")
     );
     assert_eq!(
         diagnostic.data["provider_boundary_evidence"],

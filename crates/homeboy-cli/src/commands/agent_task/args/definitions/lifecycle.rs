@@ -109,14 +109,6 @@ pub struct StatusArgs {
 }
 
 #[derive(Args, Debug)]
-pub struct LogsArgs {
-    /// Durable run or Cook ID whose logs to retrieve.
-    pub run_id: String,
-    /// Resume events after this opaque cursor.
-    #[arg(long, value_name = "CURSOR")]
-    pub cursor: Option<String>,
-}
-#[derive(Args, Debug)]
 pub struct EvidenceArgs {
     /// Durable run or Cook ID whose evidence to retrieve.
     pub run_id: String,

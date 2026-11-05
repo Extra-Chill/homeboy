@@ -31,7 +31,7 @@ use homeboy_lab_contract::lab::transport_failure::LabTransportAttemptReceipt;
 
 use super::super::CmdResult;
 use super::args::{
-    ActiveArgs, CancelArgs, DiagnoseArgs, EvidenceArgs, LifecycleReadArgs, ListArgs, LogsArgs,
+    ActiveArgs, CancelArgs, DiagnoseArgs, EvidenceArgs, LifecycleReadArgs, ListArgs,
     QuarantineArgs, RearmArgs, ReconcileArgs, ReplayProviderBoundaryArgs, StatusArgs,
 };
 use super::candidate::classify_candidates;
@@ -1216,23 +1216,6 @@ fn status_run_state(status: &Value) -> Option<&Value> {
     status.get("state")
 }
 
-pub(super) fn parse_event_cursor(
-    cursor: Option<&str>,
-    field: &'static str,
-) -> homeboy::core::Result<Option<homeboy_control_plane_contract::EventCursor>> {
-    cursor
-        .map(homeboy_control_plane_contract::EventCursor::new)
-        .transpose()
-        .map_err(|error| {
-            homeboy::core::Error::validation_invalid_argument(
-                field,
-                error.to_string(),
-                cursor.map(str::to_string),
-                None,
-            )
-        })
-}
-
 /// Status is a read-only diagnostic. A recipe-only Cook is recoverable through
 /// its exact attempt id, but only `agent-task recover` may materialize that attempt.
 fn recipe_only_status(run_or_cook_id: &str, exact: bool) -> homeboy::core::Result<Option<Value>> {
@@ -2146,7 +2129,7 @@ fn agent_task_ref(run_id: &str) -> CommandAgentTaskRef {
         id: run_id.to_string(),
         source: "homeboy-agent-task-lifecycle".to_string(),
         status_command: format!("homeboy agent-task status {run_id}"),
-        logs_command: format!("homeboy agent-task logs {run_id}"),
+        logs_command: format!("homeboy runs logs {run_id}"),
         review_command: Some(format!("homeboy agent-task review {run_id}")),
     }
 }
@@ -2226,12 +2209,6 @@ fn preserve_controller_owner_placement_with_prefix(
         }
         _ => {}
     }
-}
-
-pub(super) fn logs(args: LogsArgs) -> CmdResult<Value> {
-    let cursor = parse_event_cursor(args.cursor.as_deref(), "cursor")?;
-    let events = agent_task_service_direct::logs_from_cursor(&args.run_id, cursor.as_ref())?;
-    Ok((serde_json::to_value(events).unwrap_or(Value::Null), 0))
 }
 
 pub(super) fn artifacts(args: LifecycleReadArgs) -> CmdResult<Value> {

@@ -77,7 +77,7 @@ pub(crate) fn durable_cook_identity_lines(cook_id: Option<&str>, run_id: &str) -
     vec![
         format!("cook: durable run id `{run_id}`{cook_suffix} — persisted before materialization."),
         format!("cook: status -> homeboy --placement local agent-task status {run_id}"),
-        format!("cook: logs   -> homeboy --placement local agent-task logs {run_id}"),
+        format!("cook: logs   -> homeboy --placement local runs logs {run_id}"),
         format!("cook: cancel -> homeboy --placement local agent-task cancel {run_id}"),
     ]
 }
@@ -5278,7 +5278,7 @@ fn cook_continuation_status(
             "observation_in_progress",
             serde_json::json!({
                 "action": "watch_provider",
-                "command": format!("homeboy agent-task logs {run_id}"),
+                "command": format!("homeboy runs logs {run_id}"),
                 "message": "The runner reports active provider work; follow the durable observation until its terminal result is projected."
             }),
         )
@@ -12033,7 +12033,7 @@ mod tests {
         assert!(lines[0].contains("cook-10419"));
         let joined = lines.join("\n");
         assert!(joined.contains("homeboy --placement local agent-task status cook-10419-attempt-1"));
-        assert!(joined.contains("homeboy --placement local agent-task logs cook-10419-attempt-1"));
+        assert!(joined.contains("homeboy --placement local runs logs cook-10419-attempt-1"));
         assert!(joined.contains("homeboy --placement local agent-task cancel cook-10419-attempt-1"));
     }
 
@@ -12240,7 +12240,7 @@ mod tests {
             assert_eq!(report["guidance"]["action"], "watch_provider");
             assert_eq!(
                 report["guidance"]["command"],
-                "homeboy agent-task logs cook-active-attempt-1"
+                "homeboy runs logs cook-active-attempt-1"
             );
             assert!(report.get("continuation_command").is_none());
         });

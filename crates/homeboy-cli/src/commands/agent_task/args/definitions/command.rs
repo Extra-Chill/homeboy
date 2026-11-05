@@ -20,9 +20,9 @@ use super::cook::{AgentTaskCookArgs, PromotionProviderArgs};
 use super::fanout::{AgentTaskBatchPrepareArgs, AgentTaskFanoutArgs};
 use super::lifecycle::{
     AdoptArgs, CancelArgs, DiagnoseArgs, EvidenceArgs, FinalizePrArgs, GateFeedbackArgs,
-    LifecycleReadArgs, LogsArgs, PlacementUpdateArgs, PromoteArgs, QuarantineArgs, RearmArgs,
-    RecoverArgs, ReplayProviderBoundaryArgs, ResumeArgs, RetryArgs, ReviewArgs, RunArgs,
-    RunPlanArgs, StatusArgs, ValidatePlanArgs,
+    LifecycleReadArgs, PlacementUpdateArgs, PromoteArgs, QuarantineArgs, RearmArgs, RecoverArgs,
+    ReplayProviderBoundaryArgs, ResumeArgs, RetryArgs, ReviewArgs, RunArgs, RunPlanArgs,
+    StatusArgs, ValidatePlanArgs,
 };
 
 pub use super::super::auth::{
@@ -125,8 +125,6 @@ pub enum AgentTaskCommand {
     /// provider state. Success leaves every selected durable record reconciled
     /// to that state.
     Reconcile(ReconcileArgs),
-    /// Read the canonical durable event stream for a run.
-    Logs(LogsArgs),
     /// List artifacts and evidence refs recorded for a completed run.
     Artifacts(LifecycleReadArgs),
     /// Discover or attach selected outputs retained in a terminal Lab Cook workspace.

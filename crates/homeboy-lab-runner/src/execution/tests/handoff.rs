@@ -1542,7 +1542,7 @@ fn detached_handoff_output_includes_runner_job_and_agent_task_followups() {
         );
         assert_eq!(
             json["follow_commands"]["logs"],
-            "homeboy agent-task logs agent-task-run-6454"
+            "homeboy runs logs agent-task-run-6454"
         );
         assert_eq!(
             json["follow_commands"]["job_logs"],

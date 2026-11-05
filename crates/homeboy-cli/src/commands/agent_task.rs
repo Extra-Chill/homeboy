@@ -36,7 +36,7 @@ pub use args::{
     AgentTaskBatchPrepareArgs, AgentTaskCapacityArgs, AgentTaskCommand, AgentTaskCookArgs,
     AgentTaskDoctorArgs, AgentTaskFanoutArgs, AgentTaskFanoutCommand, AgentTaskFanoutCookBatchArgs,
     CancelArgs, ContractArgs, ContractFormat, CookFeedbackArgs, DiagnoseArgs, EvidenceArgs,
-    FinalizePrArgs, GateFeedbackArgs, ListArgs, LogsArgs, PlacementUpdateArgs, PromoteArgs,
+    FinalizePrArgs, GateFeedbackArgs, ListArgs, PlacementUpdateArgs, PromoteArgs,
     PromotionProviderArgs, ProvidersArgs, QuarantineArgs, RearmArgs, RecoverArgs,
     ReplayProviderBoundaryArgs, RetainedArtifactsArgs, RetainedArtifactsCommand, RetryArgs,
     ReviewArgs, RunPlanArgs, StatusArgs, ValidatePlanArgs, VerifyGateArgs,
@@ -385,7 +385,6 @@ pub(crate) fn run_with_cook_progress_and_provenance(
             }
         }
         AgentTaskCommand::Reconcile(args) => status::reconcile_run(args),
-        AgentTaskCommand::Logs(status_args) => status::logs(status_args),
         AgentTaskCommand::Artifacts(status_args) => status::artifacts(status_args),
         AgentTaskCommand::RetainedArtifacts(args) => retained_artifacts::run(args),
         AgentTaskCommand::Evidence(evidence_args) => status::evidence(evidence_args),

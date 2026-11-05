@@ -3396,7 +3396,7 @@ fn review_next_actions(
         ];
     }
     if record.state() == AgentTaskRunState::Running {
-        return vec!["inspect progress with `homeboy agent-task status <run-id>` and `homeboy agent-task logs <run-id>`".to_string()];
+        return vec!["inspect progress with `homeboy agent-task status <run-id>` and `homeboy runs logs <run-id>`".to_string()];
     }
     // The projected single recovery step outranks aggregate-derived actions:
     // it is what `agent-task recover` performs for this state (#15925, #16181).

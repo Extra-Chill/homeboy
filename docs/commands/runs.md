@@ -14,6 +14,7 @@ homeboy runs compare --kind fuzz --from-run <run-id> --to-run <run-id> [--hotspo
 homeboy runs hotspots <run-id>... [--limit <count>]
 homeboy runs hotspots --coverage <run-id>... [--limit <count>]
 homeboy runs hotspots --baseline-run <run-id> --candidate-run <run-id> [--limit <count>]
+homeboy runs logs <run-id> [--cursor <cursor>]
 homeboy runs show <run-id> [--format json|--json]
 homeboy runs evidence <run-id> [--proof|--dossier] [--full] [--format json|--json] [-q <jsonpath>...]
 homeboy runs artifacts <run-id> [--runner <runner-id>] [--pull] [--pull-dir <dir>] [--limit <count>] [--offset <count>] [--full]
@@ -37,6 +38,10 @@ homeboy runs report failure-digest --output-dir <dir> --results <json>
 ## Description
 
 `homeboy runs` is the inspection and maintenance surface for Homeboy's local observation store. Producers such as `bench`, `rig`, and `trace` write run and artifact records; this command lets humans and agents inspect that evidence without opening SQLite directly, export/import portable bundles, render typed report projections, and run explicit cleanup or reconciliation tasks.
+
+### Durable logs
+
+`homeboy runs logs <run-id> [--cursor <cursor>]` reads the canonical durable `ControlPlaneEventPage` through the agent-task service, not the observation store. Run and Cook IDs resolve exactly as in other durable lifecycle reads. Resume with the opaque cursor returned by the page. The command preserves the compact human log summary and the canonical JSON payload; no task filter or limit flag is exposed.
 
 ### Failure digest
 

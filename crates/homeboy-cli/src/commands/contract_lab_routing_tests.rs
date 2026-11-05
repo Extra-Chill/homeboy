@@ -41,7 +41,7 @@ fn trace_observe_stays_local_to_the_observed_target() {
 fn runner_resident_agent_task_reads_are_low_noise_polling() {
     for args in [
         ["homeboy", "agent-task", "status", "agent-task-123"].as_slice(),
-        ["homeboy", "agent-task", "logs", "agent-task-123"].as_slice(),
+        ["homeboy", "runs", "logs", "agent-task-123"].as_slice(),
         ["homeboy", "agent-task", "artifacts", "agent-task-123"].as_slice(),
         ["homeboy", "agent-task", "list"].as_slice(),
         ["homeboy", "agent-task", "active"].as_slice(),

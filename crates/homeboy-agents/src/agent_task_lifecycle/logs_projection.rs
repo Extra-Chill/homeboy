@@ -1,4 +1,4 @@
-//! Canonical ledger projection for `agent-task logs` and control-plane events.
+//! Canonical ledger projection for `runs logs` and control-plane events.
 
 use super::*;
 

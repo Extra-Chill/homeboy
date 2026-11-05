@@ -115,7 +115,7 @@ impl CookOutputLease {
                 "recovery".to_string(),
                 serde_json::json!({
                     "status": format!("homeboy agent-task status {run_id}"),
-                    "logs": format!("homeboy agent-task logs {run_id}"),
+                    "logs": format!("homeboy runs logs {run_id}"),
                     "resume": format!("homeboy agent-task resume {cook_id}"),
                 }),
             );
