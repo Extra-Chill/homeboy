@@ -195,14 +195,15 @@ impl Commands {
                 AGENT_TASK_FANOUT_COOK_BATCH_LAB_LABEL,
                 AGENT_TASK_FANOUT_COORDINATOR_CONTROLLER_REASON,
             ),
+            Commands::Runs(args) if args.cook_reader_id().is_some() => {
+                LabCommandContract::runner_resident_read_polling(AGENT_TASK_STATUS_LAB_LABEL)
+            }
             Commands::AgentTask(agent_task::AgentTaskArgs {
                 command: agent_task::AgentTaskCommand::Run(_),
             }) => LabCommandContract::runner_resident(AGENT_TASK_STATUS_LAB_LABEL),
             Commands::AgentTask(agent_task::AgentTaskArgs {
                 command:
                     agent_task::AgentTaskCommand::Status(_)
-                    | agent_task::AgentTaskCommand::Artifacts(_)
-                    | agent_task::AgentTaskCommand::Evidence(_)
                     | agent_task::AgentTaskCommand::Diagnose(_)
                     | agent_task::AgentTaskCommand::ReplayProviderBoundary(_)
                     | agent_task::AgentTaskCommand::Review(_)

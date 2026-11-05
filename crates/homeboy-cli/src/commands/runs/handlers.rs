@@ -747,6 +747,8 @@ pub fn artifacts(run_id: &str) -> CmdResult<RunsOutput> {
     artifacts_from_args(
         &test_store(),
         RunsArtifactsArgs {
+            show: None,
+            tail: None,
             run_id: run_id.to_string(),
             runner: None,
             pull: false,
@@ -773,6 +775,15 @@ pub(crate) fn artifacts_from_args(
     store: &ObservationStore,
     args: RunsArtifactsArgs,
 ) -> CmdResult<RunsOutput> {
+    if super::cook::owns(&args.run_id)? {
+        return crate::commands::agent_task::status::artifacts(super::cook::LifecycleReadArgs {
+            run_id: args.run_id,
+            full: args.full,
+            show: args.show,
+            tail: args.tail,
+        })
+        .map(|(value, code)| (RunsOutput::Cook(value), code));
+    }
     if let Some(runner_id) = args.runner.as_deref() {
         if args.pull {
             return Err(Error::validation_invalid_argument(
@@ -1701,6 +1712,8 @@ mod pull_tests {
             let result = artifacts_from_args(
                 &test_store(),
                 RunsArtifactsArgs {
+                    show: None,
+                    tail: None,
                     run_id: "run-1".to_string(),
                     runner: Some("lab".to_string()),
                     pull: true,

@@ -109,8 +109,9 @@ const REPRESENTATIVE_INVOCATIONS: &[&[&str]] = &[
     &["agent-task", "list"],
     &["agent-task", "active"],
     &["runs", "logs", "run-1"],
-    &["agent-task", "artifacts", "run-1"],
-    &["agent-task", "evidence", "run-1"],
+    // Only Cook ids route to Lab; observation runs stay controller-local.
+    &["runs", "artifacts", "agent-task-run-1"],
+    &["runs", "evidence", "agent-task-run-1"],
     &["agent-task", "review", "run-1"],
     // Only `--run` executes; the bare form is local retry bookkeeping.
     &["agent-task", "retry", "run-1", "--run"],

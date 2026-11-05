@@ -1513,8 +1513,8 @@ mod tests {
         for args in [
             ["homeboy", "agent-task", "status", "agent-task-123"].as_slice(),
             ["homeboy", "runs", "logs", "agent-task-123"].as_slice(),
-            ["homeboy", "agent-task", "artifacts", "agent-task-123"].as_slice(),
-            ["homeboy", "agent-task", "evidence", "agent-task-123"].as_slice(),
+            ["homeboy", "runs", "artifacts", "agent-task-123"].as_slice(),
+            ["homeboy", "runs", "evidence", "agent-task-123"].as_slice(),
             ["homeboy", "agent-task", "diagnose", "agent-task-123"].as_slice(),
             ["homeboy", "agent-task", "review", "agent-task-123"].as_slice(),
             ["homeboy", "agent-task", "reconcile", "agent-task-123"].as_slice(),

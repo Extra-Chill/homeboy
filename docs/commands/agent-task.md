@@ -60,7 +60,7 @@ A controller publication receipt proving `review_ready` or `draft_published` tak
 Each status `artifacts` entry has a control-plane reference `id`, distinct from an
 artifact-store byte ID. A producer-artifact `uri` retains the exact task and artifact,
 for example `homeboy://agent-task/run/<run-id>/artifacts#task=<task-id>&artifact=<artifact-id>`.
-Use that URI for artifact selection and `agent-task artifacts <run-id>` to inspect
+Use that URI for artifact selection and `runs artifacts <run-id>` to inspect
 the producer's recorded artifact. For byte downloads, obtain the storage-owned
 ID from `runs artifacts <run-id>` and pass it to `runs artifact get`. Unknown
 fragment fields are omitted from status; artifact selection does not preserve
@@ -675,7 +675,7 @@ state with:
 ```bash
 homeboy agent-task status <run-id>
 homeboy runs watch <run-id>
-homeboy agent-task evidence <run-id> --full
+homeboy runs evidence <run-id> --full
 ```
 
 Detaching after handoff is the default. Use `--wait` to observe until terminal
@@ -1013,7 +1013,7 @@ It includes schema ids, provider capability metadata, status/failure enum values
 and default redaction policy metadata without naming or depending on any specific
 executor provider.
 
-`agent-task status`, `runs logs`, and `agent-task artifacts` are read-only durable lifecycle
+`agent-task status`, `runs logs`, and `runs artifacts` are read-only durable lifecycle
 inspection commands. They do not start workloads and are not gated by warm-machine
 resource policy; use `homeboy runner exec <runner> -- homeboy agent-task status
 <run-id>` when the durable state lives on a Lab runner host. `agent-task review`
@@ -1051,7 +1051,7 @@ homeboy agent-task run-plan \
 
 homeboy agent-task status "$run_id"
 homeboy runs logs "$run_id"
-homeboy agent-task artifacts "$run_id"
+homeboy runs artifacts "$run_id"
 homeboy agent-task review "$run_id" \
   --to-worktree "$target_worktree"
 homeboy agent-task promote "$run_id" \
@@ -1350,7 +1350,7 @@ projects that diagnosis into the shared `_homeboy_actionable` envelope (`run`,
 prose. The existing `next_commands` field is unchanged.
 
 The default diagnosis keeps bounded causal excerpts and artifact refs. Use
-`--full`, `agent-task evidence --kind <kind> --full`, or their `--output` forms
+`--full`, `runs evidence --kind <kind> --full`, or their `--output` forms
 to hydrate the complete durable detail explicitly.
 
 `next_action_basis` reports how `next_actions` was produced: `diagnosis` when a
@@ -1367,11 +1367,11 @@ classification or a concrete missing-artifact set mapped to specific commands,
 | `policy_denied` | failure evidence and the full run record. No retry: an identical request is denied identically |
 | `capability_missing` | failure evidence, `agent-task providers --full`, and `agent-task doctor --runner <id>` with its `--repair` form |
 | `invalid_input` | failure evidence and `agent-task replay-provider-boundary` for the rejected input. No retry: the same input fails the same way |
-| `execution_failed` | failure evidence for the failing step (gate/verify, harvest, required typed artifacts), `agent-task review`, `agent-task artifacts --full`, then retry |
+| `execution_failed` | failure evidence for the failing step (gate/verify, harvest, required typed artifacts), `agent-task review`, `runs artifacts --full`, then retry |
 | `unknown` | no specific step is substantiable; the generic fallback set is emitted |
 
 Declared-but-missing artifacts add their own actions regardless of
-classification: `agent-task artifacts --full`, plus a task-scoped
+classification: `runs artifacts --full`, plus a task-scoped
 `agent-task replay-provider-boundary` and failure-evidence command naming the
 artifacts that were not produced. Repair-class actions carry
 `kind: "repair"`; runner-scoped actions are emitted only when the run records a

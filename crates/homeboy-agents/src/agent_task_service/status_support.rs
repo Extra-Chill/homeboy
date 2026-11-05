@@ -95,7 +95,7 @@ pub fn hydrate_evidence_ref(
             bytes_read: None,
             omitted_bytes: None,
             content: json!({
-                "summary": "Evidence ref is recorded but this URI scheme is not hydratable by agent-task evidence yet.",
+                "summary": "Evidence ref is recorded but this URI scheme is not hydratable by runs evidence yet.",
                 "unsupported_ref": evidence_ref.uri,
                 "supported_refs": ["homeboy://agent-task/run/<run-id>/<section>", "file://<absolute-path>", "local filesystem path"],
                 "next_action": "Use a file:// URI or local path for evidence stored on this machine; otherwise inspect the producing provider or artifact store for this ref.",
@@ -270,7 +270,7 @@ fn hydrate_homeboy_evidence_ref(
             persisted_gate_evidence(promotion, gate_id, uri)?
         }
         section => json!({
-            "summary": format!("homeboy agent-task evidence does not hydrate section '{section}' yet"),
+            "summary": format!("homeboy runs evidence does not hydrate section '{section}' yet"),
         }),
     };
 
@@ -470,7 +470,7 @@ fn parse_agent_task_homeboy_uri(uri: &str) -> Result<ParsedAgentTaskUri> {
         .ok_or_else(|| {
             homeboy_core::Error::validation_invalid_argument(
                 "evidence_ref",
-                "unsupported homeboy agent-task evidence ref",
+                "unsupported homeboy runs evidence ref",
                 Some(uri.to_string()),
                 None,
             )
@@ -482,7 +482,7 @@ fn parse_agent_task_homeboy_uri(uri: &str) -> Result<ParsedAgentTaskUri> {
     if run_id.is_empty() || section.is_empty() || parts.next().is_some() {
         return Err(homeboy_core::Error::validation_invalid_argument(
             "evidence_ref",
-            "homeboy agent-task evidence ref must contain exactly a run id and section",
+            "homeboy runs evidence ref must contain exactly a run id and section",
             Some(uri.to_string()),
             None,
         ));
@@ -492,7 +492,7 @@ fn parse_agent_task_homeboy_uri(uri: &str) -> Result<ParsedAgentTaskUri> {
         homeboy_core::execution_contract::decode_uri_component_strict(run_id).ok_or_else(|| {
             homeboy_core::Error::validation_invalid_argument(
                 "evidence_ref",
-                "homeboy agent-task evidence ref has malformed run id encoding",
+                "homeboy runs evidence ref has malformed run id encoding",
                 Some(uri.to_string()),
                 None,
             )
@@ -518,7 +518,7 @@ fn fragment_value(fragment: &str, key: &str, uri: &str) -> Result<Option<String>
                 .ok_or_else(|| {
                     homeboy_core::Error::validation_invalid_argument(
                         "evidence_ref",
-                        "homeboy agent-task evidence ref has malformed fragment encoding",
+                        "homeboy runs evidence ref has malformed fragment encoding",
                         Some(uri.to_string()),
                         None,
                     )

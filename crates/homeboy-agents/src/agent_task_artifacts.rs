@@ -1,4 +1,4 @@
-//! Reviewer-facing projections of agent-task artifacts.
+//! Reviewer-facing projections of durable task artifacts.
 //!
 //! Durable scheduler records retain their local artifact paths for operator
 //! recovery. Every externally serialized projection goes through this module.

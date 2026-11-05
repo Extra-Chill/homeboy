@@ -19,10 +19,9 @@ use super::super::super::tool::AgentTaskToolArgs;
 use super::cook::{AgentTaskCookArgs, PromotionProviderArgs};
 use super::fanout::{AgentTaskBatchPrepareArgs, AgentTaskFanoutArgs};
 use super::lifecycle::{
-    AdoptArgs, CancelArgs, DiagnoseArgs, EvidenceArgs, FinalizePrArgs, GateFeedbackArgs,
-    LifecycleReadArgs, PlacementUpdateArgs, PromoteArgs, QuarantineArgs, RearmArgs, RecoverArgs,
-    ReplayProviderBoundaryArgs, ResumeArgs, RetryArgs, ReviewArgs, RunArgs, RunPlanArgs,
-    StatusArgs, ValidatePlanArgs,
+    AdoptArgs, CancelArgs, DiagnoseArgs, FinalizePrArgs, GateFeedbackArgs, PlacementUpdateArgs,
+    PromoteArgs, QuarantineArgs, RearmArgs, RecoverArgs, ReplayProviderBoundaryArgs, ResumeArgs,
+    RetryArgs, ReviewArgs, RunArgs, RunPlanArgs, StatusArgs, ValidatePlanArgs,
 };
 
 pub use super::super::auth::{
@@ -125,15 +124,8 @@ pub enum AgentTaskCommand {
     /// provider state. Success leaves every selected durable record reconciled
     /// to that state.
     Reconcile(ReconcileArgs),
-    /// List artifacts and evidence refs recorded for a completed run.
-    Artifacts(LifecycleReadArgs),
     /// Discover or attach selected outputs retained in a terminal Lab Cook workspace.
     RetainedArtifacts(RetainedArtifactsArgs),
-    /// Retrieve selected durable evidence recorded for a run.
-    ///
-    /// Narrow the result with `--task` or `--kind`; `--full` returns the
-    /// unprojected evidence.
-    Evidence(EvidenceArgs),
     /// Compute a root cause, causal chain, and next actions for a failed run.
     ///
     /// Next actions are derived from the failure classification, not from prose.

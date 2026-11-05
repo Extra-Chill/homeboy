@@ -184,7 +184,7 @@ impl AgentTaskArtifact {
     }
 }
 
-/// A durable, Homeboy-owned reference to one piece of agent-task evidence.
+/// A durable, Homeboy-owned reference to one piece of durable task evidence.
 ///
 /// `kind` classifies the ref (`runner_job_log`, `run_evidence`,
 /// `artifact_bundle`, ...) so operators can pick the right follow-up without

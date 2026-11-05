@@ -315,7 +315,7 @@ pub(crate) fn artifact_refs_for_outcomes(
 }
 
 /// Returns the first URI candidate that is non-empty after trimming, mirroring
-/// the `url` → `path` precedence used for agent-task artifacts. Empty or
+/// the `url` → `path` precedence used for runs artifacts. Empty or
 /// whitespace-only URIs are treated as unavailable so status output never
 /// surfaces refs with a blank `uri`.
 pub(crate) fn first_non_empty_uri<'a>(

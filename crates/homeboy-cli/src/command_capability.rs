@@ -138,7 +138,7 @@ pub fn classify(args: &[String]) -> CommandCapability {
                 ("runs", "list")
                     | ("daemon", "status")
                     | ("agent-task", "status")
-                    | ("agent-task", "evidence")
+                    | ("runs", "evidence")
                     | ("agent-task", "active")
             ) =>
         {
@@ -214,7 +214,7 @@ mod tests {
             args(&["homeboy", "daemon", "status"]),
             args(&["homeboy", "status", "--all"]),
             args(&["homeboy", "agent-task", "status", "run-1", "--full"]),
-            args(&["homeboy", "agent-task", "evidence", "run-1"]),
+            args(&["homeboy", "runs", "evidence", "run-1"]),
             args(&["homeboy", "agent-task", "active", "--full"]),
         ] {
             assert_eq!(

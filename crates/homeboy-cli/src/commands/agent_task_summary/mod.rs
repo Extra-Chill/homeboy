@@ -714,7 +714,7 @@ pub(crate) fn control_plane_next_action(payload: &Value, run_id: &str) -> String
     {
         return string_value(payload, &["publication", "id"])
             .map(|identity| format!("review the published PR: {identity}"))
-            .unwrap_or_else(|| format!("homeboy agent-task evidence {run_id}"));
+            .unwrap_or_else(|| format!("homeboy runs evidence {run_id}"));
     }
     if string_value(payload, &["blocker", "code"])
         .is_some_and(|code| code.starts_with("resource_guard.") || code.starts_with("outcome."))
@@ -779,7 +779,7 @@ pub(crate) fn control_plane_next_action(payload: &Value, run_id: &str) -> String
         .pointer("/action_eligibility/actions")
         .and_then(Value::as_array)
     else {
-        return format!("homeboy agent-task evidence {run_id}");
+        return format!("homeboy runs evidence {run_id}");
     };
     for name in PREFERRED {
         if actions.iter().any(|action| {
@@ -793,7 +793,7 @@ pub(crate) fn control_plane_next_action(payload: &Value, run_id: &str) -> String
             return format!("homeboy agent-task {name} {run_id}");
         }
     }
-    format!("homeboy agent-task evidence {run_id}")
+    format!("homeboy runs evidence {run_id}")
 }
 
 fn render_logs_summary(payload: &Value) -> Option<String> {
@@ -2285,7 +2285,7 @@ mod tests {
             );
             assert!(summary.contains("Artifacts: 0\n"), "{summary}");
             assert!(
-                summary.contains("Next: homeboy agent-task evidence homeboy-4345\n"),
+                summary.contains("Next: homeboy runs evidence homeboy-4345\n"),
                 "{summary}"
             );
             assert!(!summary.contains("status_scope"), "{summary}");

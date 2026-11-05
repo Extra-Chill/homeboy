@@ -5102,3 +5102,32 @@ fn artifact_refs_dedup_identical_refs_across_artifacts_and_evidence() {
         "exact-duplicate refs collapse to a single entry"
     );
 }
+
+#[test]
+fn record_existence_ignores_observation_runs_of_other_kinds() {
+    // The lifecycle store shares its observation database with every run kind.
+    // `runs artifacts <id>` decides Cook ownership from this check, so a rig or
+    // bench run must not read as a durable agent-task record (#17390).
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let store = crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
+    let rig_run = store
+        .open_observation_initialized()
+        .expect("observation store")
+        .start_run(homeboy_core::observation::NewRunRecord::builder("rig").build())
+        .expect("rig run");
+
+    assert!(!run_record_exists_readonly_in_store(&store, &rig_run.id)
+        .expect("existence check succeeds for a foreign run kind"));
+
+    // An agent-task observation row without a lifecycle snapshot is evidence
+    // storage, not a durable record the lifecycle reader can decode.
+    let bare_agent_task_run = store
+        .open_observation_initialized()
+        .expect("observation store")
+        .start_run(homeboy_core::observation::NewRunRecord::builder("agent-task").build())
+        .expect("bare agent-task run");
+    assert!(
+        !run_record_exists_readonly_in_store(&store, &bare_agent_task_run.id)
+            .expect("existence check succeeds for a bare agent-task row")
+    );
+}

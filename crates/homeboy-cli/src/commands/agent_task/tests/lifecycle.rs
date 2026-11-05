@@ -1020,7 +1020,7 @@ fn status_omits_scope_for_an_ordinary_non_cook_attempt() {
 #[test]
 fn actual_status_command_renders_an_unpromoted_recoverable_candidate() {
     with_isolated_home(|_| {
-        let run_id = "status-unpromoted-recoverable-candidate";
+        let run_id = "agent-task-17390-attempt-1";
         let plan = test_plan();
         agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("submitted");
         let aggregate = AgentTaskAggregate {
@@ -1053,6 +1053,29 @@ fn actual_status_command_renders_an_unpromoted_recoverable_candidate() {
         };
         agent_task_lifecycle::record_run_aggregate(run_id, &plan, &aggregate)
             .expect("persist recoverable aggregate");
+
+        // The observation store has no copy of this lifecycle-owned patch.
+        // The public runs command must still return it for a Cook attempt id.
+        let cli = crate::cli_surface::Cli::try_parse_from([
+            "homeboy",
+            "runs",
+            "artifacts",
+            run_id,
+            "--full",
+        ])
+        .expect("parse runs artifacts");
+        let crate::cli_surface::Commands::Runs(args) = cli.command else {
+            panic!("runs command");
+        };
+        let (output, code) = crate::commands::runs::run(args).expect("runs artifacts");
+        let output = serde_json::to_value(output).expect("artifact payload");
+        assert_eq!(code, 0);
+        assert_eq!(output["source"], "agent_task_lifecycle");
+        assert!(output["artifacts"]
+            .as_array()
+            .expect("lifecycle artifacts")
+            .iter()
+            .any(|artifact| artifact["id"] == "patch"));
 
         let (value, exit_code) = status(StatusArgs {
             run_id: run_id.to_string(),
@@ -4865,7 +4888,7 @@ fn diagnose_derives_next_actions_from_the_failure_classification() {
                 // Diagnose is the evidence-first recovery verb; --full is the
                 // bounded command needed to inspect all retained evidence.
                 format!("homeboy --placement local agent-task diagnose {run_id} --full"),
-                format!("homeboy --placement local agent-task artifacts {run_id}"),
+                format!("homeboy --placement local runs artifacts {run_id}"),
                 format!("homeboy --placement local agent-task review {run_id}"),
             ])
         );
@@ -4898,7 +4921,7 @@ fn diagnose_derives_next_actions_from_the_failure_classification() {
         assert_eq!(
             commands,
             vec![
-                format!("homeboy agent-task evidence {run_id} --task task-a --failure-only"),
+                format!("homeboy runs evidence {run_id} --task task-a --failure-only"),
                 format!("homeboy agent-task review {run_id}"),
             ]
         );
@@ -5091,7 +5114,7 @@ fn diagnose_falls_back_to_the_generic_set_for_an_unclassified_failure() {
             commands,
             vec![
                 format!("homeboy agent-task status {run_id}"),
-                format!("homeboy agent-task artifacts {run_id}"),
+                format!("homeboy runs artifacts {run_id}"),
                 format!("homeboy agent-task review {run_id}"),
             ]
         );
@@ -5147,7 +5170,7 @@ fn diagnose_next_actions_name_the_artifacts_that_were_not_produced() {
                     .contains("concept_packet, design_packet")
         }));
         assert!(actions.iter().any(|action| {
-            action["command"] == json!(format!("homeboy agent-task artifacts {run_id} --full"))
+            action["command"] == json!(format!("homeboy runs artifacts {run_id} --full"))
                 && action["kind"] == "artifacts"
         }));
     });

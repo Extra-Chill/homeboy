@@ -122,10 +122,10 @@ pub(super) enum RunsCommand {
     Evidence {
         run_id: String,
         /// Show only compact proof signals: verdict, gate failures, and declared signals.
-        #[arg(long, conflicts_with_all = ["dossier", "full"])]
+        #[arg(long, conflicts_with_all = ["dossier", "full", "kind", "task", "failure_only"])]
         proof: bool,
         /// Aggregate the actionable read-only dossier for the run.
-        #[arg(long, conflicts_with_all = ["proof", "full"])]
+        #[arg(long, conflicts_with_all = ["proof", "full", "kind", "task", "failure_only"])]
         dossier: bool,
         /// Print the full projection JSON instead of its compact human summary.
         /// Equivalent to `--format json`; plain evidence output is unchanged.
@@ -136,6 +136,15 @@ pub(super) enum RunsCommand {
         /// Emit the complete lossless evidence report, including every artifact and evidence link.
         #[arg(long)]
         full: bool,
+        /// Restrict Cook evidence to this kind.
+        #[arg(long)]
+        kind: Option<String>,
+        /// Restrict Cook evidence to this task.
+        #[arg(long)]
+        task: Option<String>,
+        /// Return only Cook evidence associated with failures.
+        #[arg(long)]
+        failure_only: bool,
         /// JSONPath selector(s) projected over the evidence result so callers
         /// extract only specific fields instead of the whole structure. Repeat
         /// or comma-separate. Rooted at the evidence payload, e.g.
@@ -257,8 +266,9 @@ pub enum RunsOutput {
     Refs(RunsRefsOutput),
     Resources(RunsResourcesOutput),
     Report(ReportOutput),
+    /// Lifecycle-owned Cook payload, preserving the domain reader schema.
     #[serde(untagged)]
-    Logs(serde_json::Value),
+    Cook(Value),
 }
 
 #[derive(Serialize)]
@@ -577,6 +587,12 @@ impl RunsArtifactPathGuide {
 
 #[derive(Args, Clone)]
 pub struct RunsArtifactsArgs {
+    /// Display the contents of a Cook artifact by id.
+    #[arg(long, conflicts_with = "full")]
+    pub show: Option<String>,
+    /// Display only the final N lines of the selected Cook artifact.
+    #[arg(long, requires = "show")]
+    pub tail: Option<usize>,
     /// Observation run id that owns the artifacts
     pub run_id: String,
     /// Query artifacts from a connected execution runner daemon

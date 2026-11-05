@@ -1627,7 +1627,7 @@ mod tests {
             ["homeboy", "agent-task", "status", "run-1"].as_slice(),
             ["homeboy", "runs", "logs", "run-1"].as_slice(),
             ["homeboy", "agent-task", "cancel", "run-1"].as_slice(),
-            ["homeboy", "agent-task", "evidence", "run-1", "--full"].as_slice(),
+            ["homeboy", "runs", "evidence", "run-1", "--full"].as_slice(),
         ] {
             assert!(
                 Cli::try_parse_from(args).is_ok(),
