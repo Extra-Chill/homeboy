@@ -1660,7 +1660,7 @@ fn dead_status_with_unexpected_termination(daemon: super::DaemonStartResult) -> 
 
 fn fake_daemon_state(daemon: super::DaemonStartResult) -> DaemonState {
     DaemonState {
-        schema: "homeboy.daemon.session_lease.v1".to_string(),
+        schema: crate::daemon::DAEMON_LEASE_SCHEMA.to_string(),
         lease_id: daemon.lease_id,
         startup_token: "fake-startup-token".to_string(),
         address: daemon.address,
@@ -1676,6 +1676,11 @@ fn fake_daemon_state(daemon: super::DaemonStartResult) -> DaemonState {
         },
         binary_sha256: None,
         service_manager: None,
+        executable: crate::daemon::ExecutableIdentity {
+            path: "/usr/local/bin/homeboy".into(),
+            dev: 0,
+            ino: 0,
+        },
         runtime_paths: DaemonRuntimeSnapshot {
             loaded_at: "2026-01-01T00:00:00Z".to_string(),
             paths: Vec::new(),

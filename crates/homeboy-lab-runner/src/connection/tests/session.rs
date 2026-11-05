@@ -1363,7 +1363,7 @@ fn routine_disconnect_probes_the_exact_live_daemon_tunnel_before_authoritative_s
                 .and_then(|value| value.split_whitespace().next())
                 .expect("identity nonce");
             let body = format!(
-                r#"{{"protocol":"homeboy.daemon.endpoint-identity.v1","nonce":"{nonce}","daemon":{{"schema":"homeboy.daemon.session_lease.v1","lease_id":"lease-live","pid":4242}}}}"#
+                r#"{{"protocol":"homeboy.daemon.endpoint-identity.v1","nonce":"{nonce}","daemon":{{"schema":"homeboy.daemon.session_lease.v2","lease_id":"lease-live","pid":4242}}}}"#
             );
             stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).expect("identity response");
         });

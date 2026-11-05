@@ -1265,6 +1265,9 @@ fn daemon_state_for_test(pid: u32, address: &str) -> DaemonState {
         build_identity: build_identity::current(),
         binary_sha256: current_binary_sha256().expect("binary hash"),
         service_manager: None,
+        executable: super::lifetime::running_executable()
+            .expect("test executable identity")
+            .clone(),
         runtime_paths: capture_daemon_runtime_snapshot(),
     }
 }
