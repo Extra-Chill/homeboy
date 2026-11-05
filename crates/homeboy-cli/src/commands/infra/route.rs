@@ -4925,9 +4925,6 @@ fn controller_owns_agent_task_lifecycle_command(cli: &Cli) -> homeboy::core::Res
             let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
             return agent_task_lifecycle::run_record_exists_resolved_in_store(&store, run_id);
         }
-        if args.cook_discovery() {
-            return Ok(true);
-        }
         return match args.cook_reader_id() {
             Some(id) => crate::commands::runs::cook::owns(id),
             None => Ok(false),
