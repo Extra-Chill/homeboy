@@ -466,7 +466,9 @@ const TEST_DAEMON_NAMESPACE_ENV: &str = "HOMEBOY_TEST_DAEMON_NAMESPACE";
 /// The value is that group's id: a daemon spawned by a CLI subprocess rejoins
 /// it, because `bounded_output` puts the CLI in a group of its own and reaps
 /// that group as soon as the CLI exits, which would stop the daemon the CLI
-/// just started (#17387).
+/// just started (#17387). [`TEST_KEEP_DAEMON_IN_LAUNCHER_GROUP`] instead keeps
+/// the daemon in its launcher's group, for a test that gives the launcher a
+/// private group so it can signal the daemon's whole group.
 pub const TEST_KEEP_DAEMON_IN_PROCESS_GROUP_ENV: &str = "HOMEBOY_TEST_KEEP_DAEMON_IN_PROCESS_GROUP";
 
 /// This test process's group: the one the Cargo test runner reaps.
@@ -481,6 +483,10 @@ pub fn test_runner_process_group() -> String {
         "0".to_string()
     }
 }
+
+/// [`TEST_KEEP_DAEMON_IN_PROCESS_GROUP_ENV`] value that keeps a daemon in the
+/// process group of the command that launched it.
+pub const TEST_KEEP_DAEMON_IN_LAUNCHER_GROUP: &str = "launcher";
 
 static EXEC_CAPABLE_TEMP_BASE: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
 static SHORT_EXEC_CAPABLE_TEMP_BASE: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();

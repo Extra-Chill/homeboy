@@ -36,6 +36,7 @@ use super::{
 };
 
 const TEST_KEEP_DAEMON_IN_PROCESS_GROUP_ENV: &str = "HOMEBOY_TEST_KEEP_DAEMON_IN_PROCESS_GROUP";
+const TEST_KEEP_DAEMON_IN_LAUNCHER_GROUP: &str = "launcher";
 // A launcher can observe two five-second lease-publication attempts and clean
 // up the first attempt before returning. Followers must wait through that
 // bounded startup lifecycle, then re-read the durable lease rather than timing
@@ -3491,13 +3492,14 @@ fn detach_from_launcher_session(command: &mut Command) {
 #[cfg(unix)]
 fn join_test_runner_process_group(command: &mut Command, group: &std::ffi::OsStr) {
     use std::os::unix::process::CommandExt;
-    let Some(group) = group
+    if group == TEST_KEEP_DAEMON_IN_LAUNCHER_GROUP {
+        return;
+    }
+    let group = group
         .to_str()
         .and_then(|group| group.parse::<libc::pid_t>().ok())
         .filter(|group| *group > 0)
-    else {
-        return;
-    };
+        .unwrap_or_else(|| panic!("invalid test daemon process group {group:?}"));
     // SAFETY: `pre_exec` runs in the forked child immediately before exec;
     // `setpgid` only moves that child and reports failure through errno.
     unsafe {
