@@ -1390,18 +1390,19 @@ fn discovery_run(
     // controller-scoped until a runner-local record is independently discovered.
     let runner_id = record.runner_id().map(str::to_string);
     let runner_job_id = record.runner_job_id().map(str::to_string);
-    let command_prefix = if metadata_string(&record.metadata, "lifecycle_store_owner").as_deref()
+    let homeboy_prefix = if metadata_string(&record.metadata, "lifecycle_store_owner").as_deref()
         == Some("controller")
     {
-        "homeboy --placement local agent-task".to_string()
+        "homeboy --placement local".to_string()
     } else {
         match runner_id.as_deref() {
             // Lifecycle records resident on a runner must execute there. The
             // global `--runner` flag is only for portable Lab offload commands.
-            Some(runner_id) => format!("homeboy runner exec {runner_id} -- homeboy agent-task"),
-            None => "homeboy --placement local agent-task".to_string(),
+            Some(runner_id) => format!("homeboy runner exec {runner_id} -- homeboy"),
+            None => "homeboy --placement local".to_string(),
         }
     };
+    let command_prefix = format!("{homeboy_prefix} agent-task");
 
     AgentTaskDiscoveryRun {
         run_id: run_id.clone(),
@@ -1432,7 +1433,7 @@ fn discovery_run(
         last_update_age_minutes,
         commands: AgentTaskDiscoveryCommands {
             status: format!("{command_prefix} status {run_id}"),
-            logs: format!("{command_prefix} logs {run_id}"),
+            logs: format!("{homeboy_prefix} runs logs {run_id}"),
             artifacts: format!("{command_prefix} artifacts {run_id}"),
             review: format!("{command_prefix} review {run_id}"),
             retry: format!("{command_prefix} retry {run_id} --run"),
