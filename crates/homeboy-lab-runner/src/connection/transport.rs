@@ -131,20 +131,33 @@ pub(super) trait TransportOperations {
     fn close(&self, session: &RunnerSession);
 }
 
+/// Marks [`no_current_session_error`], so a caller polling a known job can tell
+/// a session being replaced from an authoritative refusal.
+pub(crate) const NO_CURRENT_SESSION: &str = "no_current_session";
+
+/// The runner has no current session. `runner connect` and doctor repair
+/// replace a session by removing it before persisting the new one, so a poller
+/// can observe this for the seconds a replacement takes.
+pub(crate) fn no_current_session_error(runner_id: &str) -> Error {
+    let mut error = Error::validation_invalid_argument(
+        "runner",
+        "runner has no current daemon session; run `homeboy runner connect <runner-id>` first",
+        Some(runner_id.to_string()),
+        None,
+    );
+    error.details["reason"] = NO_CURRENT_SESSION.into();
+    error
+}
+
 pub(super) fn ensure_transport_with(
     runner_id: &str,
     lifetime: TransportLifetime,
     operations: &impl TransportOperations,
 ) -> Result<RunnerSession> {
     let owner = || {
-        operations.current_session(runner_id)?.ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "runner",
-                "runner has no current daemon session; run `homeboy runner connect <runner-id>` first",
-                Some(runner_id.to_string()),
-                None,
-            )
-        })
+        operations
+            .current_session(runner_id)?
+            .ok_or_else(|| no_current_session_error(runner_id))
     };
     match lifetime {
         // A temporary tunnel never reuses the current session's tunnel: the

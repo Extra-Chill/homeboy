@@ -3451,6 +3451,7 @@ pub use session_store::{peer_session_maintenance, PeerSessionMaintenanceReport};
 pub use transport::{
     close_transport, ensure_transport, transport_is_live, TransportFailure, TransportLifetime,
 };
+pub(crate) use transport::{no_current_session_error, NO_CURRENT_SESSION};
 
 #[cfg(test)]
 mod tests;

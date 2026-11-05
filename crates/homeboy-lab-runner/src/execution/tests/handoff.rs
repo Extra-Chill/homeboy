@@ -2069,71 +2069,70 @@ fn closed_endpoint() -> String {
 }
 
 #[test]
-fn daemon_polling_keeps_its_grace_window_when_a_reattach_cannot_reach_the_daemon_yet() {
-    let stale_endpoint = closed_endpoint();
-    let job = running_job();
-    let job_id = job.id.to_string();
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("refreshed listener");
-    let refreshed_endpoint = format!("http://{}", listener.local_addr().expect("address"));
-    let server = serve_one_job_poll(listener, job.clone());
-    let client = Client::builder().no_proxy().build().expect("client");
-    let reloads = std::sync::atomic::AtomicUsize::new(0);
-
-    let (fetched, endpoint) =
-        fetch_daemon_job_resilient_with_endpoint_reload(&client, &stale_endpoint, &job_id, || {
-            if reloads.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
-                // The Lab daemon is briefly unreachable while the tunnel is
-                // re-established: the first reattach fails at transport level.
-                return Err(crate::daemon_http_get::daemon_transport_error(
+fn daemon_polling_keeps_its_grace_window_through_a_transient_reattach_failure() {
+    let lock_timeout = || {
+        let mut error = Error::internal_io(
+            "timed out after 30000ms waiting for runner state lock",
+            Some("lock runner state".to_string()),
+        );
+        error.details = serde_json::json!({ "kind": "runner_state_lock_timeout" });
+        error.retryable = Some(true);
+        error
+    };
+    let cases: [(&str, Box<dyn Fn() -> Error>); 3] = [
+        (
+            "the tunnel is re-established",
+            Box::new(|| {
+                crate::daemon_http_get::daemon_transport_error(
                     crate::daemon_http_get::DaemonHttpErrorKind::Connect,
                     "/health",
                     None,
                     "reattach runner `lab` job-owning daemon",
                     "remote daemon health endpoint failed after 4 bounded requests",
-                ));
-            }
-            Ok(Some(refreshed_endpoint.clone()))
-        })
-        .expect("a transient reattach failure must not end the poll grace window");
+                )
+            }),
+        ),
+        (
+            "concurrent Cooks hold the runner state lock",
+            Box::new(lock_timeout),
+        ),
+        (
+            "a concurrent connect is replacing the session",
+            Box::new(|| crate::connection::no_current_session_error("lab")),
+        ),
+    ];
+    for (case, first_reattach_error) in cases {
+        let stale_endpoint = closed_endpoint();
+        let job = running_job();
+        let job_id = job.id.to_string();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("refreshed listener");
+        let refreshed_endpoint = format!("http://{}", listener.local_addr().expect("address"));
+        let server = serve_one_job_poll(listener, job.clone());
+        let client = Client::builder().no_proxy().build().expect("client");
+        let reloads = std::sync::atomic::AtomicUsize::new(0);
 
-    assert_eq!(fetched.id, job.id);
-    assert_eq!(endpoint, refreshed_endpoint);
-    assert_eq!(reloads.load(std::sync::atomic::Ordering::SeqCst), 2);
-    server.join().expect("server");
-}
+        let (fetched, endpoint) = fetch_daemon_job_resilient_with_endpoint_reload(
+            &client,
+            &stale_endpoint,
+            &job_id,
+            || {
+                if reloads.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                    return Err(first_reattach_error());
+                }
+                Ok(Some(refreshed_endpoint.clone()))
+            },
+        )
+        .unwrap_or_else(|error| panic!("{case}: poll ended early: {}", error.message));
 
-#[test]
-fn daemon_polling_keeps_its_grace_window_when_a_reattach_waits_out_a_contended_runner_state_lock() {
-    let stale_endpoint = closed_endpoint();
-    let job = running_job();
-    let job_id = job.id.to_string();
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("refreshed listener");
-    let refreshed_endpoint = format!("http://{}", listener.local_addr().expect("address"));
-    let server = serve_one_job_poll(listener, job.clone());
-    let client = Client::builder().no_proxy().build().expect("client");
-    let reloads = std::sync::atomic::AtomicUsize::new(0);
-
-    let (fetched, endpoint) =
-        fetch_daemon_job_resilient_with_endpoint_reload(&client, &stale_endpoint, &job_id, || {
-            if reloads.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
-                // Concurrent Cooks hold the runner state lock; the reattach
-                // times out waiting for it (retryable).
-                let mut error = Error::internal_io(
-                    "timed out after 30000ms waiting for runner state lock",
-                    Some("lock runner state".to_string()),
-                );
-                error.details = serde_json::json!({ "kind": "runner_state_lock_timeout" });
-                error.retryable = Some(true);
-                return Err(error);
-            }
-            Ok(Some(refreshed_endpoint.clone()))
-        })
-        .expect("a contended controller lock must not end the poll grace window");
-
-    assert_eq!(fetched.id, job.id);
-    assert_eq!(endpoint, refreshed_endpoint);
-    assert_eq!(reloads.load(std::sync::atomic::Ordering::SeqCst), 2);
-    server.join().expect("server");
+        assert_eq!(fetched.id, job.id, "{case}");
+        assert_eq!(endpoint, refreshed_endpoint, "{case}");
+        assert_eq!(
+            reloads.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "{case}"
+        );
+        server.join().expect("server");
+    }
 }
 
 #[test]

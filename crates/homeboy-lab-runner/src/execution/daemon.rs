@@ -1928,7 +1928,10 @@ pub(super) fn daemon_poll_transport_was_lost(error: &Error) -> bool {
 /// contended by concurrent Cooks). Authoritative refusals, such as a
 /// daemon identity mismatch, are not retryable and end the poll.
 fn reattach_failure_is_transient(error: &Error) -> bool {
-    daemon_poll_transport_was_lost(error) || error.retryable == Some(true)
+    daemon_poll_transport_was_lost(error)
+        || error.retryable == Some(true)
+        // A concurrent connect or repair is replacing the session.
+        || error.details["reason"] == super::super::connection::NO_CURRENT_SESSION
 }
 
 pub(super) fn refreshed_daemon_endpoint(runner_id: &str) -> Result<Option<String>> {
