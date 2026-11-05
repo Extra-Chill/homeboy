@@ -7,11 +7,11 @@ use super::{
 use crate::agent_task_promotion::AgentTaskPromotionCandidate;
 use homeboy_core::error::{Error, Result};
 use homeboy_core::git::{
-    classify_git_push_failure, commit_at, get_uncommitted_changes, pr_create_with_token,
-    pr_edit_with_token, pr_find_with_token, pr_view_with_token, push_at,
-    remote_branch_head_over_push_transport, resolve_effective_push_url, run_git, CommitOptions,
-    GitPushRemote, GitPushTransportClass, GitPushTransportKind, PrCreateOptions, PrEditOptions,
-    PrFindOptions, PrState, PushOptions, DEFAULT_NON_INTERACTIVE_PUSH_TIMEOUT,
+    classify_git_push_failure, get_uncommitted_changes, pr_create_with_token, pr_edit_with_token,
+    pr_find_with_token, pr_view_with_token, push_in_checkout,
+    remote_branch_head_over_push_transport, resolve_effective_push_url, run_git, GitPushRemote,
+    GitPushTransportClass, GitPushTransportKind, PrCreateOptions, PrEditOptions, PrFindOptions,
+    PrState, PushOptions, DEFAULT_NON_INTERACTIVE_PUSH_TIMEOUT,
 };
 use homeboy_core::run_lifecycle_record::RunLifecycleRecord;
 use serde::de::DeserializeOwned;
@@ -520,15 +520,12 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
     }
 
     fn commit_all(&mut self, path: &str, message: &str) -> Result<()> {
-        let output = commit_at(None, Some(message), CommitOptions::default(), Some(path))?;
-        if !output.success {
-            return Err(Error::validation_invalid_argument_with_evidence(
-                "publication",
-                format!("git {} failed", output.action),
-                None,
-                None,
-                Some(output.failure_command_evidence()),
-            ));
+        // `path` is the already validated candidate repository root, not a
+        // component selector. Resolving it again loses Cook's admitted identity
+        // and is ambiguous for monorepos (#17379). Stage at the root so changes
+        // outside the admitted component are included in the verified candidate.
+        for args in [vec!["add", "."], vec!["commit", "-m", message]] {
+            run_git(Path::new(path), &args, "commit finalization candidate")?;
         }
         Ok(())
     }
@@ -546,8 +543,9 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
         let push_remote = route.push_remote.clone();
         let effective_remote = resolve_effective_push_url(Path::new(path), &push_remote).ok();
         let credential = publication_credential(path)?;
-        let output = push_at(
-            None,
+        let output = push_in_checkout(
+            "",
+            path,
             PushOptions {
                 remote_url: Some(
                     credential
@@ -566,7 +564,6 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
                 timeout: Some(DEFAULT_NON_INTERACTIVE_PUSH_TIMEOUT),
                 ..Default::default()
             },
-            Some(path),
         )?;
         if !output.success {
             let classification = classify_git_push_failure(&output.stderr);
