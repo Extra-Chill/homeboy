@@ -3511,6 +3511,50 @@ fn fetch_declared_base_sha(
     environment: &[(String, String)],
     timeout: Duration,
 ) -> Result<()> {
+    // Never let a destination/diff boundary masquerade as origin's base tip.
+    // Validate before any fetch can mutate the shared remote-tracking ref.
+    let observed = run_declared_base_git(
+        worktree_path,
+        git,
+        &[
+            "ls-remote",
+            "--heads",
+            "origin",
+            &format!("refs/heads/{base_ref}"),
+        ],
+        environment,
+        base_ref,
+        "resolve",
+        timeout,
+    )?;
+    if !observed.status.success() {
+        return Err(declared_base_git_failure(
+            worktree_path,
+            base_ref,
+            "resolve",
+            "ls-remote",
+            &observed.stderr,
+            environment,
+            timeout,
+        ));
+    }
+    let remote_ref = format!("refs/heads/{base_ref}");
+    let advertised = String::from_utf8_lossy(&observed.stdout);
+    let advertised_sha = advertised
+        .lines()
+        .find_map(|line| {
+            let (value, reference) = line.split_once('\t')?;
+            (reference == remote_ref).then_some(value)
+        })
+        .unwrap_or("<not advertised>");
+    if advertised_sha != sha {
+        return Err(Error::validation_invalid_argument(
+            "base_ref",
+            format!("refusing to write declared base `{base_ref}` SHA {sha}: origin advertises {advertised_sha} for {remote_ref}"),
+            None,
+            None,
+        ));
+    }
     // Materializing a verified remote tip must also advance its tracking ref.
     // Otherwise a later Cook transport retry can pin an older tracking commit
     // and mistake this already-converged base for unique destination work.

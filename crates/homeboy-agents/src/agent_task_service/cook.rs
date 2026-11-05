@@ -8508,9 +8508,6 @@ fn record_cook_workspace_base_convergence(
 /// Capture the base once before a new Cook recipe freezes its execution
 /// lineage. Existing recipes retain their recorded boundary on every retry.
 fn pin_initial_cook_workspace_base(options: &mut CookRequest) -> Result<()> {
-    if options.workspace.task_base_sha.is_some() {
-        return Ok(());
-    }
     let workspace = cook_startup_workspace(options);
     let Some(workspace) = workspace.map(Path::to_path_buf) else {
         return Ok(());
@@ -8662,7 +8659,7 @@ fn apply_persisted_task_base(
 }
 
 fn pin_cook_workspace_base_at(options: &mut CookRequest, workspace: &Path) -> Result<()> {
-    if options.workspace.task_base_sha.is_some() {
+    if options.identity.initial_plan.metadata["cook_workspace_base"]["sha"].is_string() {
         return Ok(());
     }
     #[cfg(test)]
@@ -8698,7 +8695,12 @@ fn pin_cook_workspace_base_at(options: &mut CookRequest, workspace: &Path) -> Re
         }
         Err(error) => return Err(error),
     };
-    options.workspace.task_base_sha = Some(pinned.sha.clone());
+    // The destination's starting HEAD is a diff boundary, not the declared
+    // remote base. Preserve it while recording the base's independent identity.
+    options
+        .workspace
+        .task_base_sha
+        .get_or_insert_with(|| pinned.sha.clone());
     options.identity.initial_plan.metadata["cook_workspace_base"] = serde_json::json!({
         "schema": "homeboy/cook-workspace-base/v1",
         "base": pinned.base,
@@ -8765,8 +8767,7 @@ fn preflight_cook_workspace_base_ancestry_with_provider(
         .initial_plan
         .metadata
         .get("cook_prepared_base_sha")
-        .and_then(Value::as_str)
-        .filter(|sha| options.workspace.task_base_sha.as_deref() == Some(*sha));
+        .and_then(Value::as_str);
     if cook_uses_explicit_cwd_workspace(options) {
         if let Some(prepared_base) = prepared_base {
             let prepared_base =
@@ -8792,9 +8793,11 @@ fn preflight_cook_workspace_base_ancestry_with_provider(
         &options.finalization.base
     } else {
         options
-            .workspace
-            .task_base_sha
-            .as_deref()
+            .identity
+            .initial_plan
+            .metadata
+            .pointer("/cook_workspace_base/sha")
+            .and_then(Value::as_str)
             .unwrap_or(&options.finalization.base)
     };
     if tracked_candidate {
@@ -8812,7 +8815,13 @@ fn preflight_cook_workspace_base_ancestry_with_provider(
     if !cook_uses_explicit_cwd_workspace(options) && native_owned {
         // This is the sole mutation boundary before provider execution. Preview
         // classifies only; caller-owned checkouts retain snapshot semantics.
-        let Some(pin) = options.workspace.task_base_sha.as_deref() else {
+        let Some(pin) = options
+            .identity
+            .initial_plan
+            .metadata
+            .pointer("/cook_workspace_base/sha")
+            .and_then(Value::as_str)
+        else {
             // Base capture owns resolution. Converge only after it has pinned
             // the immutable base, not in the earlier read-only preflight.
             return Ok(None);

@@ -6132,6 +6132,88 @@ fn diverged_workspace_base_ancestry_preflight_is_deterministic_not_transport_ret
 }
 
 #[test]
+fn cook_existing_destination_head_never_becomes_origin_base() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        std::fs::create_dir(&source).unwrap();
+        let git = |path: &Path, args: &[&str]| {
+            homeboy_core::git::run_git(path, args, "Cook base regression").unwrap()
+        };
+        git(&source, &["init", "--initial-branch=trunk"]);
+        git(&source, &["config", "user.name", "Test"]);
+        git(&source, &["config", "user.email", "test@example.com"]);
+        std::fs::write(source.join("base"), "base\n").unwrap();
+        git(&source, &["add", "."]);
+        git(&source, &["commit", "-m", "base"]);
+        let base = git(&source, &["rev-parse", "HEAD"]).trim().to_string();
+        let remote = root.path().join("origin.git");
+        git(
+            root.path(),
+            &[
+                "clone",
+                "--bare",
+                source.to_str().unwrap(),
+                remote.to_str().unwrap(),
+            ],
+        );
+        git(
+            &source,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        git(&source, &["fetch", "origin"]);
+        let destination = root.path().join("destination");
+        git(
+            &source,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "existing",
+                destination.to_str().unwrap(),
+                &base,
+            ],
+        );
+        std::fs::write(destination.join("pr-work"), "existing PR work\n").unwrap();
+        git(&destination, &["add", "."]);
+        git(&destination, &["commit", "-m", "existing PR work"]);
+        let head = git(&destination, &["rev-parse", "HEAD"]).trim().to_string();
+        git(&destination, &["push", "origin", "existing"]);
+        let _capacity =
+            homeboy_core::observation::disk_budget::test_seam::ample_disk_capacity_for_test(
+                root.path(),
+            );
+        let mut options = batch_cook_options(
+            "cook-existing-head-base",
+            Arc::new(AcceptedDetachedAttemptDispatcher),
+        );
+        options.provider_transport.attempt_dispatcher = None;
+        options.finalization.base = "trunk".to_string();
+        options.finalization.head = Some("existing".to_string());
+        options.workspace.to_worktree = destination.display().to_string();
+        options.workspace.source_worktree_path = Some(destination.clone());
+        options.workspace.task_base_sha = Some(head.clone());
+        options.identity.initial_plan.tasks[0].workspace.root =
+            Some(destination.display().to_string());
+        let _report = run_cook(CookContext::new(options, Arc::new(UnusedExecutor))).unwrap();
+        assert_eq!(
+            git(&source, &["rev-parse", "refs/remotes/origin/trunk"]).trim(),
+            base
+        );
+        // Defence in depth rejects even a direct attempt, without changing the ref.
+        let error =
+            crate::agent_task_promotion::materialize_declared_base_sha(&source, "trunk", &head)
+                .unwrap_err();
+        assert!(error.to_string().contains(&head), "{error}");
+        assert!(error.to_string().contains(&base), "{error}");
+        assert_eq!(
+            git(&source, &["rev-parse", "refs/remotes/origin/trunk"]).trim(),
+            base
+        );
+    });
+}
+
+#[test]
 fn retryable_preview_base_resolution_is_deferred_not_admitted() {
     let error = Error::internal_unexpected("authoritative remote unavailable").with_retryable(true);
     assert!(tolerate_retryable_cook_base_resolution::<()>(Err(error))
