@@ -40,8 +40,8 @@ use homeboy_engine_primitives::shell::shell_arg;
 
 use super::super::CmdResult;
 use super::{
-    AdoptArgs, FinalizePrArgs, GateFeedbackArgs, PromoteArgs, ProvidersArgs, ReviewArgs,
-    VerifyGateArgs,
+    merge_route_provider_config, AdoptArgs, FinalizePrArgs, GateFeedbackArgs, PromoteArgs,
+    ProvidersArgs, ReviewArgs, VerifyGateArgs,
 };
 
 #[derive(Args, Debug)]
@@ -2193,6 +2193,7 @@ enum ProviderRoute {
         backend: String,
         provider_id: String,
         model: Option<String>,
+        provider_config: Value,
         dispatchable: bool,
     },
     Blocked {
@@ -2328,17 +2329,19 @@ fn resolved_provider_dispatchability(
         backend,
         provider_id,
         model,
+        provider_config: overrides,
         dispatchable,
     } = route.as_mut()?
     else {
         return None;
     };
+    let provider_config = merge_route_provider_config(provider_config, overrides);
     let verdict = evaluate_provider_dispatchability(
         catalog,
         backend,
         Some(provider_id),
         model.as_deref(),
-        provider_config,
+        &provider_config,
         probe_runtime,
         &[],
         cache,
@@ -2423,6 +2426,7 @@ fn resolve_provider_route_for(
                 backend: route.backend,
                 provider_id: provider.id.clone(),
                 model: route.model,
+                provider_config: route.provider_config,
                 // The config-aware verdict is resolved by the caller. Do not
                 // run a second, config-less probe while constructing the route.
                 dispatchable: true,
@@ -3210,6 +3214,7 @@ mod tests {
             backend: "pi".to_string(),
             provider_id: "pi.executor".to_string(),
             model: Some("openai/gpt-5.6-sol".to_string()),
+            provider_config: Value::Null,
             dispatchable: true,
         };
 
@@ -3259,6 +3264,32 @@ mod tests {
         config.agent_task.rotation =
             rotation.map(|rotation| serde_json::to_value(rotation).expect("serialize rotation"));
         homeboy::core::defaults::save_config(&config).expect("save provider policy");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolved_rotation_route_probes_with_provider_config_overrides() {
+        crate::test_support::with_isolated_home(|_| {
+            let fake = FakePi::with_probes(
+                "exit 99",
+                "[ \"$PI_CODING_AGENT_DIR\" = /tmp/rotation-agent-dir ] && printf 'test model\\n'",
+            );
+            let catalog = provider_catalog(vec![fake.provider()]);
+            let mut overrides = fake.config();
+            overrides["pi_agent_dir"] = serde_json::json!("/tmp/rotation-agent-dir");
+            save_provider_policy(Some("pi"), Some(serde_json::from_value(serde_json::json!({
+                "entries": [{"backend": "pi", "model": "test/model", "provider_config": overrides}]
+            })).unwrap()));
+            let mut route = resolve_provider_route_for(None, None, None, &catalog, true);
+            let verdict = resolved_provider_dispatchability(
+                &mut route,
+                &catalog,
+                &serde_json::json!({"command": "/nonexistent/base-pi", "pi_agent_dir": "/tmp/base-agent-dir"}),
+                true,
+                &mut ProviderRuntimeReadinessCache::default(),
+            ).expect("resolved route");
+            assert!(verdict.ready, "{verdict:?}");
+        });
     }
 
     #[test]
@@ -3342,6 +3373,7 @@ mod tests {
                         backend: "pi".into(),
                         provider_id: provider.id.clone(),
                         model: Some(model.into()),
+                        provider_config: Value::Null,
                         dispatchable: dispatchability.ready,
                     }),
                     Some(&dispatchability),

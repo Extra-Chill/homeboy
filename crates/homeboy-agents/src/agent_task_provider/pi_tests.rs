@@ -128,6 +128,24 @@ fn prompt_session_and_model_contract() {
     );
 }
 
+#[test]
+fn readiness_missing_executable_is_not_retryable() {
+    let root = tempfile::tempdir().unwrap();
+    let executable = root.path().join("missing-pi");
+    let result = readiness(
+        &json!({"command": executable}),
+        &[],
+        std::time::Duration::from_secs(2),
+        None,
+    )
+    .unwrap();
+    assert!(!result.ready);
+    assert!(!result.retryable);
+    assert_eq!(result.classification, "deterministic_incompatibility");
+    assert_eq!(result.reason, "executable_not_found");
+    assert!(result.remediation.contains(executable.to_str().unwrap()));
+}
+
 #[cfg(unix)]
 #[test]
 fn bounded_readiness_classifies_fake_pi() {
