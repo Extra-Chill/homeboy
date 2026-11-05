@@ -178,6 +178,15 @@ pub(super) fn ensure_transport_with(
     }
 }
 
+/// How long a persisted tunnel's `/health` may take before it is replaced.
+///
+/// Replacing a persisted tunnel closes it, and other processes may be
+/// mid-request through it. A daemon that is merely slow under load is
+/// therefore not dead. A dead tunnel still fails fast: an absent tunnel
+/// process, a closed channel, or a lease/PID mismatch ends the probe
+/// immediately. Only a slow answer uses this budget.
+pub(super) const PERSISTED_TRANSPORT_LIVENESS_TIMEOUT: Duration = Duration::from_secs(10);
+
 struct LiveTransport;
 
 impl TransportOperations for LiveTransport {
@@ -186,7 +195,7 @@ impl TransportOperations for LiveTransport {
     }
 
     fn is_live(&self, session: &RunnerSession) -> bool {
-        session_is_live(session)
+        session_is_live_with_timeout(session, PERSISTED_TRANSPORT_LIVENESS_TIMEOUT)
     }
 
     fn open(&self, runner_id: &str, owner: &RunnerSession) -> Result<RunnerSession> {
@@ -289,6 +298,50 @@ pub(super) fn transport_error(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A healthy daemon that answers `/health` slower than an observation
+    /// budget is reused, not replaced: replacing closes the tunnel other
+    /// processes are mid-request through (Extra-Chill/homeboy#17407).
+    #[test]
+    fn persisted_transport_reuses_a_slow_but_healthy_tunnel() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+        let port = listener.local_addr().expect("address").port();
+        let mut session = crate::test_support::direct_ssh_session("lease-live");
+        session.tunnel_pid = None;
+        session.local_port = Some(port);
+        session.local_url = Some(format!("http://127.0.0.1:{port}"));
+        let body = serde_json::json!({
+            "freshness": { "fresh": true, "restartable": false, "lease_id": "lease-live", "pid": 4242, "active_jobs": 12 },
+            "pid": 4242,
+        })
+        .to_string();
+        let server = std::thread::spawn(move || {
+            // The readiness probe connects first; answer every request slowly.
+            for stream in listener.incoming().take(2) {
+                let mut stream = stream.expect("connection");
+                let mut request = [0; 1024];
+                if stream.read(&mut request).unwrap_or(0) == 0 {
+                    continue;
+                }
+                std::thread::sleep(Duration::from_millis(2500));
+                let _ = stream.write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    )
+                    .as_bytes(),
+                );
+                return;
+            }
+        });
+
+        assert!(LiveTransport.is_live(&session));
+        server.join().expect("server");
+    }
 
     fn failed_report(
         kind: RunnerFailureKind,
