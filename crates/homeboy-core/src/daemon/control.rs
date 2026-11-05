@@ -173,10 +173,12 @@ fn attribute_scanned_candidate(
 /// This is shared by local and SSH launches because SSH invokes the same CLI.
 pub fn supervise(addr: &str, startup_token: &str, state_dir: Option<&Path>) -> Result<()> {
     let idle_timeout = super::lifetime::configured_idle_timeout()?;
-    let exe = std::env::current_exe().map_err(|error| {
+    // Recorded before spawning, so the lifetime loop can later tell when an
+    // upgrade replaced the binary this supervisor and its daemon run.
+    let exe = super::lifetime::launchable_executable().map_err(|error| {
         Error::internal_io(
             error.to_string(),
-            Some("resolve current executable".to_string()),
+            Some("record current executable".to_string()),
         )
     })?;
     let state_dir = match state_dir {
@@ -416,9 +418,10 @@ fn wait_for_daemon_with_lifetime(
                     stopper = None;
                 }
                 if stopper.is_none() {
-                    // `current_exe()` names `<path> (deleted)` once the binary
-                    // is replaced; launch the installed file instead, or this
-                    // stop could never spawn (#15403).
+                    // `current_exe()` can name `<path> (deleted)` once the
+                    // binary is replaced; launch the recorded startup path,
+                    // where the installed file lives, or this stop could
+                    // never spawn (#15403).
                     stopper = Command::new(super::lifetime::launchable_executable()?)
                         .args(["daemon", "stop", "--lease-id", &state.lease_id])
                         .env(
@@ -2770,6 +2773,16 @@ fn reattach_exact_live_owner() -> Result<()> {
         last_seen_at: now,
         build_identity: crate::build_identity::current(),
         binary_sha256: super::current_binary_sha256()?,
+        // The owner was attributed by matching this binary, so it records
+        // the same executable identity.
+        executable: super::lifetime::running_executable()
+            .map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some("record daemon executable identity".to_string()),
+                )
+            })?
+            .clone(),
         runtime_paths: super::capture_daemon_runtime_snapshot(),
     };
     super::write_lease(&state_path, &state)

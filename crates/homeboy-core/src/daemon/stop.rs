@@ -691,6 +691,11 @@ mod tests {
             last_seen_at: "now".to_string(),
             build_identity: build_identity::current(),
             binary_sha256: None,
+            executable: crate::daemon::ExecutableIdentity {
+                path: "/usr/local/bin/homeboy".into(),
+                dev: 0,
+                ino: 0,
+            },
             runtime_paths: DaemonRuntimeSnapshot {
                 loaded_at: "now".to_string(),
                 paths: Vec::new(),
