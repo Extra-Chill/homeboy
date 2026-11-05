@@ -20,18 +20,26 @@ homeboy daemon <COMMAND>
 ## Daemon lifetime
 
 Automatically started daemons (`ensure-running`, including managed WorkJob
-launches) stop after **300 seconds with no active durable jobs**. Their
-supervisors use the existing lease-scoped stop gate: pending admissions and
-active work prevent shutdown, and every signal is tied to the exact lease and
-startup token. A subsequent command starts a new daemon using the retained
-durable store. Disposable clients do not need to leave a resident process behind.
+launches) stop after **300 seconds with no active durable jobs**. The daemon
+enforces this itself: a `serve` launched with a startup token and not run by a
+service manager polls its own lease about once a second, and while it has no
+active jobs in its scope and its launcher has exited, the idle window runs.
+When it lapses, the daemon takes the lifecycle lock and admission fence that
+`daemon stop` takes, re-checks that the lease is still its own and still idle,
+and drains through the same path as SIGTERM. If a lifecycle command holds the
+lock, it retries after another idle window. An idle daemon whose binary was
+replaced stops after 30 seconds instead, and a daemon whose state directory
+was removed stops at once. Its supervisor only waits for it and records its
+termination, killing it only if the state directory is removed. A subsequent
+command starts a new daemon using the retained durable store. Disposable clients do not need to leave a resident process behind.
 
 `homeboy daemon start` and `serve` are explicitly resident launches,
 appropriate for workflow cadences and services. Set
 `HOMEBOY_DAEMON_IDLE_TIMEOUT_SECS` to a positive number to select another idle
 window for a supervised launch, or `0` for a resident automatic launch. A
 `serve` started directly by a service manager lives as long as that manager
-keeps it.
+keeps it, and runs none of the self-stop checks above. A `serve` started by
+hand with no startup token stays resident too.
 
 Every `serve` drains on SIGINT and SIGTERM: it finishes the responses it owns,
 releases its lease, and records a `clean_stop` termination.

@@ -1830,6 +1830,12 @@ where
     } else {
         None
     };
+    // A supervised serve enforces its own lifetime; it needs the shutdown flag
+    // to end itself through the same drain SIGTERM uses.
+    let owned_lifetime = match shutdown.as_ref() {
+        Some(_) => lifetime::owned_idle_lifetime(service_manager)?,
+        None => None,
+    };
     let state = write_state(local_addr, service_manager)?;
     // The ledger is shared by every daemon of this Unix user; the scope keeps
     // this daemon's startup sweeps and counts to its own jobs (#16104).
@@ -1882,6 +1888,18 @@ where
         spawn_orchestration_reconciler(job_store.clone(), orchestration_shutdown_rx);
     let work_intent_deliverer =
         spawn_work_intent_deliverer(job_store.clone(), work_intent_shutdown_rx);
+    let (lifetime_shutdown_tx, lifetime_shutdown_rx) = mpsc::channel();
+    let lifetime_monitor = match (owned_lifetime, shutdown.as_ref()) {
+        (Some(idle), Some(flag)) => Some(lifetime::spawn_lifetime_monitor(
+            idle,
+            PathBuf::from(&state.state_path),
+            state.lease_id.clone(),
+            paths::observation_db()?,
+            Arc::clone(flag),
+            lifetime_shutdown_rx,
+        )),
+        _ => None,
+    };
 
     const CONNECTION_WORKERS: usize = 16;
     let (connection_tx, connection_rx) = std::sync::mpsc::sync_channel::<TcpStream>(64);
@@ -1998,18 +2016,21 @@ where
     let _ = completion_shutdown_tx.send(());
     let _ = orchestration_shutdown_tx.send(());
     let _ = work_intent_shutdown_tx.send(());
-    join_with_deadline(
-        vec![
-            ("local-child-reservation-reconciler", local_child_reconciler),
-            ("completion-notifier", completion_notifier),
-            ("orchestration-reconciler", orchestration_reconciler),
-            ("work-intent-deliverer", work_intent_deliverer),
-        ],
-        drain_deadline,
-    );
+    let _ = lifetime_shutdown_tx.send(());
+    let mut helpers = vec![
+        ("local-child-reservation-reconciler", local_child_reconciler),
+        ("completion-notifier", completion_notifier),
+        ("orchestration-reconciler", orchestration_reconciler),
+        ("work-intent-deliverer", work_intent_deliverer),
+    ];
+    helpers.extend(lifetime_monitor.map(|monitor| ("daemon-lifetime", monitor)));
+    join_with_deadline(helpers, drain_deadline);
+    // Termination evidence and the lease live in the state directory. Once it
+    // is removed there is no reader left, and writing would recreate it.
     if shutdown
         .as_ref()
         .is_some_and(|flag| flag.load(Ordering::Acquire))
+        && !lifetime::state_dir_removed(Path::new(&state.state_path))
     {
         // A requested stop is clean even with work in flight: controller work
         // on detached threads ends with this process and resumes from its
@@ -7854,6 +7875,18 @@ pub(crate) fn acquire_daemon_operation_lock() -> Result<DaemonOperationLock> {
     acquire_daemon_operation_lock_with_wait(daemon_operation_lock_wait())
 }
 
+/// Take the lifecycle lock only if it is free right now. A daemon stopping
+/// itself must neither wait behind a lifecycle command nor reclaim its lock,
+/// and must not recreate a removed state directory to look for it.
+pub(super) fn try_acquire_daemon_operation_lock() -> Result<Option<DaemonOperationLock>> {
+    let state = state_path()?;
+    let Some(parent) = state.parent() else {
+        return Ok(None);
+    };
+    let file = open_daemon_operation_lock_file(&parent.join("operation.lock"))?;
+    Ok(try_lock_file_exclusive(&file, "daemon lifecycle")?.then_some(DaemonOperationLock { file }))
+}
+
 /// The ensure path carries its own explicit wait so its timeout stays
 /// meaningful even though destructive lifecycle acquisition reclaims
 /// unowned locks after the shared probe window.
@@ -8080,7 +8113,7 @@ pub(super) fn acquire_daemon_job_admission_fence_with_wait(
     }
 }
 
-fn try_acquire_daemon_job_admission_fence() -> Result<Option<DaemonAdmissionFence>> {
+pub(super) fn try_acquire_daemon_job_admission_fence() -> Result<Option<DaemonAdmissionFence>> {
     let (state_lock, _) = daemon_admission_process_state();
     let mut state = state_lock
         .lock()

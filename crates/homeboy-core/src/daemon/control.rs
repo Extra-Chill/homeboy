@@ -173,9 +173,8 @@ fn attribute_scanned_candidate(
 /// Supervise one daemon child and persist its bounded termination evidence.
 /// This is shared by local and SSH launches because SSH invokes the same CLI.
 pub fn supervise(addr: &str, startup_token: &str, state_dir: Option<&Path>) -> Result<()> {
-    let idle_timeout = super::lifetime::configured_idle_timeout()?;
-    // Recorded before spawning, so the lifetime loop can later tell when an
-    // upgrade replaced the binary this supervisor and its daemon run.
+    // The child inherits this environment, including the idle window and the
+    // launcher identity: `serve` enforces its own lifetime (#17412).
     let exe = super::lifetime::launchable_executable().map_err(|error| {
         Error::internal_io(
             error.to_string(),
@@ -214,14 +213,14 @@ pub fn supervise(addr: &str, startup_token: &str, state_dir: Option<&Path>) -> R
                 Some("spawn supervised daemon".to_string()),
             )
         })?;
-    supervise_child_with_lifetime(child, idle_timeout, &state_dir.join("state.json"))
+    supervise_child_at(child, &state_dir.join("state.json"))
 }
 
 /// Own the post-spawn supervisor lifecycle. Kept separate so the real child
 /// pipes and persisted evidence can be exercised without replacing the CLI.
 #[cfg(test)]
 fn supervise_child(child: std::process::Child) -> Result<()> {
-    supervise_child_with_lifetime(child, None, &crate::paths::daemon_state_file()?)
+    supervise_child_at(child, &crate::paths::daemon_state_file()?)
 }
 
 #[cfg(all(test, unix))]
@@ -288,11 +287,7 @@ fn supervisor_stops_its_daemon_once_the_state_directory_is_removed() {
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         let waiter_path = state_path.clone();
         let waiter = thread::spawn(move || {
-            let status = wait_for_daemon_with_lifetime(
-                &mut child,
-                Some(Duration::from_secs(300)),
-                &waiter_path,
-            );
+            let status = wait_for_daemon(&mut child, &waiter_path);
             done_tx.send(()).unwrap();
             status
         });
@@ -314,11 +309,7 @@ fn supervisor_stops_its_daemon_once_the_state_directory_is_removed() {
     });
 }
 
-fn supervise_child_with_lifetime(
-    mut child: std::process::Child,
-    idle_timeout: Option<Duration>,
-    state_path: &Path,
-) -> Result<()> {
+fn supervise_child_at(mut child: std::process::Child, state_path: &Path) -> Result<()> {
     let pid = child.id();
     // A daemon can run indefinitely. Drain both pipes while it runs, retaining
     // only a diagnostic tail so supervisor RSS cannot grow with child output.
@@ -326,7 +317,7 @@ fn supervise_child_with_lifetime(
     let child_stderr = child.stderr.take().expect("piped stderr");
     let stdout = thread::spawn(move || bounded_redacted_reader(child_stdout));
     let stderr = thread::spawn(move || bounded_redacted_reader(child_stderr));
-    let status = wait_for_daemon_with_lifetime(&mut child, idle_timeout, state_path);
+    let status = wait_for_daemon(&mut child, state_path);
     let stdout = join_output_reader(stdout, "stdout");
     let stderr = join_output_reader(stderr, "stderr");
     let status = status.map_err(|error| {
@@ -335,7 +326,7 @@ fn supervise_child_with_lifetime(
             Some("wait for supervised daemon".to_string()),
         )
     })?;
-    if state_dir_removed(state_path) {
+    if super::lifetime::state_dir_removed(state_path) {
         // Termination evidence lives in the removed directory; there is no
         // reader left for it and writing it would fail.
         return Ok(());
@@ -367,95 +358,25 @@ fn supervise_child_with_lifetime(
     super::write_termination_evidence(&evidence)
 }
 
-/// Reuse the lease-scoped stop primitive rather than inventing another
-/// proof-and-signal path. It fences pending admissions and revalidates durable
-/// work and startup-token ownership immediately before every signal.
-fn wait_for_daemon_with_lifetime(
+/// Wait for the serving child, which owns its own lifetime (#17412). The one
+/// duty kept here is the backstop for a wedged child: once its state directory
+/// is removed nothing can reach the daemon any more (#15590). The child stops
+/// itself on that too; this handle is the only kill that cannot hit a reused
+/// PID.
+fn wait_for_daemon(
     child: &mut std::process::Child,
-    idle_timeout: Option<Duration>,
     state_path: &Path,
 ) -> std::io::Result<std::process::ExitStatus> {
-    let mut idle = super::lifetime::IdleLifetime::new(idle_timeout);
-    let launcher = super::lifetime::LauncherIdentity::inherited();
-    let mut stopper: Option<std::process::Child> = None;
     loop {
         if let Some(status) = child.try_wait()? {
-            // Do not wait for our stop command: it observes this supervisor's
-            // exit after reaping the serving child. Waiting would be circular.
             return Ok(status);
         }
-        if state_dir_removed(state_path) {
-            // Nothing can reach this daemon any more: no client can discover
-            // its lease, read its jobs, or run the lease-scoped stop, which
-            // itself needs this directory. Without this, the unreadable lease
-            // below counts as activity forever and the pair leaks, which is
-            // how tests whose TempDir home was dropped left hundreds of
-            // supervisors behind (#15590). We own the child handle, so this
-            // kill cannot hit a reused PID.
+        if super::lifetime::state_dir_removed(state_path) {
             child.kill()?;
             return child.wait();
         }
-        let state = super::validate_lease_file(state_path)
-            .ok()
-            .and_then(|validation| validation.state)
-            .filter(|state| state.pid == child.id());
-        if let Some(state) = state {
-            let scope = super::daemon_scope_for_state_path(state_path);
-            let idle_jobs = crate::paths::observation_db()
-                .and_then(|jobs| super::JobStore::active_count_at_path(jobs, Some(&scope)))
-                .is_ok_and(|count| count == 0);
-            if !idle_jobs || launcher.as_ref().is_some_and(|launcher| launcher.is_live()) {
-                idle.touch();
-            } else if idle.expired()
-                || idle.replaced_and_settled(super::lifetime::running_executable_replaced())
-            {
-                // An idle daemon whose binary was replaced stops now instead of
-                // serving stale code until its idle window lapses; the next
-                // command starts the installed binary (#15403).
-                if stopper
-                    .as_mut()
-                    .is_some_and(|stopper| stopper.try_wait().ok().flatten().is_some())
-                {
-                    stopper = None;
-                }
-                if stopper.is_none() {
-                    // `current_exe()` can name `<path> (deleted)` once the
-                    // binary is replaced; launch the recorded startup path,
-                    // where the installed file lives, or this stop could
-                    // never spawn (#15403).
-                    stopper = Command::new(super::lifetime::launchable_executable()?)
-                        .args(["daemon", "stop", "--lease-id", &state.lease_id])
-                        .env(
-                            crate::paths::DAEMON_STATE_DIR_ENV,
-                            state_path.parent().expect("state parent"),
-                        )
-                        .stdin(Stdio::null())
-                        .stdout(Stdio::null())
-                        .stderr(Stdio::null())
-                        .spawn()
-                        .ok();
-                    // A fenced or failed stop is retried after another complete
-                    // idle window, not in a subprocess-spawning hot loop.
-                    idle.touch();
-                }
-            }
-        } else {
-            idle.touch();
-        }
         thread::sleep(Duration::from_secs(1));
     }
-}
-
-/// True only when the daemon's state directory is provably gone.
-///
-/// A missing or unreadable `state.json` is normal during startup, before the
-/// child publishes its lease, so only the directory's absence counts. An
-/// existence check that errors (permissions, I/O) is not proof of removal and
-/// keeps the daemon alive.
-fn state_dir_removed(state_path: &Path) -> bool {
-    state_path
-        .parent()
-        .is_some_and(|dir| matches!(dir.try_exists(), Ok(false)))
 }
 
 fn join_output_reader(reader: thread::JoinHandle<Option<String>>, stream: &str) -> Option<String> {
