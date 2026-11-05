@@ -2640,7 +2640,8 @@ struct ReadinessOutputCapture {
     truncated: bool,
 }
 
-/// Use the same containment and bounded output readers as provider readiness.
+/// Why a Pi readiness probe failed. A missing executable is deterministic;
+/// everything else is treated as an interrupted, retryable probe.
 #[derive(Debug)]
 pub(super) enum PiReadinessProbeError {
     ExecutableNotFound(String),
@@ -2662,6 +2663,7 @@ impl std::fmt::Display for PiReadinessProbeError {
     }
 }
 
+/// Use the same containment and bounded output readers as provider readiness.
 pub(super) fn run_pi_readiness_probe(
     program: &str,
     flag: &str,
