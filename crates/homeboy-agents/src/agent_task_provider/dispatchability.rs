@@ -1194,7 +1194,9 @@ mod tests {
         let catalog = catalog(provider());
         let mut task = request("model");
         task.executor.backend = "missing".to_string();
-        let deadline = crate::agent_task_timeout::now_unix_ms() + 30;
+        // Already expired, so the probed route deterministically hits the
+        // readiness deadline. A short future deadline raced the probe (#17410).
+        let deadline = crate::agent_task_timeout::now_unix_ms().saturating_sub(1);
         let mut plan = AgentTaskPlan::new("deadline", vec![task]);
         plan.options.execution_budget.deadline_unix_ms = Some(deadline);
         plan.options.rotation = Some(AgentTaskProviderRotationPolicy {
