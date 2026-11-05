@@ -22031,6 +22031,160 @@ fn register_shared_repository_components(home: &std::path::Path) -> (tempfile::T
     (dir, checkout)
 }
 
+/// Repository-root publication must not repeat component discovery after Cook
+/// has admitted an explicit `--repo` component, including detached attempts.
+#[test]
+fn issue_17379_monorepo_finalization_and_recover_keep_admitted_component() {
+    homeboy_core::test_support::with_isolated_home(|home| {
+        let root = tempfile::tempdir().unwrap();
+        let primary = root.path().join("primary");
+        let checkout = root.path().join("data-machine-events@fix-issue");
+        for path in [&primary, &checkout] {
+            std::fs::create_dir_all(path).unwrap();
+            homeboy_core::test_support::run_git_fixture_command(path, &["init", "-q"]);
+            homeboy_core::test_support::run_git_fixture_command(
+                path,
+                &[
+                    "remote",
+                    "add",
+                    "origin",
+                    "https://github.com/example/data-machine.git",
+                ],
+            );
+            for id in [
+                "data-machine",
+                "data-machine-business",
+                "data-machine-events",
+                "data-machine-socials",
+            ] {
+                std::fs::create_dir_all(path.join("plugins").join(id)).unwrap();
+            }
+        }
+        let registrations = home.path().join(".config/homeboy/components");
+        std::fs::create_dir_all(&registrations).unwrap();
+        for id in [
+            "data-machine",
+            "data-machine-business",
+            "data-machine-events",
+            "data-machine-socials",
+        ] {
+            std::fs::write(
+                registrations.join(format!("{id}.json")),
+                serde_json::json!({
+                    "local_path": primary.join("plugins").join(id),
+                    "remote_url": "https://github.com/example/data-machine.git",
+                })
+                .to_string(),
+            )
+            .unwrap();
+        }
+        assert!(homeboy_core::component::resolve_effective(None, checkout.to_str(), None).is_err());
+        let cook_id = "cook-issue-17379";
+        let run_id = "cook-issue-17379-attempt-1";
+        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        options.identity.initial_run_id = run_id.to_string();
+        options.identity.initial_plan.tasks[0].executor.model = Some("fixture-model".to_string());
+        // The durable identity produced by `cook --repo data-machine-events`.
+        options.identity.initial_plan.metadata["cook_repository_identity"] = serde_json::json!({
+            "component_id": "data-machine-events",
+            "component_registered": true,
+            "provenance": "--repo",
+        });
+        options.gates.gate_environment.admitted_component_id =
+            Some("data-machine-events".to_string());
+        persist_initial_recipe(&options).unwrap();
+        agent_task_lifecycle::submit_plan(&options.identity.initial_plan, Some(run_id)).unwrap();
+        agent_task_lifecycle::record_pre_execution_failure(
+            run_id,
+            &options.identity.initial_plan,
+            "test",
+            &homeboy_core::Error::invalid_argument("test", "failed Cook attempt"),
+        )
+        .unwrap();
+        seed_review_form_aggregate(run_id, &options.identity.initial_plan);
+        let mut promotion = promotion_with_existing_path(run_id, &checkout);
+        promotion.changed_files = vec!["plugins/data-machine-events/change.txt".to_string()];
+        let mut finalization =
+            cook_finalization_options(&options, run_id, &promotion, Vec::new()).unwrap();
+        assert_eq!(
+            finalization.component_id.as_deref(),
+            Some("data-machine-events")
+        );
+        let component = homeboy_core::component::resolve_effective(
+            finalization.component_id.as_deref(),
+            Some(&finalization.path),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            PathBuf::from(component.local_path),
+            checkout.join("plugins/data-machine-events")
+        );
+
+        // Exercise the real commit backend: this was the second, identity-free
+        // resolution that the review-profile-only regression tests missed.
+        std::fs::write(
+            checkout.join("plugins/data-machine-events/change.txt"),
+            "candidate",
+        )
+        .unwrap();
+        homeboy_core::test_support::run_git_fixture_command(
+            &checkout,
+            &["config", "user.name", "Fixture"],
+        );
+        homeboy_core::test_support::run_git_fixture_command(
+            &checkout,
+            &["config", "user.email", "fixture@example.test"],
+        );
+        crate::agent_task_finalization::AgentTaskPrFinalizationBackend::commit_all(
+            &mut crate::agent_task_finalization::RealAgentTaskPrFinalizationBackend,
+            checkout.to_str().unwrap(),
+            "fix: candidate",
+        )
+        .expect("real publication commit must not rediscover the root component");
+        let remote = root.path().join("published.git");
+        std::fs::create_dir_all(&remote).unwrap();
+        homeboy_core::test_support::run_git_fixture_command(&remote, &["init", "--bare", "-q"]);
+        let pushed = homeboy_core::git::push_in_checkout(
+            "data-machine-events",
+            checkout.to_str().unwrap(),
+            homeboy_core::git::PushOptions {
+                remote_url: Some(remote.to_str().unwrap().to_string()),
+                refspec: Some("HEAD:refs/heads/candidate".to_string()),
+                ..Default::default()
+            },
+        )
+        .expect("publication push must not rediscover the root component");
+        assert!(pushed.success, "{}", pushed.stderr);
+
+        finalization.manual_finalization = true;
+        let candidate = crate::agent_task_finalization::AgentTaskPrCandidateState::Committed {
+            changed_files: vec!["plugins/data-machine-events/change.txt".to_string()],
+            push_required: false,
+        };
+        let preflight = crate::agent_task_finalization::preflight_pr_with_backend(
+            finalization,
+            &mut CaptureBackend {
+                candidate_state: Some(candidate.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        persist_manual_finalization_intent(run_id, &preflight).unwrap();
+        let recovered = recover_cook_pr_with_backend(
+            run_id,
+            Vec::new(),
+            true,
+            &mut CaptureBackend {
+                candidate_state: Some(candidate),
+                ..Default::default()
+            },
+        )
+        .expect("recover must reuse the admitted component without an operator override");
+        assert_eq!(recovered["status"], "validated");
+    });
+}
+
 /// #14725: a Cook worktree whose repository carries multiple component
 /// registrations cannot finalize, because `cook_finalization_options` hardcoded
 /// `None` into `resolve_review_profile` instead of reusing the component

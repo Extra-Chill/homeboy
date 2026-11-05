@@ -72,8 +72,15 @@ pub fn push_at(
     options: PushOptions,
     path_override: Option<&str>,
 ) -> Result<GitOutput> {
+    let (id, path) = resolve_target(component_id, path_override)?;
+    push_in_checkout(&id, &path, options)
+}
+
+/// Push from an already validated checkout without rediscovering its component.
+/// Publication controllers must preserve their admitted repository identity.
+pub fn push_in_checkout(id: &str, path: &str, options: PushOptions) -> Result<GitOutput> {
     let token = options.token.clone();
-    let result = push_at_inner(component_id, options, path_override);
+    let result = push_at_inner(id.to_string(), path.to_string(), options);
     match (result, token) {
         (Ok(mut output), Some(token)) => {
             output.stdout = output.stdout.replace(&token, "[REDACTED]");
@@ -91,12 +98,7 @@ pub fn push_at(
     }
 }
 
-fn push_at_inner(
-    component_id: Option<&str>,
-    options: PushOptions,
-    path_override: Option<&str>,
-) -> Result<GitOutput> {
-    let (id, path) = resolve_target(component_id, path_override)?;
+fn push_at_inner(id: String, path: String, options: PushOptions) -> Result<GitOutput> {
     let remote_url =
         resolve_push_remote_url(options.remote_url.as_deref(), options.token.as_deref())?;
     let mut args: Vec<String> = Vec::new();
