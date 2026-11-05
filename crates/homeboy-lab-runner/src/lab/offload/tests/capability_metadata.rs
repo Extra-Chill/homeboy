@@ -632,41 +632,72 @@ fn runner_homeboy_version_drift_reports_upgrade_guidance() {
         .is_some_and(|hint| hint.contains("no ancestry-verified refresh target"))));
 }
 
+/// Exercise the public handshake, including the real HTTP observation, rather
+/// than constructing the negotiation record that used to hide probe failures.
 #[test]
-fn exact_immutable_daemon_supplies_command_capabilities_when_the_second_probe_is_unavailable() {
-    let hash = "a".repeat(64);
-    let identity = "homeboy 0.348.6+b83a29fa4dea";
-    let mut status = hash_bound_direct_status(identity);
-    status.configured_job_binary_build_identity = None;
-    status.daemon_freshness = Some(homeboy_core::daemon::DaemonFreshnessReport {
-        fresh: true,
-        stale_reason_code: None,
-        restartable: false,
-        lease_id: Some("lease-a".to_string()),
-        pid: Some(42),
-        recovery_evidence: None,
-        ownership_evidence: None,
-        adoption_command: None,
-        binary_hash: Some(hash.clone()),
-        daemon_version: Some("0.348.6".to_string()),
-        daemon_build_identity: Some(identity.to_string()),
-        runtime_paths: None,
-        active_jobs: 0,
-        termination_evidence: None,
-        repair_plan: Vec::new(),
-    });
-    let capabilities = homeboy_lab_contract::required_lab_handoff_capabilities();
+fn admission_distinguishes_unavailable_probe_from_missing_capability() {
+    use homeboy_lab_contract::{negotiate_lab_capability_handshake, LabAdmissionRejection};
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
 
-    let evidence = super::super::metadata::hash_bound_runner_command_evidence(
-        &status,
-        &format!("/runner/homeboy-{hash}/homeboy"),
-        &capabilities,
-    )
-    .expect("the exact immutable daemon proves the command evidence");
-
-    assert_eq!(evidence.0.build_identity, identity);
-    assert_eq!(evidence.0.source_revision, "b83a29fa4dea");
-    assert_eq!(evidence.1, capabilities);
+    for (http_status, requests, expected) in [
+        (
+            "503 Service Unavailable",
+            3,
+            LabAdmissionRejection::AdmissionProbeUnavailable,
+        ),
+        ("200 OK", 1, LabAdmissionRejection::CapabilityIncompatible),
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            for _ in 0..requests {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0; 4096];
+                let count = stream.read(&mut request).unwrap();
+                assert!(String::from_utf8_lossy(&request[..count]).starts_with("GET /version "));
+                let body = r#"{"lab_handoff_capabilities":[]}"#;
+                write!(stream, "HTTP/1.1 {http_status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            }
+        });
+        let runner = crate::Runner {
+            id: "probe-regression".to_string(),
+            kind: crate::RunnerKind::Local,
+            server_id: None,
+            workspace_root: None,
+            settings: Default::default(),
+            env: Default::default(),
+            secret_env: Default::default(),
+            resources: Default::default(),
+            policy: Default::default(),
+        };
+        let mut status = connected_status(&runner.id);
+        status.session.as_mut().unwrap().local_url = Some(url);
+        let result = crate::runners::runner_capability_handshake(&runner, &status, "homeboy");
+        let error = match result {
+            Err(error) => error,
+            Ok(handshake) => {
+                let admission = negotiate_lab_capability_handshake(&handshake);
+                assert_eq!(admission.rejection_code, Some(expected));
+                capability_admission_error(&runner.id, &admission, false)
+            }
+        };
+        assert_eq!(
+            error.details["admission_cause_class"],
+            serde_json::to_value(expected).unwrap()
+        );
+        assert_eq!(error.retryable == Some(true), requests == 3);
+        if requests == 3 {
+            assert!(error.details["probe_error"]
+                .as_str()
+                .unwrap()
+                .contains("503"));
+            assert!(!error.message.contains("Upgrade or reconnect"));
+        } else {
+            assert!(error.message.contains("Upgrade or reconnect"));
+        }
+        server.join().unwrap();
+    }
 }
 
 #[test]
@@ -712,52 +743,6 @@ fn strict_capability_admission_accepts_only_compatible_exact_source() {
         &incompatible,
         false
     ));
-}
-
-#[test]
-fn daemon_capabilities_do_not_substitute_for_a_conflicting_configured_identity() {
-    let hash = "a".repeat(64);
-    let identity = "homeboy 0.348.6+b83a29fa4dea";
-    let mut status = hash_bound_direct_status(identity);
-    status.configured_job_binary_build_identity = Some("homeboy 0.348.6+different".to_string());
-    status.daemon_freshness = Some(homeboy_core::daemon::DaemonFreshnessReport {
-        fresh: true,
-        stale_reason_code: None,
-        restartable: false,
-        lease_id: Some("lease-a".to_string()),
-        pid: Some(42),
-        recovery_evidence: None,
-        ownership_evidence: None,
-        adoption_command: None,
-        binary_hash: Some(hash.clone()),
-        daemon_version: Some("0.348.6".to_string()),
-        daemon_build_identity: Some(identity.to_string()),
-        runtime_paths: None,
-        active_jobs: 0,
-        termination_evidence: None,
-        repair_plan: Vec::new(),
-    });
-
-    assert!(super::super::metadata::hash_bound_runner_command_evidence(
-        &status,
-        &format!("/runner/homeboy-{hash}/homeboy"),
-        &homeboy_lab_contract::required_lab_handoff_capabilities(),
-    )
-    .is_none());
-}
-
-fn hash_bound_direct_status(identity: &str) -> RunnerStatusReport {
-    let mut status = connected_status("homeboy-lab");
-    let session = status.session.as_mut().expect("session");
-    session.mode = RunnerTunnelMode::DirectSsh;
-    session.local_url = Some("http://127.0.0.1:7421".to_string());
-    session.remote_daemon_address = Some("127.0.0.1:7422".to_string());
-    session.remote_daemon_pid = Some(42);
-    session.remote_daemon_lease_id = Some("lease-a".to_string());
-    session.homeboy_version = "0.348.6".to_string();
-    session.homeboy_build_identity = Some(identity.to_string());
-    status.configured_job_binary_build_identity = Some(identity.to_string());
-    status
 }
 
 /// Build a connected status whose runner session reports `version`.

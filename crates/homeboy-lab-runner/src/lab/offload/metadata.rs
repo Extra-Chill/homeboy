@@ -59,11 +59,13 @@ pub(crate) fn direct_runner_capability_handshake(
         .and_then(build_commit)
         .unwrap_or_default()
         .to_string();
-    let (daemon_capabilities, daemon_contract_version) = session
-        .local_url
-        .as_deref()
-        .and_then(|url| crate::daemon_lab_handoff_capabilities(url).ok())
-        .unwrap_or_default();
+    let local_url = session.local_url.as_deref().ok_or_else(|| {
+        crate::connection::admission_probe_unavailable("daemon_version", "session has no local URL")
+    })?;
+    let (daemon_capabilities, daemon_contract_version) =
+        crate::daemon_lab_handoff_capabilities(local_url).map_err(|error| {
+            crate::connection::admission_probe_unavailable("daemon_version", error)
+        })?;
     let daemon = LabRuntimeIdentity {
         build_identity: session.homeboy_build_identity.clone().unwrap_or_default(),
         lab_contract_version: daemon_contract_version,
@@ -73,8 +75,6 @@ pub(crate) fn direct_runner_capability_handshake(
             .as_deref()
             .is_some_and(|value| value.ends_with("-dirty")),
     };
-    let command_evidence = command_evidence
-        .or_else(|| hash_bound_runner_command_evidence(status, homeboy, &daemon_capabilities));
     let Some((runner_command, runner_command_capabilities)) = command_evidence else {
         return Ok(LabCapabilityHandshake {
             controller: controller_identity.clone(),
@@ -177,51 +177,6 @@ pub(crate) fn capability_admission_error(
         }),
     )
     .with_hint(remediation)
-}
-
-pub(super) fn hash_bound_runner_command_evidence(
-    status: &RunnerStatusReport,
-    homeboy: &str,
-    daemon_capabilities: &[homeboy_lab_contract::LabCapabilityVersion],
-) -> Option<(
-    LabRuntimeIdentity,
-    Vec<homeboy_lab_contract::LabCapabilityVersion>,
-)> {
-    let session = status.session.as_ref()?;
-    let session_identity = session.homeboy_build_identity.as_deref()?;
-    let freshness = status.daemon_freshness.as_ref()?;
-    let binary_hash = freshness.binary_hash.as_deref()?;
-    let slot_hash = Path::new(homeboy)
-        .parent()?
-        .file_name()?
-        .to_str()?
-        .strip_prefix("homeboy-")?;
-    let hash_is_valid = slot_hash.len() == 64
-        && slot_hash.bytes().all(|byte| byte.is_ascii_hexdigit())
-        && slot_hash == binary_hash;
-    if !freshness.fresh
-        || session.mode != RunnerTunnelMode::DirectSsh
-        || freshness.lease_id != session.remote_daemon_lease_id
-        || freshness.pid != session.remote_daemon_pid
-        || !hash_is_valid
-        || daemon_capabilities.is_empty()
-        || status
-            .configured_job_binary_build_identity
-            .as_deref()
-            .is_some_and(|configured| configured != session_identity)
-        || freshness.daemon_build_identity.as_deref() != Some(session_identity)
-    {
-        return None;
-    }
-    Some((
-        LabRuntimeIdentity {
-            build_identity: session_identity.to_string(),
-            lab_contract_version: None,
-            source_revision: build_commit(session_identity)?.to_string(),
-            clean: !session_identity.ends_with("-dirty"),
-        },
-        daemon_capabilities.to_vec(),
-    ))
 }
 
 fn build_commit(identity: &str) -> Option<&str> {
