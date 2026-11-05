@@ -1993,13 +1993,8 @@ fn provider_timeout_diagnostic_data(
     let stdout_tail = redact_sensitive_text(&stdout_text, &redactions);
     let stderr_tail = redact_sensitive_text(&stderr_text, &redactions);
     let log_lookup = run_id.map_or_else(
-        || "homeboy agent-task logs <run-id> --task <task-id>".to_string(),
-        |run_id| {
-            format!(
-                "homeboy agent-task logs {run_id} --task {}",
-                request.task_id
-            )
-        },
+        || "homeboy runs logs <run-id>".to_string(),
+        |run_id| format!("homeboy runs logs {run_id}"),
     );
 
     json!({

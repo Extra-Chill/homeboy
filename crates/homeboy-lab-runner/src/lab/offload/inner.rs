@@ -950,7 +950,7 @@ pub(crate) fn exec_lab_context(
                     &handoff.envelope,
                 )? {
                     stderr.push_str(&format!(
-                        "Persisted remote agent-task dispatch failure evidence for run `{}`. Inspect with `homeboy agent-task status {}` and `homeboy agent-task logs {}`.\n",
+                        "Persisted remote agent-task dispatch failure evidence for run `{}`. Inspect with `homeboy agent-task status {}` and `homeboy runs logs {}`.\n",
                         record.run_id, record.run_id, record.run_id
                     ));
                     return Ok(LabOffloadOutcome::Offloaded {
@@ -979,7 +979,7 @@ pub(crate) fn exec_lab_context(
                 },
             )?;
             stderr.push_str(&format!(
-                "Persisted agent-task pre-dispatch failure evidence for run `{}`. Inspect with `homeboy agent-task status {}` and `homeboy agent-task logs {}`.\n",
+                "Persisted agent-task pre-dispatch failure evidence for run `{}`. Inspect with `homeboy agent-task status {}` and `homeboy runs logs {}`.\n",
                 record.run_id, record.run_id, record.run_id
             ));
         }
@@ -1547,7 +1547,7 @@ pub(crate) fn run_lab_offload_inner(
             plan,
             stdout: format!("{stdout}\n"),
             stderr: format!(
-                "Lab staging continues for durable run `{run_id}`.\nNext: homeboy agent-task status {run_id}\nNext: homeboy agent-task logs {run_id}\n",
+                "Lab staging continues for durable run `{run_id}`.\nNext: homeboy agent-task status {run_id}\nNext: homeboy runs logs {run_id}\n",
             ),
             exit_code: 0,
             output_file_content: Some(format!("{stdout}\n")),
@@ -2032,7 +2032,7 @@ pub(crate) fn run_lab_offload_inner(
             plan,
             stdout: format!("{stdout}\n"),
             stderr: format!(
-                "Lab staging continues for durable run `{run_id}`.\nNext: homeboy agent-task status {run_id}\nNext: homeboy agent-task logs {run_id}\n",
+                "Lab staging continues for durable run `{run_id}`.\nNext: homeboy agent-task status {run_id}\nNext: homeboy runs logs {run_id}\n",
             ),
             exit_code: 0,
             output_file_content: Some(format!("{stdout}\n")),
@@ -2615,7 +2615,7 @@ pub(crate) fn detached_staging_submission_output(
         "durable_run_id": run_id,
         "retrieval_commands": {
             "status": format!("homeboy agent-task status {run_id}"),
-            "logs": format!("homeboy agent-task logs {run_id}"),
+            "logs": format!("homeboy runs logs {run_id}"),
             "watch": format!("homeboy agent-task status {run_id} --watch"),
         },
     });

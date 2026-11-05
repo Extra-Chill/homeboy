@@ -3363,7 +3363,7 @@ fn logs_carry_gate_lifecycle_events_for_a_run_that_reached_the_gate_phase() {
         )
         .expect("persist gate failure");
 
-        let (value, exit_code) = logs(LogsArgs {
+        let (value, exit_code) = logs(RunsLogsArgs {
             run_id: run_id.to_string(),
             cursor: None,
         })
@@ -3752,22 +3752,19 @@ fn diagnose_keeps_a_successful_terminal_runner_record_healthy() {
 fn logs_exposes_only_the_canonical_cursor_surface() {
     let cli = Cli::try_parse_from([
         "homeboy",
-        "agent-task",
+        "runs",
         "logs",
         "run-1",
         "--cursor",
         "event-page-2",
     ])
     .expect("canonical cursor parses");
-    let Commands::AgentTask(agent_task) = cli.command else {
-        panic!("expected agent-task command");
+    let Commands::Runs(runs) = cli.command else {
+        panic!("expected runs command");
     };
-    let AgentTaskCommand::Logs(args) = agent_task.command else {
-        panic!("expected logs command");
-    };
-    assert_eq!(args.run_id, "run-1");
-    assert_eq!(args.cursor.as_deref(), Some("event-page-2"));
-    assert!(Cli::try_parse_from(["homeboy", "agent-task", "logs", "run-1", "--raw"]).is_err());
+    assert_eq!(runs.logs_run_id(), Some("run-1"));
+    assert!(Cli::try_parse_from(["homeboy", "runs", "logs", "run-1", "--raw"]).is_err());
+    assert!(Cli::try_parse_from(["homeboy", "agent-task", "logs", "run-1"]).is_err());
 }
 
 #[test]
@@ -3796,7 +3793,7 @@ fn controller_proxy_status_and_logs_resolve_before_runner_child_is_known() {
             ..Default::default()
         })
         .expect("controller status resolves");
-        let (logs_value, logs_exit) = logs(LogsArgs {
+        let (logs_value, logs_exit) = logs(RunsLogsArgs {
             run_id: "run-cli-controller-proxy".to_string(),
             cursor: None,
         })
@@ -4131,7 +4128,7 @@ fn logs_return_canonical_events_while_diagnostics_stay_on_diagnose_and_review() 
             ..Default::default()
         })
         .expect("status loaded");
-        let (logs_value, _) = logs(LogsArgs {
+        let (logs_value, _) = logs(RunsLogsArgs {
             run_id: run_id.to_string(),
             cursor: None,
         })

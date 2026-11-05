@@ -1301,7 +1301,7 @@ fn enrich_remote_dispatch_aggregate(envelope: &Value, aggregate: &mut AgentTaskA
                     AgentTaskEvidenceRef {
                         kind: "remote-agent-task-logs".to_string(),
                         uri: format!("homeboy://agent-task/run/{remote_run_id}/logs"),
-                        label: Some("Remote agent-task logs".to_string()),
+                        label: Some("Remote runs logs".to_string()),
                     },
                     AgentTaskEvidenceRef {
                         kind: "remote-agent-task-review".to_string(),

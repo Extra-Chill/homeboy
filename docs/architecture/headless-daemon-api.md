@@ -101,7 +101,7 @@ A useful headless UI can be built from this read/query surface:
   nested identities against the run graph, and redacts bounded payloads and
   references before persistence. Replays return the original event, including
   after its payload ages out of the retained read window; conflicting reuse of
-  a key is rejected. Synthesized `agent-task logs` remain a separate legacy
+  a key is rejected. Synthesized `runs logs` remain a separate legacy
   projection rather than being frozen into this forward-only ledger.
   Control-plane actions append one `action.accepted` event before invoking the
   delegated effect and one terminal `action.succeeded`,

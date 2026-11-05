@@ -52,6 +52,9 @@ pub(super) enum AgentTaskResourceBehavior {
 pub(super) fn agent_task_resource_behavior(
     command: &Commands,
 ) -> Option<AgentTaskResourceBehavior> {
+    if matches!(command, Commands::Runs(args) if args.logs_run_id().is_some()) {
+        return Some(AgentTaskResourceBehavior::BoundedMetadataRead);
+    }
     let Commands::AgentTask(args) = command else {
         return None;
     };
@@ -103,7 +106,6 @@ pub(super) fn agent_task_resource_behavior(
         | agent_task::AgentTaskCommand::ValidatePlan(_)
         | agent_task::AgentTaskCommand::List(_)
         | agent_task::AgentTaskCommand::ActiveScope(_)
-        | agent_task::AgentTaskCommand::Logs(_)
         | agent_task::AgentTaskCommand::Artifacts(_)
         | agent_task::AgentTaskCommand::Evidence(_)
         | agent_task::AgentTaskCommand::Diagnose(_)

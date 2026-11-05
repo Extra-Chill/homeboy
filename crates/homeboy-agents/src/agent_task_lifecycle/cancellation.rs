@@ -531,7 +531,7 @@ pub(crate) fn cancel_exact_run_in_store_with_provenance(
                     "cause": "operator_requested",
                     "reason": reason.unwrap_or("cancel requested"),
                     "timestamp": cancelled_at,
-                    "recovery_action": "inspect retained diagnostics with: homeboy agent-task logs <run-id>",
+                    "recovery_action": "inspect retained diagnostics with: homeboy runs logs <run-id>",
                 }));
             }
             if let Some(service_cleanup) = service_cleanup.clone() {
@@ -1133,7 +1133,7 @@ fn cancel_resolved_run_in_store(
                 "cause": "operator_requested",
                 "reason": reason.unwrap_or("cancel requested"),
                 "timestamp": cancelled_at,
-                "recovery_action": "inspect retained diagnostics with: homeboy agent-task logs <run-id>",
+                "recovery_action": "inspect retained diagnostics with: homeboy runs logs <run-id>",
             }));
         }
         if detached_handoff_parent {
@@ -1344,7 +1344,7 @@ pub(super) fn reconcile_controller_job_cancellation_in_store(
             "cause": "controller_job_cancelled",
             "reason": "controller-owned staging job was cancelled",
             "timestamp": cancelled_at,
-            "recovery_action": "inspect retained diagnostics with: homeboy agent-task logs <run-id>",
+            "recovery_action": "inspect retained diagnostics with: homeboy runs logs <run-id>",
         }),
     );
     metadata.insert(
@@ -1574,7 +1574,7 @@ fn cancel_record_with_opaque_provider_handles(record: &mut AgentTaskRunRecord) {
             "cause": "opaque_provider_cancellation",
             "reason": "provider cancellation requested before provider execution completed",
             "timestamp": cancelled_at,
-            "recovery_action": "inspect retained diagnostics with: homeboy agent-task logs <run-id>",
+            "recovery_action": "inspect retained diagnostics with: homeboy runs logs <run-id>",
         }),
     );
     metadata.insert(

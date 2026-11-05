@@ -71,7 +71,7 @@ fn deferred_staging_emits_only_durable_run_commands() {
     );
     assert_eq!(
         output["retrieval_commands"]["logs"],
-        "homeboy agent-task logs run-1"
+        "homeboy runs logs run-1"
     );
     let source = receipt
         .runner_receipt
@@ -110,13 +110,13 @@ fn emit_durable_run_id_writes_json_to_output_before_execution() {
     );
     assert_eq!(
         json["data"]["retrieval_commands"]["logs"],
-        "homeboy agent-task logs agent-task-run-5684"
+        "homeboy runs logs agent-task-run-5684"
     );
 
     // The operator-facing messages must carry both follow-up commands.
     let joined = messages.join("\n");
     assert!(joined.contains("homeboy agent-task status agent-task-run-5684"));
-    assert!(joined.contains("homeboy agent-task logs agent-task-run-5684"));
+    assert!(joined.contains("homeboy runs logs agent-task-run-5684"));
 }
 
 #[test]
@@ -134,7 +134,7 @@ fn emit_durable_run_id_without_output_still_records_followup_commands() {
     let message = &messages[0];
     assert!(message.contains("agent-task-run-no-output"));
     assert!(message.contains("homeboy agent-task status agent-task-run-no-output"));
-    assert!(message.contains("homeboy agent-task logs agent-task-run-no-output"));
+    assert!(message.contains("homeboy runs logs agent-task-run-no-output"));
 }
 
 #[test]

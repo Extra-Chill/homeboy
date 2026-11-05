@@ -540,7 +540,7 @@ fn in_flight_daemon_disconnect_outcome_marks_durable_run_detached() {
             "homeboy agent-task status run-123"
         );
         assert!(stderr.contains("durable agent-task run `run-123` continues remotely"));
-        assert!(stderr.contains("homeboy agent-task logs run-123"));
+        assert!(stderr.contains("homeboy runs logs run-123"));
         assert!(plan
             .steps
             .iter()

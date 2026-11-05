@@ -201,7 +201,6 @@ impl Commands {
             Commands::AgentTask(agent_task::AgentTaskArgs {
                 command:
                     agent_task::AgentTaskCommand::Status(_)
-                    | agent_task::AgentTaskCommand::Logs(_)
                     | agent_task::AgentTaskCommand::Artifacts(_)
                     | agent_task::AgentTaskCommand::Evidence(_)
                     | agent_task::AgentTaskCommand::Diagnose(_)
@@ -217,6 +216,9 @@ impl Commands {
                         command: agent_task::AgentTaskAuthCommand::Status(_),
                     }),
             }) => LabCommandContract::explicit_runner_simple(AGENT_TASK_AUTH_STATUS_LAB_LABEL),
+            Commands::Runs(args) if args.logs_run_id().is_some() => {
+                LabCommandContract::runner_resident_read_polling(AGENT_TASK_STATUS_LAB_LABEL)
+            }
             Commands::Bench(args) => return args.portability_contract(),
             Commands::Fuzz(args) => {
                 return CommandPortabilityContract::lab_optional(args.lab_contract())

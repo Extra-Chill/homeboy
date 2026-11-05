@@ -51,7 +51,7 @@ pub(crate) fn emit_durable_run_id_before_execution(
     messages: &mut Vec<String>,
 ) {
     let status_command = format!("homeboy agent-task status {run_id}");
-    let logs_command = format!("homeboy agent-task logs {run_id}");
+    let logs_command = format!("homeboy runs logs {run_id}");
 
     if let Some(path) = local_output_file {
         let envelope = serde_json::json!({
@@ -238,7 +238,7 @@ pub(crate) fn in_flight_daemon_disconnect_outcome(
         "message": error.message,
         "retrieval_commands": {
             "status": format!("homeboy agent-task status {run_id}"),
-            "logs": format!("homeboy agent-task logs {run_id}"),
+            "logs": format!("homeboy runs logs {run_id}"),
             "artifacts": format!("homeboy agent-task artifacts {run_id}"),
             "runner_job_logs": format!("homeboy runner job logs {runner_id} {job_id} --follow")
         }
@@ -257,7 +257,7 @@ pub(crate) fn in_flight_daemon_disconnect_outcome(
     );
     stderr.push_str(&format!("Reason: {reason}\n"));
     stderr.push_str(&format!("Next: homeboy agent-task status {run_id}\n"));
-    stderr.push_str(&format!("Next: homeboy agent-task logs {run_id}\n"));
+    stderr.push_str(&format!("Next: homeboy runs logs {run_id}\n"));
     stderr.push_str(&format!("Next: homeboy agent-task artifacts {run_id}\n"));
     stderr.push_str(&format!(
         "Runner job: homeboy runner job logs {runner_id} {job_id} --follow\n"

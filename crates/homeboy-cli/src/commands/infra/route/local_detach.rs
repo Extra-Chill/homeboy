@@ -959,7 +959,7 @@ fn handoff_envelope(
         "controller_job": { "state": "owned", "job_id": job_id },
         "status_command": format!("homeboy agent-task status {cook_id}"),
         "watch_command": format!("homeboy agent-task status {cook_id} --watch"),
-        "logs_command": format!("homeboy agent-task logs {cook_id}"),
+        "logs_command": format!("homeboy runs logs {cook_id}"),
         "cancel_command": format!("homeboy agent-task cancel {cook_id}"),
         "output_file_owner": "handoff_launcher",
     })

@@ -108,7 +108,7 @@ const REPRESENTATIVE_INVOCATIONS: &[&[&str]] = &[
     &["agent-task", "status", "run-1"],
     &["agent-task", "list"],
     &["agent-task", "active"],
-    &["agent-task", "logs", "run-1"],
+    &["runs", "logs", "run-1"],
     &["agent-task", "artifacts", "run-1"],
     &["agent-task", "evidence", "run-1"],
     &["agent-task", "review", "run-1"],

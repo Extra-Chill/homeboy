@@ -110,7 +110,7 @@ pub(crate) fn parsed_command_preflight_input(
         .any(|arg| arg == "--runner" || arg.starts_with("--runner="))
     {
         RunnerNormalization::PinnedCookArgv
-    } else if matches!(&cli.command, Commands::Runs(_)) {
+    } else if matches!(&cli.command, Commands::Runs(args) if args.logs_run_id().is_none()) {
         RunnerNormalization::RunsCommandOption
     } else {
         RunnerNormalization::None
@@ -1512,7 +1512,7 @@ mod tests {
         ];
         for args in [
             ["homeboy", "agent-task", "status", "agent-task-123"].as_slice(),
-            ["homeboy", "agent-task", "logs", "agent-task-123"].as_slice(),
+            ["homeboy", "runs", "logs", "agent-task-123"].as_slice(),
             ["homeboy", "agent-task", "artifacts", "agent-task-123"].as_slice(),
             ["homeboy", "agent-task", "evidence", "agent-task-123"].as_slice(),
             ["homeboy", "agent-task", "diagnose", "agent-task-123"].as_slice(),

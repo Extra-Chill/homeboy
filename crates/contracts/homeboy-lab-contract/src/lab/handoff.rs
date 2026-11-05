@@ -355,7 +355,7 @@ impl LabRunnerHandoffEnvelope {
                 .map(|run_id| format!("homeboy agent-task status {run_id}")),
             logs: actionable_run_id
                 .as_ref()
-                .map(|run_id| format!("homeboy agent-task logs {run_id}")),
+                .map(|run_id| format!("homeboy runs logs {run_id}")),
             artifacts: actionable_run_id
                 .as_ref()
                 .map(|run_id| format!("homeboy agent-task artifacts {run_id}")),

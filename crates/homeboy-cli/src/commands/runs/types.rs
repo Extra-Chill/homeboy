@@ -67,6 +67,8 @@ pub struct RunsArgs {
 
 #[derive(Subcommand, Clone)]
 pub(super) enum RunsCommand {
+    /// Read the canonical durable event stream for a run.
+    Logs(super::RunsLogsArgs),
     /// List persisted observation runs
     List(RunsListArgs),
     /// Aggregate persisted run metadata
@@ -255,6 +257,8 @@ pub enum RunsOutput {
     Refs(RunsRefsOutput),
     Resources(RunsResourcesOutput),
     Report(ReportOutput),
+    #[serde(untagged)]
+    Logs(serde_json::Value),
 }
 
 #[derive(Serialize)]

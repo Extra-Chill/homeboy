@@ -4772,7 +4772,7 @@ pub fn live_owner_continuation_denial(
         "owner_pid": child_owner_pid.or_else(|| record.owner_pid()),
         "phase": phase,
         "status_command": format!("homeboy agent-task status {}", record.run_id),
-        "logs_command": format!("homeboy agent-task logs {}", record.run_id),
+        "logs_command": format!("homeboy runs logs {}", record.run_id),
     });
     Some(error)
 }
@@ -4822,7 +4822,7 @@ pub fn cook_continuation_owner_denial(
         "owner_pid": owner.trim().parse::<u32>().ok(),
         "phase": phase,
         "status_command": format!("homeboy agent-task status {}", record.run_id),
-        "logs_command": format!("homeboy agent-task logs {}", record.run_id),
+        "logs_command": format!("homeboy runs logs {}", record.run_id),
     });
     Ok(Some(error))
 }

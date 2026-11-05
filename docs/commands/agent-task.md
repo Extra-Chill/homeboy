@@ -38,7 +38,6 @@ publication.
 | `list [--latest] [--limit <n>] [--cursor <cursor>] [--branch <branch>]` | List durable runs, newest first; `--latest` returns the newest record matching the supplied filters. |
 | `active [--limit <n>] [--cursor <cursor>] [--branch <branch>] [--reconcile [--dry-run\|--apply]]` | List queued and running durable runs, newest first, or preview/reconcile the explicit fleet mutation set. |
 | `reconcile <run-id> [--dry-run\|--apply]` | Preview or reconcile one durable run after refreshing its authoritative provider state. |
-| `logs <run-id> [--cursor <cursor>]` | Read or resume the canonical durable event stream. |
 | `artifacts <run-id>` | List artifacts and evidence refs recorded for a completed run. |
 | `replay-provider-boundary <run-id> [--task <task-id>]` | Hydrate the latest raw executor input and print provider-boundary fields without relaunching a provider. |
 | `cancel <run-id>` | Mark a queued or stale-running durable run as cancelled. |
@@ -52,7 +51,7 @@ publication.
 
 Paged `agent-task list` and `agent-task active` inspect at most 100 physical lifecycle rows per request and return at most 100 matching rows. A supplied `--limit` above 100 is retained as `requested_limit`; `limit` reports the effective 100-row ceiling. `search_status: "complete"` means the scoped history was exhausted. `"matching_limit_reached"` means the matching output cap was reached. `"search_window_exhausted"` means discovery stopped at its bounded physical window, so an empty `runs` array is incomplete rather than proof of no matches; resume with the returned opaque `next_cursor`.
 
-`agent-task status <run-id>` returns the canonical `ControlPlaneRun` resource (`homeboy/control-plane-run/v1`). Human summaries read that resource directly; they do not reconstruct `homeboy/agent-task-status-scope/v1` or wrap the run under `control_plane_run`. It is a bounded, non-reconciling read; use `agent-task logs <run-id> [--cursor <cursor>]` for canonical `ControlPlaneEventPage`s, `agent-task diagnose <run-id> --full` for detailed failure evidence, and `agent-task reconcile <run-id> --apply` for explicit state repair.
+`agent-task status <run-id>` returns the canonical `ControlPlaneRun` resource (`homeboy/control-plane-run/v1`). Human summaries read that resource directly; they do not reconstruct `homeboy/agent-task-status-scope/v1` or wrap the run under `control_plane_run`. It is a bounded, non-reconciling read; use `runs logs <run-id> [--cursor <cursor>]` for canonical `ControlPlaneEventPage`s, `agent-task diagnose <run-id> --full` for detailed failure evidence, and `agent-task reconcile <run-id> --apply` for explicit state repair.
 
 Terminal non-success status uses the current delivery/controller blocker, or, when none exists, the first non-success aggregate outcome's recorded `failure_classification` and first diagnostic. The existing `blocker.message` carries that cause and `blocker.reason` carries its matching next action (timeout/route retry, credential repair, or candidate recovery); no parallel reason record is written. Missing diagnostics are reported explicitly rather than presented as a failure cause. Status reads the record and mirrored aggregate from one authoritative SQLite observation, never from an independently updated `aggregate.json` cache.
 
@@ -72,12 +71,12 @@ credential-bearing fragments or arbitrary URLs.
 ### Resource Behavior
 
 Resource admission follows command capability rather than command names. Bounded
-controller metadata reads (`status`, `logs`, metadata-only `artifacts`, `list`,
+controller metadata reads (`status`, `runs logs`, metadata-only `artifacts`, `list`,
 `active`, `list --latest`, and their loop/controller equivalents) run locally by
 default and produce no hot-machine or Lab-routing guidance. This keeps recovery
 inspection available when a runner is disconnected, stale, or reports conflicting
 readiness. An explicit `--runner` retains runner-resident polling for status,
-logs, artifacts, list, active, and other state reads when the durable
+`runs logs`, artifacts, list, active, and other state reads when the durable
 state lives there. Provider execution, deterministic gates, explicit evidence or
 provider-boundary hydration, and review remain subject to their admission and
 routing contracts. Reconciliation is an explicit workload even when it begins
@@ -504,7 +503,7 @@ with `--cwd`; it does not re-materialize that checkout. Use
 `--model` together with `--acknowledge-model-override` to confirm a pinned route.
 Omit the model override to use configured rotation. The ordinary
 Cook durable run is then inspectable with `agent-task status`, `agent-task status --watch`, and
-`logs`:
+`runs logs`:
 
 ```bash
 homeboy agent-task cook --cwd /path/to/existing-worktree \
@@ -545,7 +544,7 @@ homeboy agent-task cook --cwd /path/to/task-worktree --placement lab \
   --prompt @task.md --verify 'git diff --check' --draft-pr
 ```
 
-Use the existing `status`, `logs`, and emitted evidence commands to inspect the
+Use the existing `status`, `runs logs`, and emitted evidence commands to inspect the
 run. `--no-finalize` intentionally stops short of PR delivery. For an untouched
 delivery acceptance, the supervisor observes raw worker artifacts, read-only
 stores, and GitHub before recording its first verdict; it does not repair,
@@ -811,7 +810,7 @@ adapters may include whatever correlation data they need to reconcile their own
 notifications or UI state, but Homeboy does not interpret transport-specific
 identifiers in core lifecycle state. Provider-specific execution settings belong
 in `--provider-config`; durable lifecycle commands remain headless and can be
-inspected later with `agent-task status`, `agent-task logs`, or `agent-task review`.
+inspected later with `agent-task status`, `runs logs`, or `agent-task review`.
 
 To verify that an installed notification resolver receives the current bridge
 context without launching provider work, run the normal read-only Cook preview:
@@ -1014,7 +1013,7 @@ It includes schema ids, provider capability metadata, status/failure enum values
 and default redaction policy metadata without naming or depending on any specific
 executor provider.
 
-`agent-task status`, `logs`, and `artifacts` are read-only durable lifecycle
+`agent-task status`, `runs logs`, and `agent-task artifacts` are read-only durable lifecycle
 inspection commands. They do not start workloads and are not gated by warm-machine
 resource policy; use `homeboy runner exec <runner> -- homeboy agent-task status
 <run-id>` when the durable state lives on a Lab runner host. `agent-task review`
@@ -1051,7 +1050,7 @@ homeboy agent-task run-plan \
   --record-run-id "$run_id"
 
 homeboy agent-task status "$run_id"
-homeboy agent-task logs "$run_id"
+homeboy runs logs "$run_id"
 homeboy agent-task artifacts "$run_id"
 homeboy agent-task review "$run_id" \
   --to-worktree "$target_worktree"

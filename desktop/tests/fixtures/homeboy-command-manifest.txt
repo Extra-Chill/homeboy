@@ -33,7 +33,6 @@ agent-task gate-execute
 agent-task gate-feedback
 agent-task latest
 agent-task list
-agent-task logs
 agent-task placement-update
 agent-task promote
 agent-task promotion-provider
@@ -365,6 +364,7 @@ runs hotspots
 runs import
 runs latest-run
 runs list
+runs logs
 runs reconcile
 runs refs
 runs report

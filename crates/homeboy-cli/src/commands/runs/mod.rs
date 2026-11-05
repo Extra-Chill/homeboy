@@ -29,6 +29,8 @@ mod gh_actions_cache;
 mod handlers;
 mod hotspots;
 mod latest;
+mod logs;
+pub(crate) use logs::{logs, RunsLogsArgs};
 mod proof;
 pub(crate) mod reconcile;
 mod refs;

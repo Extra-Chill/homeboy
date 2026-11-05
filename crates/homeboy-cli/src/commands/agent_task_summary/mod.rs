@@ -18,7 +18,6 @@ pub(crate) fn agent_task_summary_kind(args: &AgentTaskArgs) -> Option<AgentTaskS
     match &args.command {
         AgentTaskCommand::Cook(_) => Some(AgentTaskSummaryKind::Cook),
         AgentTaskCommand::Status(_) => Some(AgentTaskSummaryKind::Status),
-        AgentTaskCommand::Logs(_) => Some(AgentTaskSummaryKind::Logs),
         AgentTaskCommand::Review(_) => Some(AgentTaskSummaryKind::Review),
         AgentTaskCommand::Providers(_) => Some(AgentTaskSummaryKind::Providers),
         AgentTaskCommand::Capacity(_) => Some(AgentTaskSummaryKind::Capacity),
@@ -428,7 +427,7 @@ fn render_cook_summary(payload: &Value) -> Option<String> {
     } else if metrics.candidate_state.is_available() {
         lines.push(format!("Next: homeboy agent-task review {run_id}"));
     } else {
-        lines.push(format!("Next: homeboy agent-task logs {run_id}"));
+        lines.push(format!("Next: homeboy runs logs {run_id}"));
     }
     Some(finish(lines))
 }
@@ -1636,7 +1635,7 @@ mod tests {
 
         assert!(summary.contains("Status: no_patch_produced\n"));
         assert!(summary.contains("Patch candidates: 0 non-empty / 3 empty\n"));
-        assert!(summary.contains("Next: homeboy agent-task logs agent-task-abe47e4d\n"));
+        assert!(summary.contains("Next: homeboy runs logs agent-task-abe47e4d\n"));
         assert!(!summary.contains("Next: homeboy agent-task review"));
     }
 
@@ -1669,7 +1668,7 @@ mod tests {
         assert!(unavailable
             .contains("Promotion unavailable: aggregate key agent_task_aggregate is missing\n"));
         assert!(unavailable.contains("Remediation: restore aggregate.json or executor evidence\n"));
-        assert!(!unavailable.contains("Next: homeboy agent-task logs"));
+        assert!(!unavailable.contains("Next: homeboy runs logs"));
     }
 
     #[test]
@@ -1773,7 +1772,7 @@ mod tests {
 
         assert!(summary.contains("Status: no_patch_produced\n"));
         assert!(summary.contains("Patch candidates: 0 non-empty / 0 empty / 1 unknown\n"));
-        assert!(summary.contains("Next: homeboy agent-task logs homeboy-4345\n"));
+        assert!(summary.contains("Next: homeboy runs logs homeboy-4345\n"));
     }
 
     #[test]
@@ -1798,7 +1797,7 @@ mod tests {
 
         assert!(summary.contains("Patch candidates: 0 non-empty / 1 empty\n"));
         assert!(summary.contains("Diff bytes: 0\n"));
-        assert!(summary.contains("Next: homeboy agent-task logs homeboy-4345\n"));
+        assert!(summary.contains("Next: homeboy runs logs homeboy-4345\n"));
         assert!(!summary.contains("Next: homeboy agent-task review"));
     }
 
@@ -2037,7 +2036,7 @@ mod tests {
         assert!(summary.contains("Tasks attempted: 4\n"));
         assert!(summary.contains("Patch candidates: 0 non-empty / 0 empty\n"));
         assert!(summary.contains("Artifacts: 0\n"));
-        assert!(summary.contains("Next: homeboy agent-task logs agent-task-22bb7835\n"));
+        assert!(summary.contains("Next: homeboy runs logs agent-task-22bb7835\n"));
         assert!(!summary.contains("Next: homeboy agent-task review"));
     }
 
