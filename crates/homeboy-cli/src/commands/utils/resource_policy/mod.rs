@@ -1518,9 +1518,26 @@ mod tests {
             ["homeboy", "agent-task", "diagnose", "agent-task-123"].as_slice(),
             ["homeboy", "agent-task", "review", "agent-task-123"].as_slice(),
             ["homeboy", "agent-task", "reconcile", "agent-task-123"].as_slice(),
-            ["homeboy", "agent-task", "list"].as_slice(),
-            ["homeboy", "agent-task", "active"].as_slice(),
-            ["homeboy", "agent-task", "list", "--latest"].as_slice(),
+            ["homeboy", "runs", "list", "--kind", "agent-task"].as_slice(),
+            [
+                "homeboy",
+                "runs",
+                "list",
+                "--kind",
+                "agent-task",
+                "--active",
+            ]
+            .as_slice(),
+            [
+                "homeboy",
+                "runs",
+                "list",
+                "--kind",
+                "agent-task",
+                "--limit",
+                "1",
+            ]
+            .as_slice(),
             [
                 "homeboy",
                 "agent-task",

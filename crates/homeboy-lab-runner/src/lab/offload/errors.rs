@@ -42,8 +42,8 @@ pub(crate) fn with_lab_apply_patch_step(
 /// file as structured JSON (when requested) and printed to stdout/stderr with
 /// the exact follow-up commands. Even if the local process is then
 /// timed out or interrupted, the run id remains discoverable from this initial
-/// output rather than requiring the operator to guess from `agent-task active`
-/// / `agent-task list` / `runs list`.
+/// output rather than requiring the operator to guess from `runs list --kind agent-task --active`
+/// / `runs list --kind agent-task` / `runs list`.
 pub(crate) fn emit_durable_run_id_before_execution(
     run_id: &str,
     runner_id: &str,

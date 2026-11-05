@@ -188,7 +188,8 @@ impl CookRecoveryPerformer for CliCookRecoveryPerformer {
 
     fn reconcile(&self, run_id: &str) -> homeboy::core::Result<(Value, i32)> {
         super::status::reconcile_run(super::args::ReconcileArgs {
-            run_id: run_id.to_string(),
+            all: false,
+            run_id: Some(run_id.to_string()),
             dry_run: false,
             apply: true,
             idempotency_key: None,

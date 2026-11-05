@@ -2169,7 +2169,7 @@ const ORCHESTRATION_TICK_DEFAULT_INTERVAL_SECS: u64 = 60;
 
 /// Setting the tick interval to zero disables daemon-driven orchestration
 /// recovery, for operators who would rather drive
-/// `homeboy agent-task active --reconcile --apply` themselves. Workflow
+/// `homeboy agent-task reconcile --all --apply` themselves. Workflow
 /// cadences are admitted by this tick too, so zero also stops them.
 fn orchestration_tick_interval() -> Option<std::time::Duration> {
     parse_orchestration_tick_interval(
@@ -2192,7 +2192,7 @@ fn parse_orchestration_tick_interval(configured: Option<&str>) -> Option<std::ti
 /// human typed a command.
 ///
 /// `reconcile_stale_active_runs` had exactly two callers — `cleanup` and
-/// `agent-task active --reconcile --apply` — so a detached cook whose owner
+/// `agent-task reconcile --all --apply` — so a detached cook whose owner
 /// died stayed `running` forever. Loop Work jobs own controller waits.
 fn spawn_orchestration_reconciler(
     job_store: JobStore,

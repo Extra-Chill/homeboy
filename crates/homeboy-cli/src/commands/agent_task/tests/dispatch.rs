@@ -2843,53 +2843,6 @@ fn cook_rejects_zero_max_attempts_at_the_cli_boundary() {
 }
 
 #[test]
-fn active_cursor_continues_discovery_and_cannot_scope_fleet_reconciliation() {
-    let cli = Cli::try_parse_from([
-        "homeboy",
-        "agent-task",
-        "active",
-        "--limit",
-        "20",
-        "--cursor",
-        "opaque-page-cursor",
-    ])
-    .expect("active continuation parses");
-    let Commands::AgentTask(agent_task) = cli.command else {
-        panic!("expected agent-task command");
-    };
-    let AgentTaskCommand::Active(args) = agent_task.command else {
-        panic!("expected active command");
-    };
-    assert_eq!(args.limit, Some(20));
-    assert_eq!(args.cursor.as_deref(), Some("opaque-page-cursor"));
-    assert!(!args.reconcile);
-
-    assert!(Cli::try_parse_from(["homeboy", "agent-task", "active", "--limit", "0"]).is_err());
-
-    assert!(Cli::try_parse_from([
-        "homeboy",
-        "agent-task",
-        "active",
-        "--reconcile",
-        "--limit",
-        "20",
-    ])
-    .is_err());
-    assert!(Cli::try_parse_from([
-        "homeboy",
-        "agent-task",
-        "active",
-        "--reconcile",
-        "--cursor",
-        "20",
-    ])
-    .is_err());
-    assert!(
-        Cli::try_parse_from(["homeboy", "agent-task", "active", "--reconcile", "--full",]).is_err()
-    );
-}
-
-#[test]
 fn branch_scoped_active_stale_output_never_suggests_fleet_reconciliation() {
     with_isolated_home(|_| {
         persist_discovery_record(
@@ -2913,8 +2866,11 @@ fn branch_scoped_active_stale_output_never_suggests_fleet_reconciliation() {
 
         let active = run_discovery_page(vec![
             "homeboy".to_string(),
+            "runs".to_string(),
+            "list".to_string(),
+            "--kind".to_string(),
             "agent-task".to_string(),
-            "active".to_string(),
+            "--active".to_string(),
             "--branch".to_string(),
             "fix/scoped-stale".to_string(),
             "--full".to_string(),
@@ -2936,10 +2892,10 @@ fn branch_scoped_active_stale_output_never_suggests_fleet_reconciliation() {
         }));
         assert!(!commands
             .iter()
-            .any(|command| command.contains("agent-task active --reconcile")));
+            .any(|command| command.contains("agent-task reconcile --all")));
         let full_payload = serde_json::to_string(&active).expect("serialize full active payload");
         assert!(
-            !full_payload.contains("homeboy agent-task active --reconcile --dry-run"),
+            !full_payload.contains("homeboy agent-task reconcile --all"),
             "branch-scoped output leaked fleet reconciliation guidance: {full_payload}"
         );
     });
@@ -2947,12 +2903,15 @@ fn branch_scoped_active_stale_output_never_suggests_fleet_reconciliation() {
 
 fn run_discovery_page(args: Vec<String>) -> Value {
     let cli = Cli::try_parse_from(args).expect("discovery command parses");
-    let Commands::AgentTask(agent_task) = cli.command else {
-        panic!("expected agent-task command");
+    let Commands::Runs(runs) = cli.command else {
+        panic!("expected runs");
     };
-    let (output, exit_code) = super::super::run(agent_task).expect("discovery command succeeds");
+    let (output, exit_code) = crate::commands::runs::run(runs).expect("discovery succeeds");
     assert_eq!(exit_code, 0);
-    output
+    let crate::commands::runs::RunsOutput::Cook(value) = output else {
+        panic!("expected Cook discovery");
+    };
+    value
 }
 
 #[test]
@@ -2960,15 +2919,20 @@ fn list_and_active_default_to_the_compact_page_limit() {
     with_isolated_home(|_| {
         let list = run_discovery_page(vec![
             "homeboy".to_string(),
-            "agent-task".to_string(),
+            "runs".to_string(),
             "list".to_string(),
+            "--kind".to_string(),
+            "agent-task".to_string(),
         ]);
         assert_eq!(list["limit"], 20);
 
         let active = run_discovery_page(vec![
             "homeboy".to_string(),
+            "runs".to_string(),
+            "list".to_string(),
+            "--kind".to_string(),
             "agent-task".to_string(),
-            "active".to_string(),
+            "--active".to_string(),
         ]);
         assert_eq!(active["limit"], 20);
     });
@@ -2996,8 +2960,10 @@ fn list_pages_tied_keysets_across_insertions_and_deleted_boundaries() {
 
         let first = run_discovery_page(vec![
             "homeboy".to_string(),
-            "agent-task".to_string(),
+            "runs".to_string(),
             "list".to_string(),
+            "--kind".to_string(),
+            "agent-task".to_string(),
             "--branch".to_string(),
             "fix/ties".to_string(),
             "--limit".to_string(),
@@ -3039,8 +3005,10 @@ fn list_pages_tied_keysets_across_insertions_and_deleted_boundaries() {
 
         let second = run_discovery_page(vec![
             "homeboy".to_string(),
-            "agent-task".to_string(),
+            "runs".to_string(),
             "list".to_string(),
+            "--kind".to_string(),
+            "agent-task".to_string(),
             "--branch".to_string(),
             "fix/ties".to_string(),
             "--limit".to_string(),
@@ -3085,8 +3053,10 @@ fn list_page_skips_legacy_schema_rows_and_continues_from_the_physical_keyset() {
 
         let first = run_discovery_page(vec![
             "homeboy".to_string(),
-            "agent-task".to_string(),
+            "runs".to_string(),
             "list".to_string(),
+            "--kind".to_string(),
+            "agent-task".to_string(),
             "--branch".to_string(),
             "fix/page-health".to_string(),
             "--limit".to_string(),
@@ -3139,8 +3109,10 @@ fn list_page_scopes_record_health_to_the_returned_task_url() {
 
         let page = run_discovery_page(vec![
             "homeboy".to_string(),
-            "agent-task".to_string(),
+            "runs".to_string(),
             "list".to_string(),
+            "--kind".to_string(),
+            "agent-task".to_string(),
             "--task-url".to_string(),
             task_url.to_string(),
             "--limit".to_string(),
@@ -3176,8 +3148,11 @@ fn list_sparse_scope_fills_matching_pages_without_duplicates_or_skips() {
 
         let active = run_discovery_page(vec![
             "homeboy".to_string(),
+            "runs".to_string(),
+            "list".to_string(),
+            "--kind".to_string(),
             "agent-task".to_string(),
-            "active".to_string(),
+            "--active".to_string(),
             "--branch".to_string(),
             "fix/sparse".to_string(),
             "--limit".to_string(),
@@ -3192,9 +3167,11 @@ fn list_sparse_scope_fills_matching_pages_without_duplicates_or_skips() {
 
         let first = run_discovery_page(vec![
             "homeboy".to_string(),
-            "agent-task".to_string(),
+            "runs".to_string(),
             "list".to_string(),
-            "--state".to_string(),
+            "--kind".to_string(),
+            "agent-task".to_string(),
+            "--status".to_string(),
             "running".to_string(),
             "--branch".to_string(),
             "fix/sparse".to_string(),
@@ -3223,13 +3200,15 @@ fn list_sparse_scope_fills_matching_pages_without_duplicates_or_skips() {
             .iter()
             .find_map(|action| action["command"].as_str())
             .expect("next command");
-        assert!(next_action.contains("--state running --branch fix/sparse --limit 2 --cursor"));
+        assert!(next_action.contains("--status running --branch fix/sparse --limit 2 --cursor"));
 
         let second = run_discovery_page(vec![
             "homeboy".to_string(),
-            "agent-task".to_string(),
+            "runs".to_string(),
             "list".to_string(),
-            "--state".to_string(),
+            "--kind".to_string(),
+            "agent-task".to_string(),
+            "--status".to_string(),
             "running".to_string(),
             "--branch".to_string(),
             "fix/sparse".to_string(),
@@ -3245,9 +3224,11 @@ fn list_sparse_scope_fills_matching_pages_without_duplicates_or_skips() {
 
         let changed_scope = Cli::try_parse_from([
             "homeboy",
-            "agent-task",
+            "runs",
             "list",
-            "--state",
+            "--kind",
+            "agent-task",
+            "--status",
             "queued",
             "--branch",
             "fix/sparse",
@@ -3255,24 +3236,30 @@ fn list_sparse_scope_fills_matching_pages_without_duplicates_or_skips() {
             &cursor,
         ])
         .expect("scope-changing command parses");
-        let Commands::AgentTask(agent_task) = changed_scope.command else {
-            panic!("expected agent-task command");
+        let Commands::Runs(runs) = changed_scope.command else {
+            panic!("expected runs command");
         };
-        let error = super::super::run(agent_task).expect_err("scope mismatch is rejected");
+        let Err(error) = crate::commands::runs::run(runs) else {
+            panic!("scope mismatch is rejected");
+        };
         assert_eq!(error.details["field"], "cursor");
 
         let malformed = Cli::try_parse_from([
             "homeboy",
-            "agent-task",
+            "runs",
             "list",
+            "--kind",
+            "agent-task",
             "--cursor",
             "not-an-agent-task-cursor",
         ])
         .expect("malformed cursor reaches command validation");
-        let Commands::AgentTask(agent_task) = malformed.command else {
-            panic!("expected agent-task command");
+        let Commands::Runs(runs) = malformed.command else {
+            panic!("expected runs command");
         };
-        let error = super::super::run(agent_task).expect_err("malformed cursor is rejected");
+        let Err(error) = crate::commands::runs::run(runs) else {
+            panic!("malformed cursor is rejected");
+        };
         assert_eq!(error.details["field"], "cursor");
     });
 }
@@ -3293,9 +3280,11 @@ fn list_sparse_scope_reports_incomplete_search_before_matches_beyond_window() {
 
         let first = run_discovery_page(vec![
             "homeboy".to_string(),
-            "agent-task".to_string(),
+            "runs".to_string(),
             "list".to_string(),
-            "--state".to_string(),
+            "--kind".to_string(),
+            "agent-task".to_string(),
+            "--status".to_string(),
             "running".to_string(),
             "--branch".to_string(),
             "fix/window-match".to_string(),
@@ -3315,9 +3304,11 @@ fn list_sparse_scope_reports_incomplete_search_before_matches_beyond_window() {
 
         let second = run_discovery_page(vec![
             "homeboy".to_string(),
-            "agent-task".to_string(),
+            "runs".to_string(),
             "list".to_string(),
-            "--state".to_string(),
+            "--kind".to_string(),
+            "agent-task".to_string(),
+            "--status".to_string(),
             "running".to_string(),
             "--branch".to_string(),
             "fix/window-match".to_string(),
@@ -3338,133 +3329,6 @@ fn list_sparse_scope_reports_incomplete_search_before_matches_beyond_window() {
                 .collect::<Vec<_>>(),
             ["match-c", "match-b", "match-a"]
         );
-    });
-}
-
-#[test]
-fn list_latest_accepts_list_filters_and_rejects_pagination_selectors() {
-    let cli = Cli::try_parse_from([
-        "homeboy",
-        "agent-task",
-        "list",
-        "--latest",
-        "--repo",
-        "homeboy",
-        "--worktree",
-        "homeboy@fix-12242",
-        "--task-url",
-        "https://github.com/Extra-Chill/homeboy/issues/12242",
-        "--submitted-after",
-        "2026-01-01T00:00:00Z",
-        "--state",
-        "failed",
-        "--run-placement",
-        "runner",
-        "--parent-id",
-        "batch-12242",
-    ])
-    .expect("filtered latest list parses");
-    let Commands::AgentTask(agent_task) = cli.command else {
-        panic!("expected agent-task command");
-    };
-    let AgentTaskCommand::List(args) = agent_task.command else {
-        panic!("expected list command");
-    };
-    assert!(args.latest);
-    assert_eq!(args.repo.as_deref(), Some("homeboy"));
-    assert_eq!(args.worktree.as_deref(), Some("homeboy@fix-12242"));
-    assert_eq!(
-        args.task_url.as_deref(),
-        Some("https://github.com/Extra-Chill/homeboy/issues/12242")
-    );
-    assert_eq!(
-        args.submitted_after.as_deref(),
-        Some("2026-01-01T00:00:00Z")
-    );
-    assert_eq!(args.state.as_deref(), Some("failed"));
-    assert_eq!(args.run_placement.as_deref(), Some("runner"));
-    assert_eq!(args.parent_id.as_deref(), Some("batch-12242"));
-
-    assert!(
-        Cli::try_parse_from(["homeboy", "agent-task", "list", "--latest", "--cursor", "1",])
-            .is_err()
-    );
-    assert!(Cli::try_parse_from(["homeboy", "agent-task", "list", "--latest", "--full",]).is_err());
-    assert!(
-        Cli::try_parse_from(["homeboy", "agent-task", "list", "--latest", "--limit", "1",])
-            .is_err()
-    );
-}
-
-#[test]
-fn list_latest_selects_the_newest_complete_filtered_match_or_an_empty_result() {
-    with_isolated_home(|_| {
-        let mut matching = test_plan();
-        matching.group_key = Some("homeboy".to_string());
-        matching.tasks[0].group_key = Some("homeboy".to_string());
-        matching.tasks[0].workspace.root = Some("/work/homeboy".to_string());
-        matching.tasks[0].workspace.task_url =
-            Some("https://github.com/Extra-Chill/homeboy/issues/12242".to_string());
-        matching.tasks[0].parent_plan_id = Some("batch-12242".to_string());
-        agent_task_lifecycle::submit_plan(&matching, Some("run-filtered-match-old"))
-            .expect("persist older matching run");
-        agent_task_lifecycle::submit_plan(&matching, Some("run-filtered-match-new"))
-            .expect("persist newer matching run");
-
-        for index in 0..1001 {
-            agent_task_lifecycle::seed_queued_run_for_tests(
-                &test_plan(),
-                Some(&format!("run-unmatched-{index:04}")),
-            )
-            .expect("persist newer non-match");
-        }
-
-        let cli = Cli::try_parse_from([
-            "homeboy",
-            "agent-task",
-            "list",
-            "--latest",
-            "--repo",
-            "homeboy",
-            "--worktree",
-            "/work/homeboy",
-            "--task-url",
-            "https://github.com/Extra-Chill/homeboy/issues/12242",
-            "--state",
-            "queued",
-            "--run-placement",
-            "local",
-            "--parent-id",
-            "batch-12242",
-        ])
-        .expect("filtered latest list parses");
-        let Commands::AgentTask(agent_task) = cli.command else {
-            panic!("expected agent-task command");
-        };
-        let (result, exit_code) = super::super::run(agent_task).expect("filtered latest runs");
-        assert_eq!(exit_code, 0);
-        assert_eq!(result["filter"], "latest");
-        assert_eq!(result["count"], 1);
-        assert_eq!(result["runs"][0]["run_id"], "run-filtered-match-new");
-
-        let cli = Cli::try_parse_from([
-            "homeboy",
-            "agent-task",
-            "list",
-            "--latest",
-            "--repo",
-            "missing-repo",
-        ])
-        .expect("no-match latest list parses");
-        let Commands::AgentTask(agent_task) = cli.command else {
-            panic!("expected agent-task command");
-        };
-        let (result, exit_code) = super::super::run(agent_task).expect("no-match latest runs");
-        assert_eq!(exit_code, 0);
-        assert_eq!(result["filter"], "latest");
-        assert_eq!(result["count"], 0);
-        assert_eq!(result["total"], 0);
-        assert_eq!(result["runs"], json!([]));
     });
 }
 
@@ -4032,5 +3896,40 @@ fn cook_admits_a_project_attached_component_whose_repository_was_renamed() {
 
         // An ID whose remote agrees with the requested name is unchanged.
         resolve(&["--repo", "platform-network"]).expect("component ID still resolves");
+    });
+}
+
+#[test]
+fn cook_discovery_limit_one_keeps_list_filters_and_newest_order() {
+    with_isolated_home(|_| {
+        persist_discovery_record("filtered-old", "fix/newest", AgentTaskRunState::Queued);
+        persist_discovery_record("filtered-new", "fix/newest", AgentTaskRunState::Queued);
+        agent_task_lifecycle::rewrite_record_for_test("filtered-new", |record| {
+            record.submitted_at = "2026-09-11T00:00:00Z".to_string();
+        })
+        .unwrap();
+        persist_discovery_record("excluded", "fix/other", AgentTaskRunState::Queued);
+        let result = run_discovery_page(
+            [
+                "homeboy",
+                "runs",
+                "list",
+                "--kind",
+                "agent-task",
+                "--limit",
+                "1",
+                "--branch",
+                "fix/newest",
+                "--status",
+                "queued",
+                "--since",
+                "2026-09-10T00:00:00Z",
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+        );
+        assert_eq!(result["runs"].as_array().unwrap().len(), 1);
+        assert_eq!(result["runs"][0]["run_id"], "filtered-new");
     });
 }

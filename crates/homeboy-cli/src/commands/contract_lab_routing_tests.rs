@@ -44,11 +44,29 @@ fn runner_resident_agent_task_reads_are_low_noise_polling() {
         ["homeboy", "runs", "logs", "agent-task-123"].as_slice(),
         ["homeboy", "runs", "artifacts", "agent-task-123"].as_slice(),
         ["homeboy", "runs", "evidence", "agent-task-123"].as_slice(),
-        ["homeboy", "agent-task", "list"].as_slice(),
-        ["homeboy", "agent-task", "active"].as_slice(),
-        ["homeboy", "agent-task", "list", "--latest"].as_slice(),
+        ["homeboy", "runs", "list", "--kind", "agent-task"].as_slice(),
+        [
+            "homeboy",
+            "runs",
+            "list",
+            "--kind",
+            "agent-task",
+            "--active",
+        ]
+        .as_slice(),
+        [
+            "homeboy",
+            "runs",
+            "list",
+            "--kind",
+            "agent-task",
+            "--limit",
+            "1",
+        ]
+        .as_slice(),
     ] {
-        let contract = parsed_command(args)
+        let command = parsed_command(args);
+        let contract = command
             .lab_contract()
             .expect("runner-resident read polling contract");
         assert_eq!(contract.source_path_mode, LabSourcePathMode::RunnerResident);

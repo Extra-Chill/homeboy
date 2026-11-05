@@ -32,14 +32,14 @@ pub mod status;
 pub mod tool;
 
 pub use args::{
-    AcceptArgs, ActiveArgs, AdoptArgs, AgentTaskArgs, AgentTaskAuthArgs, AgentTaskAuthCommand,
+    AcceptArgs, AdoptArgs, AgentTaskArgs, AgentTaskAuthArgs, AgentTaskAuthCommand,
     AgentTaskBatchPrepareArgs, AgentTaskCapacityArgs, AgentTaskCommand, AgentTaskCookArgs,
     AgentTaskDoctorArgs, AgentTaskFanoutArgs, AgentTaskFanoutCommand, AgentTaskFanoutCookBatchArgs,
     CancelArgs, ContractArgs, ContractFormat, CookFeedbackArgs, DiagnoseArgs, FinalizePrArgs,
-    GateFeedbackArgs, ListArgs, PlacementUpdateArgs, PromoteArgs, PromotionProviderArgs,
-    ProvidersArgs, QuarantineArgs, RearmArgs, RecoverArgs, ReplayProviderBoundaryArgs,
-    RetainedArtifactsArgs, RetainedArtifactsCommand, RetryArgs, ReviewArgs, RunPlanArgs,
-    StatusArgs, ValidatePlanArgs, VerifyGateArgs,
+    GateFeedbackArgs, PlacementUpdateArgs, PromoteArgs, PromotionProviderArgs, ProvidersArgs,
+    QuarantineArgs, RearmArgs, RecoverArgs, ReplayProviderBoundaryArgs, RetainedArtifactsArgs,
+    RetainedArtifactsCommand, RetryArgs, ReviewArgs, RunPlanArgs, StatusArgs, ValidatePlanArgs,
+    VerifyGateArgs,
 };
 
 /// Shallow-merge rotation route overrides over the materialized base config,
@@ -347,18 +347,6 @@ pub(crate) fn run_with_cook_progress_and_provenance(
         AgentTaskCommand::Run(status_args) => run::run_submitted(status_args),
         AgentTaskCommand::ValidatePlan(args) => run::validate_plan(args),
         AgentTaskCommand::Status(status_args) => status::status(status_args),
-        AgentTaskCommand::List(list_args) => {
-            if list_args.latest {
-                status::list_filtered_latest_runs(list_args.into())
-            } else if list_args.full {
-                status::list_runs(
-                    agent_task_service::AgentTaskDiscoveryFilter::All,
-                    list_args.into(),
-                )
-            } else {
-                status::list_runs_page(agent_task_service::AgentTaskDiscoveryFilter::All, list_args)
-            }
-        }
         AgentTaskCommand::ActiveScope(scope) => {
             let path = homeboy::core::paths::observation_db()?;
             let exists = path.try_exists().map_err(|error| {
@@ -374,15 +362,6 @@ pub(crate) fn run_with_cook_progress_and_provenance(
                 serde_json::json!({"schema": "homeboy/agent-task-active-scope/v1", "caller_context": scope.context, "workspaces": [], "pending_run_ids": []})
             };
             Ok((value, 0))
-        }
-        AgentTaskCommand::Active(active_args) => {
-            if active_args.reconcile {
-                status::reconcile_active(!active_args.apply)
-            } else if active_args.full {
-                status::list_active(active_args.into())
-            } else {
-                status::list_active_page(active_args)
-            }
         }
         AgentTaskCommand::Reconcile(args) => status::reconcile_run(args),
         AgentTaskCommand::RetainedArtifacts(args) => retained_artifacts::run(args),
@@ -774,8 +753,6 @@ mod progress_tests {
         }
     }
 }
-
-use homeboy::agents::agent_tasks::service as agent_task_service;
 
 pub(crate) fn command_json_value<T: Serialize>(value: T) -> homeboy::core::Result<Value> {
     serde_json::to_value(value)

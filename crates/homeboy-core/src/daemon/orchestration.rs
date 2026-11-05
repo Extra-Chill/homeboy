@@ -63,7 +63,7 @@ pub trait OrchestrationDriver: Send + Sync {
     /// Recover orphaned `running` agent-task records whose owner died.
     ///
     /// Implementations apply the same safe cancel path the manual
-    /// `agent-task active --reconcile --apply` command uses; the daemon only
+    /// `agent-task reconcile --all --apply` command uses; the daemon only
     /// supplies the cadence.
     fn reconcile_stale_active_runs(&self) -> Result<Value>;
 }

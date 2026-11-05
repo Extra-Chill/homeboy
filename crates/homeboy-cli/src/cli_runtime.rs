@@ -3749,7 +3749,7 @@ mod tests {
         for args in [
             vec!["homeboy", "--placement", "local", "bench"],
             vec!["homeboy", "agent-task", "status", "run-123"],
-            vec!["homeboy", "agent-task", "list"],
+            vec!["homeboy", "runs", "list", "--kind", "agent-task"],
             vec!["homeboy", "runs", "logs", "run-123"],
             vec!["homeboy", "agent-task", "diagnose", "run-123"],
             vec![

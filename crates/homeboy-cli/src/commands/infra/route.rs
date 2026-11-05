@@ -4947,7 +4947,7 @@ fn controller_owns_agent_task_lifecycle_command(cli: &Cli) -> homeboy::core::Res
         AgentTaskCommand::Diagnose(args) => Some(&args.run_id),
         AgentTaskCommand::Review(args) => Some(&args.run_id),
         AgentTaskCommand::Retry(args) => Some(&args.run_id),
-        AgentTaskCommand::Reconcile(args) => Some(&args.run_id),
+        AgentTaskCommand::Reconcile(args) => args.run_id.as_ref(),
         _ => None,
     };
     let Some(run_id) = run_id else {

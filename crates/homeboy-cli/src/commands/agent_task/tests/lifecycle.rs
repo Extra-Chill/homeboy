@@ -5862,7 +5862,8 @@ fn reconcile_apply_returns_the_replayable_control_plane_acknowledgement() {
         agent_task_lifecycle::cancel_run(run_id, Some("fixture terminal")).expect("terminal");
 
         let apply = || ReconcileArgs {
-            run_id: run_id.to_string(),
+            all: false,
+            run_id: Some(run_id.to_string()),
             dry_run: false,
             apply: true,
             idempotency_key: Some("cli-reconcile-1".to_string()),
@@ -5889,7 +5890,8 @@ fn reconcile_apply_returns_the_replayable_control_plane_acknowledgement() {
         assert_eq!(replay, first);
 
         let preview = reconcile_run(ReconcileArgs {
-            run_id: run_id.to_string(),
+            all: false,
+            run_id: Some(run_id.to_string()),
             dry_run: true,
             apply: false,
             idempotency_key: None,
@@ -5925,7 +5927,8 @@ fn reconcile_apply_accounts_for_each_record_in_a_cook_scope() {
         .expect("bind accepted child");
 
         let (value, exit_code) = reconcile_run(ReconcileArgs {
-            run_id: cook_id.to_string(),
+            all: false,
+            run_id: Some(cook_id.to_string()),
             dry_run: false,
             apply: true,
             idempotency_key: Some("cli-reconcile-scope-1".to_string()),

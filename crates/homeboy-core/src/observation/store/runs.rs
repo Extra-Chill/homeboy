@@ -1700,7 +1700,7 @@ impl ObservationStore {
     /// agent-task lifecycle run. An agent-task run is a control-plane resource
     /// whether or not it belongs to a mission (`GET .../runs/:id` serves it
     /// either way), so a list limited to mission-bound rows hid every non-Cook
-    /// agent-task run that `agent-task list` shows (#13697). Generic
+    /// agent-task run that `runs list --kind agent-task` shows (#13697). Generic
     /// observation runs still need a mission to be control-plane resources.
     pub fn list_control_plane_runs_page(
         &self,

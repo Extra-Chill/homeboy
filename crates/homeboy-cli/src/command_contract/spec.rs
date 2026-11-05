@@ -75,8 +75,11 @@ pub const DEFAULT_LAB_UNSUPPORTED_NOTES: &str =
     "not declared as Lab-routable in the command registry";
 pub(crate) const AGENT_TASK_RUN_LAB_LABEL: &str = "agent-task cook/run-plan/retry --run";
 pub(crate) const AGENT_TASK_PROMOTE_LAB_LABEL: &str = "agent-task promote";
+// Lab workload family and secret categories are derived from this label's
+// `agent-task` prefix (`LabRunnerWorkloadCommandFamily::from_command_label`),
+// so the agent-task verbs must lead.
 pub(crate) const AGENT_TASK_STATUS_LAB_LABEL: &str =
-    "runs logs; agent-task run/status/artifacts/review/list/active";
+    "agent-task run/status/review; runs logs/list/artifacts/evidence";
 pub(crate) const AGENT_TASK_PROVIDERS_LAB_LABEL: &str = "agent-task providers";
 pub(crate) const AGENT_TASK_FANOUT_COOK_BATCH_LAB_LABEL: &str = "agent-task fanout cook-batch";
 pub(crate) const AGENT_TASK_AUTH_STATUS_LAB_LABEL: &str = "agent-task auth status";
@@ -247,8 +250,8 @@ const AGENT_TASK_LAB_SUPPORT: &[CommandLabSupportSummary] = &[
     },
     CommandLabSupportSummary {
         contract_labels: &[AGENT_TASK_STATUS_LAB_LABEL, AGENT_TASK_PROVIDERS_LAB_LABEL],
-        message_label: "runs logs; agent-task run/status/artifacts/review/list/active/providers",
-        hint_label: "runs logs; agent-task run/status/artifacts/review/list/active/providers",
+        message_label: "agent-task run/status/review/providers; runs logs/list/artifacts/evidence",
+        hint_label: "agent-task run/status/review/providers; runs logs/list/artifacts/evidence",
     },
     CommandLabSupportSummary {
         contract_labels: &[AGENT_TASK_FANOUT_COOK_BATCH_LAB_LABEL],
@@ -716,14 +719,9 @@ const AGENT_TASK_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
         "applies a selected patch artifact into a managed worktree unless --dry-run is passed",
     ),
     paths_safety(
-        &["active"],
-        with_dry_run(guarded_mutating_safety(&["--apply"]), "--dry-run"),
-        "reads active runs by default; --reconcile previews the full fleet mutation set and --apply authorizes its cancellation",
-    ),
-    paths_safety(
         &["reconcile"],
         with_dry_run(guarded_mutating_safety(&["--apply"]), "--dry-run"),
-        "previews reconciliation for one durable run; --apply authorizes a scoped lifecycle mutation after provider-state inspection",
+        "previews reconciliation for one durable run, or the whole active fleet with --all; --apply authorizes the lifecycle mutation after provider-state inspection",
     ),
     paths_safety(
         &["auth remove"],
@@ -877,6 +875,15 @@ pub(crate) fn runtime_extension_command_doc_slugs() -> impl Iterator<Item = &'st
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_task_status_lab_label_keeps_the_agent_task_workload_family() {
+        use homeboy_lab_contract::lab::workload::LabRunnerWorkloadCommandFamily;
+        assert_eq!(
+            LabRunnerWorkloadCommandFamily::from_command_label(AGENT_TASK_STATUS_LAB_LABEL),
+            LabRunnerWorkloadCommandFamily::AgentTask
+        );
+    }
 
     #[test]
     fn extension_converge_is_declared_mutating() {

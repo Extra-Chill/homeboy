@@ -123,7 +123,7 @@ pub(crate) fn lifecycle_action_eligibility_with_roots(
 /// Reconcile is offered exactly when the fleet reconciler would select the run.
 ///
 /// Both read the one liveness rule, `liveness_for_record` (the classifier
-/// behind `agent-task active` and the daemon reconcile tick). This report used
+/// behind `runs list --kind agent-task --active` and the daemon reconcile tick). This report used
 /// to apply its own narrower test (`Running` without a live local owner), so it
 /// advertised Reconcile for a runner-backed run with a fresh heartbeat that the
 /// reconciler would leave alone, and withheld it for an ownerless queued run

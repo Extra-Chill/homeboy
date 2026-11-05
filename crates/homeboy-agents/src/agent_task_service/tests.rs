@@ -2574,7 +2574,7 @@ fn discovery_active_classifies_liveness_and_source() {
         );
         assert_eq!(
             summary.reconcile_command,
-            "homeboy agent-task active --reconcile --dry-run"
+            "homeboy agent-task reconcile --all"
         );
     });
 }
@@ -3373,7 +3373,7 @@ fn exact_quarantine_action_rejects_a_cook_alias_without_mutating_its_attempt() {
     });
 }
 
-/// `agent-task list` and the daemon's `GET /v1/control-plane/runs` must cover
+/// `runs list --kind agent-task` and the daemon's `GET /v1/control-plane/runs` must cover
 /// the same runs. A plain agent-task run (no Cook identity, so no mission) is
 /// listed by discovery; the daemon's list used to contain only mission-bound
 /// runs, so API clients could not see it (#13697).
@@ -3879,7 +3879,7 @@ fn dead_owner_process_run_is_classified_stale_and_reconciled() {
     // Regression for #9718: a `running` record whose owner process is dead but
     // whose `runner_pid` is merely PRESENT (and heartbeat not yet age-stale)
     // was classified Active by discovery and so was never terminalized by
-    // `active --reconcile`. It must now classify Stale and reconcile to
+    // `agent-task reconcile --all --apply`. It must now classify Stale and reconcile to
     // Cancelled without a manual `cancel`.
     with_isolated_home(|_| {
         agent_task_lifecycle::submit_plan(&discovery_plan(), Some("run-dead-owner"))

@@ -19,7 +19,7 @@
 //!
 //! - `cook --queue-only` — `LocalControl`, otherwise `AdmittedWorkload`
 //! - `retry --run` — `AdmittedWorkload`, otherwise `LocalControl`
-//! - `active --reconcile` — `AdmittedWorkload`, otherwise `BoundedMetadataRead`
+//! - Cook discovery (`runs list --kind agent-task`) — `BoundedMetadataRead`
 //! - `reconcile --apply` — `AdmittedWorkload`, otherwise `BoundedMetadataRead`
 //! - `recover --preflight` — `BoundedMetadataRead`, otherwise `AdmittedWorkload`
 //! - `fanout cook-batch --dry-run` — `is_plan_only_command` below
@@ -52,7 +52,7 @@ pub(super) enum AgentTaskResourceBehavior {
 pub(super) fn agent_task_resource_behavior(
     command: &Commands,
 ) -> Option<AgentTaskResourceBehavior> {
-    if matches!(command, Commands::Runs(args) if args.logs_run_id().is_some() || args.cook_reader_id().is_some())
+    if matches!(command, Commands::Runs(args) if args.logs_run_id().is_some() || args.cook_reader_id().is_some() || args.cook_discovery())
     {
         return Some(AgentTaskResourceBehavior::BoundedMetadataRead);
     }
@@ -105,7 +105,6 @@ pub(super) fn agent_task_resource_behavior(
         agent_task::AgentTaskCommand::Recover(_) => AgentTaskResourceBehavior::AdmittedWorkload,
         agent_task::AgentTaskCommand::Status(_)
         | agent_task::AgentTaskCommand::ValidatePlan(_)
-        | agent_task::AgentTaskCommand::List(_)
         | agent_task::AgentTaskCommand::ActiveScope(_)
         | agent_task::AgentTaskCommand::Diagnose(_)
         | agent_task::AgentTaskCommand::GateFeedback(_)
@@ -131,13 +130,10 @@ pub(super) fn agent_task_resource_behavior(
                 AgentTaskResourceBehavior::AdmittedWorkload
             }
         },
-        agent_task::AgentTaskCommand::Active(active) if !active.reconcile => {
-            AgentTaskResourceBehavior::BoundedMetadataRead
-        }
         agent_task::AgentTaskCommand::Reconcile(reconcile) if !reconcile.apply => {
             AgentTaskResourceBehavior::BoundedMetadataRead
         }
-        agent_task::AgentTaskCommand::Active(_) | agent_task::AgentTaskCommand::Reconcile(_) => {
+        agent_task::AgentTaskCommand::Reconcile(_) => {
             AgentTaskResourceBehavior::AdmittedWorkload
         }
         // Cook-batch admits a workflow; batch-prepare plans it. Their
@@ -212,4 +208,29 @@ pub(super) fn is_bounded_agent_task_metadata_read(command: &Commands) -> bool {
 /// portability diagnostics stay intact.
 pub(super) fn is_local_registry_management(command: &Commands) -> bool {
     matches!(command, Commands::Rig(args) if args.is_runner_source_management_command())
+}
+
+#[cfg(test)]
+mod discovery_tests {
+    use crate::cli_surface::Cli;
+    use clap::Parser;
+    #[test]
+    fn cook_discovery_is_bounded_metadata() {
+        for active in [false, true] {
+            let mut args = vec!["homeboy", "runs", "list", "--kind", "agent-task"];
+            if active {
+                args.push("--active");
+            }
+            let cli = Cli::try_parse_from(args).unwrap();
+            assert_eq!(
+                super::agent_task_resource_behavior(&cli.command),
+                Some(super::AgentTaskResourceBehavior::BoundedMetadataRead)
+            );
+        }
+        let cli = Cli::try_parse_from(["homeboy", "runs", "list"]).unwrap();
+        assert_ne!(
+            super::agent_task_resource_behavior(&cli.command),
+            Some(super::AgentTaskResourceBehavior::BoundedMetadataRead)
+        );
+    }
 }
