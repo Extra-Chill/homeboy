@@ -2180,6 +2180,26 @@ pub fn start_installed_daemon(
     stop_lease_id: Option<&str>,
 ) -> Result<bool> {
     if let Some(lease_id) = stop_lease_id {
+        // A service manager restarts its daemon from the binary it runs; a
+        // `daemon start` here would race that restart for the owner lock and
+        // crash-loop the unit (#17387). Stop it and wait for the new build.
+        let status = homeboy_core::daemon::read_status()?;
+        if status
+            .state
+            .as_ref()
+            .is_some_and(|state| state.lease_id == lease_id)
+            && status.service_manager().is_some()
+        {
+            return homeboy_core::daemon::restart_service_managed(lease_id, |status| {
+                status.reachable
+                    && status
+                        .state
+                        .as_ref()
+                        .is_some_and(|state| state.build_identity.display == installed_identity)
+            })
+            .map(|_| true)
+            .map_err(|error| upgrade_daemon_start_required(&error.message));
+        }
         // A refused stop leaves the old daemon serving; starting a second one
         // would only contend for its owner lock. Report it pending (#15436).
         if let Err(error) = homeboy_core::daemon::stop_for_lease(lease_id) {

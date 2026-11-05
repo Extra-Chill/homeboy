@@ -301,7 +301,7 @@ fn wait_for(label: &str, mut condition: impl FnMut() -> bool) {
 }
 
 fn serving_daemon() -> (DaemonState, JobStore) {
-    let state = write_state("127.0.0.1:49152".parse().expect("addr")).expect("write lease");
+    let state = write_state("127.0.0.1:49152".parse().expect("addr"), None).expect("write lease");
     let store =
         JobStore::open_without_reconciliation(&crate::paths::observation_db().expect("jobs path"))
             .expect("durable store")
@@ -1264,6 +1264,7 @@ fn daemon_state_for_test(pid: u32, address: &str) -> DaemonState {
         last_seen_at: now,
         build_identity: build_identity::current(),
         binary_sha256: current_binary_sha256().expect("binary hash"),
+        service_manager: None,
         runtime_paths: capture_daemon_runtime_snapshot(),
     }
 }
@@ -1450,7 +1451,7 @@ fn state_path_uses_daemon_state_location() {
 fn write_state_establishes_daemon_session_lease_identity() {
     let _home = HomeGuard::new();
 
-    let state = write_state("127.0.0.1:49152".parse().expect("addr")).expect("write lease");
+    let state = write_state("127.0.0.1:49152".parse().expect("addr"), None).expect("write lease");
     let status = read_status().expect("status");
 
     assert_eq!(state.schema, DAEMON_LEASE_SCHEMA);
@@ -1497,7 +1498,8 @@ fn lease_writer_rejects_a_missing_lease_id() {
 #[test]
 fn health_route_refreshes_daemon_lease_heartbeat() {
     let _home = HomeGuard::new();
-    let mut state = write_state("127.0.0.1:49152".parse().expect("addr")).expect("write lease");
+    let mut state =
+        write_state("127.0.0.1:49152".parse().expect("addr"), None).expect("write lease");
     state.last_seen_at = "2000-01-01T00:00:00Z".to_string();
     write_daemon_state_for_test(&state);
 

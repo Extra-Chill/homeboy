@@ -1675,6 +1675,7 @@ fn fake_daemon_state(daemon: super::DaemonStartResult) -> DaemonState {
             display: "homeboy test".to_string(),
         },
         binary_sha256: None,
+        service_manager: None,
         runtime_paths: DaemonRuntimeSnapshot {
             loaded_at: "2026-01-01T00:00:00Z".to_string(),
             paths: Vec::new(),
@@ -1758,4 +1759,143 @@ mod startup_cleanup_contract {
             serde_json::json!("terminal_pre_provider_startup")
         );
     }
+}
+
+/// #17387: a held owner lock is a live or starting daemon (a service manager
+/// restarting its own, for one) even when no lease says so. No start path may
+/// spawn beside it.
+#[test]
+fn start_refuses_to_spawn_while_a_live_owner_holds_the_lock() {
+    let error = super::start_or_return_live_with_operations(
+        || Ok(fake_status(None, false)),
+        || Ok(None::<()>),
+        || unreachable!("nothing to clean up while the owner lock is held"),
+        || -> crate::error::Result<super::DaemonStartResult> {
+            panic!("a daemon was spawned beside a live owner")
+        },
+    )
+    .expect_err("a held owner lock refuses the start");
+    assert!(
+        error.message.contains("owner lock is held"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn start_names_the_service_manager_that_owns_a_stale_daemon() {
+    let mut status = fake_status(Some(fake_daemon(4242, "lease-managed")), false);
+    status.state.as_mut().unwrap().service_manager =
+        Some(crate::daemon::DaemonServiceManager::Systemd);
+    let error = super::start_or_return_live_with_operations(
+        move || Ok(status),
+        || Ok(None::<()>),
+        || unreachable!("a managed daemon's lease is never cleaned up here"),
+        || -> crate::error::Result<super::DaemonStartResult> {
+            panic!("a daemon was spawned beside its service manager")
+        },
+    )
+    .expect_err("a service-managed owner refuses the start");
+    assert!(
+        error.message.contains("service manager systemd"),
+        "{}",
+        error.message
+    );
+}
+
+fn managed_status(daemon: Option<super::DaemonStartResult>, fresh: bool) -> DaemonStatus {
+    let mut status = fake_status(daemon, fresh);
+    if let Some(state) = status.state.as_mut() {
+        state.service_manager = Some(crate::daemon::DaemonServiceManager::Systemd);
+    }
+    status
+}
+
+/// #17387: restarting a service-managed daemon signals the exact leased
+/// daemon once and then only observes; the replacement comes from its
+/// manager. The operation has no spawn step at all.
+#[test]
+fn service_managed_restart_waits_for_the_managers_replacement() {
+    let old = fake_daemon(4242, "lease-old");
+    let new = fake_daemon(4343, "lease-new");
+    let mut reads = VecDeque::from([
+        managed_status(Some(old.clone()), false),
+        // The old daemon is still draining, then gone, then replaced.
+        managed_status(Some(old.clone()), false),
+        managed_status(None, false),
+        managed_status(Some(new.clone()), true),
+    ]);
+    let mut signaled = Vec::new();
+    let replacement = super::restart_service_managed_with(
+        "lease-old",
+        DaemonStatus::admits_work,
+        || Ok(reads.pop_front().expect("no read past the replacement")),
+        |state| {
+            signaled.push(state.pid);
+            Ok(())
+        },
+        || {},
+        10,
+    )
+    .expect("the manager's replacement is returned");
+    assert_eq!(replacement, new);
+    assert_eq!(signaled, vec![old.pid]);
+}
+
+#[test]
+fn service_managed_restart_fails_instead_of_spawning_when_the_manager_does_not_replace() {
+    let old = fake_daemon(4242, "lease-old");
+    let mut terminated = 0;
+    let error = super::restart_service_managed_with(
+        "lease-old",
+        DaemonStatus::admits_work,
+        || Ok(managed_status(None, false)),
+        |_| {
+            terminated += 1;
+            Ok(())
+        },
+        || {},
+        3,
+    );
+    // The first read finds no live lease: nothing is signaled.
+    assert!(error.is_err());
+    assert_eq!(terminated, 0);
+
+    let mut reads = VecDeque::from([managed_status(Some(old), false)]);
+    let error = super::restart_service_managed_with(
+        "lease-old",
+        DaemonStatus::admits_work,
+        || {
+            Ok(reads
+                .pop_front()
+                .unwrap_or_else(|| managed_status(None, false)))
+        },
+        |_| {
+            terminated += 1;
+            Ok(())
+        },
+        || {},
+        3,
+    )
+    .expect_err("no replacement is an error, never a spawn");
+    assert_eq!(terminated, 1);
+    assert!(
+        error.message.contains("does not start one beside it"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn service_managed_restart_refuses_an_unmanaged_lease() {
+    let error = super::restart_service_managed_with(
+        "lease-plain",
+        DaemonStatus::admits_work,
+        || Ok(fake_status(Some(fake_daemon(4242, "lease-plain")), false)),
+        |_| panic!("an unmanaged daemon is not restarted through a manager"),
+        || {},
+        3,
+    )
+    .expect_err("unmanaged lease is refused");
+    assert!(error.message.contains("not owned by a service manager"));
 }

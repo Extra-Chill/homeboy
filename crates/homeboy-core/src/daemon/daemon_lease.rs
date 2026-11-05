@@ -218,12 +218,15 @@ pub(crate) fn freshness_report_from_validation(
     active_jobs: usize,
 ) -> DaemonFreshnessReport {
     let state = validation.state.as_ref();
-    // A live daemon started outside Homeboy's launcher (`daemon serve` under
-    // systemd) records no startup token, and the lease-bound stop refuses to
-    // signal it, so advertising a stop/start repair would be a plan that can
-    // never apply. Its supervisor owns its restart (#15436).
-    let externally_supervised =
-        validation.running && state.is_some_and(|state| state.startup_token.is_empty());
+    // A live tokenless daemon started outside Homeboy's launcher and outside a
+    // detected service manager (a foreground `daemon serve`) cannot be
+    // restarted by Homeboy, so advertising a stop/start repair would be a plan
+    // that can never apply (#15436). A service-managed daemon is restartable:
+    // `ensure-running` stops it and waits for its manager's replacement
+    // (#17387).
+    let externally_supervised = validation.running
+        && state
+            .is_some_and(|state| state.startup_token.is_empty() && state.service_manager.is_none());
     let restartable = !validation.fresh
         && active_jobs == 0
         && !externally_supervised
@@ -420,6 +423,7 @@ mod tests {
             last_seen_at: String::new(),
             build_identity: build_identity::current(),
             binary_sha256: None,
+            service_manager: None,
             runtime_paths: DaemonRuntimeSnapshot {
                 loaded_at: String::new(),
                 paths: Vec::new(),

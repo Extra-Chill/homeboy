@@ -51,6 +51,7 @@ pub mod runner_exec_driver;
 pub mod runner_exec_job;
 pub mod runner_staging;
 pub(crate) mod runner_watch;
+mod service_manager;
 pub mod step_job;
 mod stop;
 pub mod workflow_cadence;
@@ -61,7 +62,8 @@ pub use control::{
     adopt_orphaned_lease, artifact_content_url, ensure_running,
     ensure_running_with_replacement_operation, fetch_artifact_to_path,
     reconcile_dead_lease_orphans, reconcile_leaseless_orphans, reconcile_unleased_candidates,
-    recover_missing_lease_state, start_background, supervise, ArtifactFetchOutcome,
+    recover_missing_lease_state, restart_service_managed, start_background, supervise,
+    ArtifactFetchOutcome,
 };
 use daemon_lease::{daemon_state_identity, freshness_report_from_validation, validate_lease_file};
 /// The daemon's own executable. A direct daemon child shares the daemon's
@@ -72,6 +74,7 @@ pub use lifetime::launchable_executable as daemon_launchable_executable;
 /// resident launch. See `lifetime::launch_idle_timeout`.
 pub use lifetime::IDLE_TIMEOUT_ENV as DAEMON_IDLE_TIMEOUT_ENV;
 use patch_capture::{capture_baseline, capture_patch_report};
+pub use service_manager::DaemonServiceManager;
 #[cfg(test)]
 use stop::active_daemon_job_ids;
 pub(crate) use stop::stop_unlocked;
@@ -783,15 +786,23 @@ pub fn converge_current_build_idle_daemon() -> Result<bool> {
         return Err(error);
     }
 
-    match status.freshness.lease_id.as_deref() {
-        Some(lease_id) => {
-            stop_for_lease(lease_id)?;
+    match (
+        status.freshness.lease_id.as_deref(),
+        status.service_manager(),
+    ) {
+        // Its manager starts the replacement; Homeboy only waits (#17387).
+        (Some(lease_id), Some(_)) => {
+            restart_service_managed(lease_id, DaemonStatus::admits_work)?;
         }
-        None => {
+        (Some(lease_id), None) => {
+            stop_for_lease(lease_id)?;
+            start_background(DEFAULT_ADDR)?;
+        }
+        (None, _) => {
             stop()?;
+            start_background(DEFAULT_ADDR)?;
         }
     }
-    start_background(DEFAULT_ADDR)?;
 
     let converged = read_status()?;
     if converged.fresh {
@@ -852,6 +863,9 @@ pub struct DaemonState {
     pub build_identity: build_identity::BuildIdentity,
     pub binary_sha256: Option<String>,
     pub runtime_paths: DaemonRuntimeSnapshot,
+    /// The service manager that runs and restarts this daemon. Homeboy never
+    /// spawns a daemon beside it; restarts go through the manager (#17387).
+    pub service_manager: Option<DaemonServiceManager>,
 }
 
 /// Independent observations of one daemon session lease.
@@ -920,6 +934,33 @@ impl DaemonStatus {
         self.running && self.fresh && self.reachable
     }
 
+    /// The service manager that owns the live daemon, if one does. Only that
+    /// manager starts or replaces it; Homeboy never spawns beside it (#17387).
+    pub fn service_manager(&self) -> Option<DaemonServiceManager> {
+        self.state
+            .as_ref()
+            .filter(|_| self.running)
+            .and_then(|state| state.service_manager)
+    }
+
+    /// Live `daemon serve` processes attributed to this store other than the
+    /// live lease's own: a second daemon competing for the owner lock, such
+    /// as a service manager's restart crash-looping beside a CLI-spawned one.
+    pub fn competing_serve_pids(&self) -> Vec<u32> {
+        let Some(lease_pid) = self.state.as_ref().filter(|_| self.running).map(|s| s.pid) else {
+            return Vec::new();
+        };
+        self.process_candidates
+            .iter()
+            .filter(|candidate| {
+                candidate.ownership == DaemonProcessOwnership::Owning
+                    && candidate.pid != lease_pid
+                    && pid_is_running(candidate.pid)
+            })
+            .map(|candidate| candidate.pid)
+            .collect()
+    }
+
     /// Render [`DaemonStatus::summary`] from the status's own evidence.
     pub fn render_summary(&self) -> String {
         let mut summary = if self.running && self.reachable {
@@ -931,6 +972,23 @@ impl DaemonStatus {
         } else {
             "no daemon lease is recorded and the daemon API is unreachable".to_string()
         };
+        if let Some(manager) = self.service_manager() {
+            summary.push_str(&format!(
+                "; owned by service manager {}, which alone starts and replaces it",
+                manager.as_str()
+            ));
+        }
+        let competing = self.competing_serve_pids();
+        if !competing.is_empty() {
+            summary.push_str(&format!(
+                "; conflict: other daemon serve process(es) {} compete with the live lease for this store",
+                competing
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
         if self.fresh {
             summary.push_str("; binary is fresh (matches this Homeboy build)");
         } else if let Some(reason) = &self.stale_reason {
@@ -1624,22 +1682,9 @@ pub(crate) fn write_termination_evidence(evidence: &DaemonTerminationEvidence) -
     })
 }
 
-pub fn serve(addr: SocketAddr) -> Result<DaemonState> {
-    serve_with_analysis_runner(addr, UnsupportedAnalysisJobRunner)
-}
-
-pub fn serve_with_analysis_runner<R>(addr: SocketAddr, analysis_runner: R) -> Result<DaemonState>
-where
-    R: AnalysisJobRunner,
-{
-    // The supervised path keeps the blocking accept loop and its existing
-    // lifecycle; only a foreground serve opts into the shutdown flag.
-    let owner_lock = acquire_daemon_owner_lock()?;
-    let listener = TcpListener::bind(addr)
-        .map_err(|e| Error::internal_io(e.to_string(), Some(format!("bind daemon to {}", addr))))?;
-    serve_listener_with_analysis_runner_locked(listener, analysis_runner, owner_lock, None, None)
-}
-
+/// Serve the persistent daemon until `shutdown` is set. Every `daemon serve`
+/// drains through this flag on SIGINT/SIGTERM, supervised or not, and records
+/// the service manager that started it, if any (#17387).
 pub fn serve_with_analysis_runner_and_shutdown<R>(
     addr: SocketAddr,
     analysis_runner: R,
@@ -1657,6 +1702,7 @@ where
         owner_lock,
         None,
         Some(shutdown),
+        DaemonServiceManager::detect(),
     )
 }
 
@@ -1667,6 +1713,7 @@ pub fn serve_listener(listener: TcpListener) -> Result<DaemonState> {
         listener,
         UnsupportedAnalysisJobRunner,
         owner_lock,
+        None,
         None,
         None,
     )
@@ -1682,6 +1729,7 @@ pub fn serve_listener_for_requests(listener: TcpListener, requests: usize) -> Re
         UnsupportedAnalysisJobRunner,
         owner_lock,
         Some(requests),
+        None,
         None,
     )
 }
@@ -1701,6 +1749,7 @@ pub fn serve_listener_until_shutdown(
         owner_lock,
         None,
         Some(shutdown),
+        None,
     )
 }
 
@@ -1741,6 +1790,7 @@ fn serve_listener_with_analysis_runner_locked<R>(
     _owner_lock: DaemonOwnerLock,
     request_limit: Option<usize>,
     shutdown: Option<Arc<AtomicBool>>,
+    service_manager: Option<DaemonServiceManager>,
 ) -> Result<DaemonState>
 where
     R: AnalysisJobRunner,
@@ -1772,7 +1822,7 @@ where
     } else {
         None
     };
-    let state = write_state(local_addr)?;
+    let state = write_state(local_addr, service_manager)?;
     // The ledger is shared by every daemon of this Unix user; the scope keeps
     // this daemon's startup sweeps and counts to its own jobs (#16104).
     let scope = daemon_scope()?;
@@ -5173,7 +5223,7 @@ mod tests {
             register_enqueue_test_driver(); // This driver intentionally has no staged-source support.
             let directory = tempfile::tempdir().unwrap();
             let path = directory.path().join(crate::paths::OBSERVATION_DB_FILENAME);
-            let old_state = write_state("127.0.0.1:31001".parse().unwrap()).unwrap();
+            let old_state = write_state("127.0.0.1:31001".parse().unwrap(), None).unwrap();
             let old = JobStore::open_without_reconciliation(&path)
                 .unwrap()
                 .with_daemon_lease(old_state.lease_id.clone());
@@ -5218,7 +5268,7 @@ mod tests {
             )
             .unwrap();
             drop(old);
-            let replacement = write_state("127.0.0.1:31002".parse().unwrap()).unwrap();
+            let replacement = write_state("127.0.0.1:31002".parse().unwrap(), None).unwrap();
             let reopened = JobStore::open_without_reconciliation(&path)
                 .unwrap()
                 .with_daemon_lease(replacement.lease_id.clone());
@@ -5459,7 +5509,7 @@ mod tests {
                     stream.flush().expect("flush fake daemon response");
                 }
             });
-            write_state(owner_address.parse().expect("fake daemon address"))
+            write_state(owner_address.parse().expect("fake daemon address"), None)
                 .expect("write serving lease");
 
             let client = LocalControllerJobClient::connect_existing_job(&job_id.to_string())
@@ -7056,6 +7106,7 @@ mod tests {
             build_identity: build_identity::current(),
             binary_sha256: current_binary_sha256().expect("binary hash"),
             runtime_paths: capture_daemon_runtime_snapshot(),
+            service_manager: None,
         };
         write_lease(&state_path().expect("state path"), &state).expect("write lease");
     }
@@ -7564,7 +7615,10 @@ fn config_paths_body() -> Result<serde_json::Value> {
     }))
 }
 
-fn write_state(addr: SocketAddr) -> Result<DaemonState> {
+fn write_state(
+    addr: SocketAddr,
+    service_manager: Option<DaemonServiceManager>,
+) -> Result<DaemonState> {
     let path = state_path()?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| {
@@ -7585,6 +7639,7 @@ fn write_state(addr: SocketAddr) -> Result<DaemonState> {
         build_identity: build_identity::current(),
         binary_sha256: current_binary_sha256()?,
         runtime_paths: capture_daemon_runtime_snapshot(),
+        service_manager,
     };
     write_lease(&path, &state)?;
     Ok(state)
