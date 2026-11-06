@@ -420,6 +420,7 @@ fn execute_owned(
     let started = std::time::Instant::now();
     let last_heartbeat = std::cell::Cell::new(started);
     let heartbeat_error = std::cell::RefCell::new(None);
+    let stop_requested = std::cell::Cell::new(false);
     let cancelled = || {
         if let Some(policy) = supervision {
             if last_heartbeat.get().elapsed() >= policy.heartbeat_interval {
@@ -434,10 +435,15 @@ fn execute_owned(
                 };
                 if let Err(error) = (policy.on_heartbeat)(&status) {
                     *heartbeat_error.borrow_mut() = Some(error);
+                    stop_requested.set(true);
                     return true;
                 }
             }
-            return (policy.is_cancelled)();
+            let cancelled = (policy.is_cancelled)();
+            if cancelled {
+                stop_requested.set(true);
+            }
+            return cancelled;
         }
         false
     };
@@ -471,18 +477,26 @@ fn execute_owned(
             )));
         }
         Err(error) => {
-            // Cancellation goes through the admitted job owner, then wait
-            // for its authoritative terminal state before releasing gates.
-            crate::runner_job_cancel(
-                &request.runner_id,
+            let cancelled_terminal = settle_gate_observation_failure(
+                error.clone(),
                 job_id,
-                &format!("gate observation failed: {}", error.message),
-            )?;
-            let cancelled_terminal = crate::execution::observe_daemon_job_until_terminal(
-                &request.runner_id,
-                job_id,
-                std::time::Duration::from_secs(60),
-                &|| false,
+                stop_requested.get(),
+                || {
+                    crate::runner_job_cancel(
+                        &request.runner_id,
+                        job_id,
+                        &format!("gate controller requested stop: {}", error.message),
+                    )?;
+                    Ok(())
+                },
+                || {
+                    crate::execution::observe_daemon_job_until_terminal(
+                        &request.runner_id,
+                        job_id,
+                        std::time::Duration::from_secs(60),
+                        &|| false,
+                    )
+                },
             )?;
             for workspace in [&mut snapshot_workspace, &mut candidate_workspace] {
                 workspace.terminal(crate::WorkspaceTerminalOutcome::Cancelled);
@@ -710,6 +724,40 @@ fn execute_owned(
     Ok(receipt)
 }
 
+/// Observation alone never authorizes stopping a remote job. Only an explicit
+/// supervision stop (including a heartbeat failure) or the gate deadline does.
+/// Until cancellation and terminal observation both succeed, workspace handles
+/// remain admitted and are retained for reconciliation on drop.
+fn settle_gate_observation_failure<T>(
+    error: Error,
+    job_id: &str,
+    stop_requested: bool,
+    cancel: impl FnOnce() -> Result<()>,
+    observe_terminal: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let deadline = error.details.get("daemon_terminal_wait_timeout").is_some();
+    if !stop_requested && !deadline {
+        return Err(gate_observation_error(error, job_id));
+    }
+    cancel().map_err(|error| gate_observation_error(error, job_id))?;
+    observe_terminal().map_err(|error| gate_observation_error(error, job_id))
+}
+
+fn gate_observation_error(mut error: Error, job_id: &str) -> Error {
+    // After admission, a lost or retryable transport is an observation gap,
+    // not a gate outcome or a configuration refusal.
+    let transport_lost = crate::daemon_health::runner_daemon_health_failure(&error).is_some()
+        || error.retryable == Some(true);
+    if transport_lost {
+        error.code = homeboy_core::ErrorCode::RunnerLabTransportFailure;
+        error.retryable = Some(true);
+        error.details["gate_disposition"] = serde_json::json!("unavailable");
+    }
+    error.details["job_id"] = serde_json::json!(job_id);
+    error.details["stage"] = serde_json::json!("terminal_wait");
+    error
+}
+
 fn private_input_file(root: &Path, name: &str, bytes: &[u8]) -> Result<std::path::PathBuf> {
     #[cfg(not(unix))]
     return Err(Error::invalid_argument(
@@ -746,6 +794,9 @@ mod native_tests;
 
 #[cfg(test)]
 mod workspace_tests;
+
+#[cfg(test)]
+mod observation_tests;
 
 #[cfg(test)]
 mod secret_env_tests {
