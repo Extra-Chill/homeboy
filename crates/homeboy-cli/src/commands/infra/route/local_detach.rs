@@ -63,7 +63,7 @@ struct DetachedCookAdmission {
 
 impl DetachedCookAdmission {
     fn establish(cook_id: &str) -> homeboy::core::Result<Self> {
-        let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+        let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
         let launcher_id = std::env::var(crate::cli_runtime::COOK_STARTUP_LAUNCHER_ID_ENV)
             .unwrap_or_else(|_| uuid::Uuid::new_v4().to_string());
         agent_task_lifecycle::claim_detached_cook_handoff_parent_in_store(
@@ -359,7 +359,7 @@ fn bind_cook_step_child(
             None,
         )
     })?;
-    let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
     let launcher_id = match std::env::var(crate::cli_runtime::COOK_STARTUP_LAUNCHER_ID_ENV) {
         Ok(launcher_id) => launcher_id,
         // A workflow `cook` step has no launcher process: the step itself
@@ -980,7 +980,7 @@ mod tests {
     /// Tests are the entry point for their own unit of work, so the store
     /// resolves once here (#7505).
     fn test_lifecycle_store() -> homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore {
-        homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+        homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
             .expect("lifecycle store")
     }
     use super::*;
@@ -1861,7 +1861,7 @@ mod tests {
             .expect("publish durable Cook attempt ownership");
 
             agent_task_lifecycle::fail_detached_cook_handoff_parent_in_store(
-                &agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+                &agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
                     .expect("lifecycle store"),
                 cook_id,
                 "stale detached child exit observation",
@@ -1909,7 +1909,7 @@ mod tests {
                 .expect("persist attempt before ownership arbitration");
 
             agent_task_lifecycle::fail_detached_cook_handoff_parent_in_store(
-                &agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+                &agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
                     .expect("lifecycle store"),
                 cook_id,
                 "detached Cook exited before materializing its first attempt",
@@ -1935,7 +1935,7 @@ mod tests {
             );
             assert!(
                 agent_task_lifecycle::cook_index_exists_in_store(
-                    &agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+                    &agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
                         .expect("lifecycle store"),
                     cook_id
                 )
@@ -2040,7 +2040,7 @@ mod tests {
             );
             assert!(
                 !agent_task_lifecycle::cook_index_exists_in_store(
-                    &agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+                    &agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
                         .expect("lifecycle store"),
                     cook_id
                 )

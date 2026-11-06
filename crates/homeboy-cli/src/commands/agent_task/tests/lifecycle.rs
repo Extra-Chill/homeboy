@@ -76,7 +76,7 @@ fn validate_plan_reports_invalid_input_without_creating_a_lifecycle_record() {
         assert_eq!(value["failures"][0]["kind"], "invalid_input");
         assert!(
             homeboy::agents::agent_task_lifecycle::list_records_in_store(
-                &agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment().unwrap()
+                &agent_task_lifecycle::AgentTaskLifecycleStore::from_environment().unwrap()
             )
             .expect("records")
             .is_empty()
@@ -89,8 +89,7 @@ fn admission_failure_is_visible_in_status_and_diagnose_without_provider_evidence
     with_isolated_home(|_| {
         let run_id = "run-cli-replay-admission-diagnostic";
         agent_task_lifecycle::record_unmaterialized_cook_admission_in_store(
-            &agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
-                .expect("store"),
+            &agent_task_lifecycle::AgentTaskLifecycleStore::from_environment().expect("store"),
             run_id,
             json!({ "request_ref": "sha256:fixture" }),
             "queued",
@@ -98,8 +97,7 @@ fn admission_failure_is_visible_in_status_and_diagnose_without_provider_evidence
         )
         .expect("admission");
         let message = "native task worktree registration no longer matches the requested branch";
-        let store =
-            agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment().unwrap();
+        let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment().unwrap();
         let mut error = Error::validation_invalid_argument("to_worktree", message, None, None);
         error.details = json!({"cook_phase": "controller_target_preparation", "field": "to_worktree", "api_key": "fixture-private-key"});
         store.transition(
@@ -816,7 +814,7 @@ use super::super::AgentTaskCommand;
 /// once here keeps the ambient lookup in one place and lets the ambient
 /// wrappers be deleted (#7505).
 fn test_lifecycle_store() -> homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore {
-    homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+    homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
         .expect("lifecycle store")
 }
 
@@ -2209,8 +2207,9 @@ fn resume_and_retry_delegate_a_cook_id_to_recover_instead_of_re_deciding() {
     let run_id = "cook-cli-recover-delegation-attempt-1";
     with_temp_home(|| {
         persist_recipe_only_cook(cook_id, run_id);
-        let store = homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
-            .expect("lifecycle store");
+        let store =
+            homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
+                .expect("lifecycle store");
         let plan = homeboy::agents::agent_task_service::cook_recovery_delegation(cook_id)
             .expect("a Cook ID with a recovery step is delegated");
         assert_eq!(plan.run_id, run_id);
@@ -2280,8 +2279,9 @@ fn recover_preflight_is_read_only_and_recover_reaches_the_continuation_report() 
         let performer = FixtureCookRecoveryPerformer {
             executor: executor.clone(),
         };
-        let store = homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
-            .expect("lifecycle store");
+        let store =
+            homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
+                .expect("lifecycle store");
         // The first durable read initializes an empty lifecycle database; the
         // comparison below covers everything recover could change after it.
         assert_eq!(
@@ -2321,7 +2321,7 @@ fn recover_preflight_is_read_only_and_recover_reaches_the_continuation_report() 
         assert!(!agent_task_lifecycle::run_record_exists_readonly(run_id)
             .expect("preflight did not admit"));
         assert!(!agent_task_lifecycle::cook_index_exists_in_store(
-            &agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment().unwrap(),
+            &agent_task_lifecycle::AgentTaskLifecycleStore::from_environment().unwrap(),
             cook_id
         )
         .expect("preflight did not index"));
@@ -2374,7 +2374,7 @@ fn status_and_continuation_materialize_recipe_only_attempt_without_provider_work
         assert!(!agent_task_lifecycle::run_record_exists_readonly(run_id)
             .expect("status did not admit"));
         assert!(!agent_task_lifecycle::cook_index_exists_in_store(
-            &agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment().unwrap(),
+            &agent_task_lifecycle::AgentTaskLifecycleStore::from_environment().unwrap(),
             cook_id
         )
         .expect("status did not index"));
@@ -6061,7 +6061,7 @@ fn retry_command_returns_the_replayable_control_plane_acknowledgement() {
         assert_eq!(replay, value);
         assert_eq!(
             homeboy::agents::agent_task_lifecycle::list_records_in_store(
-                &agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment().unwrap()
+                &agent_task_lifecycle::AgentTaskLifecycleStore::from_environment().unwrap()
             )
             .expect("records")
             .len(),

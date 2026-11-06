@@ -1123,7 +1123,7 @@ mod tests {
                 agent_task_lifecycle::artifacts("run-completed-noop").expect("artifacts");
             let (_, aggregate_path) =
                 homeboy_agents::agent_task_lifecycle::aggregate_source_in_store(
-                    &agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+                    &agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
                         .expect("lifecycle store"),
                     "run-completed-noop",
                 )

@@ -137,7 +137,7 @@ pub(crate) fn reconcile_runner_job_snapshot(
     snapshot: &homeboy_core::api_jobs::RunnerJobLogSnapshot,
 ) -> Result<()> {
     reconcile_runner_job_snapshot_in_store(
-        &AgentTaskLifecycleStore::from_current_environment()?,
+        &AgentTaskLifecycleStore::from_environment()?,
         record,
         snapshot,
     )
@@ -352,7 +352,7 @@ pub fn project_terminal_runner_result(
     snapshot: &homeboy_core::api_jobs::RunnerJobLogSnapshot,
 ) -> Result<bool> {
     project_terminal_runner_result_in_store(
-        &AgentTaskLifecycleStore::from_current_environment()?,
+        &AgentTaskLifecycleStore::from_environment()?,
         run_id,
         snapshot,
     )
@@ -655,7 +655,7 @@ fn project_terminal_runner_lifecycle_event_in_store(
 pub(crate) fn project_persisted_terminal_runner_events(
     record: &mut AgentTaskRunRecord,
 ) -> Result<bool> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    let lifecycle_store = AgentTaskLifecycleStore::from_environment()?;
     project_persisted_terminal_runner_events_in_store(&lifecycle_store, record)
 }
 

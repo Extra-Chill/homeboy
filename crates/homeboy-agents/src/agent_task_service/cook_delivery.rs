@@ -1275,7 +1275,7 @@ mod step_tests {
         homeboy_core::test_support::with_isolated_home(|_| {
             let store = CookRecipeStore::from_current_data_root().expect("recipe store");
             let lifecycle_store =
-                AgentTaskLifecycleStore::from_current_environment().expect("lifecycle store");
+                AgentTaskLifecycleStore::from_environment().expect("lifecycle store");
             let options = compile_options("delivery-no-finalize");
             assert!(options.finalization.no_finalize);
             let mut side_effects = CookSideEffects::for_test(

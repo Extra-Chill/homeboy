@@ -125,8 +125,7 @@ fn native_private_daemon_cancels_only_the_rooted_staging_owner() {
         eprintln!("NATIVE_PHASE=seed_private_roots");
         let binary = env!("CARGO_BIN_EXE_homeboy");
         std::env::set_var("HOMEBOY_COMMAND", &binary);
-        let store =
-            AgentTaskLifecycleStore::from_current_environment().expect("private lifecycle store");
+        let store = AgentTaskLifecycleStore::from_environment().expect("private lifecycle store");
         let roots = store.roots();
         let other_root = AgentTaskLifecycleStore::new(homeboy_core::paths::PathRoots::new(
             roots.config().to_path_buf(),

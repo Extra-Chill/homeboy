@@ -272,8 +272,7 @@ pub(super) fn resolve_cook_reader_target(
     run_or_cook_id: &str,
     exact: bool,
 ) -> homeboy::core::Result<AgentTaskCookReaderTarget> {
-    let lifecycle_store =
-        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    let lifecycle_store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
     if exact {
         return Ok(AgentTaskCookReaderTarget {
             run_id: run_or_cook_id.to_string(),
@@ -785,7 +784,7 @@ mod compact_status_tests {
 
 fn bounded_exact_record(run_id: &str) -> homeboy::core::Result<AgentTaskRunRecord> {
     homeboy::agents::agent_task_lifecycle::exact_record_bounded_in_store(
-        &agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?,
+        &agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?,
         run_id,
     )
 }
@@ -1790,8 +1789,7 @@ pub(super) fn reconcile_run(args: ReconcileArgs) -> CmdResult<Value> {
     }
     let run_id = args.run_id.expect("clap requires run_id or --all");
     if args.apply {
-        let lifecycle_store =
-            agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+        let lifecycle_store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
         let resolved_run_ids =
             agent_task_lifecycle::reconcile_scope_run_ids_in_store(&lifecycle_store, &run_id)?;
         let scope_key = args
@@ -6444,7 +6442,7 @@ mod tests {
             let run_id = "cook-settled-attempt-1";
             let plan = AgentTaskPlan::new(run_id, Vec::new());
             agent_task_lifecycle::submit_plan(&plan, Some(run_id)).unwrap();
-            let store = AgentTaskLifecycleStore::from_current_environment().unwrap();
+            let store = AgentTaskLifecycleStore::from_environment().unwrap();
             store
                 .mutate_record(run_id, |record| {
                     record.metadata["cook_id"] = json!("cook-settled");

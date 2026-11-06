@@ -281,7 +281,7 @@ pub(crate) fn cook_started(
         return;
     };
     let Ok(lifecycle_store) =
-        crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
     else {
         return;
     };
@@ -571,7 +571,7 @@ fn cook_terminal_with(
     // An unresolvable store is treated exactly as a lost claim, which is the
     // rule this function already applied to a failed claim.
     let Ok(lifecycle_store) =
-        crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
     else {
         return;
     };
@@ -734,7 +734,7 @@ fn cook_continuation_failed_with(
     resolved_tracker: impl FnOnce(&str) -> Option<String>,
 ) {
     let Ok(lifecycle_store) =
-        crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
     else {
         return;
     };
@@ -830,7 +830,7 @@ pub fn run_reconciled(run_id: &str, state: &str, liveness: &str, reason: Option<
     // One store for claim, confirm, and release — the same exactly-once
     // protocol `cook_terminal` runs, through the same marker (#7505).
     let Ok(lifecycle_store) =
-        crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
     else {
         return;
     };

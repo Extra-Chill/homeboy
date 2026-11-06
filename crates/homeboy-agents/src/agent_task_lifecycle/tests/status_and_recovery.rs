@@ -19,7 +19,7 @@ use std::sync::Arc;
 /// store once here keeps the ambient lookup in a single place instead of at
 /// every call site, and lets the ambient wrappers be deleted (#7505).
 fn test_lifecycle_store() -> AgentTaskLifecycleStore {
-    AgentTaskLifecycleStore::from_current_environment().expect("lifecycle store")
+    AgentTaskLifecycleStore::from_environment().expect("lifecycle store")
 }
 
 #[test]

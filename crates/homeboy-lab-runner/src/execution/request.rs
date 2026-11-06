@@ -56,7 +56,7 @@ pub fn exec_request(mut request: RunnerExecRequest) -> Result<(RunnerExecOutput,
 
     let lifecycle_store = run_id
         .as_deref()
-        .map(|_| AgentTaskLifecycleStore::from_current_environment())
+        .map(|_| AgentTaskLifecycleStore::from_environment())
         .transpose()?;
     let has_workspace_sync = request.sync_workspace.is_some();
     if has_workspace_sync {

@@ -242,8 +242,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt<
     backend: &mut B,
 ) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
     let recipe_store = CookRecipeStore::from_current_data_root()?;
-    let lifecycle_store =
-        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    let lifecycle_store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
     adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_stores(
         &recipe_store,
         &lifecycle_store,
@@ -1216,8 +1215,7 @@ pub(crate) fn resolve_adoption_target_with_attempt(
     super::AgentTaskCookRecipe,
 )> {
     let recipe_store = CookRecipeStore::from_current_data_root()?;
-    let lifecycle_store =
-        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    let lifecycle_store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
     resolve_adoption_target_with_attempt_in_stores(
         &recipe_store,
         &lifecycle_store,

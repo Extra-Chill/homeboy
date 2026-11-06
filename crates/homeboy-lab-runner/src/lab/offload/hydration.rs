@@ -658,8 +658,7 @@ pub(crate) fn hydrate_for_lab_workspace_exec_with_lifecycle_for_component(
     component_id: Option<&str>,
 ) -> Result<RecordedLabDependencyHydration> {
     // The phase executions recorded here belong to the run this hydrates (#7505).
-    let lab_lifecycle_store =
-        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    let lab_lifecycle_store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
     let hydration = hydrate_for_lab_workspace_exec_internal(
         skip_deps_hydration,
         runner_id,

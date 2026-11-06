@@ -52,8 +52,7 @@ fn run_cook_explicit(
     agent_task_service::AgentTaskRunResult<agent_task_service::AgentTaskCookReport>,
 > {
     let recipe_store = agent_task_service::CookRecipeStore::from_current_data_root()?;
-    let lifecycle_store =
-        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    let lifecycle_store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
     agent_task_service::CookService::run(
         request,
         agent_task_service::CookRuntime::production(executor, &recipe_store, &lifecycle_store),
@@ -4078,8 +4077,7 @@ process.stdout.write(JSON.stringify({type:'message_end',message:{role:'assistant
             assert!(execution["provision_intent"]["task_url"].is_null());
             assert!(
                 homeboy::agents::agent_task_lifecycle::list_records_in_store(
-                    &agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
-                        .unwrap()
+                    &agent_task_lifecycle::AgentTaskLifecycleStore::from_environment().unwrap()
                 )
                 .expect("read lifecycle records")
                 .is_empty()
@@ -4219,8 +4217,7 @@ fn apply_explicit_local_continuation(
         return Ok(());
     };
     let lifecycle_store =
-        homeboy::agents::agent_tasks::lifecycle::AgentTaskLifecycleStore::from_current_environment(
-        )?;
+        homeboy::agents::agent_tasks::lifecycle::AgentTaskLifecycleStore::from_environment()?;
     homeboy::agents::agent_tasks::lifecycle::transition_execution_placement_for_continuation_in_store(
         &lifecycle_store,
         run_id,
@@ -4277,7 +4274,7 @@ where
     let record = agent_task_service::reconcile_recipe_attempt_for_continuation(&recipe, &run_id)?;
     let record =
         if homeboy::agents::agent_task_lifecycle::disconnected_runner_recovery_available(&record) {
-            let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+            let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
             homeboy::agents::agent_task_lifecycle::recover_disconnected_runner_in_store(
                 &store, &run_id,
             )?;
@@ -4412,7 +4409,7 @@ where
         let claim = if args.rearm {
             agent_task_service::claim_continuation_for_recovery_and_clear_failure_in_store(
                 &recipe_store,
-                &agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?,
+                &agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?,
                 &recipe.cook_id,
                 &run_id,
             )?
@@ -4594,8 +4591,7 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
                 ))
             }
         };
-    let lifecycle_store =
-        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    let lifecycle_store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
     if lifecycle_store.read_record(&run_id).is_ok_and(|record| {
         homeboy::agents::agent_task_lifecycle::disconnected_runner_recovery_available(&record)
     }) {
@@ -7050,8 +7046,7 @@ pub(super) fn next_live_derived_cook_branch(
                 .filter(|owner| Some(*owner) != run_id)
             {
                 Some(owner) => {
-                    let store =
-                        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+                    let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
                     store.record_exists_readonly(owner)?
                         && !store.read_record(owner)?.state().is_terminal()
                 }
@@ -7857,8 +7852,7 @@ fn run_preflight_cook_execution(
             .unwrap_or(Ok(()))
     };
     let recipe_store = agent_task_service::CookRecipeStore::from_current_data_root()?;
-    let lifecycle_store =
-        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    let lifecycle_store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
     // A local provider dispatch — not a Lab-routed one — is the workload that
     // saturates this machine, so only local dispatch consults the concurrency
     // ceiling. The lease is held for this whole cook (provider, promotion, and
@@ -12273,15 +12267,21 @@ mod tests {
     #[test]
     fn continuation_preflight_reports_a_read_only_rejection_without_creating_a_run() {
         crate::test_support::with_isolated_home(|_| {
-            let before = homeboy::agents::agent_task_lifecycle::list_records_in_store(&homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment().unwrap())
-                .expect("read initial lifecycle records");
+            let before = homeboy::agents::agent_task_lifecycle::list_records_in_store(
+                &homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
+                    .unwrap(),
+            )
+            .expect("read initial lifecycle records");
             let (report, exit_code) = preflight_continue_cook(CookContinueArgs {
                 cook_or_attempt_id: "missing-cook".to_string(),
                 ..Default::default()
             })
             .expect("preflight returns a machine-readable rejection");
-            let after = homeboy::agents::agent_task_lifecycle::list_records_in_store(&homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment().unwrap())
-                .expect("read lifecycle records after preflight");
+            let after = homeboy::agents::agent_task_lifecycle::list_records_in_store(
+                &homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
+                    .unwrap(),
+            )
+            .expect("read lifecycle records after preflight");
 
             assert_eq!(exit_code, 1);
             assert_eq!(report["admitted"], false);

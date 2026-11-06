@@ -63,10 +63,6 @@ impl AgentTaskLifecycleStore {
         Ok(Self::new(paths::PathRoots::from_environment()?))
     }
 
-    pub fn from_current_environment() -> Result<Self> {
-        Self::from_environment()
-    }
-
     pub fn run_dir(&self, run_id: &str) -> PathBuf {
         self.roots
             .data()
@@ -1897,7 +1893,7 @@ pub(crate) struct AgentTaskRecordPageRecord {
 }
 
 fn default_store() -> Result<AgentTaskLifecycleStore> {
-    AgentTaskLifecycleStore::from_current_environment()
+    AgentTaskLifecycleStore::from_environment()
 }
 
 #[cfg(any(test, feature = "test-support"))]

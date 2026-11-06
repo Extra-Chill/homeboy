@@ -153,7 +153,7 @@ pub(crate) fn execute_claimed_plan(
         .lifecycle_store
         .clone()
         .map(Ok)
-        .unwrap_or_else(AgentTaskLifecycleStore::from_current_environment)?;
+        .unwrap_or_else(AgentTaskLifecycleStore::from_environment)?;
     prepared.lifecycle_store = Some(lifecycle_store.clone());
     with_submission_lock(&lifecycle_store, run_id, || {
         let existing = lifecycle_store.read_record(run_id)?;
@@ -235,7 +235,7 @@ pub(crate) fn stage_prepared_plan(
         .lifecycle_store
         .clone()
         .map(Ok)
-        .unwrap_or_else(AgentTaskLifecycleStore::from_current_environment)?;
+        .unwrap_or_else(AgentTaskLifecycleStore::from_environment)?;
     with_submission_lock(&lifecycle_store, request.run.as_str(), || {
         let existing = load_existing_record(&lifecycle_store, request.run.as_str())?;
         let identity = submission_identity(
@@ -305,7 +305,7 @@ pub(crate) fn reject_prepared_plan(
         .lifecycle_store
         .clone()
         .map(Ok)
-        .unwrap_or_else(AgentTaskLifecycleStore::from_current_environment)?;
+        .unwrap_or_else(AgentTaskLifecycleStore::from_environment)?;
     with_submission_lock(&lifecycle_store, request.run.as_str(), || {
         let existing = load_existing_record(&lifecycle_store, request.run.as_str())?;
         let identity = submission_identity(
@@ -365,7 +365,7 @@ fn submit_prepared_plan_inner(
         .lifecycle_store
         .clone()
         .map(Ok)
-        .unwrap_or_else(AgentTaskLifecycleStore::from_current_environment)?;
+        .unwrap_or_else(AgentTaskLifecycleStore::from_environment)?;
     prepared.lifecycle_store = Some(lifecycle_store.clone());
     with_submission_lock(&lifecycle_store, request.run.as_str(), || {
         submit_prepared_plan_locked(request, prepared, executor, derived_cook_baseline)

@@ -429,8 +429,7 @@ pub(crate) fn exec_lab_context(
     // intent, the plan read, placement normalisation and outcome, the
     // detached-run record and the follow-up check all describe one run
     // (#7505).
-    let lab_lifecycle_store =
-        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    let lab_lifecycle_store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
     // Keep the daemon-visible admission active until this function returns.
     let _admission = context.admission.take();
     let request = context.request;
@@ -1468,8 +1467,7 @@ pub(crate) fn run_lab_offload_inner(
     // admission reservation and pre-execution failure below describes one
     // run; separately resolved homes let a phase land beside a record that
     // does not have it (#7505).
-    let lab_lifecycle_store =
-        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    let lab_lifecycle_store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
     let runner_id = &selection.runner_id;
     let mut runner = load(runner_id)?;
     let mut runner_status = status_for_admission(runner_id)?;

@@ -239,8 +239,7 @@ pub fn reconcile_stale_active_runs(dry_run: bool) -> Result<AgentTaskReconcileRe
     // cancels is decided from a record read here; a decision taken against one
     // installation and committed into another cancels a run it never saw
     // (#7505).
-    let lifecycle_store =
-        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    let lifecycle_store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
     // Read the durable snapshot first so an expired controller handoff remains
     // visible to this managed recovery command. `status` also converges expiry,
     // but would otherwise terminalize it before this report can record the
@@ -432,8 +431,7 @@ pub fn reconcile_stale_active_runs(dry_run: bool) -> Result<AgentTaskReconcileRe
 /// reconciliation: a state or ownership change becomes a no-op rather than a
 /// reason to inspect or mutate any other record (#10001).
 pub fn reconcile_run(run_id: &str, dry_run: bool) -> Result<AgentTaskReconcileReport> {
-    let lifecycle_store =
-        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    let lifecycle_store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
     reconcile_run_in_store(&lifecycle_store, run_id, dry_run)
 }
 
@@ -794,7 +792,7 @@ mod tests {
     /// Tests are the entry point for their own unit of work, so the store
     /// resolves once here (#7505).
     fn test_lifecycle_store() -> crate::agent_task_lifecycle::AgentTaskLifecycleStore {
-        crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
             .expect("lifecycle store")
     }
     use super::*;
@@ -1029,7 +1027,7 @@ mod tests {
             })
             .expect("runner has not been submitted yet");
             agent_task_lifecycle::record_cook_progress_in_store(
-                &agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+                &agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
                     .expect("lifecycle store"),
                 run_id,
                 "worktree_provider_ensure",

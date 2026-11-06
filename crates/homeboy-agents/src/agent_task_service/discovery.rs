@@ -371,7 +371,7 @@ pub fn discover_runs_with_options(
     filter: AgentTaskDiscoveryFilter,
     options: AgentTaskDiscoveryOptions,
 ) -> Result<AgentTaskDiscoveryReport> {
-    let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
     discover_runs_in_store(&store, filter, options)
 }
 
@@ -390,7 +390,7 @@ pub fn discover_runs_page(
         .as_deref()
         .map(|cursor| decode_page_cursor(cursor, &scope))
         .transpose()?;
-    let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
     let mut active_health = None;
     let (records, physical_count, physical_truncated, next) =
         if filter == AgentTaskDiscoveryFilter::Active {
@@ -568,7 +568,7 @@ pub fn discover_filtered_latest_run(
         .as_deref()
         .map(parse_submitted_after)
         .transpose()?;
-    let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
     let mut after = None;
     let mut seen = BTreeSet::new();
     let mut health = AgentTaskRecordHealthSummary::healthy();
@@ -1045,7 +1045,7 @@ struct AgentTaskControllerUpgradeAdmissionProvider;
 
 impl ControllerUpgradeAdmissionProvider for AgentTaskControllerUpgradeAdmissionProvider {
     fn non_terminal_work(&self) -> Result<Vec<String>> {
-        let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+        let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
         let (records, _) = store.read_active_records()?;
         Ok(records
             .into_iter()
@@ -1055,7 +1055,7 @@ impl ControllerUpgradeAdmissionProvider for AgentTaskControllerUpgradeAdmissionP
     }
 
     fn controller_upgrade_admission(&self) -> Result<ControllerUpgradeAdmission> {
-        let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+        let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
         let (mut records, health) = store.read_active_records()?;
         let references = records
             .iter()

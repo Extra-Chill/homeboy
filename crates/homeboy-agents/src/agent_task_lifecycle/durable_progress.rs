@@ -236,7 +236,7 @@ pub fn record_promotion_progress(
     detail: Option<&str>,
     output_tail: Option<&str>,
 ) -> Result<()> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    let lifecycle_store = AgentTaskLifecycleStore::from_environment()?;
     record_promotion_progress_in_store(&lifecycle_store, run_id, phase, gate, detail, output_tail)
 }
 

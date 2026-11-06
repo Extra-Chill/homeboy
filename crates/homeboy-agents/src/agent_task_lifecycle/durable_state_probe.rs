@@ -78,7 +78,7 @@ pub struct StatusPurityFixture {
 /// [`durable_state_for_test`].
 pub fn seed_status_purity_fixtures_for_test() -> super::Result<Vec<StatusPurityFixture>> {
     use super::*;
-    let store = AgentTaskLifecycleStore::from_current_environment()?;
+    let store = AgentTaskLifecycleStore::from_environment()?;
     let plan = purity_plan();
     let mut fixtures = Vec::new();
     let mut push = |label: &'static str, run_id: &str| {

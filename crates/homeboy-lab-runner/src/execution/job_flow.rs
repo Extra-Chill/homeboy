@@ -544,7 +544,7 @@ fn observed_agent_task_terminal_job_status(
     // Dispatch observers own an exact attempt. Following the mission's latest
     // retry here would keep a cancelled attempt's process and runtime pin alive.
     if let Ok(store) =
-        homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+        homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
     {
         if let Ok(record) = store.read_record(run_id) {
             if record.state().is_terminal() {
@@ -655,7 +655,7 @@ mod tests {
             };
             use homeboy_agents::agent_task_scheduler::AgentTaskPlan;
             use homeboy_core::runtime_promotion;
-            let store = AgentTaskLifecycleStore::from_current_environment().unwrap();
+            let store = AgentTaskLifecycleStore::from_environment().unwrap();
             let plan = AgentTaskPlan::new("cancelled-observer", Vec::new());
             let original_id = "cancelled-observer-attempt-1";
             let retry_id = "cancelled-observer-attempt-1-transport-retry";

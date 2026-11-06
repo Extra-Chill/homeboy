@@ -1918,7 +1918,7 @@ fn lab_run_retry_leaves_a_cook_child_for_controller_lifecycle() {
             .expect("persist Cook recipe");
         agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("persist Cook attempt");
         agent_task_lifecycle::record_cook_attempt_in_store(
-            &homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+            &homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
                 .expect("lifecycle store"),
             cook_id,
             1,
@@ -2788,7 +2788,7 @@ fn lab_cook_retry_recovers_terminal_unmaterialized_admission_without_a_workspace
         agent_task_lifecycle::recover_unmaterialized_cook_input_publication("failed-run")
             .expect("publish replay inputs");
         agent_task_lifecycle::fail_detached_cook_handoff_parent_in_store(
-            &agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+            &agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
                 .expect("lifecycle store"),
             "failed-run",
             "bounded Lab admission retry budget exhausted",
@@ -2859,8 +2859,7 @@ fn lab_cook_retry_recovers_terminal_unmaterialized_admission_without_a_workspace
                 ["published_root"],
             binding["input_publication"]["published_root"]
         );
-        let store =
-            agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment().unwrap();
+        let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment().unwrap();
         let intent = crate::agents::agent_task_service::load_execution_intent(
             &store,
             recovered.metadata["execution_scheduling"]["current_intent_id"]
@@ -4002,7 +4001,7 @@ fn rejected_admission_rebinding_writes_no_snapshot_bytes() {
     homeboy::core::test_support::with_isolated_home(|_| {
         let cook_id = "snapshot-rebinding";
         agent_task_lifecycle::record_unmaterialized_cook_admission_in_store(
-            &homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+            &homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
                 .expect("lifecycle store"),
             cook_id,
             serde_json::json!({ "request_ref": "sha256:first" }),
@@ -4472,8 +4471,7 @@ pub(super) fn reserved_retry_transport_fixture(
     // The existence check and the cook-id read are one decision about one
     // record, so they resolve one store rather than the environment twice
     // (#7505).
-    let lifecycle_store =
-        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    let lifecycle_store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
     if !agent_task_lifecycle::run_record_exists_resolved_in_store(&lifecycle_store, &retry.run_id)?
     {
         return Ok(None);

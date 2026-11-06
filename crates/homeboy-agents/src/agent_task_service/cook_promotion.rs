@@ -155,8 +155,7 @@ pub fn promotion_source(spec: &str) -> Result<(String, Option<PathBuf>)> {
         }
     }
 
-    let lifecycle_store =
-        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    let lifecycle_store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
     if let Some(source) = promotion_source_for_reader(&lifecycle_store, spec)? {
         return Ok(source);
     }
@@ -213,11 +212,10 @@ pub(crate) fn promotion_source_in_store(
 /// Replayable dry-run command for a recoverable Cook, or a structured reason
 /// that promotion cannot be reconstructed. Does not write aggregate state.
 pub fn promotion_replay_guidance(requested_id: &str) -> Value {
-    let lifecycle_store =
-        match agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment() {
-            Ok(store) => store,
-            Err(error) => return promotion_replay_unavailable(requested_id, requested_id, &error),
-        };
+    let lifecycle_store = match agent_task_lifecycle::AgentTaskLifecycleStore::from_environment() {
+        Ok(store) => store,
+        Err(error) => return promotion_replay_unavailable(requested_id, requested_id, &error),
+    };
     let resolved = match agent_task_lifecycle::resolve_cook_reader_run_id_in_store(
         &lifecycle_store,
         requested_id,
@@ -1715,8 +1713,7 @@ pub fn verify_replacement_gates(
     interrupted_rerun_authorization: Option<String>,
 ) -> Result<AgentTaskPromotionReport> {
     let run_id = super::cook_recipe::resolve_cook_continuation_run_id(cook_or_attempt_id)?;
-    let lifecycle_store =
-        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    let lifecycle_store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
     let operation_key = format!("verify-replacement:{run_id}");
     match lifecycle_store.claim_cook_operation(
         &run_id,
@@ -2951,8 +2948,7 @@ pub(crate) fn finalize_or_load_cook_pr_with_backend<B: AgentTaskPrFinalizationBa
     backend: &mut B,
 ) -> Result<Value> {
     let store = super::cook_recipe::CookRecipeStore::from_current_data_root()?;
-    let lifecycle_store =
-        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    let lifecycle_store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
     finalize_or_load_cook_pr_with_backend_with_stores(
         &store,
         &lifecycle_store,
@@ -2993,8 +2989,7 @@ pub(crate) fn finalize_cook_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
     backend: &mut B,
 ) -> Result<Value> {
     let store = super::cook_recipe::CookRecipeStore::from_current_data_root()?;
-    let lifecycle_store =
-        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    let lifecycle_store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
     finalize_cook_pr_with_backend_with_stores(
         &store,
         &lifecycle_store,
@@ -3063,8 +3058,7 @@ fn cook_finalization_options_with_review_form(
     review_form: Option<&AgentTaskSuppliedReviewForm>,
 ) -> Result<AgentTaskPrFinalizationOptions> {
     let store = super::cook_recipe::CookRecipeStore::from_current_data_root()?;
-    let lifecycle_store =
-        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    let lifecycle_store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
     cook_finalization_options_with_stores_and_review_form(
         &store,
         &lifecycle_store,
@@ -3542,7 +3536,7 @@ fn manual_candidate_binding(
         ));
     };
     let model = record.lifecycle.provider_runtime.iter().rev().find_map(|runtime| runtime.metadata["model"].as_str()).filter(|model| !model.trim().is_empty()).ok_or_else(|| Error::validation_invalid_argument("run_id", "candidate-recoverable manual finalization requires concrete provider model provenance", Some(run_id.to_string()), None))?;
-    let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
     let plan = store.read_controller_plan(run_id)?;
     let outcome = selected_outcome_for_attempt_in_store(&store, run_id)?;
     let (_, disclosure) = authoritative_execution_identity(&plan, &record, &outcome, run_id)?;
@@ -3810,7 +3804,7 @@ pub(crate) fn recover_cook_pr_with_backend_and_review_form<B: AgentTaskPrFinaliz
     // candidate, not a replacement candidate. Recover the source promotion so
     // an exact `--recover <remediation>` cannot hide that applied promotion.
     let run_id = substantive_source_for_empty_remediation(&recipe, &run_id).unwrap_or(run_id);
-    let timing_store = agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+    let timing_store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
         .and_then(|store| store.open_observation_initialized())
         .map_err(|error| {
             homeboy_core::log_status!("observe", "phase timing persistence failed: {}", error);
@@ -3939,8 +3933,7 @@ fn persist_supplied_recovery_review_form(
     promotion: &AgentTaskPromotionReport,
     options: &CookRequest,
 ) -> Result<()> {
-    let lifecycle_store =
-        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    let lifecycle_store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
     lifecycle_store.compare_and_set_metadata_value(
         run_id,
         "recovery_review_form",
@@ -5725,8 +5718,7 @@ fn required_execution_model(execution: &CookAttemptExecution, run_id: &str) -> R
 /// Shared continuation/finalization admission. Legacy attempts without durable
 /// model evidence are rejected before a continuation can claim or promote them.
 pub fn validate_cook_attempt_model_provenance(run_id: &str) -> Result<()> {
-    let lifecycle_store =
-        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    let lifecycle_store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
     required_execution_model(
         &cook_attempt_execution_in_store(&lifecycle_store, run_id)?,
         run_id,
@@ -6015,8 +6007,7 @@ pub(crate) struct CookReportInput<'a> {
 
 pub(crate) fn cook_report(input: CookReportInput<'_>) -> AgentTaskRunResult<AgentTaskCookReport> {
     let recipe_store = super::cook_recipe::CookRecipeStore::from_current_data_root().ok();
-    let lifecycle_store =
-        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment().ok();
+    let lifecycle_store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment().ok();
     cook_report_with_stores(recipe_store.as_ref(), lifecycle_store.as_ref(), input)
 }
 
@@ -7160,8 +7151,7 @@ fn agent_incomplete_reason(
     let store = match lifecycle_store {
         Some(store) => store,
         None => {
-            owned =
-                agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment().ok()?;
+            owned = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment().ok()?;
             &owned
         }
     };

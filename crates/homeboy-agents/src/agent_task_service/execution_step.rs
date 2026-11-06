@@ -710,7 +710,7 @@ pub fn execute_execution_step(
     dispatcher: impl Fn(&Value) -> Result<Option<Arc<dyn super::AgentTaskCookAttemptDispatcher>>>,
     transport: &impl ExecutionStepTransport,
 ) -> Result<i32> {
-    let store = AgentTaskLifecycleStore::from_current_environment()?;
+    let store = AgentTaskLifecycleStore::from_environment()?;
     let intent = load_execution_intent(&store, id)?;
     if !intent.authorizes(&store.read_record(&intent.subject_id)?) {
         return Ok(0);

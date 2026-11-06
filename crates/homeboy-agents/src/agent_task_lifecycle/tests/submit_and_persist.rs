@@ -17,7 +17,7 @@ use std::sync::{Arc, Barrier};
 /// once here keeps the ambient lookup in one place and lets the ambient
 /// wrappers be deleted (#7505).
 fn test_lifecycle_store() -> AgentTaskLifecycleStore {
-    AgentTaskLifecycleStore::from_current_environment().expect("lifecycle store")
+    AgentTaskLifecycleStore::from_environment().expect("lifecycle store")
 }
 
 fn supervising_submission_metadata(run_id: &str) -> serde_json::Map<String, Value> {
@@ -4211,7 +4211,7 @@ fn terminal_projection_ignores_a_stale_aggregate_cache_after_commit() {
         assert_eq!(aggregate.status(), AgentTaskRunState::Succeeded);
         assert_eq!(aggregate.outcomes[0].summary.as_deref(), Some("ok"));
         assert_eq!(
-            AgentTaskLifecycleStore::from_current_environment()
+            AgentTaskLifecycleStore::from_environment()
                 .expect("lifecycle store")
                 .read_aggregate_readonly(&record.run_id)
                 .expect("read-only admission follows SQLite")

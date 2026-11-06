@@ -80,7 +80,7 @@ fn status_totals_state(
 #[test]
 fn mixed_outcomes_keep_status_and_totals_through_deferred_candidate_reconciliation() {
     with_isolated_home(|home| {
-        let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
+        let store = AgentTaskLifecycleStore::from_environment().expect("store");
         let candidate_root = home.path().join("candidate-repo");
         let candidate = committed_candidate(&candidate_root, "mixed-scheduler");
         let plan = mixed_plan(&candidate_root);

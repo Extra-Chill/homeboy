@@ -26,7 +26,7 @@ fn status_reads(run_id: &str) {
 #[test]
 fn status_leaves_every_lifecycle_state_byte_identical() {
     with_isolated_home(|_| {
-        let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
+        let store = AgentTaskLifecycleStore::from_environment().expect("store");
         let fixtures = seed_status_purity_fixtures_for_test().expect("seed fixtures");
         assert!(fixtures.len() >= 10, "{fixtures:?}");
 
@@ -63,7 +63,7 @@ fn status_leaves_every_lifecycle_state_byte_identical() {
 #[test]
 fn reconcile_apply_owns_the_transitions_status_no_longer_performs() {
     with_isolated_home(|_| {
-        let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
+        let store = AgentTaskLifecycleStore::from_environment().expect("store");
         seed_status_purity_fixtures_for_test().expect("seed fixtures");
 
         // Persisted terminal runner observation -> terminal aggregate projection.

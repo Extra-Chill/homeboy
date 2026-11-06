@@ -836,8 +836,11 @@ mod tests {
 
             let tree = homeboy_core::observation::directory_tree_sha256(&directory).expect("tree");
             homeboy_agents::agent_task_lifecycle::checkpoint_runner_exec_directory_tree_in_store(
-                &homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment().unwrap(),
-                run_id, "evidence", &tree,
+                &homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
+                    .unwrap(),
+                run_id,
+                "evidence",
+                &tree,
             )
             .expect("tree checkpoint");
             let store = ObservationStore::open_initialized().expect("store");
@@ -852,7 +855,7 @@ mod tests {
                 )
                 .expect("first artifact before simulated crash");
             homeboy_agents::agent_task_lifecycle::record_runner_exec_directory_child_promotion_in_store(
-                &homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment().unwrap(),
+                &homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment().unwrap(),
                 run_id,
                 "evidence",
                 "first.txt",
@@ -861,7 +864,8 @@ mod tests {
             .expect("first child checkpoint");
 
             let resumed = promote_runner_exec_artifact_dirs_in_store(
-                &homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment().expect("store"),
+                &homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
+                    .expect("store"),
                 run_id,
                 &output(temp.path()),
                 &["evidence".to_string()],
@@ -873,7 +877,8 @@ mod tests {
                 runner_exec_directory_child_id(run_id, "local", "evidence", "second.txt")
             );
             assert!(promote_runner_exec_artifact_dirs_in_store(
-                &homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment().expect("store"),
+                &homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
+                    .expect("store"),
                 run_id,
                 &output(temp.path()),
                 &["evidence".to_string()],
@@ -884,7 +889,8 @@ mod tests {
 
             fs::write(directory.join("second.txt"), "changed").expect("mutate tree");
             let error = promote_runner_exec_artifact_dirs_in_store(
-                &homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment().expect("store"),
+                &homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
+                    .expect("store"),
                 run_id,
                 &output(temp.path()),
                 &["evidence".to_string()],

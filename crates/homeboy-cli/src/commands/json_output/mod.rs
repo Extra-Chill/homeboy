@@ -97,7 +97,7 @@ pub(crate) fn run_command_output(
                     cook_args.dispatch.run_id = Some(cook_id.clone());
                     let launcher_id = uuid::Uuid::new_v4().to_string();
                     let bootstrap = (|| {
-                        let store = homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+                        let store = homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
                         // Local detach claims first and may already have
                         // published supervision. Reuse that owner id so this
                         // bootstrap is an identity-matched re-entry, not a
@@ -177,7 +177,7 @@ pub(crate) fn run_command_output(
                         // materialized its first attempt, terminalize that parent
                         // before replacing the in-flight envelope.
                         let terminalize = (|| {
-                            let store = homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+                            let store = homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
                             if store.cook_index_exists(&cook_id) {
                                 return Ok(());
                             }
@@ -338,8 +338,7 @@ fn terminalize_cook_output_bootstrap_failure(
     cook_id: &str,
     error: &homeboy::core::Error,
 ) -> homeboy::core::Result<()> {
-    let store =
-        homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    let store = homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
     let plan = store.read_controller_plan(cook_id)?;
     homeboy::agents::agent_task_lifecycle::record_pre_execution_failure_in_store(
         &store,
@@ -1073,8 +1072,9 @@ mod tests {
     fn output_bootstrap_failure_terminalizes_the_persisted_cook_parent() {
         homeboy::core::test_support::with_isolated_home(|_| {
             let cook_id = "cook-output-bootstrap-failure";
-            let store = homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
-                .expect("lifecycle store");
+            let store =
+                homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
+                    .expect("lifecycle store");
             homeboy::agents::agent_task_lifecycle::record_detached_cook_handoff_parent_in_store(
                 &store, cook_id,
             )

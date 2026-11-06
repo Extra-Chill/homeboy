@@ -1852,8 +1852,7 @@ pub fn reconcile_recipe_attempt_for_continuation(
     run_id: &str,
 ) -> Result<agent_task_lifecycle::AgentTaskRunRecord> {
     let recipe_store = CookRecipeStore::from_current_data_root()?;
-    let lifecycle_store =
-        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    let lifecycle_store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
     reconcile_recipe_attempt_for_continuation_in_stores(
         &recipe_store,
         &lifecycle_store,
@@ -2853,7 +2852,7 @@ pub(crate) fn has_unambiguous_zero_execution(
 pub fn resolve_cook_continuation_run_id(cook_or_attempt_id: &str) -> Result<String> {
     resolve_cook_continuation_run_id_in_store(
         &default_store()?,
-        &agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?,
+        &agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?,
         cook_or_attempt_id,
     )
 }
@@ -5773,9 +5772,8 @@ mod tests {
     fn status_only_enqueues_and_never_invokes_the_consumer() {
         homeboy_core::test_support::with_isolated_home(|_| {
             let store = default_store().expect("Cook store");
-            let lifecycle_store =
-                agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
-                    .expect("lifecycle store");
+            let lifecycle_store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
+                .expect("lifecycle store");
             let (_, plan) = persist_recipe_run(&store, &lifecycle_store);
             crate::agent_task_lifecycle::rewrite_record_for_test("run", |record| {
                 record.ensure_metadata_object().remove("cook_id");
@@ -6052,8 +6050,7 @@ mod tests {
             let mut source_corrected = existing.clone();
             source_corrected.source_refs = vec!["corrected-source".to_string()];
             let error = ensure_correction_is_safe_in_store(
-                &crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
-                    .unwrap(),
+                &crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment().unwrap(),
                 &existing,
                 &source_corrected,
                 &recipe_mismatch_fields(&existing, &source_corrected),
@@ -6073,8 +6070,7 @@ mod tests {
             let mut destination_corrected = existing.clone();
             destination_corrected.finalization["to_worktree"] = serde_json::json!("other-target");
             let error = ensure_correction_is_safe_in_store(
-                &crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
-                    .unwrap(),
+                &crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment().unwrap(),
                 &existing,
                 &destination_corrected,
                 &recipe_mismatch_fields(&existing, &destination_corrected),
@@ -6094,8 +6090,7 @@ mod tests {
             let mut gate_corrected = existing.clone();
             gate_corrected.gate_policy["verify"] = serde_json::json!(["corrected gate"]);
             ensure_correction_is_safe_in_store(
-                &crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
-                    .unwrap(),
+                &crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment().unwrap(),
                 &existing,
                 &gate_corrected,
                 &recipe_mismatch_fields(&existing, &gate_corrected),
@@ -6112,8 +6107,7 @@ mod tests {
             })
             .expect("record gate execution");
             let error = ensure_correction_is_safe_in_store(
-                &crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
-                    .unwrap(),
+                &crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment().unwrap(),
                 &existing,
                 &gate_corrected,
                 &recipe_mismatch_fields(&existing, &gate_corrected),
@@ -6133,8 +6127,7 @@ mod tests {
             let mut finalization_corrected = existing;
             finalization_corrected.finalization["title"] = serde_json::json!("Different title");
             let error = ensure_correction_is_safe_in_store(
-                &crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
-                    .unwrap(),
+                &crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment().unwrap(),
                 &load_recipe("cook").expect("load finalized recipe"),
                 &finalization_corrected,
                 &recipe_mismatch_fields(

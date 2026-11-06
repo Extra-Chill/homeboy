@@ -19,8 +19,7 @@ struct AgentTaskTerminalRecoveryProviderImpl;
 
 impl AgentTaskTerminalRecoveryProvider for AgentTaskTerminalRecoveryProviderImpl {
     fn durable_run_is_cancelled(&self, run_id: &str) -> bool {
-        let Ok(store) =
-            crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+        let Ok(store) = crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
         else {
             return false;
         };
@@ -74,8 +73,7 @@ impl AgentTaskTerminalRecoveryProvider for AgentTaskTerminalRecoveryProviderImpl
 
     fn linked_durable_run_state(&self, run_id: &str) -> Option<DaemonLinkedDurableRunState> {
         let lifecycle_store =
-            crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
-                .ok()?;
+            crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment().ok()?;
         let resolved_run_id =
             crate::agent_task_lifecycle::resolve_run_id_in_store(&lifecycle_store, run_id).ok()?;
         let record = lifecycle_store.read_record_bounded(&resolved_run_id).ok()?;
@@ -146,7 +144,7 @@ mod tests {
     #[test]
     fn terminal_recovery_uses_persisted_records_without_reentering_runner_status() {
         homeboy_core::test_support::with_isolated_home(|_| {
-            let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
+            let store = AgentTaskLifecycleStore::from_environment().expect("store");
             let run_id = "runner-linked-terminal-recovery";
             let record = {
                 let mut record = AgentTaskRunRecord::new_queued(

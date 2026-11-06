@@ -1021,7 +1021,7 @@ where
     // One store: the controller plan read and the staging job recorded against
     // it are one submission (#7505).
     let lab_lifecycle_store =
-        homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+        homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
     if !routing_ready() {
         return Err(Error::validation_invalid_argument(
             "lab_staging_adapter",
@@ -1190,7 +1190,7 @@ fn submit_deferred_runner_staging(
         request.local_output_file.is_some(),
     )?;
     let lifecycle_store =
-        homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+        homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
     let source_path = recipe.source_path.take().ok_or_else(|| {
         Error::validation_invalid_argument(
             "source_path",
@@ -2025,8 +2025,7 @@ impl LabStagingRecipeRef {
 }
 
 pub fn load_lab_staging_recipe(run_id: &str) -> Result<LabStagingRequest> {
-    let store =
-        homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    let store = homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
     load_lab_staging_recipe_in_store(&store, run_id)
 }
 
@@ -2102,8 +2101,7 @@ fn load_validated_staging_request(
     recipe_ref: &LabStagingRecipeRef,
 ) -> Result<LabStagingExecutionRequest> {
     recipe_ref.validate()?;
-    let store =
-        homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    let store = homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
     let attachment = load_recipe_attachment(&store, run_id)?;
     let staging = load_lab_staging_recipe_in_store(&store, run_id)?;
     if attachment.payload_digest != recipe_ref.attachment_digest
@@ -4625,7 +4623,7 @@ impl LabStagingDispatchDriver {
         // One store: the staging-controller failure and the pre-execution failure
         // beside it describe one checkpoint (#7505).
         let lab_lifecycle_store =
-            homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+            homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
         checkpoint.validate()?;
         // A terminalized linked attempt closes the staging lifecycle before any
         // pre-dispatch work can begin. Once a runner job was admitted the
@@ -4970,7 +4968,9 @@ mod tests {
         crate::test_support::with_isolated_home(|home| {
             let run_id = "blocked-source-index";
             submit_recipe_run(run_id);
-            let store = homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment().expect("store");
+            let store =
+                homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
+                    .expect("store");
             let mut plan =
                 homeboy_agents::agent_task_scheduler::AgentTaskPlan::new("source-plan", Vec::new());
             plan.options.execution_budget.deadline_unix_ms = Some(now_unix_ms() + 5_000);
@@ -5398,7 +5398,7 @@ mod tests {
     /// leaves it: terminal with no `lab_staging_controller_job_id` linkage.
     fn terminalize_attempt_record(run_id: &str) {
         let lifecycle =
-            homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+            homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
                 .expect("lifecycle store");
         let mut record = lifecycle.read_record(run_id).expect("attempt record");
         record
@@ -6110,7 +6110,7 @@ mod tests {
                         harvest_context: Default::default(),
                     })
                     .expect("persist durable Cook recipe");
-                let lifecycle = homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+                let lifecycle = homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
                     .expect("lifecycle store");
                 homeboy_agents::agent_task_lifecycle::record_cook_attempt_in_store(
                     &lifecycle, cook_id, 1, run_id,
@@ -8562,8 +8562,9 @@ mod tests {
         crate::test_support::with_isolated_home(|_| {
             let run_id = "malformed-recipe-after-cancel";
             submit_recipe_run(run_id);
-            let store = homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
-                .expect("lifecycle store");
+            let store =
+                homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
+                    .expect("lifecycle store");
             let recipe_path = homeboy_core::paths::homeboy_data()
                 .expect("data root")
                 .join("agent-task-runs")

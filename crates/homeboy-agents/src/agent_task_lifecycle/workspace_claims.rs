@@ -86,7 +86,7 @@ fn terminal_workspace_authority(
             "task worktree has no owning run to attest terminality",
         ));
     };
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()
+    let lifecycle_store = AgentTaskLifecycleStore::from_environment()
         .map_err(|error| refuse(unavailable.clone(), &error.message))?;
     let terminal = match lifecycle_store.read_record(run_id) {
         Ok(controller) => controller_terminal_run(&lifecycle_store, &controller)?,
@@ -1861,7 +1861,7 @@ mod tests {
             // A Lab-style remote claim authority is configured on this controller.
             let (provider, live) = provider(Ok(vec!["runner-a".into()]));
             let _provider = install_claim_provider(provider);
-            let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
+            let store = AgentTaskLifecycleStore::from_environment().expect("store");
             let succeeded = AgentTaskRunState::Succeeded;
             controller_run(&store, "local-run", succeeded, serde_json::json!({}));
             let mut handed_off =
@@ -1954,7 +1954,7 @@ mod tests {
         use crate::agent_task::{AgentTaskOutcome, AgentTaskOutcomeStatus};
         use crate::agent_task_scheduler::{AgentTaskAggregate, AgentTaskAggregateTotals};
         with_isolated_home(|_| {
-            let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
+            let store = AgentTaskLifecycleStore::from_environment().expect("store");
             let aggregate = |status| AgentTaskAggregate {
                 schema: crate::agent_task::AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
                 plan_id: "plan".to_string(),

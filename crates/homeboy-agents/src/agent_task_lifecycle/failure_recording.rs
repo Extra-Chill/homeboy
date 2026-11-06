@@ -18,7 +18,7 @@ pub fn record_pre_execution_failure(
     phase: &str,
     error: &Error,
 ) -> Result<AgentTaskRunRecord> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    let lifecycle_store = AgentTaskLifecycleStore::from_environment()?;
     record_pre_execution_failure_in_store(&lifecycle_store, run_id, plan, phase, error)
 }
 
@@ -991,7 +991,7 @@ pub struct AgentTaskPreDispatchFailure<'a> {
 pub fn record_pre_dispatch_failure(
     failure: AgentTaskPreDispatchFailure<'_>,
 ) -> Result<AgentTaskRunRecord> {
-    let lifecycle_store = &AgentTaskLifecycleStore::from_current_environment()?;
+    let lifecycle_store = &AgentTaskLifecycleStore::from_environment()?;
     let run_id = sanitize_run_id(failure.identity.run_id);
     if let Ok(record) = reconcile_status_in_store(
         lifecycle_store,
@@ -1143,7 +1143,7 @@ pub fn record_remote_dispatch_failure(
     failure: AgentTaskRemoteDispatchFailure<'_>,
     envelope: &Value,
 ) -> Result<Option<AgentTaskRunRecord>> {
-    let lifecycle_store = &AgentTaskLifecycleStore::from_current_environment()?;
+    let lifecycle_store = &AgentTaskLifecycleStore::from_environment()?;
     if envelope.get("schema").and_then(Value::as_str) != Some("homeboy/agent-task-dispatch/v1") {
         return Ok(None);
     }
@@ -1792,7 +1792,7 @@ pub fn terminal_artifact_projection_readiness_in_store(
 /// All three reads follow the injected store. The `store::` shims above are
 /// exactly `default_store()?.read_record_bounded` and
 /// `default_store()?.read_aggregate_bounded`, and
-/// `default_store()` is `AgentTaskLifecycleStore::from_current_environment()`,
+/// `default_store()` is `AgentTaskLifecycleStore::from_environment()`,
 /// so an ambient caller reaches byte-identical state through either form. The
 /// third is the projection check itself: it opens an observation store and
 /// resolves an artifact root, which `PathRoots` carries separately from `data` —

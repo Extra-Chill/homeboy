@@ -19,7 +19,7 @@ use homeboy_core::test_support::with_isolated_home;
 /// once here keeps the ambient lookup in one place and lets the ambient
 /// wrappers be deleted (#7505).
 fn test_lifecycle_store() -> crate::agent_task_lifecycle::AgentTaskLifecycleStore {
-    crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+    crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
         .expect("lifecycle store")
 }
 
