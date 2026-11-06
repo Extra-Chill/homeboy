@@ -3150,13 +3150,15 @@ fn cook_finalization_options_with_stores_and_review_form(
         .iter()
         .map(|verified| verified.command.clone())
         .collect();
-    let inherited_failure_count = promotion
+    let inherited_gates = promotion
         .deterministic_gates
         .iter()
         .filter(|gate| {
             gate.status == crate::agent_task_gate::AgentTaskGateStatus::AcceptedInheritedFailure
         })
-        .count();
+        .map(|gate| format!("{}: baseline-red (`{}`)", gate.id, gate.command.join(" ")))
+        .collect::<Vec<_>>();
+    let inherited_failure_count = inherited_gates.len();
     let attempt_summary = if inherited_failure_count == 0 {
         format!(
             "{} deterministic cook gate attempt(s) completed green",
@@ -3164,8 +3166,9 @@ fn cook_finalization_options_with_stores_and_review_form(
         )
     } else {
         format!(
-            "{} deterministic cook gate attempt(s) completed; {inherited_failure_count} inherited baseline-red failure(s) were reproduced on the immutable base and explicitly accepted",
-            promotion.deterministic_gates.len()
+            "{} deterministic cook gate attempt(s) completed; {inherited_failure_count} inherited baseline-red failure(s) were reproduced on the immutable base and accepted: {}",
+            promotion.deterministic_gates.len(),
+            inherited_gates.join("; ")
         )
     };
     // A shared repository can register more than one component against the

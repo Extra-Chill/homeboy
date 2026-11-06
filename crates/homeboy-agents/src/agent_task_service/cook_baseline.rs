@@ -1277,7 +1277,11 @@ mod tests {
                 );
                 assert_eq!(
                     promotion.status,
-                    crate::agent_task_promotion::AgentTaskPromotionStatus::GateFailed
+                    if accepted {
+                        crate::agent_task_promotion::AgentTaskPromotionStatus::Applied
+                    } else {
+                        crate::agent_task_promotion::AgentTaskPromotionStatus::GateFailed
+                    }
                 );
             }
         });

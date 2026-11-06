@@ -8078,7 +8078,7 @@ impl CandidateAdoptionFixture {
 }
 
 #[test]
-fn adoption_accepts_an_identical_immutable_baseline_failure_when_explicitly_authorized() {
+fn adoption_accepts_an_identical_immutable_baseline_failure_without_opt_in() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let mut fixture = CandidateAdoptionFixture::new("cook-11978-inherited", 1, 0, true, None);
         fixture.options.gates.verify = vec![
@@ -8093,7 +8093,7 @@ fn adoption_accepts_an_identical_immutable_baseline_failure_when_explicitly_auth
         let result = fixture
             .adopt_run_with_inherited_failure_acceptance(
                 &fixture.run_id,
-                true,
+                false,
                 |_| Ok(None),
                 Arc::new(UnusedExecutor),
                 &mut backend,
@@ -8134,13 +8134,8 @@ fn adoption_accepts_an_identical_immutable_baseline_failure_when_explicitly_auth
         let reused = fixture
             .adopt(|_| Ok(None), Arc::new(UnusedExecutor), &mut backend)
             .expect("completed adoption returns its durable report");
-        assert_eq!(reused.exit_code, 1, "{:#?}", reused.value);
-        assert_eq!(reused.value.status, "baseline_red");
-        assert!(reused
-            .value
-            .stop_reason
-            .as_deref()
-            .is_some_and(|reason| reason.contains("--accept-inherited-failures")));
+        assert_eq!(reused.exit_code, 0, "{:#?}", reused.value);
+        assert_eq!(reused.value.status, "green_no_finalize");
     });
 }
 
@@ -18382,7 +18377,7 @@ fn cook_remediation_preserves_provider_identity_and_no_gate_requirements() {
 }
 
 #[test]
-fn canonical_completion_accepts_green_and_recipe_authorized_inherited_gate_evidence() {
+fn canonical_completion_accepts_green_and_proven_inherited_gate_evidence() {
     let mut green = promotion("canonical-green");
     green.candidate.as_mut().unwrap().tree_sha = "canonical-sha".to_string();
     assert!(canonical_finalization_eligible(&green, false, true));
@@ -18413,8 +18408,97 @@ fn canonical_completion_accepts_green_and_recipe_authorized_inherited_gate_evide
             result: crate::agent_task_gate::AgentTaskGateDifferentialResult::BaselineRed,
             diagnostic: None,
         });
-    assert!(canonical_finalization_eligible(&inherited, true, true));
-    assert!(!canonical_finalization_eligible(&inherited, false, true));
+    // Exercise the public durable verdict with both policy values: accepted
+    // baseline evidence must not turn back into a rejection on another path.
+    use crate::agent_task_gate::{AgentTaskGateFailureClassification, AgentTaskGateStatus};
+    for (name, status, classification, baseline_matches, publishable) in [
+        (
+            "inherited",
+            AgentTaskGateStatus::AcceptedInheritedFailure,
+            AgentTaskGateFailureClassification::CandidateCode,
+            true,
+            true,
+        ),
+        (
+            "candidate-only",
+            AgentTaskGateStatus::Failed,
+            AgentTaskGateFailureClassification::CandidateCode,
+            false,
+            false,
+        ),
+        (
+            "unavailable",
+            AgentTaskGateStatus::Unavailable,
+            AgentTaskGateFailureClassification::CandidateCode,
+            true,
+            false,
+        ),
+        (
+            "unproven",
+            AgentTaskGateStatus::AcceptedInheritedFailure,
+            AgentTaskGateFailureClassification::CandidateCode,
+            false,
+            false,
+        ),
+        (
+            "invalid-gate",
+            AgentTaskGateStatus::AcceptedInheritedFailure,
+            AgentTaskGateFailureClassification::GateDeclaration,
+            true,
+            false,
+        ),
+    ] {
+        let mut report = inherited.clone();
+        let gate = &mut report.deterministic_gates[0];
+        gate.status = status;
+        gate.failure_evidence.as_mut().unwrap().classification = classification;
+        gate.baseline_comparison
+            .as_mut()
+            .unwrap()
+            .matches_candidate_failure = baseline_matches;
+        report
+            .deterministic_gates
+            .push(green.deterministic_gates[0].clone());
+        for policy in [false, true] {
+            assert_eq!(report.finalization_eligible(policy), publishable, "{name}");
+            assert_eq!(
+                canonical_finalization_eligible(&report, policy, true),
+                publishable,
+                "{name}"
+            );
+        }
+        let outcome = report.gate_outcome();
+        assert_eq!(
+            outcome.status == AgentTaskPromotionStatus::Applied,
+            publishable,
+            "{name}"
+        );
+        if name == "inherited" {
+            assert_eq!(
+                outcome.gate_results[0].status,
+                homeboy_core::gate::HomeboyGateStatus::AcceptedInheritedFailure
+            );
+            assert_eq!(outcome.gate_results[0].id, report.deterministic_gates[0].id);
+            report.normalize_gate_outcome();
+            assert!(report.finalization_eligible(false));
+            assert!(report
+                .operator_notification
+                .message
+                .contains("baseline-red"));
+            assert!(report
+                .operator_notification
+                .message
+                .contains(&report.deterministic_gates[0].id));
+            assert!(report
+                .operator_notification
+                .message
+                .contains("cargo test --locked agent_task_promotion --lib"));
+            assert_eq!(
+                report.deterministic_gates[0].command,
+                inherited.deterministic_gates[0].command
+            );
+        }
+    }
 }
 
 #[test]
@@ -19557,7 +19641,7 @@ fn verify_replacement_gates_recovers_pending_verification_and_replays_completed_
         let replacement: AgentTaskPromotionReport =
             serde_json::from_value(result).expect("typed replacement proof");
 
-        assert_eq!(replacement.status, AgentTaskPromotionStatus::GateFailed);
+        assert_eq!(replacement.status, AgentTaskPromotionStatus::Applied);
         assert_eq!(
             replacement.candidate.as_ref().unwrap().candidate_sha,
             candidate_sha
@@ -19603,7 +19687,7 @@ fn verify_replacement_gates_recovers_pending_verification_and_replays_completed_
             replacement.deterministic_gates[1].status,
             crate::agent_task_gate::AgentTaskGateStatus::AcceptedInheritedFailure
         );
-        let error = verify_replacement_gates(
+        let replay_without_opt_in = verify_replacement_gates(
             "cook-verify-replacement",
             VerifyGateOptions {
                 verify: vec![replacement.deterministic_gates[0].command[2].clone()],
@@ -19612,8 +19696,8 @@ fn verify_replacement_gates_recovers_pending_verification_and_replays_completed_
             "Chris approved corrected gate evidence".to_string(),
             None,
         )
-        .expect_err("completed inherited failure needs renewed authorization");
-        assert_eq!(error.details["field"], "accept_inherited_failures");
+        .expect("proven inherited failure needs no renewed opt-in");
+        assert_eq!(replay_without_opt_in.status, replacement.status);
         let replay = verify_replacement_gates(
             "cook-verify-replacement",
             VerifyGateOptions {
@@ -20231,7 +20315,7 @@ fn baseline_comparison_is_persisted_before_feedback_finalization() {
 }
 
 #[test]
-fn gate_failure_terminal_decision_is_read_back_from_store_without_publication() {
+fn baseline_comparison_finalizes_without_inherited_failure_opt_in() {
     baseline_comparison_finalization_fixture(false);
 }
 
@@ -20397,21 +20481,9 @@ fn baseline_comparison_finalization_fixture(accept_inherited: bool) {
             ..CookContext::new(options, Arc::new(UnusedExecutor))
         })
         .unwrap();
-        if accept_inherited {
-            assert_eq!(result.value.status, "review_ready", "{:#?}", result.value);
-            assert!(result
-                .value
-                .stop_reason
-                .as_deref()
-                .is_some_and(|reason| reason.contains("accepted inherited baseline-red")));
-        } else {
-            assert_eq!(result.value.status, "baseline_red", "{:#?}", result.value);
-            assert_eq!(result.exit_code, 1);
-        }
-        assert_eq!(
-            finalized.load(Ordering::SeqCst),
-            usize::from(accept_inherited)
-        );
+        assert_eq!(result.value.status, "review_ready", "{:#?}", result.value);
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(finalized.load(Ordering::SeqCst), 1);
         assert!(observer_calls.load(Ordering::SeqCst) >= 1);
         let record = agent_task_lifecycle::reconcile_status(&run_id).unwrap();
         assert_eq!(record.metadata["provider_executions_consumed"], 1);
@@ -20425,7 +20497,7 @@ fn baseline_comparison_finalization_fixture(accept_inherited: bool) {
         );
         assert_eq!(
             record.metadata["cook_progress"]["terminal_success"],
-            serde_json::json!(accept_inherited),
+            serde_json::json!(true),
             "the disconnected observer can reconnect to the terminal durable result"
         );
         let observation = test_lifecycle_store()
@@ -20465,11 +20537,11 @@ fn baseline_comparison_finalization_fixture(accept_inherited: bool) {
         }
         assert_eq!(
             spans.span("publish").is_some(),
-            accept_inherited,
+            true,
             "publication has its own boundary"
         );
         let persisted = persisted_promotion_for_attempt(&run_id).unwrap().unwrap();
-        assert_eq!(persisted.status, AgentTaskPromotionStatus::GateFailed);
+        assert_eq!(persisted.status, AgentTaskPromotionStatus::Applied);
         assert_eq!(persisted.deterministic_gates[0].exit_code, 1);
         assert_eq!(
             persisted.deterministic_gates[0].status,

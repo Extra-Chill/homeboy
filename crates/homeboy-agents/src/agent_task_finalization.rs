@@ -1194,7 +1194,7 @@ fn is_review_form_only_follow_up(promotion: &AgentTaskPromotionReport, run_id: &
 
 fn validate_finalization_gates(
     gates: &[HomeboyGateResult],
-    accept_inherited_failures: bool,
+    _accept_inherited_failures: bool,
 ) -> Result<()> {
     if gates.is_empty() {
         return Err(Error::validation_invalid_argument(
@@ -1207,9 +1207,10 @@ fn validate_finalization_gates(
     let red: Vec<String> = gates
         .iter()
         .filter(|gate| {
-            gate.status != HomeboyGateStatus::Passed
-                && !(accept_inherited_failures
-                    && gate.status == HomeboyGateStatus::AcceptedInheritedFailure)
+            !matches!(
+                gate.status,
+                HomeboyGateStatus::Passed | HomeboyGateStatus::AcceptedInheritedFailure
+            )
         })
         .map(|gate| format!("{}={:?}", gate.name, gate.status))
         .collect();

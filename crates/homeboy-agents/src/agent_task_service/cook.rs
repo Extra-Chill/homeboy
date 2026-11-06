@@ -7797,16 +7797,13 @@ fn run_cook_spine(
                 return super::cook_delivery::ensure_published(&mut delivery, promotion);
             }
             AgentTaskCookLoopStatus::BaselineRed => {
-                if options.gates.accept_inherited_failures && promotion.finalization_eligible(true)
-                {
+                if promotion.finalization_eligible(false) {
                     return super::cook_delivery::publish_accepted(
                         &mut delivery,
                         &promotion,
                         "accepted inherited baseline-red gate",
                         None,
-                        Some(
-                            "finalized under explicit accepted inherited baseline-red gate policy",
-                        ),
+                        Some("finalized with proven inherited baseline-red gate evidence"),
                     );
                 }
                 return Ok(cook_report(CookReportInput {
