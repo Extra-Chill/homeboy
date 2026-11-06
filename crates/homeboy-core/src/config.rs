@@ -450,6 +450,17 @@ fn config_lock_timeout_error(
         "holder_pid": holder_pid,
         "holder_operation": holder_operation,
     });
+    error.message = match (holder_pid, holder_operation) {
+        (Some(pid), Some(operation)) => format!(
+            "config lock held by pid {pid} ({operation}); waited {:.1}s",
+            waited.as_secs_f64(),
+        ),
+        _ => format!(
+            "config lock at {} timed out after {:.1}s (holder unknown)",
+            lock_path.display(),
+            waited.as_secs_f64(),
+        ),
+    };
     error.retryable = Some(true);
     error
 }
@@ -1992,6 +2003,11 @@ mod tests {
             assert_eq!(error.details["operation"], "config read");
             assert_eq!(error.details["holder_pid"], std::process::id());
             assert_eq!(error.details["holder_operation"], "active config mutation");
+            assert_eq!(error.retryable, Some(true));
+            assert!(error
+                .message
+                .contains(&format!("pid {}", std::process::id())));
+            assert!(error.message.contains("active config mutation"));
             assert_eq!(error.details["timeout_ms"], 1_000);
             assert!(error
                 .hints

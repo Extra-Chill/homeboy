@@ -24,6 +24,25 @@ use homeboy_core::observation::{
 };
 use homeboy_core::{build_identity, paths, Error, ErrorCode, Result};
 
+thread_local! {
+    static LIFECYCLE_LOCK_PATHS: std::cell::RefCell<Vec<PathBuf>> = const {
+        std::cell::RefCell::new(Vec::new())
+    };
+}
+
+struct LifecycleLockGuard {
+    // Closing the file releases the kernel lock, including on unwind.
+    _file: fs::File,
+}
+
+impl Drop for LifecycleLockGuard {
+    fn drop(&mut self) {
+        LIFECYCLE_LOCK_PATHS.with(|paths| {
+            paths.borrow_mut().pop();
+        });
+    }
+}
+
 /// Durable agent-task lifecycle storage bound to immutable filesystem roots.
 ///
 /// Record writes keep workspace owner renewal, terminal workspace authority,
@@ -221,8 +240,31 @@ impl AgentTaskLifecycleStore {
         ObservationStore::open_initialized_in_roots(&self.roots)
     }
 
-    pub fn with_config_lock<T>(&self, operation: impl FnOnce() -> Result<T>) -> Result<T> {
-        homeboy_core::config::with_config_lock_at(self.roots.config(), operation)
+    /// Serialize lifecycle and Cook mutations, including nested store operations.
+    ///
+    /// Lock ordering: config → lifecycle store → subordinate stores/SQLite.
+    /// Resolve config before entering this section; never acquire config locks
+    /// (including config read locks) while holding the lifecycle lock.
+    pub fn with_store_lock<T>(&self, operation: impl FnOnce() -> Result<T>) -> Result<T> {
+        let lock_path = self.roots.data().join("agent-task-runs/lifecycle.lock");
+        LIFECYCLE_LOCK_PATHS.with(|paths| {
+            if paths.borrow().contains(&lock_path) {
+                return operation();
+            }
+            fs::create_dir_all(lock_path.parent().expect("lifecycle lock parent"))
+                .map_err(|error| Error::internal_io(error.to_string(), None))?;
+            let file = fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .open(&lock_path)
+                .map_err(|error| Error::internal_io(error.to_string(), None))?;
+            homeboy_core::config::lock_exclusive_bounded(&file, &lock_path, "lifecycle mutation")?;
+            paths.borrow_mut().push(lock_path);
+            let _guard = LifecycleLockGuard { _file: file };
+            operation()
+        })
     }
 
     pub fn write_controller_plan(&self, run_id: &str, plan: &AgentTaskPlan) -> Result<PathBuf> {
@@ -248,7 +290,7 @@ impl AgentTaskLifecycleStore {
         plan: &AgentTaskPlan,
         authorize: impl FnOnce(&AgentTaskRunRecord) -> bool,
     ) -> Result<Option<AgentTaskRunRecord>> {
-        self.with_config_lock(|| {
+        self.with_store_lock(|| {
             let mut record = self.read_record(run_id)?;
             if record.state() != super::AgentTaskRunState::Queued
                 || record.metadata.get("queue_quarantine").is_some()
@@ -278,7 +320,7 @@ impl AgentTaskLifecycleStore {
         &self,
         intent: &crate::agent_task_service::ExecutionStepIntent,
     ) -> Result<bool> {
-        self.with_config_lock(|| {
+        self.with_store_lock(|| {
             let mut record = self.read_record(&intent.subject_id)?;
             if !intent.authorizes(&record) {
                 return Ok(false);
@@ -701,7 +743,7 @@ impl AgentTaskLifecycleStore {
         recorded_at: String,
         candidate: Option<AgentTaskCookLatestSubstantiveCandidate>,
     ) -> Result<AgentTaskCookIndex> {
-        self.with_config_lock(|| {
+        self.with_store_lock(|| {
             self.write_cook_index_attempt_locked(cook_id, attempt, run_id, recorded_at, candidate)
         })
     }
@@ -1307,14 +1349,14 @@ impl AgentTaskLifecycleStore {
     /// runner's result), replacing whatever this store holds for the run.
     ///
     /// The imported revision belongs to the remote store, so it is replaced by
-    /// the local one read under the config lock; the write is fenced at that
+    /// the local one read under the lifecycle lock; the write is fenced at that
     /// revision and recorded as an `import` transition.
     pub(crate) fn import_record_with_aggregate(
         &self,
         record: &mut AgentTaskRunRecord,
         aggregate: &AgentTaskAggregate,
     ) -> Result<()> {
-        let committed = self.with_config_lock(|| {
+        let committed = self.with_store_lock(|| {
             let stored = self.read_record(&record.run_id).ok();
             record.revision = stored.as_ref().map_or(0, |stored| stored.revision);
             let committed = write_record_fenced(
@@ -1357,13 +1399,13 @@ impl AgentTaskLifecycleStore {
             &mut prepared,
         )?;
         let committed =
-            self.with_config_lock(|| self.commit_prepared_locked(&prepared, kind, emit_events))?;
+            self.with_store_lock(|| self.commit_prepared_locked(&prepared, kind, emit_events))?;
         self.project_terminal_record_after_unlock(&committed.run_id)?;
         record.revision = committed.revision;
         Ok(())
     }
 
-    /// [`Self::commit_record`] for a caller that owns the config lock and
+    /// [`Self::commit_record`] for a caller that owns the lifecycle lock and
     /// decided from a record read under it. Terminal authority is projected
     /// by the caller after the lock is released.
     pub(crate) fn commit_record_locked_without_terminal_projection(
@@ -1373,7 +1415,7 @@ impl AgentTaskLifecycleStore {
         self.commit_prepared_locked(record, None, true)
     }
 
-    /// [`Self::advance_record`] for a caller that owns the config lock.
+    /// [`Self::advance_record`] for a caller that owns the lifecycle lock.
     pub(crate) fn advance_record_locked_without_terminal_projection(
         &self,
         record: &AgentTaskRunRecord,
@@ -1425,7 +1467,7 @@ impl AgentTaskLifecycleStore {
         &self,
         record: &AgentTaskRunRecord,
     ) -> Result<AgentTaskRunRecord> {
-        self.with_config_lock(|| {
+        self.with_store_lock(|| {
             let existing = self.read_record(&record.run_id)?;
             if !existing.state().is_terminal()
                 || !crate::agent_task_service::has_unambiguous_zero_execution(&existing)
@@ -1527,7 +1569,7 @@ impl AgentTaskLifecycleStore {
         run_id: &str,
         mutate: impl FnOnce(&mut AgentTaskRunRecord) -> bool,
     ) -> Result<Option<AgentTaskRunRecord>> {
-        let record = self.with_config_lock(|| {
+        let record = self.with_store_lock(|| {
             self.mutate_record_locked_without_terminal_projection(run_id, mutate)
         })?;
         if let Some(record) = record.as_ref() {
@@ -1544,7 +1586,7 @@ impl AgentTaskLifecycleStore {
         // The read self-heals this row's own resource projection if missing,
         // so a legacy row does not defer that repair to an unrelated read.
         //
-        // The mutation is applied to a record read under the config lock and
+        // The mutation is applied to a record read under the lifecycle lock and
         // committed at the revision it was read at, so it can never replace a
         // write it did not see (#15718). It is not validated as an annotation:
         // the decision is made from the fresh record, which is what a typed
@@ -1582,7 +1624,7 @@ impl AgentTaskLifecycleStore {
         transition: AgentTaskTransition,
     ) -> std::result::Result<AgentTaskRunRecord, AgentTaskTransitionError> {
         let run_id = sanitize_run_id(run_id);
-        let committed = self.with_config_lock(|| {
+        let committed = self.with_store_lock(|| {
             self.transition_locked_without_terminal_projection(
                 &run_id,
                 expected_revision,
@@ -1595,7 +1637,7 @@ impl AgentTaskLifecycleStore {
     }
 
     /// Decide a terminal transition from the current record and commit it at
-    /// that record's revision, all under the config lock.
+    /// that record's revision, all under the lifecycle lock.
     ///
     /// `decide` returning `None` is a successful no-op. A conflict re-reads and
     /// re-decides, which is safe because the decision is re-evaluated against
@@ -1607,7 +1649,7 @@ impl AgentTaskLifecycleStore {
         decide: impl FnMut(&AgentTaskRunRecord) -> Option<AgentTaskTransition>,
     ) -> Result<Option<AgentTaskRunRecord>> {
         let run_id = sanitize_run_id(run_id);
-        let committed = self.with_config_lock(|| {
+        let committed = self.with_store_lock(|| {
             self.transition_when_locked_without_terminal_projection(&run_id, decide)
         })?;
         if let Some(record) = committed.as_ref() {
@@ -1617,7 +1659,7 @@ impl AgentTaskLifecycleStore {
     }
 
     /// The locked body of [`Self::transition_when`], for callers that already
-    /// own this store's config lock. Terminal authority is projected by the
+    /// own this store's lifecycle lock. Terminal authority is projected by the
     /// caller only after the lock is released.
     pub(crate) fn transition_when_locked_without_terminal_projection(
         &self,
@@ -1658,7 +1700,7 @@ impl AgentTaskLifecycleStore {
         &self,
         prepared: &AgentTaskRunRecord,
     ) -> Result<TerminalRecordCommit> {
-        let committed = self.with_config_lock(|| {
+        let committed = self.with_store_lock(|| {
             let mut expected = prepared.revision;
             let mut attempts = 0;
             loop {
@@ -1693,7 +1735,7 @@ impl AgentTaskLifecycleStore {
     }
 
     /// Commit a terminal record/aggregate pair decided, under this store's
-    /// config lock, from the record at `record.revision`. The compare-and-swap
+    /// lifecycle lock, from the record at `record.revision`. The compare-and-swap
     /// refuses the commit if a writer outside the lock moved the run since;
     /// the conflict is surfaced and nothing is written (#15718).
     ///
@@ -1732,7 +1774,7 @@ impl AgentTaskLifecycleStore {
         decided_from: AgentTaskRunState,
         aggregate: &AgentTaskAggregate,
     ) -> Result<AgentTaskRunRecord> {
-        let committed = self.with_config_lock(|| {
+        let committed = self.with_store_lock(|| {
             let mut expected = prepared.revision;
             let mut attempts = 0;
             loop {
@@ -1858,7 +1900,7 @@ impl AgentTaskLifecycleStore {
         record: &AgentTaskRunRecord,
         aggregate: &AgentTaskAggregate,
     ) -> Result<PathBuf> {
-        let committed = self.with_config_lock(|| {
+        let committed = self.with_store_lock(|| {
             self.write_aggregate_and_record_locked_without_terminal_projection(record, aggregate)
         })?;
         self.project_terminal_record_after_unlock(&committed.run_id)?;
@@ -1876,7 +1918,7 @@ impl AgentTaskLifecycleStore {
             &super::workspace_claims::workspace_claim_store_at(self.data_root()),
             &mut record,
         )?;
-        let committed = self.with_config_lock(|| {
+        let committed = self.with_store_lock(|| {
             write_record_with_aggregate_without_workspace_authority(self, &record, aggregate)
         })?;
         self.project_terminal_record_after_unlock(&committed.run_id)?;
@@ -1914,7 +1956,7 @@ pub(super) fn write_plan_in_store(
     run_id: &str,
     plan: &AgentTaskPlan,
 ) -> Result<PathBuf> {
-    store.with_config_lock(|| {
+    store.with_store_lock(|| {
         validate_execution_budget(plan)?;
         validate_managed_services(plan)?;
         let path = store.controller_plan_path(run_id);

@@ -3783,7 +3783,7 @@ fn append_event_in_store(
     request: &ControlPlaneEventAppendRequest,
 ) -> Result<homeboy_control_plane_contract::ControlPlaneEvent, ControlPlaneError> {
     store
-        .with_config_lock(|| {
+        .with_store_lock(|| {
             let record = store.read_record(run.as_str())?;
             let prepared =
                 prepare_control_plane_event_append(run, &record, request).map_err(|error| {

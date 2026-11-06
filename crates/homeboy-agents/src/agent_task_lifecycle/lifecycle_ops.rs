@@ -630,7 +630,7 @@ pub fn prepare_unmaterialized_cook_admission(
     validate_unmaterialized_admission_input(&binding, requested_state)?;
     let store = AgentTaskLifecycleStore::from_environment()?;
     let cook_id = sanitize_run_id(cook_id);
-    store.with_config_lock(|| {
+    store.with_store_lock(|| {
         let resolved = resolve_run_id_in_store(&store, &cook_id)?;
         if resolved != cook_id {
             return Err(Error::validation_invalid_argument(
@@ -772,7 +772,7 @@ pub(crate) fn record_unmaterialized_cook_admission_with_metadata_in_store(
     reason: &str,
     metadata: serde_json::Map<String, Value>,
 ) -> Result<AgentTaskRunRecord> {
-    lifecycle_store.with_config_lock(|| {
+    lifecycle_store.with_store_lock(|| {
         record_unmaterialized_cook_admission_locked(
             lifecycle_store,
             cook_id,
@@ -911,14 +911,14 @@ fn record_unmaterialized_cook_admission_locked(
 
 /// Validate immutable Cook admission ownership before the CLI snapshots any
 /// replay bytes. The final parent+binding write repeats this decision under the
-/// same config lock, so this is an early rejection optimization, not authority.
+/// same lifecycle lock, so this is an early rejection optimization, not authority.
 pub fn precheck_unmaterialized_cook_admission(
     cook_id: &str,
     request_ref: &str,
 ) -> Result<Option<AgentTaskRunRecord>> {
     let store = AgentTaskLifecycleStore::from_environment()?;
     let cook_id = sanitize_run_id(cook_id);
-    store.with_config_lock(|| {
+    store.with_store_lock(|| {
         let resolved = resolve_run_id_in_store(&store, &cook_id)?;
         if resolved != cook_id {
             return Err(Error::validation_invalid_argument(
@@ -963,7 +963,7 @@ pub fn recover_unmaterialized_cook_input_publication_in_store(
     cook_id: &str,
 ) -> Result<AgentTaskRunRecord> {
     let cook_id = sanitize_run_id(cook_id);
-    store.with_config_lock(|| {
+    store.with_store_lock(|| {
         let current = store.read_record(&cook_id)?;
         let admission = &current.metadata["unmaterialized_cook_admission"];
         if admission["state"] != "preparing_inputs" {
@@ -1136,7 +1136,7 @@ pub fn update_unmaterialized_cook_placement_in_store(
                     None,
                 )
             })?;
-    store.with_config_lock(|| {
+    store.with_store_lock(|| {
         let mut intent_error = None;
         let updated = store.mutate_record_locked_without_terminal_projection(&cook_id, |record| {
             let execution_started = record.metadata["provider_executions"]
@@ -4264,7 +4264,7 @@ pub fn claim_next_eligible_queued_run_with_preflight_and_filter_in_store(
 /// * the controller-runtime and durable-plan preflight read that store's own
 ///   record and run directory,
 /// * quarantine of invalid provenance mutates that store's own record, and
-/// * the atomic Running transition takes that store's own config lock through
+/// * the atomic Running transition takes that store's own lifecycle lock through
 ///   [`mark_running_in_store`].
 ///
 /// The `include` and `preflight` closures belong to the caller and are passed
@@ -6585,7 +6585,7 @@ pub fn record_cook_attempt_in_store(
     attempt: u32,
     run_id: &str,
 ) -> Result<AgentTaskCookIndex> {
-    let registration = lifecycle_store.with_config_lock(|| {
+    let registration = lifecycle_store.with_store_lock(|| {
         let registration =
             record_cook_attempt_locked_in_store(lifecycle_store, cook_id, attempt, run_id)?;
         // The index is the handoff's ownership proof. Redirect its placeholder

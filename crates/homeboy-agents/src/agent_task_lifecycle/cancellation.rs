@@ -156,7 +156,7 @@ pub fn cancel_run(run_id: &str, reason: Option<&str>) -> Result<AgentTaskRunReco
     )
 }
 
-/// Apply a cancellation annotation to the record read under the config lock
+/// Apply a cancellation annotation to the record read under the lifecycle lock
 /// rather than to the caller's copy, which a process signal, a service
 /// reconciliation or a runner call may have left stale (#15718). Only the
 /// annotation is applied; anything committed in between is kept.
@@ -183,7 +183,7 @@ pub fn fence_cook_mission_in_store(
     reason: Option<&str>,
 ) -> Result<bool> {
     let cook_id = sanitize_run_id(cook_id);
-    lifecycle_store.with_config_lock(|| {
+    lifecycle_store.with_store_lock(|| {
         let mut fenced = false;
         lifecycle_store.update_cook_index(&cook_id, |index| {
             if index.cancellation_fence.is_some() {
@@ -280,7 +280,7 @@ pub fn cancel_claimed_detached_cook_in_store(
 ) -> Result<Option<AgentTaskRunRecord>> {
     let cook_id = sanitize_run_id(cook_id);
     let launcher_id = launcher_id.to_string();
-    let authorized = lifecycle_store.with_config_lock(|| {
+    let authorized = lifecycle_store.with_store_lock(|| {
         let parent = lifecycle_store.read_record(&cook_id)?;
         if parent.metadata["detached_cook_handoff"]["launcher_id"] != launcher_id {
             return Ok(false);
@@ -420,7 +420,7 @@ pub(crate) fn cancel_exact_run_in_store_with_provenance(
     }
     let canonical_provenance =
         canonical_cancellation_provenance_in_store(lifecycle_store, &run_id)?;
-    let committed = lifecycle_store.with_config_lock(|| {
+    let committed = lifecycle_store.with_store_lock(|| {
         let record = lifecycle_store.read_record(&run_id)?;
         ensure_rooted_exact_cancellation_supported(&record)?;
         if successful_provider_execution_is_pending_import(&record) {

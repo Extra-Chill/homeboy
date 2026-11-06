@@ -998,7 +998,7 @@ pub(super) fn prepare_reserved_cook_retry(
         preparation.attempt,
         run_id,
     )?;
-    let result = lifecycle_store.with_config_lock(|| {
+    let result = lifecycle_store.with_store_lock(|| {
         let recipes = super::CookRecipeStore::for_lifecycle_store(lifecycle_store);
         if source_recipe_revision(&recipes, &preparation.cook_id, &preparation.source_run_id)?
             != preparation.source_recipe_revision
@@ -1684,7 +1684,7 @@ where
             created,
         });
     }
-    let recovered_replacement = config::with_config_lock(|| {
+    let recovered_replacement = lifecycle_store.with_store_lock(|| {
         let Some(mut cook_retry) = retryable_cook_attempt(&lifecycle_store, &source)? else {
             return Ok(None);
         };
