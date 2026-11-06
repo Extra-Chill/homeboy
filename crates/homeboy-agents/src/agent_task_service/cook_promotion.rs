@@ -3025,6 +3025,7 @@ pub(crate) fn finalize_cook_pr_with_backend_with_stores<B: AgentTaskPrFinalizati
         successful_run_id,
         &promotion,
         Vec::new(),
+        None,
     )?;
     lifecycle_store.record_promotion(
         successful_run_id,
@@ -3041,55 +3042,18 @@ pub(crate) fn cook_finalization_options(
     promotion: &AgentTaskPromotionReport,
     overrides: Vec<AgentTaskReviewOverride>,
 ) -> Result<AgentTaskPrFinalizationOptions> {
-    cook_finalization_options_with_review_form(
+    cook_finalization_options_with_stores(
+        &super::cook_recipe::CookRecipeStore::from_current_data_root()?,
+        &agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?,
         options,
         successful_run_id,
         promotion,
         overrides,
         None,
-    )
-}
-
-fn cook_finalization_options_with_review_form(
-    options: &CookRequest,
-    successful_run_id: &str,
-    promotion: &AgentTaskPromotionReport,
-    overrides: Vec<AgentTaskReviewOverride>,
-    review_form: Option<&AgentTaskSuppliedReviewForm>,
-) -> Result<AgentTaskPrFinalizationOptions> {
-    let store = super::cook_recipe::CookRecipeStore::from_current_data_root()?;
-    let lifecycle_store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
-    cook_finalization_options_with_stores_and_review_form(
-        &store,
-        &lifecycle_store,
-        options,
-        successful_run_id,
-        promotion,
-        overrides,
-        review_form,
     )
 }
 
 pub(crate) fn cook_finalization_options_with_stores(
-    store: &super::cook_recipe::CookRecipeStore,
-    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
-    options: &CookRequest,
-    successful_run_id: &str,
-    promotion: &AgentTaskPromotionReport,
-    overrides: Vec<AgentTaskReviewOverride>,
-) -> Result<AgentTaskPrFinalizationOptions> {
-    cook_finalization_options_with_stores_and_review_form(
-        store,
-        lifecycle_store,
-        options,
-        successful_run_id,
-        promotion,
-        overrides,
-        None,
-    )
-}
-
-fn cook_finalization_options_with_stores_and_review_form(
     store: &super::cook_recipe::CookRecipeStore,
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     options: &CookRequest,
@@ -3868,7 +3832,9 @@ pub(crate) fn recover_cook_pr_with_backend_and_review_form<B: AgentTaskPrFinaliz
     // A supplied form replaces the agent's form whatever its state; the
     // agent's form is never consulted alongside it (#16441).
     let supplied_review_form = resolve_supplied_recovery_review_form(&run_id, review_form)?;
-    let finalization = cook_finalization_options_with_review_form(
+    let finalization = cook_finalization_options_with_stores(
+        &super::cook_recipe::CookRecipeStore::from_current_data_root()?,
+        &agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?,
         &options,
         &run_id,
         &promotion,
