@@ -1288,98 +1288,6 @@ fn direct_readiness_homeboy_path(
     }
 }
 
-/// Fence detached controller staging behind the same direct-SSH identity
-/// evidence as synchronous execution. A permitted automatic route may return
-/// locally here; every other stable mismatch remains unavailable to staging.
-fn direct_readiness_fence_before_detached_staging(
-    runner_id: &str,
-    runner: Runner,
-    status: RunnerStatusReport,
-    request: &LabOffloadRequest<'_>,
-    selection: &LabRunnerSelection,
-    plan: &HomeboyPlan,
-    hot_label: &str,
-    release_gate: bool,
-    observation: &mut OffloadObservation,
-) -> Result<(Runner, RunnerStatusReport, Option<LabOffloadOutcome>)> {
-    if !status
-        .session
-        .as_ref()
-        .is_some_and(|session| session.mode == RunnerTunnelMode::DirectSsh)
-    {
-        return Ok((runner, status, None));
-    }
-
-    let readiness = collect_direct_readiness_evidence(runner_id, runner, status, None)?;
-    let mut runner_homeboy =
-        lab_runner_homeboy_metadata(runner_id, &readiness.homeboy_path, &readiness.status);
-    runner_homeboy["readiness_observation"] = serde_json::json!({
-        "controller_build_identity": &readiness.controller_build_identity,
-        "configured_executable": &readiness.homeboy_path,
-        "configured_job_binary_build_identity": &readiness.configured_build_identity,
-        "daemon_build_identity": &readiness.generation.daemon_build_identity,
-        "daemon_lease_id": &readiness.generation.remote_daemon_lease_id,
-        "daemon_address": &readiness.generation.remote_daemon_address,
-        "daemon_pid": readiness.generation.remote_daemon_pid,
-        "observed_at": &readiness.observed_at,
-        "collection_attempts": readiness.attempts,
-    });
-    runner_homeboy["capability_admission"] = serde_json::to_value(&readiness.capability_admission)
-        .expect("Lab capability admission serializes");
-    let fallback = detached_direct_staging_fallback_or_refusal(
-        runner_id,
-        request,
-        selection,
-        plan,
-        &readiness.status,
-        &runner_homeboy,
-        &readiness.capability_admission,
-        require_exact_runner_version(&readiness.runner.settings),
-        readiness.runner.settings.concurrency_limit,
-        hot_label,
-        release_gate,
-        observation,
-    )?;
-    Ok((readiness.runner, readiness.status, fallback))
-}
-
-#[allow(clippy::too_many_arguments)]
-fn detached_direct_staging_fallback_or_refusal(
-    runner_id: &str,
-    request: &LabOffloadRequest<'_>,
-    selection: &LabRunnerSelection,
-    plan: &HomeboyPlan,
-    status: &RunnerStatusReport,
-    runner_homeboy: &serde_json::Value,
-    capability_admission: &homeboy_lab_contract::LabCapabilityAdmission,
-    require_exact_runner_version: bool,
-    concurrency_limit: Option<usize>,
-    hot_label: &str,
-    release_gate: bool,
-    observation: &mut OffloadObservation,
-) -> Result<Option<LabOffloadOutcome>> {
-    if let Some(outcome) = late_direct_identity_fallback(
-        request,
-        selection,
-        plan,
-        status,
-        runner_homeboy,
-        release_gate,
-        observation,
-    )? {
-        return Ok(Some(outcome));
-    }
-    require_available_lab_runner(runner_id, status, concurrency_limit, hot_label)?;
-    if capability_admission_has_blocking_drift(capability_admission, require_exact_runner_version) {
-        return Err(capability_admission_error(
-            runner_id,
-            capability_admission,
-            require_exact_runner_version,
-        ));
-    }
-    Ok(None)
-}
-
 /// A direct-SSH identity comparison happens after selection but before daemon
 /// admission. Only an automatic policy-selected runner may return locally here.
 fn late_direct_identity_fallback(
@@ -1531,39 +1439,7 @@ pub(crate) fn run_lab_offload_inner(
         ));
     }
 
-    // Detached commands without an agent-task argv shape receive their durable
-    // plan and identity from routing. Admit the controller job before capacity
-    // checks or remote preparation so caller loss cannot orphan staging.
-    if let (true, Some(_), Some(run_id)) = (
-        request.detach_after_handoff,
-        request.durable_agent_task_plan,
-        request.durable_run_id,
-    ) {
-        let (_, _, fallback) = direct_readiness_fence_before_detached_staging(
-            runner_id,
-            runner,
-            runner_status,
-            &request,
-            &selection,
-            &plan,
-            contract.hot_label,
-            contract.routing_policy.release_gate,
-            &mut observation,
-        )?;
-        if let Some(outcome) = fallback {
-            return Ok(outcome);
-        }
-        return submit_detached_lab_offload(
-            &lab_lifecycle_store,
-            run_id,
-            &selection,
-            &request,
-            plan,
-            &mut messages,
-        );
-    }
-
-    // A detached Cook must converge before deriving any provider-preflight
+    // A detached run must converge before deriving any provider-preflight
     // input. Refresh can select a new runner executable, so the runner config,
     // daemon session, and every command prefix below must come from a fresh
     // observation rather than the stale pre-convergence snapshot.
@@ -1598,6 +1474,17 @@ pub(crate) fn run_lab_offload_inner(
         })?;
 
     if contract.workspace_mode_policy == LabOffloadWorkspaceModePolicy::RunnerResident {
+        // The resident path executes synchronously; a detached handoff must
+        // return once staging owns the run, which durable staging does not
+        // implement for resident commands.
+        if durable_detached_handoff {
+            return Err(Error::validation_invalid_argument(
+                "workspace_mode_policy",
+                "Runner-resident Lab commands are not implemented by durable workspace staging",
+                None,
+                None,
+            ));
+        }
         return run_runner_resident_lab_offload(
             request,
             selection,
@@ -1976,17 +1863,22 @@ pub(crate) fn run_lab_offload_inner(
     if let Some(preflight) = capability_preflight.as_ref() {
         preflight_runner_toolchain_readiness(&runner, preflight)?;
     }
-    // Detached agent-task work is controller-owned from this point.
-    // It must never fall through to caller-side workspace staging after admission.
-    if request.detach_after_handoff && request.durable_agent_task_plan.is_some() {
-        let run_id = pre_acceptance_run_id.as_deref().ok_or_else(|| {
-            Error::validation_invalid_argument(
+    // Every detached durable run is admitted above, then handed to the
+    // controller staging job; it never falls through to caller-side workspace
+    // staging. Generic detached commands carry their run id from routing,
+    // agent-task commands derive it from their argv.
+    if durable_detached_handoff {
+        let run_id = request
+            .durable_run_id
+            .or(pre_acceptance_run_id.as_deref())
+            .ok_or_else(|| {
+                Error::validation_invalid_argument(
             "run_id",
             "detached Lab offload requires a durable agent-task attempt before controller staging",
             None,
             None,
         )
-        })?;
+            })?;
         return submit_detached_lab_offload(
             &lab_lifecycle_store,
             run_id,
@@ -3340,10 +3232,6 @@ mod tests {
             mode: RunnerTunnelMode::DirectSsh,
         };
         let runner_homeboy = lab_runner_homeboy_metadata("homeboy-lab", "/runner/homeboy", &status);
-        let admission = matching_capability_admission(
-            true,
-            homeboy_lab_contract::LabRuntimeAncestry::ExactSource,
-        );
 
         crate::test_support::with_isolated_home(|_| {
             let run_id = "late-identity-drift-fallback";
@@ -3418,28 +3306,6 @@ mod tests {
             ..LabOffloadRequest::for_test(&args)
         };
 
-        let mut controller_staging_submissions = 0;
-        if detached_direct_staging_fallback_or_refusal(
-            "homeboy-lab",
-            &request,
-            &selection,
-            &base_lab_plan(None),
-            &status,
-            &runner_homeboy,
-            &admission,
-            false,
-            None,
-            "cook",
-            false,
-            &mut OffloadObservation::start(),
-        )
-        .expect("detached admission fence")
-        .is_none()
-        {
-            controller_staging_submissions += 1;
-        }
-        assert_eq!(controller_staging_submissions, 0);
-
         let explicit = LabRunnerSelection {
             source: LabRunnerSelectionSource::Explicit,
             ..selection.clone()
@@ -3501,23 +3367,9 @@ mod tests {
     }
 
     #[test]
-    fn detached_staging_refuses_capability_or_strict_ancestry_drift_before_submission() {
+    fn capability_drift_refuses_admission_with_its_cause_class() {
         // Admission reads the controller drain ledger; keep it hermetic.
         let _home = homeboy_core::test_support::HomeGuard::new();
-        let args = Vec::new();
-        let request = LabOffloadRequest {
-            normalized_args: &args,
-            ..LabOffloadRequest::for_test(&args)
-        };
-        let selection = LabRunnerSelection {
-            runner_id: "homeboy-lab".to_string(),
-            source: LabRunnerSelectionSource::Default,
-            mode: RunnerTunnelMode::DirectSsh,
-        };
-        let status = direct_identity_status(Some("homeboy 0.339.0+83a9bd058619"), "lease-a");
-        let runner_homeboy = lab_runner_homeboy_metadata("homeboy-lab", "/runner/homeboy", &status);
-        let mut controller_staging_submissions = 0;
-
         for (admission, expected_cause_class, expected_message) in [
             (
                 matching_capability_admission(
@@ -3528,26 +3380,8 @@ mod tests {
                 "Lab offload refused runner `homeboy-lab` because its capability admission is incompatible: missing capabilities. Upgrade or reconnect the runner so its command and daemon advertise the required Lab handoff capabilities, then retry.",
             ),
         ] {
-            let error = detached_direct_staging_fallback_or_refusal(
-                "homeboy-lab",
-                &request,
-                &selection,
-                &base_lab_plan(None),
-                &status,
-                &runner_homeboy,
-                &admission,
-                true,
-                None,
-                "cook",
-                false,
-                &mut OffloadObservation::start(),
-            )
-            .map(|outcome| {
-                if outcome.is_none() {
-                    controller_staging_submissions += 1;
-                }
-            })
-            .expect_err("capability or strict ancestry drift must block staging");
+            assert!(capability_admission_has_blocking_drift(&admission, true));
+            let error = capability_admission_error("homeboy-lab", &admission, true);
 
             assert_eq!(error.code, ErrorCode::RunnerCapabilityMissing);
             assert_eq!(error.message, expected_message);
@@ -3563,7 +3397,6 @@ mod tests {
                     .expect("ancestry serializes")
             );
         }
-        assert_eq!(controller_staging_submissions, 0);
     }
 
     #[test]
