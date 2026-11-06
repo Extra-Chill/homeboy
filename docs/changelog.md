@@ -4,6 +4,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.446.4] - 2026-11-06
+
+### Changed
+- Share declared package download caches across isolated gate dependency setup
+- delete seven ambient lifecycle_ops twins
+- delete the AgentTaskLifecycleStore::from_current_environment alias
+
 ## [0.446.3] - 2026-11-06
 
 ### Changed
