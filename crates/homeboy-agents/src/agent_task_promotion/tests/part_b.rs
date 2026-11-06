@@ -1734,7 +1734,7 @@ fn promotion_setup_failure_is_bounded_and_never_dispatches_a_gate() {
             ..Default::default()
         };
 
-        let error = promote_with_provider(
+        let report = promote_with_provider(
             AgentTaskPromotionRequest {
                 source,
                 source_run_id: Some("setup-failure-no-gate-dispatch".to_string()),
@@ -1756,31 +1756,48 @@ fn promotion_setup_failure_is_bounded_and_never_dispatches_a_gate() {
             },
             &mut provider,
         )
-        .expect_err("failed setup stops before a gate can spend repair capacity");
+        .expect("failed setup remains a recoverable promotion");
 
-        assert_eq!(error.code.as_str(), "dependency_step_failed");
+        assert_eq!(report.status, AgentTaskPromotionStatus::GateDeferred);
+        let gate = &report.deterministic_gates[0];
         assert_eq!(
-            error.details["cause"]["classification"],
-            "destination_gate_setup"
+            gate.status,
+            crate::agent_task_gate::AgentTaskGateStatus::Unavailable
         );
-        assert_eq!(error.details["status"], 23);
+        assert!(gate.baseline_comparison.is_none());
         assert_eq!(
-            error.details["cause"]["outcome"]["cwd"],
+            gate.setup.len(),
+            2,
+            "setup retries once in the same promotion"
+        );
+        assert_eq!(
+            report.operator_notification.next_command.as_deref(),
+            Some("homeboy agent-task recover setup-failure-no-gate-dispatch")
+        );
+        assert!(report
+            .operator_notification
+            .message
+            .contains("unavailable=[gate-1]"));
+        assert!(report
+            .operator_notification
+            .message
+            .contains("install failure"));
+        let diagnostic = &gate.lab_receipt.as_ref().unwrap()["diagnostic"];
+        let error = &diagnostic["details"];
+        assert_eq!(diagnostic["code"], "dependency_step_failed");
+        assert_eq!(error["cause"]["classification"], "destination_gate_setup");
+        assert_eq!(error["status"], 23);
+        assert_eq!(
+            error["cause"]["outcome"]["cwd"],
             workspace.join("component").display().to_string()
         );
+        assert_eq!(error["cause"]["outcome"]["stdout"], "install output");
+        assert_eq!(error["cause"]["outcome"]["stderr"], "install failure");
         assert_eq!(
-            error.details["cause"]["outcome"]["stdout"],
-            "install output"
-        );
-        assert_eq!(
-            error.details["cause"]["outcome"]["stderr"],
-            "install failure"
-        );
-        assert_eq!(
-            error.details["logs"],
+            error["logs"],
             serde_json::json!(["stdout: install output", "stderr: install failure"])
         );
-        assert!(error.details["cause"]["outcome"].to_string().len() <= 20 * 1024);
+        assert!(error["cause"]["outcome"].to_string().len() <= 20 * 1024);
         assert!(
             provider.verify_calls.is_empty(),
             "no gate/provider dispatch occurs"

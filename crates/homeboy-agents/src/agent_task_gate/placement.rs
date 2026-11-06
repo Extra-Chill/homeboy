@@ -334,11 +334,32 @@ pub(super) fn dispatch(
     request: &LabGateRequest,
     supervision: Option<&GateSupervision>,
 ) -> Result<AgentTaskGateReport> {
-    let receipt = match active_transport().execute(cwd, request, supervision) {
-        Ok(receipt) => receipt,
-        Err(error) => return Ok(non_execution_report(request, &error)),
-    };
-    request.verify_receipt(&receipt)?;
+    let mut setup_attempts = Vec::new();
+    let mut receipt = None;
+    for attempt in 0..2 {
+        let result = match active_transport().execute(cwd, request, supervision) {
+            Ok(receipt) => receipt,
+            Err(error) => return Ok(non_execution_report(request, &error)),
+        };
+        request.verify_receipt(&result)?;
+        let failed = result
+            .setup
+            .iter()
+            .any(|outcome| outcome.status == homeboy_core::deps::DependencyHydrationStatus::Failed);
+        let cancelled = result.setup.iter().any(|outcome| {
+            outcome.termination == homeboy_core::deps::DependencyHydrationTermination::Cancelled
+        });
+        setup_attempts.extend(result.setup.iter().cloned());
+        receipt = Some(result);
+        if !failed
+            || cancelled
+            || supervision.is_some_and(|policy| (policy.is_cancelled)())
+            || attempt == 1
+        {
+            break;
+        }
+    }
+    let receipt = receipt.expect("setup always has an initial attempt");
     // A runner receipt cannot authorize a destination edited during transport.
     if candidate_fingerprint(&cwd.display().to_string())? != request.candidate {
         return Err(Error::invalid_argument(
@@ -360,9 +381,12 @@ pub(super) fn dispatch(
         if failed.termination == homeboy_core::deps::DependencyHydrationTermination::TimedOut {
             error.message = format!("{}; {}", error.message, failed.reason);
         }
-        return Err(error);
+        let mut report = non_execution_report(request, &error);
+        report.setup = setup_attempts;
+        return Ok(report);
     }
     let mut report = receipt.report;
+    report.setup = setup_attempts;
     // The step is an in-memory compatibility view and is not on the wire.
     // Rebuild it from the verified terminal result, never its serde skip default.
     rebuild_terminal_step(&mut report);
@@ -487,7 +511,7 @@ pub(crate) fn gate_non_execution_report(
         "details": error.details,
     }));
     let message = format!(
-        "Lab gate did not execute: [{}] {}",
+        "Gate unavailable: setup or execution infrastructure did not execute the gate: [{}] {}",
         error.code.as_str(),
         diagnostic["message"].as_str().unwrap_or("unknown cause"),
     );
@@ -1880,21 +1904,21 @@ mod tests {
                 .unwrap()
                 .contains("Lab gate time limit of 1s"));
 
-            let error = dispatch(temp.path(), &request, None)
-                .expect_err("a spent setup budget is a gate-setup error, not a gate report");
-            assert_eq!(error.code, homeboy_core::ErrorCode::DependencyStepFailed);
-            assert_eq!(error.details["step_id"], "promotion.gate_setup");
+            let report = dispatch(temp.path(), &request, None)
+                .expect("a spent setup budget is unavailable, not a candidate verdict");
+            assert_eq!(report.status, AgentTaskGateStatus::Unavailable);
+            assert_eq!(report.setup.len(), 2);
+            assert!(!marker.exists());
+            let diagnostic = &report.lab_receipt.as_ref().unwrap()["diagnostic"];
+            assert_eq!(diagnostic["details"]["step_id"], "promotion.gate_setup");
             assert_eq!(
-                error.details["cause"]["retry_action"],
+                diagnostic["details"]["cause"]["retry_action"],
                 "retry_dependency_hydration"
             );
-            assert!(
-                error
-                    .message
-                    .contains("the Lab gate time limit of 1s was spent in dependency setup"),
-                "{}",
-                error.message
-            );
+            assert!(diagnostic["message"]
+                .as_str()
+                .unwrap()
+                .contains("the Lab gate time limit of 1s was spent in dependency setup"));
         });
     }
 
@@ -1929,14 +1953,13 @@ mod tests {
         );
     }
 
-    /// #16262: a failed runner-side dependency setup is gate setup, not
-    /// candidate code. The controller maps the receipt's recorded outcome to a
-    /// retryable `promotion.gate_setup` failure that names the runner-side
-    /// workspace, instead of executing (or blaming) the gate.
+    /// Dependency setup gets one warm retry and never supplies a gate verdict.
     #[test]
-    fn failed_runner_dependency_setup_surfaces_as_gate_setup_failure() {
+    fn runner_dependency_setup_retries_then_reports_non_execution_or_runs() {
         struct FailedSetupTransport {
             previous: Arc<dyn LabGateTransport>,
+            calls: Arc<std::sync::atomic::AtomicUsize>,
+            clears_on_retry: bool,
         }
         impl LabGateTransport for FailedSetupTransport {
             fn declared_runner(&self, command: &str) -> Result<Option<String>> {
@@ -1951,6 +1974,8 @@ mod tests {
                 if request.runner_id != "setup-failure-runner" {
                     return self.previous.execute(cwd, request, supervision);
                 }
+                let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let recovered = self.clears_on_retry && call > 0;
                 let mut report = non_execution_report(
                     request,
                     &Error::new(
@@ -1960,6 +1985,10 @@ mod tests {
                     ),
                 );
                 report.environment.lab_runner = Some(request.runner_id.clone());
+                if recovered {
+                    report.status = AgentTaskGateStatus::Succeeded;
+                    report.stdout = "gate ran".to_string();
+                }
                 Ok(LabGateReceipt {
                     readiness: Some(serde_json::json!({"schema":"homeboy/lab-gate-readiness/v1", "status":"unavailable", "executed_gate":false})),
                     materialization: None,
@@ -1979,9 +2008,9 @@ mod tests {
                         reason: "install_failed".to_string(),
                         download_cache: Default::default(),
                         download_auth: Default::default(),
-                        termination: homeboy_core::deps::DependencyHydrationTermination::ExitFailure,
-                        status: homeboy_core::deps::DependencyHydrationStatus::Failed,
-                        exit_code: Some(3),
+                        termination: if recovered { homeboy_core::deps::DependencyHydrationTermination::Completed } else { homeboy_core::deps::DependencyHydrationTermination::NoProgress },
+                        status: if recovered { homeboy_core::deps::DependencyHydrationStatus::Succeeded } else { homeboy_core::deps::DependencyHydrationStatus::Failed },
+                        exit_code: None,
                         stdout: String::new(),
                         stderr: "boom".to_string(),
                         missing_outputs: Vec::new(),
@@ -1990,40 +2019,55 @@ mod tests {
             }
         }
         homeboy_core::test_support::with_isolated_home(|_| {
-            let previous = active_transport();
-            register_lab_gate_transport(Arc::new(FailedSetupTransport { previous }));
-            let temp = tempfile::tempdir().unwrap();
-            repository(temp.path());
-            let environment = AgentTaskGateEnvironmentPolicy {
-                lab_runner: Some("setup-failure-runner".to_string()),
-                ..Default::default()
-            };
+            for clears_on_retry in [false, true] {
+                let previous = active_transport();
+                let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                register_lab_gate_transport(Arc::new(FailedSetupTransport {
+                    previous,
+                    calls: calls.clone(),
+                    clears_on_retry,
+                }));
+                let temp = tempfile::tempdir().unwrap();
+                repository(temp.path());
+                let environment = AgentTaskGateEnvironmentPolicy {
+                    lab_runner: Some("setup-failure-runner".to_string()),
+                    ..Default::default()
+                };
 
-            let error = run_gate_command_with_timeout(
-                temp.path(),
-                1,
-                "true",
-                AgentTaskGateVisibility::Visible,
-                AgentTaskGateRevealPolicy::FullEvidence,
-                temp.path(),
-                Duration::from_secs(30),
-                &environment,
-                &[],
-            )
-            .expect_err("a failed runner setup is a gate-setup error, not a gate report");
-
-            assert_eq!(error.code, homeboy_core::ErrorCode::DependencyStepFailed);
-            assert_eq!(error.details["step_id"], "promotion.gate_setup");
-            assert_eq!(
-                error.details["cause"]["retry_action"], "retry_dependency_hydration",
-                "an environmental setup failure is retried, never candidate blame"
-            );
-            assert_eq!(error.details["cause"]["classification"], "lab_gate_setup");
-            assert_eq!(error.details["cause"]["outcome"]["status"], "failed");
-            assert_eq!(
-                error.details["cause"]["outcome"]["cwd"], "/runner/workspaces/candidate",
-                "the failure names the runner-side workspace it ran in"
-            );
+                let report = run_gate_command_with_timeout(
+                    temp.path(),
+                    1,
+                    "true",
+                    AgentTaskGateVisibility::Visible,
+                    AgentTaskGateRevealPolicy::FullEvidence,
+                    temp.path(),
+                    Duration::from_secs(30),
+                    &environment,
+                    &[],
+                )
+                .expect("setup produces a non-execution report, not candidate failure");
+                assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+                assert_eq!(report.setup.len(), 2);
+                assert_eq!(
+                    report.status,
+                    if clears_on_retry {
+                        AgentTaskGateStatus::Succeeded
+                    } else {
+                        AgentTaskGateStatus::Unavailable
+                    }
+                );
+                if clears_on_retry {
+                    assert_eq!(report.stdout, "gate ran");
+                } else {
+                    let diagnostic = &report.lab_receipt.as_ref().unwrap()["diagnostic"];
+                    assert_eq!(diagnostic["details"]["step_id"], "promotion.gate_setup");
+                    assert_eq!(
+                        diagnostic["details"]["cause"]["outcome"]["termination"],
+                        "no_progress"
+                    );
+                    assert!(report.failure_evidence.is_none());
+                }
+            }
         });
     }
 
