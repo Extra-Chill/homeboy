@@ -127,6 +127,17 @@
             "exec_command": { "type": "string" }
           }
         },
+        "download_cache": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["env"],
+          "properties": {
+            "env": {
+              "type": "string",
+              "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+            }
+          }
+        },
         "package_identity": { "$ref": "#/$defs/package_identity" },
         "outputs": {
           "type": "array",

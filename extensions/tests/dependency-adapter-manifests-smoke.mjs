@@ -77,6 +77,12 @@ function validateAgainstSchema(definition, value, label) {
 	}
 }
 
+const downloadCacheSchema = schema.$defs.package_manager.properties.download_cache;
+validateAgainstSchema(downloadCacheSchema, { env: 'COMPOSER_CACHE_DIR' }, 'download_cache');
+for (const invalid of [{ env: 'bad-env' }, { env: '1CACHE' }, { env: '' }, {}, { env: 1 }, { env: 'CACHE', extra: true }]) {
+	assert.throws(() => validateAgainstSchema(downloadCacheSchema, invalid, 'download_cache'));
+}
+
 assert.equal(schema.properties.schema.const, 'homeboy-extension/dependency-adapter-manifest/v1');
 assert.ok(schema.required.includes('ecosystem'));
 assert.ok(schema.required.includes('project_signals'));
@@ -190,6 +196,7 @@ try {
 
 const composerManifest = JSON.parse(fs.readFileSync(path.join(exampleDir, 'composer.json'), 'utf8'));
 assert.deepEqual(composerManifest.lockfile_priority, ['composer.lock']);
+assert.equal(composerManifest.package_managers[0].download_cache.env, 'COMPOSER_CACHE_DIR');
 
 const adapterModule = await import(path.join(manifestRoot, 'index.mjs'));
 assert.deepEqual(
