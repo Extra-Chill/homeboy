@@ -7,9 +7,9 @@ use uuid::Uuid;
 
 use homeboy::core::api_jobs::{DaemonJobInspection, JobEvent, JobStatus, JobStore};
 use homeboy::core::daemon::{
-    self, DaemonCandidateReconciliationResult, DaemonExactOrphanRecoveryResult,
-    DaemonLeaselessRecoveryResult, DaemonOrphanAdoptionResult, DaemonStartResult,
-    DaemonStateLossRecoveryResult, DaemonStatus, DaemonStopResult,
+    self, DaemonExactOrphanRecoveryResult, DaemonLeaselessRecoveryResult,
+    DaemonOrphanAdoptionResult, DaemonStartResult, DaemonStateLossRecoveryResult, DaemonStatus,
+    DaemonStopResult,
 };
 use homeboy::core::http_api::{AnalysisJobRunOutput, AnalysisJobRunner};
 use homeboy::core::Error;
@@ -108,20 +108,6 @@ enum DaemonCommand {
         #[arg(long, default_value = daemon::DEFAULT_ADDR)]
         addr: String,
         /// Controller-generated idempotency key for a replacement operation.
-        #[arg(long)]
-        replacement_operation_id: Option<String>,
-    },
-    /// On Linux, preview unleased daemon candidates, or explicitly retire only
-    /// proven orphan candidates and start a replacement when the durable store is idle.
-    #[command(hide = true)]
-    ReconcileUnleasedCandidates {
-        #[arg(long, default_value = daemon::DEFAULT_ADDR)]
-        addr: String,
-        /// Signal only candidates whose store, binary, startup token, and
-        /// unreachable endpoint were proven by this invocation.
-        #[arg(long)]
-        apply: bool,
-        /// Controller-generated idempotency key for this replacement operation.
         #[arg(long)]
         replacement_operation_id: Option<String>,
     },
@@ -285,7 +271,6 @@ pub enum DaemonOutput {
     AdoptOrphan(DaemonOrphanAdoptionResult),
     ReconcileDeadLeaseOrphans(DaemonExactOrphanRecoveryResult),
     ReconcileLeaselessOrphans(DaemonLeaselessRecoveryResult),
-    ReconcileUnleasedCandidates(DaemonCandidateReconciliationResult),
     RecoverMissingLeaseState(DaemonStateLossRecoveryResult),
     Serve(DaemonStartResult),
     Stop(DaemonStopResult),
@@ -519,18 +504,6 @@ pub fn run(args: DaemonArgs) -> CmdResult<DaemonOutput> {
                 0,
             ))
         }
-        DaemonCommand::ReconcileUnleasedCandidates {
-            addr,
-            apply,
-            replacement_operation_id,
-        } => Ok((
-            DaemonOutput::ReconcileUnleasedCandidates(daemon::reconcile_unleased_candidates(
-                &addr,
-                apply,
-                replacement_operation_id.as_deref(),
-            )?),
-            0,
-        )),
         DaemonCommand::RecoverMissingLeaseState {
             lease_id,
             recorded_pid,
@@ -826,7 +799,7 @@ fn job_summary(inspection: DaemonJobInspection) -> DaemonJobSummary {
 
 const COMPACT_STATUS_BYTES: usize = 8 * 1024;
 const COMPACT_STATUS_TEXT_LIMIT: usize = 256;
-const COMPACT_STATUS_CANDIDATE_LIMIT: usize = 4;
+const COMPACT_STATUS_ACTION_LIMIT: usize = 4;
 const COMPACT_STATUS_JOB_LIMIT: usize = 8;
 
 /// Status collection remains lossless in core. The CLI's default is deliberately
@@ -840,26 +813,6 @@ fn status_output(status: DaemonStatus, full: bool) -> Value {
 }
 
 fn bounded_status_projection(status: &DaemonStatus) -> Value {
-    let unrelated_candidates = status
-        .process_candidates
-        .iter()
-        .filter(|candidate| candidate.ownership == daemon::DaemonProcessOwnership::Unrelated)
-        .count();
-    let relevant_candidates = status
-        .process_candidates
-        .iter()
-        .filter(|candidate| candidate.ownership != daemon::DaemonProcessOwnership::Unrelated)
-        .take(COMPACT_STATUS_CANDIDATE_LIMIT)
-        .map(|candidate| {
-            json!({
-                "pid": candidate.pid,
-                "ownership": candidate.ownership,
-                "executable": bounded_text(&candidate.executable),
-                "endpoint": candidate.bind_endpoint.as_deref().map(bounded_text),
-                "store": candidate.state_dir.as_deref().map(bounded_text),
-            })
-        })
-        .collect::<Vec<_>>();
     let active_jobs = status
         .active_job_recovery_evidence
         .iter()
@@ -879,7 +832,7 @@ fn bounded_status_projection(status: &DaemonStatus) -> Value {
         .freshness
         .repair_plan
         .iter()
-        .take(COMPACT_STATUS_CANDIDATE_LIMIT)
+        .take(COMPACT_STATUS_ACTION_LIMIT)
         .map(|step| json!({ "code": step.code, "command": step.command }))
         .collect::<Vec<_>>();
     let projection = json!({
@@ -898,7 +851,8 @@ fn bounded_status_projection(status: &DaemonStatus) -> Value {
             "desired_build": bounded_text(&homeboy::core::build_identity::current().display),
             "service_manager": status.service_manager(),
         },
-        "competing_serve_pids": status.competing_serve_pids(),
+        "owner_lock": status.owner_lock,
+        "competing_serve": status.competing_serve,
         "recovery": {
             "stale_reason_code": status.freshness.stale_reason_code,
             "restartable": status.freshness.restartable,
@@ -907,11 +861,9 @@ fn bounded_status_projection(status: &DaemonStatus) -> Value {
             "next_actions": next_actions,
         },
         "active_jobs": active_jobs,
-        "process_candidates": relevant_candidates,
         "truncation": {
             "active_jobs": { "shown": active_jobs.len(), "omitted": status.active_job_recovery_evidence.len().saturating_sub(active_jobs.len()) },
-            "process_candidates": { "shown": relevant_candidates.len(), "unrelated": unrelated_candidates, "omitted": status.process_candidates.len().saturating_sub(relevant_candidates.len()) },
-            "omitted_sections": ["state", "runtime_paths", "ownership_evidence", "termination_evidence", "candidate_cmdlines", "complete_job_recovery_evidence"],
+            "omitted_sections": ["state", "runtime_paths", "ownership_evidence", "termination_evidence", "complete_job_recovery_evidence"],
             "full_command": "homeboy daemon status --full",
         },
     });
@@ -1071,21 +1023,7 @@ where
     if !output.plan.executable {
         // A read-only diagnosis, or evidence that authorizes nothing. The plan
         // and its reason are the answer; running it would be a guess.
-        output.blocked_on = Some(
-            if output
-                .plan
-                .steps
-                .iter()
-                .any(|step| step.code == actions::DAEMON_RECONCILE_UNLEASED_CANDIDATES)
-            {
-                format!(
-                    "daemon_unleased_process_conflict: {}; review candidates before applying",
-                    output.plan.reason
-                )
-            } else {
-                output.plan.reason.clone()
-            },
-        );
+        output.blocked_on = Some(output.plan.reason.clone());
         output.next_command = rendered_plan(&output.plan);
         return Ok((DaemonOutput::Recover(output), 1));
     }
@@ -1124,26 +1062,6 @@ where
 
     output.applied_steps = match execute(&output.plan, &lease_id, &job_ids) {
         Ok(applied_steps) => applied_steps,
-        Err(error) if error.details["classification"] == "daemon_unleased_process_conflict" => {
-            // Lease retirement can legitimately reveal a foreground daemon that
-            // was previously hidden by the lease owner. Re-enumerate before
-            // returning so the operator receives the new typed review plan,
-            // rather than an obsolete stop/start plan or a raw PID error.
-            let converged = read_postcondition()?;
-            output.fresh = converged.fresh;
-            output.stale_reason_code = converged.freshness.stale_reason_code;
-            output.lease_id = converged.freshness.lease_id.clone();
-            output.store_path = converged.state_path.clone();
-            output.active_jobs = converged.freshness.active_jobs;
-            output.plan = actions::plan_recovery(&converged);
-            output.lifecycle_plan = Some(output.plan.lifecycle.clone());
-            output.blocked_on = Some(format!(
-                "daemon_unleased_process_conflict: {}; review the exact candidates with `homeboy daemon reconcile-unleased-candidates` before applying",
-                output.plan.reason
-            ));
-            output.next_command = rendered_plan(&output.plan);
-            return Ok((DaemonOutput::Recover(output), 1));
-        }
         Err(error) if error.details["classification"] == "stale_daemon_recovery_plan" => {
             output.blocked_on = Some(error.message);
             output.next_command = "homeboy daemon recover --dry-run".to_string();
@@ -1521,40 +1439,6 @@ mod tests {
         assert!(Cli::try_parse_from(["homeboy", "daemon", "status", "--full"]).is_ok());
     }
 
-    #[test]
-    fn daemon_status_default_projection_is_bounded_and_full_retains_candidates() {
-        with_isolated_home(|_| {
-            let mut status = daemon::read_status().expect("status");
-            status.process_candidates = (0..200)
-                .map(|pid| daemon::DaemonProcessCandidate {
-                    pid,
-                    process_start_identity: None,
-                    executable: format!("/very/long/path/{}", "x".repeat(1024)),
-                    executable_digest: None,
-                    cmdline: "evidence ".repeat(2048),
-                    bind_endpoint: Some("127.0.0.1:7421".to_string()),
-                    state_dir: Some(format!("/tmp/{pid}")),
-                    build_identity: None,
-                    startup_token: Some("token".repeat(512)),
-                    ownership: daemon::DaemonProcessOwnership::Unrelated,
-                })
-                .collect();
-
-            let compact = status_output(status.clone(), false);
-            let full = status_output(status, true);
-
-            assert!(status_projection_bytes(&compact) <= COMPACT_STATUS_BYTES);
-            assert_eq!(compact["process_candidates"].as_array().unwrap().len(), 0);
-            assert_eq!(
-                compact["truncation"]["process_candidates"]["unrelated"],
-                200
-            );
-            assert_eq!(compact["truncation"]["process_candidates"]["omitted"], 200);
-            assert_eq!(full["process_candidates"].as_array().unwrap().len(), 200);
-            assert!(full.to_string().len() > COMPACT_STATUS_BYTES);
-        });
-    }
-
     /// `--confirm-workload-processes-absent` is the one confirmation on this
     /// surface that is not ceremony. This command exists because the daemon died
     /// before persisting any child identity, so the store holds no PID for the
@@ -1701,7 +1585,8 @@ mod tests {
             state: None,
             state_path: "test".to_string(),
             state_identity: "test".to_string(),
-            process_candidates: Vec::new(),
+            owner_lock: daemon::DaemonOwnerLockProbe::Free,
+            competing_serve: None,
             active_job_recovery_evidence: Vec::new(),
             termination_evidence: None,
         };
@@ -2034,75 +1919,6 @@ mod tests {
             .as_deref()
             .is_some_and(|message| message.contains("authoritative status remains stale")));
         assert_recovery_json_agrees_with_command_outcome(&output, exit_code);
-    }
-
-    #[test]
-    fn leased_retirement_reenumerates_an_unleased_candidate_into_a_review_plan() {
-        use daemon::recovery_actions as actions;
-
-        let initial = recovery_status(
-            false,
-            Some(daemon::DaemonStaleReasonCode::VersionMismatch),
-            vec![
-                daemon::DaemonRepairStep::executable(
-                    actions::DAEMON_STOP,
-                    actions::stop_for_lease("lease-test"),
-                ),
-                daemon::DaemonRepairStep::executable(actions::DAEMON_START, actions::start()),
-            ],
-        );
-        let mut exposed = recovery_status(
-            false,
-            Some(daemon::DaemonStaleReasonCode::LeaseMissing),
-            Vec::new(),
-        );
-        exposed
-            .process_candidates
-            .push(daemon::DaemonProcessCandidate {
-                pid: 4243,
-                process_start_identity: None,
-                executable: "homeboy".to_string(),
-                executable_digest: None,
-                cmdline: "homeboy daemon serve".to_string(),
-                bind_endpoint: Some("127.0.0.1:0".to_string()),
-                state_dir: Some("test".to_string()),
-                build_identity: Some("current_executable".to_string()),
-                startup_token: None,
-                ownership: daemon::DaemonProcessOwnership::Owning,
-            });
-
-        let (output, exit_code) = recover_from_status(
-            initial,
-            false,
-            false,
-            |_, _, _| {
-                let mut error = Error::internal_unexpected("replacement blocked");
-                error.details = serde_json::json!({
-                    "classification": "daemon_unleased_process_conflict"
-                });
-                Err(error)
-            },
-            || Ok(exposed),
-        )
-        .expect("the chained transition returns a typed review plan");
-
-        assert_eq!(exit_code, 1);
-        let DaemonOutput::Recover(output) = output else {
-            panic!("expected recovery output");
-        };
-        assert_eq!(
-            output.plan.steps[0].code,
-            actions::DAEMON_RECONCILE_UNLEASED_CANDIDATES
-        );
-        assert!(!output.plan.executable);
-        assert!(output.blocked_on.as_deref().is_some_and(|reason| {
-            reason.contains("daemon_unleased_process_conflict")
-                && reason.contains("before applying")
-        }));
-        assert_eq!(
-            output.next_command, "homeboy daemon reconcile-unleased-candidates",
-            "typed candidate blocker carries its concrete review action"
-        );
     }
 
     #[test]

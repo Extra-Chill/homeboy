@@ -280,10 +280,6 @@ pub(super) enum RunnerCommand {
         #[arg(long)]
         reconcile_leaseless_orphans: bool,
 
-        /// Explicitly apply the bounded remote daemon-candidate reconciliation.
-        #[arg(long)]
-        reconcile_unleased_candidates: bool,
-
         /// Recover this exact lease after the remote daemon state record was lost
         #[arg(long)]
         recover_missing_lease_state: Option<String>,

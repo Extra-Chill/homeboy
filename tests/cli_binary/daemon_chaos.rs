@@ -290,8 +290,8 @@ fn whole_daemon_process_group_killed_recovers_without_edits() {
     }
     // In production the init system reaps the killed processes at once. The
     // test binary can be their subreaper (nextest runs each test as its own
-    // process), so reap exactly what was killed; otherwise the zombies read
-    // as live unleased daemon candidates and recovery rightly refuses.
+    // process), so reap exactly what was killed; otherwise the zombie PIDs
+    // still read as live to the liveness assertion below.
     reap_exact(&[pid]);
     assert!(
         !pid_alive(pid),

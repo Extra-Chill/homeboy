@@ -26,10 +26,9 @@ pub use crate::{
     apply_change_artifact, apply_workspace_patch, broker_auth_store_path,
     broker_submit_token_for_runner, broker_token_from_env, close_transport, connect,
     connect_converging_binary, connect_with_live_lease_adoption, connect_with_orphan_adoption,
-    connect_with_unleased_candidate_reconciliation, ensure_runner_extension_parity,
-    ensure_transport, reconcile_terminal_jobs, transport_is_live, BrokerAuthGrant, BrokerAuthStore,
-    BrokerCredential, BrokerScope, MintedCredential, TransportFailure, TransportLifetime,
-    BROKER_TOKEN_ENV, BROKER_TOKEN_HEADER,
+    ensure_runner_extension_parity, ensure_transport, reconcile_terminal_jobs, transport_is_live,
+    BrokerAuthGrant, BrokerAuthStore, BrokerCredential, BrokerScope, MintedCredential,
+    TransportFailure, TransportLifetime, BROKER_TOKEN_ENV, BROKER_TOKEN_HEADER,
 };
 pub use crate::{
     diagnostic_status, disconnect, disconnect_local_recovery, download_remote_artifact,

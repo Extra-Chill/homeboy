@@ -1,7 +1,7 @@
 //! The controller's durable journal of one runner's daemon replacement.
 //!
-//! A remote lifecycle mutation (start, state-loss recovery, unleased
-//! candidate reconciliation) is journaled under a stable operation id before
+//! A remote lifecycle mutation (start, state-loss or lease-less recovery) is
+//! journaled under a stable operation id before
 //! it crosses the remote boundary, so a lost response is replayed rather than
 //! repeated. A recovery-created daemon's coordinates are journaled as the
 //! pending replacement until a controller authenticates it. Every journal is
@@ -182,86 +182,6 @@ pub(super) fn record_replacement_operation_replay(
     })
 }
 
-/// Bind candidate reconciliation to the current replacement identity. An
-/// explicit operator recovery may supersede only `ensure-running`: that command
-/// can create one of the candidates reconciliation is responsible for, and
-/// replaying it first would reproduce the conflict the operator selected this
-/// recovery to resolve.
-pub(super) fn record_unleased_candidate_reconciliation_replay(
-    runner_id: &str,
-    command: &str,
-) -> Result<()> {
-    with_rooted_runner_registry_lock(runner_id, |config_root| {
-        let path = replacement_operation_path_in_root(config_root, runner_id);
-        let mut operation: ReplacementOperation =
-            serde_json::from_slice(&std::fs::read(&path).map_err(|error| {
-                Error::internal_io(error.to_string(), Some(format!("read {}", path.display())))
-            })?)
-            .map_err(|error| Error::config_invalid_json(path.display().to_string(), error))?;
-        match (
-            operation.kind.as_deref(),
-            operation.replay_command.as_deref(),
-        ) {
-            (Some("unleased-candidates"), Some(existing)) if existing == command => return Ok(()),
-            (Some("ensure-running"), Some(previous_command)) => {
-                write_durable_json(
-                    &superseded_replacement_path_in_root(config_root, runner_id),
-                    &SupersededReplacementEvidence {
-                        schema: "homeboy/runner-replacement-operation-supersession/v1",
-                        runner_id,
-                        operation_id: &operation.operation_id,
-                        previous_kind: "ensure-running",
-                        previous_replay_command: previous_command,
-                        replacement_kind: "unleased-candidates",
-                        replacement_replay_command: command,
-                        superseded_at: Utc::now().to_rfc3339(),
-                    },
-                )?;
-            }
-            (None, None) => {}
-            _ => {
-                return Err(Error::internal_unexpected(
-                    "replacement operation cannot transition to unleased candidate reconciliation",
-                ));
-            }
-        }
-        operation.kind = Some("unleased-candidates".to_string());
-        operation.replay_command = Some(command.to_string());
-        write_durable_json(&path, &operation)
-    })
-}
-
-/// An acknowledged `applied: false` reconciliation is terminal: the remote
-/// inspected the candidate set and declined to mutate it. Rotate the operation
-/// identity rather than replaying that stale observation on a later connect.
-pub(super) fn terminalize_unleased_candidate_reconciliation(runner_id: &str) -> Result<()> {
-    with_runner_registry_lock(runner_id, || {
-        let path = replacement_operation_path(runner_id)?;
-        let operation: ReplacementOperation =
-            serde_json::from_slice(&std::fs::read(&path).map_err(|error| {
-                Error::internal_io(error.to_string(), Some(format!("read {}", path.display())))
-            })?)
-            .map_err(|error| Error::config_invalid_json(path.display().to_string(), error))?;
-        if operation.runner_id != runner_id
-            || operation.kind.as_deref() != Some("unleased-candidates")
-            || operation.replay_command.is_none()
-        {
-            return Err(Error::internal_unexpected(
-                "refusing to terminalize a replacement operation that is not an immutable unleased candidate reconciliation",
-            ));
-        }
-        write_durable_json(
-            &path,
-            &ReplacementOperation {
-                runner_id: runner_id.to_string(),
-                operation_id: uuid::Uuid::new_v4().to_string(),
-                replay_command: None,
-                kind: None,
-            },
-        )
-    })
-}
-
 /// An exact live-lease adoption rechecks the observed daemon after its tunnel
 /// health probe. Once that succeeds, an older automatic start replay cannot
 /// safely add information and is terminalized with its replacement evidence.
@@ -373,37 +293,6 @@ pub(super) fn retire_rejected_state_loss_replacement(
         output.timed_out,
         &output.stdout,
         &output.stderr,
-    )
-}
-
-/// Retire a terminally refused `ensure-running` replacement after preserving
-/// the exact rejection. `ensure-running` journals its replay command before
-/// crossing the remote mutation boundary (#8811 pattern) so a lost response
-/// can be replayed safely — but a `daemon_unleased_process_conflict` refusal
-/// is not a lost response, it is the remote authoritatively saying the exact
-/// operation id this journal entry names will never be admitted. Replaying
-/// that same command forever reproduces #15087: every subsequent `runner
-/// connect`/`refresh-homeboy --reconnect` repeats the identical doomed
-/// mutation instead of minting a fresh attempt.
-///
-/// Plain fields rather than a borrowed `CommandOutput`: the caller that hits
-/// this refusal on the *first* ensure-running attempt (not a replay) only
-/// has the summarized `Error` the remote failure was projected into, not the
-/// raw SSH transport output.
-pub(super) fn retire_rejected_ensure_running_replacement(
-    runner_id: &str,
-    exit_code: i32,
-    timed_out: bool,
-    stdout: &str,
-    stderr: &str,
-) -> Result<()> {
-    retire_rejected_replacement(
-        runner_id,
-        "ensure-running",
-        exit_code,
-        timed_out,
-        stdout,
-        stderr,
     )
 }
 
@@ -546,147 +435,6 @@ mod tests {
                 replacement_operation("runner-a").expect("new operation"),
                 next_operation
             );
-        });
-    }
-
-    /// #15087: a `daemon_unleased_process_conflict` refusal is authoritative,
-    /// not a lost response. Retiring it must clear the journal so the next
-    /// connect mints a fresh operation id instead of replaying the exact
-    /// command that will refuse identically forever, and must preserve the
-    /// exact rejection as durable evidence.
-    #[test]
-    fn retiring_a_rejected_ensure_running_replacement_preserves_evidence_and_frees_the_operation() {
-        crate::test_support::with_isolated_home(|_| {
-            let first_operation = replacement_operation("runner-a").expect("operation");
-            let command =
-                "homeboy daemon ensure-running --replacement-operation-id operation-a --addr 127.0.0.1:0";
-            record_replacement_operation_replay("runner-a", "ensure-running", command)
-                .expect("ensure-running replay journal");
-            record_pending_replacement("runner-a", &session("lease-conflict"))
-                .expect("pending coordinates");
-
-            retire_rejected_ensure_running_replacement(
-                "runner-a",
-                2,
-                false,
-                "",
-                "daemon lease is absent or stale while foreground daemon candidates remain live",
-            )
-            .expect("retire the terminally refused ensure-running replacement");
-
-            assert!(
-                pending_replacement("runner-a")
-                    .expect("read pending")
-                    .is_none(),
-                "the unpublishable pending coordinates must not survive the refusal"
-            );
-            assert!(
-                replacement_operation_replay("runner-a")
-                    .expect("read replay")
-                    .is_none(),
-                "the doomed replay command must not be replayed again"
-            );
-            let next_operation = replacement_operation("runner-a").expect("new operation");
-            assert_ne!(
-                next_operation, first_operation,
-                "a fresh operation id must be minted so a retry cannot collide with the refused one"
-            );
-
-            let evidence_dir = paths::runner_sessions_dir()
-                .expect("runner sessions")
-                .join("runner-a")
-                .join("rejected-replacements");
-            let evidence = std::fs::read_dir(&evidence_dir)
-                .expect("rejection evidence directory")
-                .collect::<std::result::Result<Vec<_>, _>>()
-                .expect("evidence entries");
-            assert_eq!(evidence.len(), 1, "exactly one rejection is recorded");
-            let evidence: serde_json::Value = serde_json::from_slice(
-                &std::fs::read(evidence[0].path()).expect("read rejection evidence"),
-            )
-            .expect("rejection evidence JSON");
-            assert_eq!(evidence["kind"], "ensure-running");
-            assert_eq!(evidence["operation_id"], first_operation);
-            assert_eq!(evidence["replay_command"], command);
-            assert_eq!(evidence["exit_code"], 2);
-            assert_eq!(evidence["timed_out"], false);
-        });
-    }
-
-    /// Retiring the wrong kind must fail closed rather than silently clearing
-    /// a replacement journal entry that belongs to a different, still-viable
-    /// recovery (e.g. a state-loss replay in flight).
-    #[test]
-    fn retiring_ensure_running_refuses_a_journal_of_a_different_kind() {
-        crate::test_support::with_isolated_home(|_| {
-            replacement_operation("runner-a").expect("operation");
-            record_replacement_operation_replay(
-                "runner-a",
-                "state-loss",
-                "homeboy daemon recover-missing-lease-state --lease-id lease-a",
-            )
-            .expect("state-loss replay journal");
-
-            let error =
-                retire_rejected_ensure_running_replacement("runner-a", 1, false, "", "unrelated")
-                    .expect_err("must not retire a differently-kinded journal entry");
-            assert!(error
-                .message
-                .contains("not the rejected ensure-running recovery"));
-            assert_eq!(
-                replacement_operation_replay("runner-a")
-                    .expect("read replay")
-                    .map(|(kind, _)| kind),
-                Some("state-loss".to_string()),
-                "the unrelated journal entry must be left untouched"
-            );
-        });
-    }
-
-    #[test]
-    fn explicit_candidate_reconciliation_supersedes_ensure_running_with_evidence() {
-        crate::test_support::with_isolated_home(|_| {
-            let operation_id = replacement_operation("runner-a").expect("operation");
-            record_replacement_operation_replay(
-                "runner-a",
-                "ensure-running",
-                "homeboy daemon ensure-running --replacement-operation-id operation-a",
-            )
-            .expect("ensure-running replay");
-
-            let reconciliation = "homeboy daemon reconcile-unleased-candidates --apply --replacement-operation-id operation-a";
-            record_unleased_candidate_reconciliation_replay("runner-a", reconciliation)
-                .expect("explicit reconciliation supersedes ensure-running");
-            record_unleased_candidate_reconciliation_replay("runner-a", reconciliation)
-                .expect("same reconciliation replay is idempotent");
-
-            assert_eq!(
-                replacement_operation("runner-a").expect("preserved operation"),
-                operation_id
-            );
-            assert_eq!(
-                replacement_operation_replay("runner-a").expect("replacement replay"),
-                Some((
-                    "unleased-candidates".to_string(),
-                    reconciliation.to_string()
-                ))
-            );
-            let evidence_dir = paths::runner_sessions_dir()
-                .expect("runner sessions")
-                .join("runner-a")
-                .join("superseded-replacements");
-            let evidence = std::fs::read_dir(evidence_dir)
-                .expect("supersession evidence")
-                .collect::<std::result::Result<Vec<_>, _>>()
-                .expect("evidence entries");
-            assert_eq!(evidence.len(), 1, "idempotent replay writes one transition");
-            let evidence: serde_json::Value = serde_json::from_slice(
-                &std::fs::read(evidence[0].path()).expect("read supersession evidence"),
-            )
-            .expect("supersession evidence JSON");
-            assert_eq!(evidence["operation_id"], operation_id);
-            assert_eq!(evidence["previous_kind"], "ensure-running");
-            assert_eq!(evidence["replacement_kind"], "unleased-candidates");
         });
     }
 

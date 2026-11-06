@@ -11,8 +11,8 @@ pub const DAEMON_STATE_DIR_ENV: &str = "HOMEBOY_DAEMON_STATE_DIR";
 
 /// The startup token a daemon persists into its own session lease
 /// (`DaemonState::startup_token`). Any launcher that wants its daemon to
-/// publish an attributable ownership token — proof a later `daemon status`,
-/// `daemon reconcile-unleased-candidates`, or `daemon ensure-running` call can
+/// publish an attributable ownership token — proof a later `daemon status` or
+/// `daemon ensure-running` call can
 /// use to tell "a process this launcher started" apart from an unrelated
 /// foreground `daemon serve` — must set this exact variable in the child's
 /// environment before it writes its lease. Shared here, rather than defined

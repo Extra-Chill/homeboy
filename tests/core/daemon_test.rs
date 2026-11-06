@@ -1272,10 +1272,18 @@ fn daemon_state_for_test(pid: u32, address: &str) -> DaemonState {
     }
 }
 
-fn write_daemon_state_for_test(state: &DaemonState) {
+/// Write `state` as the lease. A lease naming this test process is live only
+/// while its owner lock is held, so the returned guard holds the lock as the
+/// serving daemon would; any other PID's lease is left without a holder.
+#[must_use]
+fn write_daemon_state_for_test(state: &DaemonState) -> Option<DaemonOwnerLock> {
     let path = state_path().expect("state path");
     std::fs::create_dir_all(path.parent().expect("state parent")).expect("state dir");
+    let owner = (state.pid == std::process::id()).then(|| {
+        acquire_daemon_owner_lock_at(&path, std::time::Duration::ZERO).expect("serve owner lock")
+    });
     std::fs::write(&path, serde_json::to_string(state).expect("state json")).expect("write state");
+    owner
 }
 
 #[test]
@@ -1284,7 +1292,7 @@ fn controller_job_client_rejects_a_live_daemon_from_another_build() {
     let mut state = daemon_state_for_test(std::process::id(), "127.0.0.1:49152");
     state.build_identity.version = "0.0.0-stale".to_string();
     state.build_identity.display = "homeboy 0.0.0-stale+fixture".to_string();
-    write_daemon_state_for_test(&state);
+    let _owner = write_daemon_state_for_test(&state);
 
     let error = match LocalControllerJobClient::connect_current_build() {
         Ok(_) => panic!("typed controller jobs require the invoking daemon build"),
@@ -1315,7 +1323,7 @@ fn status_reports_active_job_recovery_evidence_without_mutating_the_store() {
     let _home = HomeGuard::new();
     let mut state = daemon_state_for_test(u32::MAX, "127.0.0.1:49152");
     state.lease_id = "evidence-lease".to_string();
-    write_daemon_state_for_test(&state);
+    let _owner = write_daemon_state_for_test(&state);
     let path = crate::paths::observation_db().expect("jobs path");
     let store = JobStore::open_without_reconciliation(&path)
         .expect("store")
@@ -1345,7 +1353,7 @@ fn status_marks_pidless_jobs_non_recoverable_while_the_lease_is_live() {
     let _home = HomeGuard::new();
     let mut state = daemon_state_for_test(std::process::id(), "127.0.0.1:49152");
     state.lease_id = "live-evidence-lease".to_string();
-    write_daemon_state_for_test(&state);
+    let _owner = write_daemon_state_for_test(&state);
     let path = crate::paths::observation_db().expect("jobs path");
     let store = JobStore::open_without_reconciliation(&path)
         .expect("store")
@@ -1360,45 +1368,6 @@ fn status_marks_pidless_jobs_non_recoverable_while_the_lease_is_live() {
         status.active_job_recovery_evidence[0].disposition,
         crate::api_jobs::DaemonActiveJobRecoveryDisposition::MissingChildIdentityRecoverable
     );
-}
-
-#[test]
-fn stale_binary_candidate_owns_only_the_matching_live_lease_coordinates() {
-    let mut state = daemon_state_for_test(4242, "127.0.0.1:49152");
-    state.startup_token = "recorded-token".to_string();
-    let state_dir = std::path::PathBuf::from("/tmp/homeboy-daemon");
-    let candidate = DaemonProcessCandidate {
-        pid: state.pid,
-        process_start_identity: None,
-        executable: "/opt/homeboy-previous".to_string(),
-        executable_digest: None,
-        cmdline: "daemon serve".to_string(),
-        bind_endpoint: Some(state.address.clone()),
-        state_dir: Some(state_dir.display().to_string()),
-        build_identity: None,
-        startup_token: Some(state.startup_token.clone()),
-        ownership: DaemonProcessOwnership::Ambiguous,
-    };
-
-    assert!(candidate_matches_live_lease(&candidate, &state, &state_dir));
-    for candidate in [
-        DaemonProcessCandidate {
-            pid: 4243,
-            ..candidate.clone()
-        },
-        DaemonProcessCandidate {
-            bind_endpoint: Some("127.0.0.1:49153".to_string()),
-            ..candidate.clone()
-        },
-        DaemonProcessCandidate {
-            startup_token: Some("other-token".to_string()),
-            ..candidate
-        },
-    ] {
-        assert!(!candidate_matches_live_lease(
-            &candidate, &state, &state_dir
-        ));
-    }
 }
 
 fn write_legacy_daemon_state_for_test(pid: u32, address: &str) -> (std::path::PathBuf, String) {
@@ -1453,6 +1422,8 @@ fn state_path_uses_daemon_state_location() {
 #[test]
 fn write_state_establishes_daemon_session_lease_identity() {
     let _home = HomeGuard::new();
+    let _owner = acquire_daemon_owner_lock_at(&state_path().expect("state path"), Duration::ZERO)
+        .expect("serve owner lock");
 
     let state = write_state("127.0.0.1:49152".parse().expect("addr"), None).expect("write lease");
     let status = read_status().expect("status");
@@ -1504,7 +1475,7 @@ fn health_route_refreshes_daemon_lease_heartbeat() {
     let mut state =
         write_state("127.0.0.1:49152".parse().expect("addr"), None).expect("write lease");
     state.last_seen_at = "2000-01-01T00:00:00Z".to_string();
-    write_daemon_state_for_test(&state);
+    let _owner = write_daemon_state_for_test(&state);
 
     let response = route("GET", "/health");
     let refreshed = read_status().expect("status").state.expect("state");
@@ -1518,7 +1489,7 @@ fn read_status_classifies_unknown_binary_freshness_as_stale() {
     let _home = HomeGuard::new();
     let mut state = daemon_state_for_test(std::process::id(), "127.0.0.1:49152");
     state.binary_sha256 = Some("unknown".to_string());
-    write_daemon_state_for_test(&state);
+    let _owner = write_daemon_state_for_test(&state);
 
     let status = read_status().expect("status");
 
@@ -1574,7 +1545,7 @@ fn freshness_report_classifies_schema_mismatch() {
     let _home = HomeGuard::new();
     let mut state = daemon_state_for_test(std::process::id(), "127.0.0.1:49152");
     state.schema = "homeboy.daemon.session_lease.v0".to_string();
-    write_daemon_state_for_test(&state);
+    let _owner = write_daemon_state_for_test(&state);
 
     let status = read_status().expect("status");
 
@@ -1590,7 +1561,7 @@ fn freshness_report_classifies_version_mismatch() {
     let mut state = daemon_state_for_test(std::process::id(), "127.0.0.1:49152");
     state.build_identity.version = "0.0.0".to_string();
     state.build_identity.display = "homeboy 0.0.0".to_string();
-    write_daemon_state_for_test(&state);
+    let _owner = write_daemon_state_for_test(&state);
 
     let status = read_status().expect("status");
 
@@ -1616,7 +1587,7 @@ fn daemon_status_live_but_stale_daemon_reports_liveness_true_and_freshness_false
     state.build_identity.version = "0.0.0-stale".to_string();
     state.build_identity.display = "homeboy 0.0.0-stale+fixture".to_string();
     state.lease_id = "live-stale-lease".to_string();
-    write_daemon_state_for_test(&state);
+    let _owner = write_daemon_state_for_test(&state);
     let path = crate::paths::observation_db().expect("jobs path");
     let store = JobStore::open_without_reconciliation(&path)
         .expect("store")
@@ -1671,7 +1642,7 @@ fn daemon_status_live_but_stale_daemon_reports_liveness_true_and_freshness_false
 fn daemon_status_dead_lease_reports_a_dead_process_and_an_unblocked_idle_replacement() {
     let _home = HomeGuard::new();
     let state = daemon_state_for_test(u32::MAX, "127.0.0.1:49152");
-    write_daemon_state_for_test(&state);
+    let _owner = write_daemon_state_for_test(&state);
 
     let status = read_status().expect("status");
 
@@ -1729,7 +1700,7 @@ fn daemon_status_without_a_lease_reports_no_live_process_and_an_unreachable_api(
 fn daemon_status_live_and_fresh_daemon_reports_every_independent_field_true() {
     let _home = HomeGuard::new();
     let state = daemon_state_for_test(std::process::id(), "127.0.0.1:49152");
-    write_daemon_state_for_test(&state);
+    let _owner = write_daemon_state_for_test(&state);
 
     let status = read_status().expect("status");
 
@@ -1766,7 +1737,7 @@ fn freshness_report_classifies_runtime_paths_drift() {
         path: runtime_path.display().to_string(),
         fingerprint: "old".to_string(),
     });
-    write_daemon_state_for_test(&state);
+    let _owner = write_daemon_state_for_test(&state);
 
     let status = read_status().expect("status");
 
@@ -1818,7 +1789,7 @@ fn local_freshness_report_carries_the_same_evidence_fields_as_the_remote_produce
     // SSH, so no consumer could rely on either half of the one contract.
     let _home = HomeGuard::new();
     let state = daemon_state_for_test(u32::MAX, "127.0.0.1:49152");
-    write_daemon_state_for_test(&state);
+    let _owner = write_daemon_state_for_test(&state);
 
     let status = read_status().expect("status");
 
@@ -1846,29 +1817,10 @@ fn local_freshness_report_carries_the_same_evidence_fields_as_the_remote_produce
 }
 
 #[test]
-fn dead_lease_conflict_suppresses_the_adoption_command_until_candidate_attribution_clears() {
-    let candidate = DaemonProcessCandidate {
-        pid: 4242,
-        process_start_identity: None,
-        executable: "/tmp/homeboy".to_string(),
-        executable_digest: None,
-        cmdline: "HOME=/tmp/home homeboy daemon serve --addr 127.0.0.1:0".to_string(),
-        bind_endpoint: Some("127.0.0.1:0".to_string()),
-        state_dir: Some("/tmp/home/.config/homeboy/daemon".to_string()),
-        build_identity: None,
-        startup_token: None,
-        ownership: DaemonProcessOwnership::Ambiguous,
-    };
-
-    assert!(has_conflicting_process_candidates(&[candidate]));
-    assert!(!has_conflicting_process_candidates(&[]));
-}
-
-#[test]
 fn local_freshness_report_plans_explicit_reconciliation_for_a_restartable_lease() {
     let _home = HomeGuard::new();
     let state = daemon_state_for_test(u32::MAX, "127.0.0.1:49152");
-    write_daemon_state_for_test(&state);
+    let _owner = write_daemon_state_for_test(&state);
 
     let status = read_status().expect("status");
 
@@ -1930,7 +1882,7 @@ fn status_treats_dead_known_legacy_lease_as_missing_metadata_for_recovery() {
 fn read_status_reports_stale_state_as_not_running() {
     let _home = HomeGuard::new();
     let state = daemon_state_for_test(u32::MAX, "127.0.0.1:49152");
-    write_daemon_state_for_test(&state);
+    let _owner = write_daemon_state_for_test(&state);
 
     let status = read_status().expect("status");
 
@@ -2117,7 +2069,7 @@ fn stop_refuses_stale_lease_that_points_at_reused_pid() {
     let _home = HomeGuard::new();
     let mut state = daemon_state_for_test(std::process::id(), "127.0.0.1:49152");
     state.binary_sha256 = Some("stale-binary-hash".to_string());
-    write_daemon_state_for_test(&state);
+    let _owner = write_daemon_state_for_test(&state);
 
     let result = stop().expect("stop stale lease");
     let status = read_status().expect("status after stop");
@@ -2156,7 +2108,7 @@ fn force_stop_lease_mismatch_cannot_signal_a_process() {
     let mut child = spawn_force_stop_test_process(None);
     let mut state = daemon_state_for_test(child.id(), "127.0.0.1:1");
     state.binary_sha256 = Some("stale-binary-hash".to_string());
-    write_daemon_state_for_test(&state);
+    let _owner = write_daemon_state_for_test(&state);
 
     let error = force_stop_for_lease("other-lease").expect_err("mismatched lease is rejected");
 
@@ -2178,7 +2130,7 @@ fn force_stop_with_active_jobs_keeps_the_lease_and_never_signals_an_unowned_pid(
     let mut child = spawn_force_stop_test_process(None);
     let mut state = daemon_state_for_test(child.id(), "127.0.0.1:1");
     state.binary_sha256 = Some("stale-binary-hash".to_string());
-    write_daemon_state_for_test(&state);
+    let _owner = write_daemon_state_for_test(&state);
     let store =
         JobStore::open_without_reconciliation(&crate::paths::observation_db().expect("jobs path"))
             .expect("store")
@@ -2215,7 +2167,7 @@ fn force_stop_matching_zero_job_stale_daemon_is_terminated_and_verified() {
     let mut state = daemon_state_for_test(pid, "127.0.0.1:1");
     state.binary_sha256 = Some("stale-binary-hash".to_string());
     state.startup_token = startup_token.to_string();
-    write_daemon_state_for_test(&state);
+    let _owner = write_daemon_state_for_test(&state);
 
     let result = force_stop_for_lease(&state.lease_id).expect("force stop stale daemon");
 
@@ -2241,7 +2193,7 @@ fn force_stop_escalates_when_a_token_owned_daemon_ignores_sigterm() {
     let mut state = daemon_state_for_test(pid, "127.0.0.1:1");
     state.binary_sha256 = Some("stale-binary-hash".to_string());
     state.startup_token = startup_token.to_string();
-    write_daemon_state_for_test(&state);
+    let _owner = write_daemon_state_for_test(&state);
 
     let result = force_stop_for_lease(&state.lease_id).expect("bounded forced stop");
 
@@ -2282,7 +2234,7 @@ fn ordinary_stop_converges_a_term_resistant_mixed_version_daemon() {
     state.build_identity.display = "homeboy 0.321.1+92323a8adef6".to_string();
     state.binary_sha256 = Some("recorded-homeboy-0.321.1".to_string());
     state.startup_token = startup_token.to_string();
-    write_daemon_state_for_test(&state);
+    let _owner = write_daemon_state_for_test(&state);
 
     let started = Instant::now();
     let result = stop().expect("ordinary stop converges a stale daemon");
@@ -2305,7 +2257,7 @@ fn ordinary_stop_escalates_a_fresh_term_resistant_daemon() {
     let daemon_pid = spawn_term_resistant_daemon(startup_token);
     let mut state = daemon_state_for_test(daemon_pid, "127.0.0.1:1");
     state.startup_token = startup_token.to_string();
-    write_daemon_state_for_test(&state);
+    let _owner = write_daemon_state_for_test(&state);
 
     let started = Instant::now();
     let result = stop().expect("ordinary fresh stop converges");
@@ -2339,7 +2291,7 @@ fn lease_bound_stop_recovers_only_the_exact_daemon_after_binary_rebuild() {
     state.lease_id = "build-a-lease".to_string();
     state.startup_token = owner_token.to_string();
     state.binary_sha256 = Some(build_a);
-    write_daemon_state_for_test(&state);
+    let _owner = write_daemon_state_for_test(&state);
 
     // The configured executable path is rebuilt in place while build A remains
     // active. The replacement client observes build B at that same path.
@@ -2372,7 +2324,7 @@ fn force_stop_matching_idle_lease_retires_a_reused_pid_without_signaling() {
     let mut child = spawn_force_stop_test_process(None);
     let mut state = daemon_state_for_test(child.id(), "127.0.0.1:1");
     state.binary_sha256 = Some("stale-binary-hash".to_string());
-    write_daemon_state_for_test(&state);
+    let _owner = write_daemon_state_for_test(&state);
 
     let result = force_stop_for_lease(&state.lease_id).expect("retire unowned idle lease");
 
@@ -2391,7 +2343,7 @@ fn termination_revalidation_classifies_lost_ownership_as_absent_without_signalin
     let mut child = spawn_force_stop_test_process(None);
     let mut state = daemon_state_for_test(child.id(), "127.0.0.1:1");
     state.startup_token = "ownership-that-disappeared".to_string();
-    write_daemon_state_for_test(&state);
+    let _owner = write_daemon_state_for_test(&state);
     let path = state_path().expect("state path");
     let identity = DaemonLeaseIdentity::from_state(&state);
 
@@ -2412,7 +2364,7 @@ fn ordinary_stop_retires_a_live_unowned_stale_lease_without_signaling() {
     let _home = HomeGuard::new();
     let mut state = daemon_state_for_test(std::process::id(), "127.0.0.1:49152");
     state.binary_sha256 = Some("stale-binary-hash".to_string());
-    write_daemon_state_for_test(&state);
+    let _owner = write_daemon_state_for_test(&state);
 
     let result = stop().expect("routine stop stale lease");
 
@@ -2428,7 +2380,7 @@ fn lease_bound_stop_retires_a_live_unowned_idle_lease() {
     let _home = HomeGuard::new();
     let mut state = daemon_state_for_test(std::process::id(), "127.0.0.1:49152");
     state.binary_sha256 = Some("stale-binary-hash".to_string());
-    write_daemon_state_for_test(&state);
+    let _owner = write_daemon_state_for_test(&state);
 
     let result = stop_for_lease(&state.lease_id).expect("retire unowned stale lease");
 

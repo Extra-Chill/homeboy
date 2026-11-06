@@ -113,7 +113,6 @@ daemon jobs watch
 daemon plan
 daemon reconcile-dead-lease-orphans
 daemon reconcile-leaseless-orphans
-daemon reconcile-unleased-candidates
 daemon recover
 daemon recover-missing-lease-state
 daemon serve

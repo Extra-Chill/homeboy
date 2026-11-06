@@ -59,10 +59,13 @@ pub use artifact_download::ArtifactDownload;
 pub use control::{
     adopt_orphaned_lease, artifact_content_url, ensure_running,
     ensure_running_with_replacement_operation, fetch_artifact_to_path,
-    reconcile_dead_lease_orphans, reconcile_leaseless_orphans, reconcile_unleased_candidates,
-    recover_missing_lease_state, restart_service_managed, start_background, ArtifactFetchOutcome,
+    reconcile_dead_lease_orphans, reconcile_leaseless_orphans, recover_missing_lease_state,
+    restart_service_managed, start_background, ArtifactFetchOutcome,
 };
-use daemon_lease::{daemon_state_identity, freshness_report_from_validation, validate_lease_file};
+use daemon_lease::{
+    daemon_state_identity, freshness_report_from_validation, validate_lease_file,
+    DaemonLeaseValidation,
+};
 /// The daemon's own executable. A direct daemon child shares the daemon's
 /// build-specific durable store, so runner drivers launch Homeboy children
 /// from this path rather than from configuration or `PATH`.
@@ -915,10 +918,14 @@ pub struct DaemonStatus {
     pub state_path: String,
     /// Identity of the lease and durable queue observed by status callers.
     pub state_identity: String,
-    /// Process-level evidence is retained even when the lease is absent so an
-    /// operator can distinguish another runner from an attributable owner.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub process_candidates: Vec<DaemonProcessCandidate>,
+    /// What `<state-dir>/owner.lock` says: free (no daemon serves this store)
+    /// or held, with the holder's record when it has finished writing it.
+    pub owner_lock: DaemonOwnerLockProbe,
+    /// A `daemon serve` that the current holder refused the owner lock, such
+    /// as a service manager's restart crash-looping beside a CLI-spawned
+    /// daemon (#17387).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub competing_serve: Option<DaemonOwnerContender>,
     /// Durable evidence only; status never reconciles or mutates active jobs.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub active_job_recovery_evidence: Vec<DaemonActiveJobRecoveryEvidence>,
@@ -948,24 +955,6 @@ impl DaemonStatus {
             .and_then(|state| state.service_manager)
     }
 
-    /// Live `daemon serve` processes attributed to this store other than the
-    /// live lease's own: a second daemon competing for the owner lock, such
-    /// as a service manager's restart crash-looping beside a CLI-spawned one.
-    pub fn competing_serve_pids(&self) -> Vec<u32> {
-        let Some(lease_pid) = self.state.as_ref().filter(|_| self.running).map(|s| s.pid) else {
-            return Vec::new();
-        };
-        self.process_candidates
-            .iter()
-            .filter(|candidate| {
-                candidate.ownership == DaemonProcessOwnership::Owning
-                    && candidate.pid != lease_pid
-                    && pid_is_running(candidate.pid)
-            })
-            .map(|candidate| candidate.pid)
-            .collect()
-    }
-
     /// Render [`DaemonStatus::summary`] from the status's own evidence.
     pub fn render_summary(&self) -> String {
         let mut summary = if self.running && self.reachable {
@@ -983,15 +972,10 @@ impl DaemonStatus {
                 manager.as_str()
             ));
         }
-        let competing = self.competing_serve_pids();
-        if !competing.is_empty() {
+        if let Some(contender) = &self.competing_serve {
             summary.push_str(&format!(
-                "; conflict: other daemon serve process(es) {} compete with the live lease for this store",
-                competing
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                "; conflict: {} competes with the live lease for this store",
+                contender.describe()
             ));
         }
         if self.fresh {
@@ -1043,53 +1027,90 @@ pub struct DaemonTerminationEvidence {
     pub stop_requested: bool,
 }
 
+/// The record the serving daemon writes into `<state-dir>/owner.lock` right
+/// after it takes the lock. The lock being held proves the holder is live; the
+/// record names exactly which process that is.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-pub struct DaemonProcessCandidate {
+#[serde(deny_unknown_fields)]
+pub struct DaemonOwnerHolder {
     pub pid: u32,
-    /// Kernel-issued PID-instance identity captured with the process snapshot.
-    /// A later signal must reject PID reuse on every supported platform.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub process_start_identity: Option<crate::process::ProcessStartIdentity>,
-    pub executable: String,
-    /// SHA-256 of the executable used to attribute this candidate. This is
-    /// emitted only when the process resolves to the invoking binary.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub executable_digest: Option<String>,
-    pub cmdline: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub bind_endpoint: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub state_dir: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub build_identity: Option<String>,
-    /// Exact startup identity carried by the daemon argv, when its
-    /// process command line preserves an unambiguous value.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub startup_token: Option<String>,
-    pub ownership: DaemonProcessOwnership,
+    /// Kernel start identity of `pid`, so a reused PID is never the holder.
+    /// `None` only on platforms that expose no start identity.
+    pub start_identity: Option<crate::process::ProcessStartIdentity>,
+    /// The holder's startup token; empty for a foreground or service-managed
+    /// `daemon serve`.
+    pub startup_token: String,
 }
 
-/// Read-only or explicitly-applied reconciliation of unleased daemon process
-/// candidates. The complete candidate evidence is returned in both modes so a
-/// controller never has to scrape prose to decide whether it may retry.
+impl DaemonOwnerHolder {
+    fn current() -> Self {
+        let pid = std::process::id();
+        Self {
+            pid,
+            start_identity: crate::process::process_start_identity(pid).ok().flatten(),
+            startup_token: std::env::var(DAEMON_STARTUP_TOKEN_ENV).unwrap_or_default(),
+        }
+    }
+
+    /// Whether `state` is the lease this holder published. Only the lock
+    /// holder writes the lease, and the holder's PID is live while it holds
+    /// the lock, so the PID alone identifies its lease.
+    pub(super) fn published(&self, state: &DaemonState) -> bool {
+        self.pid == state.pid
+    }
+}
+
+/// One observation of `<state-dir>/owner.lock`.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-pub struct DaemonCandidateReconciliationResult {
-    pub applied: bool,
-    pub active_jobs: usize,
-    pub candidates: Vec<DaemonProcessCandidate>,
-    pub retired_pids: Vec<u32>,
-    pub blocked_pids: Vec<u32>,
-    pub evidence: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub replacement: Option<DaemonStartResult>,
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum DaemonOwnerLockProbe {
+    /// Nothing holds the lock, so no daemon serves this store.
+    Free,
+    /// Something holds the lock. `holder` is `None` while the holder has not
+    /// finished writing its record, or when the lock is held by a non-daemon
+    /// recovery operation or a brief probe: that counts as starting.
+    Held { holder: Option<DaemonOwnerHolder> },
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum DaemonProcessOwnership {
-    Owning,
-    Unrelated,
-    Ambiguous,
+impl DaemonOwnerLockProbe {
+    pub fn is_held(&self) -> bool {
+        matches!(self, Self::Held { .. })
+    }
+
+    pub fn holder(&self) -> Option<&DaemonOwnerHolder> {
+        match self {
+            Self::Held { holder } => holder.as_ref(),
+            Self::Free => None,
+        }
+    }
+}
+
+/// A `daemon serve` that gave up on the owner lock after the bounded
+/// acquisition window. It records itself, and the holder that refused it, in
+/// `<state-dir>/owner.contender.json` so status can name the conflict.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DaemonOwnerContender {
+    pub contender: DaemonOwnerHolder,
+    pub service_manager: Option<DaemonServiceManager>,
+    pub refused_by: Option<DaemonOwnerHolder>,
+    pub observed_at: String,
+}
+
+impl DaemonOwnerContender {
+    fn describe(&self) -> String {
+        match self.service_manager {
+            Some(manager) => format!(
+                "daemon serve pid {} started by service manager {} was refused the owner lock",
+                self.contender.pid,
+                manager.as_str()
+            ),
+            None => format!(
+                "daemon serve pid {} was refused the owner lock",
+                self.contender.pid
+            ),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
@@ -1472,9 +1493,35 @@ pub(super) fn read_status_for_state_path(path: PathBuf) -> Result<DaemonStatus> 
 /// Read daemon ownership against explicitly injected state and observation paths.
 pub fn read_status_at_paths(path: PathBuf, jobs_path: PathBuf) -> Result<DaemonStatus> {
     let state_path = path.display().to_string();
-    let state_dir = path.parent().unwrap_or(&path).to_path_buf();
     let state_identity = daemon_state_identity(&path, &jobs_path)?;
-    let validation = validate_lease_file(&path)?;
+    let owner_lock = probe_daemon_owner_lock_at(&path)?;
+    let mut validation = validate_lease_file(&path)?;
+    // Liveness comes from the owner lock, not the PID: only `serve` writes the
+    // lease, and only while it holds the lock. A lease its holder did not
+    // publish (the lock is free, or held by another process) is dead, even
+    // when its PID has been reused.
+    if let Some(state) = validation.state.take() {
+        let published = owner_lock
+            .holder()
+            .is_some_and(|holder| holder.published(&state));
+        validation = if validation.running && !published {
+            daemon_lease::stale_lease(
+                state,
+                false,
+                DaemonStaleReasonCode::PidDead,
+                if owner_lock.is_held() {
+                    "daemon owner lock is not held by the lease's daemon"
+                } else {
+                    "daemon owner lock is free, so the lease's daemon is dead"
+                },
+            )
+        } else {
+            DaemonLeaseValidation {
+                state: Some(state),
+                ..validation
+            }
+        };
+    }
     // Every daemon of one Unix user shares this ledger, whatever its state
     // dir (#16089). Scope it to this state dir's daemon scope (#16104) and to
     // the lease it recorded, live or dead, so another controller's stamped
@@ -1517,58 +1564,20 @@ pub fn read_status_at_paths(path: PathBuf, jobs_path: PathBuf) -> Result<DaemonS
                 != crate::api_jobs::DaemonActiveJobRecoveryDisposition::TerminalEvidence
         })
         .count();
-    let mut process_candidates = control::daemon_process_candidates(&state_dir)?;
-    if validation.running {
-        if let Some(state) = validation.state.as_ref() {
-            for candidate in &mut process_candidates {
-                if candidate_matches_live_lease(candidate, state, &state_dir) {
-                    candidate.ownership = DaemonProcessOwnership::Owning;
-                }
-            }
-        }
-    }
     let mut freshness = freshness_report_from_validation(&validation, blocking_active_jobs);
-    // A dead lease proves only its recorded PID is gone. It cannot authorize a
-    // replacement while another foreground candidate might still own this store.
-    // In particular, offering adoption here would lead it to the same candidate
-    // preflight and leave the dead lease in place on every retry.
-    let candidate_conflict = matches!(
-        validation.stale_reason_code,
-        Some(DaemonStaleReasonCode::LeaseMissing | DaemonStaleReasonCode::PidDead)
-    ) && has_conflicting_process_candidates(&process_candidates);
-    let selected_owner_unverified = !validation.running && daemon_owner_lock_is_held_at(&path)?;
-    let stale_reason = if selected_owner_unverified {
-        let message = format!(
-            "daemon owner lock is held without a valid live lease at {}; replacement is blocked",
-            path.display()
-        );
+    let stale_reason = if !validation.running && owner_lock.is_held() {
+        let message = match owner_lock.holder() {
+            Some(holder) => format!(
+                "daemon owner lock at {} is held by pid {} without a valid live lease; replacement is blocked",
+                path.display(),
+                holder.pid
+            ),
+            None => format!(
+                "daemon owner lock at {} is held by a starting daemon; replacement is blocked",
+                path.display()
+            ),
+        };
         freshness.restartable = false;
-        freshness.ownership_evidence = Some(message.clone());
-        freshness.adoption_command = None;
-        freshness.repair_plan.clear();
-        Some(message)
-    } else if candidate_conflict {
-        let evidence = process_candidates
-            .iter()
-            .filter(|candidate| {
-                matches!(
-                    candidate.ownership,
-                    DaemonProcessOwnership::Owning | DaemonProcessOwnership::Ambiguous
-                )
-            })
-            .map(|candidate| {
-                format!(
-                    "pid={} ownership={:?} endpoint={}",
-                    candidate.pid,
-                    candidate.ownership,
-                    candidate.bind_endpoint.as_deref().unwrap_or("unreported")
-                )
-            })
-            .collect::<Vec<_>>();
-        let message = format!(
-            "daemon lease is missing while foreground daemon candidates remain live: {}; no process was signaled",
-            evidence.join(", ")
-        );
         freshness.ownership_evidence = Some(message.clone());
         freshness.adoption_command = None;
         freshness.repair_plan.clear();
@@ -1576,11 +1585,14 @@ pub fn read_status_at_paths(path: PathBuf, jobs_path: PathBuf) -> Result<DaemonS
     } else {
         validation.stale_reason.clone()
     };
+    let competing_serve = owner_lock
+        .holder()
+        .and_then(|holder| read_owner_contender_at(&path, holder));
     // A stale daemon with an authorized repair plan (a restartable stop/start,
     // an adoption, or an explicit reconciliation) can be replaced through that
     // plan. A stale daemon with no plan — protected active jobs, a corrupt
-    // lease, an unreachable transport, or conflicting foreground candidates —
-    // has its replacement blocked, with the blocker named in evidence terms.
+    // lease, an unreachable transport, or an owner lock held without a live
+    // lease — has its replacement blocked, with the blocker named in evidence terms.
     let replacement_blocked = !freshness.fresh && freshness.repair_plan.is_empty();
     let replacement_blocked_reason = replacement_blocked.then(|| {
         if freshness.active_jobs > 0 {
@@ -1607,7 +1619,8 @@ pub fn read_status_at_paths(path: PathBuf, jobs_path: PathBuf) -> Result<DaemonS
         state: validation.state,
         state_path,
         state_identity,
-        process_candidates,
+        owner_lock,
+        competing_serve,
         active_job_recovery_evidence,
         termination_evidence: (!validation.running)
             .then(read_termination_evidence)
@@ -1616,31 +1629,6 @@ pub fn read_status_at_paths(path: PathBuf, jobs_path: PathBuf) -> Result<DaemonS
     };
     status.summary = status.render_summary();
     Ok(status)
-}
-
-/// A stale binary can still own the recorded live lease. Promote only the
-/// complete persisted process coordinates; incomplete process inspection stays
-/// ambiguous and therefore cannot authorize mutation.
-fn candidate_matches_live_lease(
-    candidate: &DaemonProcessCandidate,
-    state: &DaemonState,
-    state_dir: &Path,
-) -> bool {
-    candidate.ownership == DaemonProcessOwnership::Ambiguous
-        && candidate.pid == state.pid
-        && candidate.state_dir.as_deref() == state_dir.to_str()
-        && candidate.bind_endpoint.as_deref() == Some(state.address.as_str())
-        && !state.startup_token.is_empty()
-        && candidate.startup_token.as_deref() == Some(state.startup_token.as_str())
-}
-
-fn has_conflicting_process_candidates(candidates: &[DaemonProcessCandidate]) -> bool {
-    candidates.iter().any(|candidate| {
-        matches!(
-            candidate.ownership,
-            DaemonProcessOwnership::Owning | DaemonProcessOwnership::Ambiguous
-        )
-    })
 }
 
 pub(crate) fn read_termination_evidence() -> Result<Option<DaemonTerminationEvidence>> {
@@ -1811,21 +1799,11 @@ where
     let local_addr = listener.local_addr().map_err(|e| {
         Error::internal_io(e.to_string(), Some("read daemon local address".to_string()))
     })?;
-    // The exclusive daemon-owner lock is already held. Keep exact prior-owner
-    // death evidence before write_state replaces the lease; version skew alone
-    // never authorizes replay of an adopted job.
-    let prior = validate_lease_file(&paths::daemon_state_file()?)?;
-    let proven_dead = if prior.stale_reason_code == Some(DaemonStaleReasonCode::PidDead) {
-        let candidates = control::daemon_process_candidates(&paths::observation_db()?)?
-            .into_iter()
-            .filter(|candidate| candidate.pid != std::process::id())
-            .collect::<Vec<_>>();
-        (!has_conflicting_process_candidates(&candidates))
-            .then_some(prior.state)
-            .flatten()
-    } else {
-        None
-    };
+    // The exclusive daemon-owner lock is already held, so whatever generation
+    // wrote a prior lease is dead: only a lock holder writes the lease. Keep
+    // its identity before write_state replaces it; version skew alone never
+    // authorizes replay of an adopted job.
+    let proven_dead = validate_lease_file(&paths::daemon_state_file()?)?.state;
     // A CLI-launched serve enforces its own lifetime; it needs the shutdown flag
     // to end itself through the same drain SIGTERM uses.
     let owned_lifetime = match shutdown.as_ref() {
@@ -7326,6 +7304,126 @@ mod tests {
     }
 
     #[test]
+    fn the_owner_lock_holder_record_round_trips() {
+        with_isolated_home(|_| {
+            let state = state_path().expect("state path");
+            let _lock = acquire_daemon_owner_lock_at(&state, Duration::ZERO).expect("serve lock");
+
+            let probe = probe_daemon_owner_lock_at(&state).expect("probe");
+            assert_eq!(
+                probe,
+                DaemonOwnerLockProbe::Held {
+                    holder: Some(DaemonOwnerHolder::current()),
+                }
+            );
+            let wire = serde_json::to_value(&probe).expect("serialize probe");
+            assert_eq!(wire["state"], "held");
+            assert_eq!(wire["holder"]["pid"], std::process::id());
+            assert_eq!(
+                serde_json::from_value::<DaemonOwnerLockProbe>(wire).expect("parse probe"),
+                probe
+            );
+        });
+    }
+
+    /// A non-daemon holder (recovery) clears any earlier record, so it reads
+    /// as held without an identity: starting.
+    #[test]
+    fn a_non_daemon_owner_lock_holder_reads_as_starting() {
+        with_isolated_home(|_| {
+            let state = state_path().expect("state path");
+            drop(acquire_daemon_owner_lock_at(&state, Duration::ZERO).expect("serve lock"));
+            let _recovery = try_acquire_daemon_owner_lock()
+                .expect("recovery lock")
+                .expect("lock is free");
+
+            assert_eq!(
+                probe_daemon_owner_lock_at(&state).expect("probe"),
+                DaemonOwnerLockProbe::Held { holder: None }
+            );
+        });
+    }
+
+    /// The lease's PID is live (it is this test process), but nothing holds
+    /// the owner lock, so the generation that wrote it is dead.
+    #[test]
+    fn a_free_owner_lock_reports_a_present_lease_dead() {
+        with_isolated_home(|_| {
+            let state = write_state("127.0.0.1:31002".parse().unwrap(), None).expect("lease");
+            assert!(pid_is_running(state.pid));
+
+            let status = read_status().expect("status");
+
+            assert_eq!(status.owner_lock, DaemonOwnerLockProbe::Free);
+            assert!(!status.running);
+            assert_eq!(
+                status.freshness.stale_reason_code,
+                Some(DaemonStaleReasonCode::PidDead)
+            );
+            assert_eq!(
+                status.freshness.recovery_evidence,
+                Some(DaemonRecoveryEvidence::ProvenDead)
+            );
+            assert!(!status.replacement_blocked);
+        });
+    }
+
+    #[test]
+    fn a_held_owner_lock_reports_its_holder_as_the_live_lease() {
+        with_isolated_home(|_| {
+            let state = state_path().expect("state path");
+            let _lock = acquire_daemon_owner_lock_at(&state, Duration::ZERO).expect("serve lock");
+            let lease = write_state("127.0.0.1:31003".parse().unwrap(), None).expect("lease");
+
+            let status = read_status().expect("status");
+
+            assert_eq!(
+                status.owner_lock.holder(),
+                Some(&DaemonOwnerHolder::current())
+            );
+            assert!(status.running);
+            assert_eq!(
+                status.state.map(|state| state.lease_id),
+                Some(lease.lease_id)
+            );
+            assert_eq!(status.competing_serve, None);
+        });
+    }
+
+    /// Status and recovery probe the lock by taking it briefly. A `serve`
+    /// starting at that instant retries instead of giving up.
+    #[test]
+    fn a_brief_probe_does_not_make_a_starting_serve_give_up() {
+        with_isolated_home(|_| {
+            let state = state_path().expect("state path");
+            let probe = try_acquire_daemon_owner_lock_at(&state)
+                .expect("probe lock")
+                .expect("lock is free");
+            assert!(
+                acquire_daemon_owner_lock_at(&state, Duration::ZERO).is_err(),
+                "without the retry window the probe wins"
+            );
+            let release = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(300));
+                drop(probe);
+            });
+
+            let lock = acquire_daemon_owner_lock_at(&state, DAEMON_OWNER_LOCK_ACQUIRE_WINDOW)
+                .expect("serve outlasts the probe");
+            release.join().unwrap();
+            assert_eq!(
+                probe_daemon_owner_lock_at(&state).expect("probe").holder(),
+                Some(&DaemonOwnerHolder::current())
+            );
+            drop(lock);
+            assert_eq!(
+                probe_daemon_owner_lock_at(&state).expect("probe"),
+                DaemonOwnerLockProbe::Free
+            );
+        });
+    }
+
+    #[test]
     fn canonical_run_ref_metadata_prefers_lifecycle_run_id() {
         let lifecycle = crate::api_jobs::RunnerJobLifecycleMetadata {
             source: Some("runner-daemon".to_string()),
@@ -8027,26 +8125,20 @@ fn reclaim_unowned_daemon_operation_lock(path: &Path) -> Result<DaemonOperationL
     )))
 }
 
+/// How long `serve` keeps retrying the owner lock before it reports the store
+/// held by a live daemon. Status and recovery probe the lock by taking it
+/// briefly; a daemon starting at that instant must not lose to the probe.
+pub(super) const DAEMON_OWNER_LOCK_ACQUIRE_WINDOW: Duration = Duration::from_secs(2);
+const DAEMON_OWNER_LOCK_RETRY: Duration = Duration::from_millis(50);
+const DAEMON_OWNER_LOCK_FILE: &str = "owner.lock";
+const DAEMON_OWNER_CONTENDER_FILE: &str = "owner.contender.json";
+
+/// Take the owner lock for a non-daemon operation (recovery, tests). Such a
+/// holder writes no record: the lock file is emptied, so a probe reads it as
+/// held without an identity, which counts as starting.
 pub(super) fn try_acquire_daemon_owner_lock() -> Result<Option<DaemonOwnerLock>> {
     let state = state_path()?;
     try_acquire_daemon_owner_lock_at(&state)
-}
-
-/// Inspect only the daemon store's existing lock. Status must not create
-/// a store or a lock file while diagnosing a missing lease.
-fn daemon_owner_lock_is_held_at(state: &Path) -> Result<bool> {
-    let path = state.with_file_name("owner.lock");
-    let file = match File::open(&path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => {
-            return Err(Error::internal_io(
-                error.to_string(),
-                Some(format!("inspect daemon owner lock {}", path.display())),
-            ));
-        }
-    };
-    Ok(!try_lock_file_exclusive(&file, "daemon owner")?)
 }
 
 pub(super) fn try_acquire_daemon_owner_lock_at(state: &Path) -> Result<Option<DaemonOwnerLock>> {
@@ -8067,18 +8159,151 @@ pub(super) fn try_acquire_daemon_owner_lock_at(state: &Path) -> Result<Option<Da
         .write(true)
         .create(true)
         .truncate(false)
-        .open(parent.join("owner.lock"))
+        .open(parent.join(DAEMON_OWNER_LOCK_FILE))
         .map_err(|error| {
             Error::internal_io(
                 error.to_string(),
                 Some("open daemon owner lock".to_string()),
             )
         })?;
-    if try_lock_file_exclusive(&file, "daemon owner")? {
-        Ok(Some(DaemonOwnerLock { file }))
-    } else {
-        Ok(None)
+    if !try_lock_file_exclusive(&file, "daemon owner")? {
+        return Ok(None);
     }
+    // A previous holder's record names a process that no longer holds the
+    // lock; it must never be read as this holder's.
+    file.set_len(0).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("clear daemon owner lock record".to_string()),
+        )
+    })?;
+    Ok(Some(DaemonOwnerLock { file }))
+}
+
+/// Take the owner lock for `serve` and record this process as its holder.
+/// Retries for [`DAEMON_OWNER_LOCK_ACQUIRE_WINDOW`] so a brief probe cannot
+/// make a starting daemon exit.
+fn acquire_daemon_owner_lock() -> Result<DaemonOwnerLock> {
+    acquire_daemon_owner_lock_at(&state_path()?, DAEMON_OWNER_LOCK_ACQUIRE_WINDOW)
+}
+
+fn acquire_daemon_owner_lock_at(state: &Path, window: Duration) -> Result<DaemonOwnerLock> {
+    let deadline = Instant::now() + window;
+    let mut lock = loop {
+        if let Some(lock) = try_acquire_daemon_owner_lock_at(state)? {
+            break lock;
+        }
+        if Instant::now() >= deadline {
+            record_owner_contender_at(state);
+            return Err(Error::internal_unexpected(
+                "daemon owner lock is held by a live daemon",
+            ));
+        }
+        std::thread::sleep(DAEMON_OWNER_LOCK_RETRY);
+    };
+    lock.write_holder(&DaemonOwnerHolder::current())?;
+    let _ = fs::remove_file(state.with_file_name(DAEMON_OWNER_CONTENDER_FILE));
+    Ok(lock)
+}
+
+impl DaemonOwnerLock {
+    fn write_holder(&mut self, holder: &DaemonOwnerHolder) -> Result<()> {
+        use std::io::Seek;
+
+        let body = serde_json::to_vec(holder).map_err(|error| {
+            Error::internal_json(
+                error.to_string(),
+                Some("serialize daemon owner holder".to_string()),
+            )
+        })?;
+        let io = |error: std::io::Error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("write daemon owner holder record".to_string()),
+            )
+        };
+        self.file.set_len(0).map_err(io)?;
+        self.file.rewind().map_err(io)?;
+        self.file.write_all(&body).map_err(io)?;
+        self.file.sync_all().map_err(io)
+    }
+}
+
+/// Observe the owner lock without keeping it. Taking the lock is the only
+/// portable liveness test of an advisory lock, so a free lock is released
+/// immediately. Status must not create a store or a lock file, so a missing
+/// lock file is simply free.
+pub(super) fn probe_daemon_owner_lock_at(state: &Path) -> Result<DaemonOwnerLockProbe> {
+    let path = state.with_file_name(DAEMON_OWNER_LOCK_FILE);
+    let mut file = match File::open(&path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(DaemonOwnerLockProbe::Free)
+        }
+        Err(error) => {
+            return Err(Error::internal_io(
+                error.to_string(),
+                Some(format!("inspect daemon owner lock {}", path.display())),
+            ));
+        }
+    };
+    if try_lock_file_exclusive(&file, "daemon owner")? {
+        return Ok(DaemonOwnerLockProbe::Free);
+    }
+    let mut body = Vec::new();
+    let holder = file
+        .read_to_end(&mut body)
+        .ok()
+        .and_then(|_| serde_json::from_slice::<DaemonOwnerHolder>(&body).ok())
+        // A record whose process is gone was left by an earlier holder; the
+        // current one (a probe or a recovery operation) has not identified
+        // itself.
+        .filter(owner_holder_is_live);
+    Ok(DaemonOwnerLockProbe::Held { holder })
+}
+
+fn owner_holder_is_live(holder: &DaemonOwnerHolder) -> bool {
+    match holder.start_identity.as_ref() {
+        Some(identity) => {
+            crate::process::process_identity_state_with_start_identity(
+                holder.pid,
+                None,
+                Some(identity),
+            ) == crate::process::ProcessIdentityState::Live
+        }
+        None => pid_is_running(holder.pid),
+    }
+}
+
+/// Best effort: a `serve` that lost the owner lock records itself and the
+/// holder that refused it, so status can report the conflict (#17387).
+fn record_owner_contender_at(state: &Path) {
+    let contender = DaemonOwnerContender {
+        contender: DaemonOwnerHolder::current(),
+        service_manager: DaemonServiceManager::detect(),
+        refused_by: probe_daemon_owner_lock_at(state)
+            .ok()
+            .and_then(|probe| probe.holder().cloned()),
+        observed_at: chrono::Utc::now().to_rfc3339(),
+    };
+    if let Ok(body) = serde_json::to_vec_pretty(&contender) {
+        let _ = fs::write(state.with_file_name(DAEMON_OWNER_CONTENDER_FILE), body);
+    }
+}
+
+/// The contender the current `holder` refused, while that conflict still
+/// stands: the contender is still running, or a service manager owns it and
+/// will keep restarting it.
+fn read_owner_contender_at(
+    state: &Path,
+    holder: &DaemonOwnerHolder,
+) -> Option<DaemonOwnerContender> {
+    let body = fs::read(state.with_file_name(DAEMON_OWNER_CONTENDER_FILE)).ok()?;
+    let contender = serde_json::from_slice::<DaemonOwnerContender>(&body).ok()?;
+    (contender.refused_by.as_ref() == Some(holder)
+        && contender.contender.pid != holder.pid
+        && (contender.service_manager.is_some() || owner_holder_is_live(&contender.contender)))
+    .then_some(contender)
 }
 
 /// Prevent a recovery from observing idle work and then racing a new durable
@@ -8323,12 +8548,6 @@ fn try_lock_file_exclusive(_file: &File, operation: &str) -> Result<bool> {
     Err(Error::internal_unexpected(format!(
         "{operation} lock is not implemented on this platform"
     )))
-}
-
-fn acquire_daemon_owner_lock() -> Result<DaemonOwnerLock> {
-    try_acquire_daemon_owner_lock()?.ok_or_else(|| {
-        Error::internal_unexpected("daemon owner lock is held by a live or starting daemon")
-    })
 }
 
 impl Drop for DaemonOwnerLock {

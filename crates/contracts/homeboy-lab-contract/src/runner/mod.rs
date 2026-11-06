@@ -29,7 +29,7 @@ use homeboy_runner_contract::{
 use serde::{Deserialize, Serialize};
 
 /// Bump only on a breaking controller↔runner wire change.
-pub const LAB_CONTRACT_VERSION: u32 = 5;
+pub const LAB_CONTRACT_VERSION: u32 = 6;
 
 /// Options controlling how a runner workspace is synced before a job runs.
 #[derive(Debug, Clone, Default)]
@@ -152,17 +152,6 @@ pub const DAEMON_RECOVERY_STATE_LOSS_CAPABILITY: &str = "daemon-recovery-state-l
 pub const DAEMON_ENSURE_RUNNING_OPERATION_ID_CAPABILITY: &str =
     "daemon-ensure-running-operation-id";
 
-/// Capability id for bounded unleased daemon candidate reconciliation.
-pub const DAEMON_RECOVERY_UNLEASED_CANDIDATES_CAPABILITY: &str =
-    "daemon-recovery-unleased-candidates";
-
-/// Whether this binary can safely reconcile an unleased daemon candidate.
-/// Linux pidfds bind a signal to the observed process instance and prevent PID
-/// reuse from turning reconciliation into a signal for a different process.
-pub const fn unleased_candidate_reconciliation_supported() -> bool {
-    cfg!(target_os = "linux")
-}
-
 /// The conditionally-needed daemon recovery contracts a runner may advertise.
 ///
 /// These are NOT part of [`required_lab_handoff_capabilities`]: they are
@@ -171,21 +160,17 @@ pub const fn unleased_candidate_reconciliation_supported() -> bool {
 /// that omits them can still execute work; controllers that need the recovery
 /// path require the typed capability. Keep these names protocol-focused.
 pub fn daemon_recovery_capabilities() -> Vec<LabCapabilityVersion> {
-    let mut capabilities = vec![
+    [
         DAEMON_RECOVERY_LEASELESS_CAPABILITY,
         DAEMON_RECOVERY_STATE_LOSS_CAPABILITY,
         DAEMON_ENSURE_RUNNING_OPERATION_ID_CAPABILITY,
-    ];
-    if unleased_candidate_reconciliation_supported() {
-        capabilities.push(DAEMON_RECOVERY_UNLEASED_CANDIDATES_CAPABILITY);
-    }
-    capabilities
-        .into_iter()
-        .map(|id| LabCapabilityVersion {
-            id: id.to_string(),
-            version: 1,
-        })
-        .collect()
+    ]
+    .into_iter()
+    .map(|id| LabCapabilityVersion {
+        id: id.to_string(),
+        version: 1,
+    })
+    .collect()
 }
 
 /// Decide whether a remote daemon advertises a recovery capability.
@@ -578,14 +563,11 @@ mod daemon_recovery_capability_tests {
             .iter()
             .map(|capability| capability.id.as_str())
             .collect();
-        let mut expected = BTreeSet::from([
+        let expected = BTreeSet::from([
             DAEMON_RECOVERY_LEASELESS_CAPABILITY,
             DAEMON_RECOVERY_STATE_LOSS_CAPABILITY,
             DAEMON_ENSURE_RUNNING_OPERATION_ID_CAPABILITY,
         ]);
-        if unleased_candidate_reconciliation_supported() {
-            expected.insert(DAEMON_RECOVERY_UNLEASED_CANDIDATES_CAPABILITY);
-        }
         assert_eq!(ids, expected);
         assert!(recovery.iter().all(|capability| capability.version == 1));
 

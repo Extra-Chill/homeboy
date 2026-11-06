@@ -21,7 +21,7 @@ use serde::Serialize;
 use uuid::Uuid;
 
 use super::lifecycle_plan::{Attestation, BlockCause, Plan, Step, WaitCause};
-use super::{DaemonProcessOwnership, DaemonRepairStep, DaemonStaleReasonCode, DaemonStatus};
+use super::{DaemonRepairStep, DaemonStaleReasonCode, DaemonStatus};
 use crate::error::{ActionSafety, ExecutableAction};
 
 /// Stop the daemon recorded in the local state file.
@@ -36,8 +36,6 @@ pub const DAEMON_ADOPT_ORPHAN: &str = "daemon_adopt_orphan";
 pub const DAEMON_RECONCILE_LEASELESS_ORPHANS: &str = "daemon_reconcile_leaseless_orphans";
 /// Reconcile an exact PID-less job set after an operator-authorized daemon loss.
 pub const DAEMON_RECONCILE_DEAD_LEASE_ORPHANS: &str = "daemon_reconcile_dead_lease_orphans";
-/// Preview/review unleased foreground candidates after a lease retirement.
-pub const DAEMON_RECONCILE_UNLEASED_CANDIDATES: &str = "daemon_reconcile_unleased_candidates";
 /// Re-read daemon evidence. The step emitted when nothing else is authorized.
 pub const DAEMON_DIAGNOSE: &str = "daemon_diagnose";
 
@@ -185,18 +183,6 @@ pub fn diagnose() -> ExecutableAction {
     )
 }
 
-pub fn reconcile_unleased_candidates() -> ExecutableAction {
-    action(
-        "daemon.reconcile_unleased_candidates",
-        "review unleased local daemon candidates".to_string(),
-        [
-            "daemon".to_string(),
-            "reconcile-unleased-candidates".to_string(),
-        ],
-        ActionSafety::ReadOnly,
-    )
-}
-
 /// The recovery a dispatcher resolved from one `homeboy daemon status` read.
 ///
 /// Every argument in `steps` is already filled in from that report. The point
@@ -245,24 +231,6 @@ impl DaemonRecoveryPlan {
     }
 }
 
-/// Live daemon processes that hold no lease but may own this store. The
-/// recorded lease's own PID is excluded: it is the store's daemon.
-fn live_unleased_candidates(status: &DaemonStatus) -> Vec<u32> {
-    let lease_pid = status.state.as_ref().map(|state| state.pid);
-    status
-        .process_candidates
-        .iter()
-        .filter(|candidate| {
-            matches!(
-                candidate.ownership,
-                DaemonProcessOwnership::Owning | DaemonProcessOwnership::Ambiguous
-            ) && Some(candidate.pid) != lease_pid
-                && crate::process::pid_is_running(candidate.pid)
-        })
-        .map(|candidate| candidate.pid)
-        .collect()
-}
-
 /// Resolve the recovery for one daemon status report.
 ///
 /// This is the one daemon recovery planner. The freshness report already
@@ -293,16 +261,11 @@ fn plan_recovery_steps(status: &DaemonStatus) -> DaemonRecoveryPlan {
     // A second daemon process competing with the live lease for this store is
     // a conflict however healthy the lease looks (#17387): nothing is started
     // or replaced until one of them is gone.
-    let competing = status.competing_serve_pids();
-    if !competing.is_empty() {
-        let pids = competing
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join(", ");
+    if let Some(contender) = &status.competing_serve {
         return DaemonRecoveryPlan::diagnose(
             format!(
-                "daemon serve process(es) {pids} compete with the live lease for this store; stop the one its service manager does not own"
+                "{} while the live lease holds this store; stop the one its service manager does not own",
+                contender.describe()
             ),
             |reason| Plan::Blocked {
                 cause: BlockCause::UnleasedProcess,
@@ -352,43 +315,27 @@ fn plan_recovery_steps(status: &DaemonStatus) -> DaemonRecoveryPlan {
         }
     }
 
-    // Nothing serves the store, yet a live daemon process that holds no lease
-    // may own it. Any start, adoption, or stop could race that process, so
-    // nothing proceeds until the typed candidate set is reviewed. A dead
-    // lease's own jobs are decided first: their recovery re-proves ownership
-    // under the owner lock.
-    let dead_lease_jobs = status.state.is_some()
-        && !status.running
-        && !status.active_job_recovery_evidence.is_empty();
+    // The owner lock is held, yet no live lease names its holder: a daemon is
+    // starting, or a recovery operation holds the store. Any start, adoption,
+    // or stop could race it, so nothing proceeds until the holder publishes a
+    // lease or releases the lock.
     if !status.running
-        && !dead_lease_jobs
+        && status.owner_lock.is_held()
         && freshness.stale_reason_code != Some(DaemonStaleReasonCode::LeaseCorrupt)
     {
-        let unleased = live_unleased_candidates(status);
-        if !unleased.is_empty() {
-            let pids = unleased
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join(", ");
-            return DaemonRecoveryPlan {
-                steps: vec![DaemonRepairStep::executable(
-                    DAEMON_RECONCILE_UNLEASED_CANDIDATES,
-                    reconcile_unleased_candidates(),
-                )],
-                lifecycle: Plan::Blocked {
-                    cause: BlockCause::UnleasedProcess,
-                    reason: format!(
-                        "live daemon process(es) {pids} hold no lease; no process is signaled and no daemon is started while ownership is unresolved"
-                    ),
-                },
-                reason: format!(
-                    "live daemon process(es) {pids} hold no lease; review the typed candidate set before explicit apply"
-                ),
-                required_confirmations: Vec::new(),
-                executable: false,
-            };
-        }
+        let holder = match status.owner_lock.holder() {
+            Some(holder) => format!("daemon pid {}", holder.pid),
+            None => "a starting daemon or a recovery operation".to_string(),
+        };
+        return DaemonRecoveryPlan::diagnose(
+            format!(
+                "the daemon owner lock is held by {holder} without a live lease; no process is signaled and no daemon is started until it publishes a lease or exits"
+            ),
+            |reason| Plan::Blocked {
+                cause: BlockCause::UnleasedProcess,
+                reason,
+            },
+        );
     }
 
     let requires_exact_dead_lease_recovery = pid_dead
@@ -490,33 +437,6 @@ fn plan_recovery_steps(status: &DaemonStatus) -> DaemonRecoveryPlan {
                 executable: true,
             };
         }
-    }
-
-    // A preceding lease-bound retirement can expose an old foreground daemon
-    // with no lease or startup token. Keep it separate from the destructive
-    // plan: this command first emits a reviewed, identity-bound apply token.
-    if freshness.active_jobs == 0
-        && status.process_candidates.iter().any(|candidate| {
-            matches!(
-                candidate.ownership,
-                DaemonProcessOwnership::Owning | DaemonProcessOwnership::Ambiguous
-            )
-        })
-    {
-        let reason = "lease recovery exposed unleased foreground daemon candidates; review the typed candidate set before explicit apply".to_string();
-        return DaemonRecoveryPlan {
-            steps: vec![DaemonRepairStep::executable(
-                DAEMON_RECONCILE_UNLEASED_CANDIDATES,
-                reconcile_unleased_candidates(),
-            )],
-            lifecycle: Plan::Blocked {
-                cause: BlockCause::Unauthorized,
-                reason: reason.clone(),
-            },
-            reason,
-            required_confirmations: Vec::new(),
-            executable: false,
-        };
     }
 
     // Nothing is authorized. Say so, and hand back the read-only step that
@@ -677,7 +597,8 @@ mod tests {
             state: None,
             state_path: "/root/.config/homeboy/daemon/state.json".to_string(),
             state_identity: "identity".to_string(),
-            process_candidates: Vec::new(),
+            owner_lock: super::super::DaemonOwnerLockProbe::Free,
+            competing_serve: None,
             active_job_recovery_evidence: Vec::new(),
             termination_evidence: None,
         };
@@ -1058,21 +979,6 @@ mod tests {
         assert!(authorizes_automatic_idle_restart(&status));
     }
 
-    fn unleased_candidate() -> super::super::DaemonProcessCandidate {
-        super::super::DaemonProcessCandidate {
-            pid: 0,
-            process_start_identity: None,
-            executable: "homeboy".to_string(),
-            executable_digest: None,
-            cmdline: "homeboy daemon serve".to_string(),
-            bind_endpoint: None,
-            state_dir: None,
-            build_identity: None,
-            startup_token: None,
-            ownership: DaemonProcessOwnership::Unrelated,
-        }
-    }
-
     fn recovery_evidence(job_id: Uuid) -> crate::api_jobs::DaemonActiveJobRecoveryEvidence {
         crate::api_jobs::DaemonActiveJobRecoveryEvidence {
             job_id,
@@ -1106,11 +1012,11 @@ mod tests {
         }
     }
 
-    /// Nothing serves the store but a live daemon process holds no lease: the
-    /// adoption the freshness report offers would race that process, so the
-    /// one planner blocks it and the mutation gate refuses.
+    /// The owner lock is held but no live lease names its holder (a daemon is
+    /// starting): the adoption the freshness report offers would race that
+    /// holder, so the one planner blocks it and the mutation gate refuses.
     #[test]
-    fn a_live_unleased_process_blocks_a_dead_lease_without_jobs() {
+    fn a_held_owner_lock_blocks_a_dead_lease_without_jobs() {
         let mut status = status(
             Some(super::super::DaemonStaleReasonCode::PidDead),
             vec![DaemonRepairStep::executable(
@@ -1120,16 +1026,12 @@ mod tests {
             0,
         );
         status.running = false;
-        status.process_candidates = vec![super::super::DaemonProcessCandidate {
-            pid: std::process::id(),
-            ownership: DaemonProcessOwnership::Ambiguous,
-            ..unleased_candidate()
-        }];
+        status.owner_lock = super::super::DaemonOwnerLockProbe::Held { holder: None };
 
         let plan = plan_recovery(&status);
 
         assert!(!plan.executable);
-        assert_eq!(plan.steps[0].code, DAEMON_RECONCILE_UNLEASED_CANDIDATES);
+        assert_eq!(plan.steps[0].code, DAEMON_DIAGNOSE);
         assert!(matches!(
             plan.lifecycle,
             Plan::Blocked {

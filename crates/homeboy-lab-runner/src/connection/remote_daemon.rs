@@ -840,15 +840,6 @@ pub(super) fn remote_daemon_recovery_freshness_from_status(
             daemon_repair::RUNNER_RECONCILE_LEASELESS_ORPHANS,
             daemon_repair::reconcile_leaseless_orphans_action(runner_id),
         ))
-    } else if status.active_jobs == 0
-        && status
-            .stale_reason
-            .as_deref()
-            .is_some_and(|reason| reason.contains("foreground daemon candidates"))
-    {
-        daemon_repair::reconcile_unleased_candidates_action(runner_id).map(|action| {
-            daemon_repair::action_step(daemon_repair::RUNNER_RECONCILE_UNLEASED_CANDIDATES, action)
-        })
     } else if recoverable_fresh_idle {
         Some(daemon_repair::action_step(
             daemon_repair::RUNNER_CONNECT,
@@ -2016,8 +2007,7 @@ fn remote_daemon_ensure_running(
         // Every homeboy command failure exits 2 by convention (see
         // `cli_runtime.rs`), so a nonzero remote exit is not proof the JSON
         // body on stdout is unusable — the remote's own typed error envelope
-        // is usually still there. Prefer it: a refusal like
-        // `daemon_unleased_process_conflict` must be reported (and retired)
+        // is usually still there. Prefer it: a typed refusal must be reported
         // as itself, not flattened into a generic bootstrap failure that
         // hides the real, non-retryable cause (#15087).
         if let Some(error) = parse_envelope(&output.stdout)
