@@ -615,19 +615,28 @@ struct StartupLeaseObservation {
     observed_running: Option<bool>,
     observed_fresh: Option<bool>,
     observed_reachable: Option<bool>,
+    /// Exit status of the spawned `serve` child, when it died before
+    /// publishing a work-admitting lease.
+    child_exit: Option<String>,
 }
 
 /// A launch token is an attempt identity, never a general daemon readiness
 /// signal. The spawned process is the daemon itself, but a PID alone can be
 /// reused, so the live lease is identified by its unique token.
-fn observe_startup_lease<ReadStatus, Sleep>(
-    _launcher_pid: u32,
+///
+/// `child_exit` reports the spawned child's exit status once it has exited. A
+/// child that exited can never publish a lease, so observation stops at once
+/// instead of polling out the whole budget (#17445). It is sampled before each
+/// status read, so a lease published just before the exit is still observed.
+fn observe_startup_lease<ChildExit, ReadStatus, Sleep>(
+    mut child_exit: ChildExit,
     startup_token: &str,
     observations: usize,
     mut read_status: ReadStatus,
     mut sleep: Sleep,
 ) -> Result<std::result::Result<DaemonStartResult, StartupLeaseObservation>>
 where
+    ChildExit: FnMut() -> Option<String>,
     ReadStatus: FnMut() -> Result<super::DaemonStatus>,
     Sleep: FnMut(),
 {
@@ -638,8 +647,10 @@ where
         observed_running: None,
         observed_fresh: None,
         observed_reachable: None,
+        child_exit: None,
     };
     for attempt in 0..=observations {
+        let exited = child_exit();
         let status = read_status()?;
         let admits_work = status.admits_work();
         observed.observed_running = Some(status.running);
@@ -658,6 +669,10 @@ where
             observed.observed_lease_id = Some(state.lease_id);
             observed.observed_token =
                 (!state.startup_token.is_empty()).then_some(state.startup_token);
+        }
+        if exited.is_some() {
+            observed.child_exit = exited;
+            return Ok(Err(observed));
         }
         if attempt < observations {
             sleep();
@@ -681,6 +696,15 @@ impl StartupAttempt {
             state_path: state_path.to_path_buf(),
             armed: true,
         }
+    }
+
+    /// The child's exit status once it has exited; reaps it.
+    fn exit_status(&mut self) -> Option<String> {
+        self.child
+            .try_wait()
+            .ok()
+            .flatten()
+            .map(|status| status.to_string())
     }
 
     fn cleanup(&mut self) -> Vec<String> {
@@ -928,13 +952,22 @@ fn startup_timeout_error(
         .as_deref()
         .is_some_and(|token| token != startup_token);
     let mut failed = Vec::new();
-    if observation.observed_running == Some(false) {
+    // An exited child explains every other failed condition: nothing is
+    // running, so nothing is fresh or reachable either.
+    let exited = observation
+        .child_exit
+        .as_deref()
+        .map(|status| format!("the daemon process exited before publishing its lease ({status})"));
+    if let Some(exited) = &exited {
+        failed.push(exited.as_str());
+    }
+    if exited.is_none() && observation.observed_running == Some(false) {
         failed.push("the daemon process was not running");
     }
-    if observation.observed_fresh == Some(false) {
+    if exited.is_none() && observation.observed_fresh == Some(false) {
         failed.push("the daemon binary was stale (did not match this Homeboy build)");
     }
-    if observation.observed_reachable == Some(false) {
+    if exited.is_none() && observation.observed_reachable == Some(false) {
         failed.push("the daemon API was not reachable");
     }
     if token_mismatch {
@@ -957,6 +990,7 @@ fn startup_timeout_error(
             "reachable": observation.observed_reachable,
             "startup_token_mismatch": token_mismatch,
         },
+        "child_exit": observation.child_exit,
         "daemon_log": daemon_log,
         "expected": { "pid": pid, "startup_token": startup_token },
         "observed": {
@@ -1046,13 +1080,14 @@ fn spawn_and_wait_for_lease_attempt(
     let pid = child.id();
     let mut attempt = StartupAttempt::new(child, startup_token, &state_path);
     let result = (|| {
-        match observe_startup_lease(
-            pid,
+        let observed = observe_startup_lease(
+            || attempt.exit_status(),
             startup_token,
             STARTUP_LEASE_OBSERVATIONS,
             || super::read_status_for_state_path(state_path.clone()),
             || thread::sleep(STARTUP_LEASE_POLL),
-        )? {
+        )?;
+        match observed {
             Ok(result) => Ok(result),
             Err(observation) => {
                 // Cleanup is evidence about the failed attempt, not a replacement

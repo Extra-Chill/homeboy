@@ -368,7 +368,7 @@ fn ensure_running_returns_the_startup_failure() {
 fn startup_observation_requires_a_live_attempt_token() {
     let expected = "attempt-token";
     let wrong = fake_status(Some(fake_daemon(4242, "other-lease")), true);
-    let result = observe_startup_lease(4343, expected, 0, || Ok(wrong.clone()), || {})
+    let result = observe_startup_lease(|| None, expected, 0, || Ok(wrong.clone()), || {})
         .expect("observe startup");
     let observed = result.expect_err("wrong daemon must not be adopted");
     assert_eq!(observed.observed_pid, Some(4242));
@@ -376,7 +376,7 @@ fn startup_observation_requires_a_live_attempt_token() {
 
     let mut stale = fake_status(Some(fake_daemon(4242, "stale-lease")), true);
     stale.state.as_mut().expect("state").startup_token = expected.to_string();
-    let result = observe_startup_lease(4343, expected, 0, || Ok(stale.clone()), || {})
+    let result = observe_startup_lease(|| None, expected, 0, || Ok(stale.clone()), || {})
         .expect("observe startup");
     assert!(
         result.is_ok(),
@@ -385,7 +385,7 @@ fn startup_observation_requires_a_live_attempt_token() {
 
     let mut dead = fake_status(Some(fake_daemon(4242, "dead-lease")), false);
     dead.state.as_mut().expect("state").startup_token = expected.to_string();
-    let result = observe_startup_lease(4343, expected, 0, || Ok(dead.clone()), || {})
+    let result = observe_startup_lease(|| None, expected, 0, || Ok(dead.clone()), || {})
         .expect("observe startup");
     assert!(result.is_err(), "a stale matching token is not ready");
 }
@@ -399,7 +399,7 @@ fn startup_observation_waits_for_delayed_token_without_provider_work() {
     let states = Arc::new(Mutex::new(vec![missing, ready]));
     let read_states = Arc::clone(&states);
     let result = observe_startup_lease(
-        4343,
+        || None,
         expected,
         1,
         move || Ok(read_states.lock().expect("states").remove(0)),
@@ -408,6 +408,68 @@ fn startup_observation_waits_for_delayed_token_without_provider_work() {
     .expect("observe delayed startup")
     .expect("matching delayed token is ready");
     assert_eq!(result.lease_id, "lease-new");
+}
+
+#[test]
+fn startup_observation_stops_as_soon_as_the_child_exits() {
+    // #17445: a `serve` that died on bind used to be polled for the whole
+    // observation budget, each poll hashing the binary for freshness.
+    let missing = fake_status(None, false);
+    let mut reads = 0;
+    let mut sleeps = 0;
+    let observed = observe_startup_lease(
+        || Some("exit status: 1".to_string()),
+        "attempt-token",
+        100,
+        || {
+            reads += 1;
+            Ok(missing.clone())
+        },
+        || sleeps += 1,
+    )
+    .expect("observe startup")
+    .expect_err("an exited child never admits work");
+    assert_eq!((reads, sleeps), (1, 0), "one status read, no polling");
+    assert_eq!(observed.child_exit.as_deref(), Some("exit status: 1"));
+}
+
+#[test]
+fn startup_observation_admits_a_lease_published_before_the_child_exited() {
+    let expected = "attempt-token";
+    let mut ready = fake_status(Some(fake_daemon(4343, "lease-new")), true);
+    ready.state.as_mut().expect("state").startup_token = expected.to_string();
+    let result = observe_startup_lease(
+        || Some("exit status: 0".to_string()),
+        expected,
+        100,
+        || Ok(ready.clone()),
+        || {},
+    )
+    .expect("observe startup")
+    .expect("an admitting lease wins over a later-sampled exit");
+    assert_eq!(result.lease_id, "lease-new");
+}
+
+#[test]
+fn startup_error_names_the_child_exit_instead_of_its_consequences() {
+    let exited = super::StartupLeaseObservation {
+        observed_pid: None,
+        observed_lease_id: None,
+        observed_token: None,
+        observed_running: Some(false),
+        observed_fresh: Some(false),
+        observed_reachable: Some(false),
+        child_exit: Some("exit status: 1".to_string()),
+    };
+    let error = super::startup_timeout_error(4343, "attempt-token", exited, Vec::new(), None);
+    let message = error.to_string();
+    assert!(
+        message.contains("the daemon process exited before publishing its lease (exit status: 1)"),
+        "{message}"
+    );
+    assert!(!message.contains("stale"), "{message}");
+    assert!(!message.contains("not reachable"), "{message}");
+    assert_eq!(error.details["child_exit"], "exit status: 1");
 }
 
 #[test]
@@ -493,6 +555,7 @@ fn startup_recovery_reuses_only_the_authoritative_attempt_identity() {
         observed_running: None,
         observed_fresh: None,
         observed_reachable: None,
+        child_exit: None,
     };
     assert!(can_recover_startup_attempt(true, expected, &absent, &[]));
 
@@ -503,6 +566,7 @@ fn startup_recovery_reuses_only_the_authoritative_attempt_identity() {
         observed_running: None,
         observed_fresh: None,
         observed_reachable: None,
+        child_exit: None,
     };
     assert!(can_recover_startup_attempt(true, expected, &stale, &[]));
 
@@ -513,6 +577,7 @@ fn startup_recovery_reuses_only_the_authoritative_attempt_identity() {
         observed_running: None,
         observed_fresh: None,
         observed_reachable: None,
+        child_exit: None,
     };
     assert!(!can_recover_startup_attempt(
         true,
@@ -540,6 +605,7 @@ fn startup_timeout_error_reports_failed_admission_without_fabricating_a_token_mi
         observed_running: Some(false),
         observed_fresh: Some(true),
         observed_reachable: Some(true),
+        child_exit: None,
     };
     let error = super::startup_timeout_error(4343, "attempt-token", died.clone(), Vec::new(), None);
     assert!(
@@ -569,6 +635,7 @@ fn startup_timeout_error_reports_failed_admission_without_fabricating_a_token_mi
         observed_running: Some(true),
         observed_fresh: Some(true),
         observed_reachable: Some(false),
+        child_exit: None,
     };
     let error = super::startup_timeout_error(4343, "attempt-token", unreachable, Vec::new(), None);
     assert!(
@@ -585,6 +652,7 @@ fn startup_timeout_error_reports_failed_admission_without_fabricating_a_token_mi
         observed_running: Some(true),
         observed_fresh: Some(true),
         observed_reachable: Some(true),
+        child_exit: None,
     };
     let error = super::startup_timeout_error(4343, "attempt-token", competing, Vec::new(), None);
     assert!(
@@ -602,6 +670,7 @@ fn startup_timeout_error_carries_the_daemon_log_tail() {
         observed_running: Some(false),
         observed_fresh: Some(true),
         observed_reachable: Some(false),
+        child_exit: None,
     };
     let error = super::startup_timeout_error(
         4343,
@@ -882,6 +951,7 @@ mod startup_cleanup_contract {
             observed_running: Some(false),
             observed_fresh: Some(true),
             observed_reachable: Some(true),
+            child_exit: None,
         };
         let error = super::super::startup_timeout_error(
             4343,

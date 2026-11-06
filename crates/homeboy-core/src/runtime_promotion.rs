@@ -2682,7 +2682,9 @@ mod tests {
                 |event| events.lock().expect("collect admission events").push(event),
             )
             .and_then(|lease| {
-                lease.drain_for_binary_replacement(Duration::from_millis(250), |event| {
+                // One heartbeat per 100ms drain poll: a deadline of a few polls
+                // left one slow pin scan room for a single heartbeat (#17410).
+                lease.drain_for_binary_replacement(Duration::from_secs(1), |event| {
                     events.lock().expect("collect drain events").push(event)
                 })
             })
