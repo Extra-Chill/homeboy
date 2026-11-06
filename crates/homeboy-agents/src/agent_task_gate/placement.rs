@@ -599,8 +599,9 @@ pub fn execute_admitted_with_resources(
     execute_with_context_and_resources(request, cwd, &context, resources)
 }
 
-#[cfg(test)]
-fn execute_with_context(
+/// Exercise runner gate execution with an authenticated fixture context.
+#[cfg(any(test, feature = "test-support"))]
+pub fn execute_with_context(
     request: LabGateRequest,
     cwd: &Path,
     context: &homeboy_core::runner_job_execution_context::RunnerJobExecutionContext,
@@ -708,6 +709,10 @@ fn execute_with_context_and_resources(
     // The existing subprocess projection is emitted only after authenticating
     // the accepted runner context. Nested Homeboy gates execute in place rather
     // than attempting admission through their deliberately private registry.
+    environment.variables.insert(
+        homeboy_runner_contract::RUNNER_HOSTED_EXEC_ENV.to_string(),
+        "1".to_string(),
+    );
     environment.variables.insert(homeboy_core::observation::LAB_OFFLOAD_METADATA_ENV.to_string(),
         serde_json::json!({"schema": "homeboy/lab-offload-subprocess/v1", "runner_id": context.runner_id(), "runner_job_execution_context": context.evidence_record()?}).to_string());
     if !environment.isolate_home || !environment.isolate_xdg {

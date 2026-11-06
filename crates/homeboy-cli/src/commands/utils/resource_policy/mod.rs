@@ -2585,16 +2585,86 @@ mod tests {
     }
 
     #[test]
-    fn runner_hosted_exec_does_not_fail_non_interactive_preflight() {
-        let _lock = env_lock();
-        let _guard = EnvVarGuard::set(crate::runner::RUNNER_HOSTED_EXEC_ENV, "1");
-        let warning = evaluate(
-            lab_supported_hot("agent-task cook/run-plan"),
-            &resources(ResourceRecommendation::Hot),
-        )
-        .expect("hot machines warn");
-
-        assert!(non_interactive_preflight_error(&warning, false, false, None, false).is_none());
+    fn lab_gate_runner_hosted_exec_does_not_fail_non_interactive_preflight() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            use crate::agents::agent_tasks::gate::{placement, AgentTaskGateEnvironmentPolicy};
+            let _hosted = EnvVarGuard::remove(crate::runner::RUNNER_HOSTED_EXEC_ENV);
+            let _ci = EnvVarGuard::remove("GITHUB_ACTIONS");
+            let temp = tempfile::tempdir().unwrap();
+            for args in [
+                vec!["init", "-q"],
+                vec![
+                    "-c",
+                    "user.name=Fixture",
+                    "-c",
+                    "user.email=fixture@example.invalid",
+                    "commit",
+                    "--allow-empty",
+                    "-qm",
+                    "candidate",
+                ],
+            ] {
+                assert!(std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(temp.path())
+                    .status()
+                    .unwrap()
+                    .success());
+            }
+            let request = placement::LabGateRequest {
+                schema: placement::LabGateRequestSchema::V2,
+                preflight_only: false,
+                toolchains: vec![],
+                runner_id: "lab".to_string(),
+                candidate: crate::agents::agent_task_promotion::candidate_fingerprint(
+                    temp.path().to_str().unwrap(),
+                )
+                .unwrap(),
+                index: 1,
+                argv: vec![
+                    "sh".to_string(),
+                    "-c".to_string(),
+                    "printf '%s' \"$HOMEBOY_RUNNER_HOSTED_EXEC\"".to_string(),
+                ],
+                label: "promotion gate".to_string(),
+                visibility: Default::default(),
+                reveal_policy: Default::default(),
+                environment: AgentTaskGateEnvironmentPolicy {
+                    hydrate_dependencies: false,
+                    hydrate_rust_cache: false,
+                    variables: std::collections::BTreeMap::from([(
+                        crate::runner::RUNNER_HOSTED_EXEC_ENV.to_string(),
+                        "0".to_string(),
+                    )]),
+                    ..Default::default()
+                },
+                package_artifacts: vec![],
+                declared_plan: None,
+                timeout_seconds: 30,
+                no_progress_timeout_seconds: 30,
+            };
+            let context = homeboy_core::runner_job_execution_context::RunnerJobExecutionContext::direct_daemon(
+                Some("controller-cook"), "lab", "job", "homeboy", "reservation",
+            ).unwrap();
+            let receipt = placement::execute_with_context(request, temp.path(), &context).unwrap();
+            assert_eq!(
+                receipt.report.status,
+                crate::agents::agent_tasks::gate::AgentTaskGateStatus::Succeeded
+            );
+            assert_eq!(receipt.report.stdout, "1");
+            // Evaluate the hot-machine policy with the marker actually emitted
+            // by the isolated gate process, not a hard-coded parent fixture.
+            let _gate_context = EnvVarGuard::set(
+                crate::runner::RUNNER_HOSTED_EXEC_ENV,
+                &receipt.report.stdout,
+            );
+            let warning = evaluate(
+                lab_supported_hot("review lint"),
+                &resources(ResourceRecommendation::Hot),
+            )
+            .expect("hot machines warn");
+            assert!(non_interactive_preflight_error(&warning, false, false, None, false).is_none());
+        });
     }
 
     #[test]
