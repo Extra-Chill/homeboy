@@ -97,6 +97,19 @@ pub fn ensure_transport(runner_id: &str, lifetime: TransportLifetime) -> Result<
     ensure_transport_with(runner_id, lifetime, &LiveTransport)
 }
 
+/// Reattach an admitted job to its captured owner, never the newest session.
+/// The caller owns the returned temporary tunnel and must close it.
+pub(crate) fn reattach_job_owner(runner_id: &str, owner: &RunnerSession) -> Result<RunnerSession> {
+    open_transport(runner_id, owner).map_err(|mut error| {
+        if TransportFailure::of(&error) == Some(TransportFailure::IdentityMismatch) {
+            // A refusal to publish an endpoint is not evidence that the job
+            // terminated. Do not follow the replacement generation either.
+            error.retryable = Some(true);
+        }
+        error
+    })
+}
+
 /// The one liveness predicate: the session's own tunnel is reachable and the
 /// daemon behind it answers `/health` with the session's lease and PID.
 ///

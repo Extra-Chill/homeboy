@@ -549,6 +549,58 @@ fn transient_daemon_transport_drop_keeps_the_durable_job_recoverable() {
 }
 
 #[test]
+fn generation_mismatch_does_not_terminalize_an_admitted_job() {
+    crate::test_support::with_isolated_home(|_| {
+        let runner = ssh_runner();
+        let job = running_job();
+        let command = vec!["homeboy".to_string(), "cook".to_string()];
+        let run_id = persist_lab_offload_handoff_run(
+            &runner,
+            "/srv/homeboy/project",
+            &command,
+            &job,
+            None,
+            false,
+        )
+        .unwrap();
+        let mut source = Error::validation_invalid_argument(
+            "runner",
+            "endpoint identity did not match the selected generation",
+            Some(runner.id.clone()),
+            None,
+        );
+        source.details["transport_failure"] = json!("identity_mismatch");
+        let error = terminal_runner_poll_failure(
+            &runner,
+            "/srv/homeboy/project",
+            &command,
+            &job,
+            "daemon",
+            None,
+            &homeboy_core::source_snapshot::existing_remote(
+                "lab",
+                "/srv/homeboy/project",
+                Some("/srv/homeboy"),
+            ),
+            &[],
+            Some(&run_id),
+            Some("accepted-build"),
+            source,
+        );
+        assert_eq!(error.retryable, Some(true));
+        assert_eq!(error.details["status"], "recoverable_followup_required");
+        assert_eq!(
+            error.details["source"]["details"]["transport_failure"],
+            "identity_mismatch"
+        );
+        let store = ObservationStore::open_initialized().unwrap();
+        let run = store.get_run(&run_id).unwrap().unwrap();
+        assert_eq!(run.status, "running");
+        assert!(run.metadata_json["lab"]["controller_terminal"].is_null());
+    });
+}
+
+#[test]
 fn daemon_identity_transition_reports_a_restarted_control_plane() {
     let transition = super::super::daemon::daemon_identity_transition(
         Some("homeboy 0.283.1+95ce06c58b95"),

@@ -3465,6 +3465,7 @@ pub(crate) use service::{
 use session_store::*;
 pub(crate) use session_store::{controller_id, read_session};
 pub use session_store::{peer_session_maintenance, PeerSessionMaintenanceReport};
+pub(crate) use transport::reattach_job_owner;
 pub use transport::{
     close_transport, ensure_transport, transport_is_live, TransportFailure, TransportLifetime,
 };

@@ -199,6 +199,7 @@ pub(super) fn exec_via_daemon(
         .transpose()?;
     let foreground_source_lease = std::cell::RefCell::new(None);
     let daemon_endpoint = std::cell::RefCell::new(local_url.to_string());
+    let owner_transport = JobOwnerTransport::new(accepted_session.as_ref());
     // The runner owns the job's event log; the controller keeps only a
     // cursor into it (#13881 step 2).
     let watch_follow = std::cell::RefCell::new(DaemonWatchFollow::default());
@@ -271,7 +272,7 @@ pub(super) fn exec_via_daemon(
                     .renew_running_runner_exec_source_lease(run_id, token)?;
             }
             let job_id = current.id.to_string();
-            let reload = || refreshed_daemon_endpoint(&runner.id);
+            let reload = || owner_transport.reload(&runner.id);
             let poll_failure = |err| {
                 terminal_runner_poll_failure(
                     runner,
@@ -325,7 +326,7 @@ pub(super) fn exec_via_daemon(
                 let endpoint = daemon_endpoint.borrow().clone();
                 let refreshed_endpoint = follow
                     .drain_to_end(&client, &endpoint, &job.id.to_string(), || {
-                        refreshed_daemon_endpoint(&runner.id)
+                        owner_transport.reload(&runner.id)
                     })
                     .map_err(|error| {
                         lab_terminal_result_transport_error(runner, &cwd, &command, job, error)
@@ -1989,12 +1990,113 @@ pub(super) fn daemon_poll_transport_was_lost(error: &Error) -> bool {
     )
 }
 
-/// A failed job-owner reattach is transient when it lost the daemon transport
-/// or its producer marked it retryable (for example a runner state lock
-/// contended by concurrent Cooks). Authoritative refusals, such as a
-/// daemon identity mismatch, are not retryable and end the poll.
+/// Failed reattachment is not an authoritative job outcome. In particular,
+/// a generation mismatch must never terminalize an already admitted job.
 fn reattach_failure_is_transient(error: &Error) -> bool {
-    daemon_poll_transport_was_lost(error) || error.retryable == Some(true)
+    daemon_poll_transport_was_lost(error)
+        || error.retryable == Some(true)
+        || crate::connection::TransportFailure::of(error)
+            == Some(crate::connection::TransportFailure::IdentityMismatch)
+}
+
+/// A foreground follow owns only its replacement tunnel, not the persisted
+/// session's tunnel. Keeping the accepted owner immutable prevents reconnect
+/// from silently switching the job to a newly published daemon generation.
+struct JobOwnerTransport {
+    owner: Option<RunnerSession>,
+    temporary: std::cell::RefCell<Option<RunnerSession>>,
+}
+
+impl JobOwnerTransport {
+    fn new(owner: Option<&RunnerSession>) -> Self {
+        Self {
+            owner: owner.cloned(),
+            temporary: std::cell::RefCell::new(None),
+        }
+    }
+
+    fn reload(&self, runner_id: &str) -> Result<Option<String>> {
+        if self.owner.is_none() {
+            return refreshed_daemon_endpoint(runner_id);
+        }
+        self.reopen(|owner| crate::connection::reattach_job_owner(runner_id, owner))
+    }
+
+    fn reopen(
+        &self,
+        open: impl FnOnce(&RunnerSession) -> Result<RunnerSession>,
+    ) -> Result<Option<String>> {
+        let owner = self.owner.as_ref().expect("admitted job owner");
+        let session = open(owner)?;
+        let endpoint = session.local_url.clone();
+        if let Some(previous) = self.temporary.replace(Some(session)) {
+            crate::connection::close_transport(&previous);
+        }
+        Ok(endpoint)
+    }
+}
+
+#[cfg(test)]
+mod job_owner_transport_tests {
+    use super::*;
+
+    #[test]
+    fn follow_keeps_the_accepted_generation_across_tunnel_reloads() {
+        let owner = crate::test_support::direct_ssh_session("lease-old");
+        let follow = JobOwnerTransport::new(Some(&owner));
+        for port in [4321, 4322] {
+            let endpoint = follow
+                .reopen(|captured| {
+                    assert_eq!(
+                        captured.remote_daemon_lease_id,
+                        owner.remote_daemon_lease_id
+                    );
+                    assert_eq!(
+                        captured.homeboy_build_identity,
+                        owner.homeboy_build_identity
+                    );
+                    let mut tunnel = captured.clone();
+                    tunnel.local_url = Some(format!("http://127.0.0.1:{port}"));
+                    tunnel.tunnel_pid = None;
+                    Ok(tunnel)
+                })
+                .unwrap();
+            assert_eq!(endpoint, Some(format!("http://127.0.0.1:{port}")));
+        }
+        let failed = follow.reopen(|_| {
+            Err(Error::internal_unexpected(
+                "generation temporarily unavailable",
+            ))
+        });
+        assert!(failed.is_err());
+        assert_eq!(
+            follow
+                .temporary
+                .borrow()
+                .as_ref()
+                .unwrap()
+                .local_url
+                .as_deref(),
+            Some("http://127.0.0.1:4322")
+        );
+        assert_eq!(
+            follow
+                .owner
+                .as_ref()
+                .unwrap()
+                .remote_daemon_lease_id
+                .as_deref(),
+            Some("lease-old")
+        );
+    }
+}
+
+impl Drop for JobOwnerTransport {
+    fn drop(&mut self) {
+        if let Some(session) = self.temporary.get_mut().take() {
+            crate::connection::close_transport(&session);
+        }
+    }
 }
 
 pub(super) fn refreshed_daemon_endpoint(runner_id: &str) -> Result<Option<String>> {
@@ -2297,7 +2399,8 @@ pub(super) fn terminal_runner_poll_failure(
     // recoverable so a reconnect can pick it back up instead of reporting a
     // still-running job as failed (#7928).
     let transient_transport_drop =
-        super::super::daemon_health::runner_daemon_health_failure(&source).is_some();
+        super::super::daemon_health::runner_daemon_health_failure(&source).is_some()
+            || reattach_failure_is_transient(&source);
     let mut error = daemon_job_context_error(&runner.id, &job_id, persisted_run_id, source);
     if transient_transport_drop {
         // `daemon_job_context_error` already marks this recoverable
