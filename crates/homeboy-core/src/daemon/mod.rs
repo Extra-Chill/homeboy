@@ -1672,7 +1672,16 @@ pub(crate) fn write_termination_evidence(evidence: &DaemonTerminationEvidence) -
             Some("serialize daemon termination evidence".to_string()),
         )
     })?;
-    fs::write(&path, body).map_err(|error| {
+    // Readers treat an unparsable file as a hard error, and a starting daemon
+    // reads this while a stopping one may be writing it. Replace it atomically
+    // so a reader sees the previous evidence or the new one, never a torn file
+    // (#17425).
+    crate::io::output_file::write_output_file_atomically(
+        &path,
+        body,
+        crate::io::output_file::OutputWriteOptions::json_output(),
+    )
+    .map_err(|error| {
         Error::internal_io(error.to_string(), Some(format!("write {}", path.display())))
     })
 }

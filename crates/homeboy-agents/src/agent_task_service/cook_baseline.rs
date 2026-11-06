@@ -1012,11 +1012,14 @@ mod tests {
                     AgentTaskGateDifferentialResult::CandidateRegression,
                     false,
                 ),
+                // The counter assertion needs the shell to record its run
+                // before the timeout kills it. A 10ms timeout could fire
+                // before the `echo` on a loaded runner (#17410).
                 (
                     "inconclusive",
-                    "sleep 1; exit 1",
+                    "sleep 5; exit 1",
                     "candidate\n",
-                    std::time::Duration::from_millis(10),
+                    std::time::Duration::from_secs(1),
                     AgentTaskGateDifferentialResult::Inconclusive,
                     false,
                 ),

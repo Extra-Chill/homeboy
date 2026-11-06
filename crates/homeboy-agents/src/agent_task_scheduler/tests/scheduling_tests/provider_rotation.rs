@@ -1750,7 +1750,7 @@ mod provider_rotation_tests {
                     self.cancellation_receiver
                         .lock()
                         .expect("cancellation receiver")
-                        .recv_timeout(Duration::from_secs(5))
+                        .recv_timeout(Duration::from_secs(60))
                         .expect("scheduler cancelled the timed-out first attempt");
                     let mut outcome = outcome(request.task_id, AgentTaskOutcomeStatus::Succeeded);
                     outcome.outputs = serde_json::json!({
@@ -1789,15 +1789,24 @@ mod provider_rotation_tests {
         let mut plan = plan_with_tasks(1);
         // The first worker returns only after the scheduler reaches the normal
         // timeout cancellation path, so test scheduling cannot decide whether
-        // this is a timeout or a successful attempt.
-        plan.tasks[0].limits.timeout_ms = Some(500);
+        // this is a timeout or a successful attempt. The cancelled worker must
+        // still return inside the timeout grace (timeout/10, at least 100ms),
+        // or the scheduler takes the deferred-cleanup path, which does not
+        // rotate. A 500ms timeout left a 100ms grace that loaded CI runners
+        // missed (#17410); 5s leaves 500ms.
+        plan.tasks[0].limits.timeout_ms = Some(5_000);
         plan.options.rotation = Some(rotation_policy(vec![entry("fallback-backend-a")]));
         enable_rotation(&mut plan);
         crate::agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("durable run record");
 
         let aggregate = scheduler.run(plan);
 
-        assert_eq!(aggregate.status(), AgentTaskRunState::Succeeded);
+        assert_eq!(
+            aggregate.status(),
+            AgentTaskRunState::Succeeded,
+            "{:?}",
+            aggregate.outcomes
+        );
         assert_eq!(cancel_calls.load(Ordering::SeqCst), 1);
         assert_eq!(
             aggregate.outcomes[0].metadata["provider_rotation"]["attempts"][0]["status"],
