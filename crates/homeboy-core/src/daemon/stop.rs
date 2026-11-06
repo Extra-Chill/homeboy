@@ -101,10 +101,10 @@ fn request_foreground_lifecycle_stop(state: &DaemonState) -> Result<DaemonStopRe
 pub fn force_stop_for_lease(expected_lease_id: &str) -> Result<DaemonStopResult> {
     let _lock = acquire_daemon_operation_lock()?;
     let _admission_fence = acquire_daemon_job_admission_fence()?;
-    force_stop_for_lease_unlocked(expected_lease_id)
+    stop_for_lease_unlocked(expected_lease_id, true)
 }
 
-fn force_stop_for_lease_unlocked(expected_lease_id: &str) -> Result<DaemonStopResult> {
+fn stop_for_lease_unlocked(expected_lease_id: &str, force: bool) -> Result<DaemonStopResult> {
     let path = state_path()?;
     let state_path_display = path.display().to_string();
     let validation = validate_lease_file(&path)?;
@@ -177,7 +177,7 @@ fn force_stop_for_lease_unlocked(expected_lease_id: &str) -> Result<DaemonStopRe
         });
     }
 
-    stop_token_owned_daemon(&path, &identity, &state, state_path_display)
+    stop_token_owned_daemon(&path, &identity, &state, state_path_display, force)
 }
 
 /// Stop an exact token-owned daemon. Active controller work is interrupted,
@@ -190,6 +190,7 @@ fn stop_token_owned_daemon(
     identity: &DaemonLeaseIdentity,
     state: &DaemonState,
     state_path_display: String,
+    force: bool,
 ) -> Result<DaemonStopResult> {
     let active_jobs = active_daemon_job_ids()?.len();
     let mut evidence = DaemonTerminationEvidence {
@@ -207,7 +208,14 @@ fn stop_token_owned_daemon(
     // Recorded before the signal, so the evidence names a requested stop even
     // if this command dies before the daemon exits.
     write_termination_evidence(&evidence)?;
-    let signal = match terminate_exact_daemon(path, identity, state)? {
+    // Idle daemons have no work to preserve. Explicit force also authorizes
+    // escalation; ordinary stops with active work must only drain or hand off.
+    let outcome = if force || active_jobs == 0 {
+        terminate_exact_daemon(path, identity, state)?
+    } else {
+        drain_exact_daemon(path, identity, state)?
+    };
+    let signal = match outcome {
         DaemonTerminationOutcome::Stopped(signal) => signal,
         DaemonTerminationOutcome::AlreadyAbsent => {
             remove_lease_if_identity_matches(path, identity)?;
@@ -261,6 +269,28 @@ fn signal_name(signal: i32) -> &'static str {
         SIGNAL_KILL => "SIGKILL",
         _ => "unknown signal",
     }
+}
+
+/// Ordinary stops with active work never escalate to SIGKILL. The daemon can
+/// spend longer than TERM_GRACE draining helpers; killing it destroys work
+/// that has not yet handed off. An operator can explicitly force a stuck stop.
+fn drain_exact_daemon(
+    path: &std::path::Path,
+    identity: &DaemonLeaseIdentity,
+    state: &DaemonState,
+) -> Result<DaemonTerminationOutcome> {
+    if revalidate_exact_termination_target(path, identity, state)? == ExactTerminationTarget::Absent
+    {
+        return Ok(DaemonTerminationOutcome::AlreadyAbsent);
+    }
+    signal_pid(state.pid, SIGNAL_TERMINATE)?;
+    if wait_for_pid_exit(state.pid, Duration::from_secs(30)) {
+        return Ok(DaemonTerminationOutcome::Stopped(SIGNAL_TERMINATE));
+    }
+    Err(Error::internal_unexpected(format!(
+        "daemon pid {} is still draining; no SIGKILL sent (active jobs: {:?}). Wait or explicitly force the stop",
+        state.pid, active_daemon_job_ids()?
+    )))
 }
 
 fn terminate_exact_daemon(
@@ -351,7 +381,7 @@ pub(super) fn stop_with_force_for_lease(
     // endpoint. The persisted lease, token, and zero-job gate below still bind
     // direct termination to this exact daemon owner.
     if !validation.fresh && validation.running {
-        return force_stop_for_lease_unlocked(expected_lease_id);
+        return stop_for_lease_unlocked(expected_lease_id, force);
     }
     let mut result = stop_unlocked_with_force(force)?;
     if !result.stopped {
@@ -406,7 +436,7 @@ pub(super) fn stop_unlocked_with_force(force: bool) -> Result<DaemonStopResult> 
     // A stale binary cannot serve the current client's lifecycle request. For
     // an idle, token-owned lease, converge through the bounded direct path.
     if !validation.fresh && validation.running {
-        return force_stop_for_lease_unlocked(&state.lease_id);
+        return stop_for_lease_unlocked(&state.lease_id, force);
     }
 
     if !validation.fresh || !validation.running {
@@ -453,7 +483,7 @@ pub(super) fn stop_unlocked_with_force(force: bool) -> Result<DaemonStopResult> 
     }
 
     if pid_is_running(pid) && !force {
-        return stop_token_owned_daemon(&path, &identity, state, state_path_display);
+        return stop_token_owned_daemon(&path, &identity, state, state_path_display, false);
     }
     let active_jobs = JobStore::active_count_at_path(
         paths::observation_db()?,
@@ -476,7 +506,7 @@ pub(super) fn stop_unlocked_with_force(force: bool) -> Result<DaemonStopResult> 
         })?;
     }
     let stopped = if pid_is_running(pid) {
-        terminate_pid(pid)?;
+        terminate_exact_daemon(&path, &identity, state)?;
         true
     } else {
         false
