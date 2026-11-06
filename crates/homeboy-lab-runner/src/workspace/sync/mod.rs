@@ -622,7 +622,7 @@ fn prepared_source_cache_path(workspace_root: &str, remote_url: &str, commit: &s
     hasher.update(remote_url.as_bytes());
     hasher.update(commit.as_bytes());
     let digest = hex_prefix(&hasher.finalize(), 12);
-    let name = sanitize_path_segment(repository_cache_name(remote_url));
+    let name = repository_cache_name(remote_url);
     format!(
         "{}/{name}-{digest}",
         prepared_source_cache_root(workspace_root)
@@ -632,15 +632,9 @@ fn prepared_source_cache_path(workspace_root: &str, remote_url: &str, commit: &s
 /// Derive a readable directory-name segment from a repository's remote URL,
 /// stripped of trailing `.git`/`/` noise. Falls back to `workspace` for an
 /// unparseable remote so the cache path is always well-formed.
-fn repository_cache_name(remote_url: &str) -> &str {
-    remote_url
-        .trim()
-        .trim_end_matches('/')
-        .trim_end_matches(".git")
-        .rsplit(['/', ':'])
-        .next()
-        .filter(|name| !name.is_empty())
-        .unwrap_or("workspace")
+fn repository_cache_name(remote_url: &str) -> String {
+    homeboy_engine_primitives::identifier::repository_id(remote_url)
+        .unwrap_or_else(|_| "workspace".to_string())
 }
 
 fn prepared_source_cache_root(workspace_root: &str) -> String {

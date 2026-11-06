@@ -194,6 +194,33 @@ mod tests {
     }
 
     #[test]
+    fn component_rename_dotted_noop_errors_without_changing_files() {
+        crate::test_support::with_isolated_home(|home| {
+            let repo = write_component_repo(home, "liberatesh");
+            let before = fs::read(repo.join("homeboy.json")).unwrap();
+            let error =
+                rename("liberatesh", "liberate.sh").expect_err("normalized no-op must fail");
+            assert!(error.message.contains("normalizes to 'liberatesh'"));
+            assert_eq!(fs::read(repo.join("homeboy.json")).unwrap(), before);
+            assert_eq!(
+                crate::component::load("liberatesh").unwrap().id,
+                "liberatesh"
+            );
+            let renamed = rename("liberatesh", "liberate-shell").unwrap();
+            assert_eq!(renamed.id, "liberate-shell");
+            assert!(inventory::registered_primary_by_id("liberatesh")
+                .unwrap()
+                .is_none());
+            assert!(inventory::registered_primary_by_id("liberate-shell")
+                .unwrap()
+                .is_some());
+            let value: Value =
+                serde_json::from_slice(&fs::read(repo.join("homeboy.json")).unwrap()).unwrap();
+            assert_eq!(value["id"], "liberate-shell");
+        });
+    }
+
+    #[test]
     fn merge_local_path_updates_standalone_registration() {
         crate::test_support::with_isolated_home(|home| {
             let old_repo = home.path().join("sample-plugin");

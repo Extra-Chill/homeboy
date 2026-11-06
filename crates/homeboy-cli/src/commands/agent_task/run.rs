@@ -6482,7 +6482,7 @@ fn durable_component_cwd(
     })
 }
 
-pub(super) fn cook_repository_names_for_selection(
+pub(crate) fn cook_repository_names_for_selection(
     repo: &str,
 ) -> homeboy::core::Result<(String, String)> {
     let component = cook_components_for_repository_name(repo)?
@@ -6529,7 +6529,7 @@ fn cook_component_repository_remote(
     component.remote_url.clone()
 }
 
-fn validate_cook_repository_component_selection(
+pub(crate) fn validate_cook_repository_component_selection(
     repo: &str,
     component: &homeboy::core::component::Component,
 ) -> homeboy::core::Result<()> {
@@ -6735,13 +6735,7 @@ fn repository_component_identity_ambiguity_error(
 }
 
 pub(crate) fn normalize_repository_name(repository: &str) -> String {
-    repository
-        .trim()
-        .trim_end_matches(".git")
-        .rsplit('/')
-        .next()
-        .unwrap_or_default()
-        .to_ascii_lowercase()
+    homeboy::core::engine::identifier::repository_id(repository).unwrap_or_default()
 }
 
 pub(super) fn cook_repository_identities_for_workspace(

@@ -57,6 +57,20 @@ pub fn slugify_id(value: &str, field_name: &str) -> Result<String> {
     Ok(out)
 }
 
+/// Repository selectors use the same filesystem-safe slug as component IDs.
+/// Accept a name, checkout path, HTTPS remote, or SCP-style Git remote.
+/// Dots are deliberately removed, preserving existing component registrations.
+pub fn repository_id(value: &str) -> Result<String> {
+    let name = value
+        .trim()
+        .trim_end_matches(['/', '\\'])
+        .rsplit(['/', '\\', ':'])
+        .next()
+        .unwrap_or_default();
+    let name = name.strip_suffix(".git").unwrap_or(name);
+    slugify_id(name, "component_id")
+}
+
 fn capitalize(s: &str) -> String {
     let mut chars = s.chars();
     match chars.next() {

@@ -3,7 +3,7 @@ use crate::error::Result;
 use crate::project;
 
 fn update_project_references(old_id: &str, new_id: &str) -> Result<()> {
-    let projects = project::list().unwrap_or_default();
+    let projects = project::list()?;
     for proj in projects {
         if project::has_component(&proj, old_id) {
             let updated_components: Vec<project::ProjectComponentAttachment> = proj
@@ -61,6 +61,22 @@ pub fn shared_components() -> Result<std::collections::HashMap<String, Vec<Strin
 
 pub fn rename_component(id: &str, new_id: &str) -> Result<Component> {
     let resolved_new_id = crate::engine::identifier::slugify_id(new_id, "component_id")?;
+    if resolved_new_id == id {
+        return Err(crate::error::Error::validation_invalid_argument(
+            "new_id",
+            format!("Rename would not change component '{id}': '{new_id}' normalizes to '{resolved_new_id}'"),
+            Some(new_id.to_string()),
+            Some(vec!["Choose a name with a different normalized component ID; dots are removed from IDs".to_string()]),
+        ));
+    }
+    if crate::component::inventory::registered_primary_by_id(&resolved_new_id)?.is_some() {
+        return Err(crate::error::Error::validation_invalid_argument(
+            "new_id",
+            format!("Component '{resolved_new_id}' is already registered"),
+            Some(new_id.to_string()),
+            None,
+        ));
+    }
     let component = crate::component::mutate_portable(id, |component| {
         component.id = resolved_new_id.clone();
         Ok(())
