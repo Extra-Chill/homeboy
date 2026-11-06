@@ -5,17 +5,6 @@ use super::*;
 use homeboy_core::build_identity;
 use homeboy_core::secret_env_plan::SECRET_ENV_PLAN_ENV_DELTA_SOURCE;
 
-pub(super) fn with_agent_task_retry_hint(
-    error: Error,
-    _run_id: &str,
-    _plan: Option<&homeboy_agents::agent_task_scheduler::AgentTaskPlan>,
-) -> Error {
-    // Only the controller can combine durable owner, placement, and current
-    // workspace identity. Its status projection emits a retry action when that
-    // complete contract is replayable.
-    error
-}
-
 /// Homeboy-owned Lab artifact directory for a given runner checkout root.
 ///
 /// Lab structured output is a Homeboy-owned artifact, not part of the synced
@@ -1455,6 +1444,65 @@ fn late_direct_identity_fallback(
     }))
 }
 
+/// Hand a detached durable run to the controller staging job and return.
+///
+/// The run id is emitted unconditionally, before submission. `--output` is
+/// optional for `emit_durable_run_id_before_execution`, and an interruptible
+/// non-TTY client without it must still learn the handle (#10419). A
+/// retryable transport failure can follow durable acceptance, so only a
+/// non-retryable failure terminates the parent; replay then reconciles the
+/// same controller idempotency key instead of contradicting live work.
+fn submit_detached_lab_offload(
+    lab_lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    run_id: &str,
+    selection: &LabRunnerSelection,
+    request: &LabOffloadRequest<'_>,
+    plan: HomeboyPlan,
+    messages: &mut Vec<String>,
+) -> Result<LabOffloadOutcome> {
+    emit_durable_run_id_before_execution(
+        run_id,
+        &selection.runner_id,
+        request.local_output_file,
+        messages,
+    );
+    let submission = crate::lab_staging_controller::submit_detached_staging(
+        run_id,
+        &selection.runner_id,
+        selection.mode.clone(),
+        request,
+    )
+    .inspect_err(|error| {
+        if error.retryable == Some(true) {
+            return;
+        }
+        if let Some(durable_plan) = request.durable_agent_task_plan {
+            let _ = agent_task_lifecycle::record_pre_execution_failure_in_store(
+                lab_lifecycle_store,
+                run_id,
+                durable_plan,
+                "lab_staging_submission",
+                error,
+            );
+        }
+    })?;
+    let submission = detached_staging_submission_output(submission, run_id);
+    let stdout = serde_json::to_string_pretty(&serde_json::json!({
+        "success": true,
+        "data": submission,
+    }))
+    .unwrap_or_else(|_| format!("Lab staging accepted for {run_id}"));
+    Ok(LabOffloadOutcome::InFlight {
+        plan,
+        stdout: format!("{stdout}\n"),
+        stderr: format!(
+            "Lab staging continues for durable run `{run_id}`.\nNext: homeboy agent-task status {run_id}\nNext: homeboy runs logs {run_id}\n",
+        ),
+        exit_code: 0,
+        output_file_content: Some(format!("{stdout}\n")),
+    })
+}
+
 pub(crate) fn run_lab_offload_inner(
     request: LabOffloadRequest<'_>,
     selection: LabRunnerSelection,
@@ -1486,7 +1534,7 @@ pub(crate) fn run_lab_offload_inner(
     // Detached commands without an agent-task argv shape receive their durable
     // plan and identity from routing. Admit the controller job before capacity
     // checks or remote preparation so caller loss cannot orphan staging.
-    if let (true, Some(durable_plan), Some(run_id)) = (
+    if let (true, Some(_), Some(run_id)) = (
         request.detach_after_handoff,
         request.durable_agent_task_plan,
         request.durable_run_id,
@@ -1505,51 +1553,14 @@ pub(crate) fn run_lab_offload_inner(
         if let Some(outcome) = fallback {
             return Ok(outcome);
         }
-        emit_durable_run_id_before_execution(
+        return submit_detached_lab_offload(
+            &lab_lifecycle_store,
             run_id,
-            runner_id,
-            request.local_output_file,
+            &selection,
+            &request,
+            plan,
             &mut messages,
         );
-        let submission = match crate::lab_staging_controller::submit_detached_staging(
-            run_id,
-            runner_id,
-            selection.mode.clone(),
-            &request,
-        ) {
-            Ok(submission) => submission,
-            Err(error) => {
-                if error.retryable != Some(true) {
-                    let _ = agent_task_lifecycle::record_pre_execution_failure_in_store(
-                        &lab_lifecycle_store,
-                        run_id,
-                        durable_plan,
-                        "lab_staging_submission",
-                        &error,
-                    );
-                }
-                return Err(with_agent_task_retry_hint(
-                    error,
-                    run_id,
-                    request.durable_agent_task_plan,
-                ));
-            }
-        };
-        let submission = detached_staging_submission_output(submission, run_id);
-        let stdout = serde_json::to_string_pretty(&serde_json::json!({
-            "success": true,
-            "data": submission,
-        }))
-        .unwrap_or_else(|_| format!("Lab staging accepted for {run_id}"));
-        return Ok(LabOffloadOutcome::InFlight {
-            plan,
-            stdout: format!("{stdout}\n"),
-            stderr: format!(
-                "Lab staging continues for durable run `{run_id}`.\nNext: homeboy agent-task status {run_id}\nNext: homeboy runs logs {run_id}\n",
-            ),
-            exit_code: 0,
-            output_file_content: Some(format!("{stdout}\n")),
-        });
     }
 
     // A detached Cook must converge before deriving any provider-preflight
@@ -1967,10 +1978,7 @@ pub(crate) fn run_lab_offload_inner(
     }
     // Detached agent-task work is controller-owned from this point.
     // It must never fall through to caller-side workspace staging after admission.
-    if request.detach_after_handoff
-        && request.durable_agent_task_plan.is_some()
-        && capability_preflight.is_some()
-    {
+    if request.detach_after_handoff && request.durable_agent_task_plan.is_some() {
         let run_id = pre_acceptance_run_id.as_deref().ok_or_else(|| {
             Error::validation_invalid_argument(
             "run_id",
@@ -1979,62 +1987,14 @@ pub(crate) fn run_lab_offload_inner(
             None,
         )
         })?;
-        // Emit unconditionally. `emit_durable_run_id_before_execution` already
-        // treats `--output` as optional and still prints the handle plus its
-        // follow-up commands to stderr. Gating the whole call on `--output`
-        // meant the most common detached invocation — no `--output`, submitted
-        // by an interruptible non-TTY client — got no identity at all before
-        // controller staging began (#10419).
-        emit_durable_run_id_before_execution(
+        return submit_detached_lab_offload(
+            &lab_lifecycle_store,
             run_id,
-            runner_id,
-            request.local_output_file,
+            &selection,
+            &request,
+            plan,
             &mut messages,
         );
-        let submission = match crate::lab_staging_controller::submit_detached_staging(
-            run_id,
-            runner_id,
-            selection.mode.clone(),
-            &request,
-        ) {
-            Ok(submission) => submission,
-            Err(error) => {
-                // A retryable transport failure can follow durable acceptance.
-                // Keep the parent nonterminal so replay can reconcile the same
-                // controller idempotency key instead of contradicting live work.
-                if error.retryable != Some(true) {
-                    if let Some(durable_plan) = request.durable_agent_task_plan.as_ref() {
-                        let _ = agent_task_lifecycle::record_pre_execution_failure_in_store(
-                            &lab_lifecycle_store,
-                            run_id,
-                            durable_plan,
-                            "lab_staging_submission",
-                            &error,
-                        );
-                    }
-                }
-                return Err(with_agent_task_retry_hint(
-                    error,
-                    run_id,
-                    request.durable_agent_task_plan,
-                ));
-            }
-        };
-        let submission = detached_staging_submission_output(submission, run_id);
-        let stdout = serde_json::to_string_pretty(&serde_json::json!({
-            "success": true,
-            "data": submission,
-        }))
-        .unwrap_or_else(|_| format!("Lab staging accepted for {run_id}"));
-        return Ok(LabOffloadOutcome::InFlight {
-            plan,
-            stdout: format!("{stdout}\n"),
-            stderr: format!(
-                "Lab staging continues for durable run `{run_id}`.\nNext: homeboy agent-task status {run_id}\nNext: homeboy runs logs {run_id}\n",
-            ),
-            exit_code: 0,
-            output_file_content: Some(format!("{stdout}\n")),
-        });
     }
     let workspace_sync_timer = observation.timer.start("stage.lab.materialize");
     let workspace_stage = match prepare_lab_offload_workspace_stage(
@@ -2054,11 +2014,6 @@ pub(crate) fn run_lab_offload_inner(
     ) {
         Ok(stage) => stage,
         Err(error) => {
-            let error = if let Some(run_id) = pre_acceptance_run_id.as_deref() {
-                with_agent_task_retry_hint(error, run_id, request.durable_agent_task_plan)
-            } else {
-                error
-            };
             if let Some(run_id) = pre_acceptance_run_id.as_deref() {
                 if let Ok(plan) =
                     agent_task_lifecycle::load_plan_in_store(&lab_lifecycle_store, run_id)
