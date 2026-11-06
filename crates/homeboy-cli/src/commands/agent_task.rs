@@ -394,7 +394,7 @@ pub(crate) fn run_with_cook_progress_and_provenance(
             };
             let record =
                 homeboy::agents::agent_tasks::lifecycle::record_acceptance_verdict_with_feedback_in_store(
-                    &homeboy::agents::agent_tasks::lifecycle::AgentTaskLifecycleStore::from_current_environment()?,
+                    &homeboy::agents::agent_tasks::lifecycle::AgentTaskLifecycleStore::from_environment()?,
                     &args.run_id,
                     verdict,
                     args.evidence_refs,

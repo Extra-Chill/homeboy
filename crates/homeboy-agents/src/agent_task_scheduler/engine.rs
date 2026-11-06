@@ -221,9 +221,7 @@ impl AgentTaskScheduler {
         }
         #[cfg(test)]
         let store = match self.run_id.as_ref() {
-            Some(_) => {
-                crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?
-            }
+            Some(_) => crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?,
             None => crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_data_root(
                 tempfile::Builder::new()
                     .prefix("homeboy-scheduler-test-")
@@ -233,8 +231,7 @@ impl AgentTaskScheduler {
             ),
         };
         #[cfg(not(test))]
-        let store =
-            crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+        let store = crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
         Ok(self.resolved_lifecycle_store.get_or_init(|| store))
     }
 

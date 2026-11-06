@@ -9,7 +9,7 @@ use serde_json::json;
 #[test]
 fn agent_task_status_run_directories_preserve_recorded_cause_and_next_action() {
     crate::test_support::with_isolated_home(|_| {
-        let store = AgentTaskLifecycleStore::from_current_environment().unwrap();
+        let store = AgentTaskLifecycleStore::from_environment().unwrap();
         let service = OrchestrationService::new(LifecycleStoreLookup::new(store.clone()));
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../homeboy-agents/tests/fixtures/cook-status");
@@ -52,7 +52,7 @@ fn agent_task_status_run_directories_preserve_recorded_cause_and_next_action() {
 #[test]
 fn agent_task_status_published_receipt_wins_over_terminal_and_promotion_snapshots() {
     crate::test_support::with_isolated_home(|_| {
-        let store = AgentTaskLifecycleStore::from_current_environment().unwrap();
+        let store = AgentTaskLifecycleStore::from_environment().unwrap();
         let service = OrchestrationService::new(LifecycleStoreLookup::new(store.clone()));
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../homeboy-agents/tests/fixtures/cook-status/contradictory-publication");

@@ -19,7 +19,7 @@ fn record_candidate(run_id: &str) {
 }
 
 fn test_lifecycle_store() -> homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore {
-    homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+    homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
         .expect("lifecycle store")
 }
 

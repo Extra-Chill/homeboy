@@ -1461,7 +1461,7 @@ mod tests {
             )
             .expect("run");
             homeboy_agents::agent_task_lifecycle::record_runner_exec_artifact_declarations_in_store(
-                &homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment().unwrap(),
+                &homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment().unwrap(),
                 run_id,
                 &["artifacts/result.json".to_string(), "a~b/c".to_string()],
                 &[],

@@ -150,7 +150,7 @@ fn run_before_resolved_cancellation_for_test() {
 
 pub fn cancel_run(run_id: &str, reason: Option<&str>) -> Result<AgentTaskRunRecord> {
     cancel_run_in_store(
-        &AgentTaskLifecycleStore::from_current_environment()?,
+        &AgentTaskLifecycleStore::from_environment()?,
         run_id,
         reason,
     )
@@ -1507,7 +1507,7 @@ fn cancel_runner_job(
 
 pub fn cancel(run_id: &str) -> Result<AgentTaskRunRecord> {
     let run_id = sanitize_run_id(run_id);
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    let lifecycle_store = AgentTaskLifecycleStore::from_environment()?;
     let refuses_cancellation = |record: &AgentTaskRunRecord| {
         matches!(
             record.state(),
@@ -1607,7 +1607,7 @@ mod tests {
     /// Tests are the entry point for their own unit of work, so the store
     /// resolves once here (#7505).
     fn test_lifecycle_store() -> crate::agent_task_lifecycle::AgentTaskLifecycleStore {
-        crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
             .expect("lifecycle store")
     }
     use super::*;
@@ -1904,8 +1904,7 @@ mod tests {
                 );
                 assert!(
                     cancel_exact_run_in_store(
-                        &AgentTaskLifecycleStore::from_current_environment()
-                            .expect("lifecycle store"),
+                        &AgentTaskLifecycleStore::from_environment().expect("lifecycle store"),
                         &attempt_id,
                         None
                     )

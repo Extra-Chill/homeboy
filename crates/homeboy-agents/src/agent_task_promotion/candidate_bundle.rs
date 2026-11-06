@@ -513,7 +513,7 @@ mod tests {
             if promote {
                 aggregate.outcomes[0].status = crate::agent_task::AgentTaskOutcomeStatus::Succeeded;
             }
-            let store = lifecycle::AgentTaskLifecycleStore::from_current_environment().unwrap();
+            let store = lifecycle::AgentTaskLifecycleStore::from_environment().unwrap();
             let observation = store.open_observation_initialized().unwrap();
             observation
                 .time_run_phase(&record.run_id, "stage.lab.observe", || Ok(()))
@@ -607,8 +607,7 @@ mod tests {
             let record = crate::agent_task_lifecycle::submit_plan(&plan, Some("run-1")).unwrap();
             let aggregate = serde_json::from_value(serde_json::json!({"plan_id":"plan", "status":"failed", "totals":{"skipped":0}, "outcomes":[{"task_id":"task", "status":"timeout", "candidate":f.candidate}]})).unwrap();
             let store =
-                crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
-                    .unwrap();
+                crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment().unwrap();
             let error = fetch_run_candidates(&store, &record, &plan, &aggregate).unwrap_err();
             assert_eq!(error.retryable, Some(false));
             assert!(error.message.contains("non-recoverable"));

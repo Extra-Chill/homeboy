@@ -33,7 +33,7 @@ impl super::RunsArgs {
 }
 
 pub(crate) fn owns(id: &str) -> homeboy::core::Result<bool> {
-    let store = AgentTaskLifecycleStore::from_current_environment()?;
+    let store = AgentTaskLifecycleStore::from_environment()?;
     Ok(store.cook_index_exists(id)
         || agent_task_lifecycle::run_record_exists_readonly_in_store(&store, id)?)
 }

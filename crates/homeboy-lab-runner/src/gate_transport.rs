@@ -501,7 +501,8 @@ fn execute_owned(
             for workspace in [&mut snapshot_workspace, &mut candidate_workspace] {
                 workspace.terminal(crate::WorkspaceTerminalOutcome::Cancelled);
             }
-            let store = homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+            let store =
+                homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
             homeboy_agents::agent_task_lifecycle::project_terminal_runner_result_in_store(
                 &store,
                 run_id,
@@ -706,7 +707,7 @@ fn execute_owned(
     let artifact = store.record_artifact_with_metadata(run_id, "admitted-lab-gate-receipt", &path, serde_json::json!({"candidate": request.candidate, "request_sha256": request.identity()?, "runner_job_id": job_id, "visibility": request.visibility}))?;
     receipt.artifact_ref = Some(format!("homeboy://run/{run_id}/artifact/{}", artifact.id));
     let lifecycle =
-        homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+        homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
     homeboy_agents::agent_task_lifecycle::record_runner_exec_artifact_refs_in_store(
         &lifecycle,
         run_id,

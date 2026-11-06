@@ -2238,8 +2238,8 @@ fn runs_show_cook_id_follows_latest_attempt_not_admission_pass() {
         use homeboy::agents::agent_tasks::scheduler::AgentTaskPlan;
 
         let cook_id = "agent-task-cook-watch";
-        let lifecycle = agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
-            .expect("lifecycle");
+        let lifecycle =
+            agent_task_lifecycle::AgentTaskLifecycleStore::from_environment().expect("lifecycle");
         agent_task_lifecycle::record_detached_cook_handoff_parent_in_store(&lifecycle, cook_id)
             .expect("parent");
         let attempt_id = "agent-task-cook-watch-attempt-1-abcd1234";
@@ -2289,8 +2289,8 @@ fn cook_row_mirrors_latest_attempt_through_recovery() {
         use homeboy::agents::agent_tasks::scheduler::AgentTaskPlan;
 
         let cook_id = "agent-task-cook-row";
-        let lifecycle = agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
-            .expect("lifecycle");
+        let lifecycle =
+            agent_task_lifecycle::AgentTaskLifecycleStore::from_environment().expect("lifecycle");
         agent_task_lifecycle::record_detached_cook_handoff_parent_in_store(&lifecycle, cook_id)
             .expect("parent");
         let first = "agent-task-cook-row-attempt-1-abcd1234";
@@ -2368,8 +2368,8 @@ fn runs_list_groups_cook_sub_runs_under_the_cook() {
         use homeboy::agents::agent_tasks::scheduler::AgentTaskPlan;
 
         let cook_id = "agent-task-cook-list";
-        let lifecycle = agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
-            .expect("lifecycle");
+        let lifecycle =
+            agent_task_lifecycle::AgentTaskLifecycleStore::from_environment().expect("lifecycle");
         agent_task_lifecycle::record_detached_cook_handoff_parent_in_store(&lifecycle, cook_id)
             .expect("parent");
         let attempt_id = "agent-task-cook-list-attempt-1-abcd1234";

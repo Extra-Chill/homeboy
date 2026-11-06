@@ -45,7 +45,7 @@ pub(crate) fn route_after_parse_with_provenance(
         command: crate::commands::agent_task::AgentTaskCommand::Retry(retry),
     }) = &cli.command
     {
-        let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+        let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
         if agent_task_lifecycle::run_record_exists_resolved_in_store(&store, &retry.run_id)? {
             // Controller-owned retries reserve through the action adapter.
             // Their committed exact step owns transport. A runner-owned source
@@ -2318,7 +2318,7 @@ fn run_terminal_cook_continuation(
                 crate::agents::agent_task_service::CookRuntime::production(
                     executor,
                     &store,
-                    &agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?,
+                    &agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?,
                 ),
                 crate::agents::agent_task_service::CookMode::ContinueTerminal,
             )
@@ -4925,7 +4925,7 @@ fn controller_owns_agent_task_lifecycle_command(cli: &Cli) -> homeboy::core::Res
             return Ok(true);
         }
         if let Some(run_id) = args.logs_run_id() {
-            let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+            let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
             return agent_task_lifecycle::run_record_exists_resolved_in_store(&store, run_id);
         }
         return match args.cook_reader_id() {
@@ -4956,8 +4956,7 @@ fn controller_owns_agent_task_lifecycle_command(cli: &Cli) -> homeboy::core::Res
     let Some(run_id) = run_id else {
         return Ok(false);
     };
-    let lifecycle_store =
-        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    let lifecycle_store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
     let present =
         agent_task_lifecycle::run_record_exists_resolved_in_store(&lifecycle_store, run_id)?;
     if !present {

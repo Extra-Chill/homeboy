@@ -12,7 +12,7 @@ use homeboy_core::test_support::with_isolated_home;
 /// store once here keeps the ambient lookup in a single place instead of at
 /// every call site, and lets the ambient wrappers be deleted (#7505).
 fn test_lifecycle_store() -> AgentTaskLifecycleStore {
-    AgentTaskLifecycleStore::from_current_environment().expect("lifecycle store")
+    AgentTaskLifecycleStore::from_environment().expect("lifecycle store")
 }
 
 #[test]
@@ -417,7 +417,7 @@ fn generic_runner_exec_terminal_projection_is_authoritative_and_idempotent() {
             )
             .expect("generic run bound to daemon job");
             record_runner_exec_artifact_declarations_in_store(
-                &AgentTaskLifecycleStore::from_current_environment().unwrap(),
+                &AgentTaskLifecycleStore::from_environment().unwrap(),
                 run_id,
                 &["case-log.jsonl".to_string()],
                 &["artifacts".to_string()],
@@ -918,7 +918,7 @@ fn synchronous_diagnostic_ssh_and_local_runs_finish_with_artifacts_and_replay_sa
             ensure_generic_runner_exec_run(run_id, "runner", "/workspace", &["true".to_string()])
                 .expect("synchronous run");
             record_runner_exec_artifact_declarations_in_store(
-                &AgentTaskLifecycleStore::from_current_environment().unwrap(),
+                &AgentTaskLifecycleStore::from_environment().unwrap(),
                 run_id,
                 &["diagnostic.log".to_string()],
                 &[],
@@ -969,7 +969,7 @@ fn declaration_replay_uses_literal_path_and_tilde_keys() {
             .expect("run");
         let declarations = ["artifacts/result.json", "a~b/c"];
         record_runner_exec_artifact_declarations_in_store(
-            &AgentTaskLifecycleStore::from_current_environment().unwrap(),
+            &AgentTaskLifecycleStore::from_environment().unwrap(),
             run_id,
             &declarations
                 .iter()

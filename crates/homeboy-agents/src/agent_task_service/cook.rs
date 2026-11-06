@@ -486,7 +486,7 @@ fn claim_pre_artifact_interruption_retry(
     plan: &AgentTaskPlan,
 ) -> Result<Option<(u32, String)>> {
     let recipe_store = CookRecipeStore::from_current_data_root()?;
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    let lifecycle_store = AgentTaskLifecycleStore::from_environment()?;
     claim_pre_artifact_interruption_retry_with_stores(
         (&recipe_store, &lifecycle_store),
         cook_id,
@@ -3972,7 +3972,7 @@ pub(crate) fn review_form_attempt_is_ready_for_cook_continuation(
     plan: &AgentTaskPlan,
     record: &agent_task_lifecycle::AgentTaskRunRecord,
 ) -> Result<bool> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    let lifecycle_store = AgentTaskLifecycleStore::from_environment()?;
     review_form_attempt_is_ready_for_cook_continuation_in_store(&lifecycle_store, plan, record)
 }
 
@@ -4025,7 +4025,7 @@ fn retryable_review_form_terminal_failure(
     record: &agent_task_lifecycle::AgentTaskRunRecord,
     aggregate: &crate::agent_task_schedule::AgentTaskAggregate,
 ) -> bool {
-    let lifecycle_store = match AgentTaskLifecycleStore::from_current_environment() {
+    let lifecycle_store = match AgentTaskLifecycleStore::from_environment() {
         Ok(store) => store,
         Err(_) => return false,
     };
@@ -4598,7 +4598,7 @@ pub fn terminal_review_form_continuation_is_eligible(
     plan: &AgentTaskPlan,
     record: &agent_task_lifecycle::AgentTaskRunRecord,
 ) -> Result<bool> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    let lifecycle_store = AgentTaskLifecycleStore::from_environment()?;
     terminal_review_form_continuation_is_eligible_in_store(&lifecycle_store, plan, record)
 }
 
@@ -5043,7 +5043,7 @@ pub(crate) fn run_cook(ctx: CookContext<'_>) -> Result<AgentTaskRunResult<AgentT
     };
     let lifecycle_store = match ctx.lifecycle_store {
         Some(store) => store.clone(),
-        None => AgentTaskLifecycleStore::from_current_environment()?,
+        None => AgentTaskLifecycleStore::from_environment()?,
     };
     let mut side_effects = ctx.side_effects.unwrap_or_else(|| {
         CookSideEffects::new(|lifecycle_store, options, run_id, promotion| {
@@ -5485,7 +5485,7 @@ fn durable_cook_error_report(
 /// The durable failure report, bound to the roots its caller owns.
 ///
 /// `lifecycle_store` is `Option` because one caller genuinely has none: `run_cook`
-/// routes here precisely when `AgentTaskLifecycleStore::from_current_environment()`
+/// routes here precisely when `AgentTaskLifecycleStore::from_environment()`
 /// failed, so there is no store to inject and the ambient reads below will fail
 /// the same way they always did. Every caller that *does* hold a lifecycle store
 /// now passes it.
@@ -8376,7 +8376,7 @@ fn cook_run_record_needs_execution(record: &agent_task_lifecycle::AgentTaskRunRe
 #[cfg(test)]
 fn validate_cook_workspace(options: &CookRequest) -> Result<Option<CookWorkspaceBaseValidation>> {
     validate_cook_workspace_with_adopted_candidate(
-        &AgentTaskLifecycleStore::from_current_environment()?,
+        &AgentTaskLifecycleStore::from_environment()?,
         options,
         false,
     )

@@ -26,8 +26,7 @@ fn record(id: &str, state: &str, submitted_at: &str, metadata: Value) -> AgentTa
 #[test]
 fn admission_loads_terminal_cook_parent_outside_active_set() {
     with_isolated_home(|_| {
-        let store =
-            agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment().unwrap();
+        let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment().unwrap();
         store
             .write_record(&record(
                 "parent",
@@ -60,8 +59,7 @@ fn admission_loads_terminal_cook_parent_outside_active_set() {
 #[test]
 fn admission_blocks_nonterminal_record_older_than_display_window() {
     with_isolated_home(|_| {
-        let store =
-            agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment().unwrap();
+        let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment().unwrap();
         store
             .write_record(&record(
                 "old-active",

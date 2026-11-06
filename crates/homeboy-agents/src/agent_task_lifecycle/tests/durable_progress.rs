@@ -916,7 +916,7 @@ fn provider_success_and_enrichment_keep_stable_receipts() {
 #[test]
 fn aggregate_progress_appends_once() {
     with_isolated_home(|_| {
-        let lifecycle_store = AgentTaskLifecycleStore::from_current_environment().unwrap();
+        let lifecycle_store = AgentTaskLifecycleStore::from_environment().unwrap();
         let plan = test_plan();
         let aggregate = succeeded_aggregate(&plan);
         record_completed_run(&plan, &aggregate, Some("durable-aggregate")).expect("completed");
@@ -934,7 +934,7 @@ fn aggregate_progress_appends_once() {
 #[test]
 fn aggregate_repeated_same_state_messages_keep_distinct_receipts() {
     with_isolated_home(|_| {
-        let lifecycle_store = AgentTaskLifecycleStore::from_current_environment().unwrap();
+        let lifecycle_store = AgentTaskLifecycleStore::from_environment().unwrap();
         let plan = test_plan();
         let mut aggregate = succeeded_aggregate(&plan);
         aggregate.events = vec![
@@ -1102,7 +1102,7 @@ fn provider_state_survives_model_correction() {
 #[test]
 fn aggregate_replacement_replays_reordered_same_content() {
     with_isolated_home(|_| {
-        let lifecycle_store = AgentTaskLifecycleStore::from_current_environment().unwrap();
+        let lifecycle_store = AgentTaskLifecycleStore::from_environment().unwrap();
         let plan = test_plan();
         let mut first = succeeded_aggregate(&plan);
         first.events = vec![

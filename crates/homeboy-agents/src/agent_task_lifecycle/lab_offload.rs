@@ -51,7 +51,7 @@ pub fn bind_accepted_lab_runner_job(
     remote_workspace: &str,
     remote_command: &[String],
 ) -> Result<AgentTaskRunRecord> {
-    let lifecycle_store = &AgentTaskLifecycleStore::from_current_environment()?;
+    let lifecycle_store = &AgentTaskLifecycleStore::from_environment()?;
     if !identity.is_complete() {
         return Err(Error::validation_invalid_argument(
             "runner_job_identity",
@@ -97,10 +97,7 @@ pub struct LabOffloadProxyPlan<'a> {
 /// a Lab. The runner owns child execution; this record owns the stable local
 /// identity and is reconciled from that child once it is accepted.
 pub fn record_lab_offload_planned(input: LabOffloadProxyPlan<'_>) -> Result<AgentTaskRunRecord> {
-    record_lab_offload_planned_in_store(
-        &AgentTaskLifecycleStore::from_current_environment()?,
-        input,
-    )
+    record_lab_offload_planned_in_store(&AgentTaskLifecycleStore::from_environment()?, input)
 }
 
 /// The store-rooted counterpart of [`record_lab_offload_planned`].
@@ -160,7 +157,7 @@ pub fn record_lab_offload_phase(
     durable_plan: Option<&AgentTaskPlan>,
 ) -> Result<AgentTaskRunRecord> {
     record_lab_offload_phase_in_store(
-        &AgentTaskLifecycleStore::from_current_environment()?,
+        &AgentTaskLifecycleStore::from_environment()?,
         LabOffloadPhaseRecord {
             requested_run_id,
             runner_id,
@@ -262,7 +259,7 @@ pub fn record_local_lab_identity_fallback(
     identity_drift: &Value,
     fallback_reason: &str,
 ) -> Result<AgentTaskRunRecord> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    let lifecycle_store = AgentTaskLifecycleStore::from_environment()?;
     let mut record = lifecycle_store.read_record(&sanitize_run_id(run_id))?;
     if record.state().is_terminal() {
         return Ok(record);
@@ -577,7 +574,7 @@ fn record_lab_offload_phase_metadata(
 }
 
 pub fn record_detached_lab_run(input: DetachedLabRunRecord<'_>) -> Result<AgentTaskRunRecord> {
-    record_detached_lab_run_in_store(&AgentTaskLifecycleStore::from_current_environment()?, input)
+    record_detached_lab_run_in_store(&AgentTaskLifecycleStore::from_environment()?, input)
 }
 
 /// The store-rooted counterpart of [`record_detached_lab_run`].

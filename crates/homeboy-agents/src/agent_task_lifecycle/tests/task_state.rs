@@ -43,7 +43,7 @@ fn record_task_state(
 #[test]
 fn failed_task_recovered_by_deferred_candidate_reconciliation_reads_back_recoverable() {
     with_isolated_home(|home| {
-        let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
+        let store = AgentTaskLifecycleStore::from_environment().expect("store");
         let run_id = "recovered-task-state";
         let candidate_root = home.path().join("candidate-repo");
         let candidate = committed_candidate(&candidate_root, run_id);

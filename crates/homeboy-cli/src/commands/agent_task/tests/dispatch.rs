@@ -2989,7 +2989,7 @@ fn list_pages_tied_keysets_across_insertions_and_deleted_boundaries() {
         // belongs to a later fresh walk rather than displacing an in-progress one.
         persist_discovery_record("tie-z", "fix/ties", AgentTaskRunState::Queued);
         let lifecycle =
-            homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+            homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
                 .expect("lifecycle store");
         let connection = rusqlite::Connection::open(lifecycle.observation_db_path())
             .expect("open lifecycle database");
@@ -3037,7 +3037,7 @@ fn list_page_skips_legacy_schema_rows_and_continues_from_the_physical_keyset() {
             persist_discovery_record(run_id, "fix/page-health", AgentTaskRunState::Queued);
         }
         let lifecycle =
-            homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+            homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
                 .expect("lifecycle store");
         let observation = lifecycle
             .open_observation_initialized()
@@ -3093,7 +3093,7 @@ fn list_page_scopes_record_health_to_the_returned_task_url() {
         );
 
         let lifecycle =
-            homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+            homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
                 .expect("lifecycle store");
         let observation = lifecycle
             .open_observation_initialized()
@@ -3136,7 +3136,7 @@ fn list_sparse_scope_fills_matching_pages_without_duplicates_or_skips() {
         }
 
         let lifecycle =
-            homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+            homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
                 .expect("lifecycle store");
         assert_eq!(
             lifecycle

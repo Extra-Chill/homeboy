@@ -825,7 +825,7 @@ pub(crate) fn run_next_with_cook_dispatcher_and_queue_preflight(
     }
     let claim =
         agent_task_lifecycle::claim_next_eligible_queued_run_with_preflight_and_filter_and_limit_in_store(
-            &agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?,
+            &agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?,
             |record| scoped_run_ids.is_none_or(|run_ids| run_ids.contains(&record.run_id)),
             remaining_budget,
             |record, plan| queue_preflight(record, plan),
@@ -895,8 +895,7 @@ fn execute_claimed_queue_record(
         let mut options = super::reconstruct_options_with_dispatcher(&recipe, attempt_dispatcher)?;
         options.identity.initial_run_id = attempt.run_id.clone();
         options.identity.initial_plan = attempt.plan.clone();
-        let lifecycle_store =
-            agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+        let lifecycle_store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
         let cook = super::CookService::run(
             options,
             super::CookRuntime::production(executor.clone(), &store, &lifecycle_store),
@@ -1170,7 +1169,7 @@ fn consume_claimed_continuation(
         |recipe| dispatcher(recipe),
         |options| {
             let lifecycle_store =
-                crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+                crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
             super::CookService::run(
                 options,
                 super::CookRuntime::production(executor.clone(), &store, &lifecycle_store),
@@ -1258,7 +1257,7 @@ pub fn resume(
     run_id: String,
     executor: SharedAgentTaskExecutor,
 ) -> Result<AgentTaskRunResult<AgentTaskAggregate>> {
-    let recovery_store = agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    let recovery_store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
     agent_task_lifecycle::recover_disconnected_runner_in_store(&recovery_store, &run_id)?;
     if let Some(result) = terminal_run_result(&run_id)? {
         return Ok(result);
@@ -1272,8 +1271,7 @@ pub fn resume(
         }
         return Err(transport_proxy_recovery_error(recovery));
     }
-    let lifecycle_store =
-        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    let lifecycle_store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
     agent_task_lifecycle::mark_resuming_in_store(&lifecycle_store, &run_id)?;
     run_claimed(run_id, executor)
 }
@@ -1318,8 +1316,7 @@ pub fn terminal_run_result(run_id: &str) -> Result<Option<AgentTaskRunResult<Age
 pub(crate) fn persisted_terminal_run_result(
     run_id: &str,
 ) -> Result<Option<AgentTaskRunResult<AgentTaskAggregate>>> {
-    let lifecycle_store =
-        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    let lifecycle_store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
     let record = lifecycle_store.read_record_bounded(run_id)?;
     terminal_run_result_for_record(record, false)
 }
@@ -1641,8 +1638,7 @@ where
     // binding the Cook attempt are one durable lineage: a successor reserved in
     // one installation and bound in another is a retry that cannot be proved to
     // own the work it replaces (#7505).
-    let lifecycle_store =
-        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    let lifecycle_store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
     let source = lifecycle_store.read_record(run_id)?;
     let mut source_plan =
         agent_task_lifecycle::load_controller_plan_in_store(&lifecycle_store, &source.run_id)?;
@@ -2942,8 +2938,7 @@ pub(crate) enum RetryProjectionAdmission {
 /// Read-only retry admission for control-plane projections of records that
 /// carry Cook metadata.
 pub(crate) fn retry_admission_for_projection(run_id: &str) -> Result<RetryProjectionAdmission> {
-    let lifecycle_store =
-        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    let lifecycle_store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
     // Eligibility is part of resource projection. Every durable read below must
     // stay non-initializing: reading through an ordinary lifecycle accessor can
     // backfill that same projection and recurse here until the stack
@@ -2976,8 +2971,7 @@ pub fn retry_admission_with_preflight<F>(run_id: &str, preflight: F) -> Result<(
 where
     F: Fn(&AgentTaskPlan) -> Result<()>,
 {
-    let lifecycle_store =
-        agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    let lifecycle_store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
     let source = lifecycle_store.read_record(run_id)?;
     let retry = retry_admission_in_store(&lifecycle_store, &source, true)?;
     if let Some(retry) = retry {
@@ -3807,7 +3801,7 @@ mod tests {
     #[test]
     fn reconcile_cancelled_cook_attempt_admits_a_durable_retry_but_operator_cancel_does_not() {
         homeboy_core::test_support::with_isolated_home(|_| {
-            let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+            let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
                 .expect("lifecycle store");
             let workspace = tempfile::tempdir().expect("workspace");
             let cook_id = "reconcile-cancelled-cook";

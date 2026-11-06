@@ -96,7 +96,7 @@ pub(super) mod concurrency_tests {
         assert!(execution["post_provider_cleanup_finished_at"].is_string());
         assert!(
             !crate::agent_task_lifecycle::has_active_provider_execution_in_store(
-                &crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+                &crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
                     .expect("lifecycle store"),
                 run_id,
             )
@@ -675,7 +675,7 @@ pub(super) mod concurrency_tests {
         // bound below, which was already relaxed for exactly this (#7505).
         let aggregate = scheduler.run(plan);
         let lifecycle_store =
-            crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+            crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
                 .expect("lifecycle store");
         assert!(
             crate::agent_task_lifecycle::has_active_provider_execution_in_store(

@@ -977,7 +977,10 @@ fn mirror_job_run_record(
                 Some(roots) => homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::new(
                     roots.clone(),
                 ),
-                None => homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?,
+                None => {
+                    homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment(
+                    )?
+                }
             };
             lifecycle_store.record_detached_lab_run(
                 homeboy_agents::agent_task_lifecycle::DetachedLabRunRecord {

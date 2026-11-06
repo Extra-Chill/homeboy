@@ -16,7 +16,7 @@ use homeboy::core::server;
 /// once here keeps the ambient lookup in one place and lets the ambient
 /// wrappers be deleted (#7505).
 fn test_lifecycle_store() -> homeboy::agents::agent_tasks::lifecycle::AgentTaskLifecycleStore {
-    homeboy::agents::agent_tasks::lifecycle::AgentTaskLifecycleStore::from_current_environment()
+    homeboy::agents::agent_tasks::lifecycle::AgentTaskLifecycleStore::from_environment()
         .expect("lifecycle store")
 }
 
@@ -1238,11 +1238,14 @@ fn runner_exec_promotes_artifact_dir_children_to_run_store() {
         )
         .expect("generic runner-exec run");
 
-        let promoted =
-            promote_runner_exec_artifact_dirs_in_store(
-                &homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment().expect("store"),
-                &run.id, &output, &["outputs".to_string()])
-                .expect("promote artifact dir children");
+        let promoted = promote_runner_exec_artifact_dirs_in_store(
+            &homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
+                .expect("store"),
+            &run.id,
+            &output,
+            &["outputs".to_string()],
+        )
+        .expect("promote artifact dir children");
 
         assert_eq!(promoted.len(), 3);
         let artifacts = store.list_artifacts(&run.id).expect("artifacts");
@@ -1442,11 +1445,14 @@ fn runner_exec_promotes_artifact_dir_typed_schema_children() {
         )
         .expect("generic runner-exec run");
 
-        let promoted =
-            promote_runner_exec_artifact_dirs_in_store(
-                &homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment().expect("store"),
-                &run.id, &output, &["outputs".to_string()])
-                .expect("promote artifact dir children");
+        let promoted = promote_runner_exec_artifact_dirs_in_store(
+            &homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
+                .expect("store"),
+            &run.id,
+            &output,
+            &["outputs".to_string()],
+        )
+        .expect("promote artifact dir children");
 
         assert_eq!(promoted.len(), 3);
         let artifacts = store.list_artifacts(&run.id).expect("artifacts");

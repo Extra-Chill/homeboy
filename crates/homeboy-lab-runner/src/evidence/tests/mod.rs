@@ -1201,7 +1201,9 @@ fn runner_exec_explicit_run_id_overrides_inferred_name() {
 fn mirroring_lab_job_preserves_agent_task_lifecycle_metadata() {
     crate::test_support::with_isolated_home(|_| {
         let store = ObservationStore::open_initialized().expect("store");
-        let lifecycle_store = homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment().expect("lifecycle store");
+        let lifecycle_store =
+            homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
+                .expect("lifecycle store");
         let command = vec![
             "homeboy".to_string(),
             "agent-task".to_string(),
@@ -1288,7 +1290,9 @@ fn mirroring_lab_job_preserves_agent_task_lifecycle_metadata() {
 fn transport_retry_lab_mirror_requires_and_preserves_the_controller_agent_task() {
     crate::test_support::with_isolated_home(|_| {
         let store = ObservationStore::open_initialized().expect("store");
-        let lifecycle_store = homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment().expect("lifecycle store");
+        let lifecycle_store =
+            homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
+                .expect("lifecycle store");
         let run_id = "agent-task-cook-attempt-1-transport-retry";
         let runner = ssh_runner();
         let command = vec![
@@ -1894,7 +1898,9 @@ fn terminal_mirroring_imports_only_the_submitted_overlapping_job_run_and_artifac
 fn remote_artifacts_preserve_controller_ownership_and_terminal_projection() {
     crate::test_support::with_isolated_home(|_| {
         let store = ObservationStore::open_initialized().expect("store");
-        let lifecycle = homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment().expect("lifecycle");
+        let lifecycle =
+            homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
+                .expect("lifecycle");
         let runner = ssh_runner();
         let command = vec!["cargo".to_string(), "--version".to_string()];
         // Both canonical controller owners share this remote publication seam.

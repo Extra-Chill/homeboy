@@ -219,7 +219,7 @@ impl<'a> CookExecutionPreparation<'a> {
 #[cfg(test)]
 pub(crate) fn materialize_initial_cook_attempt(options: &CookRequest) -> Result<()> {
     let recipe_store = CookRecipeStore::from_current_data_root()?;
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    let lifecycle_store = AgentTaskLifecycleStore::from_environment()?;
     materialize_initial_cook_attempt_with_stores(&recipe_store, &lifecycle_store, options)
 }
 
@@ -474,7 +474,7 @@ pub fn recover_recipe_attempt(
     cook_or_attempt_id: &str,
 ) -> Result<Option<agent_task_lifecycle::AgentTaskRunRecord>> {
     let recipe_store = CookRecipeStore::from_current_data_root()?;
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    let lifecycle_store = AgentTaskLifecycleStore::from_environment()?;
     recover_recipe_attempt_with_stores(&recipe_store, &lifecycle_store, cook_or_attempt_id)
 }
 
@@ -884,7 +884,7 @@ mod tests {
     fn initial_cook_materialization_publishes_pre_provider_heartbeat_with_run() {
         homeboy_core::test_support::with_isolated_home(|_| {
             let lifecycle_store =
-                AgentTaskLifecycleStore::from_current_environment().expect("lifecycle store");
+                AgentTaskLifecycleStore::from_environment().expect("lifecycle store");
             let recipe_store = CookRecipeStore::from_current_data_root().expect("recipe store");
             let cook_id = "atomic-cook-progress";
             let run_id = "atomic-cook-progress-attempt-1";
@@ -922,7 +922,7 @@ mod tests {
     fn pre_execution_failure_details_derives_committed_harvest_cause_from_outcome_aggregate() {
         homeboy_core::test_support::with_isolated_home(|_| {
             let lifecycle_store =
-                AgentTaskLifecycleStore::from_current_environment().expect("lifecycle store");
+                AgentTaskLifecycleStore::from_environment().expect("lifecycle store");
             let run_id = "lab-dispatch-committed-harvest-failure";
             let plan = plan("lab-dispatch-committed-harvest-plan", "harvest");
             lifecycle_store

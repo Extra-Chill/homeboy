@@ -75,7 +75,7 @@ use std::sync::{mpsc, Arc, Barrier, Condvar, Mutex};
 /// once here keeps the ambient lookup in one place and lets the ambient
 /// wrappers be deleted (#7505).
 fn test_lifecycle_store() -> AgentTaskLifecycleStore {
-    AgentTaskLifecycleStore::from_current_environment().expect("lifecycle store")
+    AgentTaskLifecycleStore::from_environment().expect("lifecycle store")
 }
 
 #[test]
@@ -1604,7 +1604,7 @@ fn seed_candidate_commit_aggregate(
     candidate_repo: &std::path::Path,
 ) {
     let lifecycle_store =
-        AgentTaskLifecycleStore::from_current_environment().expect("ambient lifecycle store");
+        AgentTaskLifecycleStore::from_environment().expect("ambient lifecycle store");
     seed_candidate_commit_aggregate_in_store(&lifecycle_store, run_id, plan, candidate_repo);
 }
 
@@ -4134,7 +4134,7 @@ fn moved_base_catch_up_rebases_real_owned_candidate_and_refuses_divergence() {
         git(&advance, &["push", "origin", "main"]);
         std::fs::write(destination.join("divergent.txt"), "not authorized\n").unwrap();
         let catch_up = catch_up_cook_candidate_to_base_in_store(
-            &agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+            &agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
                 .expect("lifecycle store"),
             &options,
             run_id,
@@ -4228,7 +4228,7 @@ fn moved_base_catch_up_leaves_a_follow_up_cook_pr_branch_to_finalization() {
         .unwrap();
 
         let catch_up = catch_up_cook_candidate_to_base_in_store(
-            &agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+            &agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
                 .expect("lifecycle store"),
             &options,
             run_id,
@@ -7421,7 +7421,7 @@ fn reconstructed_cook_rejects_a_removed_managed_workspace_before_provider_execut
 #[test]
 fn concurrent_first_cooks_elect_one_recipe_creator_without_replacing_its_plan() {
     let ambient_lifecycle_store =
-        AgentTaskLifecycleStore::from_current_environment().expect("ambient lifecycle store");
+        AgentTaskLifecycleStore::from_environment().expect("ambient lifecycle store");
     let run_id = homeboy_core::test_support::with_isolated_home(|_| {
         run_concurrent_first_cooks_recipe_creator_fixture()
     });
@@ -11789,7 +11789,7 @@ fn cook_continue_adopts_recipe_bound_retry_missing_run_and_index() {
         let ambient_recipe_store =
             CookRecipeStore::from_current_data_root().expect("ambient recipe store");
         let ambient_lifecycle_store =
-            AgentTaskLifecycleStore::from_current_environment().expect("ambient lifecycle store");
+            AgentTaskLifecycleStore::from_environment().expect("ambient lifecycle store");
         let result = run_cook_spine(
             &ambient_recipe_store,
             &ambient_lifecycle_store,
@@ -12757,7 +12757,7 @@ fn strict_locked_retry_registration_uses_the_outer_transaction() {
             agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("reserve retry run");
             homeboy_core::config::with_config_lock(|| {
                 agent_task_lifecycle::record_cook_attempt_locked_in_store(
-                    &agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+                    &agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
                         .expect("lifecycle store"),
                     cook_id,
                     2,
@@ -18120,8 +18120,7 @@ fn cook_report_surfaces_skipped_provider_routes_in_its_status_summary() {
 
         let recipe_store = super::super::cook_recipe::CookRecipeStore::from_current_data_root()
             .expect("recipe store");
-        let lifecycle_store =
-            AgentTaskLifecycleStore::from_current_environment().expect("lifecycle store");
+        let lifecycle_store = AgentTaskLifecycleStore::from_environment().expect("lifecycle store");
         let report = cook_report_with_stores(
             Some(&recipe_store),
             Some(&lifecycle_store),
@@ -20106,7 +20105,7 @@ fn interrupted_replacement_gate_fence_requires_external_proof_without_rerunning(
         failed.deterministic_gates[0].exit_code = 1;
         agent_task_lifecycle::record_promotion(run_id, serde_json::to_value(failed).unwrap())
             .expect("record failed promotion");
-        let lifecycle_store = AgentTaskLifecycleStore::from_current_environment().expect("store");
+        let lifecycle_store = AgentTaskLifecycleStore::from_environment().expect("store");
         mark_replacement_gate_execution_started(&lifecycle_store, run_id)
             .expect("persist start fence");
         let set_owner = |pid: u32| {
@@ -21181,7 +21180,7 @@ fn duplicate_controller_passes_revalidate_one_promoted_candidate() {
         // side-effect boundary, exactly as three restarted/concurrent controllers
         // would. The injected finalize effect increments a shared counter.
         let mut finalizations = Vec::new();
-        let lifecycle_store = AgentTaskLifecycleStore::from_current_environment().unwrap();
+        let lifecycle_store = AgentTaskLifecycleStore::from_environment().unwrap();
         for _ in 0..3 {
             let calls = Arc::clone(&finalize_calls);
             let mut side_effects = CookSideEffects::new(
@@ -26309,7 +26308,7 @@ fn materialize_prior_cook_attempt(cook_id: &str, state: AgentTaskRunState) -> St
     persist_initial_recipe(&prior).expect("persist prior Cook recipe");
     super::super::materialize_initial_cook_attempt(&prior).expect("materialize prior Cook");
     let run_id = prior.identity.initial_run_id.clone();
-    AgentTaskLifecycleStore::from_current_environment()
+    AgentTaskLifecycleStore::from_environment()
         .expect("lifecycle store")
         .mutate_record(&run_id, |record| {
             record.set_state_for_test(state);
@@ -26356,8 +26355,7 @@ fn recook_preserves_prior_failed_candidate_and_starts_from_clean_base() {
         let options = recook_options("cook-15775-recook", handle, &target);
         persist_initial_recipe(&options).expect("persist re-cook recipe");
         super::super::materialize_initial_cook_attempt(&options).expect("materialize re-cook");
-        let lifecycle_store =
-            AgentTaskLifecycleStore::from_current_environment().expect("lifecycle store");
+        let lifecycle_store = AgentTaskLifecycleStore::from_environment().expect("lifecycle store");
         let evidence = super::super::cook_prior_candidate::preserve_prior_attempt_candidate(
             &lifecycle_store,
             &options,
@@ -26442,8 +26440,7 @@ fn recook_preserves_prior_failed_candidate_and_starts_from_clean_base() {
 fn recook_preservation_leaves_unattributed_dirt_for_existing_admission() {
     homeboy_core::test_support::with_isolated_home(|home| {
         let handle = "fixture@fix-issue-15775-fixture";
-        let lifecycle_store =
-            AgentTaskLifecycleStore::from_current_environment().expect("lifecycle store");
+        let lifecycle_store = AgentTaskLifecycleStore::from_environment().expect("lifecycle store");
 
         // Owner without a durable lifecycle record: dirt is not attributable.
         let (_primary, target) =
@@ -26520,8 +26517,7 @@ fn a_destination_whose_cook_is_still_driving_refuses_another_cook() {
         leave_prior_candidate(&target);
         let dirty = porcelain(&target);
         let options = recook_options("cook-15884-second", handle, &target);
-        let lifecycle_store =
-            AgentTaskLifecycleStore::from_current_environment().expect("lifecycle store");
+        let lifecycle_store = AgentTaskLifecycleStore::from_environment().expect("lifecycle store");
 
         let lock_path = homeboy_core::paths::homeboy_data()
             .expect("data root")
@@ -26583,7 +26579,7 @@ fn cook_takes_over_a_nonterminal_destination_after_driver_death() {
         let (_primary, target) = prior_candidate_destination(home.path(), handle, &prior_run);
         leave_prior_candidate(&target);
         let options = recook_options("cook-16323-takeover", handle, &target);
-        let lifecycle_store = AgentTaskLifecycleStore::from_current_environment().unwrap();
+        let lifecycle_store = AgentTaskLifecycleStore::from_environment().unwrap();
         // A stale PID is diagnostic only: the unlocked OS lock is the proof.
         let lock_path = homeboy_core::paths::homeboy_data()
             .unwrap()
@@ -26619,8 +26615,7 @@ fn recook_preservation_is_a_noop_for_a_clean_prior_destination() {
             materialize_prior_cook_attempt("cook-15775-clean-prior", AgentTaskRunState::Failed);
         let (_primary, target) = prior_candidate_destination(home.path(), handle, &prior_run);
         let options = recook_options("cook-15775-clean", handle, &target);
-        let lifecycle_store =
-            AgentTaskLifecycleStore::from_current_environment().expect("lifecycle store");
+        let lifecycle_store = AgentTaskLifecycleStore::from_environment().expect("lifecycle store");
         assert_eq!(
             super::super::cook_prior_candidate::preserve_prior_attempt_candidate(
                 &lifecycle_store,
@@ -26665,7 +26660,7 @@ fn run_cook_preserves_prior_failed_candidate_before_detached_dispatch() {
         assert_eq!(porcelain(&target), "");
         // The terminal prior run durably records where its candidate went;
         // the detached handoff re-projects the new run's record.
-        let prior = AgentTaskLifecycleStore::from_current_environment()
+        let prior = AgentTaskLifecycleStore::from_environment()
             .expect("lifecycle store")
             .read_record(&prior_run)
             .expect("prior record");
@@ -26850,7 +26845,7 @@ fn recover_retries_a_runner_cancelled_cook_but_not_an_operator_cancelled_one() {
             super::super::persist_initial_recipe(&options).expect("persist Cook recipe");
             super::super::materialize_initial_cook_attempt(&options)
                 .expect("materialize first attempt");
-            let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+            let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
                 .expect("lifecycle store");
             agent_task_lifecycle::cancel_exact_run_in_store_with_provenance(
                 &store,

@@ -103,7 +103,7 @@ pub(crate) fn start_candidate_adoption_with_policy(
     rerun_completed_gates: bool,
     replace_interrupted: bool,
 ) -> Result<AgentTaskRunRecord> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    let lifecycle_store = AgentTaskLifecycleStore::from_environment()?;
     start_candidate_adoption_with_policy_in_store(
         &lifecycle_store,
         run_id,

@@ -331,7 +331,7 @@ pub fn submit_plan(
     plan: &AgentTaskPlan,
     requested_run_id: Option<&str>,
 ) -> Result<AgentTaskRunRecord> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    let lifecycle_store = AgentTaskLifecycleStore::from_environment()?;
     submit_plan_in_store(&lifecycle_store, plan, requested_run_id)
 }
 
@@ -628,7 +628,7 @@ pub fn prepare_unmaterialized_cook_admission(
     reason: &str,
 ) -> Result<AgentTaskRunRecord> {
     validate_unmaterialized_admission_input(&binding, requested_state)?;
-    let store = AgentTaskLifecycleStore::from_current_environment()?;
+    let store = AgentTaskLifecycleStore::from_environment()?;
     let cook_id = sanitize_run_id(cook_id);
     store.with_config_lock(|| {
         let resolved = resolve_run_id_in_store(&store, &cook_id)?;
@@ -916,7 +916,7 @@ pub fn precheck_unmaterialized_cook_admission(
     cook_id: &str,
     request_ref: &str,
 ) -> Result<Option<AgentTaskRunRecord>> {
-    let store = AgentTaskLifecycleStore::from_current_environment()?;
+    let store = AgentTaskLifecycleStore::from_environment()?;
     let cook_id = sanitize_run_id(cook_id);
     store.with_config_lock(|| {
         let resolved = resolve_run_id_in_store(&store, &cook_id)?;
@@ -958,7 +958,7 @@ pub fn precheck_unmaterialized_cook_admission(
 /// Recover or complete the atomic input-directory publication for one prepared
 /// admission, then expose its requested queue state in the same locked update.
 pub fn recover_unmaterialized_cook_input_publication(cook_id: &str) -> Result<AgentTaskRunRecord> {
-    let store = AgentTaskLifecycleStore::from_current_environment()?;
+    let store = AgentTaskLifecycleStore::from_environment()?;
     recover_unmaterialized_cook_input_publication_in_store(&store, cook_id)
 }
 
@@ -1088,7 +1088,7 @@ pub fn recover_unmaterialized_cook_input_publication_in_store(
 /// Rearm one blocked admission for an explicit scoped resume. Active execution or
 /// materialization ownership is preserved; terminal records are never reopened.
 pub fn rearm_unmaterialized_cook_admission(cook_id: &str) -> Result<AgentTaskRunRecord> {
-    let store = AgentTaskLifecycleStore::from_current_environment()?;
+    let store = AgentTaskLifecycleStore::from_environment()?;
     let cook_id = sanitize_run_id(cook_id);
     let current = store.read_record(&cook_id)?;
     let Some(_subject_lock) =
@@ -1838,7 +1838,7 @@ pub fn normalize_missing_execution_placement_decision(
     run_id: &str,
     decision: &homeboy_lab_contract::ExecutionPlacementDecision,
 ) -> Result<bool> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    let lifecycle_store = AgentTaskLifecycleStore::from_environment()?;
     normalize_missing_execution_placement_decision_in_store(&lifecycle_store, run_id, decision)
 }
 
@@ -1892,7 +1892,7 @@ pub fn record_execution_placement_outcome(
     run_id: &str,
     outcome: homeboy_lab_contract::ExecutionPlacementOutcome,
 ) -> Result<()> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    let lifecycle_store = AgentTaskLifecycleStore::from_environment()?;
     record_execution_placement_outcome_in_store(&lifecycle_store, run_id, outcome)
 }
 
@@ -2024,7 +2024,7 @@ mod execution_placement_tests {
     /// Tests are the entry point for their own unit of work, so the store
     /// resolves once here (#7505).
     fn test_lifecycle_store() -> crate::agent_task_lifecycle::AgentTaskLifecycleStore {
-        crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
             .expect("lifecycle store")
     }
     use super::*;
@@ -2106,7 +2106,7 @@ mod execution_placement_tests {
             );
             plan.metadata = json!({ "execution_placement_decision": prior });
             submit_plan_with_runtime_admission_in_store(
-                &AgentTaskLifecycleStore::from_current_environment().unwrap(),
+                &AgentTaskLifecycleStore::from_environment().unwrap(),
                 &plan,
                 Some("local-continuation"),
                 execution_runner_id(),
@@ -2191,7 +2191,7 @@ mod execution_placement_tests {
             let prior = decision();
             plan.metadata = json!({ "execution_placement_decision": prior });
             submit_plan_with_runtime_admission_in_store(
-                &AgentTaskLifecycleStore::from_current_environment().unwrap(),
+                &AgentTaskLifecycleStore::from_environment().unwrap(),
                 &plan,
                 Some("lab-only-continuation"),
                 execution_runner_id(),
@@ -2231,7 +2231,7 @@ mod execution_placement_tests {
             let placement = decision();
             plan.metadata = json!({ "execution_placement_decision": placement });
             let record = submit_plan_with_runtime_admission_in_store(
-                &AgentTaskLifecycleStore::from_current_environment().unwrap(),
+                &AgentTaskLifecycleStore::from_environment().unwrap(),
                 &plan,
                 Some("placement-run"),
                 execution_runner_id(),
@@ -2268,7 +2268,7 @@ mod execution_placement_tests {
         homeboy_core::test_support::with_isolated_home(|_| {
             let plan = super::super::tests::test_plan();
             let record = submit_plan_with_runtime_admission_in_store(
-                &AgentTaskLifecycleStore::from_current_environment().unwrap(),
+                &AgentTaskLifecycleStore::from_environment().unwrap(),
                 &plan,
                 Some("local-run"),
                 execution_runner_id(),
@@ -2305,7 +2305,7 @@ mod execution_placement_tests {
         homeboy_core::test_support::with_isolated_home(|_| {
             let plan = super::super::tests::test_plan();
             submit_plan_with_runtime_admission_in_store(
-                &AgentTaskLifecycleStore::from_current_environment().unwrap(),
+                &AgentTaskLifecycleStore::from_environment().unwrap(),
                 &plan,
                 Some("stamped-run"),
                 execution_runner_id(),
@@ -2352,7 +2352,7 @@ mod execution_placement_tests {
             let mut plan = super::super::tests::test_plan();
             plan.metadata = json!({ "execution_placement_decision": decision() });
             submit_plan_with_runtime_admission_in_store(
-                &AgentTaskLifecycleStore::from_current_environment().unwrap(),
+                &AgentTaskLifecycleStore::from_environment().unwrap(),
                 &plan,
                 Some("placement-run"),
                 execution_runner_id(),
@@ -2379,7 +2379,7 @@ mod execution_placement_tests {
         homeboy_core::test_support::with_isolated_home(|_| {
             let plan = super::super::tests::test_plan();
             let record = submit_plan_with_runtime_admission_in_store(
-                &AgentTaskLifecycleStore::from_current_environment().unwrap(),
+                &AgentTaskLifecycleStore::from_environment().unwrap(),
                 &plan,
                 Some("placement-run"),
                 execution_runner_id(),
@@ -2449,7 +2449,7 @@ pub fn seed_queued_run_for_tests(
     plan: &AgentTaskPlan,
     requested_run_id: Option<&str>,
 ) -> Result<AgentTaskRunRecord> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    let lifecycle_store = AgentTaskLifecycleStore::from_environment()?;
     submit_plan_with_runtime_admission_in_store_without_runtime(
         &lifecycle_store,
         plan,
@@ -3126,13 +3126,13 @@ pub fn record_completed_run(
     aggregate: &AgentTaskAggregate,
     requested_run_id: Option<&str>,
 ) -> Result<AgentTaskRunRecord> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    let lifecycle_store = AgentTaskLifecycleStore::from_environment()?;
     let mut record = submit_plan_in_store(&lifecycle_store, plan, requested_run_id)?;
     record_aggregate_in_store(&lifecycle_store, &mut record, plan, aggregate)
 }
 
 pub fn load_plan(run_id: &str) -> Result<AgentTaskPlan> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    let lifecycle_store = AgentTaskLifecycleStore::from_environment()?;
     load_plan_in_store(&lifecycle_store, run_id)
 }
 
@@ -3148,7 +3148,7 @@ pub fn load_plan_in_store(
 /// Load the plan owned by this controller's durable run identity. Runner paths
 /// projected into lifecycle metadata are transport evidence, not retry input.
 pub fn load_controller_plan(run_id: &str) -> Result<AgentTaskPlan> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    let lifecycle_store = AgentTaskLifecycleStore::from_environment()?;
     load_controller_plan_in_store(&lifecycle_store, run_id)
 }
 
@@ -3165,7 +3165,7 @@ pub fn load_controller_plan_in_store(
 
 /// Load a durable plan for a scheduler or provider execution without mutation.
 pub(crate) fn load_plan_for_execution(run_id: &str) -> Result<AgentTaskPlan> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    let lifecycle_store = AgentTaskLifecycleStore::from_environment()?;
     load_plan_for_execution_in_store(&lifecycle_store, run_id)
 }
 
@@ -3182,7 +3182,7 @@ pub fn load_plan_for_execution_in_store(
 }
 
 pub fn mark_running(run_id: &str) -> Result<AgentTaskRunRecord> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    let lifecycle_store = AgentTaskLifecycleStore::from_environment()?;
     mark_running_in_store(&lifecycle_store, run_id)
 }
 
@@ -3456,7 +3456,7 @@ pub(crate) fn record_provider_execution_process(
     attempt: u32,
     pid: u32,
 ) -> Result<AgentTaskRunRecord> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    let lifecycle_store = AgentTaskLifecycleStore::from_environment()?;
     record_provider_execution_process_in_store(&lifecycle_store, run_id, task_id, attempt, pid)
 }
 
@@ -3538,7 +3538,7 @@ pub fn record_cook_controller_failure(
     run_id: &str,
     diagnostic: &Value,
 ) -> Result<AgentTaskRunRecord> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    let lifecycle_store = AgentTaskLifecycleStore::from_environment()?;
     record_cook_controller_failure_in_store(&lifecycle_store, run_id, diagnostic)
 }
 
@@ -3960,7 +3960,7 @@ pub(crate) fn record_provider_execution_runtime_evidence(
     stderr_uri: Option<String>,
     structured_progress_uri: Option<String>,
 ) -> Result<AgentTaskRunRecord> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    let lifecycle_store = AgentTaskLifecycleStore::from_environment()?;
     let run_id = sanitize_run_id(run_id);
     let key = format!("{task_id}:{attempt}");
     let record = lifecycle_store.mutate_record(&run_id, |record| {
@@ -3999,7 +3999,7 @@ pub(crate) fn record_provider_execution_workspace_activity(
     task_id: &str,
     attempt: u32,
 ) -> Result<AgentTaskRunRecord> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    let lifecycle_store = AgentTaskLifecycleStore::from_environment()?;
     let run_id = sanitize_run_id(run_id);
     let key = format!("{task_id}:{attempt}");
     let record = lifecycle_store.mutate_record(&run_id, |record| {
@@ -4089,7 +4089,7 @@ pub fn rewrite_record_for_test<F>(run_id: &str, mut rewrite: F) -> Result<AgentT
 where
     F: FnMut(&mut AgentTaskRunRecord),
 {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    let lifecycle_store = AgentTaskLifecycleStore::from_environment()?;
     let mut record = lifecycle_store.read_record(&sanitize_run_id(run_id))?;
     rewrite(&mut record);
     lifecycle_store.write_record_in_place(&mut record)?;
@@ -4721,7 +4721,7 @@ pub fn record_run_aggregate(
     plan: &AgentTaskPlan,
     aggregate: &AgentTaskAggregate,
 ) -> Result<AgentTaskRunRecord> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    let lifecycle_store = AgentTaskLifecycleStore::from_environment()?;
     record_run_aggregate_in_store(&lifecycle_store, run_id, plan, aggregate)
 }
 
@@ -4739,7 +4739,7 @@ pub fn record_run_aggregate_in_store(
 /// recovery path for historical runner results whose aggregate was persisted
 /// before the controller finalized its artifact-byte projection.
 pub fn reconcile_terminal_artifact_projection(run_id: &str) -> Result<bool> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    let lifecycle_store = AgentTaskLifecycleStore::from_environment()?;
     let mut record = lifecycle_store.read_record(&sanitize_run_id(run_id))?;
     if !record.state().is_terminal() {
         return Ok(false);
@@ -4915,7 +4915,7 @@ pub struct AgentTaskStatusOutcome {
 /// (#13697); the transitions a record's durable evidence implies are owned by
 /// [`reconcile_status`] (#15718).
 pub fn status(run_id: &str) -> Result<AgentTaskRunRecord> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    let lifecycle_store = AgentTaskLifecycleStore::from_environment()?;
     status_in_store(&lifecycle_store, run_id)
 }
 
@@ -4930,7 +4930,7 @@ pub fn status(run_id: &str) -> Result<AgentTaskRunRecord> {
 /// converged record (promotion, finalization, retry, cancellation, Cook
 /// supervision). Status reads use [`status`] and never call this (#15718).
 pub fn reconcile_status(run_id: &str) -> Result<AgentTaskRunRecord> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    let lifecycle_store = AgentTaskLifecycleStore::from_environment()?;
     Ok(reconcile_status_in_store(
         &lifecycle_store,
         run_id,
@@ -4948,7 +4948,7 @@ pub fn reconcile_status_with_options(
     run_id: &str,
     options: AgentTaskStatusOptions,
 ) -> Result<AgentTaskStatusOutcome> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    let lifecycle_store = AgentTaskLifecycleStore::from_environment()?;
     reconcile_status_in_store(&lifecycle_store, run_id, options, false)
 }
 
@@ -5013,7 +5013,7 @@ pub(crate) fn reconcile_terminal_cook_provider_result_with_scheduler(
     run_id: &str,
     schedule: impl FnOnce(&Value) -> Result<Value>,
 ) -> Result<AgentTaskRunRecord> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    let lifecycle_store = AgentTaskLifecycleStore::from_environment()?;
     let record = lifecycle_store.read_record(run_id)?;
     if !record.state().is_terminal() {
         return Ok(record);
@@ -5497,7 +5497,7 @@ pub fn list_records_with_health_in_store(
 #[cfg(test)]
 pub(crate) fn read_all_records_with_health(
 ) -> Result<(Vec<AgentTaskRunRecord>, AgentTaskRecordHealthSummary)> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    let lifecycle_store = AgentTaskLifecycleStore::from_environment()?;
     let (mut records, health) = lifecycle_store.read_all_records_with_health()?;
     sort_records_newest_first(&mut records);
     Ok((records, health))
@@ -5520,7 +5520,7 @@ pub(crate) fn sort_records_newest_first(records: &mut [AgentTaskRunRecord]) {
 /// finished, so the path rather than a transient process-local identifier is
 /// the durable source identity.
 pub fn run_id_for_aggregate_path(path: &std::path::Path) -> Result<Option<String>> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    let lifecycle_store = AgentTaskLifecycleStore::from_environment()?;
     let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let mut matching_run_ids = lifecycle_store
         .read_records()?
@@ -5634,7 +5634,7 @@ pub(crate) fn mark_resuming_in_store(
 /// Retry a run through the reserved lifecycle path. Generic Lab replay requires
 /// controller workspace preflight and cannot use this entry point.
 pub fn retry(run_id: &str, requested_run_id: Option<&str>) -> Result<AgentTaskRunRecord> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    let lifecycle_store = AgentTaskLifecycleStore::from_environment()?;
     let source_run_id = resolve_run_id_in_store(&lifecycle_store, run_id)?;
     let plan = load_controller_plan_in_store(&lifecycle_store, &source_run_id)?;
     if plan.metadata.get("generic_lab_command_replay").is_some() {
@@ -5872,7 +5872,7 @@ pub fn plan_has_retry_materialization_identity(plan: &AgentTaskPlan) -> bool {
 }
 
 pub(crate) fn record_metadata_value(run_id: &str, key: &str, value: Value) -> Result<()> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    let lifecycle_store = AgentTaskLifecycleStore::from_environment()?;
     record_metadata_value_in_store(&lifecycle_store, run_id, key, value)
 }
 
@@ -6439,7 +6439,7 @@ pub(crate) fn find_unbound_cook_retry_successor_in_store(
 /// before retrying. A persisted follow-up plan names a temporary checkout, not
 /// authority to reuse whatever happens to exist at that path.
 pub fn artifacts(run_id: &str) -> Result<AgentTaskRunArtifacts> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    let lifecycle_store = AgentTaskLifecycleStore::from_environment()?;
     artifacts_in_store(&lifecycle_store, run_id)
 }
 
@@ -6508,7 +6508,7 @@ pub struct AgentTaskDurableReadUnavailable {
 /// Read the durable controller record and its local aggregate within the
 /// read-only store budget, without runner liveness reconciliation.
 pub fn durable_local_read(run_id: &str) -> Result<AgentTaskDurableLocalRead> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    let lifecycle_store = AgentTaskLifecycleStore::from_environment()?;
     let run_id = resolve_run_id_in_store(&lifecycle_store, run_id)?;
     durable_local_read_record_in_store(&lifecycle_store, &run_id)
 }
@@ -6555,7 +6555,7 @@ fn durable_local_read_record_in_store(
 /// Read the aggregate after a transport reconciliation completed it without
 /// scheduling the controller-side synthetic handoff task.
 pub(crate) fn read_aggregate(run_id: &str) -> Result<AgentTaskAggregate> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    let lifecycle_store = AgentTaskLifecycleStore::from_environment()?;
     read_aggregate_in_store(&lifecycle_store, run_id)
 }
 
@@ -7450,7 +7450,7 @@ fn empty_acceptance_candidate() -> crate::agent_task_promotion::AgentTaskCandida
 }
 
 pub fn record_promotion(run_id: &str, promotion: Value) -> Result<AgentTaskRunRecord> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    let lifecycle_store = AgentTaskLifecycleStore::from_environment()?;
     record_promotion_in_store(&lifecycle_store, run_id, promotion)
 }
 
@@ -7463,7 +7463,7 @@ pub fn record_promotion_progress_frames(
 ) -> Result<()> {
     const MAX_FRAMES: usize = 64;
 
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    let lifecycle_store = AgentTaskLifecycleStore::from_environment()?;
     let run_id = sanitize_run_id(run_id);
     let _ = lifecycle_store.mutate_record(&run_id, |record| {
         let metadata = record.ensure_metadata_object();
@@ -7806,7 +7806,7 @@ fn promotion_is_applied(metadata: &Value) -> bool {
 /// Persist the controller publication result separately from promotion so a
 /// resumed cook can prove finalization already completed before it publishes.
 pub fn record_cook_finalization(run_id: &str, finalization: Value) -> Result<AgentTaskRunRecord> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    let lifecycle_store = AgentTaskLifecycleStore::from_environment()?;
     record_cook_finalization_in_store(&lifecycle_store, run_id, finalization)
 }
 
@@ -7841,7 +7841,7 @@ pub(crate) fn record_manual_finalization_intent(
     intent: Value,
 ) -> Result<AgentTaskRunRecord> {
     let digest = manual_finalization_intent_digest(&intent);
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    let lifecycle_store = AgentTaskLifecycleStore::from_environment()?;
     record_cook_delivery(&lifecycle_store, run_id, |_, draft| {
         let manual = &mut draft.artifacts.manual;
         manual.intent = Some(intent.clone());
@@ -7853,7 +7853,7 @@ pub(crate) fn record_manual_finalization_intent(
 /// Mark a preflight dossier as a retryable direct publication. Unlike an
 /// explicit `--preflight` recovery, this path may still need to commit.
 pub fn record_manual_finalization_retry(run_id: &str) -> Result<AgentTaskRunRecord> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    let lifecycle_store = AgentTaskLifecycleStore::from_environment()?;
     record_cook_delivery(&lifecycle_store, run_id, |_, draft| {
         draft.artifacts.manual.retry = true;
         Some(CookDeliveryCommit::FollowDelivery)
@@ -7864,7 +7864,7 @@ pub fn record_manual_finalization_retry_candidate(
     run_id: &str,
     candidate: Value,
 ) -> Result<AgentTaskRunRecord> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    let lifecycle_store = AgentTaskLifecycleStore::from_environment()?;
     record_cook_delivery(&lifecycle_store, run_id, |_, draft| {
         draft.artifacts.manual.retry_candidate = Some(candidate.clone());
         Some(CookDeliveryCommit::FollowDelivery)
@@ -7883,7 +7883,7 @@ pub(crate) fn record_manual_finalization_receipt(
     run_id: &str,
     receipt: Value,
 ) -> Result<AgentTaskRunRecord> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    let lifecycle_store = AgentTaskLifecycleStore::from_environment()?;
     record_cook_delivery(&lifecycle_store, run_id, |_, draft| {
         let artifacts = &mut draft.artifacts;
         artifacts.finalization = Some(receipt.clone());
@@ -7920,7 +7920,7 @@ pub fn record_manual_finalization_failure(
             "details": policy.redact_json(&error.details),
         },
     });
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    let lifecycle_store = AgentTaskLifecycleStore::from_environment()?;
     record_cook_delivery(&lifecycle_store, &run_id, |_, draft| {
         draft.artifacts.manual.failure = Some(failure.clone());
         Some(CookDeliveryCommit::Terminal(

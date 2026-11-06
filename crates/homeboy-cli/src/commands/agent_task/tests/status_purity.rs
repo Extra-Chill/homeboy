@@ -27,7 +27,7 @@ fn status_args(run_id: &str, full: bool, exact: bool, strict_subject_exit: bool)
 #[test]
 fn agent_task_status_leaves_record_revision_events_and_work_intents_unchanged() {
     with_isolated_home(|_| {
-        let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
+        let store = AgentTaskLifecycleStore::from_environment().expect("store");
         let fixtures = seed_status_purity_fixtures_for_test().expect("seed fixtures");
 
         for fixture in &fixtures {

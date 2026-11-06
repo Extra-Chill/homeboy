@@ -235,7 +235,7 @@ pub(super) fn observe_cook_step_exit(exit: &StepTerminalDelivery) -> Result<()> 
 fn workflow_cook_record(
     cook_id: &str,
 ) -> std::result::Result<agent_task_lifecycle::AgentTaskRunRecord, WorkflowRunOutcome> {
-    let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+    let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
         .map_err(|_| WorkflowRunOutcome::Pending)?;
     let parent = store.read_record(cook_id).ok();
     let redirected = parent
@@ -325,7 +325,7 @@ fn workflow_cook_progress(cook_id: &str) -> Option<Value> {
 }
 
 fn observe_launch_exit(cook_id: &str, exit: &StepTerminalDelivery) -> Result<()> {
-    let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
     let parent = store.read_record(cook_id)?;
     if exit.cancelled {
         // A workflow `cook` step derives its Cook ID from its own step key, so
@@ -448,7 +448,7 @@ fn settle_missing_launch_index(
 }
 
 fn notify_cook_attempt(cook_id: &str, attempt_run_id: &str) -> Result<()> {
-    let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
     let record = store.read_record(attempt_run_id)?;
     if !record.state().is_terminal() {
         return Ok(());
@@ -512,8 +512,7 @@ mod tests {
     #[test]
     fn missing_launch_index_does_not_replace_cancellation() {
         with_isolated_home(|home| {
-            let store =
-                agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment().unwrap();
+            let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment().unwrap();
             let cook_id = "cancelled-missing-index";
             agent_task_lifecycle::record_detached_cook_handoff_parent_in_store(&store, cook_id)
                 .unwrap();

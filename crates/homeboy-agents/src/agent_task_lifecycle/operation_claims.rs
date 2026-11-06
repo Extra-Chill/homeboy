@@ -285,7 +285,7 @@ pub fn fail_cook_operation_in_store(
 
 /// Read a single operation claim for reconciliation, if present.
 pub(crate) fn operation_claim(run_id: &str, operation_key: &str) -> Result<Option<OperationClaim>> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    let lifecycle_store = AgentTaskLifecycleStore::from_environment()?;
     operation_claim_in_store(&lifecycle_store, run_id, operation_key)
 }
 
@@ -335,7 +335,7 @@ pub fn operation_claim_for_effect_in_store(
 /// that deadline. Callers use this to decide between waiting and reconciling an
 /// interrupted effect via Git/PR lookup.
 pub fn operation_lease_is_active(run_id: &str, operation_key: &str) -> Result<bool> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    let lifecycle_store = AgentTaskLifecycleStore::from_environment()?;
     operation_lease_is_active_in_store(&lifecycle_store, run_id, operation_key)
 }
 

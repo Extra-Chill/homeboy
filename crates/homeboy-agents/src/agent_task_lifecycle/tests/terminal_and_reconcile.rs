@@ -19,7 +19,7 @@ use tempfile::TempDir;
 /// store once here keeps the ambient lookup in a single place instead of at
 /// every call site, and lets the ambient wrappers be deleted (#7505).
 fn test_lifecycle_store() -> AgentTaskLifecycleStore {
-    AgentTaskLifecycleStore::from_current_environment().expect("lifecycle store")
+    AgentTaskLifecycleStore::from_environment().expect("lifecycle store")
 }
 
 struct TerminalSnapshotProvider {
@@ -4885,7 +4885,7 @@ fn cancellation_wins_the_retry_pre_execution_failure_race() {
         cancel_run(run_id, Some("operator cancellation")).expect("cancel retry");
 
         let failure = record_pre_execution_failure_in_store(
-            &AgentTaskLifecycleStore::from_current_environment().expect("lifecycle store"),
+            &AgentTaskLifecycleStore::from_environment().expect("lifecycle store"),
             run_id,
             &plan,
             "local_retry_supervisor",
@@ -4937,7 +4937,7 @@ fn snapshot_fence_transition_preserves_cancelled_terminal_winner() {
         let plan = test_plan();
         submit_plan(&plan, Some(run_id)).expect("submit");
         cancel_run(run_id, Some("operator cancellation")).expect("cancel");
-        let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
+        let store = AgentTaskLifecycleStore::from_environment().expect("store");
         let error = Error::validation_invalid_argument(
             "workspace",
             "Cook workspace snapshot was invalidated before provider execution",
@@ -4958,7 +4958,7 @@ fn snapshot_fence_transition_preserves_unrelated_zero_execution_failure() {
     with_isolated_home(|_| {
         let run_id = "snapshot-fence-unrelated-failure";
         let plan = test_plan();
-        let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
+        let store = AgentTaskLifecycleStore::from_environment().expect("store");
         submit_plan(&plan, Some(run_id)).expect("submit");
         let original =
             Error::validation_invalid_argument("workspace", "unrelated failure", None, None);
@@ -4983,7 +4983,7 @@ fn snapshot_fence_transition_rejects_same_class_without_pre_provider_identity() 
     with_isolated_home(|_| {
         let run_id = "snapshot-fence-same-class-provider-outcome";
         let plan = test_plan();
-        let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
+        let store = AgentTaskLifecycleStore::from_environment().expect("store");
         submit_plan(&plan, Some(run_id)).expect("submit");
         let original =
             Error::validation_invalid_argument("workspace", "unrelated failure", None, None);
@@ -5021,8 +5021,7 @@ fn dead_retry_launcher_persists_terminal_failure_under_strict_config_locking() {
             let plan = test_plan();
             submit_plan(&plan, Some(run_id)).expect("persist retry reservation");
 
-            let store =
-                AgentTaskLifecycleStore::from_current_environment().expect("lifecycle store");
+            let store = AgentTaskLifecycleStore::from_environment().expect("lifecycle store");
             let failed = record_pre_execution_failure_in_store(
                 &store,
                 run_id,

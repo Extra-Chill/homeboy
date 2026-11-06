@@ -102,7 +102,8 @@ impl CookStartupAdmission {
             normalized_args.splice(owned..owned, ["--run-id".to_string(), cook_id.clone()]);
         }
 
-        let store = homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+        let store =
+            homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
         let mut record = if inherited_launcher_id.is_some() && is_local_detached_child {
             // The Cook step binds itself to the handoff its launcher claimed.
             // It inherits that launcher's id for the binding, but is not
@@ -3731,7 +3732,7 @@ mod tests {
     /// Tests are the entry point for their own unit of work, so the store
     /// resolves once here (#7505).
     fn test_lifecycle_store() -> homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore {
-        homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+        homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
             .expect("lifecycle store")
     }
     use super::*;

@@ -1239,11 +1239,10 @@ mod tests {
                 dispatch_with_provider_catalog(request, Arc::new(NeverRunExecutor), &catalog)
                     .expect("queue admitted fallback");
             assert!(result.value.queued);
-            let plan =
-                crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
-                    .expect("lifecycle store")
-                    .read_controller_plan(&run_id)
-                    .expect("queued controller plan");
+            let plan = crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
+                .expect("lifecycle store")
+                .read_controller_plan(&run_id)
+                .expect("queued controller plan");
 
             assert_eq!(plan.tasks[0].executor.model(), Some("test/fallback"));
             assert_eq!(

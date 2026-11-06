@@ -3925,7 +3925,7 @@ pub fn canonical_candidate_from_durable_record(
 /// Read one canonical run resource from the current controller installation.
 pub fn run_exact_from_current_environment(run_id: &str) -> homeboy_core::Result<ControlPlaneRun> {
     let requested_id = parse_run_id(run_id)?;
-    let store = AgentTaskLifecycleStore::from_current_environment()?;
+    let store = AgentTaskLifecycleStore::from_environment()?;
     let record = store.read_record_bounded(requested_id.as_str())?;
     let snapshot = LifecycleStoreLookup::new(store)
         .snapshot(record)
@@ -3951,7 +3951,7 @@ pub fn review_from_current_environment(
     request: &ControlPlaneRunReviewRequest,
 ) -> homeboy_core::Result<ControlPlaneRunReview> {
     let requested_id = parse_run_id(run_id)?;
-    let store = AgentTaskLifecycleStore::from_current_environment()?;
+    let store = AgentTaskLifecycleStore::from_environment()?;
     OrchestrationService::new(LifecycleStoreLookup::new(store))
         .review(&requested_id, request)
         .map_err(|error| run_boundary_error_to_homeboy(error, "run_id", Some(run_id)))
@@ -4060,7 +4060,7 @@ where
     ) -> homeboy_core::Result<crate::agent_task_promotion::AgentTaskPromotionReport>,
 {
     let requested_id = parse_run_id(run_id)?;
-    let store = AgentTaskLifecycleStore::from_current_environment()?;
+    let store = AgentTaskLifecycleStore::from_environment()?;
     OrchestrationService::new(LifecycleStoreLookup::new(store))
         .execute_action_with_delegates(&requested_id, request, retry, resume, promote)
         .map_err(|error| run_boundary_error_to_homeboy(error, "action", None))
@@ -7498,7 +7498,7 @@ mod tests {
     #[test]
     fn reference_registration_is_durable_idempotent_and_run_scoped() {
         with_isolated_home(|_| {
-            let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
+            let store = AgentTaskLifecycleStore::from_environment().expect("store");
             store.write_record(&record(AGENT_TASK_RUN)).expect("record");
             let run = RunId::new(AGENT_TASK_RUN).expect("run");
             let request = ControlPlaneReferenceRegistration {
@@ -7671,7 +7671,7 @@ mod tests {
     #[test]
     fn lifecycle_store_run_discovery_uses_bounded_keyset_pages() {
         with_isolated_home(|_| {
-            let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
+            let store = AgentTaskLifecycleStore::from_environment().expect("store");
             for (run_id, submitted_at) in [
                 ("run-oldest", "2026-01-01T00:00:00Z"),
                 ("run-middle", "2026-01-02T00:00:00Z"),
@@ -7753,7 +7753,7 @@ mod tests {
     fn registered_provider_submits_a_prepared_controller_plan_once() {
         with_isolated_home(|_| {
             let run_id = "prepared-control-plane-run";
-            let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
+            let store = AgentTaskLifecycleStore::from_environment().expect("store");
             let mut plan = AgentTaskPlan::new("prepared-plan", Vec::new());
             plan.metadata = json!({
                 "fanout": {
@@ -7847,7 +7847,7 @@ mod tests {
     #[test]
     fn review_preserves_authoritative_aggregate_absence() {
         with_isolated_home(|_| {
-            let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
+            let store = AgentTaskLifecycleStore::from_environment().expect("store");
             let mut persisted = record(AGENT_TASK_RUN);
             persisted.metadata["cook_id"] = json!("unverified-cook");
             store.write_record(&persisted).expect("record");
@@ -7885,7 +7885,7 @@ mod tests {
     #[test]
     fn review_pr_receipts_share_completion_identity_without_mutating_records() {
         with_isolated_home(|_| {
-            let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
+            let store = AgentTaskLifecycleStore::from_environment().expect("store");
             let service = OrchestrationService::new(LifecycleStoreLookup::new(store.clone()));
             let cases = [
                 (
@@ -8093,7 +8093,7 @@ mod tests {
                     .expect("rooted index attempt");
             }
             // Colliding ambient IDs must never supply this service's evidence.
-            let ambient = AgentTaskLifecycleStore::from_current_environment().expect("ambient");
+            let ambient = AgentTaskLifecycleStore::from_environment().expect("ambient");
             let mut foreign = record(candidate_id);
             crate::agent_task_service::set_cook_delivery_artifact_for_test(
                 &mut foreign.metadata,
@@ -8207,7 +8207,7 @@ mod tests {
     #[test]
     fn review_redacts_automatic_retention_inventory() {
         with_isolated_home(|_| {
-            let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
+            let store = AgentTaskLifecycleStore::from_environment().expect("store");
             let mut run = record(AGENT_TASK_RUN);
             run.metadata["automatic_artifact_retention"] = json!({
                 "worktree_count": 2,
@@ -8244,7 +8244,7 @@ mod tests {
     #[test]
     fn terminal_cancel_is_replayed_and_conflicting_key_reuse_is_rejected() {
         with_isolated_home(|_| {
-            let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
+            let store = AgentTaskLifecycleStore::from_environment().expect("store");
             store.write_record(&record(AGENT_TASK_RUN)).expect("record");
             let service = OrchestrationService::new(LifecycleStoreLookup::new(store));
             let run = RunId::new(AGENT_TASK_RUN).expect("run");
@@ -8411,7 +8411,7 @@ mod tests {
     #[test]
     fn effect_status_survives_restart_and_preserves_the_immutable_request() {
         with_isolated_home(|_| {
-            let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
+            let store = AgentTaskLifecycleStore::from_environment().expect("store");
             store.write_record(&record(AGENT_TASK_RUN)).expect("record");
             let run = RunId::new(AGENT_TASK_RUN).expect("run");
             let request = ControlPlaneActionRequest {
@@ -8458,7 +8458,7 @@ mod tests {
     #[test]
     fn accepted_cancel_returns_the_converged_resource_and_replays_without_waiting_again() {
         with_isolated_home(|_| {
-            let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
+            let store = AgentTaskLifecycleStore::from_environment().expect("store");
             crate::agent_task_lifecycle::submit_plan_in_store(
                 &store,
                 &AgentTaskPlan::new("cancel-converges", Vec::new()),
@@ -8500,7 +8500,7 @@ mod tests {
     #[test]
     fn cancel_action_is_already_satisfied_when_the_run_finishes_after_admission() {
         with_isolated_home(|_| {
-            let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
+            let store = AgentTaskLifecycleStore::from_environment().expect("store");
             crate::agent_task_lifecycle::submit_plan_in_store(
                 &store,
                 &AgentTaskPlan::new("cancel-finishes-after-admit", Vec::new()),
@@ -8546,7 +8546,7 @@ mod tests {
     #[test]
     fn cancel_action_preserves_unrelated_errors_when_the_run_is_terminal() {
         with_isolated_home(|_| {
-            let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
+            let store = AgentTaskLifecycleStore::from_environment().expect("store");
             crate::agent_task_lifecycle::submit_plan_in_store(
                 &store,
                 &AgentTaskPlan::new("cancel-preserve-error", Vec::new()),
@@ -8592,7 +8592,7 @@ mod tests {
     #[test]
     fn exact_cancel_does_not_follow_a_rebound_cook_alias() {
         with_isolated_home(|_| {
-            let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
+            let store = AgentTaskLifecycleStore::from_environment().expect("store");
             let cook_id = "cook-cancel-alias-rebind";
             let first_id = crate::agent_task_lifecycle::cook_attempt_run_id(cook_id, 1);
             let second_id = crate::agent_task_lifecycle::cook_attempt_run_id(cook_id, 2);
@@ -8668,7 +8668,7 @@ mod tests {
             ("live-verification", false, true),
         ] {
             with_isolated_home(|_| {
-                let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
+                let store = AgentTaskLifecycleStore::from_environment().expect("store");
                 let cook_id = format!("cook-cancel-fence-{case}");
                 let attempt_id = crate::agent_task_lifecycle::cook_attempt_run_id(&cook_id, 1);
                 crate::agent_task_lifecycle::submit_plan_in_store(
@@ -8772,7 +8772,7 @@ mod tests {
     #[test]
     fn live_ineligible_record_rejects_quarantine_without_an_effect() {
         with_isolated_home(|_| {
-            let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
+            let store = AgentTaskLifecycleStore::from_environment().expect("store");
             crate::agent_task_lifecycle::submit_plan_in_store(
                 &store,
                 &AgentTaskPlan::new("quarantine-ineligible", Vec::new()),
@@ -8819,7 +8819,7 @@ mod tests {
     #[test]
     fn interrupted_cancel_recovers_terminal_evidence_without_repeating_effects() {
         with_isolated_home(|_| {
-            let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
+            let store = AgentTaskLifecycleStore::from_environment().expect("store");
             crate::agent_task_lifecycle::submit_plan_in_store(
                 &store,
                 &AgentTaskPlan::new("interrupted-cancel", Vec::new()),
@@ -8888,7 +8888,7 @@ mod tests {
     #[test]
     fn interrupted_retry_recovers_its_deterministic_successor_without_redispatch() {
         with_isolated_home(|_| {
-            let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
+            let store = AgentTaskLifecycleStore::from_environment().expect("store");
             crate::agent_task_lifecycle::submit_plan_in_store(
                 &store,
                 &AgentTaskPlan::new("interrupted-retry", Vec::new()),
@@ -8959,7 +8959,7 @@ mod tests {
     #[test]
     fn interrupted_promotion_recovers_only_its_exact_request_report() {
         with_isolated_home(|_| {
-            let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
+            let store = AgentTaskLifecycleStore::from_environment().expect("store");
             store.write_record(&record(AGENT_TASK_RUN)).expect("record");
             let service = OrchestrationService::new(LifecycleStoreLookup::new(store.clone()));
             let run = RunId::new(AGENT_TASK_RUN).expect("run");
@@ -9153,7 +9153,7 @@ mod tests {
     #[test]
     fn action_audit_supports_the_maximum_action_idempotency_key() {
         with_isolated_home(|_| {
-            let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
+            let store = AgentTaskLifecycleStore::from_environment().expect("store");
             store.write_record(&record(AGENT_TASK_RUN)).expect("record");
             let service = OrchestrationService::new(LifecycleStoreLookup::new(store));
             let run = RunId::new(AGENT_TASK_RUN).expect("run");
@@ -9238,7 +9238,7 @@ mod tests {
     #[test]
     fn resume_action_replays_the_stored_result_without_reexecuting() {
         with_isolated_home(|_| {
-            let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
+            let store = AgentTaskLifecycleStore::from_environment().expect("store");
             let mut terminal = record(AGENT_TASK_RUN);
             terminal.set_state_for_test(AgentTaskRunState::Running);
             terminal.metadata = json!({});
@@ -9309,7 +9309,7 @@ mod tests {
     #[test]
     fn resume_on_candidate_recoverable_names_the_recover_entry_point() {
         with_isolated_home(|_| {
-            let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
+            let store = AgentTaskLifecycleStore::from_environment().expect("store");
             let mut stranded = record(AGENT_TASK_RUN);
             stranded.set_state_for_test(AgentTaskRunState::CandidateRecoverable);
             stranded.artifact_refs.clear();
@@ -9372,7 +9372,7 @@ mod tests {
     #[test]
     fn terminal_runner_resume_admits_when_advisory_eligibility_is_stale() {
         with_isolated_home(|_| {
-            let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
+            let store = AgentTaskLifecycleStore::from_environment().expect("store");
             store.write_record(&record(AGENT_TASK_RUN)).expect("record");
             let aggregate = serde_json::from_value(json!({
                 "schema": "homeboy/agent-task-aggregate/v1",
@@ -9434,7 +9434,7 @@ mod tests {
     #[test]
     fn failed_promotion_action_replays_without_reexecuting() {
         with_isolated_home(|_| {
-            let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
+            let store = AgentTaskLifecycleStore::from_environment().expect("store");
             store.write_record(&record(AGENT_TASK_RUN)).expect("record");
             let service = OrchestrationService::new(LifecycleStoreLookup::new(store));
             let run = RunId::new(AGENT_TASK_RUN).expect("run");
@@ -9497,7 +9497,7 @@ mod tests {
     #[test]
     fn promotion_action_owns_handoff_recording_and_idempotent_replay() {
         with_isolated_home(|_| {
-            let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
+            let store = AgentTaskLifecycleStore::from_environment().expect("store");
             store.write_record(&record(AGENT_TASK_RUN)).expect("record");
             let service = OrchestrationService::new(LifecycleStoreLookup::new(store));
             let run = RunId::new(AGENT_TASK_RUN).expect("run");
@@ -10073,7 +10073,7 @@ mod tests {
     #[test]
     fn cli_and_daemon_run_reads_resolve_a_mission_bound_observation_run_identically() {
         with_isolated_home(|_| {
-            let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
+            let store = AgentTaskLifecycleStore::from_environment().expect("store");
             let run = store
                 .open_observation_initialized()
                 .expect("observation store")
@@ -10099,7 +10099,7 @@ mod tests {
     #[test]
     fn missing_run_boundaries_preserve_context_without_rows_or_effects() {
         with_isolated_home(|_| {
-            let store = AgentTaskLifecycleStore::from_current_environment().expect("store");
+            let store = AgentTaskLifecycleStore::from_environment().expect("store");
             store
                 .write_record(&record(AGENT_TASK_RUN))
                 .expect("sentinel record");

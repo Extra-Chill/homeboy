@@ -29,7 +29,7 @@ mod boundary_tests;
 /// once here keeps the ambient lookup in one place and lets the ambient
 /// wrappers be deleted (#7505).
 fn test_lifecycle_store() -> crate::agent_task_lifecycle::AgentTaskLifecycleStore {
-    crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+    crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
         .expect("lifecycle store")
 }
 
@@ -3291,7 +3291,7 @@ fn control_plane_reconciliation_completes_its_effect_across_runner_terminal_proj
                 .state(),
             AgentTaskRunState::Cancelled
         );
-        let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+        let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
             .expect("lifecycle store");
         let effect = store
             .open_observation_initialized()
@@ -3526,9 +3526,8 @@ fn active_reconcile_preview_writes_nothing() {
     // has exited.
     with_isolated_home(|_| {
         let run_id = "sweep-preview-must-not-write";
-        let lifecycle_store =
-            agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
-                .expect("ambient store");
+        let lifecycle_store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
+            .expect("ambient store");
         let command = vec!["homeboy".to_string(), "agent-task".to_string()];
         lifecycle_store
             .record_detached_lab_run(agent_task_lifecycle::DetachedLabRunRecord {
@@ -3828,7 +3827,7 @@ fn scoped_reconcile_uses_validated_handoff_child_not_later_index_attempt() {
         index_cook_attempts(cook_id, &attempt_one, &attempt_two);
 
         let scope = agent_task_lifecycle::reconcile_scope_run_ids_in_store(
-            &agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
+            &agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
                 .expect("lifecycle store"),
             cook_id,
         )
@@ -4189,8 +4188,7 @@ fn active_discovery_finds_records_beyond_a_thousand_terminal_rows() {
         let full = discover_runs(AgentTaskDiscoveryFilter::Active).unwrap();
         assert_eq!(full.count, 2);
         assert_eq!(full.global_record_health.healthy, 2);
-        let store =
-            agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment().unwrap();
+        let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment().unwrap();
         assert_eq!(
             discover_runs_in_store(&store, AgentTaskDiscoveryFilter::Active, Default::default())
                 .unwrap()

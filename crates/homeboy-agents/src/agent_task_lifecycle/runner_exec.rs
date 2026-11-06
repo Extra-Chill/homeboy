@@ -16,7 +16,7 @@ pub fn record_runner_job_identity(
     runner_job_id: &str,
 ) -> Result<AgentTaskRunRecord> {
     record_runner_job_identity_in_store(
-        &AgentTaskLifecycleStore::from_current_environment()?,
+        &AgentTaskLifecycleStore::from_environment()?,
         run_id,
         runner_id,
         runner_job_id,
@@ -58,7 +58,7 @@ pub fn recorded_runner_job_identity(run_id: &str) -> Result<Option<(String, Stri
 pub fn accepted_lab_runner_job_identity(
     run_id: &str,
 ) -> Result<Option<homeboy_core::lab_contract::RunnerJobIdentity>> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    let lifecycle_store = AgentTaskLifecycleStore::from_environment()?;
     let record = lifecycle_store.read_record(&sanitize_run_id(run_id))?;
     Ok(accepted_lab_runner_job_identity_from_record(&record))
 }
@@ -201,7 +201,7 @@ pub fn record_runner_exec_job_identity(
     remote_command: &[String],
 ) -> Result<homeboy_core::observation::RunRecord> {
     ensure_runner_exec_observation_run(
-        &AgentTaskLifecycleStore::from_current_environment()?,
+        &AgentTaskLifecycleStore::from_environment()?,
         run_id,
         runner_id,
         remote_workspace,
@@ -218,7 +218,7 @@ pub fn record_runner_exec_execution_record(
     execution_record: &homeboy_core::runner_execution_envelope::RunnerExecutionRecord,
 ) -> Result<()> {
     record_runner_exec_execution_record_in_store(
-        &AgentTaskLifecycleStore::from_current_environment()?,
+        &AgentTaskLifecycleStore::from_environment()?,
         run_id,
         execution_record,
     )
@@ -295,8 +295,7 @@ pub fn record_runner_exec_provider_result(
 /// installation has no runner-exec run with that id on that runner, so callers
 /// can stay fail-closed for an owner they cannot resolve.
 pub fn runner_exec_run_is_terminal(run_id: &str, runner_id: &str) -> Result<Option<bool>> {
-    let store =
-        AgentTaskLifecycleStore::from_current_environment()?.open_observation_maintained()?;
+    let store = AgentTaskLifecycleStore::from_environment()?.open_observation_maintained()?;
     let Some(run) = store.get_run(&sanitize_run_id(run_id))? else {
         return Ok(None);
     };
@@ -324,7 +323,7 @@ pub fn ensure_generic_runner_exec_run(
     remote_command: &[String],
 ) -> Result<homeboy_core::observation::RunRecord> {
     ensure_generic_runner_exec_run_in_store(
-        &AgentTaskLifecycleStore::from_current_environment()?,
+        &AgentTaskLifecycleStore::from_environment()?,
         run_id,
         runner_id,
         remote_workspace,
@@ -499,7 +498,7 @@ pub fn record_runner_exec_terminal_checkpoint(
     snapshot: &RunnerJobLogSnapshot,
 ) -> Result<()> {
     record_runner_exec_terminal_checkpoint_in_store(
-        &AgentTaskLifecycleStore::from_current_environment()?,
+        &AgentTaskLifecycleStore::from_environment()?,
         run_id,
         snapshot,
     )

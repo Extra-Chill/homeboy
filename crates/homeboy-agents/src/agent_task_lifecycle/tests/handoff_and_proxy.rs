@@ -19,7 +19,7 @@ use std::sync::Mutex;
 /// once here keeps the ambient lookup in one place and lets the ambient
 /// wrappers be deleted (#7505).
 fn test_lifecycle_store() -> AgentTaskLifecycleStore {
-    AgentTaskLifecycleStore::from_current_environment().expect("lifecycle store")
+    AgentTaskLifecycleStore::from_environment().expect("lifecycle store")
 }
 
 enum TestRunnerReconciliation {
@@ -425,7 +425,7 @@ fn durable_terminal_run_preserves_parent_mission_and_explicit_handoff_identity()
 #[test]
 fn accepted_runner_identity_binds_before_snapshot_validation_and_survives_caller_loss() {
     with_isolated_home(|_| {
-        let lifecycle_store = AgentTaskLifecycleStore::from_current_environment().unwrap();
+        let lifecycle_store = AgentTaskLifecycleStore::from_environment().unwrap();
         let run_id = "cook-9567-pre-provider-race";
         let plan = test_plan();
         record_lab_offload_phase_with_submission_in_store(
@@ -496,7 +496,7 @@ fn accepted_runner_identity_binds_before_snapshot_validation_and_survives_caller
 #[test]
 fn accepted_runner_binding_fails_if_terminalization_wins_before_identity_persistence() {
     with_isolated_home(|_| {
-        let lifecycle_store = AgentTaskLifecycleStore::from_current_environment().unwrap();
+        let lifecycle_store = AgentTaskLifecycleStore::from_environment().unwrap();
         let run_id = "cook-12926-accepted-before-binding";
         let plan = test_plan();
         record_lab_offload_phase_with_submission_in_store(
@@ -545,7 +545,7 @@ fn accepted_runner_binding_fails_if_terminalization_wins_before_identity_persist
 #[test]
 fn accepted_runner_identity_rejects_mutable_metadata_without_typed_handoff() {
     with_isolated_home(|_| {
-        let lifecycle_store = AgentTaskLifecycleStore::from_current_environment().unwrap();
+        let lifecycle_store = AgentTaskLifecycleStore::from_environment().unwrap();
         let run_id = "cook-9567-metadata-is-not-acceptance";
         let mut record = lifecycle_store
             .submit_plan_with_runtime_admission(&test_plan(), run_id, |_| Ok(json!({})))
@@ -1061,7 +1061,7 @@ fn runner_snapshot_binds_pending_lab_handoff_before_validation() {
         snapshot.events.clear();
 
         reconcile_transport_proxy_snapshot_in_store(
-            &AgentTaskLifecycleStore::from_current_environment().expect("lifecycle store"),
+            &AgentTaskLifecycleStore::from_environment().expect("lifecycle store"),
             &mut record,
             &snapshot,
         )

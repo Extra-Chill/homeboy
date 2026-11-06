@@ -3,7 +3,7 @@
 use super::*;
 
 pub fn logs(run_id: &str) -> Result<homeboy_control_plane_contract::ControlPlaneEventPage> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    let lifecycle_store = AgentTaskLifecycleStore::from_environment()?;
     logs_in_store(&lifecycle_store, run_id)
 }
 
@@ -11,7 +11,7 @@ pub fn logs_from_cursor(
     run_id: &str,
     cursor: Option<&homeboy_control_plane_contract::EventCursor>,
 ) -> Result<homeboy_control_plane_contract::ControlPlaneEventPage> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_current_environment()?;
+    let lifecycle_store = AgentTaskLifecycleStore::from_environment()?;
     event_page_in_store(&lifecycle_store, run_id, cursor)
 }
 

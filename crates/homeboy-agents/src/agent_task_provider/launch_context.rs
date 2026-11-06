@@ -279,9 +279,8 @@ mod tests {
         let run_id = "launch-context-run";
         let plan = AgentTaskPlan::new("launch-context-plan", vec![request.clone()]);
         crate::agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("durable run");
-        let store =
-            crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()
-                .expect("lifecycle store");
+        let store = crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
+            .expect("lifecycle store");
         AgentTaskScheduler::new(Arc::new(
             super::super::ExtensionProviderAgentTaskExecutor::with_providers(vec![provider]),
         ))
