@@ -7358,6 +7358,9 @@ fn cook_recovery_actions_with_prefix(
         super::cook_recovery::cook_recovery_step(&super::cook_recovery::CookRecoveryInputs {
             status,
             recovery_legal,
+            disconnected_runner: agent_task_lifecycle::exact_record(run_id).is_ok_and(|record| {
+                agent_task_lifecycle::disconnected_runner_recovery_available(&record)
+            }),
             blocking_claim,
             retry_admitted,
             retry_refusal,

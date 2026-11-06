@@ -2923,6 +2923,9 @@ fn continuation_source_run_id(
     let Ok(latest) = lifecycle_store.read_record(&latest_run_id) else {
         return latest_run_id;
     };
+    if agent_task_lifecycle::disconnected_runner_recovery_available(&latest) {
+        return latest_run_id;
+    }
     let empty_terminal_attempt =
         matches!(
             latest.state(),

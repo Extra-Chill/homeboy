@@ -24,6 +24,7 @@ fn test_lifecycle_store() -> AgentTaskLifecycleStore {
 
 enum TestRunnerReconciliation {
     Snapshot(Box<homeboy_core::api_jobs::RunnerJobLogSnapshot>),
+    Snapshots(Vec<homeboy_core::api_jobs::RunnerJobLogSnapshot>),
     ConfirmedAbsent(usize),
     Unconfirmed,
 }
@@ -39,9 +40,14 @@ impl RunnerContinuationProvider for ReconciliationProvider {
         _runner_id: &str,
         _job_id: &str,
     ) -> Result<homeboy_core::api_jobs::RunnerJobLogSnapshot> {
-        Err(Error::internal_unexpected(
-            "snapshot must use generation reconciliation",
-        ))
+        let mut result = self.result.lock().expect("snapshot result");
+        if let Some(TestRunnerReconciliation::Snapshots(snapshots)) = result.as_mut() {
+            return Ok(snapshots.remove(0));
+        }
+        match result.take() {
+            Some(TestRunnerReconciliation::Snapshot(snapshot)) => Ok(*snapshot),
+            _ => Err(Error::internal_unexpected("runner unavailable")),
+        }
     }
 
     fn reconcile_runner_job(&self, _runner_id: &str, _job_id: &str) -> RunnerJobReconciliation {
@@ -54,9 +60,10 @@ impl RunnerContinuationProvider for ReconciliationProvider {
                     checked_generations,
                 }
             }
-            Some(TestRunnerReconciliation::Unconfirmed) | None => {
-                RunnerJobReconciliation::UnconfirmedAbsence
-            }
+            Some(
+                TestRunnerReconciliation::Unconfirmed | TestRunnerReconciliation::Snapshots(_),
+            )
+            | None => RunnerJobReconciliation::UnconfirmedAbsence,
         }
     }
 
@@ -89,6 +96,69 @@ impl RunnerContinuationProvider for ReconciliationProvider {
     ) -> Result<i32> {
         Err(Error::internal_unexpected("not used by reconciliation"))
     }
+}
+
+#[test]
+fn disconnected_runner_recovery_adopts_terminal_evidence_without_dispatch() {
+    with_isolated_home(|_| {
+        let run_id = "agent-task-disconnected-child";
+        let mut record = accepted_detached_handoff(run_id);
+        record.set_state_for_test(AgentTaskRunState::Failed);
+        record.ensure_metadata_object().insert(
+            "pre_execution_failure".into(),
+            json!({
+                "error_code": "runner.controller_disconnected", "phase": "lab_handoff"
+            }),
+        );
+        let store = test_lifecycle_store();
+        store.write_record(&record).unwrap();
+        assert!(disconnected_runner_recovery_available(&record));
+        let snapshot = terminal_child_snapshot(&succeeded_aggregate(&test_plan()));
+        let mut running = snapshot.clone();
+        running.job.status = homeboy_core::api_jobs::JobStatus::Running;
+        running.events.clear();
+        let _provider = RunnerContinuationTestGuard::install(Box::new(ReconciliationProvider {
+            result: Mutex::new(Some(TestRunnerReconciliation::Snapshots(vec![
+                running, snapshot,
+            ]))),
+            recovered_runner_job_id: Mutex::new(None),
+        }));
+        assert!(recover_disconnected_runner_in_store(&store, run_id).unwrap());
+        assert_eq!(
+            store.read_record(run_id).unwrap().state(),
+            AgentTaskRunState::Succeeded
+        );
+        assert!(store.read_aggregate(run_id).is_ok());
+        assert!(!recover_disconnected_runner_in_store(&store, run_id).unwrap());
+    });
+}
+
+#[test]
+fn disconnected_runner_recovery_preserves_failure_when_unreachable() {
+    with_isolated_home(|_| {
+        let run_id = "agent-task-disconnected-child";
+        let mut record = accepted_detached_handoff(run_id);
+        record.set_state_for_test(AgentTaskRunState::Failed);
+        record.ensure_metadata_object().insert(
+            "pre_execution_failure".into(),
+            json!({
+                "error_code": "runner.controller_disconnected"
+            }),
+        );
+        let store = test_lifecycle_store();
+        store.write_record(&record).unwrap();
+        let _provider = RunnerContinuationTestGuard::install(Box::new(ReconciliationProvider {
+            result: Mutex::new(None),
+            recovered_runner_job_id: Mutex::new(None),
+        }));
+        assert!(recover_disconnected_runner_in_store(&store, run_id).is_err());
+        assert_eq!(
+            store.read_record(run_id).unwrap().state(),
+            AgentTaskRunState::Failed
+        );
+        record.lab_handoff = None;
+        assert!(!disconnected_runner_recovery_available(&record));
+    });
 }
 
 fn accepted_detached_handoff(run_id: &str) -> AgentTaskRunRecord {

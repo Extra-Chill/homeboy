@@ -160,6 +160,71 @@ pub fn recover_terminal_transport_proxy_evidence(run_id: &str) -> Result<bool> {
     Ok(store::read_aggregate(&record.run_id).is_ok())
 }
 
+/// A failed controller observation is not a failed runner execution. Only an
+/// authenticated, accepted handoff may be recovered without new admission.
+pub fn disconnected_runner_recovery_available(record: &AgentTaskRunRecord) -> bool {
+    record.state() == AgentTaskRunState::Failed
+        && record
+            .metadata
+            .pointer("/pre_execution_failure/error_code")
+            .and_then(Value::as_str)
+            == Some("runner.controller_disconnected")
+        && is_authenticated_transport_recovery_record(record)
+}
+
+/// Observe the exact accepted job to completion. This path never submits work
+/// and leaves the original failure intact when the runner cannot be reached.
+pub fn recover_disconnected_runner_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<bool> {
+    if !lifecycle_store.record_exists(run_id)? {
+        return Ok(false);
+    }
+    let mut record = lifecycle_store.read_record(run_id)?;
+    if !disconnected_runner_recovery_available(&record) {
+        return Ok(false);
+    }
+    let runner_id = record.runner_id().unwrap().to_string();
+    let job_id = record.runner_job_id().unwrap().to_string();
+    // Each probe reads the job's full event log, so a long-running job is
+    // polled at a steady low rate instead of once a second.
+    let mut backoff = std::time::Duration::from_secs(1);
+    loop {
+        let snapshot = super::runner_continuation::with_runner_continuation(|provider| {
+            provider.runner_job_log_snapshot(&runner_id, &job_id)
+        })?;
+        // Validate before importing anything, including snapshots of live jobs.
+        validate_runner_job_snapshot(&record, &snapshot)?;
+        reconcile_runner_job_snapshot_in_store(lifecycle_store, &mut record, &snapshot)?;
+        if matches!(
+            snapshot.job.status,
+            homeboy_core::api_jobs::JobStatus::Succeeded
+                | homeboy_core::api_jobs::JobStatus::Failed
+                | homeboy_core::api_jobs::JobStatus::Cancelled
+        ) || !disconnected_runner_recovery_available(&record)
+        {
+            if disconnected_runner_recovery_available(&record) {
+                return Err(Error::internal_unexpected(format!(
+                    "runner job `{job_id}` is terminal but has no authenticated agent-task result; retain the workspace and inspect runner job logs"
+                )));
+            }
+            lifecycle_store.commit_record(&mut record)?;
+            return Ok(true);
+        }
+        // Do not resurrect the controller failure while the daemon still owns
+        // execution. Terminal lifecycle evidence replaces it atomically.
+        std::thread::sleep(backoff);
+        backoff = backoff
+            .saturating_mul(2)
+            .min(std::time::Duration::from_secs(10));
+        record = lifecycle_store.read_record(run_id)?;
+        if !disconnected_runner_recovery_available(&record) {
+            return Ok(true);
+        }
+    }
+}
+
 fn is_authenticated_transport_recovery_record(record: &AgentTaskRunRecord) -> bool {
     record.lab_handoff.as_ref().is_some_and(|handoff| {
         handoff.validation_error().is_none()

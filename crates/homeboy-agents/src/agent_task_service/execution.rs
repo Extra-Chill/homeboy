@@ -1258,6 +1258,8 @@ pub fn resume(
     run_id: String,
     executor: SharedAgentTaskExecutor,
 ) -> Result<AgentTaskRunResult<AgentTaskAggregate>> {
+    let recovery_store = agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    agent_task_lifecycle::recover_disconnected_runner_in_store(&recovery_store, &run_id)?;
     if let Some(result) = terminal_run_result(&run_id)? {
         return Ok(result);
     }
