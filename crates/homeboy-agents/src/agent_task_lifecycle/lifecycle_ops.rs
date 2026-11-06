@@ -3015,6 +3015,19 @@ pub fn durable_notification_route(
     homeboy_core::notification_route::NotificationRoute::from_metadata(&record.metadata)
 }
 
+/// [`durable_notification_route`] read from the store that owns the run.
+pub(crate) fn durable_notification_route_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Option<homeboy_core::notification_route::NotificationRoute> {
+    if run_id.trim().is_empty() {
+        return None;
+    }
+    let run_id = resolve_run_id_in_store(lifecycle_store, run_id).ok()?;
+    let record = lifecycle_store.read_record(&run_id).ok()?;
+    homeboy_core::notification_route::NotificationRoute::from_metadata(&record.metadata)
+}
+
 /// Claim a Cook's single terminal notification within an explicitly rooted
 /// store. The `O_EXCL` marker is created beside that store's own Cook index, so
 /// two stores are two independent claims and neither consumes the other's

@@ -414,7 +414,15 @@ fn cook_lifecycle_emission_is_inert_without_a_configured_transport() {
     // transport is installed at all.
     homeboy_core::test_support::with_isolated_home(|_| {
         cook_started(
-            "cook-abc", "run-1", "task", None, "main", 3, "claude", false,
+            &crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment().unwrap(),
+            "cook-abc",
+            "run-1",
+            "task",
+            None,
+            "main",
+            3,
+            "claude",
+            false,
         );
         cook_retrying("cook-abc", "run-1", None, 2, 3);
         cook_terminal(&report("succeeded", None), None, 0);
@@ -448,6 +456,7 @@ fn started_announcement_is_durable_once_per_cook_across_recipe_reentry() {
 
         let start = |run_id| {
             cook_started(
+                &crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment().unwrap(),
                 "cook-once",
                 run_id,
                 "task",
@@ -497,6 +506,7 @@ fn unrouted_admission_does_not_consume_the_started_announcement() {
         install_transport("extension", vec!["false"]);
         set_default_transport("extension");
         cook_started(
+            &crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment().unwrap(),
             "cook-late-route",
             "missing",
             "task",
@@ -510,6 +520,7 @@ fn unrouted_admission_does_not_consume_the_started_announcement() {
 
         seed_run_with_route("cook-late-route-attempt-1-aaaa", "thread-42");
         cook_started(
+            &crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment().unwrap(),
             "cook-late-route",
             "cook-late-route-attempt-1-aaaa",
             "task",
@@ -529,6 +540,7 @@ fn historical_cook_progress_seeds_start_marker_without_reannouncing() {
         install_transport("extension", vec!["false"]);
         seed_run_with_route("historical-attempt", "old-thread");
         cook_started(
+            &crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment().unwrap(),
             "historical-cook",
             "historical-attempt",
             "old task",
@@ -542,6 +554,7 @@ fn historical_cook_progress_seeds_start_marker_without_reannouncing() {
         // A second process sees the confirmed marker even if progress was
         // rewritten to durable_identity by the first continuation.
         cook_started(
+            &crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment().unwrap(),
             "historical-cook",
             "historical-attempt",
             "old task",

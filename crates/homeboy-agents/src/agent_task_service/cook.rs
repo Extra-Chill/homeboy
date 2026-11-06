@@ -66,11 +66,10 @@ use super::cook_pre_execution::{
     CookExecutionPreparation,
 };
 use super::cook_promotion::{
-    attempt_needs_execution_with_store, catch_up_cook_candidate_to_base_in_store, cook_report,
-    cook_report_with_stores, finalize_or_load_cook_pr_with_stores,
-    persisted_promotion_for_attempt_in_store, pre_provider_diagnostic_cause,
-    promote_or_load_attempt_in_store, retryable_provider_discovery_failure_with_store, BaseCatchUp,
-    CookReportInput,
+    attempt_needs_execution_with_store, catch_up_cook_candidate_to_base_in_store,
+    finalize_or_load_cook_pr_with_stores, persisted_promotion_for_attempt_in_store,
+    pre_provider_diagnostic_cause, promote_or_load_attempt_in_store,
+    retryable_provider_discovery_failure_with_store, BaseCatchUp, CookReportInput, CookStores,
 };
 use super::cook_recipe::{CookRecipeStore, InitialRecipeMaterialization};
 use super::cook_recovery::CookRecoveryStep;
@@ -418,6 +417,7 @@ fn pre_artifact_execution_count(record: &agent_task_lifecycle::AgentTaskRunRecor
 }
 
 fn pre_artifact_interruption_report(
+    stores: CookStores<'_>,
     cook_id: String,
     attempts: Vec<AgentTaskCookAttemptReport>,
     run_id: &str,
@@ -425,7 +425,7 @@ fn pre_artifact_interruption_report(
     reason: String,
     exit_code: i32,
 ) -> AgentTaskRunResult<AgentTaskCookReport> {
-    let mut report = cook_report(CookReportInput {
+    let mut report = stores.report(CookReportInput {
         cook_id,
         status: "pre_artifact_interruption",
         disposition: CookDisposition::Terminal,
@@ -451,13 +451,14 @@ fn pre_artifact_interruption_report(
 /// [`CookDisposition::Terminal`] is declared explicitly: nothing is left
 /// carrying this Cook forward, so the orchestrator's completion is due now.
 pub(super) fn cook_deadline_report(
+    stores: CookStores<'_>,
     cook_id: String,
     attempts: Vec<AgentTaskCookAttemptReport>,
     run_id: &str,
     deadline: &CookDeadline,
     boundary: &str,
 ) -> AgentTaskRunResult<AgentTaskCookReport> {
-    let mut report = cook_report(CookReportInput {
+    let mut report = stores.report(CookReportInput {
         cook_id,
         // The existing vocabulary entry for "exceeded its wall-clock budget"
         // ([`CookStatus::TimedOut`]). Written as the literal every other exit
@@ -5270,6 +5271,10 @@ fn run_cook_reported(
     durable_observer: Option<&CookProgressObserver<'_>>,
     mode: CookMode,
 ) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
+    let stores = CookStores {
+        recipe: store,
+        lifecycle: lifecycle_store,
+    };
     let mut failure_options = options.clone();
     let mut result = match run_cook_spine(
         store,
@@ -5283,10 +5288,7 @@ fn run_cook_reported(
         Ok(result) => result,
         Err(mut error) => {
             if error.details["concurrent_cook_creation_loser"] == Value::Bool(true) {
-                let mut report = cook_report_with_stores(
-                    Some(store),
-                    Some(lifecycle_store),
-                    CookReportInput {
+                let mut report = stores.report(CookReportInput {
                         cook_id: failure_options.identity.cook_id.clone(),
                         status: "durable_failure",
                         disposition: CookDisposition::Terminal,
@@ -5374,6 +5376,7 @@ fn run_cook_reported(
                 }
                 if record.metadata.get("pre_execution_failure").is_some() {
                     return Ok(pre_execution_failure_report(
+                        stores,
                         failure_options.identity.cook_id.clone(),
                         vec![AgentTaskCookAttemptReport {
                             attempt: 1,
@@ -5391,7 +5394,7 @@ fn run_cook_reported(
             }
             return durable_cook_error_report_with_store(
                 store,
-                Some(lifecycle_store),
+                lifecycle_store,
                 &failure_options,
                 error,
             );
@@ -5438,7 +5441,7 @@ fn run_cook_reported(
         ) {
             return durable_cook_error_report_with_store(
                 store,
-                Some(lifecycle_store),
+                lifecycle_store,
                 &failure_options,
                 error,
             );
@@ -5453,7 +5456,7 @@ fn run_cook_reported(
             ) {
                 return durable_cook_error_report_with_store(
                     store,
-                    Some(lifecycle_store),
+                    lifecycle_store,
                     &failure_options,
                     error,
                 );
@@ -5472,20 +5475,12 @@ fn durable_cook_error_report(
     error: Error,
 ) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
     let store = CookRecipeStore::from_current_data_root()?;
-    // The fully ambient entry point: it resolves the recipe root and holds no
-    // lifecycle store, so nothing is injected here and nothing is split.
-    durable_cook_error_report_with_store(&store, None, options, error)
+    durable_cook_error_report_with_store(&store, &store.lifecycle_store(), options, error)
 }
 
 /// The durable failure report, bound to the roots its caller owns.
 ///
-/// `lifecycle_store` is `Option` because one caller genuinely has none: `run_cook`
-/// routes here precisely when `AgentTaskLifecycleStore::from_environment()`
-/// failed, so there is no store to inject and the ambient reads below will fail
-/// the same way they always did. Every caller that *does* hold a lifecycle store
-/// now passes it.
-///
-/// That distinction is the whole point. This function reads the recipe from an
+/// This function reads the recipe from an
 /// injected `CookRecipeStore` and used to write the controller failure through
 /// ambient `agent_task_lifecycle` shims, so a Cook whose recipe lives in an
 /// injected home had its failure diagnostic recorded in whatever home the
@@ -5496,22 +5491,25 @@ fn durable_cook_error_report(
 /// of naming a store constructor (#7505).
 fn durable_cook_error_report_with_store(
     store: &CookRecipeStore,
-    lifecycle_store: Option<&AgentTaskLifecycleStore>,
+    lifecycle_store: &AgentTaskLifecycleStore,
     options: &CookRequest,
     error: Error,
 ) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
+    let stores = CookStores {
+        recipe: store,
+        lifecycle: lifecycle_store,
+    };
     // The attempt record is presentation only — a missing one degrades to an
     // empty attempts list, exactly as the ambient read's `.ok()` already did.
-    let attempt_record = |run_id: &str| match lifecycle_store {
-        Some(lifecycle_store) => agent_task_lifecycle::reconcile_status_in_store(
+    let attempt_record = |run_id: &str| {
+        agent_task_lifecycle::reconcile_status_in_store(
             lifecycle_store,
             run_id,
             agent_task_lifecycle::AgentTaskStatusOptions::default(),
             false,
         )
         .ok()
-        .map(|outcome| outcome.record),
-        None => agent_task_lifecycle::reconcile_status(run_id).ok(),
+        .map(|outcome| outcome.record)
     };
     if store.recipe_exists(&options.identity.cook_id) {
         let attempts = store
@@ -5530,7 +5528,7 @@ fn durable_cook_error_report_with_store(
             })
             .into_iter()
             .collect();
-        let mut report = cook_report(CookReportInput {
+        let mut report = stores.report(CookReportInput {
             cook_id: options.identity.cook_id.clone(),
             status: "durable_failure",
             disposition: CookDisposition::Terminal,
@@ -5559,28 +5557,15 @@ fn durable_cook_error_report_with_store(
             // the injected one (or the reverse) is a check that answers about a
             // record the write never touches.
             let diagnostic = context.diagnostic.as_ref().expect("controller diagnostic");
-            match lifecycle_store {
-                Some(lifecycle_store) => {
-                    if agent_task_lifecycle::run_record_exists_in_store(
-                        lifecycle_store,
-                        &options.identity.initial_run_id,
-                    )? {
-                        agent_task_lifecycle::record_cook_controller_failure_in_store(
-                            lifecycle_store,
-                            &options.identity.initial_run_id,
-                            diagnostic,
-                        )?;
-                    }
-                }
-                None => {
-                    if agent_task_lifecycle::run_record_exists(&options.identity.initial_run_id)? {
-                        agent_task_lifecycle::record_cook_controller_failure_in_store(
-                            &agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?,
-                            &options.identity.initial_run_id,
-                            diagnostic,
-                        )?;
-                    }
-                }
+            if agent_task_lifecycle::run_record_exists_in_store(
+                lifecycle_store,
+                &options.identity.initial_run_id,
+            )? {
+                agent_task_lifecycle::record_cook_controller_failure_in_store(
+                    lifecycle_store,
+                    &options.identity.initial_run_id,
+                    diagnostic,
+                )?;
             }
         }
         return Ok(report);
@@ -5665,6 +5650,10 @@ fn run_cook_spine(
     durable_observer: Option<&CookProgressObserver<'_>>,
     mode: CookMode,
 ) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
+    let stores = CookStores {
+        recipe: store,
+        lifecycle: lifecycle_store,
+    };
     // The local detached launcher persists this fence before spawn. Recheck it
     // at each durable/external boundary so a dead launcher cannot revive work.
     lifecycle_store.require_detached_cook_handoff_fence_open(&options.identity.cook_id)?;
@@ -5848,6 +5837,7 @@ fn run_cook_spine(
     )?;
     let notify_component = cook_component(&options);
     crate::agent_task_notify::cook_started(
+        lifecycle_store,
         &options.identity.cook_id,
         &options.identity.initial_run_id,
         &options.finalization.title,
@@ -6096,7 +6086,7 @@ fn run_cook_spine(
         &options.identity.initial_run_id,
     )?
     else {
-        return Ok(cook_report(CookReportInput {
+        return Ok(stores.report(CookReportInput {
             cook_id: options.identity.cook_id.clone(),
             status: CookStatus::Queued.as_str(),
             disposition: CookDisposition::InFlight,
@@ -6185,7 +6175,7 @@ fn run_cook_spine(
                     record.state() == agent_task_lifecycle::AgentTaskRunState::Cancelled
                 })
             {
-                return Ok(cook_report(CookReportInput {
+                return Ok(stores.report(CookReportInput {
                     cook_id: options.identity.cook_id.clone(),
                     status: CookStatus::Cancelled.as_str(),
                     disposition: CookDisposition::Terminal,
@@ -6204,6 +6194,7 @@ fn run_cook_spine(
                 &error,
             )?;
             return Ok(pre_execution_failure_report(
+                stores,
                 options.identity.cook_id.clone(),
                 Vec::new(),
                 pre_execution_failure_details(
@@ -6242,6 +6233,7 @@ fn run_cook_spine(
                 "gate_declaration_preflight",
             )?;
             return Ok(pre_execution_failure_report(
+                stores,
                 options.identity.cook_id.clone(),
                 Vec::new(),
                 pre_execution_failure_details(
@@ -6288,6 +6280,7 @@ fn run_cook_spine(
             "gate_toolchain_preflight",
         )?;
         return Ok(pre_execution_failure_report(
+            stores,
             options.identity.cook_id.clone(),
             Vec::new(),
             pre_execution_failure_details(
@@ -6318,6 +6311,7 @@ fn run_cook_spine(
                 "dependency_tool_preflight",
             )?;
             return Ok(pre_execution_failure_report(
+                stores,
                 options.identity.cook_id.clone(),
                 Vec::new(),
                 pre_execution_failure_details(
@@ -6442,6 +6436,7 @@ fn run_cook_spine(
         // have run is never started rather than started and killed.
         if let Some(deadline) = expired_cook_deadline() {
             return Ok(cook_deadline_report(
+                stores,
                 cook_id,
                 attempts,
                 &run_id,
@@ -7004,6 +6999,7 @@ fn run_cook_spine(
                 });
                 if !pre_execution_failure.retryable {
                     return Ok(pre_execution_failure_report(
+                        stores,
                         cook_id,
                         attempts,
                         pre_execution_failure,
@@ -7014,7 +7010,7 @@ fn run_cook_spine(
                 if !transport_retry_available(store, &cook_id, attempt)?
                     && !transport_admission_reset_available(record.as_ref())
                 {
-                    return Ok(pre_execution_failure_report(
+                    return Ok(pre_execution_failure_report(stores,
                         cook_id,
                         attempts,
                         pre_execution_failure,
@@ -7079,7 +7075,7 @@ fn run_cook_spine(
                 promotion: None,
                 feedback: None,
             });
-            return Ok(cook_report(CookReportInput {
+            return Ok(stores.report(CookReportInput {
                 cook_id,
                 status: CookStatus::Cancelled.as_str(),
                 disposition: CookDisposition::Terminal,
@@ -7107,7 +7103,7 @@ fn run_cook_spine(
                 promotion: None,
                 feedback: None,
             });
-            return Ok(cook_report(CookReportInput {
+            return Ok(stores.report(CookReportInput {
                 cook_id,
                 status: "in_flight",
                 disposition: CookDisposition::InFlight,
@@ -7121,7 +7117,7 @@ fn run_cook_spine(
         let plan = lifecycle_store.read_controller_plan(&run_id)?;
         budget_limit.get_or_insert_with(|| plan.options.execution_budget.clone());
         let Some(source_request) = plan.tasks.first().cloned() else {
-            return Ok(cook_report(CookReportInput {
+            return Ok(stores.report(CookReportInput {
                 cook_id,
                 status: "policy_failure",
                 disposition: CookDisposition::Terminal,
@@ -7152,7 +7148,7 @@ fn run_cook_spine(
                 promotion: None,
                 feedback: None,
             });
-            return Ok(cook_report(CookReportInput {
+            return Ok(stores.report(CookReportInput {
                 cook_id,
                 status: &status,
                 disposition: CookDisposition::Terminal,
@@ -7239,7 +7235,7 @@ fn run_cook_spine(
                             1,
                         ),
                     };
-                    return Ok(cook_report(CookReportInput {
+                    return Ok(stores.report(CookReportInput {
                         cook_id,
                         status,
                         disposition: CookDisposition::Terminal,
@@ -7260,7 +7256,7 @@ fn run_cook_spine(
                         promotion: None,
                         feedback: None,
                     });
-                    return Ok(pre_artifact_interruption_report(
+                    return Ok(pre_artifact_interruption_report(stores,
                         cook_id,
                         attempts,
                         &run_id,
@@ -7289,7 +7285,7 @@ fn run_cook_spine(
                     phase == PreArtifactInterruptionPhase::BeforeProviderStart;
                 if !replace_semantic_attempt && attempt >= max_attempts {
                     publish_latest_incomplete_draft(&options, lifecycle_store)?;
-                    return Ok(pre_artifact_interruption_report(
+                    return Ok(pre_artifact_interruption_report(stores,
                         cook_id,
                         attempts,
                         &run_id,
@@ -7305,7 +7301,7 @@ fn run_cook_spine(
                     .as_ref()
                     .expect("budget is initialized from the loaded attempt plan");
                 if budget_remaining(budget_limit, observed_budget_used).is_none() {
-                    return Ok(pre_artifact_interruption_report(
+                    return Ok(pre_artifact_interruption_report(stores,
                         cook_id,
                         attempts,
                         &run_id,
@@ -7321,7 +7317,7 @@ fn run_cook_spine(
                     && !transport_retry_available(store, &cook_id, attempt)?
                     && !transport_admission_reset_available(Some(&record))
                 {
-                    return Ok(pre_artifact_interruption_report(
+                    return Ok(pre_artifact_interruption_report(stores,
                         cook_id,
                         attempts,
                         &run_id,
@@ -7349,7 +7345,7 @@ fn run_cook_spine(
                         continue;
                     }
                     None => {
-                        return Ok(pre_artifact_interruption_report(
+                        return Ok(pre_artifact_interruption_report(stores,
                             cook_id,
                             attempts,
                             &run_id,
@@ -7396,6 +7392,7 @@ fn run_cook_spine(
                     feedback: None,
                 });
                 return Ok(pre_execution_failure_report(
+                    stores,
                     cook_id,
                     attempts,
                     failure,
@@ -7453,7 +7450,7 @@ fn run_cook_spine(
                 feedback: None,
             });
             let is_refusal = status == "no_candidate";
-            let mut report = cook_report(CookReportInput {
+            let mut report = stores.report(CookReportInput {
                 cook_id,
                 status,
                 disposition: CookDisposition::Terminal,
@@ -7498,7 +7495,7 @@ fn run_cook_spine(
             if !cancelled && attempt >= attempt_limit {
                 publish_latest_incomplete_draft(&options, lifecycle_store)?;
             }
-            let mut report = cook_report(CookReportInput {
+            let mut report = stores.report(CookReportInput {
                 cook_id,
                 status: status.as_str(),
                 disposition: CookDisposition::Terminal,
@@ -7616,19 +7613,19 @@ fn run_cook_spine(
                 promotion: None,
                 feedback: None,
             });
-            let mut report = cook_report(CookReportInput {
-                cook_id,
-                status: if requires_candidate {
-                    "no_candidate"
-                } else {
-                    "intentional_no_change"
-                },
-                disposition: CookDisposition::Terminal,
-                attempts,
-                finalization: None,
-                stop_reason: Some(
-                    if declaration.verdict == AgentTaskIntentionalNoChangeVerdict::Blocked {
-                        format!(
+            let mut report = stores.report(CookReportInput {
+                    cook_id,
+                    status: if requires_candidate {
+                        "no_candidate"
+                    } else {
+                        "intentional_no_change"
+                    },
+                    disposition: CookDisposition::Terminal,
+                    attempts,
+                    finalization: None,
+                    stop_reason: Some(
+                        if declaration.verdict == AgentTaskIntentionalNoChangeVerdict::Blocked {
+                            format!(
                         "provider returned a verified blocked verdict; promotion and publication were skipped{}",
                         declaration
                             .next_action
@@ -7636,21 +7633,22 @@ fn run_cook_spine(
                             .then(String::new)
                             .unwrap_or_else(|| format!("; next action: {}", declaration.next_action))
                     )
-                    } else if requires_candidate {
-                        format!(
+                        } else if requires_candidate {
+                            format!(
                         "provider completed a verified {} review, but task policy requires a substantive candidate patch",
                         declaration.verdict
                     )
-                    } else {
-                        format!(
+                        } else {
+                            format!(
                         "provider completed a verified {} evidence-only review without a candidate patch; promotion and publication were skipped",
                         declaration.verdict
                     )
-                    },
-                ),
-                exit_code: i32::from(requires_candidate),
-                invocation_latest_run_id: Some(&run_id),
-            });
+                        },
+                    ),
+                    exit_code: i32::from(requires_candidate),
+                    invocation_latest_run_id: Some(&run_id),
+                },
+            );
             report.value.intentional_no_change = Some(AgentTaskCookIntentionalNoChangeReport {
                 declaration,
                 review_form,
@@ -7769,7 +7767,7 @@ fn run_cook_spine(
                         });
                     return Ok(report);
                 }
-                let mut report = cook_report(CookReportInput {
+                let mut report = stores.report(CookReportInput {
                     cook_id,
                     status: "intentional_no_change",
                     disposition: CookDisposition::Terminal,
@@ -7806,7 +7804,7 @@ fn run_cook_spine(
                         Some("finalized with proven inherited baseline-red gate evidence"),
                     );
                 }
-                return Ok(cook_report(CookReportInput {
+                return Ok(stores.report(CookReportInput {
                     cook_id,
                     status: "baseline_red",
                     disposition: CookDisposition::Terminal,
@@ -7824,7 +7822,7 @@ fn run_cook_spine(
                 if attempt >= attempt_limit {
                     publish_latest_incomplete_draft(&options, lifecycle_store)?;
                 }
-                return Ok(cook_report(CookReportInput {
+                return Ok(stores.report(CookReportInput {
                     cook_id,
                     status: "no_changes",
                     disposition: CookDisposition::Terminal,
@@ -7847,7 +7845,7 @@ fn run_cook_spine(
                     .and_then(|form| form.incomplete_reason())
                     .unwrap_or("no reason recorded")
                     .to_string();
-                return Ok(cook_report(CookReportInput {
+                return Ok(stores.report(CookReportInput {
                     cook_id,
                     status: "candidate_recoverable",
                     disposition: CookDisposition::Terminal,
@@ -7864,7 +7862,7 @@ fn run_cook_spine(
                 if attempt >= attempt_limit {
                     publish_latest_incomplete_draft(&options, lifecycle_store)?;
                 }
-                return Ok(cook_report(CookReportInput {
+                return Ok(stores.report(CookReportInput {
                     cook_id,
                     status: "no_changes_gate_failed",
                     disposition: CookDisposition::Terminal,
@@ -7888,7 +7886,7 @@ fn run_cook_spine(
             // than spending another provider execution.
             AgentTaskCookLoopStatus::GatesDeferred => {
                 let stop_reason = gates_deferred_stop_reason(&promotion, &cook_id);
-                return Ok(cook_report(CookReportInput {
+                return Ok(stores.report(CookReportInput {
                     cook_id,
                     status: "gates_deferred",
                     disposition: CookDisposition::Terminal,
@@ -7900,7 +7898,7 @@ fn run_cook_spine(
                 }));
             }
             AgentTaskCookLoopStatus::GateBudgetExceeded => {
-                return Ok(cook_report(CookReportInput {
+                return Ok(stores.report(CookReportInput {
                     cook_id,
                     status: "timed_out",
                     disposition: CookDisposition::Terminal,
@@ -7915,7 +7913,7 @@ fn run_cook_spine(
                 }));
             }
             AgentTaskCookLoopStatus::GateDeclarationInvalid => {
-                return Ok(cook_report(CookReportInput {
+                return Ok(stores.report(CookReportInput {
                     cook_id,
                     status: "gate_declaration_invalid",
                     disposition: CookDisposition::Terminal,
@@ -7931,7 +7929,7 @@ fn run_cook_spine(
             }
             AgentTaskCookLoopStatus::RetryRequested => {
                 let Some(follow_up_request) = follow_up_request else {
-                    return Ok(cook_report(CookReportInput {
+                    return Ok(stores.report(CookReportInput {
                         cook_id,
                         status: "policy_failure",
                         disposition: CookDisposition::Terminal,
@@ -7996,7 +7994,7 @@ fn run_cook_spine(
                         }
                     }
                     CookFollowUpDispatch::BudgetExhausted { reason } => {
-                        return Ok(cook_report(CookReportInput {
+                        return Ok(stores.report(CookReportInput {
                             cook_id,
                             status: "execution_budget_exhausted",
                             disposition: CookDisposition::Terminal,
@@ -8013,7 +8011,7 @@ fn run_cook_spine(
                         }));
                     }
                     CookFollowUpDispatch::PolicyFailure { reason } => {
-                        return Ok(cook_report(CookReportInput {
+                        return Ok(stores.report(CookReportInput {
                             cook_id,
                             status: "policy_failure",
                             disposition: CookDisposition::Terminal,
@@ -8028,7 +8026,7 @@ fn run_cook_spine(
             }
             AgentTaskCookLoopStatus::RetriesExhausted => {
                 publish_latest_incomplete_draft(&options, lifecycle_store)?;
-                return Ok(cook_report(CookReportInput {
+                return Ok(stores.report(CookReportInput {
                     cook_id,
                     status: "retries_exhausted",
                     disposition: CookDisposition::Terminal,
@@ -8046,7 +8044,7 @@ fn run_cook_spine(
     }
 
     publish_latest_incomplete_draft(&options, lifecycle_store)?;
-    Ok(cook_report(CookReportInput {
+    Ok(stores.report(CookReportInput {
         cook_id,
         status: "retries_exhausted",
         disposition: CookDisposition::Terminal,
@@ -10575,7 +10573,14 @@ mod cook_deadline_tests {
     #[test]
     fn deadline_expiry_at_an_attempt_boundary_terminalizes_as_timed_out() {
         let deadline = expired();
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let store = CookRecipeStore::new(context.path_roots());
+        let lifecycle_store = store.lifecycle_store();
         let result = cook_deadline_report(
+            CookStores {
+                recipe: &store,
+                lifecycle: &lifecycle_store,
+            },
             "cook-1".to_string(),
             Vec::new(),
             "run-1",
@@ -10619,7 +10624,14 @@ mod cook_deadline_tests {
     /// time before the gates could run" call for different follow-ups.
     #[test]
     fn a_gate_boundary_stop_names_the_gate_phase() {
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let store = CookRecipeStore::new(context.path_roots());
+        let lifecycle_store = store.lifecycle_store();
         let reason = cook_deadline_report(
+            CookStores {
+                recipe: &store,
+                lifecycle: &lifecycle_store,
+            },
             "cook-1".to_string(),
             Vec::new(),
             "run-1",

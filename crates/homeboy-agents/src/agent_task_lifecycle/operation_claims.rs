@@ -284,6 +284,7 @@ pub fn fail_cook_operation_in_store(
 }
 
 /// Read a single operation claim for reconciliation, if present.
+#[cfg(test)]
 pub(crate) fn operation_claim(run_id: &str, operation_key: &str) -> Result<Option<OperationClaim>> {
     let lifecycle_store = AgentTaskLifecycleStore::from_environment()?;
     operation_claim_in_store(&lifecycle_store, run_id, operation_key)

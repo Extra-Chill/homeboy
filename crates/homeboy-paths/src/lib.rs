@@ -442,11 +442,12 @@ fn assert_ambient_root_allowed(what: &str) {
     let backtrace = std::backtrace::Backtrace::force_capture().to_string();
     let mut frames: Vec<&str> = backtrace
         .lines()
-        .map(str::trim)
-        .filter(|line| line.starts_with("at ") && line.contains("crates/homeboy"))
-        .filter(|line| !line.contains("crates/homeboy-paths/"))
-        .take(16)
+        .filter_map(|line| line.trim().split_once(": ").map(|(_, symbol)| symbol))
+        .filter(|symbol| symbol.starts_with("homeboy") || symbol.starts_with("<homeboy"))
+        .filter(|symbol| !symbol.starts_with("homeboy_paths::"))
         .collect();
+    frames.dedup();
+    frames.truncate(30);
     if frames.is_empty() {
         frames = backtrace.lines().map(str::trim).take(60).collect();
     }

@@ -5968,15 +5968,27 @@ pub(crate) struct CookReportInput<'a> {
     pub invocation_latest_run_id: Option<&'a str>,
 }
 
-pub(crate) fn cook_report(input: CookReportInput<'_>) -> AgentTaskRunResult<AgentTaskCookReport> {
-    let recipe_store = super::cook_recipe::CookRecipeStore::from_current_data_root().ok();
-    let lifecycle_store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment().ok();
-    cook_report_with_stores(recipe_store.as_ref(), lifecycle_store.as_ref(), input)
+/// The recipe and lifecycle stores that own one Cook.
+#[derive(Clone, Copy)]
+pub(crate) struct CookStores<'a> {
+    pub recipe: &'a super::cook_recipe::CookRecipeStore,
+    pub lifecycle: &'a agent_task_lifecycle::AgentTaskLifecycleStore,
 }
 
-pub(crate) fn cook_report_with_stores(
-    recipe_store: Option<&super::cook_recipe::CookRecipeStore>,
-    lifecycle_store: Option<&agent_task_lifecycle::AgentTaskLifecycleStore>,
+impl CookStores<'_> {
+    /// Every Cook report is built from the stores that own the Cook: there is
+    /// no ambient report, so a report can never describe another installation.
+    pub(crate) fn report(
+        self,
+        input: CookReportInput<'_>,
+    ) -> AgentTaskRunResult<AgentTaskCookReport> {
+        cook_report(self.recipe, self.lifecycle, input)
+    }
+}
+
+pub(crate) fn cook_report(
+    recipe_store: &super::cook_recipe::CookRecipeStore,
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     input: CookReportInput<'_>,
 ) -> AgentTaskRunResult<AgentTaskCookReport> {
     let _finalization = homeboy_core::observation::phase_timing::guard("mission.finalization");
@@ -5991,7 +6003,8 @@ pub(crate) fn cook_report_with_stores(
         invocation_latest_run_id,
     } = input;
     let ci_deferred = recipe_store
-        .and_then(|store| store.load_recipe(&cook_id).ok())
+        .load_recipe(&cook_id)
+        .ok()
         .is_some_and(|recipe| recipe.gate_policy["verify_ci"] == true);
     let awaiting_ci = ci_deferred
         && finalization
@@ -6013,8 +6026,7 @@ pub(crate) fn cook_report_with_stores(
         "cook exit reported in-flight status {status:?} but declared {disposition:?}"
     );
     let history_run_ids = lifecycle_store
-        .map(|store| store.read_cook_index(&cook_id))
-        .unwrap_or_else(|| agent_task_lifecycle::cook_index(&cook_id))
+        .read_cook_index(&cook_id)
         .map(|index| {
             index
                 .attempts
@@ -6024,8 +6036,7 @@ pub(crate) fn cook_report_with_stores(
         })
         .unwrap_or_else(|_| {
             recipe_store
-                .map(|store| store.load_recipe(&cook_id))
-                .unwrap_or_else(|| super::load_recipe(&cook_id))
+                .load_recipe(&cook_id)
                 .map(|recipe| {
                     recipe
                         .attempts
@@ -6040,8 +6051,7 @@ pub(crate) fn cook_report_with_stores(
         .map(str::to_string)
         .or_else(|| {
             lifecycle_store
-                .map(|store| store.read_cook_index(&cook_id))
-                .unwrap_or_else(|| agent_task_lifecycle::cook_index(&cook_id))
+                .read_cook_index(&cook_id)
                 .ok()
                 .map(|index| index.latest_run_id)
         })
@@ -6050,8 +6060,7 @@ pub(crate) fn cook_report_with_stores(
             // materialization fails in that window, its final immutable attempt is
             // still the only durable identity we can safely report.
             recipe_store
-                .map(|store| store.load_recipe(&cook_id))
-                .unwrap_or_else(|| super::load_recipe(&cook_id))
+                .load_recipe(&cook_id)
                 .ok()
                 .and_then(|recipe| recipe.attempts.last().map(|attempt| attempt.run_id.clone()))
         });
@@ -6100,16 +6109,13 @@ pub(crate) fn cook_report_with_stores(
             primary_failure: None,
             provider_route_notes: notes,
             failure_context,
-            report_stores: recipe_store
-                .zip(lifecycle_store)
-                .map(|(recipe, lifecycle)| (recipe.clone(), lifecycle.clone())),
+            report_stores: Some((recipe_store.clone(), lifecycle_store.clone())),
         },
         exit_code,
     };
     if report.exit_code != 0 {
         if let Some(run_id) = report.value.latest_run_id.clone() {
-            if let Some(record) = lifecycle_store.and_then(|store| store.read_record(&run_id).ok())
-            {
+            if let Some(record) = lifecycle_store.read_record(&run_id).ok() {
                 super::cook::apply_resource_guard_stop(
                     &mut report,
                     &record.metadata,
@@ -6166,7 +6172,7 @@ pub(crate) fn bind_report_to_stores(
             });
     }
     report.selected_candidate = cook_selected_candidate_provenance(
-        Some(lifecycle_store),
+        lifecycle_store,
         &report.cook_id,
         &report.invocation_run_ids,
     );
@@ -6179,8 +6185,8 @@ pub(crate) fn bind_report_to_stores(
     report.failure_context = failure_context_required
         .then(|| {
             cook_failure_context_with_stores(
-                Some(recipe_store),
-                Some(lifecycle_store),
+                recipe_store,
+                lifecycle_store,
                 &report.cook_id,
                 report.latest_run_id.as_deref(),
                 &report.status,
@@ -6205,7 +6211,7 @@ pub(crate) fn bind_report_to_stores(
         }
     }
     report.provider_route_notes =
-        provider_route_notes_for_run(Some(lifecycle_store), report.latest_run_id.as_deref());
+        provider_route_notes_for_run(lifecycle_store, report.latest_run_id.as_deref());
     report.report_stores = Some((recipe_store.clone(), lifecycle_store.clone()));
 }
 
@@ -6214,10 +6220,11 @@ pub(crate) fn bind_report_to_stores(
 /// (#15881). The projection reads the durable run record and its admission
 /// plan; without either, a run rendered no route notes.
 fn provider_route_notes_for_run(
-    lifecycle_store: Option<&agent_task_lifecycle::AgentTaskLifecycleStore>,
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     run_id: Option<&str>,
 ) -> Vec<String> {
-    let Some((store, run_id)) = lifecycle_store.zip(run_id) else {
+    let store = lifecycle_store;
+    let Some(run_id) = run_id else {
         return Vec::new();
     };
     let Ok(record) = store.read_record(run_id) else {
@@ -6245,14 +6252,11 @@ fn provider_route_notes_for_run(
 /// recovery commands. The orchestrator could not previously tell the two apart.
 /// `invocation_scoped` states it explicitly. The selection itself is unchanged.
 fn cook_selected_candidate_provenance(
-    lifecycle_store: Option<&agent_task_lifecycle::AgentTaskLifecycleStore>,
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     cook_id: &str,
     invocation_run_ids: &[String],
 ) -> Option<Value> {
-    let selection = lifecycle_store
-        .map(|store| store.select_cook_candidate(cook_id))
-        .unwrap_or_else(|| agent_task_lifecycle::select_cook_candidate(cook_id))
-        .ok()?;
+    let selection = lifecycle_store.select_cook_candidate(cook_id).ok()?;
     let mut value = serde_json::to_value(&selection).ok()?;
     value["invocation_scoped"] = serde_json::json!(
         !selection.run_id.is_empty()
@@ -6263,10 +6267,7 @@ fn cook_selected_candidate_provenance(
     if selection.incomplete || selection.run_id.is_empty() {
         return Some(value);
     }
-    let record = lifecycle_store
-        .map(|store| store.read_record(&selection.run_id))
-        .unwrap_or_else(|| agent_task_lifecycle::exact_record(&selection.run_id))
-        .ok()?;
+    let record = lifecycle_store.read_record(&selection.run_id).ok()?;
     if let Ok(Some(promotion)) = recorded_promotion_report(&record.metadata) {
         value["applied_promotion"] = serde_json::json!({
             "identity": promotion.pointer("/candidate/tree_sha"),
@@ -6318,27 +6319,29 @@ pub fn cook_failure_context(
     latest_run_id: Option<&str>,
     status: &str,
 ) -> Option<super::AgentTaskCookFailureContext> {
-    cook_failure_context_with_stores(None, None, cook_id, latest_run_id, status)
+    let lifecycle_store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment().ok()?;
+    let recipe_store = super::cook_recipe::CookRecipeStore::for_lifecycle_store(&lifecycle_store);
+    cook_failure_context_with_stores(
+        &recipe_store,
+        &lifecycle_store,
+        cook_id,
+        latest_run_id,
+        status,
+    )
 }
 
 pub(crate) fn cook_failure_context_with_stores(
-    recipe_store: Option<&super::cook_recipe::CookRecipeStore>,
-    lifecycle_store: Option<&agent_task_lifecycle::AgentTaskLifecycleStore>,
+    recipe_store: &super::cook_recipe::CookRecipeStore,
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     cook_id: &str,
     latest_run_id: Option<&str>,
     status: &str,
 ) -> Option<super::AgentTaskCookFailureContext> {
-    let recipe = recipe_store
-        .map(|store| store.load_recipe(cook_id))
-        .unwrap_or_else(|| super::load_recipe(cook_id))
-        .ok()?;
+    let recipe = recipe_store.load_recipe(cook_id).ok()?;
     let chronological_latest_run_id = latest_run_id
         .map(str::to_string)
         .or_else(|| recipe.attempts.last().map(|attempt| attempt.run_id.clone()))?;
-    let selection = lifecycle_store
-        .map(|store| store.select_cook_candidate(cook_id))
-        .unwrap_or_else(|| agent_task_lifecycle::select_cook_candidate(cook_id))
-        .ok();
+    let selection = lifecycle_store.select_cook_candidate(cook_id).ok();
     let selected_run_id = selection
         .as_ref()
         .filter(|selection| !selection.incomplete && !selection.run_id.is_empty())
@@ -6347,10 +6350,7 @@ pub(crate) fn cook_failure_context_with_stores(
     // operation on this invocation. Its legality, phase, diagnostics, and every
     // emitted command must therefore come from this exact durable record.
     let record_run_id = chronological_latest_run_id.as_str();
-    let record = lifecycle_store
-        .map(|store| store.read_record(record_run_id))
-        .unwrap_or_else(|| agent_task_lifecycle::exact_record(record_run_id))
-        .ok();
+    let record = lifecycle_store.read_record(record_run_id).ok();
     let provider_executions_consumed = recipe
         .attempts
         .iter()
@@ -6358,12 +6358,7 @@ pub(crate) fn cook_failure_context_with_stores(
         // Cook ID alias to its latest attempt, which can count that later
         // provider execution again when an earlier preflight failure used the
         // Cook ID as its run ID.
-        .filter_map(|attempt| {
-            lifecycle_store
-                .map(|store| store.read_record(&attempt.run_id))
-                .unwrap_or_else(|| agent_task_lifecycle::exact_record(&attempt.run_id))
-                .ok()
-        })
+        .filter_map(|attempt| lifecycle_store.read_record(&attempt.run_id).ok())
         .map(|record| {
             record.metadata["provider_executions_consumed"]
                 .as_u64()
@@ -6383,13 +6378,7 @@ pub(crate) fn cook_failure_context_with_stores(
         .as_ref()
         .is_some_and(|record| record.metadata.get("superseded_by_run_id").is_none());
     let promotion_claim = lifecycle_store
-        .map(|store| store.operation_claim(record_run_id, &format!("promote:{record_run_id}")))
-        .unwrap_or_else(|| {
-            agent_task_lifecycle::operation_claim(
-                record_run_id,
-                &format!("promote:{record_run_id}"),
-            )
-        })
+        .operation_claim(record_run_id, &format!("promote:{record_run_id}"))
         .ok()
         .flatten();
     let blocking_claim = promotion_claim.as_ref().and_then(|claim| {
@@ -6413,29 +6402,13 @@ pub(crate) fn cook_failure_context_with_stores(
         .map(|candidate| candidate.tree_sha.as_str())
         .and_then(|sha| {
             lifecycle_store
-                .map(|store| {
-                    store.operation_claim(record_run_id, &format!("finalize:{record_run_id}:{sha}"))
-                })
-                .unwrap_or_else(|| {
-                    agent_task_lifecycle::operation_claim(
-                        record_run_id,
-                        &format!("finalize:{record_run_id}:{sha}"),
-                    )
-                })
+                .operation_claim(record_run_id, &format!("finalize:{record_run_id}:{sha}"))
                 .ok()
                 .flatten()
         })
         .or_else(|| {
             lifecycle_store
-                .map(|store| {
-                    store.operation_claim(record_run_id, &format!("finalize:{record_run_id}"))
-                })
-                .unwrap_or_else(|| {
-                    agent_task_lifecycle::operation_claim(
-                        record_run_id,
-                        &format!("finalize:{record_run_id}"),
-                    )
-                })
+                .operation_claim(record_run_id, &format!("finalize:{record_run_id}"))
                 .ok()
                 .flatten()
         });
@@ -6480,19 +6453,19 @@ pub(crate) fn cook_failure_context_with_stores(
                 })
             })
     });
-    let pre_provider_cause = lifecycle_store
-        .map(|store| store.read_aggregate(record_run_id))
-        .unwrap_or_else(|| agent_task_lifecycle::read_attempt_aggregate(record_run_id))
-        .ok()
-        .and_then(|aggregate| {
-            pre_provider_diagnostic_cause(
-                provider_executions_consumed,
-                aggregate
-                    .outcomes
-                    .iter()
-                    .flat_map(|outcome| &outcome.diagnostics),
-            )
-        });
+    let pre_provider_cause =
+        lifecycle_store
+            .read_aggregate(record_run_id)
+            .ok()
+            .and_then(|aggregate| {
+                pre_provider_diagnostic_cause(
+                    provider_executions_consumed,
+                    aggregate
+                        .outcomes
+                        .iter()
+                        .flat_map(|outcome| &outcome.diagnostics),
+                )
+            });
     let (phase, reason_code, diagnostic) = if status == "no_candidate" {
         (
             "candidate_selection".to_string(),
@@ -6629,35 +6602,18 @@ pub(crate) fn cook_failure_context_with_stores(
         })
         .unwrap_or_else(|| {
             let retry_refusal = record.as_ref().map(|record| {
-                lifecycle_store
-                    .map(|store| super::retry_admission_in_root(store, &record.run_id))
-                    .unwrap_or_else(|| super::retry_admission(&record.run_id))
+                super::retry_admission_in_root(lifecycle_store, &record.run_id)
                     .err()
                     .map(|error| error.message)
             });
             let retry_admitted = matches!(retry_refusal, Some(None));
             let continuation_state = record.as_ref().and_then(|record| {
-                lifecycle_store
-                    .map(|store| {
-                        super::cook_recipe::continuation_state_in_store(
-                            &super::cook_recipe::CookRecipeStore::for_lifecycle_store(store),
-                            cook_id,
-                            &record.run_id,
-                        )
-                        .ok()
-                    })
-                    .unwrap_or_else(|| {
-                        super::cook_recipe::CookRecipeStore::from_current_data_root()
-                            .ok()
-                            .and_then(|store| {
-                                super::cook_recipe::continuation_state_in_store(
-                                    &store,
-                                    cook_id,
-                                    &record.run_id,
-                                )
-                                .ok()
-                            })
-                    })
+                super::cook_recipe::continuation_state_in_store(
+                    &super::cook_recipe::CookRecipeStore::for_lifecycle_store(lifecycle_store),
+                    cook_id,
+                    &record.run_id,
+                )
+                .ok()
             });
             let continuation_pending =
                 continuation_state == Some(super::cook_recipe::CookContinuationState::Pending);
@@ -7010,7 +6966,7 @@ fn unfingerprinted_timeout_worktree_recovery(
     record: Option<&agent_task_lifecycle::AgentTaskRunRecord>,
     run_id: &str,
     diagnostic: Option<&Value>,
-    lifecycle_store: Option<&agent_task_lifecycle::AgentTaskLifecycleStore>,
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     prefix: Option<String>,
 ) -> Option<CookRecoveryActions> {
     let message = diagnostic.and_then(|diagnostic| {
@@ -7057,11 +7013,10 @@ fn timeout_worktree_path(
     recipe: &super::AgentTaskCookRecipe,
     record: Option<&agent_task_lifecycle::AgentTaskRunRecord>,
     run_id: &str,
-    lifecycle_store: Option<&agent_task_lifecycle::AgentTaskLifecycleStore>,
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
 ) -> Option<String> {
     let from_artifact = lifecycle_store
-        .map(|store| store.read_aggregate(run_id))
-        .unwrap_or_else(|| agent_task_lifecycle::read_attempt_aggregate(run_id))
+        .read_aggregate(run_id)
         .ok()
         .and_then(|aggregate| {
             aggregate.outcomes.iter().find_map(|outcome| {
@@ -7107,18 +7062,10 @@ fn timeout_worktree_path(
 /// declared the task incomplete. Unreadable evidence yields `None`, leaving the
 /// step to the remaining recovery facts.
 fn agent_incomplete_reason(
-    lifecycle_store: Option<&agent_task_lifecycle::AgentTaskLifecycleStore>,
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     run_id: &str,
 ) -> Option<String> {
-    let owned;
-    let store = match lifecycle_store {
-        Some(store) => store,
-        None => {
-            owned = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment().ok()?;
-            &owned
-        }
-    };
-    let outcome = selected_outcome_for_attempt_in_store(store, run_id).ok()?;
+    let outcome = selected_outcome_for_attempt_in_store(lifecycle_store, run_id).ok()?;
     crate::agent_task_review_dossier::AiFilledReviewForm::from_outcome_outputs(&outcome.outputs)
         .ok()
         .flatten()?
