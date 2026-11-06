@@ -149,11 +149,12 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
                 "publication_identity",
                 serde_json::json!(identity),
             )?,
-            None => crate::agent_task_lifecycle::record_metadata_value(
-                run_id,
-                "publication_identity",
-                serde_json::json!(identity),
-            )?,
+            None => crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?
+                .record_metadata_value(
+                    run_id,
+                    "publication_identity",
+                    serde_json::json!(identity),
+                )?,
         }
         Ok((identity, requester))
     }

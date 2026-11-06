@@ -1108,7 +1108,10 @@ fn admit_unmaterialized_cook(
     }));
     let record = if let Some(existing) = existing {
         if existing.metadata["unmaterialized_cook_admission"]["state"] == "preparing_inputs" {
-            agent_task_lifecycle::recover_unmaterialized_cook_input_publication(&cook_id)?
+            agent_task_lifecycle::recover_unmaterialized_cook_input_publication_in_store(
+                &agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?,
+                &cook_id,
+            )?
         } else {
             existing
         }
@@ -1124,7 +1127,10 @@ fn admit_unmaterialized_cook(
             &reason,
         )?;
         let _ = record;
-        agent_task_lifecycle::recover_unmaterialized_cook_input_publication(&cook_id)?
+        agent_task_lifecycle::recover_unmaterialized_cook_input_publication_in_store(
+            &agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?,
+            &cook_id,
+        )?
     };
     if !cli.detach_after_handoff {
         let (output, exit_code) =

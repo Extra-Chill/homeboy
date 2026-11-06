@@ -436,7 +436,8 @@ pub(crate) fn record_local_outcome(request: &LabOffloadRequest<'_>) -> Result<()
     };
     let run_id = target.agent_task_run_id();
     // Replace the current submission stamp with the authoritative routed decision.
-    homeboy_agents::agent_task_lifecycle::normalize_missing_execution_placement_decision(
+    homeboy_agents::agent_task_lifecycle::normalize_missing_execution_placement_decision_in_store(
+        &homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?,
         run_id,
         &request.placement_decision,
     )?;

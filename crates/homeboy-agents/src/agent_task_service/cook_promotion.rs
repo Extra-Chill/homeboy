@@ -3409,16 +3409,18 @@ pub fn prepare_manual_finalization_identity(requested_id: &str) -> Result<String
         Vec::new(),
     );
     crate::agent_task_lifecycle::submit_plan(&plan, Some(requested_id))?;
-    crate::agent_task_lifecycle::record_metadata_value(
-        requested_id,
-        "manual_finalization_identity",
-        serde_json::json!(true),
-    )?;
-    crate::agent_task_lifecycle::record_metadata_value(
-        requested_id,
-        "manual_finalization_identity_version",
-        serde_json::json!(1),
-    )?;
+    crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?
+        .record_metadata_value(
+            requested_id,
+            "manual_finalization_identity",
+            serde_json::json!(true),
+        )?;
+    crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?
+        .record_metadata_value(
+            requested_id,
+            "manual_finalization_identity_version",
+            serde_json::json!(1),
+        )?;
     Ok(requested_id.to_string())
 }
 
@@ -3889,7 +3891,11 @@ pub(crate) fn recover_cook_pr_with_backend_and_review_form<B: AgentTaskPrFinaliz
     };
     let value = serde_json::to_value(&report).unwrap_or(Value::Null);
     if !preflight {
-        agent_task_lifecycle::record_cook_finalization(&run_id, value.clone())?;
+        agent_task_lifecycle::record_cook_finalization_in_store(
+            &agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?,
+            &run_id,
+            value.clone(),
+        )?;
     }
     Ok(value)
 }
@@ -4110,7 +4116,11 @@ fn recover_verified_no_change_finalization(
         "gate_results": promotion.gate_outcome().gate_results,
     });
     // A completed receipt makes recovery idempotent without inventing a patch publication.
-    agent_task_lifecycle::record_cook_finalization(run_id, receipt.clone())?;
+    agent_task_lifecycle::record_cook_finalization_in_store(
+        &agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?,
+        run_id,
+        receipt.clone(),
+    )?;
     Ok(Some(receipt))
 }
 

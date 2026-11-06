@@ -3936,7 +3936,9 @@ fn concurrent_provider_children_keep_liveness_attributed_to_their_own_processes(
                     1,
                 )
                 .expect("reserve provider execution");
-                agent_task_lifecycle::record_provider_execution_process(
+                agent_task_lifecycle::record_provider_execution_process_in_store(
+                    &agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
+                        .expect("lifecycle store"),
                     run_id,
                     &plan.tasks[0].task_id,
                     1,

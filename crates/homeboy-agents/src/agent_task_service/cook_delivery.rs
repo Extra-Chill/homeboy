@@ -984,8 +984,7 @@ pub(super) fn ensure_verified(
             ctx.push_attempt(record, None);
             let selection_required = error.details["selection_required"] == Value::Bool(true);
             let recovery = if selection_required {
-                agent_task_lifecycle::record_metadata_value_in_store(
-                    lifecycle_store,
+                lifecycle_store.record_metadata_value(
                     run_id,
                     "cook_selection_required",
                     error.details.clone(),

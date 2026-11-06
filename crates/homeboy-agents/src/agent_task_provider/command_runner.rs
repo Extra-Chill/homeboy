@@ -946,16 +946,13 @@ pub(super) fn run_materialized_provider_command_once(
     if let Some(run_id) = run_id {
         // Failure to record this diagnostic identity must not interrupt provider
         // execution. The reservation remains the execution authority.
-        if let Some(store) = execution.lifecycle_store() {
+        let ambient = match execution.lifecycle_store() {
+            Some(_) => None,
+            None => crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment().ok(),
+        };
+        if let Some(store) = execution.lifecycle_store().or(ambient.as_ref()) {
             let _ = crate::agent_task_lifecycle::record_provider_execution_process_in_store(
                 store,
-                run_id,
-                &request.request.task_id,
-                attempt,
-                child.identity().expect("supervised identity").root_pid,
-            );
-        } else {
-            let _ = crate::agent_task_lifecycle::record_provider_execution_process(
                 run_id,
                 &request.request.task_id,
                 attempt,

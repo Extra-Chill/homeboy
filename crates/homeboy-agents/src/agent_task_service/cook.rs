@@ -1567,7 +1567,7 @@ const COOK_CONTINUE_ROUTE_SCHEMA: &str = "homeboy/agent-task-cook-continue-route
 /// This is durable route authority, not caller-controlled plan metadata.
 pub fn authorize_cook_continue_route(options: &CookRequest) -> Result<()> {
     agent_task_lifecycle::exact_record(&options.identity.initial_run_id)?;
-    agent_task_lifecycle::record_metadata_value(
+    agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?.record_metadata_value(
         &options.identity.initial_run_id,
         "cook_continue_route",
         serde_json::json!({
@@ -4882,12 +4882,7 @@ fn record_cook_disk_pressure_advisory(
             "homeboy cleanup --apply",
         ],
     });
-    agent_task_lifecycle::record_metadata_value_in_store(
-        lifecycle_store,
-        run_id,
-        "cook_workspace_disk_pressure_advisory",
-        advisory,
-    )
+    lifecycle_store.record_metadata_value(run_id, "cook_workspace_disk_pressure_advisory", advisory)
 }
 
 /// Typed execution intent. Continuation authorization is no longer encoded by
@@ -5579,7 +5574,8 @@ fn durable_cook_error_report_with_store(
                 }
                 None => {
                     if agent_task_lifecycle::run_record_exists(&options.identity.initial_run_id)? {
-                        agent_task_lifecycle::record_cook_controller_failure(
+                        agent_task_lifecycle::record_cook_controller_failure_in_store(
+                            &agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?,
                             &options.identity.initial_run_id,
                             diagnostic,
                         )?;
@@ -6031,8 +6027,7 @@ fn run_cook_spine(
         if let Some(workspace_base) = workspace_base {
             match workspace_base {
                 CookWorkspaceBaseValidation::Snapshot(snapshot) => {
-                    agent_task_lifecycle::record_metadata_value_in_store(
-                        lifecycle_store,
+                    lifecycle_store.record_metadata_value(
                         &options.identity.initial_run_id,
                         "cook_workspace_base_snapshot",
                         snapshot,
@@ -6625,8 +6620,7 @@ fn run_cook_spine(
                 // persistence and external transports retain restart authority.
                 let mut dispatch_plan = plan.clone();
                 if let Some(snapshot) = base_snapshot {
-                    agent_task_lifecycle::record_metadata_value_in_store(
-                        lifecycle_store,
+                    lifecycle_store.record_metadata_value(
                         &run_id,
                         "cook_workspace_base_snapshot",
                         snapshot.clone(),
@@ -9323,8 +9317,7 @@ fn admit_explicit_cook_workspace_before_provider(
         return Err(error);
     }
     if lifecycle_store.record_exists(run_id)? {
-        agent_task_lifecycle::record_metadata_value_in_store(
-            lifecycle_store,
+        lifecycle_store.record_metadata_value(
             run_id,
             "explicit_cwd_cleanliness_admission",
             serde_json::json!({
@@ -9901,12 +9894,7 @@ fn record_continuation_admission_trace(
     run_id: &str,
     trace: &ContinuationAdmissionTrace,
 ) -> Result<()> {
-    agent_task_lifecycle::record_metadata_value_in_store(
-        lifecycle_store,
-        run_id,
-        "cook_continuation_admission",
-        trace.value(),
-    )
+    lifecycle_store.record_metadata_value(run_id, "cook_continuation_admission", trace.value())
 }
 
 struct TrackedPromotionContinuation {
@@ -10255,8 +10243,7 @@ fn record_active_cook_worktree_warning(
         .iter()
         .map(|record| record.run_id.clone())
         .collect::<Vec<_>>();
-    agent_task_lifecycle::record_metadata_value_in_store(
-        lifecycle_store,
+    lifecycle_store.record_metadata_value(
         &options.identity.initial_run_id,
         "cook_active_worktree_warning",
         serde_json::json!({

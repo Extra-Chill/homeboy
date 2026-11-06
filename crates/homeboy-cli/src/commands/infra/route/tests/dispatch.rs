@@ -2785,8 +2785,12 @@ fn lab_cook_retry_recovers_terminal_unmaterialized_admission_without_a_workspace
         )
         .expect("submit unmaterialized admission");
         staged.retain_for_recovery();
-        agent_task_lifecycle::recover_unmaterialized_cook_input_publication("failed-run")
-            .expect("publish replay inputs");
+        agent_task_lifecycle::recover_unmaterialized_cook_input_publication_in_store(
+            &agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
+                .expect("lifecycle store"),
+            "failed-run",
+        )
+        .expect("publish replay inputs");
         agent_task_lifecycle::fail_detached_cook_handoff_parent_in_store(
             &agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
                 .expect("lifecycle store"),
@@ -4403,7 +4407,12 @@ fn execution_step_corrupt_published_inputs_preserve_staging_and_never_dispatch()
             .unwrap();
         std::fs::write(prompt, "corrupt mission").unwrap();
         assert!(
-            agent_task_lifecycle::recover_unmaterialized_cook_input_publication(cook_id).is_err()
+            agent_task_lifecycle::recover_unmaterialized_cook_input_publication_in_store(
+                &agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
+                    .expect("lifecycle store"),
+                cook_id
+            )
+            .is_err()
         );
         assert!(staging.is_dir(), "verification must precede cleanup");
         assert_eq!(
