@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.446.13] - 2026-11-06
+
+### Fixed
+- skip non-git component roots and name the inventory failure cause
+
 ## [0.446.12] - 2026-11-06
 
 ### Changed
