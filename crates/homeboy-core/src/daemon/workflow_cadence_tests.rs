@@ -248,7 +248,8 @@ fn wait_terminal(store: &JobStore, instance: &str) {
             assert_eq!(
                 job.status,
                 crate::api_jobs::JobStatus::Succeeded,
-                "instance {instance} finished without succeeding: {job:?}"
+                "instance {instance} finished without succeeding: {job:?}\nevents: {:?}",
+                store.events(job.id)
             );
             return;
         }
