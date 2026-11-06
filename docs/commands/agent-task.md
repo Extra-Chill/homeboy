@@ -9,9 +9,12 @@ see [`docs/architecture/provider-fanout-boundary.md`](../architecture/provider-f
 ## Incomplete Cook drafts
 
 `agent-task cook --publish-incomplete-draft` opts into preserving a non-empty
-candidate when the attempt budget is exhausted and every attempt failed a
-deterministic gate. Cook pushes the candidate branch and requests a **draft** PR
-linked to the task URL (source refs). Its body names the failed gates, includes
+candidate when the attempt budget is exhausted. Cook selects the most recent
+non-empty candidate that ran and failed a deterministic gate, ignoring later
+timeouts, provider failures, or empty diffs. Without such a candidate, nothing
+is published. Cook pushes the candidate branch and requests a **draft** PR
+linked to the task URL (source refs). Its body names the source attempt and later
+attempt outcomes, names the failed gates, includes
 the last 40 lines of their output, and records the review form's
 `incomplete_reason`. Cook still reports failure; no failed gate is accepted.
 The default is off, including for historical recipes. `--no-finalize` suppresses

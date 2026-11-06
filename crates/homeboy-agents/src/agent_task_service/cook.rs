@@ -7291,6 +7291,7 @@ fn run_cook_spine(
                 let replace_semantic_attempt =
                     phase == PreArtifactInterruptionPhase::BeforeProviderStart;
                 if !replace_semantic_attempt && attempt >= max_attempts {
+                    publish_latest_incomplete_draft(&options, lifecycle_store)?;
                     return Ok(pre_artifact_interruption_report(
                         cook_id,
                         attempts,
@@ -7497,6 +7498,9 @@ fn run_cook_spine(
                 .and_then(|budget| budget_remaining(budget, budget_used));
             let status = terminal_fallback_status(record.state());
             let cancelled = status == CookStatus::Cancelled;
+            if !cancelled && attempt >= attempt_limit {
+                publish_latest_incomplete_draft(&options, lifecycle_store)?;
+            }
             let mut report = cook_report(CookReportInput {
                 cook_id,
                 status: status.as_str(),
@@ -7823,6 +7827,9 @@ fn run_cook_spine(
                 }));
             }
             AgentTaskCookLoopStatus::NoChanges => {
+                if attempt >= attempt_limit {
+                    publish_latest_incomplete_draft(&options, lifecycle_store)?;
+                }
                 return Ok(cook_report(CookReportInput {
                     cook_id,
                     status: "no_changes",
@@ -7860,6 +7867,9 @@ fn run_cook_spine(
                 }));
             }
             AgentTaskCookLoopStatus::NoChangesGateFailed => {
+                if attempt >= attempt_limit {
+                    publish_latest_incomplete_draft(&options, lifecycle_store)?;
+                }
                 return Ok(cook_report(CookReportInput {
                     cook_id,
                     status: "no_changes_gate_failed",
@@ -8023,22 +8033,7 @@ fn run_cook_spine(
                 }
             }
             AgentTaskCookLoopStatus::RetriesExhausted => {
-                if options.finalization.publish_incomplete_draft
-                    && !options.finalization.no_finalize
-                    && !promotion.changed_files.is_empty()
-                    && delivery.attempts.iter().all(|attempt| {
-                        attempt.promotion.as_ref().is_some_and(|promotion| {
-                            promotion.status
-                                == crate::agent_task_promotion::AgentTaskPromotionStatus::GateFailed
-                                && promotion.deterministic_gates.iter().any(|gate| {
-                                    gate.status
-                                        == crate::agent_task_gate::AgentTaskGateStatus::Failed
-                                })
-                        })
-                    })
-                {
-                    publish_incomplete_draft(&options, &promotion, review_form.as_ref())?;
-                }
+                publish_latest_incomplete_draft(&options, lifecycle_store)?;
                 return Ok(cook_report(CookReportInput {
                     cook_id,
                     status: "retries_exhausted",
@@ -8056,6 +8051,7 @@ fn run_cook_spine(
         }
     }
 
+    publish_latest_incomplete_draft(&options, lifecycle_store)?;
     Ok(cook_report(CookReportInput {
         cook_id,
         status: "retries_exhausted",
@@ -8068,10 +8064,61 @@ fn run_cook_spine(
     }))
 }
 
+/// Select from durable attempts, including attempts preceding a resumed invocation.
+/// An ungated provider result must never displace a gate-failed candidate.
+fn publish_latest_incomplete_draft(
+    options: &CookRequest,
+    lifecycle_store: &AgentTaskLifecycleStore,
+) -> Result<()> {
+    if !options.finalization.publish_incomplete_draft || options.finalization.no_finalize {
+        return Ok(());
+    }
+    let recipes = super::cook_recipe::CookRecipeStore::from_environment()?;
+    let recipe = recipes.load_recipe(&options.identity.cook_id)?;
+    let mut later = Vec::new();
+    for attempt in recipe.attempts.iter().rev() {
+        let record = lifecycle_store.read_record(&attempt.run_id)?;
+        if let Some(promotion) = super::recorded_promotion_report(&record.metadata)? {
+            let promotion: AgentTaskPromotionReport =
+                serde_json::from_value(promotion).map_err(|error| {
+                    Error::git_command_failed(format!("invalid promotion: {error}"))
+                })?;
+            if promotion.status == crate::agent_task_promotion::AgentTaskPromotionStatus::GateFailed
+                && !promotion.changed_files.is_empty()
+                && promotion
+                    .deterministic_gates
+                    .iter()
+                    .any(|gate| gate.status == crate::agent_task_gate::AgentTaskGateStatus::Failed)
+            {
+                let aggregate = lifecycle_store.read_aggregate(&attempt.run_id)?;
+                let form = review_form_from_aggregate(&aggregate)?;
+                return publish_incomplete_draft(
+                    options,
+                    &promotion,
+                    form.as_ref(),
+                    attempt.attempt,
+                    &attempt.run_id,
+                    &later,
+                );
+            }
+        }
+        later.push(format!(
+            "Attempt {} ({}): {:?}; no non-empty gate-failed candidate.",
+            attempt.attempt,
+            attempt.run_id,
+            record.state()
+        ));
+    }
+    Ok(())
+}
+
 fn publish_incomplete_draft(
     options: &CookRequest,
     promotion: &AgentTaskPromotionReport,
     form: Option<&crate::agent_task_review_dossier::AiFilledReviewForm>,
+    attempt: u32,
+    run_id: &str,
+    later: &[String],
 ) -> Result<()> {
     use homeboy_core::git;
     let path = promotion
@@ -8098,6 +8145,12 @@ fn publish_incomplete_draft(
     let mut body = format!("Incomplete candidate; deterministic verification failed.\n\nTask: {}\n\nincomplete_reason: {}\n",
         options.workspace.source_refs.join("\n"),
         form.map(|form| form.incomplete_reason.as_str()).unwrap_or("not recorded"));
+    body.push_str(&format!(
+        "\nCandidate from attempt {attempt} (`{run_id}`).\n"
+    ));
+    if !later.is_empty() {
+        body.push_str(&format!("\nLater attempts:\n{}\n", later.join("\n")));
+    }
     for gate in promotion
         .deterministic_gates
         .iter()
@@ -8135,17 +8188,39 @@ fn publish_incomplete_draft(
         },
         Some(path),
     )?;
-    git::pr_create(
+    let existing = git::pr_find(
         None,
-        git::PrCreateOptions {
+        git::PrFindOptions {
+            head: Some(head.clone()),
+            state: git::PrState::Open,
+            limit: 1,
             path: Some(path.to_string()),
-            base: options.finalization.base.clone(),
-            head,
-            title,
-            body,
-            draft: true,
+            ..Default::default()
         },
     )?;
+    if let Some(pr) = existing.items.first() {
+        git::pr_comment(
+            None,
+            git::PrCommentOptions {
+                number: pr.number,
+                body,
+                path: Some(path.to_string()),
+                ..Default::default()
+            },
+        )?;
+    } else {
+        git::pr_create(
+            None,
+            git::PrCreateOptions {
+                path: Some(path.to_string()),
+                base: options.finalization.base.clone(),
+                head,
+                title,
+                body,
+                draft: true,
+            },
+        )?;
+    }
     Ok(())
 }
 
