@@ -6,6 +6,11 @@ The desktop app currently shells out to the standalone Rust CLI (`homeboy`) for 
 
 For current behavior, prefer the code and other documentation (for example `docs/CLI.md`).
 
+## [0.13.1] - 2026-11-06
+
+### Changed
+- the owner lock records its holder; delete process-candidate scanning
+
 ## [0.13.0] - 2026-11-06
 
 ### Added
