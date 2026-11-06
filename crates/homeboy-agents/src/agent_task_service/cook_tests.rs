@@ -21595,6 +21595,7 @@ fn finalization_dossier_and_backend_hydration_use_explicit_lifecycle_store() {
         run_id,
         &promotion,
         Vec::new(),
+        None,
     )
     .unwrap();
     let right = cook_finalization_options_with_stores(
@@ -21604,6 +21605,7 @@ fn finalization_dossier_and_backend_hydration_use_explicit_lifecycle_store() {
         run_id,
         &promotion,
         Vec::new(),
+        None,
     )
     .unwrap();
     assert_eq!(
@@ -21772,6 +21774,7 @@ fn cook_promotion_finalizes_into_the_injected_stores_across_split_recipe_and_lif
         run_id,
         &promotion,
         Vec::new(),
+        None,
     )
     .expect("build finalization options through the injected split-root store pair");
     assert_eq!(
@@ -21851,6 +21854,7 @@ fn cook_promotion_finalizes_into_the_injected_stores_across_split_recipe_and_lif
         run_id,
         &promotion,
         Vec::new(),
+        None,
     )
     .expect_err("the lifecycle root holds no recipe lineage for this Cook");
     assert_eq!(error.code.as_str(), "internal.io_error");
@@ -26808,6 +26812,7 @@ fn finalization_options_for_task(
         run_id,
         &promotion,
         Vec::new(),
+        None,
     )
     .expect("build finalization options")
 }
