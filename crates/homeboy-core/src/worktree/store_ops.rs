@@ -482,8 +482,7 @@ fn cleanup_skip_reasons(
     // is the base it started from: no work exists yet, so it is no evidence
     // that anything landed. That is the Lab Cook destination, which stays
     // pristine until promotion and must survive until its owner finalizes.
-    let branch_merged =
-        branch_cleanup.status == BranchCleanupStatus::Merged && !branch_never_moved;
+    let branch_merged = branch_cleanup.status == BranchCleanupStatus::Merged && !branch_never_moved;
     if let Some(owner) = record
         .run_id
         .as_deref()
