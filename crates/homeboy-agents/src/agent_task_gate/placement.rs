@@ -1978,6 +1978,7 @@ mod tests {
                         cwd: "/runner/workspaces/candidate".to_string(),
                         reason: "install_failed".to_string(),
                         download_cache: Default::default(),
+                        download_auth: Default::default(),
                         termination: homeboy_core::deps::DependencyHydrationTermination::ExitFailure,
                         status: homeboy_core::deps::DependencyHydrationStatus::Failed,
                         exit_code: Some(3),

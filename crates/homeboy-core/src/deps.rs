@@ -131,6 +131,9 @@ pub struct DependencyHydrationOutcome {
     /// Download-cache mappings visible to dependency setup.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub download_cache: BTreeMap<String, String>,
+    /// Declared auth source by env name, or `unavailable`; never credential values.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub download_auth: BTreeMap<String, String>,
     pub termination: DependencyHydrationTermination,
     pub status: DependencyHydrationStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -295,6 +298,8 @@ fn hydrate_declared_dependencies_unlocked(
     };
     let mut outcomes = Vec::new();
     let mut cache_mappings = BTreeMap::new();
+    let mut auth_mappings = BTreeMap::new();
+    let mut secrets = HydrationSecrets::default();
 
     for provider in providers {
         if hydration_deadline_expired(policy, deadline) {
@@ -324,6 +329,10 @@ fn hydrate_declared_dependencies_unlocked(
             outcomes.push(deadline_hydration_outcome(policy, workspace, package_root));
             break;
         }
+        let (auth_environment, auth_evidence) =
+            hydration_download_auth(&plan, &policy.environment, &mut secrets)?;
+        environment.extend(auth_environment);
+        auth_mappings.insert(plan.provider_id.clone(), auth_evidence);
         let mapping = hydration_download_cache(&plan, &policy.environment)?;
         environment.extend(mapping.clone());
         let provider_id = crate::redaction::redact_string(&plan.provider_id);
@@ -343,6 +352,7 @@ fn hydrate_declared_dependencies_unlocked(
                 &provider_id,
                 "assessing_reusable_state",
                 &environment,
+                &secrets,
                 policy,
                 deadline,
             );
@@ -398,6 +408,7 @@ fn hydrate_declared_dependencies_unlocked(
             &provider_id,
             "installing",
             &environment,
+            &secrets,
             policy,
             deadline,
         );
@@ -477,11 +488,183 @@ fn hydrate_declared_dependencies_unlocked(
     }
 
     for outcome in &mut outcomes {
+        // Scrub every evidence string, including provider-declared commands and paths.
+        let value = serde_json::to_value(&*outcome).expect("hydration outcome serializes");
+        *outcome = serde_json::from_value(secrets.redact_json(value))
+            .expect("redaction preserves hydration outcome structure");
+        outcome.download_auth = auth_mappings
+            .remove(&outcome.provider_id)
+            .unwrap_or_default();
         outcome.download_cache = cache_mappings
             .remove(&outcome.provider_id)
             .unwrap_or_default();
     }
     Ok(outcomes)
+}
+
+#[derive(Default)]
+struct HydrationSecrets {
+    names: Vec<String>,
+    values: Vec<String>,
+}
+
+impl HydrationSecrets {
+    fn register(&mut self, name: &str, value: &str) {
+        self.names.push(name.to_string());
+        if !value.is_empty() {
+            self.values.push(value.to_string());
+            // Tools may print one line or one JSON credential rather than the envelope.
+            self.values.extend(
+                value
+                    .lines()
+                    .filter(|line| !line.is_empty())
+                    .map(str::to_string),
+            );
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(value) {
+                self.register_json_values(&json);
+            }
+        }
+    }
+
+    fn register_json_values(&mut self, value: &serde_json::Value) {
+        match value {
+            serde_json::Value::String(value) if !value.is_empty() => {
+                self.values.push(value.clone())
+            }
+            serde_json::Value::Object(values) => {
+                for value in values.values() {
+                    self.register_json_values(value);
+                }
+            }
+            serde_json::Value::Array(values) => {
+                for value in values {
+                    self.register_json_values(value);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn redact(&self, text: &str) -> String {
+        let mut text = text.to_string();
+        let mut values = self.values.iter().collect::<Vec<_>>();
+        values.sort_by_key(|value| std::cmp::Reverse(value.len()));
+        for value in values {
+            text = text.replace(value, "[REDACTED]");
+        }
+        self.names
+            .iter()
+            .fold(
+                crate::redaction::RedactionPolicy::default(),
+                |policy, name| policy.with_sensitive_key(name),
+            )
+            .redact_string(&text)
+    }
+
+    fn redact_json(&self, value: serde_json::Value) -> serde_json::Value {
+        match value {
+            serde_json::Value::String(text) => serde_json::Value::String(self.redact(&text)),
+            serde_json::Value::Array(values) => values
+                .into_iter()
+                .map(|value| self.redact_json(value))
+                .collect(),
+            serde_json::Value::Object(values) => serde_json::Value::Object(
+                values
+                    .into_iter()
+                    .map(|(key, value)| (key, self.redact_json(value)))
+                    .collect(),
+            ),
+            value => value,
+        }
+    }
+}
+
+fn hydration_download_auth(
+    plan: &provider::DependencyProviderHydrationPlan,
+    environment: &DependencyHydrationEnvironment,
+    secrets: &mut HydrationSecrets,
+) -> Result<(BTreeMap<String, String>, BTreeMap<String, String>)> {
+    let mut mapping = BTreeMap::new();
+    let mut evidence = BTreeMap::new();
+    let Some(auth) = plan
+        .download_auth
+        .as_ref()
+        .filter(|_| environment.isolate_download_cache)
+    else {
+        return Ok((mapping, evidence));
+    };
+    let invalid = || {
+        Error::internal_io(
+            "Invalid dependency download-auth declaration or source".to_string(),
+            None,
+        )
+    };
+    let file = Path::new(&auth.file);
+    if auth.env.is_empty()
+        || !auth.env.bytes().enumerate().all(|(index, byte)| {
+            byte.is_ascii_alphabetic() || byte == b'_' || (index > 0 && byte.is_ascii_digit())
+        })
+        || file.as_os_str().is_empty()
+        || file.is_absolute()
+        || file
+            .components()
+            .any(|part| !matches!(part, std::path::Component::Normal(_)))
+    {
+        return Err(invalid());
+    }
+    if let Some(value) = environment.set.get(&auth.env) {
+        secrets.register(&auth.env, value);
+        mapping.insert(auth.env.clone(), value.clone());
+        evidence.insert(auth.env.clone(), "operator_override".to_string());
+        return Ok((mapping, evidence));
+    }
+    let home = crate::paths::home_root()?;
+    let source = home.join(file);
+    // Reject symlinks in every component, including parents, before opening.
+    let mut current = home;
+    for part in file.components() {
+        current.push(part);
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => return Err(invalid()),
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                evidence.insert(auth.env.clone(), "unavailable".to_string());
+                return Ok((mapping, evidence));
+            }
+            Err(_) => return Err(invalid()),
+        }
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let mut handle = options.open(&source).map_err(|_| invalid())?;
+    let metadata = handle.metadata().map_err(|_| invalid())?;
+    if !metadata.is_file() {
+        return Err(invalid());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if metadata.uid() != unsafe { libc::geteuid() } {
+            return Err(invalid());
+        }
+    }
+    use std::io::Read;
+    let mut content = String::new();
+    handle.read_to_string(&mut content).map_err(|_| invalid())?;
+    secrets.register(&auth.env, &content);
+    let value = match auth.mode {
+        provider::DependencyDownloadAuthMode::Content => content,
+        provider::DependencyDownloadAuthMode::Path => source.display().to_string(),
+    };
+    // Path itself is public evidence; file contents remain secret in both modes.
+    mapping.insert(auth.env.clone(), value);
+    evidence.insert(auth.env.clone(), source.display().to_string());
+    Ok((mapping, evidence))
 }
 
 fn hydration_download_cache(
@@ -578,6 +761,7 @@ fn run_hydration_command(
     provider_id: &str,
     phase: &str,
     environment: &[(String, String)],
+    secrets: &HydrationSecrets,
     policy: &DependencyHydrationPolicy,
     deadline: Instant,
 ) -> HydrationCommandExecution {
@@ -645,7 +829,10 @@ fn run_hydration_command(
             policy.heartbeat_interval.max(Duration::from_millis(1)),
             move || cancellation() || Instant::now() >= deadline,
             |heartbeat| {
-                progress(&hydration_progress(provider_id, phase, &heartbeat));
+                let mut event = hydration_progress(provider_id, phase, &heartbeat);
+                event.phase = secrets.redact(&event.phase);
+                event.current = event.current.map(|value| secrets.redact(&value));
+                progress(&event);
                 Ok(())
             },
         ) {
@@ -675,8 +862,8 @@ fn run_hydration_command(
     HydrationCommandExecution {
         exit_code: output.output.status.code(),
         termination,
-        stdout: crate::redaction::redact_string(&String::from_utf8_lossy(&output.output.stdout)),
-        stderr: crate::redaction::redact_string(&String::from_utf8_lossy(&output.output.stderr)),
+        stdout: secrets.redact(&String::from_utf8_lossy(&output.output.stdout)),
+        stderr: secrets.redact(&String::from_utf8_lossy(&output.output.stderr)),
     }
 }
 
@@ -804,6 +991,7 @@ fn hydration_outcome(
         cwd: crate::redaction::redact_string(&cwd),
         reason: crate::redaction::redact_string(&reason),
         download_cache: BTreeMap::new(),
+        download_auth: BTreeMap::new(),
         termination,
         status,
         exit_code,
@@ -1672,6 +1860,7 @@ esac
                     "fixture",
                     "installing",
                     &environment,
+                    &HydrationSecrets::default(),
                     &policy,
                     Instant::now() + policy.timeout,
                 );
