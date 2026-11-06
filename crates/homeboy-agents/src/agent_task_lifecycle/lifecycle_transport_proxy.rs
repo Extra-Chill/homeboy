@@ -187,6 +187,9 @@ pub fn recover_disconnected_runner_in_store(
     }
     let runner_id = record.runner_id().unwrap().to_string();
     let job_id = record.runner_job_id().unwrap().to_string();
+    // Each probe reads the job's full event log, so a long-running job is
+    // polled at a steady low rate instead of once a second.
+    let mut backoff = std::time::Duration::from_secs(1);
     loop {
         let snapshot = super::runner_continuation::with_runner_continuation(|provider| {
             provider.runner_job_log_snapshot(&runner_id, &job_id)
@@ -211,7 +214,10 @@ pub fn recover_disconnected_runner_in_store(
         }
         // Do not resurrect the controller failure while the daemon still owns
         // execution. Terminal lifecycle evidence replaces it atomically.
-        std::thread::sleep(std::time::Duration::from_secs(1));
+        std::thread::sleep(backoff);
+        backoff = backoff
+            .saturating_mul(2)
+            .min(std::time::Duration::from_secs(10));
         record = lifecycle_store.read_record(run_id)?;
         if !disconnected_runner_recovery_available(&record) {
             return Ok(true);
