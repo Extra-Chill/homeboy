@@ -55,6 +55,8 @@ mod logs_projection;
 mod operation_claims;
 mod private_attachment;
 mod records;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod run_processes;
 pub mod runner_continuation;
 mod runner_exec;
 mod terminal_transition;

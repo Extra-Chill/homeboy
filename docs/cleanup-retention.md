@@ -12,6 +12,19 @@ Unsafe existing local artifact paths keep the run and its lifecycle directory.
 The existing cleanup inventory remains the only planner. This change does not
 add a second cleanup engine.
 
+## Run process release
+
+On Linux and macOS, terminal Cook/agent-task records trigger best-effort release
+of same-user orphan process trees carrying the exact inherited `HOMEBOY_RUN_ID`.
+Release sends SIGTERM, waits 200 ms, then SIGKILL, rechecking start time before
+each signal. The current process, its ancestors, all Homeboy commands and their
+live descendants, and daemon-state PIDs are protected. Unknown ancestry or
+unreadable process data is skipped. Live provider/gate trees are conservatively
+left alone; background leftovers become eligible after reparenting.
+
+This does not add a live-process cleanup category or orphan sweep, retain/pin
+semantics, Studio site ownership, or Chrome scoped-temp-directory cleanup.
+
 ## Durable Aggregate Apply
 
 `homeboy cleanup --apply` submits the existing aggregate inventory to the local
