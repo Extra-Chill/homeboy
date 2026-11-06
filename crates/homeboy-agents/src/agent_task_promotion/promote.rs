@@ -3929,7 +3929,7 @@ fn promotion_notification(
     }
 }
 
-fn promotion_notification_with_gate_summary(
+pub(super) fn promotion_notification_with_gate_summary(
     status: AgentTaskPromotionStatus,
     target: &AgentTaskPromotionTarget,
     gates: &[crate::agent_task_gate::AgentTaskGateReport],
@@ -3945,14 +3945,17 @@ fn promotion_notification_with_gate_summary(
                 .join(", ")
         };
         let passed = gate_ids(&[AgentTaskGateStatus::Succeeded]);
-        let failed = gate_ids(&[
-            AgentTaskGateStatus::Failed,
-            AgentTaskGateStatus::AcceptedInheritedFailure,
-        ]);
+        let failed = gate_ids(&[AgentTaskGateStatus::Failed]);
+        let inherited = gates
+            .iter()
+            .filter(|gate| gate.status == AgentTaskGateStatus::AcceptedInheritedFailure)
+            .map(|gate| format!("{}: baseline-red (`{}`)", gate.id, gate.command.join(" ")))
+            .collect::<Vec<_>>()
+            .join(", ");
         let skipped = gate_ids(&[AgentTaskGateStatus::Skipped]);
         let deferred = gate_ids(&[AgentTaskGateStatus::Deferred]);
         notification.message.push_str(&format!(
-            "; deterministic gates: passed=[{passed}], failed=[{failed}], skipped=[{skipped}], deferred=[{deferred}]"
+            "; deterministic gates: passed=[{passed}], failed=[{failed}], skipped=[{skipped}], deferred=[{deferred}], inherited=[{inherited}]"
         ));
     }
     notification

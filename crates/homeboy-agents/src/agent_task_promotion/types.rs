@@ -84,9 +84,9 @@ pub struct AgentTaskPromotionGateOutcome {
 }
 
 impl AgentTaskPromotionReport {
-    /// Whether the report can cross the finalization boundary. An accepted
-    /// inherited failure remains a baseline-red required gate in the report;
-    /// only the caller's explicit policy can accept its proven non-regression.
+    /// Whether the report can cross the finalization boundary. Proven inherited
+    /// failures are non-regressions, not rejections; they retain their baseline-red
+    /// evidence. The policy argument is retained for caller compatibility.
     pub fn finalization_eligible(&self, accept_inherited_failures: bool) -> bool {
         !self.deterministic_gates.is_empty()
             && self
@@ -99,11 +99,11 @@ impl AgentTaskPromotionReport {
     /// using the same per-gate rule as [`Self::finalization_eligible`].
     pub fn finalization_blocking_gates(
         &self,
-        accept_inherited_failures: bool,
+        _accept_inherited_failures: bool,
     ) -> impl Iterator<Item = &AgentTaskGateReport> {
         self.deterministic_gates
             .iter()
-            .filter(move |gate| !gate_finalization_eligible(gate, accept_inherited_failures))
+            .filter(|gate| !gate_finalization_eligible(gate))
     }
 
     pub fn gate_outcome(&self) -> AgentTaskPromotionGateOutcome {
@@ -114,10 +114,14 @@ impl AgentTaskPromotionReport {
             .map(HomeboyGateResult::from)
             .collect::<Vec<_>>();
         let all_gates_passed = self.finalization_eligible(false);
-        let status = if self.status == AgentTaskPromotionStatus::GateFailed && all_gates_passed {
-            AgentTaskPromotionStatus::Applied
-        } else {
-            self.status
+        let status = match self.status {
+            AgentTaskPromotionStatus::GateFailed if all_gates_passed => {
+                AgentTaskPromotionStatus::Applied
+            }
+            AgentTaskPromotionStatus::NoChangesGateFailed if all_gates_passed => {
+                AgentTaskPromotionStatus::VerifiedNoChanges
+            }
+            status => status,
         };
         AgentTaskPromotionGateOutcome {
             status,
@@ -132,21 +136,12 @@ impl AgentTaskPromotionReport {
         let status_changed = self.status != outcome.status;
         self.status = outcome.status;
         self.gate_results = outcome.gate_results;
-        if status_changed && self.status == AgentTaskPromotionStatus::Applied {
-            let target_path = self
-                .target
-                .path
-                .as_deref()
-                .unwrap_or(self.target.worktree.as_str());
-            self.operator_notification = AgentTaskPromotionNotification {
-                status: "completed".to_string(),
-                message: format!(
-                    "patch promoted into {}; finalize from {} using the verified_base_sha recorded in this promotion report",
-                    self.target.worktree, target_path
-                ),
-                resumable_blocker: None,
-                next_command: None,
-            };
+        if status_changed {
+            self.operator_notification = super::promote::promotion_notification_with_gate_summary(
+                self.status,
+                &self.target,
+                &self.deterministic_gates,
+            );
         }
     }
 
@@ -384,20 +379,18 @@ fn promotion_report_schema() -> String {
     AGENT_TASK_PROMOTION_REPORT_SCHEMA.to_string()
 }
 
-fn gate_finalization_eligible(gate: &AgentTaskGateReport, accept_inherited_failures: bool) -> bool {
+fn gate_finalization_eligible(gate: &AgentTaskGateReport) -> bool {
     match gate.status {
         AgentTaskGateStatus::Succeeded => gate.exit_code == 0,
         AgentTaskGateStatus::AcceptedInheritedFailure => {
-            accept_inherited_failures
-                && gate.failure_evidence.as_ref().is_some_and(|evidence| {
-                    evidence.classification
-                        == crate::agent_task_gate::AgentTaskGateFailureClassification::CandidateCode
-                })
-                && gate.baseline_comparison.as_ref().is_some_and(|comparison| {
-                    comparison.matches_candidate_failure
-                        && comparison.result
-                            == crate::agent_task_gate::AgentTaskGateDifferentialResult::BaselineRed
-                })
+            gate.failure_evidence.as_ref().is_some_and(|evidence| {
+                evidence.classification
+                    == crate::agent_task_gate::AgentTaskGateFailureClassification::CandidateCode
+            }) && gate.baseline_comparison.as_ref().is_some_and(|comparison| {
+                comparison.matches_candidate_failure
+                    && comparison.result
+                        == crate::agent_task_gate::AgentTaskGateDifferentialResult::BaselineRed
+            })
         }
         AgentTaskGateStatus::Failed
         | AgentTaskGateStatus::Skipped

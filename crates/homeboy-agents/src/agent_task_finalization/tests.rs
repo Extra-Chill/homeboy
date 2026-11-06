@@ -524,6 +524,35 @@ impl AgentTaskPrFinalizationBackend for MockBackend {
 }
 
 #[test]
+fn publishes_with_accepted_inherited_gate_without_policy_opt_in() {
+    let mut backend = MockBackend {
+        changed_files: vec!["src/lib.rs".to_string()],
+        ..Default::default()
+    };
+    let mut options = options();
+    options.accept_inherited_failures = false;
+    let mut inherited = options.normalized_gate_results[0].clone();
+    inherited.id = "baseline-check".to_string();
+    inherited.name = "cargo test baseline_check".to_string();
+    inherited.status = HomeboyGateStatus::AcceptedInheritedFailure;
+    options.normalized_gate_results.push(inherited);
+
+    let report = finalize_pr_with_backend(options, &mut backend).expect("publish non-regression");
+    assert_eq!(report.status, "review_ready");
+    assert!(backend.created);
+    let inherited = report
+        .normalized_gate_results
+        .iter()
+        .find(|gate| gate.id == "baseline-check")
+        .expect("inherited evidence retained");
+    assert_eq!(
+        inherited.status,
+        HomeboyGateStatus::AcceptedInheritedFailure
+    );
+    assert_eq!(inherited.name, "cargo test baseline_check");
+}
+
+#[test]
 fn creates_new_pr_after_green_gates() {
     let mut backend = MockBackend {
         changed_files: vec!["src/lib.rs".to_string()],
