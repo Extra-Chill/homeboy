@@ -1,0 +1,210 @@
+{
+  "schema": "homeboy/agent-task-aggregate/v1",
+  "plan_id": "agent-task-dispatch-567fc5cf-03a8-4a43-b3de-344fa44913a8",
+  "status": "failed",
+  "totals": {
+    "queued": 0,
+    "running": 0,
+    "blocked": 0,
+    "skipped": 0,
+    "succeeded": 0,
+    "candidate_recoverable": 0,
+    "recoverable_candidates": 0,
+    "failed": 1,
+    "cancelled": 0,
+    "timed_out": 0
+  },
+  "outcomes": [
+    {
+      "schema": "homeboy/agent-task-outcome/v1",
+      "task_id": "cook-blocks-engine",
+      "status": "failed",
+      "summary": "agent task did not produce required typed artifacts: patch.",
+      "failure_classification": "execution_failed",
+      "typed_artifacts": [
+        {
+          "name": "agent_result",
+          "type": "json",
+          "artifact_schema": "homeboy/agent-task-outcome/v1",
+          "payload": {
+            "outputs": {
+              "review_form": {
+                "completion": "incomplete",
+                "incomplete_reason": "The owning runtime-wrapper and link-layer paths still emit layout-shell blocks. Acceptance and CI remain failing; no verified fix was produced.",
+                "pr_title": "Investigate remaining layout-shell import failures",
+                "summary": "No candidate changes retained: the attempted extension introduced a contract regression and did not satisfy acceptance.",
+                "what_changed": [
+                  "Read the issue and comments and inspected all five CI failure logs.",
+                  "Ran whole-site acceptance: /about/ and / still reproduce; screenshot parity also fails.",
+                  "Tested and reverted an unsafe wrapper-folding change."
+                ]
+              }
+            },
+            "status": "succeeded",
+            "summary": "provider produced no change; Homeboy verified the attempt checkout is unchanged from its base",
+            "task_id": "cook-blocks-engine"
+          },
+          "metadata": {
+            "normalized_from": "runtime_outcome"
+          }
+        },
+        {
+          "name": "transcript",
+          "type": "evidence_ref",
+          "payload": {
+            "kind": "provider-runtime-stderr",
+            "label": "runtime stderr",
+            "uri": "file:///home/chubes/.local/share/homeboy/artifacts/agent-task/executor-artifacts/wf-import-findings-loop-f6e48e0c2adf-cook-i1-n0-a1-attempt-1-04ae2d8a/cook-blocks-engine/attempt-1/provider-runtime-stderr-1.log"
+          },
+          "metadata": {
+            "normalized_from": "runtime_evidence"
+          }
+        }
+      ],
+      "evidence_refs": [
+        {
+          "kind": "executor-input",
+          "uri": "file:///home/chubes/.local/share/homeboy/artifacts/agent-task/executor-evidence/wf-import-findings-loop-f6e48e0c2adf-cook-i1-n0-a1-attempt-1-04ae2d8a/cook-blocks-engine/executor-input.json",
+          "label": "latest raw executor input"
+        },
+        {
+          "kind": "executor-result",
+          "uri": "file:///home/chubes/.local/share/homeboy/artifacts/agent-task/executor-evidence/wf-import-findings-loop-f6e48e0c2adf-cook-i1-n0-a1-attempt-1-04ae2d8a/cook-blocks-engine/executor-result.json",
+          "label": "latest raw executor result"
+        },
+        {
+          "kind": "executor-runtime-evidence",
+          "uri": "file:///home/chubes/.local/share/homeboy/artifacts/agent-task/executor-evidence/wf-import-findings-loop-f6e48e0c2adf-cook-i1-n0-a1-attempt-1-04ae2d8a/cook-blocks-engine/executor-runtime-evidence.json",
+          "label": "provider runtime evidence index"
+        },
+        {
+          "kind": "executor-artifact-root",
+          "uri": "file:///home/chubes/.local/share/homeboy/artifacts/agent-task/executor-artifacts/wf-import-findings-loop-f6e48e0c2adf-cook-i1-n0-a1-attempt-1-04ae2d8a/cook-blocks-engine/attempt-1",
+          "label": "executor artifact root"
+        },
+        {
+          "kind": "provider-runtime-stderr",
+          "uri": "file:///home/chubes/.local/share/homeboy/artifacts/agent-task/executor-artifacts/wf-import-findings-loop-f6e48e0c2adf-cook-i1-n0-a1-attempt-1-04ae2d8a/cook-blocks-engine/attempt-1/provider-runtime-stderr-1.log",
+          "label": "runtime stderr"
+        },
+        {
+          "kind": "provider-runtime-stdout",
+          "uri": "file:///home/chubes/.local/share/homeboy/artifacts/agent-task/executor-artifacts/wf-import-findings-loop-f6e48e0c2adf-cook-i1-n0-a1-attempt-1-04ae2d8a/cook-blocks-engine/attempt-1/provider-runtime-stdout-1.log",
+          "label": "runtime stdout"
+        }
+      ],
+      "diagnostics": [
+        {
+          "class": "provider",
+          "message": "Pi finished after 45 turn(s) and 44 tool call(s).",
+          "data": {}
+        },
+        {
+          "class": "agent_task.required_typed_artifacts_missing",
+          "message": "agent task did not produce required typed artifacts: patch.",
+          "data": {
+            "missing": [
+              "patch"
+            ]
+          }
+        }
+      ],
+      "outputs": {
+        "review_form": {
+          "completion": "incomplete",
+          "incomplete_reason": "The owning runtime-wrapper and link-layer paths still emit layout-shell blocks. Acceptance and CI remain failing; no verified fix was produced.",
+          "pr_title": "Investigate remaining layout-shell import failures",
+          "summary": "No candidate changes retained: the attempted extension introduced a contract regression and did not satisfy acceptance.",
+          "what_changed": [
+            "Read the issue and comments and inspected all five CI failure logs.",
+            "Ran whole-site acceptance: /about/ and / still reproduce; screenshot parity also fails.",
+            "Tested and reverted an unsafe wrapper-folding change."
+          ]
+        }
+      },
+      "metadata": {
+        "command": "pi",
+        "cwd": "/home/chubes/.local/share/homeboy/controller-scratch/attempts/wf-import-findings-loop-f6e48e0c2adf-cook-i1-n0-a1-attempt-1-04ae2d8a/agent-task-dispatch-567fc5cf-03a8-4a43-b3de-344fa44913a8/cook-blocks-engine/attempt-1/d64bbdfc-223c-4736-930d-af2851f4cdda/workspace",
+        "execution_budget": {
+          "executions_used": 1,
+          "exhausted": null,
+          "max_provider_executions": 3,
+          "max_provider_rotations": 0,
+          "max_same_provider_retries": 2,
+          "provider_rotations_used": 0,
+          "remaining_provider_executions": 2,
+          "same_provider_retries_used": 0,
+          "terminal_reason": "failed"
+        },
+        "exit_code": 0,
+        "homeboy_empty_attempt_verified": true,
+        "managed_services": [],
+        "model": "cook-heavy",
+        "model_identity": {
+          "actual": "cook-heavy",
+          "attempted": "roadie/cook-heavy",
+          "candidate_producing": "cook-heavy",
+          "provider_reported": "cook-heavy",
+          "requested": "roadie/cook-heavy",
+          "resolved": "roadie/cook-heavy"
+        },
+        "model_ms": 392072.0,
+        "provider": "roadie",
+        "publication": {
+          "owner": "controller",
+          "status": "not_attempted"
+        },
+        "served_models": [
+          "gpt-6.1-sol"
+        ],
+        "stop_reason": "stop",
+        "tool_calls": 44,
+        "tool_errors": 7,
+        "tool_ms": 412141.0,
+        "tool_ms_by_name": {
+          "bash": 412076.0,
+          "edit": 15.0,
+          "read": 50.0
+        },
+        "turns": 45,
+        "usage": {
+          "cache_read_tokens": 285952.0,
+          "cache_write_tokens": 0.0,
+          "cost_usd": 0.0,
+          "input_tokens": 1344245.0,
+          "output_tokens": 7301.0,
+          "total_tokens": 1637498.0
+        }
+      }
+    }
+  ],
+  "events": [
+    {
+      "task_id": "cook-blocks-engine",
+      "state": "queued",
+      "attempt": 1
+    },
+    {
+      "task_id": "cook-blocks-engine",
+      "state": "running",
+      "attempt": 1
+    },
+    {
+      "task_id": "cook-blocks-engine",
+      "state": "failed",
+      "attempt": 1,
+      "message": "agent task did not produce required typed artifacts: patch."
+    }
+  ],
+  "queue": {
+    "max_concurrency": 1,
+    "queued": 0,
+    "running": 0,
+    "blocked": 0,
+    "completed": 1,
+    "resource_budget": {
+      "default_task_units": 1,
+      "active_units": 0
+    }
+  }
+}

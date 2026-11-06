@@ -2346,6 +2346,46 @@ fn terminal_fallback_status(state: agent_task_lifecycle::AgentTaskRunState) -> C
     }
 }
 
+/// A normal provider stop can still fail the patch contract when the agent
+/// explicitly reports that it could not finish. That is a candidate-selection
+/// result, not a provider outage. Keep this narrow so other failures retain
+/// their provider diagnostics and recovery actions.
+fn incomplete_no_candidate_reason(
+    aggregate: &crate::agent_task_schedule::AgentTaskAggregate,
+) -> Option<String> {
+    let [outcome] = aggregate.outcomes.as_slice() else {
+        return None;
+    };
+    if outcome.metadata["stop_reason"] != "stop"
+        || outcome.metadata["exit_code"]
+            .as_i64()
+            .is_some_and(|code| code != 0)
+        || outcome.candidate.is_some()
+        || outcome
+            .artifacts
+            .iter()
+            .any(|artifact| artifact.kind == "patch")
+        || !outcome.diagnostics.iter().any(|diagnostic| {
+            diagnostic.class == "agent_task.required_typed_artifacts_missing"
+                && diagnostic.data["missing"] == serde_json::json!(["patch"])
+        })
+        || outcome.diagnostics.iter().any(|diagnostic| {
+            !matches!(
+                diagnostic.class.as_str(),
+                "provider" | "agent_task.required_typed_artifacts_missing"
+            ) || diagnostic.data.get("failure_code").is_some()
+                || (diagnostic.class == "agent_task.required_typed_artifacts_missing"
+                    && diagnostic.data["missing"] != serde_json::json!(["patch"]))
+        })
+    {
+        return None;
+    }
+    let form = review_form_from_aggregate(aggregate).ok()??;
+    form.incomplete_reason()
+        .filter(|reason| !reason.is_empty())
+        .map(str::to_string)
+}
+
 /// Read the first durable outcome diagnostic for a failed attempt. Batch
 /// coordinators use this bounded projection when a Cook report only retains
 /// generic failure context; expanded evidence remains attached to the run.
@@ -7480,7 +7520,15 @@ fn run_cook_spine(
             let remaining_budget = budget_limit
                 .as_ref()
                 .and_then(|budget| budget_remaining(budget, budget_used));
-            let status = terminal_fallback_status(record.state());
+            let no_candidate_reason = (record.state()
+                == agent_task_lifecycle::AgentTaskRunState::Failed)
+                .then(|| incomplete_no_candidate_reason(&aggregate))
+                .flatten();
+            let status = if no_candidate_reason.is_some() {
+                CookStatus::NoCandidate
+            } else {
+                terminal_fallback_status(record.state())
+            };
             let cancelled = status == CookStatus::Cancelled;
             if !cancelled && attempt >= attempt_limit {
                 publish_latest_incomplete_draft(&options, lifecycle_store)?;
@@ -7491,7 +7539,9 @@ fn run_cook_spine(
                 disposition: CookDisposition::Terminal,
                 attempts,
                 finalization: None,
-                stop_reason: if cancelled {
+                stop_reason: if let Some(reason) = no_candidate_reason {
+                    Some(reason)
+                } else if cancelled {
                     Some(format!(
                         "Cook was cancelled: {}",
                         record.metadata["cancel_reason"]
@@ -7510,6 +7560,9 @@ fn run_cook_spine(
             if cancelled {
                 report.value.terminal_phase = Some("cancellation".to_string());
                 report.value.terminal_failure_classification = Some("cancelled".to_string());
+            } else if status == CookStatus::NoCandidate {
+                report.value.terminal_phase = Some("candidate_selection".to_string());
+                report.value.terminal_failure_classification = Some("no_candidate".to_string());
             } else {
                 make_provider_timeout_actionable(
                     Some(lifecycle_store),
