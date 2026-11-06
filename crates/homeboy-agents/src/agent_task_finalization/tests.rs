@@ -85,6 +85,8 @@ struct MockBackend {
     last_body: String,
     publication_binding: Option<AgentTaskPublicationBinding>,
     publication_binding_calls: u8,
+    binding_io_failures: u8,
+    quarantine_capabilities: Vec<AgentTaskPrQuarantineCapability>,
     remote_candidate_sha: Option<String>,
     remote_candidate_checks: u8,
     quarantine_capability: Option<AgentTaskPrQuarantineCapability>,
@@ -462,6 +464,13 @@ impl AgentTaskPrFinalizationBackend for MockBackend {
         _pr: &AgentTaskPrRef,
     ) -> Result<AgentTaskPublicationBinding> {
         self.publication_binding_calls += 1;
+        if self.binding_io_failures > 0 {
+            self.binding_io_failures -= 1;
+            return Err(Error::internal_io(
+                "read temporarily unavailable",
+                Some("binding config read".into()),
+            ));
+        }
         Ok(self
             .publication_binding
             .clone()
@@ -481,6 +490,12 @@ impl AgentTaskPrFinalizationBackend for MockBackend {
             }))
     }
 
+    fn mark_pr_ready(&mut self, _path: &str, pr: &AgentTaskPrRef) -> Result<AgentTaskPrRef> {
+        let mut ready = pr.clone();
+        ready.is_draft = false;
+        Ok(ready)
+    }
+
     fn quarantine_pr(
         &mut self,
         _path: &str,
@@ -488,6 +503,7 @@ impl AgentTaskPrFinalizationBackend for MockBackend {
         capability: AgentTaskPrQuarantineCapability,
     ) -> Result<String> {
         self.quarantine_calls += 1;
+        self.quarantine_capabilities.push(capability);
         if self.quarantine_error {
             return Err(Error::git_command_failed("quarantine command failed"));
         }
@@ -614,6 +630,95 @@ fn creates_new_pr_after_green_gates() {
             .map(|binding| binding.pr_head_sha.as_str()),
         Some("candidate-sha")
     );
+}
+
+#[test]
+fn binding_observation_failure_is_retried_and_recoverable_not_drift() {
+    for (failures, drift, draft) in [
+        (1, false, false),
+        (3, false, false),
+        (3, false, true),
+        (0, true, false),
+    ] {
+        let mut backend = MockBackend {
+            changed_files: vec!["src/lib.rs".into()],
+            binding_io_failures: failures,
+            ..Default::default()
+        };
+        if drift {
+            backend.publication_binding = Some(AgentTaskPublicationBinding {
+                candidate_sha: "candidate-sha".into(),
+                candidate_tree: "candidate-tree".into(),
+                remote_sha: "different-sha".into(),
+                pr_head_sha: "candidate-sha".into(),
+                repository: "Extra-Chill/homeboy".into(),
+                head_repository: "Extra-Chill/homeboy".into(),
+                changed_files: vec!["src/lib.rs".into()],
+            });
+        }
+        let mut request = options();
+        request.draft_pr = draft;
+        let result = finalize_pr_with_backend(request.clone(), &mut backend);
+        if failures == 1 {
+            assert!(result.unwrap().finalization_outcome.published);
+            assert_eq!(backend.publication_binding_calls, 2);
+            assert_eq!(backend.quarantine_calls, 0);
+        } else if drift {
+            assert!(result
+                .unwrap_err()
+                .message
+                .contains("publication candidate drift refused"));
+            assert!(matches!(
+                backend.quarantine_capabilities.as_slice(),
+                [AgentTaskPrQuarantineCapability::CloseNewPr]
+            ));
+            assert_eq!(backend.publication_binding_calls, 1);
+        } else {
+            let error = result.unwrap_err();
+            assert_eq!(backend.publication_binding_calls, 3);
+            for reason in [
+                "recoverable",
+                "read temporarily unavailable",
+                "binding config read",
+                &format!("homeboy agent-task recover {}", request.run_id),
+            ] {
+                assert!(error.message.contains(reason), "{}", error.message);
+            }
+            assert_eq!(error.retryable, Some(true));
+            assert!(error.details["binding_error"]
+                .as_str()
+                .unwrap()
+                .contains("read temporarily unavailable"));
+            assert!(!backend
+                .quarantine_capabilities
+                .iter()
+                .any(|capability| matches!(
+                    capability,
+                    AgentTaskPrQuarantineCapability::CloseNewPr
+                )));
+            assert!(
+                matches!(
+                    backend.quarantine_capabilities[0],
+                    AgentTaskPrQuarantineCapability::PreserveExistingDraft
+                ) == draft
+            );
+            // Recovery discovers and binds the same open PR, without creating another.
+            backend.existing_pr = Some(AgentTaskPrRef {
+                number: 123,
+                url: "https://github.com/Extra-Chill/homeboy/pull/123".into(),
+                is_draft: true,
+            });
+            backend.created = false;
+            backend.candidate_state = Some(AgentTaskPrCandidateState::Committed {
+                changed_files: vec!["src/lib.rs".into()],
+                push_required: false,
+            });
+            let recovered = finalize_pr_with_backend(request, &mut backend).unwrap();
+            assert!(recovered.finalization_outcome.published);
+            assert_eq!(recovered.finalization_outcome.pr_number, Some(123));
+            assert!(!backend.created);
+        }
+    }
 }
 
 #[test]
