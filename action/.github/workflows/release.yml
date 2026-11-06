@@ -197,6 +197,8 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       results: ${{ steps.releases.outputs.results }}
+      released: ${{ steps.released.outputs.released }}
+      released-count: ${{ steps.released.outputs.released-count }}
     steps:
       - name: Generate GitHub App token
         id: app-token
@@ -252,6 +254,15 @@ jobs:
           name: homeboy-monorepo-releases
           path: ${{ runner.temp }}/homeboy-monorepo-releases.json
           if-no-files-found: ignore
+      # Read from the aggregate file, not the composite output, so a failed
+      # component still lets every release that did land be dispatched.
+      - name: Collect released components
+        id: released
+        if: always() && steps.source.outputs.stale != 'true'
+        shell: bash
+        env:
+          DRY_RUN: ${{ inputs.dry-run }}
+        run: python3 .homeboy-action/scripts/release/run-monorepo-releases.py released
 
   # ── Step 1: Check for releasable commits ──
   check:
@@ -474,15 +485,26 @@ jobs:
   # dispatches. A dispatch failure fails this job only — the release has
   # already been tagged and published and is not rolled back.
   #
+  # Both modes share this job and scripts/release/dispatch-releases.sh:
+  # single-component mode sends one event from the release job's outputs;
+  # `components: all` sends one event per component the monorepo job actually
+  # released (a failed sibling does not suppress the ones that landed).
+  #
   # GITHUB_TOKEN cannot dispatch to another repository, so the token is
   # DISPATCH_TOKEN when the caller provides it, otherwise a HOMEBOY_APP_*
   # installation token scoped to exactly dispatch-repo.
   dispatch:
     name: Dispatch
     needs:
+      - monorepo
       - check
       - release
-    if: needs.check.outputs.should-release == 'true' && needs.release.outputs.released == 'true' && inputs.dispatch-repo != '' && inputs.dry-run != true
+    if: >-
+      !cancelled() && inputs.dispatch-repo != '' && inputs.dry-run != true && (
+        (inputs.components == '' && needs.release.result == 'success' &&
+         needs.check.outputs.should-release == 'true' && needs.release.outputs.released == 'true') ||
+        (inputs.components != '' && needs.monorepo.outputs.released-count != '' &&
+         needs.monorepo.outputs.released-count != '0'))
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -511,27 +533,23 @@ jobs:
           owner: ${{ steps.target.outputs.owner }}
           repositories: ${{ steps.target.outputs.repo }}
 
-      - name: Check out released tag
+      # Single mode checks out its released tag; monorepo mode checks out the
+      # default ref. fetch-depth 0 fetches every tag either way, so each
+      # released tag resolves to its peeled commit with repository credentials.
+      - name: Check out released tags
         uses: actions/checkout@v6
         with:
-          ref: ${{ needs.release.outputs.release-tag }}
+          ref: ${{ inputs.components == '' && needs.release.outputs.release-tag || '' }}
           fetch-depth: 0
           persist-credentials: false
           token: ${{ github.token }}
 
-      - name: Resolve released tag SHA
-        id: tag-sha
-        shell: bash
-        env:
-          TAG: ${{ needs.release.outputs.release-tag }}
-        run: |
-          set -euo pipefail
-          tag_sha="$(git rev-parse --verify "${TAG}^{commit}")"
-          if [ -z "${tag_sha}" ]; then
-            echo "::error::Could not resolve released tag '${TAG}' to its commit SHA."
-            exit 1
-          fi
-          echo "sha=${tag_sha}" >> "${GITHUB_OUTPUT}"
+      - name: Check out action revision
+        uses: actions/checkout@v6
+        with:
+          repository: Extra-Chill/homeboy-action
+          ref: ${{ needs.check.outputs.action-sha || inputs.action-ref }}
+          path: .homeboy-action
 
       - name: Send repository_dispatch
         shell: bash
@@ -540,47 +558,13 @@ jobs:
           APP_TOKEN: ${{ steps.app-token.outputs.token }}
           DISPATCH_REPO: ${{ inputs.dispatch-repo }}
           DISPATCH_EVENT: ${{ inputs.dispatch-event }}
+          RELEASES_JSON: ${{ inputs.components != '' && needs.monorepo.outputs.released || '' }}
           COMPONENT: ${{ needs.release.outputs.component }}
           VERSION: ${{ needs.release.outputs.release-version }}
           TAG: ${{ needs.release.outputs.release-tag }}
           BUMP: ${{ needs.release.outputs.release-bump-type }}
-          TAG_SHA: ${{ steps.tag-sha.outputs.sha }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          set -euo pipefail
-          if [ -n "${DISPATCH_TOKEN}" ]; then
-            token="${DISPATCH_TOKEN}"
-            source="DISPATCH_TOKEN"
-          elif [ -n "${APP_TOKEN}" ]; then
-            token="${APP_TOKEN}"
-            source="HOMEBOY_APP installation token scoped to ${DISPATCH_REPO}"
-          else
-            echo "::error::No token can dispatch to ${DISPATCH_REPO}: GITHUB_TOKEN cannot send repository_dispatch cross-repo. Pass secrets.DISPATCH_TOKEN (contents:write on the target) or install the Homeboy App on the target repository."
-            exit 1
-          fi
-
-          jq -n \
-            --arg component "${COMPONENT}" \
-            --arg repository "${GITHUB_REPOSITORY}" \
-            --arg version "${VERSION}" \
-            --arg tag "${TAG}" \
-            --arg bump "${BUMP}" \
-            --arg sha "${TAG_SHA}" \
-            --arg run_url "${RUN_URL}" \
-            --arg event_type "${DISPATCH_EVENT}" \
-            '{event_type:$event_type,client_payload:{component:$component,repository:$repository,version:$version,tag:$tag,bump:$bump,sha:$sha,run_url:$run_url}}' \
-            > "${RUNNER_TEMP}/dispatch_body.json"
-
-          echo "Dispatching ${DISPATCH_EVENT} to ${DISPATCH_REPO} using ${source}"
-          cat "${RUNNER_TEMP}/dispatch_body.json"
-
-          # Send the whole body as JSON. `gh api -F key=@file` posts the file
-          # contents as a string, which GitHub rejects with HTTP 422
-          # ("client_payload ... is not an object").
-          GH_TOKEN="${token}" gh api \
-            --method POST \
-            "repos/${DISPATCH_REPO}/dispatches" \
-            --input "${RUNNER_TEMP}/dispatch_body.json"
+        run: bash .homeboy-action/scripts/release/dispatch-releases.sh
 
   # ── Record failed SHA to prevent retry loops ──
   record-failure:

@@ -157,9 +157,11 @@ not stop later components, but fail the job at the end. Release-commit pushes
 are not filtered in this mode, allowing a later run to catch up missed releases.
 
 `release-results` is a JSON list of
-`{component, released, version, tag, skipped_reason}`. The same JSON is uploaded
-as `homeboy-monorepo-releases`, including on component failure. Single-component
-outputs and post-release dispatch remain specific to single-component mode.
+`{component, released, version, tag, bump, skipped_reason}`. The same JSON is
+uploaded as `homeboy-monorepo-releases`, including on component failure.
+Single-component outputs remain specific to single-component mode. Post-release
+dispatch works in both modes: with `dispatch-repo` set, `components: all` sends
+one `repository_dispatch` per component released in that run (see below).
 `dry-run` and publish opt-outs apply to every component. Do not combine
 `components: all` with `component`. Omit `components` to keep the existing
 single-component workflow unchanged.
@@ -455,6 +457,24 @@ triggering event SHA.
 token scoped to exactly `dispatch-repo` — so the Homeboy App must be installed
 on the target repository. With neither, the job fails with an explicit error.
 Outputs `dispatched` and `dispatch-repo` are exported for chaining.
+
+In `components: all` mode the same job sends one event per component that the
+run actually released, with the same payload and token. `component`, `version`,
+`tag` and `bump` describe that component (nested components use
+`<id>-vX.Y.Z` tags); components with nothing to release send nothing, and a
+component failure does not suppress events for the components that did
+release. A dry run, or a run that releases nothing, sends no events. If any
+event fails, the remaining ones are still sent and the `dispatch` job fails.
+
+```yaml
+jobs:
+  release:
+    uses: Extra-Chill/homeboy-action/.github/workflows/release.yml@v2
+    with:
+      components: all
+      dispatch-repo: my-org/my-deploy-repo
+    secrets: inherit
+```
 
 #### Direct composite action
 
