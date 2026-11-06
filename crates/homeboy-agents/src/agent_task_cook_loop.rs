@@ -1475,7 +1475,7 @@ mod tests {
             // make an intrinsic failure eligible for explicit acceptance.
             gate.status = AgentTaskGateStatus::AcceptedInheritedFailure;
             let promotion = promotion_report(AgentTaskPromotionStatus::GateFailed, vec![gate]);
-            assert!(!promotion.finalization_eligible(true));
+            assert!(!promotion.finalization_eligible());
         }
     }
 

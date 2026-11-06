@@ -7114,7 +7114,7 @@ fn dirty_destination_recovery_actions_commit_review_and_adopt_through_publicatio
         assert!(adopted.value.attempts[0]
             .promotion
             .as_ref()
-            .is_some_and(|promotion| promotion.finalization_eligible(false)));
+            .is_some_and(|promotion| promotion.finalization_eligible()));
         assert!(backend.committed && backend.pushed && backend.created);
 
         let record = agent_task_lifecycle::reconcile_status(&fixture.run_id)
@@ -8014,7 +8014,6 @@ impl CandidateAdoptionFixture {
     ) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
         self.adopt_run_with_inherited_failure_acceptance(
             &self.run_id,
-            false,
             dispatcher,
             executor,
             backend,
@@ -8028,9 +8027,7 @@ impl CandidateAdoptionFixture {
         executor: SharedAgentTaskExecutor,
         backend: &mut CaptureBackend,
     ) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
-        self.adopt_run_with_inherited_failure_acceptance(
-            run_id, false, dispatcher, executor, backend,
-        )
+        self.adopt_run_with_inherited_failure_acceptance(run_id, dispatcher, executor, backend)
     }
 
     fn adopt_replacing_interrupted(
@@ -8045,7 +8042,6 @@ impl CandidateAdoptionFixture {
             AgentTaskCandidateAdoptionOptions {
                 ai_model: Some("openai/gpt-5.6-terra".to_string()),
                 replace_interrupted: true,
-                accept_inherited_failures: false,
             },
             dispatcher,
             executor,
@@ -8056,7 +8052,6 @@ impl CandidateAdoptionFixture {
     fn adopt_run_with_inherited_failure_acceptance(
         &self,
         run_id: &str,
-        accept_inherited_failures: bool,
         dispatcher: impl FnOnce(&Value) -> Result<Option<Arc<dyn AgentTaskCookAttemptDispatcher>>>,
         executor: SharedAgentTaskExecutor,
         backend: &mut CaptureBackend,
@@ -8067,7 +8062,6 @@ impl CandidateAdoptionFixture {
             AgentTaskCandidateAdoptionOptions {
                 ai_model: Some("openai/gpt-5.6-terra".to_string()),
                 replace_interrupted: false,
-                accept_inherited_failures,
             },
             dispatcher,
             executor,
@@ -8092,7 +8086,6 @@ fn adoption_accepts_an_identical_immutable_baseline_failure_without_opt_in() {
         let result = fixture
             .adopt_run_with_inherited_failure_acceptance(
                 &fixture.run_id,
-                false,
                 |_| Ok(None),
                 Arc::new(UnusedExecutor),
                 &mut backend,
@@ -8149,7 +8142,6 @@ fn adoption_blocks_a_changed_failure_despite_inherited_failure_authorization() {
         let result = fixture
             .adopt_run_with_inherited_failure_acceptance(
                 &fixture.run_id,
-                true,
                 |_| Ok(None),
                 Arc::new(UnusedExecutor),
                 &mut backend,
@@ -8240,7 +8232,6 @@ fn adoption_replays_candidate_and_baseline_gates_from_the_persisted_component_wo
         let result = fixture
             .adopt_run_with_inherited_failure_acceptance(
                 &fixture.run_id,
-                true,
                 |_| Ok(None),
                 Arc::new(UnusedExecutor),
                 &mut backend,
@@ -8610,7 +8601,6 @@ fn adoption_blocks_inherited_failure_when_candidate_package_artifact_differs_fro
         let result = fixture
             .adopt_run_with_inherited_failure_acceptance(
                 &fixture.run_id,
-                true,
                 |_| Ok(None),
                 Arc::new(UnusedExecutor),
                 &mut backend,
@@ -15090,7 +15080,6 @@ fn adopt_green_candidate_missing_review_form(
         AgentTaskCandidateAdoptionOptions {
             ai_model: Some("fixture-model-review".to_string()),
             replace_interrupted: false,
-            accept_inherited_failures: false,
         },
         |_| Ok(None),
         review_executor,
@@ -18348,7 +18337,7 @@ fn cook_remediation_preserves_provider_identity_and_no_gate_requirements() {
 fn canonical_completion_accepts_green_and_proven_inherited_gate_evidence() {
     let mut green = promotion("canonical-green");
     green.candidate.as_mut().unwrap().tree_sha = "canonical-sha".to_string();
-    assert!(canonical_finalization_eligible(&green, false, true));
+    assert!(canonical_finalization_eligible(&green, true));
 
     let mut inherited = green.clone();
     inherited.status = AgentTaskPromotionStatus::GateFailed;
@@ -18376,8 +18365,7 @@ fn canonical_completion_accepts_green_and_proven_inherited_gate_evidence() {
             result: crate::agent_task_gate::AgentTaskGateDifferentialResult::BaselineRed,
             diagnostic: None,
         });
-    // Exercise the public durable verdict with both policy values: accepted
-    // baseline evidence must not turn back into a rejection on another path.
+    // Accepted baseline evidence must not turn back into a rejection.
     use crate::agent_task_gate::{AgentTaskGateFailureClassification, AgentTaskGateStatus};
     for (name, status, classification, baseline_matches, publishable) in [
         (
@@ -18427,10 +18415,10 @@ fn canonical_completion_accepts_green_and_proven_inherited_gate_evidence() {
         report
             .deterministic_gates
             .push(green.deterministic_gates[0].clone());
-        for policy in [false, true] {
-            assert_eq!(report.finalization_eligible(policy), publishable, "{name}");
+        {
+            assert_eq!(report.finalization_eligible(), publishable, "{name}");
             assert_eq!(
-                canonical_finalization_eligible(&report, policy, true),
+                canonical_finalization_eligible(&report, true),
                 publishable,
                 "{name}"
             );
@@ -18448,7 +18436,7 @@ fn canonical_completion_accepts_green_and_proven_inherited_gate_evidence() {
             );
             assert_eq!(outcome.gate_results[0].id, report.deterministic_gates[0].id);
             report.normalize_gate_outcome();
-            assert!(report.finalization_eligible(false));
+            assert!(report.finalization_eligible());
             assert!(report
                 .operator_notification
                 .message
@@ -18472,7 +18460,7 @@ fn canonical_completion_accepts_green_and_proven_inherited_gate_evidence() {
 #[test]
 fn canonical_completion_requires_a_valid_review_form() {
     let green = promotion("canonical-missing-review-form");
-    assert!(!canonical_finalization_eligible(&green, false, false));
+    assert!(!canonical_finalization_eligible(&green, false));
 }
 
 #[test]
@@ -19450,7 +19438,7 @@ fn verify_replacement_gates_recovers_pending_verification_and_replays_completed_
         options.identity.initial_run_id = "run-verify-replacement".to_string();
         options.workspace.to_worktree = "fixture@cook-candidate".to_string();
         options.workspace.source_worktree_path = Some(target.clone());
-        options.gates.accept_inherited_failures = true;
+
         persist_initial_recipe(&options).expect("persist recipe");
         record_tracked_promotion_continuation(&options, &target);
         agent_task_lifecycle::record_cook_attempt_in_store(
@@ -19518,7 +19506,7 @@ fn verify_replacement_gates_recovers_pending_verification_and_replays_completed_
             "cook-verify-replacement",
             VerifyGateOptions {
                 verify: vec![reviewer_gate.clone()],
-                accept_inherited_failures: true,
+
                 ..Default::default()
             },
             "Chris approved corrected gate evidence".to_string(),
@@ -19557,7 +19545,7 @@ fn verify_replacement_gates_recovers_pending_verification_and_replays_completed_
                 verify: vec![reviewer_gate.clone()],
                 private_verify: vec![gate.clone()],
                 execution_policy: crate::agent_task_gate::AgentTaskGateExecutionPolicy::ContinueAll,
-                accept_inherited_failures: true,
+
                 ..Default::default()
             }),
             authorize_external_proof: "Chris approved corrected gate evidence".to_string(),
@@ -19670,7 +19658,7 @@ fn verify_replacement_gates_recovers_pending_verification_and_replays_completed_
             "cook-verify-replacement",
             VerifyGateOptions {
                 verify: vec![replacement.deterministic_gates[0].command[2].clone()],
-                accept_inherited_failures: true,
+
                 ..Default::default()
             },
             "Chris approved corrected gate evidence".to_string(),
@@ -19711,11 +19699,6 @@ fn verify_replacement_gates_recovers_pending_verification_and_replays_completed_
             record.metadata["cook_delivery"]["artifacts"]["promotion"]["provenance"]
                 ["replacement_gate_proof"]["reason"],
             "interrupted_original_verification"
-        );
-        assert_eq!(
-            record.metadata["cook_delivery"]["artifacts"]["promotion"]["provenance"]
-                ["replacement_gate_proof"]["accept_inherited_failures"],
-            true
         );
         assert_eq!(
             record.metadata["cook_delivery"]["artifacts"]["promotion"]["provenance"]
@@ -19901,7 +19884,7 @@ fn corrected_replacement_gates(run_id: &str, verify: &str) -> Result<AgentTaskPr
 fn a_finished_failing_replacement_run_is_replaced_without_interrupted_rerun_authority() {
     with_corrected_gate_failure(false, |options, _target| {
         let run_id = &options.identity.initial_run_id;
-        corrected_replacement_gates(run_id, "test \"$(cat tracked.txt)\" = never")
+        corrected_replacement_gates(run_id, "test \"$(cat tracked.txt)\" != promoted")
             .expect_err("the replacement gate ran and failed");
         assert!(replacement_gate_fence(run_id).is_null());
 
@@ -20279,15 +20262,10 @@ fn adopted_baseline_gate_outcome_is_candidate_bound_and_recovery_safe() {
 
 #[test]
 fn baseline_comparison_is_persisted_before_feedback_finalization() {
-    baseline_comparison_finalization_fixture(true);
+    baseline_comparison_finalization_fixture();
 }
 
-#[test]
-fn baseline_comparison_finalizes_without_inherited_failure_opt_in() {
-    baseline_comparison_finalization_fixture(false);
-}
-
-fn baseline_comparison_finalization_fixture(accept_inherited: bool) {
+fn baseline_comparison_finalization_fixture() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let temp = tempfile::tempdir().expect("repository");
         let root = temp.path();
@@ -20318,7 +20296,7 @@ fn baseline_comparison_finalization_fixture(accept_inherited: bool) {
         options.retry_policy.max_attempts = 1;
         options.identity.initial_plan.tasks[0].executor.model = Some("test/model".to_string());
         options.ai_disclosure.ai_model = Some("test/model".to_string());
-        options.gates.accept_inherited_failures = accept_inherited;
+
         options.gates.verify = vec!["cat failure >&2; exit 1".to_string()];
         options.identity.initial_plan.options.execution_budget =
             crate::agent_task_scheduler::AgentTaskExecutionBudget::new(1, 0, 0);
@@ -20483,7 +20461,7 @@ fn baseline_comparison_finalization_fixture(accept_inherited: bool) {
         for phase in ["cook.execution", "mission.finalization"] {
             assert!(spans.span(phase).is_some(), "missing {phase}");
         }
-        if accept_inherited {
+        {
             for phase in [
                 "promote.recover.candidate",
                 "promote.recover.controller_gates",
@@ -23451,7 +23429,7 @@ fn candidate_recoverable_manual_preflight_binds_canonical_candidate_and_recovers
             selection.selected_candidate_sha.as_deref(),
             Some(candidate.candidate_sha.as_str())
         );
-        assert!(promotion.finalization_eligible(false));
+        assert!(promotion.finalization_eligible());
 
         assert_eq!(
             prepare_manual_finalization_identity(cook_id).expect("Cook selects candidate"),
@@ -23839,10 +23817,6 @@ fn recovery_hydrates_adopted_baseline_gate_evidence_and_can_preflight_without_mu
         options.finalization.head = Some("fix/8058".to_string());
         options.gates = VerifyGateOptions {
             verify: vec!["cargo test --locked agent_task_promotion --lib".to_string()],
-            // The fixture below marks the gate AcceptedInheritedFailure, which
-            // is only a finalizable (and therefore recoverable) state when the
-            // cook actually accepted inherited failures.
-            accept_inherited_failures: true,
             ..Default::default()
         };
         persist_initial_recipe(&options).unwrap();
@@ -23992,6 +23966,121 @@ fn recovered_cook_finalization_uses_latest_resumed_gate_contract() {
         );
         assert!(!report.to_string().contains("stale-original-contract"));
         assert!(!report.to_string().contains("private stale gate"));
+    });
+}
+
+#[test]
+fn recovery_publishes_historical_inherited_failure_without_running_gates() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-inherited-recovery";
+        let run_id = "cook-inherited-recovery-attempt-1";
+        let target = tempfile::tempdir().expect("fixture target");
+        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        options.identity.initial_run_id = run_id.to_string();
+        options.identity.initial_plan.tasks[0].executor.model = Some("fixture-model".to_string());
+        persist_initial_recipe(&options).expect("persist recipe");
+        agent_task_lifecycle::submit_plan(&options.identity.initial_plan, Some(run_id))
+            .expect("submit run");
+        agent_task_lifecycle::record_cook_attempt_in_store(
+            &test_lifecycle_store(),
+            cook_id,
+            1,
+            run_id,
+        )
+        .expect("link recipe attempt");
+        seed_substantive_candidate_aggregate(
+            run_id,
+            &options.identity.initial_plan,
+            &target.path().join("candidate.patch"),
+            "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n",
+        );
+        assert!(
+            agent_task_lifecycle::read_aggregate(run_id)
+                .unwrap()
+                .outcomes
+                .iter()
+                .all(|outcome| outcome.outputs.get("review_form").is_none()),
+            "fixture must model the missing historical form"
+        );
+        let marker = target.path().join("gate-must-not-run");
+        let mut applied = promotion_with_existing_path(run_id, target.path());
+        let mut inherited = applied.deterministic_gates[0].clone();
+        inherited.id = "baseline-check".to_string();
+        inherited.command = vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            format!("touch {}; exit 1", marker.display()),
+        ];
+        inherited.status = crate::agent_task_gate::AgentTaskGateStatus::AcceptedInheritedFailure;
+        inherited.exit_code = 1;
+        inherited.failure_evidence = Some(crate::agent_task_gate::AgentTaskGateFailureEvidence {
+            classification:
+                crate::agent_task_gate::AgentTaskGateFailureClassification::CandidateCode,
+            summary: "baseline-red inherited failure".to_string(),
+            command: inherited.command[2].clone(),
+            exit_code: 1,
+            stdout_tail: String::new(),
+            stderr_tail: String::new(),
+            agent_feedback: String::new(),
+            diagnostics: Vec::new(),
+        });
+        inherited.baseline_comparison =
+            Some(crate::agent_task_gate::AgentTaskGateBaselineComparison {
+                base_ref: "immutable-base".to_string(),
+                exit_code: 1,
+                failure_fingerprint: "baseline-red".to_string(),
+                matches_candidate_failure: true,
+                result: crate::agent_task_gate::AgentTaskGateDifferentialResult::BaselineRed,
+                diagnostic: None,
+            });
+        applied.deterministic_gates.push(inherited);
+        applied.status = AgentTaskPromotionStatus::GateFailed;
+        let mut rejected = applied.clone();
+        rejected.deterministic_gates[1].status =
+            crate::agent_task_gate::AgentTaskGateStatus::Failed;
+        agent_task_lifecycle::record_promotion(run_id, serde_json::to_value(&rejected).unwrap())
+            .unwrap();
+        let refusal = recover_cook_pr_with_backend_and_review_form(
+            run_id,
+            Some(supplied_test_review_form()),
+            None,
+            Vec::new(),
+            false,
+            &mut CaptureBackend::default(),
+        )
+        .expect_err("unproven failure remains blocked");
+        assert!(
+            refusal
+                .message
+                .contains(&format!("homeboy agent-task status {run_id}")),
+            "{refusal:?}"
+        );
+
+        // Store the old compatibility status verbatim, as pre-#17467 did.
+        agent_task_lifecycle::record_promotion(run_id, serde_json::to_value(&applied).unwrap())
+            .unwrap();
+        let mut backend = CaptureBackend {
+            hydrate_gate_proof_run_id: Some(run_id.to_string()),
+            ..Default::default()
+        };
+        let published = recover_cook_pr_with_backend_and_review_form(
+            cook_id,
+            Some(supplied_test_review_form()),
+            None,
+            Vec::new(),
+            false,
+            &mut backend,
+        )
+        .expect("persisted inherited failures publish without replacement proof");
+        assert!(backend.created && backend.pushed);
+        assert!(
+            !marker.exists(),
+            "recovery must never execute the persisted gate"
+        );
+        assert!(
+            published.to_string().contains("baseline-red"),
+            "{published}"
+        );
     });
 }
 
@@ -24445,7 +24534,7 @@ fn replacement_gate_proof_recovers_failed_candidate_without_hiding_evidence_or_r
                 capture: Default::default(),
             },
         ];
-        let error = record_replacement_gate_proof(run_id, replacement.clone(), None, false)
+        let error = record_replacement_gate_proof(run_id, replacement.clone(), None)
             .expect_err("external proof requires operator authorization");
         assert!(error.message.contains("explicit operator authorization"));
 
@@ -24455,7 +24544,6 @@ fn replacement_gate_proof_recovers_failed_candidate_without_hiding_evidence_or_r
             run_id,
             drifted,
             Some("Chris approved external proof".to_string()),
-            false,
         )
         .expect_err("base drift is refused");
         assert!(error.message.contains("drifted"));
@@ -24470,7 +24558,6 @@ fn replacement_gate_proof_recovers_failed_candidate_without_hiding_evidence_or_r
             run_id,
             mismatched_evidence,
             Some("Chris approved external proof".to_string()),
-            false,
         )
         .expect_err("each gate needs matching command evidence");
         assert!(error.message.contains("matching_command_evidence"));
@@ -24486,7 +24573,6 @@ fn replacement_gate_proof_recovers_failed_candidate_without_hiding_evidence_or_r
             run_id,
             private_gate,
             Some("Chris approved external proof".to_string()),
-            false,
         )
         .expect_err("private gates cannot hydrate reviewer test instructions");
         assert_eq!(error.details["failed_eligibility_predicate"], "visibility");
@@ -24506,7 +24592,6 @@ fn replacement_gate_proof_recovers_failed_candidate_without_hiding_evidence_or_r
             run_id,
             unrelated_legacy_checkout,
             Some("Chris approved external proof".to_string()),
-            false,
         )
         .expect_err("legacy replacement checkout must match the original immutable fingerprint");
         assert_eq!(
@@ -24542,7 +24627,6 @@ fn replacement_gate_proof_recovers_failed_candidate_without_hiding_evidence_or_r
             run_id,
             mixed_gates,
             Some("Chris approved external proof".to_string()),
-            false,
         )
         .expect_err("an unbound private gate cannot be persisted beside a valid visible gate");
         assert_eq!(
@@ -24577,14 +24661,12 @@ fn replacement_gate_proof_recovers_failed_candidate_without_hiding_evidence_or_r
             run_id,
             replacement,
             Some("Chris approved external proof".to_string()),
-            false,
         )
         .expect("a fresh immutable gate checkout does not change the candidate");
         let replay = record_replacement_gate_proof(
             run_id,
             replacement_for_replay,
             Some("Chris approved external proof".to_string()),
-            false,
         )
         .expect("identical proof replay is idempotent");
         assert_eq!(

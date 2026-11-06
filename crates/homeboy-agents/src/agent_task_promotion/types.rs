@@ -86,21 +86,14 @@ pub struct AgentTaskPromotionGateOutcome {
 impl AgentTaskPromotionReport {
     /// Whether the report can cross the finalization boundary. Proven inherited
     /// failures are non-regressions, not rejections; they retain their baseline-red
-    /// evidence. The policy argument is retained for caller compatibility.
-    pub fn finalization_eligible(&self, accept_inherited_failures: bool) -> bool {
-        !self.deterministic_gates.is_empty()
-            && self
-                .finalization_blocking_gates(accept_inherited_failures)
-                .next()
-                .is_none()
+    /// evidence.
+    pub fn finalization_eligible(&self) -> bool {
+        !self.deterministic_gates.is_empty() && self.finalization_blocking_gates().next().is_none()
     }
 
     /// Gates that keep the report from crossing the finalization boundary,
     /// using the same per-gate rule as [`Self::finalization_eligible`].
-    pub fn finalization_blocking_gates(
-        &self,
-        _accept_inherited_failures: bool,
-    ) -> impl Iterator<Item = &AgentTaskGateReport> {
+    pub fn finalization_blocking_gates(&self) -> impl Iterator<Item = &AgentTaskGateReport> {
         self.deterministic_gates
             .iter()
             .filter(|gate| !gate_finalization_eligible(gate))
@@ -113,7 +106,7 @@ impl AgentTaskPromotionReport {
             .cloned()
             .map(HomeboyGateResult::from)
             .collect::<Vec<_>>();
-        let all_gates_passed = self.finalization_eligible(false);
+        let all_gates_passed = self.finalization_eligible();
         let status = match self.status {
             AgentTaskPromotionStatus::GateFailed if all_gates_passed => {
                 AgentTaskPromotionStatus::Applied

@@ -328,7 +328,6 @@ pub enum CookReplacementProof {
     /// Record this externally produced, candidate-bound promotion report.
     External {
         promotion: Box<crate::agent_task_promotion::AgentTaskPromotionReport>,
-        accept_inherited_failures: bool,
     },
 }
 
@@ -418,14 +417,10 @@ pub trait CookRecoveryPerformer {
                 request.authorize_external_proof,
                 request.authorize_interrupted_rerun,
             )?,
-            CookReplacementProof::External {
-                promotion,
-                accept_inherited_failures,
-            } => super::record_replacement_gate_proof(
+            CookReplacementProof::External { promotion } => super::record_replacement_gate_proof(
                 run_id,
                 *promotion,
                 Some(request.authorize_external_proof),
-                accept_inherited_failures,
             )?,
         };
         Ok((

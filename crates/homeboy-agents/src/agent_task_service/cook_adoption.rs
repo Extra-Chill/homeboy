@@ -280,10 +280,6 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
     )?;
     let cook_id = &recipe.cook_id;
     let mut options = super::reconstruct_options_without_dispatcher(&recipe)?;
-    // Adoption is a separate explicit authorization. The durable recipe keeps
-    // its historical policy, while this invocation may accept only normalized
-    // immutable-baseline matches produced below.
-    options.gates.accept_inherited_failures = adoption.accept_inherited_failures;
     let run_id = record.run_id.clone();
     let plan = lifecycle_store.read_controller_plan(&run_id)?;
     let recipe_attempt = recipe
@@ -867,7 +863,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
         };
     }
     if feedback.status == AgentTaskCookLoopStatus::BaselineRed {
-        if promotion.finalization_eligible(false) {
+        if promotion.finalization_eligible() {
             // Continue directly to finalization below; this adoption already has
             // durable baseline proof and must not spend another provider attempt.
         } else {
@@ -891,7 +887,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
     }
     if feedback.status != AgentTaskCookLoopStatus::GreenCompleted
         && !(feedback.status == AgentTaskCookLoopStatus::BaselineRed
-            && promotion.finalization_eligible(false))
+            && promotion.finalization_eligible())
     {
         // Name the verdict the feedback actually reached. Only a red declared
         // gate is a gate failure; green gates with another unmet requirement

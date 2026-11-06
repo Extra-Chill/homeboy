@@ -1584,9 +1584,6 @@ pub fn authorize_cook_continue_route(options: &CookRequest) -> Result<()> {
 pub struct AgentTaskCandidateAdoptionOptions {
     pub ai_model: Option<String>,
     pub replace_interrupted: bool,
-    /// Explicitly permit a candidate whose failed gate reproduces on the
-    /// immutable base. Regressions remain ineligible after differential replay.
-    pub accept_inherited_failures: bool,
 }
 
 /// A Cook outcome.
@@ -1879,11 +1876,7 @@ pub(crate) fn cook_observation_state(
                     AgentTaskPromotionStatus::Applied
                         | AgentTaskPromotionStatus::GateFailed
                         | AgentTaskPromotionStatus::VerifiedNoChanges
-                ) && promotion.finalization_eligible(
-                    recipe.as_ref().is_some_and(|recipe| {
-                        recipe.gate_policy["accept_inherited_failures"] == true
-                    }),
-                )
+                ) && promotion.finalization_eligible()
             });
     let no_finalize = recipe
         .as_ref()
@@ -2058,11 +2051,6 @@ fn canonical_finalization_recovery_run_id_with_stores(
     let run_id = candidate["run_id"].as_str()?;
     let task_id = candidate["selected_task_id"].as_str()?;
     let cook_id = candidate["cook_id"].as_str()?;
-    let recipe = stores
-        .map(|(store, _)| store.load_recipe(cook_id))
-        .unwrap_or_else(|| super::cook_recipe::load_recipe(cook_id))
-        .ok()?;
-    let options = super::cook_recipe::reconstruct_options_without_dispatcher(&recipe).ok()?;
     let promotion = stores
         .map(|(_, lifecycle)| {
             super::cook_promotion::persisted_promotion_for_attempt_in_store(lifecycle, run_id)
@@ -2074,7 +2062,6 @@ fn canonical_finalization_recovery_run_id_with_stores(
         super::cook_promotion::canonical_cook_recovery_run_id_with_stores(stores, cook_id)?;
     if !canonical_finalization_eligible(
         &promotion,
-        options.gates.accept_inherited_failures,
         review_form_from_aggregate(
             &stores
                 .map(|(_, lifecycle)| lifecycle.read_aggregate(&recovery_run_id))
@@ -2098,13 +2085,13 @@ fn canonical_finalization_recovery_run_id_with_stores(
 
 fn canonical_finalization_eligible(
     promotion: &AgentTaskPromotionReport,
-    accept_inherited_failures: bool,
+
     has_valid_review_form: bool,
 ) -> bool {
     matches!(
         promotion.status,
         AgentTaskPromotionStatus::Applied | AgentTaskPromotionStatus::GateFailed
-    ) && promotion.finalization_eligible(accept_inherited_failures)
+    ) && promotion.finalization_eligible()
         && has_valid_review_form
 }
 
@@ -7797,7 +7784,7 @@ fn run_cook_spine(
                 return super::cook_delivery::ensure_published(&mut delivery, promotion);
             }
             AgentTaskCookLoopStatus::BaselineRed => {
-                if promotion.finalization_eligible(false) {
+                if promotion.finalization_eligible() {
                     return super::cook_delivery::publish_accepted(
                         &mut delivery,
                         &promotion,

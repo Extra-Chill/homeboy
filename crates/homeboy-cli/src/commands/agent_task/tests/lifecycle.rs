@@ -6276,7 +6276,6 @@ fn recover_accepts_external_replacement_proof_with_operator_authorization() {
         "@replacement.json",
         "--authorize-external-proof",
         "Chris approved durable evidence",
-        "--accept-inherited-failures",
     ]);
     assert_eq!(args.id, "cook-11290-attempt-1");
     assert_eq!(args.promotion.as_deref(), Some("@replacement.json"));
@@ -6284,7 +6283,6 @@ fn recover_accepts_external_replacement_proof_with_operator_authorization() {
         args.authorize_external_proof.as_deref(),
         Some("Chris approved durable evidence")
     );
-    assert!(args.gates.accept_inherited_failures);
 }
 
 #[test]
@@ -6346,15 +6344,6 @@ fn recover_refuses_replacement_inputs_without_authorization_or_proof() {
         let performer = FixtureCookRecoveryPerformer {
             executor: Arc::new(CountingCookExecutor::default()),
         };
-        for argv in [vec!["cook-12788", "--accept-inherited-failures"]] {
-            let error = super::super::recover::recover_with(parse_recover(&argv), &performer)
-                .expect_err("replacement inputs without authorization are refused");
-            assert!(
-                error.message.contains("--authorize-external-proof"),
-                "{argv:?}: {}",
-                error.message
-            );
-        }
         assert!(
             Cli::try_parse_from([
                 "homeboy",
@@ -6367,12 +6356,10 @@ fn recover_refuses_replacement_inputs_without_authorization_or_proof() {
             .is_err(),
             "--promotion requires --authorize-external-proof"
         );
-        let error = super::super::recover::recover_with(
-            parse_recover(&["cook-12788", "--authorize-external-proof", "x"]),
-            &performer,
-        )
-        .expect_err("authorization alone names no proof");
-        assert!(error.message.contains("--promotion"), "{}", error.message);
+        let mut args = parse_recover(&["cook-12788", "--authorize-external-proof", "x"]);
+        assert!(super::super::recover::replace_gates_request(&mut args)
+            .unwrap()
+            .is_none());
         assert_eq!(
             performer.executor.executions.load(Ordering::SeqCst),
             0,

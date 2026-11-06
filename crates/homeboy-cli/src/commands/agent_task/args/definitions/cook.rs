@@ -274,10 +274,7 @@ pub struct VerifyGateArgs {
     /// attempt instead of reusing the recorded pass. Off by default.
     #[arg(long = "rerun-completed-gates")]
     pub rerun_completed_gates: bool,
-    /// Finalize only when an inherited required-gate failure was reproduced on
-    /// the immutable baseline. The gate remains reported as baseline-red.
-    #[arg(long = "accept-inherited-failures")]
-    pub accept_inherited_failures: bool,
+
     /// Do not add the component's declared lint gate. By default, when the
     /// Cook resolves to a registered component whose configuration declares
     /// lint support (`scripts.lint` or a linked lint extension), Cook requires
@@ -591,7 +588,7 @@ impl From<VerifyGateArgs> for VerifyGateOptions {
             gate_heartbeat_interval_seconds: args.gate_heartbeat_interval_seconds,
             gate_no_progress_timeout_seconds: args.gate_no_progress_timeout_seconds,
             rerun_completed_gates: args.rerun_completed_gates,
-            accept_inherited_failures: args.accept_inherited_failures,
+
             gate_environment: AgentTaskGateEnvironmentPolicy {
                 lab_runner: args.gate_runner,
                 mode: match args.gate_environment_mode.as_str() {
