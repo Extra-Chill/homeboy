@@ -397,25 +397,33 @@ pub fn observation_db_in_root(data_root: &Path) -> PathBuf {
 }
 
 thread_local! {
-    static HERMETIC_CONTEXTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static HERMETIC_RUNTIME_ROOTS: std::cell::RefCell<Vec<PathBuf>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// Test-isolation lifetime: while one is alive on this thread, the ambient
-/// data root (and every default store below it) must not be resolved.
+/// data root (and every default store below it) must not be resolved, and
+/// runtime temp lands in the isolation's own runtime root.
 #[doc(hidden)]
 pub struct ObservationStoreIsolation(std::marker::PhantomData<std::rc::Rc<()>>);
 
 impl ObservationStoreIsolation {
-    pub fn enter() -> Self {
-        HERMETIC_CONTEXTS.with(|count| count.set(count.get() + 1));
+    pub fn enter(runtime_root: PathBuf) -> Self {
+        HERMETIC_RUNTIME_ROOTS.with(|roots| roots.borrow_mut().push(runtime_root));
         Self(std::marker::PhantomData)
     }
 }
 
 impl Drop for ObservationStoreIsolation {
     fn drop(&mut self) {
-        HERMETIC_CONTEXTS.with(|count| count.set(count.get() - 1));
+        HERMETIC_RUNTIME_ROOTS.with(|roots| roots.borrow_mut().pop());
     }
+}
+
+/// The runtime-temp root of the innermost test isolation on this thread.
+#[doc(hidden)]
+pub fn hermetic_runtime_root() -> Option<PathBuf> {
+    HERMETIC_RUNTIME_ROOTS.with(|roots| roots.borrow().last().cloned())
 }
 
 /// Panic when ambient Homeboy state is resolved inside test isolation.
@@ -427,7 +435,7 @@ impl Drop for ObservationStoreIsolation {
 #[track_caller]
 fn assert_ambient_root_allowed(what: &str) {
     let caller = std::panic::Location::caller();
-    if HERMETIC_CONTEXTS.with(|count| count.get()) == 0 {
+    if HERMETIC_RUNTIME_ROOTS.with(|roots| roots.borrow().is_empty()) {
         return;
     }
     let explicit_home = home_root_override()

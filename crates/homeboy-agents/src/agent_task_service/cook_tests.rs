@@ -892,16 +892,20 @@ fn provider_timeout_resume_is_not_offered_while_deferred_cleanup_is_pending() {
         data: serde_json::json!({ "timeout_ms": 1_200_000 }),
     }];
 
-    let mut report = ambient_cook_report(CookReportInput {
-        cook_id: "timeout-pending-cleanup".to_string(),
-        status: "provider_failure",
-        disposition: CookDisposition::Terminal,
-        attempts: Vec::new(),
-        finalization: None,
-        stop_reason: None,
-        exit_code: 1,
-        invocation_latest_run_id: Some("timeout-pending-run"),
-    });
+    let mut report = cook_report(
+        &recipe_store,
+        &lifecycle_store,
+        CookReportInput {
+            cook_id: "timeout-pending-cleanup".to_string(),
+            status: "provider_failure",
+            disposition: CookDisposition::Terminal,
+            attempts: Vec::new(),
+            finalization: None,
+            stop_reason: None,
+            exit_code: 1,
+            invocation_latest_run_id: Some("timeout-pending-run"),
+        },
+    );
     report.value.failure_context = Some(AgentTaskCookFailureContext {
         recovery_step: None,
         cook_id: "timeout-pending-cleanup".to_string(),

@@ -551,10 +551,13 @@ pub struct HermeticTestContext {
 
 impl HermeticTestContext {
     pub fn new() -> Self {
+        let runtime = exec_capable_tempdir();
         let context = Self {
-            _store_isolation: crate::paths::ObservationStoreIsolation::enter(),
+            _store_isolation: crate::paths::ObservationStoreIsolation::enter(
+                runtime.path().to_path_buf(),
+            ),
             root: exec_capable_tempdir(),
-            runtime: exec_capable_tempdir(),
+            runtime,
             invocation_runtime: short_invocation_tempdir(),
         };
         for path in [

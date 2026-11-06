@@ -6638,6 +6638,11 @@ pub(crate) fn cook_failure_context_with_stores(
             cook_recovery_actions_with_prefix(
                 status,
                 &chronological_latest_run_id,
+                lifecycle_store
+                    .read_record(&chronological_latest_run_id)
+                    .is_ok_and(|record| {
+                        agent_task_lifecycle::disconnected_runner_recovery_available(&record)
+                    }),
                 recovery_legal,
                 blocking_claim.is_some(),
                 continuation_admitted,
@@ -7219,6 +7224,9 @@ fn cook_recovery_actions(
     cook_recovery_actions_with_prefix(
         status,
         run_id,
+        agent_task_lifecycle::exact_record(run_id).is_ok_and(|record| {
+            agent_task_lifecycle::disconnected_runner_recovery_available(&record)
+        }),
         recovery_legal,
         blocking_claim,
         retry_admitted,
@@ -7238,6 +7246,7 @@ fn cook_recovery_actions(
 fn cook_recovery_actions_with_prefix(
     status: &str,
     run_id: &str,
+    disconnected_runner: bool,
     recovery_legal: bool,
     blocking_claim: bool,
     retry_admitted: bool,
@@ -7258,9 +7267,7 @@ fn cook_recovery_actions_with_prefix(
         super::cook_recovery::cook_recovery_step(&super::cook_recovery::CookRecoveryInputs {
             status,
             recovery_legal,
-            disconnected_runner: agent_task_lifecycle::exact_record(run_id).is_ok_and(|record| {
-                agent_task_lifecycle::disconnected_runner_recovery_available(&record)
-            }),
+            disconnected_runner,
             blocking_claim,
             retry_admitted,
             retry_refusal,
