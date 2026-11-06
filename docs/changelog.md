@@ -4,6 +4,19 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.445.10] - 2026-11-06
+
+### Changed
+- Retain workflow instance history by age instead of job-store budget
+- one process per daemon; delete the supervisor
+- fold agent-task list/active into runs list --kind agent-task
+
+### Fixed
+- derive the retry action only for records that project it
+- Fix Cook incomplete drafts after later attempt failures
+- never cancel a running Lab gate because observation lost transport
+- Fix Cook destination HEAD contaminating origin base tracking refs
+
 ## [0.445.9] - 2026-11-05
 
 ### Changed
