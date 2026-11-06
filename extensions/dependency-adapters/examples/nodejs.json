@@ -20,6 +20,7 @@
   "package_managers": [
     {
       "id": "pnpm",
+      "download_cache": { "env": "npm_config_store_dir" },
       "selection": {
         "priority": 1,
         "search": "upward",
@@ -61,6 +62,7 @@
     },
     {
       "id": "yarn",
+      "download_cache": { "env": "YARN_CACHE_FOLDER" },
       "selection": {
         "priority": 2,
         "search": "project-root",
@@ -102,6 +104,7 @@
     },
     {
       "id": "npm",
+      "download_cache": { "env": "npm_config_cache" },
       "selection": {
         "priority": 3,
         "search": "project-root",

@@ -32,6 +32,22 @@ Adapters may describe:
 | `package_managers` | Selection signals, install intent, script runner commands, and dependency outputs. |
 | `package_identity` | Manifest paths for reading package name, version, and declared dependency maps, plus an optional `lockfile` describing where resolved versions are recorded so status reports them without installing. |
 | `helpers` | Extension-owned helper capabilities that prepare dependencies without requiring core to know their implementation. |
+| `download_cache` | Optional package-manager object declaring the cache environment variable (`env`) for runner-owned shared downloads under gate HOME/XDG isolation. |
+
+## Download cache variables
+
+The bundled declarations follow the tools' configuration documentation:
+
+- Composer: [`COMPOSER_CACHE_DIR`](https://getcomposer.org/doc/03-cli.md#composer-cache-dir)
+  overrides `config.cache-dir`, including project-local cache paths.
+- npm: [`npm_config_cache`](https://docs.npmjs.com/cli/v11/using-npm/config#environment-variables)
+  selects the `cache` setting.
+- pnpm: [`npm_config_store_dir`](https://github.com/pnpm/pnpm.io/blob/main/versioned_docs_archived/version-9.x/configuring.md)
+  uses npm-style configuration for the
+  [`store-dir`](https://github.com/pnpm/pnpm.io/blob/main/versioned_docs_archived/version-9.x/npmrc.md#store-dir) setting.
+- Yarn Classic: [`YARN_CACHE_FOLDER`](https://classic.yarnpkg.com/en/docs/cli/cache/)
+  selects the download cache directory. This declaration does not promise support
+  for Yarn Berry's different cache configuration.
 
 ## Discovery
 

@@ -21,6 +21,7 @@
   "package_managers": [
     {
       "id": "composer",
+      "download_cache": { "env": "COMPOSER_CACHE_DIR" },
       "selection": {
         "priority": 1,
         "search": "project-root",
