@@ -39,6 +39,10 @@ class MonorepoTests(unittest.TestCase):
                     self.assertEqual(step['uses'], './.homeboy-action')
                     self.assertEqual(step['with']['commands'], 'release')
                     self.assertEqual(step['with']['release-skip-publish'], '')
+                record_steps = [s for s in action['runs']['steps']
+                                if s.get('name', '').startswith('Record ')]
+                self.assertEqual(record_steps[0]['env']['RELEASE_BUMP_TYPE'],
+                                 '${{ steps.component_0.outputs.release-bump-type }}')
                 # Simulate Actions executing the interleaved record steps. The
                 # final successful release must still be recorded after failure.
                 for index, outcome in enumerate(('success', 'failure', 'success')):
@@ -48,6 +52,7 @@ class MonorepoTests(unittest.TestCase):
                                             OUTCOME=outcome, RELEASED=str(index == 2).lower(),
                                             RELEASE_VERSION='1.2.3' if index == 2 else '',
                                             RELEASE_TAG='c-later-v1.2.3' if index == 2 else '',
+                                            RELEASE_BUMP_TYPE='minor' if index == 2 else '',
                                             SKIPPED_REASON='no-releasable-commits' if index == 0 else ''))
                 completed = subprocess.run(['python3', str(SCRIPT), 'finish'], env=env)
                 self.assertEqual(completed.returncode, 1)
@@ -55,6 +60,17 @@ class MonorepoTests(unittest.TestCase):
                 self.assertEqual(rows[0]['skipped_reason'], 'no-releasable-commits')
                 self.assertEqual(rows[1]['skipped_reason'], 'release-failed')
                 self.assertTrue(rows[2]['released'])
+                self.assertEqual(rows[2]['bump'], 'minor')
+                self.assertEqual(rows[0]['bump'], '')
+                # Only the landed release is exposed for dispatch, even though
+                # a sibling failed and the serial step exits non-zero.
+                Path(tmp, 'output').write_text('')
+                subprocess.run(['python3', str(SCRIPT), 'released'], check=True,
+                               env=dict(env, DRY_RUN='false'), capture_output=True)
+                self.assertIn('released=[{"component":"c-later","version":"1.2.3",'
+                              '"tag":"c-later-v1.2.3","bump":"minor"}]',
+                              Path(tmp, 'output').read_text())
+                self.assertIn('released-count=1', Path(tmp, 'output').read_text())
                 # A no-op alone is successful.
                 Path('.homeboy-monorepo/components.json').write_text(json.dumps([{'component': 'a-skip'}]))
                 self.assertEqual(subprocess.run(['python3', str(SCRIPT), 'finish'], env=env).returncode, 0)

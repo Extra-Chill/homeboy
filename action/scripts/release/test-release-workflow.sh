@@ -180,9 +180,9 @@ assert_not_contains 'SSH_AGENT_PID: ${{ env.SSH_AGENT_PID }}' "${ROOT_DIR}/actio
 assert_contains "inputs.component || 'root'" "${REUSABLE_RELEASE}" "failure cache preserves root compatibility while isolating components"
 assert_contains 'CACHE_PREFIX:' "${REUSABLE_RELEASE}" "failure cache cleanup receives a separate safe prefix value"
 assert_contains 'jq -r --arg prefix "${CACHE_PREFIX}"' "${REUSABLE_RELEASE}" "failure cache cleanup safely handles component paths"
-assert_contains 'TAG_SHA: ${{ steps.tag-sha.outputs.sha }}' "${REUSABLE_RELEASE}" "dispatch receives the released tag SHA"
-assert_contains 'ref: ${{ needs.release.outputs.release-tag }}' "${REUSABLE_RELEASE}" "dispatch checks out the released tag with repository credentials"
-assert_contains 'git rev-parse --verify "${TAG}^{commit}"' "${REUSABLE_RELEASE}" "dispatch resolves lightweight and annotated tags"
+DISPATCH_SCRIPT="${ROOT_DIR}/scripts/release/dispatch-releases.sh"
+assert_contains "ref: \${{ inputs.components == '' && needs.release.outputs.release-tag || '' }}" "${REUSABLE_RELEASE}" "dispatch checks out the single-mode released tag with repository credentials"
+assert_contains 'git rev-parse --verify --quiet "${tag}^{commit}"' "${DISPATCH_SCRIPT}" "dispatch resolves lightweight and annotated tags to the released commit"
 assert_not_contains 'git ls-remote "https://github.com/${GITHUB_REPOSITORY}.git"' "${REUSABLE_RELEASE}" "dispatch does not resolve private tags anonymously"
 assert_contains 'prepared-ref' "${ROOT_DIR}/scripts/release/test-resolve-prepared-ref.sh" "prepared-ref behavior has a focused test"
 
@@ -228,14 +228,145 @@ assert_contains '      dispatch-repo:' "${REUSABLE_RELEASE}" "reusable release w
 assert_contains '      dispatch-event:' "${REUSABLE_RELEASE}" "reusable release workflow exposes dispatch-event"
 assert_contains '      DISPATCH_TOKEN:' "${REUSABLE_RELEASE}" "reusable release workflow accepts an optional DISPATCH_TOKEN secret"
 assert_contains '  dispatch:' "${REUSABLE_RELEASE}" "reusable release workflow declares the dispatch job"
-assert_contains "needs.release.outputs.released == 'true' && inputs.dispatch-repo != '' && inputs.dry-run != true" "${REUSABLE_RELEASE}" "dispatch job is gated on a real successful release with a target and no dry-run"
-assert_contains '"repos/${DISPATCH_REPO}/dispatches"' "${REUSABLE_RELEASE}" "dispatch job posts a repository_dispatch to the target"
-assert_contains 'GITHUB_TOKEN cannot send repository_dispatch cross-repo' "${REUSABLE_RELEASE}" "dispatch job fails closed without a cross-repo-capable token"
-assert_contains 'contents:write on the target' "${REUSABLE_RELEASE}" "dispatch documentation uses contents write permission"
+assert_contains "inputs.dispatch-repo != '' && inputs.dry-run != true" "${REUSABLE_RELEASE}" "dispatch job requires a target and no dry-run"
+assert_contains "needs.check.outputs.should-release == 'true' && needs.release.outputs.released == 'true'" "${REUSABLE_RELEASE}" "single-mode dispatch is gated on a real successful release"
+assert_contains '"repos/${DISPATCH_REPO}/dispatches"' "${DISPATCH_SCRIPT}" "dispatch script posts a repository_dispatch to the target"
+assert_contains 'GITHUB_TOKEN cannot send repository_dispatch cross-repo' "${DISPATCH_SCRIPT}" "dispatch script fails closed without a cross-repo-capable token"
+assert_contains 'contents:write on the target' "${DISPATCH_SCRIPT}" "dispatch documentation uses contents write permission"
 assert_contains 'value: ${{ jobs.dispatch.result == '"'"'success'"'"' }}' "${REUSABLE_RELEASE}" "reusable release workflow re-exports dispatched"
 assert_contains 'component: ${{ steps.release.outputs.component }}' "${REUSABLE_RELEASE}" "release job exposes the portable component id for the payload"
 assert_contains 'dispatch-repo: example-org/example-deploy' "${DISPATCH_CONSUMER_FIXTURE}" "dispatch consumer fixture sets a dispatch target"
 assert_contains 'dry-run: true' "${DISPATCH_CONSUMER_FIXTURE}" "dispatch consumer fixture stays dry-run so it can never dispatch"
 assert_contains 'secrets: inherit' "${DISPATCH_CONSUMER_FIXTURE}" "dispatch consumer fixture inherits secrets"
+
+# Monorepo dispatch (Extra-Chill/homeboy#17345): `components: all` must not
+# silently ignore dispatch-repo. Both modes share one dispatch job and script.
+python3 - "${REUSABLE_RELEASE}" <<'PY'
+import sys
+
+workflow = open(sys.argv[1]).read()
+monorepo = workflow.split('  # ── Step 1:', 1)[0].split('  monorepo:', 1)[1]
+dispatch = workflow.split('  dispatch:\n', 1)[1].split('  # ── Record failed SHA', 1)[0]
+assert 'released: ${{ steps.released.outputs.released }}' in monorepo
+assert 'released-count: ${{ steps.released.outputs.released-count }}' in monorepo
+collect = monorepo.split('id: released', 1)[1]
+assert "if: always() && steps.source.outputs.stale != 'true'" in collect, 'collect runs even when a component failed'
+assert 'DRY_RUN: ${{ inputs.dry-run }}' in collect
+assert 'run-monorepo-releases.py released' in collect
+needs = dispatch.split('    if:', 1)[0]
+for job in ('monorepo', 'check', 'release'):
+    assert f'      - {job}\n' in needs, job
+gate = dispatch.split('    if:', 1)[1].split('    runs-on:', 1)[0]
+assert '!cancelled()' in gate
+assert "inputs.dispatch-repo != ''" in gate and 'inputs.dry-run != true' in gate
+assert "inputs.components != '' && needs.monorepo.outputs.released-count != ''" in gate
+assert "needs.monorepo.outputs.released-count != '0'" in gate
+assert "inputs.components == '' && needs.release.result == 'success'" in gate
+assert "RELEASES_JSON: ${{ inputs.components != '' && needs.monorepo.outputs.released || '' }}" in dispatch
+assert 'DISPATCH_REPO: ${{ inputs.dispatch-repo }}' in dispatch
+assert 'DISPATCH_TOKEN: ${{ secrets.DISPATCH_TOKEN }}' in dispatch
+assert 'repositories: ${{ steps.target.outputs.repo }}' in dispatch
+assert dispatch.count('run: bash .homeboy-action/scripts/release/dispatch-releases.sh') == 1
+assert dispatch.index('fetch-depth: 0') < dispatch.index('path: .homeboy-action'), 'action checkout must follow the consumer checkout'
+assert '"repos/' not in dispatch, 'dispatch POST lives only in the shared script'
+print('PASS: monorepo mode wires dispatch-repo into the shared dispatch step')
+PY
+
+# Behavior of the shared dispatch script against a fake `gh`.
+DISPATCH_TMP="$(mktemp -d)"
+trap 'rm -rf "${DISPATCH_TMP}"' EXIT
+mkdir -p "${DISPATCH_TMP}/bin" "${DISPATCH_TMP}/calls"
+cat > "${DISPATCH_TMP}/bin/gh" <<'GH'
+#!/usr/bin/env bash
+set -euo pipefail
+n="$(find "${GH_CALLS}" -name 'call-*.json' | wc -l | tr -d ' ')"
+input=''
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --input) input="$2"; shift 2 ;;
+    *) printf '%s\n' "$1" >> "${GH_CALLS}/args-${n}"; shift ;;
+  esac
+done
+cp "${input}" "${GH_CALLS}/call-${n}.json"
+printf '%s\n' "${GH_TOKEN}" > "${GH_CALLS}/token-${n}"
+if [ -n "${GH_FAIL_COMPONENT:-}" ] && jq -e --arg c "${GH_FAIL_COMPONENT}" '.client_payload.component == $c' "${input}" >/dev/null; then
+  exit 1
+fi
+GH
+chmod +x "${DISPATCH_TMP}/bin/gh"
+dispatch_repo_dir="${DISPATCH_TMP}/repo"
+git init -q "${dispatch_repo_dir}"
+git -C "${dispatch_repo_dir}" -c user.email=t@example.test -c user.name=T commit -q --allow-empty -m one
+git -C "${dispatch_repo_dir}" tag alpha-v1.0.0
+git -C "${dispatch_repo_dir}" -c user.email=t@example.test -c user.name=T commit -q --allow-empty -m two
+git -C "${dispatch_repo_dir}" -c user.email=t@example.test -c user.name=T tag -a beta-v2.1.0 -m beta
+git -C "${dispatch_repo_dir}" tag v3.0.0
+alpha_sha="$(git -C "${dispatch_repo_dir}" rev-parse alpha-v1.0.0)"
+beta_sha="$(git -C "${dispatch_repo_dir}" rev-parse 'beta-v2.1.0^{commit}')"
+run_url='https://github.com/example-org/example-plugins/actions/runs/1'
+
+run_dispatch() {
+  rm -f "${DISPATCH_TMP}"/calls/*
+  (cd "${dispatch_repo_dir}" && env PATH="${DISPATCH_TMP}/bin:${PATH}" GH_CALLS="${DISPATCH_TMP}/calls" \
+    RUNNER_TEMP="${DISPATCH_TMP}" GITHUB_REPOSITORY=example-org/example-plugins \
+    DISPATCH_REPO=example-org/example-deploy DISPATCH_EVENT=component-released \
+    RUN_URL="${run_url}" DISPATCH_TOKEN= APP_TOKEN= RELEASES_JSON= \
+    "$@" bash "${DISPATCH_SCRIPT}") > "${DISPATCH_TMP}/out" 2>&1
+}
+calls() { find "${DISPATCH_TMP}/calls" -name 'call-*.json' | wc -l | tr -d ' '; }
+expect() {
+  if [ "$1" != "$2" ]; then
+    printf 'FAIL: %s\nexpected: %s\nactual: %s\n' "$3" "$2" "$1"
+    cat "${DISPATCH_TMP}/out"
+    exit 1
+  fi
+  printf 'PASS: %s\n' "$3"
+}
+
+two_released='[{"component":"alpha","version":"1.0.0","tag":"alpha-v1.0.0","bump":"minor"},{"component":"beta","version":"2.1.0","tag":"beta-v2.1.0","bump":"patch"}]'
+run_dispatch DISPATCH_TOKEN=pat APP_TOKEN=app RELEASES_JSON="${two_released}"
+expect "$(calls)" 2 "monorepo dispatch sends one event per released component"
+expect "$(jq -c . "${DISPATCH_TMP}/calls/call-0.json")" \
+  "$(jq -nc --arg sha "${alpha_sha}" --arg run_url "${run_url}" '{event_type:"component-released",client_payload:{component:"alpha",repository:"example-org/example-plugins",version:"1.0.0",tag:"alpha-v1.0.0",bump:"minor",sha:$sha,run_url:$run_url}}')" \
+  "monorepo payload matches the single-component payload shape"
+expect "$(jq -r .client_payload.sha "${DISPATCH_TMP}/calls/call-1.json")" "${beta_sha}" "annotated monorepo tag dispatches its peeled commit"
+expect "$(cat "${DISPATCH_TMP}/calls/token-0")" pat "DISPATCH_TOKEN wins over the app token"
+expect "$(cat "${DISPATCH_TMP}"/calls/args-* | grep -c '^repos/example-org/example-deploy/dispatches$')" 2 "every event posts to the dispatch target"
+
+run_dispatch APP_TOKEN=app COMPONENT=root-plugin VERSION=3.0.0 TAG=v3.0.0 BUMP=major
+expect "$(calls)" 1 "single-component dispatch sends exactly one event"
+expect "$(jq -r '.client_payload | [.component,.version,.tag,.bump] | join(" ")' "${DISPATCH_TMP}/calls/call-0.json")" "root-plugin 3.0.0 v3.0.0 major" "single-component payload comes from the release outputs"
+expect "$(cat "${DISPATCH_TMP}/calls/token-0")" app "scoped app token is the fallback"
+
+run_dispatch DISPATCH_TOKEN=pat RELEASES_JSON='[]'
+expect "$(calls)" 0 "nothing is dispatched when nothing was released"
+
+status=0
+run_dispatch RELEASES_JSON="${two_released}" || status=$?
+expect "${status}:$(calls)" "1:0" "dispatch fails closed without a cross-repo token"
+
+status=0
+run_dispatch DISPATCH_TOKEN=pat GH_FAIL_COMPONENT=alpha \
+  RELEASES_JSON='[{"component":"alpha","version":"1.0.0","tag":"alpha-v1.0.0","bump":"minor"},{"component":"gone","version":"9.0.0","tag":"gone-v9.0.0","bump":"major"},{"component":"beta","version":"2.1.0","tag":"beta-v2.1.0","bump":"patch"}]' || status=$?
+expect "${status}:$(calls)" "1:2" "a failed or unresolvable dispatch does not stop the remaining components"
+
+# The released list feeding dispatch: dry runs and non-releases send nothing.
+released_count() {
+  printf '%s' "$1" > "${DISPATCH_TMP}/homeboy-monorepo-releases.json"
+  : > "${DISPATCH_TMP}/output"
+  RUNNER_TEMP="${DISPATCH_TMP}" GITHUB_OUTPUT="${DISPATCH_TMP}/output" DRY_RUN="$2" \
+    python3 "${ROOT_DIR}/scripts/release/run-monorepo-releases.py" released >/dev/null
+  sed -n 's/^released-count=//p' "${DISPATCH_TMP}/output"
+}
+mixed='[{"component":"alpha","released":true,"version":"1.0.0","tag":"alpha-v1.0.0","bump":"minor","skipped_reason":""},{"component":"quiet","released":false,"version":"","tag":"","bump":"","skipped_reason":"no-releasable-commits"},{"component":"broken","released":false,"version":"","tag":"","bump":"","skipped_reason":"release-failed"}]'
+expect "$(released_count "${mixed}" false)" 1 "only components actually released are dispatched"
+expect "$(sed -n 's/^released=//p' "${DISPATCH_TMP}/output")" '[{"component":"alpha","version":"1.0.0","tag":"alpha-v1.0.0","bump":"minor"}]' "released list carries the dispatch payload fields"
+expect "$(released_count "${mixed}" true)" 0 "a dry run never yields components to dispatch"
+expect "$(released_count '[{"component":"quiet","released":false,"tag":""}]' false)" 0 "a no-op monorepo run yields nothing to dispatch"
+rm -f "${DISPATCH_TMP}/homeboy-monorepo-releases.json"
+: > "${DISPATCH_TMP}/output"
+RUNNER_TEMP="${DISPATCH_TMP}" GITHUB_OUTPUT="${DISPATCH_TMP}/output" DRY_RUN=false \
+  python3 "${ROOT_DIR}/scripts/release/run-monorepo-releases.py" released >/dev/null
+expect "$(sed -n 's/^released-count=//p' "${DISPATCH_TMP}/output")" 0 "a missing aggregate file yields nothing to dispatch"
 
 printf 'All release workflow checks passed.\n'

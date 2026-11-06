@@ -70,7 +70,7 @@ def generate():
             (directory / f'result-{index}.json').write_text(json.dumps({
                 'failed': False,
                 'result': {'component': row['component'], 'released': False, 'version': '',
-                           'tag': '', 'skipped_reason': 'no-releasable-commits'}}))
+                           'tag': '', 'bump': '', 'skipped_reason': 'no-releasable-commits'}}))
             continue
         step_id = f'component_{index}'
         action_inputs = {key: inputs.get(key, '') for key in (
@@ -93,7 +93,8 @@ def generate():
                       'continue-on-error': True, 'with': action_inputs})
         env = {'COMPONENT_INDEX': str(index), 'COMPONENT_ID': row['component'],
                'OUTCOME': '${{ steps.' + step_id + '.outcome }}'}
-        for key in ('released', 'release-version', 'release-tag', 'skipped-reason'):
+        for key in ('released', 'release-version', 'release-tag', 'release-bump-type',
+                    'skipped-reason'):
             env[key.upper().replace('-', '_')] = '${{ steps.' + step_id + '.outputs.' + key + ' }}'
         steps.append({'name': 'Record ' + row['component'], 'if': '${{ !cancelled() }}',
                       'shell': 'bash', 'env': env, 'run': script + ' record'})
@@ -113,6 +114,7 @@ def record():
               'released': not failed and os.environ.get('RELEASED') == 'true',
               'version': os.environ.get('RELEASE_VERSION', ''),
               'tag': os.environ.get('RELEASE_TAG', ''),
+              'bump': os.environ.get('RELEASE_BUMP_TYPE', ''),
               'skipped_reason': ('release-failed' if failed else
                                  os.environ.get('SKIPPED_REASON', ''))}
     Path(f".homeboy-monorepo/result-{os.environ['COMPONENT_INDEX']}.json").write_text(
@@ -126,7 +128,8 @@ def finish():
         path = Path(f'.homeboy-monorepo/result-{index}.json')
         item = json.loads(path.read_text()) if path.exists() else {
             'failed': True, 'result': {'component': row['component'], 'released': False,
-                                     'version': '', 'tag': '', 'skipped_reason': 'result-missing'}}
+                                     'version': '', 'tag': '', 'bump': '',
+                                     'skipped_reason': 'result-missing'}}
         failed |= item['failed']
         results.append(item['result'])
     payload = json.dumps(results, separators=(',', ':'))
@@ -137,5 +140,27 @@ def finish():
     return int(failed)
 
 
+def released():
+    """Expose only the components this run actually released, for dispatch.
+
+    Reads the aggregate file rather than the composite output so a component
+    failure (which fails the serial step) still dispatches every release that
+    did land. A dry run never reports a release: nothing was tagged.
+    """
+    path = Path(os.environ['RUNNER_TEMP'], 'homeboy-monorepo-releases.json')
+    rows = json.loads(path.read_text()) if path.exists() else []
+    if os.environ.get('DRY_RUN', 'false') == 'true':
+        rows = []
+    picked = [{key: row.get(key, '') for key in ('component', 'version', 'tag', 'bump')}
+              for row in rows if row.get('released') is True and row.get('tag')]
+    payload = json.dumps(picked, separators=(',', ':'))
+    with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+        output.write('released=' + payload + '\n')
+        output.write('released-count=' + str(len(picked)) + '\n')
+    print(payload)
+    return 0
+
+
 if __name__ == '__main__':
-    sys.exit({'generate': generate, 'record': record, 'finish': finish}[sys.argv[1]]())
+    sys.exit({'generate': generate, 'record': record, 'finish': finish,
+              'released': released}[sys.argv[1]]())
