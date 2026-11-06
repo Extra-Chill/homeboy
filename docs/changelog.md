@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.446.3] - 2026-11-06
+
+### Changed
+- Restore runner-hosted execution context for Lab Cook gates
+
+### Fixed
+- attach lock-free store evidence to a busy read-only ledger open
+
 ## [0.446.2] - 2026-11-06
 
 ### Changed
