@@ -325,6 +325,12 @@ fn resume_promoted_patch_internal<'a>(
     };
     let operator_notification =
         promotion_notification_with_gate_summary(gates.status, &target, &gates.deterministic_gates);
+    let mut operator_notification = operator_notification;
+    attach_setup_retry_command(
+        &mut operator_notification,
+        gates.status,
+        options.source_run_id.as_deref(),
+    );
     let report = AgentTaskPromotionReport {
         schema: AGENT_TASK_PROMOTION_REPORT_SCHEMA.to_string(),
         status: gates.status,
@@ -900,6 +906,12 @@ fn promote_candidate(
     let (gates, verified_base) = verified_base;
     let operator_notification =
         promotion_notification_with_gate_summary(gates.status, &target, &gates.deterministic_gates);
+    let mut operator_notification = operator_notification;
+    attach_setup_retry_command(
+        &mut operator_notification,
+        gates.status,
+        options.source_run_id.as_deref(),
+    );
     // Gates can create incidental files. Feedback retains the pre-gate identity.
     let candidate: Option<super::AgentTaskPromotionCandidate> = post_apply
         .as_ref()
@@ -1547,6 +1559,12 @@ fn promote_committed_changes(
     let gate_feedback_baseline = post_apply
         .as_ref()
         .and_then(|report| report.provenance.get("gate_feedback_baseline").cloned());
+    let mut operator_notification = operator_notification;
+    attach_setup_retry_command(
+        &mut operator_notification,
+        gates.status,
+        options.source_run_id.as_deref(),
+    );
     let adoption_merge = committed_patch.adoption_merge.as_ref().map(|proof| {
         json!({
             "candidate_parent": &proof.candidate_parent,
@@ -1745,7 +1763,8 @@ fn run_promotion_gates_inner(
     let candidate_setup = Vec::new();
     let gate_workspace = promotion_gate_workspace(options, worktree_path, gate_workspace);
     let lab_placement = options.gates.gate_environment.lab_runner.is_some();
-    let destination_gate_setup =
+    let mut setup_attempts = Vec::new();
+    let mut run_setup = || {
         homeboy_core::observation::phase_timing::time("gate.destination_setup", || {
             Ok(if lab_placement {
                 // A Lab gate runs in the runner's materialized workspace, so the
@@ -1825,6 +1844,7 @@ fn run_promotion_gates_inner(
                     }));
                 }
                 let setup = setup?;
+                setup_attempts.extend(setup.iter().cloned());
                 if let Some(failed) = setup.iter().find(|outcome| {
                     outcome.status == homeboy_core::deps::DependencyHydrationStatus::Failed
                 }) {
@@ -1837,7 +1857,19 @@ fn run_promotion_gates_inner(
                 // materialization claim.
                 Vec::new()
             })
-        })?;
+        })
+    };
+    // Setup has no candidate verdict. Give transient infrastructure one warm
+    // retry in this attempt, then project non-execution through the same gate
+    // status used for an unavailable runner (never differential baseline red).
+    let setup_result = match run_setup() {
+        Err(error) if error.retryable != Some(false) && !promotion_cancellation()() => run_setup(),
+        result => result,
+    };
+    let (destination_gate_setup, setup_error) = match setup_result {
+        Ok(setup) => (setup, None),
+        Err(error) => (setup_attempts, Some(error)),
+    };
     let _execution = homeboy_core::observation::phase_timing::guard(if lab_placement {
         "gate.lab_wait"
     } else {
@@ -1869,7 +1901,17 @@ fn run_promotion_gates_inner(
             Some("gate-1".to_string()),
             Some("starting declared test plan".to_string()),
         );
-        let gate = run_declared_promotion_test(options, &gate_workspace, 1, plan)?;
+        let gate = if let Some(error) = setup_error.as_ref() {
+            crate::agent_task_gate::placement::gate_non_execution_report(
+                1,
+                vec!["declared-test-plan".to_string()],
+                AgentTaskGateVisibility::Visible,
+                AgentTaskGateRevealPolicy::FullEvidence,
+                error,
+            )
+        } else {
+            run_declared_promotion_test(options, &gate_workspace, 1, plan)?
+        };
         if matches!(
             gate.status,
             AgentTaskGateStatus::Failed
@@ -1879,6 +1921,10 @@ fn run_promotion_gates_inner(
             == crate::agent_task_gate::AgentTaskGateExecutionPolicy::OrderedFailFast
         {
             blocking_gate_id = Some(gate.id.clone());
+        }
+        let mut gate = gate;
+        if setup_error.is_some() {
+            gate.setup = destination_gate_setup.clone();
         }
         deterministic_gates.push(gate);
     }
@@ -1892,7 +1938,15 @@ fn run_promotion_gates_inner(
         } else {
             &gate_workspace
         };
-        let gate = if let Some(blocking_gate_id) = blocking_gate_id.as_deref() {
+        let gate = if let Some(error) = setup_error.as_ref() {
+            crate::agent_task_gate::placement::gate_non_execution_report(
+                index,
+                crate::agent_task_gate::legacy_gate_argv(command),
+                visibility,
+                reveal_policy,
+                error,
+            )
+        } else if let Some(blocking_gate_id) = blocking_gate_id.as_deref() {
             crate::agent_task_gate::AgentTaskGateReport::skipped(
                 format!("gate-{index}"),
                 crate::agent_task_gate::legacy_gate_argv(command),
@@ -1927,6 +1981,9 @@ fn run_promotion_gates_inner(
             blocking_gate_id = Some(gate.id.clone());
         }
         let mut gate = gate;
+        if setup_error.is_some() {
+            gate.setup = destination_gate_setup.clone();
+        }
         gate.cwd = Some(crate::agent_task_gate::AgentTaskGateCwdEvidence {
             requested: worktree_path.display().to_string(),
             effective: execution_workspace.display().to_string(),
@@ -3929,6 +3986,18 @@ fn promotion_notification(
     }
 }
 
+fn attach_setup_retry_command(
+    notification: &mut AgentTaskPromotionNotification,
+    status: AgentTaskPromotionStatus,
+    run_id: Option<&str>,
+) {
+    if status == AgentTaskPromotionStatus::GateDeferred {
+        if let Some(run_id) = run_id {
+            notification.next_command = Some(format!("homeboy agent-task recover {run_id}"));
+        }
+    }
+}
+
 pub(super) fn promotion_notification_with_gate_summary(
     status: AgentTaskPromotionStatus,
     target: &AgentTaskPromotionTarget,
@@ -3954,9 +4023,20 @@ pub(super) fn promotion_notification_with_gate_summary(
             .join(", ");
         let skipped = gate_ids(&[AgentTaskGateStatus::Skipped]);
         let deferred = gate_ids(&[AgentTaskGateStatus::Deferred]);
+        let unavailable = gate_ids(&[AgentTaskGateStatus::Unavailable]);
         notification.message.push_str(&format!(
-            "; deterministic gates: passed=[{passed}], failed=[{failed}], skipped=[{skipped}], deferred=[{deferred}], inherited=[{inherited}]"
+            "; deterministic gates: passed=[{passed}], failed=[{failed}], skipped=[{skipped}], deferred=[{deferred}], unavailable=[{unavailable}], inherited=[{inherited}]"
         ));
+        if status == AgentTaskPromotionStatus::GateDeferred && !unavailable.is_empty() {
+            if let Some(gate) = gates
+                .iter()
+                .find(|gate| gate.status == AgentTaskGateStatus::Unavailable)
+            {
+                notification
+                    .message
+                    .push_str(&format!("; infrastructure fault: {}", gate.stderr));
+            }
+        }
     }
     notification
 }
