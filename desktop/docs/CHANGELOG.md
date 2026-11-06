@@ -6,6 +6,11 @@ The desktop app currently shells out to the standalone Rust CLI (`homeboy`) for 
 
 For current behavior, prefer the code and other documentation (for example `docs/CLI.md`).
 
+## [0.13.2] - 2026-11-06
+
+### Changed
+- startup recovers its dead predecessor; daemon recover is the only recovery verb
+
 ## [0.13.1] - 2026-11-06
 
 ### Changed
