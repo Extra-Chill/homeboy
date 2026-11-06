@@ -935,6 +935,27 @@ fn instance_job(
     if state.job_type != WORKFLOW_JOB_TYPE {
         return Err(invalid(format!("`{instance}` is not a workflow instance")));
     }
+    if job.status.is_terminal() {
+        let expires_at_ms = state.request["expired_at_ms"].as_u64().unwrap_or_else(|| {
+            job.finished_at_ms
+                .unwrap_or(job.updated_at_ms)
+                .saturating_add(
+                    crate::defaults::load_config()
+                        .retention
+                        .workflow_instance_days
+                        .saturating_mul(86_400_000),
+                )
+        });
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        if now >= expires_at_ms {
+            return Err(invalid(format!(
+                "workflow instance `{instance}` expired at {expires_at_ms} (Unix milliseconds)"
+            )));
+        }
+    }
     Ok((job, state))
 }
 
