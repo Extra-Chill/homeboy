@@ -595,11 +595,11 @@ pub(crate) fn local_path_writable(path: &Path) -> bool {
 }
 
 pub(crate) fn local_path_or_parent_writable(path: &Path) -> bool {
-    if path.exists() {
-        local_path_writable(path)
-    } else {
-        path.parent().map(local_path_writable).unwrap_or(false)
-    }
+    // Fresh installations may not have any of the store's intermediate
+    // directories yet. Test the nearest existing ancestor, not just one parent.
+    path.ancestors()
+        .find(|ancestor| ancestor.exists())
+        .is_some_and(|ancestor| ancestor.is_dir() && local_path_writable(ancestor))
 }
 
 pub(crate) fn remote_path_writable(client: &SshClient, path: &str) -> bool {

@@ -48,6 +48,24 @@ run_bounded perl -e '
     HOMEBOY_RUNNER_JOB_EXECUTION_CONTEXT_ID \
     HOMEBOY_CALLER_CONTEXT
 
+# Read-only tests must not see the operator home, XDG roots, or product env.
+HOMEBOY_RUN_ID=outer HOMEBOY_CONFIG_ROOT=/operator/config \
+HOMEBOY_DATA_DIR=/operator/data HOMEBOY_TRANSIENT_WORKSPACE_MARKERS=outer \
+XDG_CONFIG_HOME=/operator/xdg run_bounded sh -c '
+    [ "$HOME" = "$TMPDIR/home" ] &&
+    [ "$XDG_CONFIG_HOME" = "$HOME/.config" ] &&
+    [ "$XDG_DATA_HOME" = "$HOME/.local/share" ] &&
+    [ "$XDG_CACHE_HOME" = "$HOME/.cache" ] &&
+    [ "$XDG_STATE_HOME" = "$HOME/.local/state" ] &&
+    [ "$XDG_RUNTIME_DIR" = "$HOME/run" ] &&
+    [ -d "$XDG_RUNTIME_DIR" ] &&
+    [ -z "${HOMEBOY_RUN_ID+x}" ] &&
+    [ -z "${HOMEBOY_CONFIG_ROOT+x}" ] &&
+    [ -z "${HOMEBOY_DATA_DIR+x}" ] &&
+    [ -z "${HOMEBOY_TRANSIENT_WORKSPACE_MARKERS+x}" ] &&
+    [ -n "$CARGO_HOME" ] && [ -n "$RUSTUP_HOME" ]
+' || { echo "runner inherited operator state" >&2; exit 1; }
+
 started="$(date +%s)"
 run_bounded sh -c 'printf "%s" "$TMPDIR" > "$1"; exit 0' sh "$scratch/clean-tmp"
 elapsed=$(( $(date +%s) - started ))
