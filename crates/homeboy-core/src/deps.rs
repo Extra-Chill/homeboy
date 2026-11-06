@@ -128,6 +128,9 @@ pub struct DependencyHydrationOutcome {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub cwd: String,
     pub reason: String,
+    /// Download-cache mappings visible to dependency setup.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub download_cache: BTreeMap<String, String>,
     pub termination: DependencyHydrationTermination,
     pub status: DependencyHydrationStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -150,6 +153,8 @@ pub struct DependencyHydrationProgress {
 
 #[derive(Debug, Clone, Default)]
 pub struct DependencyHydrationEnvironment {
+    /// Enable runner-owned download caches for isolated gates.
+    pub isolate_download_cache: bool,
     pub clear: bool,
     pub remove: Vec<String>,
     pub set: BTreeMap<String, String>,
@@ -289,6 +294,7 @@ fn hydrate_declared_dependencies_unlocked(
         )]);
     };
     let mut outcomes = Vec::new();
+    let mut cache_mappings = BTreeMap::new();
 
     for provider in providers {
         if hydration_deadline_expired(policy, deadline) {
@@ -297,7 +303,7 @@ fn hydrate_declared_dependencies_unlocked(
         }
         let component_for_plan = component.clone();
         let path_for_plan = path.to_path_buf();
-        let (plan, environment) =
+        let (plan, mut environment) =
             match run_with_hydration_deadline(policy, deadline, move |control| {
                 let plan = provider.hydration_plan(&component_for_plan, &path_for_plan, control)?;
                 plan.map(|plan| {
@@ -318,7 +324,10 @@ fn hydrate_declared_dependencies_unlocked(
             outcomes.push(deadline_hydration_outcome(policy, workspace, package_root));
             break;
         }
+        let mapping = hydration_download_cache(&plan, &policy.environment)?;
+        environment.extend(mapping.clone());
         let provider_id = crate::redaction::redact_string(&plan.provider_id);
+        cache_mappings.insert(provider_id.clone(), mapping);
         let install_command = crate::redaction::redact_argv(&plan.install.argv());
         (policy.on_progress)(&DependencyHydrationProgress {
             provider_id: provider_id.clone(),
@@ -397,9 +406,13 @@ fn hydrate_declared_dependencies_unlocked(
                 workspace,
                 package_root,
                 provider_id,
-                install_command,
+                install_command.clone(),
                 plan.install.cwd.display().to_string(),
-                stale_reason,
+                format!(
+                    "install {:?}: {}",
+                    execution.termination,
+                    install_command.join(" ")
+                ),
                 execution.termination,
                 DependencyHydrationStatus::Failed,
                 execution.exit_code,
@@ -414,9 +427,13 @@ fn hydrate_declared_dependencies_unlocked(
                 workspace,
                 package_root,
                 provider_id,
-                install_command,
+                install_command.clone(),
                 plan.install.cwd.display().to_string(),
-                stale_reason,
+                format!(
+                    "install exited with code {:?}: {}",
+                    exit_code,
+                    install_command.join(" ")
+                ),
                 DependencyHydrationTermination::ExitFailure,
                 DependencyHydrationStatus::Failed,
                 exit_code,
@@ -459,7 +476,94 @@ fn hydrate_declared_dependencies_unlocked(
         ));
     }
 
+    for outcome in &mut outcomes {
+        outcome.download_cache = cache_mappings
+            .remove(&outcome.provider_id)
+            .unwrap_or_default();
+    }
     Ok(outcomes)
+}
+
+fn hydration_download_cache(
+    plan: &provider::DependencyProviderHydrationPlan,
+    environment: &DependencyHydrationEnvironment,
+) -> Result<BTreeMap<String, String>> {
+    let mut mapping = BTreeMap::new();
+    let Some(cache) = plan
+        .download_cache
+        .as_ref()
+        .filter(|_| environment.isolate_download_cache)
+    else {
+        return Ok(mapping);
+    };
+    let valid_env = !cache.env.is_empty()
+        && cache.env.bytes().enumerate().all(|(index, byte)| {
+            byte.is_ascii_alphabetic() || byte == b'_' || (index > 0 && byte.is_ascii_digit())
+        });
+    let valid_id = !plan.provider_id.is_empty()
+        && plan.provider_id != "."
+        && plan.provider_id != ".."
+        && plan
+            .provider_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte));
+    if !valid_env || !valid_id {
+        return Err(Error::internal_io(
+            "Invalid dependency download-cache declaration".to_string(),
+            None,
+        ));
+    }
+    if let Some(value) = environment.set.get(&cache.env) {
+        mapping.insert(cache.env.clone(), value.clone());
+        return Ok(mapping);
+    }
+    let root = crate::paths::homeboy_data()?.join("controller-state/dependency-download-cache");
+    ensure_safe_download_cache_root(&root)?;
+    let directory = root.join(&plan.provider_id);
+    ensure_safe_download_cache_root(&directory)?;
+    mapping.insert(cache.env.clone(), directory.display().to_string());
+    Ok(mapping)
+}
+
+/// Like gate-rust-cache, shared download storage must be runner-owned, private,
+/// and a real directory rather than an operator-controlled symlink.
+fn ensure_safe_download_cache_root(path: &Path) -> Result<()> {
+    let io_error = |error: std::io::Error| {
+        Error::internal_io(
+            error.to_string(),
+            Some(format!("dependency download cache {}", path.display())),
+        )
+    };
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(path).map_err(io_error)?;
+    let metadata = std::fs::symlink_metadata(path).map_err(io_error)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(Error::internal_io(
+            "Dependency download cache is not a real directory".to_string(),
+            None,
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        if metadata.uid() != unsafe { libc::geteuid() }
+            || metadata.permissions().mode() & 0o022 != 0
+        {
+            return Err(Error::internal_io(
+                "Dependency download cache is not runner-owned or is writable by others"
+                    .to_string(),
+                None,
+            ));
+        }
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).map_err(io_error)?;
+    }
+    Ok(())
 }
 
 struct HydrationCommandExecution {
@@ -699,6 +803,7 @@ fn hydration_outcome(
         command,
         cwd: crate::redaction::redact_string(&cwd),
         reason: crate::redaction::redact_string(&reason),
+        download_cache: BTreeMap::new(),
         termination,
         status,
         exit_code,
@@ -2548,6 +2653,11 @@ esac
 
             assert_eq!(outcomes[0].status, DependencyHydrationStatus::Failed);
             assert_eq!(outcomes[0].exit_code, Some(23));
+            assert!(outcomes[0].reason.contains("exited with code Some(23)"));
+            assert!(outcomes[0].reason.contains("sh -c"));
+            assert!(!outcomes[0]
+                .reason
+                .contains("provider_did_not_declare_reusable_state"));
             assert_eq!(outcomes[0].cwd, root.path().display().to_string());
             assert_eq!(outcomes[0].stdout, "install output");
             assert_eq!(outcomes[0].stderr, "install failure");
