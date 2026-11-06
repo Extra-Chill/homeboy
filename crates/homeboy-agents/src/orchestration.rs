@@ -2033,24 +2033,37 @@ impl OrchestrationService<LifecycleStoreLookup> {
         } else {
             match request.action {
                 ControlPlaneAction::Cancel if record.state().is_terminal() => {
+                    let record = self
+                        .lookup
+                        .store
+                        .read_record(&resolved)
+                        .map_err(map_lifecycle_error)?;
+                    let fenced = record.metadata.get("cancellation_fence").is_some()
+                        || record.metadata.get("candidate_retirement").is_some();
                     let resource = project_record(&record, None)?;
                     let verifying = resource.phase.as_deref() == Some(LIVE_GATE_VERIFYING_PHASE);
                     let mut result = cancel_result_for_record(&record, Duration::ZERO, 0, None);
-                    if verifying {
+                    if fenced {
+                        result.disposition = ControlPlaneCancelDisposition::Cancelled;
+                        result.terminal = true;
+                    } else if verifying {
                         // The attempt's recoverable latch is terminal, but the
                         // live verifier still has to observe the mission fence.
                         result.disposition = ControlPlaneCancelDisposition::Requested;
                         result.terminal = false;
                     }
                     (
-                        if verifying {
+                        if verifying || fenced {
                             ControlPlaneActionOutcome::Succeeded
                         } else {
                             ControlPlaneActionOutcome::AlreadySatisfied
                         },
                         resource,
                         cancel_result_payload(result),
-                        Some(if verifying {
+                        Some(if fenced {
+                            "mission fenced; recoverable candidates retired (evidence preserved)"
+                                .to_string()
+                        } else if verifying {
                             "Cook promotion verification cancellation requested".to_string()
                         } else {
                             "run is already terminal".to_string()
@@ -2645,6 +2658,11 @@ fn fence_owning_cook_mission(
     for cook_id in owner.into_iter().chain(std::iter::once(requested_id)) {
         crate::agent_task_lifecycle::fence_cook_mission_in_store(store, cook_id, reason)?;
     }
+    if store.read_record(&record.run_id)?.state()
+        == crate::agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
+    {
+        crate::agent_task_lifecycle::cancel_run_in_store(store, &record.run_id, reason)?;
+    }
     Ok(())
 }
 
@@ -2662,6 +2680,11 @@ fn action_unavailability(
         ControlPlaneAction::Cancel | ControlPlaneAction::Reconcile
     ) {
         return None;
+    }
+    if record.metadata.get("cancellation_fence").is_some()
+        || record.metadata.get("candidate_retirement").is_some()
+    {
+        return Some("Cook mission is fenced; its candidate is retired".into());
     }
     if action == ControlPlaneAction::Resume
         && record.state().is_terminal()
@@ -4136,6 +4159,11 @@ pub fn project_record(
     let record = &project_dead_candidate_adoption(record);
     let mut resource = project_summary_fields(record, plan)?;
     resource.action_eligibility = Some(lifecycle_action_eligibility(record, plan));
+    if record.metadata.get("cancellation_fence").is_some()
+        || record.metadata.get("candidate_retirement").is_some()
+    {
+        resource.action_eligibility = None;
+    }
     Ok(resource)
 }
 
@@ -4218,6 +4246,31 @@ fn project_summary_fields(
     resource.publication = delivery.as_ref().and_then(publication);
     resource.recovery = projected_cook_recovery(record);
     project_live_gate_verification(&mut resource, record);
+    if let Some(fence) = record
+        .metadata
+        .get("cancellation_fence")
+        .or_else(|| record.metadata.get("candidate_retirement"))
+    {
+        resource.state = ControlPlaneRunState::Cancelled;
+        resource.recovery = None;
+        resource.phase = Some("cancelled".into());
+        resource.blocker = Some(ControlPlaneBlocker {
+            code: Some("mission_cancelled".into()),
+            message: redacted_bounded(
+                &format!(
+                    "mission fenced at {}: {}",
+                    fence["cancelled_at"].as_str().unwrap_or("unknown"),
+                    fence["reason"].as_str().unwrap_or("cancel requested")
+                ),
+                MESSAGE_BOUND,
+            ),
+            state: Some("cancelled".into()),
+            reason: None,
+            retry: None,
+            daemon: None,
+            output: None,
+        });
+    }
     if resource.state.is_terminal() {
         resource.finished_at = record.updated_at.clone();
     }
@@ -8741,19 +8794,17 @@ mod tests {
                         .unwrap()
                 });
 
-                assert_eq!(
-                    cancelled.outcome,
-                    if verifying {
-                        ControlPlaneActionOutcome::Succeeded
-                    } else {
-                        ControlPlaneActionOutcome::AlreadySatisfied
-                    }
-                );
-                if verifying {
-                    let result = &cancelled.result;
-                    assert_eq!(result.data["disposition"], "requested");
-                    assert_eq!(result.data["terminal"], false);
-                }
+                // Cancellation now closes the candidate rather than merely
+                // acknowledging its old terminal latch, even with a live driver.
+                assert_eq!(cancelled.outcome, ControlPlaneActionOutcome::Succeeded);
+                assert_eq!(cancelled.result.data["disposition"], "cancelled");
+                assert_eq!(cancelled.result.data["terminal"], true);
+                assert!(cancelled.message.as_deref().unwrap().contains("retired"));
+                let projected =
+                    project_record(&store.read_record(&attempt_id).unwrap(), None).unwrap();
+                assert_eq!(projected.state, ControlPlaneRunState::Cancelled);
+                assert!(projected.recovery.is_none());
+                assert!(projected.blocker.unwrap().message.contains("operator stop"));
                 let fence = store
                     .read_cook_index(&cook_id)
                     .expect("index")

@@ -197,8 +197,49 @@ pub fn fence_cook_mission_in_store(
             fenced = true;
             true
         })?;
+        // Retire every retained candidate, not just the latest alias target.
+        // Keep delivery, aggregate and candidate artifacts intact for inspection.
+        let index = lifecycle_store.read_cook_index(&cook_id).ok();
+        if let Some(index) = index {
+            for attempt in &index.attempts {
+                retire_candidate_in_store(lifecycle_store, &attempt.run_id, reason)?;
+                lifecycle_store.mutate_record_locked_without_terminal_projection(
+                    &attempt.run_id,
+                    |record| {
+                        record.ensure_metadata_object().insert(
+                            "cancellation_fence".into(),
+                            index.cancellation_fence.clone().unwrap_or(Value::Null),
+                        );
+                        true
+                    },
+                )?;
+            }
+        }
         Ok(fenced)
     })
+}
+
+fn retire_candidate_in_store(
+    store: &AgentTaskLifecycleStore,
+    run_id: &str,
+    reason: Option<&str>,
+) -> Result<bool> {
+    Ok(store
+        .mutate_record_locked_without_terminal_projection(run_id, |record| {
+            if record.state() != AgentTaskRunState::CandidateRecoverable {
+                return false;
+            }
+            set_run_state(record, AgentTaskRunState::Cancelled);
+            record.ensure_metadata_object().insert(
+                "candidate_retirement".into(),
+                json!({
+                    "cancelled_at": now_timestamp(),
+                    "reason": reason.unwrap_or("cancel requested"),
+                }),
+            );
+            true
+        })?
+        .is_some())
 }
 
 /// The store-rooted counterpart of [`cancel_run`].
@@ -219,6 +260,17 @@ pub fn cancel_run_in_store(
     // Fence it before resolving the current alias so a retry cannot become the
     // new mission outcome between cancellation passes.
     fence_cook_mission_in_store(lifecycle_store, &requested_run_id, reason)?;
+    // A Cook alias need not have a literal run record.
+    let retired = if lifecycle_store.read_cook_index(&requested_run_id).is_ok() {
+        false
+    } else {
+        lifecycle_store.with_store_lock(|| {
+            retire_candidate_in_store(lifecycle_store, &requested_run_id, reason)
+        })?
+    };
+    if retired {
+        return lifecycle_store.read_record(&requested_run_id);
+    }
     let mut resolved_run_id = resolve_run_id_in_store(lifecycle_store, &requested_run_id)?;
     // Index publication is independent from parent cancellation. Re-resolve
     // after each mutation until the Cook alias is stable, so every attempt that
@@ -1636,6 +1688,68 @@ mod tests {
                 !cook_index_exists_in_store(&test_lifecycle_store(), cook_id)
                     .expect("inspect absent Cook index")
             );
+        });
+    }
+
+    #[test]
+    fn mission_cancel_retires_older_candidate_and_suppresses_attention() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let store = test_lifecycle_store();
+            let cook = "retire-old-candidate";
+            for (attempt, id, state) in [
+                (
+                    1,
+                    "retire-old-attempt-1",
+                    AgentTaskRunState::CandidateRecoverable,
+                ),
+                (2, "retire-old-attempt-2", AgentTaskRunState::Failed),
+            ] {
+                submit_plan(&AgentTaskPlan::new(id, Vec::new()), Some(id)).unwrap();
+                record_cook_attempt_in_store(&store, cook, attempt, id).unwrap();
+                store
+                    .mutate_record(id, |record| {
+                        set_run_state(record, state);
+                        record.metadata["candidate_evidence"] = json!("preserved");
+                        true
+                    })
+                    .unwrap();
+            }
+            cancel_run_in_store(&store, cook, Some("shipped in https://example.test/pr/1"))
+                .unwrap();
+            let retired = store.read_record("retire-old-attempt-1").unwrap();
+            assert_eq!(retired.state(), AgentTaskRunState::Cancelled);
+            assert_eq!(retired.metadata["candidate_evidence"], "preserved");
+            assert_eq!(
+                retired.metadata["candidate_retirement"]["reason"],
+                "shipped in https://example.test/pr/1"
+            );
+            assert!(retired.metadata["cancellation_fence"]["cancelled_at"].is_string());
+            assert!(!claim_cook_terminal_notification_in_store(&store, cook, "test").unwrap());
+            let projection = crate::orchestration::project_record(&retired, None).unwrap();
+            assert!(projection.recovery.is_none());
+            assert_eq!(
+                projection.state,
+                homeboy_control_plane_contract::ControlPlaneRunState::Cancelled
+            );
+            let recovery = crate::agent_task_service::plan_cook_recovery(cook).unwrap();
+            assert!(recovery.step.is_none());
+        });
+    }
+
+    #[test]
+    fn exact_candidate_cancel_retires_instead_of_returning_terminal_error() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let store = test_lifecycle_store();
+            let id = "exact-retirable-candidate";
+            submit_plan(&AgentTaskPlan::new(id, Vec::new()), Some(id)).unwrap();
+            store
+                .mutate_record(id, |record| {
+                    set_run_state(record, AgentTaskRunState::CandidateRecoverable);
+                    true
+                })
+                .unwrap();
+            let cancelled = cancel_run_in_store(&store, id, Some("superseded")).unwrap();
+            assert_eq!(cancelled.state(), AgentTaskRunState::Cancelled);
         });
     }
 
