@@ -1661,13 +1661,17 @@ fn job_timestamp_ms_to_rfc3339(timestamp_ms: u64) -> String {
         .to_rfc3339()
 }
 
-/// Grace window during which a transient daemon polling failure (connection
-/// refused while the daemon restarts, a stale tunnel returning `null`, etc.) is
-/// retried instead of aborting the wait. A daemon-managed exec job persists its
-/// status across restarts, so a brief reconnection gap should not cost the
-/// caller the real terminal result of in-flight work (#4770, #3631, #3624).
-pub(super) const DAEMON_POLL_TRANSIENT_GRACE: Duration = Duration::from_secs(30);
+/// Outage window during which a lost daemon transport (connection refused
+/// while the daemon restarts, a dropped tunnel, a session being replaced) is
+/// retried instead of ending the observation of a known job. The daemon
+/// persists the job and it keeps running, so the controller waits out
+/// control-plane flaps instead of failing the Cook (#4770, #17385). Lab
+/// tunnel flaps routinely outlast a minute; 15 minutes bounds a real outage.
+pub(super) const DAEMON_POLL_TRANSIENT_GRACE: Duration = Duration::from_secs(15 * 60);
 pub(super) const DAEMON_POLL_RETRY_BACKOFF: Duration = Duration::from_millis(500);
+/// Ceiling for reattach backoff, so a long outage is probed every few seconds
+/// instead of twice a second for its whole duration.
+const DAEMON_POLL_MAX_RETRY_BACKOFF: Duration = Duration::from_secs(5);
 
 /// First wait between terminal-status polls. Matches the flat 200ms this loop
 /// used before it was bounded, so a job that settles quickly is still observed
@@ -1759,7 +1763,13 @@ pub(crate) fn observe_daemon_job_until_terminal(
         |endpoint| fetch_daemon_job(&client, endpoint, runner_job_id),
         || refreshed_daemon_endpoint(runner_id),
     )?;
-    let events = fetch_daemon_events(&client, &endpoint, runner_job_id)?;
+    let (events, _) = daemon_read_resilient_with_endpoint_reload(
+        &endpoint,
+        |endpoint| fetch_daemon_events(&client, endpoint, runner_job_id),
+        runner_job_id,
+        "reading events for",
+        || refreshed_daemon_endpoint(runner_id),
+    )?;
     Ok(DaemonTerminalObservation { job, events })
 }
 
@@ -1865,6 +1875,7 @@ where
         return Ok(endpoint);
     }
     let deadline = Instant::now() + DAEMON_POLL_TRANSIENT_GRACE;
+    let mut backoff = DAEMON_POLL_RETRY_BACKOFF;
     loop {
         match reload_endpoint() {
             Ok(Some(endpoint)) => return Ok(endpoint),
@@ -1885,9 +1896,10 @@ where
             }
             Err(error) => return Err(error),
         }
-        if sleep_daemon_wait_unless_cancelled(DAEMON_POLL_RETRY_BACKOFF, cancelled) {
+        if sleep_daemon_wait_unless_cancelled(backoff, cancelled) {
             return Err(daemon_terminal_wait_cancelled_error(runner_job_id));
         }
+        backoff = backoff.saturating_mul(2).min(DAEMON_POLL_MAX_RETRY_BACKOFF);
     }
 }
 
@@ -1925,6 +1937,7 @@ where
     Reload: Fn() -> Result<Option<String>>,
 {
     let transient_deadline = Instant::now() + DAEMON_POLL_TRANSIENT_GRACE;
+    let mut backoff = DAEMON_POLL_RETRY_BACKOFF;
     let mut endpoint = local_url.to_string();
     loop {
         match read(&endpoint) {
@@ -1960,7 +1973,8 @@ where
                     Err(reload_err) if reattach_failure_is_transient(&reload_err) => {}
                     Err(reload_err) => return Err(reload_err),
                 }
-                std::thread::sleep(DAEMON_POLL_RETRY_BACKOFF);
+                std::thread::sleep(backoff);
+                backoff = backoff.saturating_mul(2).min(DAEMON_POLL_MAX_RETRY_BACKOFF);
             }
         }
     }
