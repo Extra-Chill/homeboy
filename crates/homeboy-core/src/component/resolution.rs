@@ -370,12 +370,7 @@ fn normalize_git_remote(remote: &str) -> String {
 }
 
 fn repository_name(remote: &str) -> Option<String> {
-    let normalized = normalize_git_remote(remote);
-    normalized
-        .rsplit(['/', ':'])
-        .next()
-        .filter(|name| !name.is_empty())
-        .map(str::to_string)
+    crate::engine::identifier::repository_id(remote).ok()
 }
 
 fn path_candidates(git: &StaticGitCheckout, components: Vec<String>) -> RegisteredPathCandidates {
@@ -383,7 +378,7 @@ fn path_candidates(git: &StaticGitCheckout, components: Vec<String>) -> Register
         .remote
         .as_deref()
         .and_then(repository_name)
-        .or_else(|| git.root.file_name()?.to_str().map(str::to_string))
+        .or_else(|| crate::engine::identifier::repository_id(git.root.to_str()?).ok())
         .into_iter()
         .collect();
     RegisteredPathCandidates {

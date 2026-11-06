@@ -715,7 +715,7 @@ fn derive_component_id_for_create(
             )
         })?;
 
-    homeboy::core::engine::identifier::slugify_id(dir_name, "component_id")
+    homeboy::core::engine::identifier::repository_id(dir_name)
 }
 
 fn show(id: Option<&str>, path: Option<&str>) -> CmdResult<ComponentOutput> {
@@ -1383,6 +1383,60 @@ mod tests {
         argv.extend_from_slice(extra);
         let cli = TestCli::try_parse_from(argv).expect("component create should parse");
         run(cli.component)
+    }
+
+    #[test]
+    fn agent_task_component_create_repository_identity_agrees() {
+        crate::test_support::with_isolated_home(|_| {
+            for (name, remote, expected) in [
+                (
+                    "liberate.sh",
+                    "git@github.com:Automattic/liberate.sh.git",
+                    "liberatesh",
+                ),
+                (
+                    "liberate.sh",
+                    "https://github.com/Automattic/liberate.sh",
+                    "liberatesh",
+                ),
+                (
+                    "control",
+                    "https://github.com/Automattic/control.git",
+                    "control",
+                ),
+            ] {
+                let temp = tempfile::tempdir().unwrap();
+                let repo = temp.path().join(name);
+                fs::create_dir_all(&repo).unwrap();
+                for args in [vec!["init", "-q"], vec!["remote", "add", "origin", remote]] {
+                    assert!(std::process::Command::new("git")
+                        .args(args)
+                        .current_dir(&repo)
+                        .status()
+                        .unwrap()
+                        .success());
+                }
+                let (created, _) = run_create(&[], &repo).expect("public component create");
+                assert_eq!(created.id.as_deref(), Some(expected));
+                let component = component::load(expected).unwrap();
+                let identity = crate::commands::agent_task::run::normalize_repository_name(remote);
+                assert_eq!(identity, expected);
+                for spelling in [name, expected, remote] {
+                    assert_eq!(
+                        crate::commands::agent_task::run::cook_repository_names_for_selection(
+                            spelling
+                        )
+                        .unwrap(),
+                        (expected.to_string(), expected.to_string())
+                    );
+                    crate::commands::agent_task::run::validate_cook_repository_component_selection(
+                        spelling, &component,
+                    )
+                    .expect("target ownership accepts repository spelling");
+                }
+                assert_eq!(read_json(&repo.join("homeboy.json"))["id"], expected);
+            }
+        });
     }
 
     fn read_json(path: &Path) -> Value {
