@@ -158,9 +158,9 @@ pub mod gate {
 pub mod lifecycle {
     pub use super::super::agent_task_lifecycle::{
         artifacts, cancel_run, cook_index, durable_local_read, load_plan, logs,
-        reconcile_terminal_artifact_projection, record_cook_finalization,
-        record_execution_placement_outcome, recover_unmaterialized_cook_input_publication, retry,
-        run_id_for_aggregate_path, run_record_exists, run_record_exists_readonly, submit_plan,
+        reconcile_terminal_artifact_projection, record_execution_placement_outcome,
+        recover_unmaterialized_cook_input_publication_in_store, retry, run_id_for_aggregate_path,
+        run_record_exists, run_record_exists_readonly, submit_plan,
     };
     pub use super::super::agent_task_lifecycle::{
         cancel, claim_cook_operation_in_store, claim_detached_cook_handoff_parent_in_store,

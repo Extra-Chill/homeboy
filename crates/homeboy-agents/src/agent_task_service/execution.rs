@@ -645,7 +645,10 @@ pub(crate) fn run_submitted_with_timeout_and_catalog(
         }
         return Err(transport_proxy_recovery_error(recovery));
     }
-    let mut plan = agent_task_lifecycle::load_plan_for_execution(&run_id)?;
+    let mut plan = agent_task_lifecycle::load_plan_for_execution_in_store(
+        &agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?,
+        &run_id,
+    )?;
     if let Some(timeout_ms) = timeout_ms {
         plan.options.timeout_ms = Some(timeout_ms);
     }
@@ -1743,8 +1746,7 @@ where
                 &preflight,
             )?;
             prepare_reserved_cook_retry(&lifecycle_store, retry_run_id, &preparation)?;
-            agent_task_lifecycle::record_metadata_value_in_store(
-                &lifecycle_store,
+            lifecycle_store.record_metadata_value(
                 retry_run_id,
                 "cook_retry_recipe_recovery",
                 json!({
@@ -3070,7 +3072,10 @@ fn run_claimed(
     run_id: String,
     executor: SharedAgentTaskExecutor,
 ) -> Result<AgentTaskRunResult<AgentTaskAggregate>> {
-    let mut plan = agent_task_lifecycle::load_plan_for_execution(&run_id)?;
+    let mut plan = agent_task_lifecycle::load_plan_for_execution_in_store(
+        &agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?,
+        &run_id,
+    )?;
     if let Err(error) = prepare_plan_for_execution(&mut plan, Some(&run_id)) {
         crate::agent_task_submission_service::reject_prepared_plan(
             &crate::agent_task_submission_service::prepared_submission_request(

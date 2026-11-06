@@ -3400,7 +3400,9 @@ fn terminal_cook_recovery_settles_rows_and_one_span_in_both_directions() {
             (failed, "fail", 1),
         ] {
             if exit_code != 0 && origin.is_some() {
-                agent_task_lifecycle::record_cook_finalization(
+                agent_task_lifecycle::record_cook_finalization_in_store(
+                    &agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
+                        .expect("lifecycle store"),
                     run_id,
                     serde_json::json!({"status":"failed"}),
                 )
@@ -3417,7 +3419,7 @@ fn terminal_cook_recovery_settles_rows_and_one_span_in_both_directions() {
                     |_, _, _| Ok(BaseCatchUp::Current),
                     |_, _, _, _| {
                         let receipt = serde_json::json!({"status":"review_ready", "run_id":run_id, "pr_url":"https://github.com/example/repo/pull/1"});
-                        agent_task_lifecycle::record_cook_finalization(run_id, receipt.clone())?;
+                        agent_task_lifecycle::record_cook_finalization_in_store(&agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?, run_id, receipt.clone())?;
                         Ok(receipt)
                     },
                 )),
@@ -6813,13 +6815,13 @@ fn explicit_cook_workspace_cleanliness_is_an_initial_admission_check() {
         .expect("out-of-tree projected evidence leaves the checkout clean");
         assert!(!target.join(".homeboy").exists());
 
-        agent_task_lifecycle::record_metadata_value_in_store(
-            &test_lifecycle_store(),
-            &options.identity.initial_run_id,
-            "provider_executions_consumed",
-            serde_json::json!(1),
-        )
-        .expect("record provider execution boundary");
+        test_lifecycle_store()
+            .record_metadata_value(
+                &options.identity.initial_run_id,
+                "provider_executions_consumed",
+                serde_json::json!(1),
+            )
+            .expect("record provider execution boundary");
         std::fs::write(target.join("candidate.txt"), "provider change\n")
             .expect("write provider candidate");
         admit_explicit_cook_workspace_before_provider(
@@ -22087,13 +22089,13 @@ fn standalone_manual_preflight_recovers_merged_publication_without_republishing(
         persist_initial_recipe(&options).expect("persist fixture recipe");
         agent_task_lifecycle::submit_plan(&options.identity.initial_plan, Some(run_id))
             .expect("submit standalone manual record");
-        agent_task_lifecycle::record_metadata_value_in_store(
-            &test_lifecycle_store(),
-            run_id,
-            "manual_finalization_identity",
-            serde_json::json!(true),
-        )
-        .expect("mark manual identity");
+        test_lifecycle_store()
+            .record_metadata_value(
+                run_id,
+                "manual_finalization_identity",
+                serde_json::json!(true),
+            )
+            .expect("mark manual identity");
         seed_review_form_aggregate(run_id, &options.identity.initial_plan);
         let promotion = promotion_with_existing_path(run_id, target.path());
         let mut finalization = cook_finalization_options(&options, run_id, &promotion, Vec::new())
@@ -22471,13 +22473,13 @@ fn cook_promotion_recovery_accepts_component_fallback_when_no_recorded_identity_
         persist_initial_recipe(&options).expect("persist fixture recipe");
         agent_task_lifecycle::submit_plan(&options.identity.initial_plan, Some(run_id))
             .expect("submit standalone manual record");
-        agent_task_lifecycle::record_metadata_value_in_store(
-            &test_lifecycle_store(),
-            run_id,
-            "manual_finalization_identity",
-            serde_json::json!(true),
-        )
-        .expect("mark manual identity");
+        test_lifecycle_store()
+            .record_metadata_value(
+                run_id,
+                "manual_finalization_identity",
+                serde_json::json!(true),
+            )
+            .expect("mark manual identity");
         seed_review_form_aggregate(run_id, &options.identity.initial_plan);
 
         let promotion = promotion_with_existing_path(run_id, &checkout);
@@ -23065,12 +23067,10 @@ fn promoted_detached_retry_recovers_cook_finalization_and_updates_existing_pr() 
 
         agent_task_lifecycle::submit_plan(&options.identity.initial_plan, Some(retry_run_id))
             .expect("submit detached retry");
-        agent_task_lifecycle::record_metadata_value(
-            retry_run_id,
-            "retry_of",
-            serde_json::json!(source_run_id),
-        )
-        .expect("bind detached retry lineage");
+        agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
+            .expect("lifecycle store")
+            .record_metadata_value(retry_run_id, "retry_of", serde_json::json!(source_run_id))
+            .expect("bind detached retry lineage");
         seed_review_form_aggregate(retry_run_id, &options.identity.initial_plan);
         agent_task_lifecycle::rewrite_record_for_test(retry_run_id, |record| {
             record

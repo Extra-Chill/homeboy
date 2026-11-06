@@ -390,10 +390,13 @@ where
                         "reason_code": error.code.as_str(),
                         "message": error.message,
                     });
-                    let _ = homeboy_agents::agent_task_lifecycle::record_cook_controller_failure(
-                        run_id,
-                        &diagnostic,
-                    );
+                    if let Ok(store) =
+                        homeboy_agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
+                    {
+                        let _ = homeboy_agents::agent_task_lifecycle::record_cook_controller_failure_in_store(
+                            &store, run_id, &diagnostic,
+                        );
+                    }
                     return Err(error);
                 }
             }

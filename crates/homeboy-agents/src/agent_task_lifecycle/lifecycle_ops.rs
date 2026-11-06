@@ -957,10 +957,6 @@ pub fn precheck_unmaterialized_cook_admission(
 
 /// Recover or complete the atomic input-directory publication for one prepared
 /// admission, then expose its requested queue state in the same locked update.
-pub fn recover_unmaterialized_cook_input_publication(cook_id: &str) -> Result<AgentTaskRunRecord> {
-    let store = AgentTaskLifecycleStore::from_environment()?;
-    recover_unmaterialized_cook_input_publication_in_store(&store, cook_id)
-}
 
 pub fn recover_unmaterialized_cook_input_publication_in_store(
     store: &AgentTaskLifecycleStore,
@@ -1834,13 +1830,6 @@ fn controller_local_placement_decision(
 
 /// Replace a current submission stamp with the canonical routing decision.
 /// Never overwrites a routed decision.
-pub fn normalize_missing_execution_placement_decision(
-    run_id: &str,
-    decision: &homeboy_lab_contract::ExecutionPlacementDecision,
-) -> Result<bool> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_environment()?;
-    normalize_missing_execution_placement_decision_in_store(&lifecycle_store, run_id, decision)
-}
 
 /// Adopt a canonical placement decision inside an explicitly rooted store.
 ///
@@ -2332,10 +2321,12 @@ mod execution_placement_tests {
                 },
                 Placement::Local,
             );
-            assert!(
-                normalize_missing_execution_placement_decision("stamped-run", &routed)
-                    .expect("supersede the submission stamp")
-            );
+            assert!(normalize_missing_execution_placement_decision_in_store(
+                &AgentTaskLifecycleStore::from_environment().expect("lifecycle store"),
+                "stamped-run",
+                &routed
+            )
+            .expect("supersede the submission stamp"));
             record_execution_placement_outcome(
                 "stamped-run",
                 routed
@@ -3164,10 +3155,6 @@ pub fn load_controller_plan_in_store(
 }
 
 /// Load a durable plan for a scheduler or provider execution without mutation.
-pub(crate) fn load_plan_for_execution(run_id: &str) -> Result<AgentTaskPlan> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_environment()?;
-    load_plan_for_execution_in_store(&lifecycle_store, run_id)
-}
 
 /// [`load_plan_for_execution`] against explicitly injected durable lifecycle
 /// roots.
@@ -3450,16 +3437,6 @@ pub fn record_provider_launch_context_in_store(
 /// The request ID is also the durable Cook identity, so the queue timeout points
 /// back to the record that the caller can inspect and retry.
 
-pub(crate) fn record_provider_execution_process(
-    run_id: &str,
-    task_id: &str,
-    attempt: u32,
-    pid: u32,
-) -> Result<AgentTaskRunRecord> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_environment()?;
-    record_provider_execution_process_in_store(&lifecycle_store, run_id, task_id, attempt, pid)
-}
-
 pub fn record_provider_execution_process_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
@@ -3534,13 +3511,6 @@ pub fn record_cook_progress_in_store(
 
 /// Retain a redacted, bounded controller failure independently of continuation
 /// claim transitions. Claims describe ownership; they must not replace cause.
-pub fn record_cook_controller_failure(
-    run_id: &str,
-    diagnostic: &Value,
-) -> Result<AgentTaskRunRecord> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_environment()?;
-    record_cook_controller_failure_in_store(&lifecycle_store, run_id, diagnostic)
-}
 
 pub fn record_cook_controller_failure_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
@@ -5871,20 +5841,6 @@ pub fn plan_has_retry_materialization_identity(plan: &AgentTaskPlan) -> bool {
             .is_some_and(|identity| !identity.trim().is_empty())
 }
 
-pub(crate) fn record_metadata_value(run_id: &str, key: &str, value: Value) -> Result<()> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_environment()?;
-    record_metadata_value_in_store(&lifecycle_store, run_id, key, value)
-}
-
-pub(crate) fn record_metadata_value_in_store(
-    lifecycle_store: &AgentTaskLifecycleStore,
-    run_id: &str,
-    key: &str,
-    value: Value,
-) -> Result<()> {
-    lifecycle_store.record_metadata_value(run_id, key, value)
-}
-
 // The ambient `retry_with_force()` shim that used to sit above this is gone.
 // Its last caller was the Cook retry boundary, which now reserves the successor
 // in the store it holds for the whole lineage (#7505).
@@ -7805,10 +7761,6 @@ fn promotion_is_applied(metadata: &Value) -> bool {
 
 /// Persist the controller publication result separately from promotion so a
 /// resumed cook can prove finalization already completed before it publishes.
-pub fn record_cook_finalization(run_id: &str, finalization: Value) -> Result<AgentTaskRunRecord> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_environment()?;
-    record_cook_finalization_in_store(&lifecycle_store, run_id, finalization)
-}
 
 pub fn record_cook_finalization_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,

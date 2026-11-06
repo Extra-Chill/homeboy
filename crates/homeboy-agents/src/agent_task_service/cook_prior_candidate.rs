@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use crate::agent_task_lifecycle::{self, AgentTaskLifecycleStore, AgentTaskRunState};
+use crate::agent_task_lifecycle::{AgentTaskLifecycleStore, AgentTaskRunState};
 use homeboy_core::{Error, Result};
 
 use super::cook_baseline::{git_output, git_output_with_env};
@@ -316,15 +316,13 @@ pub(crate) fn preserve_prior_attempt_candidate(
     let mut preserved_by = evidence.clone();
     preserved_by["preserved_by_run_id"] = Value::String(options.identity.initial_run_id.clone());
     preserved_by["preserved_by_cook_id"] = Value::String(options.identity.cook_id.clone());
-    agent_task_lifecycle::record_metadata_value_in_store(
-        lifecycle_store,
+    lifecycle_store.record_metadata_value(
         &owner.run_id,
         PRIOR_ATTEMPT_CANDIDATE_METADATA_KEY,
         preserved_by,
     )?;
     if lifecycle_store.record_exists(&options.identity.initial_run_id)? {
-        agent_task_lifecycle::record_metadata_value_in_store(
-            lifecycle_store,
+        lifecycle_store.record_metadata_value(
             &options.identity.initial_run_id,
             PRIOR_ATTEMPT_CANDIDATE_METADATA_KEY,
             evidence.clone(),
