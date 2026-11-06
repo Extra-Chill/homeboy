@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.25.7] - 2026-11-06
+
+### Fixed
+- dispatch one repository_dispatch per released component in components: all mode
+
 ## [2.25.6] - 2026-11-02
 
 ### Fixed
