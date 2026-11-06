@@ -1510,6 +1510,26 @@ pub fn ensure_running(addr: &str) -> Result<DaemonStartResult> {
         .as_ref()
         .filter(|_| status.running && !status.fresh)
     {
+        // A binary upgrade must not strand control of jobs on the previous
+        // build. Keep routing to its recorded, reachable endpoint while busy;
+        // status/plan retain the mismatch and defer replacement until idle.
+        if status.reachable
+            && status.freshness.active_jobs > 0
+            && matches!(
+                status.freshness.stale_reason_code,
+                Some(
+                    DaemonStaleReasonCode::VersionMismatch
+                        | DaemonStaleReasonCode::BinaryHashMismatch
+                )
+            )
+        {
+            return Ok(DaemonStartResult {
+                pid: state.pid,
+                address: state.address.clone(),
+                state_path: state.state_path.clone(),
+                lease_id: state.lease_id.clone(),
+            });
+        }
         // A service manager starts the replacement itself; spawning one here
         // would race it for the owner lock (#17387).
         if state.service_manager.is_some() {
