@@ -22,6 +22,7 @@
     {
       "id": "composer",
       "download_cache": { "env": "COMPOSER_CACHE_DIR" },
+      "download_auth": { "env": "COMPOSER_AUTH", "file": ".config/composer/auth.json", "as": "content" },
       "selection": {
         "priority": 1,
         "search": "project-root",

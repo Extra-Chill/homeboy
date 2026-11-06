@@ -138,6 +138,26 @@
             }
           }
         },
+        "download_auth": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["env", "file", "as"],
+          "properties": {
+            "env": {
+              "type": "string",
+              "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+            },
+            "file": {
+              "type": "string",
+              "description": "Nonempty relative path resolved against the runner's real HOME; core additionally rejects non-normal components and symlinks.",
+              "pattern": "^(?![/\\\\]|[A-Za-z]:).+$"
+            },
+            "as": {
+              "type": "string",
+              "enum": ["content", "path"]
+            }
+          }
+        },
         "package_identity": { "$ref": "#/$defs/package_identity" },
         "outputs": {
           "type": "array",
