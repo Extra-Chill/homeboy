@@ -22,10 +22,10 @@ use homeboy_engine_primitives::content_hash;
 use homeboy_engine_primitives::shell::{quote_arg, quote_args};
 
 use crate::agent_task_finalization::{
-    finalize_pr_with_backend, finalize_pr_with_backend_in_store, preflight_pr_with_backend,
-    validate_publication_intent, AgentTaskPrEvidence, AgentTaskPrFinalizationBackend,
-    AgentTaskPrFinalizationOptions, AgentTaskPrFinalizationReport, AgentTaskPrRuntimeGuardrails,
-    AgentTaskPrSourceRelationship, AgentTaskPrVerification, RealAgentTaskPrFinalizationBackend,
+    finalize_pr_with_backend, preflight_pr_with_backend, validate_publication_intent,
+    AgentTaskPrEvidence, AgentTaskPrFinalizationBackend, AgentTaskPrFinalizationOptions,
+    AgentTaskPrFinalizationReport, AgentTaskPrRuntimeGuardrails, AgentTaskPrSourceRelationship,
+    AgentTaskPrVerification, RealAgentTaskPrFinalizationBackend,
 };
 use crate::agent_task_lifecycle;
 use crate::agent_task_promotion::{
@@ -3031,7 +3031,7 @@ pub(crate) fn finalize_cook_pr_with_backend_with_stores<B: AgentTaskPrFinalizati
         successful_run_id,
         serde_json::to_value(&promotion).unwrap_or(Value::Null),
     )?;
-    finalize_pr_with_backend_in_store(finalization, backend, lifecycle_store)
+    finalize_pr_with_backend(finalization, backend, lifecycle_store)
         .map(|report| serde_json::to_value(report).unwrap_or(Value::Null))
 }
 
@@ -3723,11 +3723,14 @@ pub(crate) fn recover_cook_pr_with_backend_and_review_form<B: AgentTaskPrFinaliz
             finalization.expected_candidate_sha = None;
         }
         let failure_run_id = finalization.run_id.clone();
-        let result = if preflight {
-            preflight_pr_with_backend(finalization, backend)
-        } else {
-            finalize_pr_with_backend(finalization, backend)
-        };
+        let result =
+            agent_task_lifecycle::AgentTaskLifecycleStore::from_environment().and_then(|store| {
+                if preflight {
+                    preflight_pr_with_backend(finalization, backend, &store)
+                } else {
+                    finalize_pr_with_backend(finalization, backend, &store)
+                }
+            });
         let report = match result {
             Ok(report) => report,
             Err(error) => {
@@ -3853,18 +3856,15 @@ pub(crate) fn recover_cook_pr_with_backend_and_review_form<B: AgentTaskPrFinaliz
             serde_json::to_value(&promotion).unwrap_or(Value::Null),
         )?;
     }
+    let lifecycle_store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
     let report = if preflight {
-        preflight_pr_with_backend(finalization, backend)?
+        preflight_pr_with_backend(finalization, backend, &lifecycle_store)?
     } else {
-        finalize_pr_with_backend(finalization, backend)?
+        finalize_pr_with_backend(finalization, backend, &lifecycle_store)?
     };
     let value = serde_json::to_value(&report).unwrap_or(Value::Null);
     if !preflight {
-        agent_task_lifecycle::record_cook_finalization_in_store(
-            &agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?,
-            &run_id,
-            value.clone(),
-        )?;
+        lifecycle_store.record_cook_finalization(&run_id, value.clone())?;
     }
     Ok(value)
 }
@@ -4300,11 +4300,14 @@ fn recover_manual_finalization_pr<B: AgentTaskPrFinalizationBackend>(
         // mutation. It is safe to retry that original mutation after failure.
         finalization.expected_candidate_sha = None;
     }
-    let result = if preflight {
-        preflight_pr_with_backend(finalization, backend)
-    } else {
-        finalize_pr_with_backend(finalization, backend)
-    };
+    let result =
+        agent_task_lifecycle::AgentTaskLifecycleStore::from_environment().and_then(|store| {
+            if preflight {
+                preflight_pr_with_backend(finalization, backend, &store)
+            } else {
+                finalize_pr_with_backend(finalization, backend, &store)
+            }
+        });
     let report = match result {
         Ok(report) => report,
         Err(error) => {

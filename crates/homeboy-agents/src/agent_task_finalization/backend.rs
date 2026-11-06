@@ -131,14 +131,11 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
     fn publication_context(
         &mut self,
         run_id: &str,
-        store: Option<&crate::agent_task_lifecycle::AgentTaskLifecycleStore>,
+        lifecycle_store: &crate::agent_task_lifecycle::AgentTaskLifecycleStore,
     ) -> Result<(String, Option<String>)> {
         let config = homeboy_core::defaults::load_config_for_read()?;
         let identity = homeboy_core::git::github_app::identity(config.github_app.as_ref());
-        let record = match match store {
-            Some(store) => store.read_record(run_id),
-            None => crate::agent_task_lifecycle::status(run_id),
-        } {
+        let record = match lifecycle_store.read_record(run_id) {
             Ok(record) => record,
             Err(error) if error.message.contains("agent-task run record not found") => {
                 return Ok((identity, None))
@@ -150,36 +147,12 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
             .pointer("/client_context/requester")
             .and_then(|value| value.as_str())
             .map(str::to_owned);
-        match store {
-            Some(store) => store.record_metadata_value(
-                run_id,
-                "publication_identity",
-                serde_json::json!(identity),
-            )?,
-            None => crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?
-                .record_metadata_value(
-                    run_id,
-                    "publication_identity",
-                    serde_json::json!(identity),
-                )?,
-        }
+        lifecycle_store.record_metadata_value(
+            run_id,
+            "publication_identity",
+            serde_json::json!(identity),
+        )?;
         Ok((identity, requester))
-    }
-    fn hydrate_run(&mut self, run_id: &str) -> Result<RunLifecycleRecord> {
-        Ok(crate::agent_task_lifecycle::reconcile_status(run_id)?.lifecycle)
-    }
-
-    fn hydrate_gate_proof(&mut self, run_id: &str) -> Result<AgentTaskPrDurableGateProof> {
-        let record = crate::agent_task_lifecycle::reconcile_status(run_id)?;
-        optional_gate_proof(record)?.ok_or_else(missing_promotion)
-    }
-
-    fn hydrate_optional_gate_proof(
-        &mut self,
-        run_id: &str,
-    ) -> Result<Option<AgentTaskPrDurableGateProof>> {
-        let record = crate::agent_task_lifecycle::reconcile_status(run_id)?;
-        optional_gate_proof(record)
     }
 
     fn hydrate_run_in_store(
@@ -210,15 +183,6 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
         run_id: &str,
     ) -> Result<Option<AgentTaskPrDurableGateProof>> {
         optional_gate_proof(lifecycle_store.read_record(run_id)?)
-    }
-
-    fn validate_candidate(&mut self, options: &AgentTaskPrFinalizationOptions) -> Result<()> {
-        validate_real_candidate_fingerprint(options)?;
-        homeboy_core::repository_integrity::verify_tracked_symlink_portability(
-            std::path::Path::new(&options.path),
-            "HEAD",
-            options.repository_integrity_evidence.as_ref(),
-        )
     }
 
     fn validate_candidate_in_store(
@@ -1358,13 +1322,6 @@ mod pr_head_repository_tests {
     fn a_wholly_absent_payload_fails_closed() {
         assert_eq!(pr_head_repository_from_json(&json!({})), "");
     }
-}
-
-pub(super) fn validate_real_candidate_fingerprint(
-    options: &AgentTaskPrFinalizationOptions,
-) -> Result<()> {
-    let record = crate::agent_task_lifecycle::reconcile_status(&options.run_id)?;
-    validate_real_candidate_fingerprint_from_record(options, &record)
 }
 
 pub(super) fn validate_real_candidate_fingerprint_in_store(

@@ -17445,9 +17445,14 @@ struct CaptureBackend {
 }
 
 impl AgentTaskPrFinalizationBackend for CaptureBackend {
-    fn hydrate_run(&mut self, run_id: &str) -> Result<RunLifecycleRecord> {
+    fn hydrate_run_in_store(
+        &mut self,
+        lifecycle_store: &AgentTaskLifecycleStore,
+        run_id: &str,
+    ) -> Result<RunLifecycleRecord> {
         if self.hydrate_run_id.is_some() {
-            return RealAgentTaskPrFinalizationBackend.hydrate_run(run_id);
+            return RealAgentTaskPrFinalizationBackend
+                .hydrate_run_in_store(lifecycle_store, run_id);
         }
         Ok(RunLifecycleRecord {
             execution: RunExecutionLifecycle {
@@ -17466,38 +17471,6 @@ impl AgentTaskPrFinalizationBackend for CaptureBackend {
             }],
             ..RunLifecycleRecord::default()
         })
-    }
-    fn hydrate_gate_proof(&mut self, run_id: &str) -> Result<AgentTaskPrDurableGateProof> {
-        if self.hydrate_run_id.is_some() || self.hydrate_gate_proof_run_id.is_some() {
-            return RealAgentTaskPrFinalizationBackend.hydrate_gate_proof(run_id);
-        }
-        if let Some(mut promotion) = self.synthetic_gate_proof.clone() {
-            promotion.source.run_id = Some(run_id.to_string());
-            if let Ok(Some(persisted)) = persisted_promotion_for_attempt(run_id) {
-                if let Some(follow_up) = persisted.provenance.get("cook_follow_up") {
-                    promotion.provenance["cook_follow_up"] = follow_up.clone();
-                }
-            }
-            return Ok(AgentTaskPrDurableGateProof {
-                run_id: run_id.to_string(),
-                promotion,
-            });
-        }
-        Ok(AgentTaskPrDurableGateProof {
-            run_id: run_id.to_string(),
-            promotion: promotion(run_id),
-        })
-    }
-    fn hydrate_run_in_store(
-        &mut self,
-        lifecycle_store: &AgentTaskLifecycleStore,
-        run_id: &str,
-    ) -> Result<RunLifecycleRecord> {
-        if self.hydrate_run_id.is_some() {
-            return RealAgentTaskPrFinalizationBackend
-                .hydrate_run_in_store(lifecycle_store, run_id);
-        }
-        self.hydrate_run(run_id)
     }
     fn hydrate_gate_proof_in_store(
         &mut self,
@@ -17522,14 +17495,10 @@ impl AgentTaskPrFinalizationBackend for CaptureBackend {
                 promotion,
             });
         }
-        self.hydrate_gate_proof(run_id)
-    }
-    fn validate_candidate_in_store(
-        &mut self,
-        _lifecycle_store: &AgentTaskLifecycleStore,
-        options: &crate::agent_task_finalization::AgentTaskPrFinalizationOptions,
-    ) -> Result<()> {
-        self.validate_candidate(options)
+        Ok(AgentTaskPrDurableGateProof {
+            run_id: run_id.to_string(),
+            promotion: promotion(run_id),
+        })
     }
     fn current_branch(&mut self, _path: &str) -> Result<String> {
         Ok("fix/8058".to_string())
@@ -20734,8 +20703,6 @@ fn promotion_operation_claim_completes_once_and_replays_persisted_result() {
         // Finalization reads the externalized report through the resolving
         // reader instead of rejecting the payload reference (#16664).
         let mut backend = RealAgentTaskPrFinalizationBackend;
-        let proof = backend.hydrate_gate_proof(run_id).unwrap();
-        assert_eq!(gate_feedback_current_diff(&proof.promotion), large_diff);
         let proof = backend
             .hydrate_gate_proof_in_store(&test_lifecycle_store(), run_id)
             .unwrap();
@@ -22031,6 +21998,7 @@ fn cook_backed_manual_recovery_failure_persists_structured_git_evidence() {
                 candidate_state: Some(dirty.clone()),
                 ..Default::default()
             },
+            &test_lifecycle_store(),
         )
         .expect("preflight direct manual publication");
         super::super::cook_promotion::persist_manual_finalization_retry_intent(run_id, &intent)
@@ -22187,6 +22155,7 @@ fn standalone_manual_preflight_recovers_merged_publication_without_republishing(
                 candidate_state: Some(candidate.clone()),
                 ..Default::default()
             },
+            &test_lifecycle_store(),
         )
         .expect("manual preflight");
         persist_manual_finalization_intent(run_id, &preflight).expect("persist validated intent");
@@ -22404,6 +22373,7 @@ fn issue_17379_monorepo_finalization_and_recover_keep_admitted_component() {
                 candidate_state: Some(candidate.clone()),
                 ..Default::default()
             },
+            &test_lifecycle_store(),
         )
         .unwrap();
         persist_manual_finalization_intent(run_id, &preflight).unwrap();
@@ -22503,6 +22473,7 @@ fn cook_promotion_recovery_reuses_recorded_component_identity_after_gate_failure
                 candidate_state: Some(candidate.clone()),
                 ..Default::default()
             },
+            &test_lifecycle_store(),
         )
         .expect("manual preflight");
         persist_manual_finalization_intent(run_id, &preflight)
@@ -22572,6 +22543,7 @@ fn cook_promotion_recovery_accepts_component_fallback_when_no_recorded_identity_
                 candidate_state: Some(candidate.clone()),
                 ..Default::default()
             },
+            &test_lifecycle_store(),
         )
         .expect("manual preflight");
         persist_manual_finalization_intent(run_id, &preflight).expect("persist validated intent");
@@ -23255,6 +23227,7 @@ fn manual_preflight_intent_does_not_block_normal_cook_finalization() {
         let intent = crate::agent_task_finalization::preflight_pr_with_backend(
             manual,
             &mut preflight_backend,
+            &test_lifecycle_store(),
         )
         .expect("manual preflight");
         persist_manual_finalization_intent(run_id, &intent).expect("persist intent");
@@ -23355,6 +23328,7 @@ fn failed_attempt_manual_preflight_hydrates_serialized_intent_and_publishes() {
                 candidate_state: Some(candidate.clone()),
                 ..Default::default()
             },
+            &test_lifecycle_store(),
         )
         .expect("manual preflight");
         assert_eq!(preflight.status, "validated");
@@ -23500,6 +23474,7 @@ fn candidate_recoverable_manual_preflight_binds_canonical_candidate_and_recovers
                 hydrate_run_id: Some(run_id.to_string()),
                 ..Default::default()
             },
+            &test_lifecycle_store(),
         )
         .expect("manual preflight");
         assert_eq!(
@@ -23659,6 +23634,7 @@ fn manual_preflight_recovers_without_a_persisted_promotion_and_rejects_tampering
         let preflight = crate::agent_task_finalization::preflight_pr_with_backend(
             finalization,
             &mut preflight_backend,
+            &test_lifecycle_store(),
         )
         .expect("manual preflight");
         assert_eq!(preflight.status, "validated");
