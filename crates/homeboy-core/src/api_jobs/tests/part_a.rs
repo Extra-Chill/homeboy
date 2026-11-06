@@ -613,7 +613,7 @@ fn durable_store_reconciles_running_jobs_as_stale_after_restart() {
 }
 
 #[test]
-fn daemon_lease_reconciliation_recovers_results_and_only_fails_unfinished_matching_jobs() {
+fn dead_generation_reconciliation_recovers_results_and_only_fails_unfinished_dead_jobs() {
     let temp = tempfile::tempdir().expect("temp dir");
     let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
     let matching = JobStore::open_without_reconciliation(&path)
@@ -667,15 +667,17 @@ fn daemon_lease_reconciliation_recovers_results_and_only_fails_unfinished_matchi
     record_test_local_child(&matching, unfinished_job.id, u32::MAX);
 
     let other = JobStore::open_without_reconciliation(&path)
-        .expect("open other")
-        .with_daemon_lease("lease-other".to_string());
+        .expect("open live generation")
+        .with_daemon_lease("lease-live".to_string());
     let other_job = other.create("runner.exec");
-    other.start(other_job.id).expect("start other job");
+    other
+        .start(other_job.id)
+        .expect("start live-generation job");
 
     let store = JobStore::open_without_reconciliation(&path).expect("open recovery store");
     let diagnostics = store
-        .reconcile_dead_daemon_lease_jobs_with_child_liveness("lease-dead", |pid| pid == 4242)
-        .expect("reconcile matching lease");
+        .reconcile_dead_generation_jobs_with_child_liveness("lease-live", |pid| pid == 4242)
+        .expect("reconcile dead generations");
 
     assert_eq!(
         diagnostics.matching_job_ids,
@@ -690,9 +692,8 @@ fn daemon_lease_reconciliation_recovers_results_and_only_fails_unfinished_matchi
         .into_iter()
         .collect::<Vec<_>>()
     );
-    assert_eq!(diagnostics.other_lease_job_ids, vec![other_job.id]);
-    assert!(diagnostics.unowned_job_ids.is_empty());
     assert!(diagnostics.protected_job_ids.is_empty());
+    assert!(diagnostics.needs_attestation_job_ids.is_empty());
     assert_eq!(
         store.get(succeeded_job.id).expect("succeeded job").status,
         JobStatus::Succeeded
@@ -736,8 +737,11 @@ fn daemon_lease_reconciliation_recovers_results_and_only_fails_unfinished_matchi
         }));
 }
 
+/// An unstamped active job has no live owner either: while the successor holds
+/// the owner lock it is a dead generation's work, reported for attestation
+/// because it recorded no child.
 #[test]
-fn legacy_unowned_active_job_blocks_dead_lease_reconciliation() {
+fn unstamped_active_job_is_a_dead_generation_job_needing_attestation() {
     let temp = tempfile::tempdir().expect("temp dir");
     let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
     let legacy = JobStore::open_without_reconciliation(&path).expect("open legacy store");
@@ -745,12 +749,11 @@ fn legacy_unowned_active_job_blocks_dead_lease_reconciliation() {
     legacy.start(legacy_job.id).expect("start legacy job");
 
     let store = JobStore::open_without_reconciliation(&path).expect("open recovery store");
-    let error = store
-        .reconcile_dead_daemon_lease_jobs("lease-dead")
-        .expect_err("legacy job blocks automatic recovery");
+    let diagnostics = store
+        .reconcile_dead_generation_jobs("lease-live")
+        .expect("reconcile dead generations");
 
-    assert!(error.message.contains("legacy unowned active job"));
-    assert!(error.message.contains(&legacy_job.id.to_string()));
+    assert_eq!(diagnostics.needs_attestation_job_ids, vec![legacy_job.id]);
     assert_eq!(
         store.get(legacy_job.id).expect("legacy job").status,
         JobStatus::Running
@@ -764,7 +767,7 @@ fn dead_lease_reconciliation_preserves_a_job_with_a_live_recorded_child() {
     record_test_local_child(&store, job.id, 4242);
 
     let diagnostics = store
-        .reconcile_dead_daemon_lease_jobs_with_child_liveness("lease-dead", |pid| pid == 4242)
+        .reconcile_dead_generation_jobs_with_child_liveness("lease-live", |pid| pid == 4242)
         .expect("reconcile dead lease");
 
     assert_eq!(diagnostics.protected_job_ids, vec![job.id]);
@@ -785,7 +788,7 @@ fn dead_lease_reconciliation_terminalizes_a_job_with_a_dead_recorded_child() {
     record_test_local_child(&store, job.id, 4242);
 
     let diagnostics = store
-        .reconcile_dead_daemon_lease_jobs_with_child_liveness("lease-dead", |_| false)
+        .reconcile_dead_generation_jobs_with_child_liveness("lease-live", |_| false)
         .expect("reconcile dead lease");
 
     assert!(diagnostics.protected_job_ids.is_empty());
@@ -815,115 +818,80 @@ fn child_identity_is_durable_before_a_job_becomes_running() {
     }));
 }
 
+/// #15556 chaos case 2: a running job with no recorded child is left exactly
+/// as it was and reported; nothing in process can prove its workload is gone.
 #[test]
-fn missing_child_identity_remains_blocked_without_exact_process_evidence() {
-    let store = JobStore::default().with_daemon_lease("lease-dead".to_string());
-    let job = store.create("runner.exec");
-    store.start(job.id).expect("start legacy job");
-
-    let error = store
-        .reconcile_dead_daemon_lease_jobs("lease-dead")
-        .expect_err("missing identity blocks recovery");
-    assert!(error.message.contains("no authoritative terminal result"));
-    assert_eq!(store.get(job.id).expect("job").status, JobStatus::Running);
-}
-
-#[test]
-fn leaseless_recovery_refuses_missing_typed_child_identity_without_mutation() {
-    let store = JobStore::default().with_daemon_lease("lease-dead".to_string());
-    let job = store.create("runner.exec");
-    store.start(job.id).expect("start legacy job");
-    let event_count = store.events(job.id).expect("events").len();
-
-    let error = store
-        .reconcile_leaseless_orphan_jobs()
-        .expect_err("missing identity blocks lease-less recovery");
-
-    assert!(error.message.contains("no authoritative terminal result"));
-    assert_eq!(store.get(job.id).expect("job").status, JobStatus::Running);
-    assert_eq!(store.events(job.id).expect("events").len(), event_count);
-}
-
-#[test]
-fn linked_active_or_unresolved_job_blocks_confirmed_recovery_before_persisting() {
-    for linked in [
-        LinkedDurableRunResolution::Active("run-active".to_string()),
-        LinkedDurableRunResolution::Unresolved("run-unresolved".to_string()),
-    ] {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
-        let store = JobStore::open_without_reconciliation(&path)
-            .expect("store")
-            .with_daemon_lease("lease-dead".to_string());
-        let selected = store.create("runner.exec");
-        store.start(selected.id).expect("start selected");
-        let linked_job = store.create("runner.exec");
-        store
-            .start_with_child_identity(linked_job.id, 4242, "dead-child".to_string())
-            .expect("record child");
-        let before = super::durable_snapshot(&path);
-
-        let result = store
-            .reconcile_dead_daemon_lease_jobs_with_confirmed_no_pid_jobs_and_linked_resolver(
-                "lease-dead",
-                &[selected.id],
-                |_| false,
-                |stored| {
-                    (stored.job.id == linked_job.id)
-                        .then(|| linked.clone())
-                        .unwrap_or(LinkedDurableRunResolution::None)
-                },
-            );
-
-        match linked {
-            LinkedDurableRunResolution::Active(_) => assert_eq!(
-                result
-                    .expect("active returns diagnostics")
-                    .protected_job_ids,
-                vec![linked_job.id]
-            ),
-            LinkedDurableRunResolution::Unresolved(_) => assert!(result
-                .expect_err("unresolved errors")
-                .message
-                .contains("cannot be safely resolved")),
-            _ => unreachable!(),
-        }
-        assert_eq!(super::durable_snapshot(&path), before);
-    }
-}
-
-#[test]
-fn confirmed_pidless_job_with_unselected_live_child_returns_diagnostics_without_persisting() {
+fn missing_child_identity_is_left_untouched_and_reported_for_attestation() {
     let temp = tempfile::tempdir().expect("temp dir");
     let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
     let store = JobStore::open_without_reconciliation(&path)
         .expect("store")
         .with_daemon_lease("lease-dead".to_string());
-    let confirmed = store.create("runner.exec");
-    store.start(confirmed.id).expect("start confirmed job");
-    let live_child = store.create("runner.exec");
-    store.start(live_child.id).expect("start live child");
-    store
-        .append_event(
-            live_child.id,
-            JobEventKind::Progress,
-            None,
-            Some(json!({ "process": { "root_pid": 4242 } })),
-        )
-        .expect("record live child");
+    let job = store.create("runner.exec");
+    store.start(job.id).expect("start pid-less job");
     let before = super::durable_snapshot(&path);
 
     let diagnostics = store
-        .reconcile_dead_daemon_lease_jobs_with_confirmed_no_pid_jobs_and_linked_resolver(
-            "lease-dead",
-            &[confirmed.id],
-            |pid| pid == 4242,
-            |_| LinkedDurableRunResolution::None,
-        )
-        .expect("live child returns protected diagnostics");
+        .reconcile_dead_generation_jobs("lease-live")
+        .expect("reconcile dead generations");
 
-    assert_eq!(diagnostics.protected_job_ids, vec![live_child.id]);
+    assert_eq!(diagnostics.needs_attestation_job_ids, vec![job.id]);
+    assert_eq!(diagnostics.terminalized_count(), 0);
     assert_eq!(super::durable_snapshot(&path), before);
+}
+
+/// `--attest-absent` checks every named job before it mutates any: a refused
+/// member leaves the whole ledger unchanged.
+#[test]
+fn attestation_refuses_the_whole_set_before_persisting() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
+    let dead = JobStore::open_without_reconciliation(&path)
+        .expect("store")
+        .with_daemon_lease("lease-dead".to_string());
+    let pidless = dead.create("runner.exec");
+    dead.start(pidless.id).expect("start pid-less job");
+    let with_child = dead.create("runner.exec");
+    record_test_local_child(&dead, with_child.id, 4242);
+    let live = JobStore::open_without_reconciliation(&path)
+        .expect("store")
+        .with_daemon_lease("lease-live".to_string());
+    let live_job = live.create("runner.exec");
+    live.start(live_job.id).expect("start live job");
+    let before = super::durable_snapshot(&path);
+
+    for (refused, reason) in [
+        (with_child.id, "recorded child identity"),
+        (live_job.id, "live daemon generation"),
+        (uuid::Uuid::new_v4(), "does not exist"),
+    ] {
+        let error = dead
+            .attest_dead_generation_jobs_absent(Some("lease-live"), &[pidless.id, refused])
+            .expect_err("refused set");
+        assert!(error.message.contains(reason), "{}", error.message);
+        assert_eq!(super::durable_snapshot(&path), before);
+    }
+    for duplicate_or_empty in [vec![], vec![pidless.id, pidless.id]] {
+        assert!(dead
+            .attest_dead_generation_jobs_absent(Some("lease-live"), &duplicate_or_empty)
+            .is_err());
+    }
+
+    assert_eq!(
+        dead.attest_dead_generation_jobs_absent(Some("lease-live"), &[pidless.id])
+            .expect("valid set"),
+        vec![pidless.id]
+    );
+    assert_eq!(dead.get(pidless.id).expect("job").status, JobStatus::Failed);
+    assert_eq!(
+        live.get(live_job.id).expect("job").status,
+        JobStatus::Running
+    );
+    assert!(dead
+        .attest_dead_generation_jobs_absent(Some("lease-live"), &[pidless.id])
+        .expect_err("a replay names a job that is no longer active")
+        .message
+        .contains("is not active"));
 }
 
 #[test]

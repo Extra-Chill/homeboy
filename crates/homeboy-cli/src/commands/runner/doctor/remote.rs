@@ -493,7 +493,12 @@ pub(super) fn disconnected_report(
             }
             (
                 "Disconnected runner was checked through bounded remote lease recovery".to_string(),
-                recovery.adoption_command.clone(),
+                match recovery.repair_plan.as_slice() {
+                    [step] if step.code != daemon_repair_codes::RUNNER_DIAGNOSE => {
+                        Some(step.command.clone())
+                    }
+                    _ => None,
+                },
             )
         }
         None => (

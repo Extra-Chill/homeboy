@@ -705,10 +705,10 @@ pub(super) fn daemon_runtime_loaded_paths_from_body(body: &Value) -> BTreeMap<St
 
 /// Restate a daemon-authored freshness report in the controller's frame.
 ///
-/// A daemon composes its `repair_plan` and `adoption_command` as
-/// `homeboy daemon *`, which is correct on the machine that runs it. Once the
-/// report has crossed the SSH tunnel those commands are actively wrong: running
-/// them here would stop or adopt the *controller's* daemon. The typed evidence
+/// A daemon composes its `repair_plan` as `homeboy daemon *`, which is correct
+/// on the machine that runs it. Once the report has crossed the SSH tunnel
+/// those commands are actively wrong: running them here would stop or start
+/// the *controller's* daemon. The typed evidence
 /// survives the crossing; the actions do not, so they are rebuilt against an
 /// explicit runner id (#10302).
 fn into_controller_frame(
@@ -716,14 +716,6 @@ fn into_controller_frame(
     runner_id: &str,
 ) -> DaemonFreshnessReport {
     report.repair_plan = daemon_repair::controller_frame_plan(runner_id, &report);
-    // An adoption command is one explicit, operator-confirmed action. A
-    // multi-step restart sequence is a plan, not an adoption, so it is exposed
-    // only as steps, and the read-only fallback is a diagnosis rather than an
-    // adoption an operator could mistake for one.
-    report.adoption_command = match report.repair_plan.as_slice() {
-        [step] if step.code != daemon_repair::RUNNER_DIAGNOSE => Some(step.command.clone()),
-        _ => None,
-    };
     report
 }
 
@@ -770,7 +762,6 @@ fn daemon_freshness_report(
             pid: None,
             recovery_evidence: None,
             ownership_evidence: None,
-            adoption_command: None,
             binary_hash: None,
             daemon_version: daemon_version_from_body(&body).map(str::to_string),
             daemon_build_identity: daemon_identity_from_body(&body).map(str::to_string),
@@ -858,7 +849,6 @@ mod tests {
                 pid: Some(pid),
                 recovery_evidence: None,
                 ownership_evidence: None,
-                adoption_command: None,
                 binary_hash: None,
                 daemon_version: Some("0.1.0".to_string()),
                 daemon_build_identity: Some("homeboy 0.1.0+stale".to_string()),
@@ -1057,34 +1047,19 @@ mod tests {
     }
 
     #[test]
-    fn controller_frame_preserves_dead_lease_adoption_eligibility() {
-        let mut conflict = report("lease-dead", 7331).freshness;
-        conflict.stale_reason_code = Some(DaemonStaleReasonCode::PidDead);
-        conflict.recovery_evidence = Some(homeboy_core::daemon::DaemonRecoveryEvidence::ProvenDead);
-        conflict.active_jobs = 0;
-        conflict.adoption_command = None;
-        conflict.repair_plan.clear();
+    fn controller_frame_repairs_a_dead_generation_by_reconnecting() {
+        let mut dead = report("lease-dead", 7331).freshness;
+        dead.stale_reason_code = Some(DaemonStaleReasonCode::PidDead);
+        dead.recovery_evidence = Some(homeboy_core::daemon::DaemonRecoveryEvidence::ProvenDead);
+        dead.active_jobs = 1;
 
-        let conflict = into_controller_frame(conflict, "remote-lab");
-        assert!(conflict.adoption_command.is_none());
-        assert!(conflict
-            .repair_plan
-            .iter()
-            .all(|step| step.code != daemon_repair::RUNNER_ADOPT_ORPHAN_LEASE));
-
-        let mut eligible = report("lease-dead", 7331).freshness;
-        eligible.stale_reason_code = Some(DaemonStaleReasonCode::PidDead);
-        eligible.recovery_evidence = Some(homeboy_core::daemon::DaemonRecoveryEvidence::ProvenDead);
-        eligible.active_jobs = 0;
-        eligible.adoption_command =
-            Some("homeboy daemon adopt-orphan --lease-id lease-dead".to_string());
-
-        let eligible = into_controller_frame(eligible, "remote-lab");
+        let dead = into_controller_frame(dead, "remote-lab");
+        assert_eq!(dead.repair_plan.len(), 1);
+        assert_eq!(dead.repair_plan[0].code, daemon_repair::RUNNER_CONNECT);
         assert_eq!(
-            eligible.adoption_command.as_deref(),
-            Some("homeboy runner connect remote-lab --adopt-orphan-lease lease-dead")
+            dead.repair_plan[0].command,
+            "homeboy runner connect remote-lab"
         );
-        assert_eq!(eligible.repair_plan.len(), 1);
     }
 
     /// #8459: a freshly started daemon can accept the TCP connection before its

@@ -3682,7 +3682,6 @@ mod tests {
             pid: None,
             recovery_evidence: Some(homeboy_core::daemon::DaemonRecoveryEvidence::Unavailable),
             ownership_evidence: Some("ambiguous daemon candidates".to_string()),
-            adoption_command: None,
             binary_hash: None,
             daemon_version: None,
             daemon_build_identity: None,
@@ -3830,7 +3829,6 @@ mod tests {
             worker_identity: None,
             worker_pid: None,
             last_seen_at: None,
-            leaseless_recovery_evidence: None,
         }
     }
 
@@ -3910,7 +3908,6 @@ mod tests {
                 pid: Some(42),
                 recovery_evidence: Some(homeboy_core::daemon::DaemonRecoveryEvidence::Recoverable),
                 ownership_evidence: None,
-                adoption_command: None,
                 binary_hash: None,
                 daemon_version: None,
                 daemon_build_identity: None,

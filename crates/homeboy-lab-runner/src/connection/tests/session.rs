@@ -19,7 +19,6 @@ fn first_connect_routes_to_idempotent_ensure_start_when_no_daemon_exists() {
         work_evidence: RemoteDaemonWorkEvidence::Unknown,
         endpoint_probe_error: None,
         termination_evidence: None,
-        daemon_freshness: None,
     };
 
     assert_eq!(
@@ -159,7 +158,6 @@ fn missing_daemon_state_with_active_jobs_refuses_ensure_running() {
         work_evidence: RemoteDaemonWorkEvidence::Unknown,
         endpoint_probe_error: None,
         termination_evidence: None,
-        daemon_freshness: None,
     };
 
     let error = remote_daemon_connect_action(None, &status)
@@ -656,7 +654,7 @@ fn parses_self_identity_json_envelope() {
 #[test]
 fn parses_advertised_daemon_recovery_capabilities() {
     let identity = parse_self_identity_output(
-        r#"{"success":true,"data":{"version":"0.330.0","display":"homeboy 0.330.0+19a41cd5102d","daemon_recovery_capabilities":[{"id":"daemon-recovery-leaseless","version":1},{"id":"daemon-recovery-state-loss","version":1}]}}"#,
+        r#"{"success":true,"data":{"version":"0.330.0","display":"homeboy 0.330.0+19a41cd5102d","daemon_recovery_capabilities":[{"id":"daemon-ensure-running-operation-id","version":1},{"id":"a-capability-from-the-future","version":1}]}}"#,
     )
     .expect("identity");
 
@@ -669,7 +667,10 @@ fn parses_advertised_daemon_recovery_capabilities() {
         .collect::<Vec<_>>();
     assert_eq!(
         ids,
-        vec!["daemon-recovery-leaseless", "daemon-recovery-state-loss"]
+        vec![
+            "daemon-ensure-running-operation-id",
+            "a-capability-from-the-future"
+        ]
     );
 }
 
@@ -695,7 +696,7 @@ fn malformed_capability_fields_degrade_to_the_scrape_fallback() {
     for body in [
         r#"{"success":true,"data":{"version":"0.330.0","display":"homeboy 0.330.0+19a41cd5102d","daemon_recovery_capabilities":null}}"#,
         r#"{"success":true,"data":{"version":"0.330.0","display":"homeboy 0.330.0+19a41cd5102d","daemon_recovery_capabilities":"leaseless"}}"#,
-        r#"{"success":true,"data":{"version":"0.330.0","display":"homeboy 0.330.0+19a41cd5102d","daemon_recovery_capabilities":[{"id":"daemon-recovery-leaseless"}]}}"#,
+        r#"{"success":true,"data":{"version":"0.330.0","display":"homeboy 0.330.0+19a41cd5102d","daemon_recovery_capabilities":[{"id":"daemon-ensure-running-operation-id"}]}}"#,
     ] {
         let identity = parse_self_identity_output(body).expect("identity still parses");
         assert_eq!(identity.version, "0.330.0");
@@ -712,7 +713,7 @@ fn malformed_capability_fields_degrade_to_the_scrape_fallback() {
 #[test]
 fn unknown_ids_and_future_versions_are_preserved() {
     let identity = parse_self_identity_output(
-        r#"{"success":true,"data":{"version":"9.9.9","display":"homeboy 9.9.9+19a41cd5102d","daemon_recovery_capabilities":[{"id":"daemon-recovery-leaseless","version":7},{"id":"a-capability-from-the-future","version":2}]}}"#,
+        r#"{"success":true,"data":{"version":"9.9.9","display":"homeboy 9.9.9+19a41cd5102d","daemon_recovery_capabilities":[{"id":"daemon-ensure-running-operation-id","version":7},{"id":"a-capability-from-the-future","version":2}]}}"#,
     )
     .expect("identity");
 
@@ -722,7 +723,7 @@ fn unknown_ids_and_future_versions_are_preserved() {
     assert_eq!(advertised.len(), 2);
     assert!(homeboy_lab_contract::daemon_recovery_capability_advertised(
         Some(advertised.as_slice()),
-        homeboy_lab_contract::DAEMON_RECOVERY_LEASELESS_CAPABILITY,
+        homeboy_lab_contract::DAEMON_ENSURE_RUNNING_OPERATION_ID_CAPABILITY,
     ));
 }
 

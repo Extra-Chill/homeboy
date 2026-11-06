@@ -57,10 +57,9 @@ pub mod workflow_job;
 mod workflow_notify;
 pub use artifact_download::ArtifactDownload;
 pub use control::{
-    adopt_orphaned_lease, artifact_content_url, ensure_running,
-    ensure_running_with_replacement_operation, fetch_artifact_to_path,
-    reconcile_dead_lease_orphans, reconcile_leaseless_orphans, recover_missing_lease_state,
-    restart_service_managed, start_background, ArtifactFetchOutcome,
+    artifact_content_url, attest_absent, ensure_running, ensure_running_with_replacement_operation,
+    fetch_artifact_to_path, restart_service_managed, start_background, ArtifactFetchOutcome,
+    DaemonAttestAbsentResult,
 };
 use daemon_lease::{
     daemon_state_identity, freshness_report_from_validation, validate_lease_file,
@@ -1204,8 +1203,6 @@ pub struct DaemonFreshnessReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ownership_evidence: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub adoption_command: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub binary_hash: Option<String>,
     /// Version observed from the reachable daemon endpoint, rather than inferred
     /// from the selected runner executable or a persisted controller session.
@@ -1254,62 +1251,6 @@ pub struct DaemonStartResult {
     pub address: String,
     pub state_path: String,
     pub lease_id: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct DaemonOrphanAdoptionResult {
-    pub adopted_lease_id: String,
-    pub dead_pid: u32,
-    pub active_jobs_terminalized: usize,
-    pub retry_guidance: String,
-    pub replacement: DaemonStartResult,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct DaemonExactOrphanRecoveryResult {
-    pub recovered_lease_id: String,
-    pub dead_pid: u32,
-    pub reconciled_job_ids: Vec<Uuid>,
-    /// Launcher evidence is optional because the launcher may be the component
-    /// that was lost. The ownership proof and durable job provenance describe
-    /// explicit operator authority when it is absent or stale.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub termination_evidence: Option<DaemonTerminationEvidence>,
-    pub ownership_proof: Vec<String>,
-    /// The daemon started after recovery. `None` when the caller asked for no
-    /// replacement (`--no-replacement`), as the remote attested reconcile does
-    /// when the controller owns what serves next.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub replacement: Option<DaemonStartResult>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-pub struct DaemonLeaselessRecoveryResult {
-    pub affected_job_ids: Vec<Uuid>,
-    pub affected_job_count: usize,
-    #[serde(default)]
-    pub affected_jobs: Vec<crate::api_jobs::LeaselessOrphanAffectedJob>,
-    #[serde(default)]
-    pub historical_lease_ids: Vec<String>,
-    pub evidence_snapshot_path: String,
-    pub ownership_proof: Vec<String>,
-    pub retry_guidance: String,
-    pub replacement: DaemonStartResult,
-}
-
-/// Evidence retained when an operator recovers jobs from a lost daemon state
-/// record using the exact lease and PID captured before the loss.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-pub struct DaemonStateLossRecoveryResult {
-    pub recovered_lease_id: String,
-    pub recorded_dead_pid: u32,
-    pub recorded_endpoint: String,
-    pub affected_job_ids: Vec<Uuid>,
-    pub affected_job_count: usize,
-    pub evidence_snapshot_path: String,
-    pub ownership_proof: Vec<String>,
-    pub retry_guidance: String,
-    pub replacement: DaemonStartResult,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1561,18 +1502,29 @@ pub fn read_status_at_paths(path: PathBuf, jobs_path: PathBuf) -> Result<DaemonS
             pid_is_running,
         )
         .into_iter()
-        .filter(|evidence| match validation.state {
-            Some(_) => job_store.executes_lease(evidence.daemon_lease_id.as_deref()),
-            None => evidence.daemon_lease_id.is_none(),
+        // A dead generation's in-scope job awaiting attestation is reported
+        // whatever its lease: it is this scope's to attest (#17429).
+        .filter(|evidence| {
+            evidence.disposition
+                == crate::api_jobs::DaemonActiveJobRecoveryDisposition::NeedsAttestation
+                || match validation.state {
+                    Some(_) => job_store.executes_lease(evidence.daemon_lease_id.as_deref()),
+                    None => evidence.daemon_lease_id.is_none(),
+                }
         })
         .collect::<Vec<_>>();
     // Durable terminal evidence proves no workload remains, so those jobs are
     // reported as evidence but do not protect the daemon from replacement.
+    // Neither do jobs awaiting attestation: a replacement leaves them as they
+    // are, exactly as this daemon did.
     let blocking_active_jobs = active_job_recovery_evidence
         .iter()
         .filter(|evidence| {
-            evidence.disposition
-                != crate::api_jobs::DaemonActiveJobRecoveryDisposition::TerminalEvidence
+            !matches!(
+                evidence.disposition,
+                crate::api_jobs::DaemonActiveJobRecoveryDisposition::TerminalEvidence
+                    | crate::api_jobs::DaemonActiveJobRecoveryDisposition::NeedsAttestation
+            )
         })
         .count();
     let mut freshness = freshness_report_from_validation(&validation, blocking_active_jobs);
@@ -1590,7 +1542,6 @@ pub fn read_status_at_paths(path: PathBuf, jobs_path: PathBuf) -> Result<DaemonS
         };
         freshness.restartable = false;
         freshness.ownership_evidence = Some(message.clone());
-        freshness.adoption_command = None;
         freshness.repair_plan.clear();
         Some(message)
     } else {
@@ -1599,9 +1550,9 @@ pub fn read_status_at_paths(path: PathBuf, jobs_path: PathBuf) -> Result<DaemonS
     let competing_serve = owner_lock
         .holder()
         .and_then(|holder| read_owner_contender_at(&path, holder));
-    // A stale daemon with an authorized repair plan (a restartable stop/start,
-    // an adoption, or an explicit reconciliation) can be replaced through that
-    // plan. A stale daemon with no plan — protected active jobs, a corrupt
+    // A stale or dead daemon with an authorized repair plan (a restart, or a
+    // start whose startup recovery reconciles the dead generation) can be
+    // replaced through that plan. A stale daemon with no plan — protected active jobs, a corrupt
     // lease, an unreachable transport, or an owner lock held without a live
     // lease — has its replacement blocked, with the blocker named in evidence terms.
     let replacement_blocked = !freshness.fresh && freshness.repair_plan.is_empty();
@@ -1810,11 +1761,6 @@ where
     let local_addr = listener.local_addr().map_err(|e| {
         Error::internal_io(e.to_string(), Some("read daemon local address".to_string()))
     })?;
-    // The exclusive daemon-owner lock is already held, so whatever generation
-    // wrote a prior lease is dead: only a lock holder writes the lease. Keep
-    // its identity before write_state replaces it; version skew alone never
-    // authorizes replay of an adopted job.
-    let proven_dead = validate_lease_file(&paths::daemon_state_file()?)?.state;
     // A CLI-launched serve enforces its own lifetime; it needs the shutdown flag
     // to end itself through the same drain SIGTERM uses.
     let owned_lifetime = match shutdown.as_ref() {
@@ -1835,9 +1781,7 @@ where
     // Expire only reservations that never recorded a child identity.
     job_store.reconcile_expired_local_child_reservations()?;
     job_store.reconcile_expired_admissions()?;
-    if let Some(prior) = proven_dead {
-        recover_staged_direct_jobs_after_owner_death(&job_store, &prior.lease_id)?;
-    }
+    recover_dead_generations(&job_store, &state.lease_id)?;
     reconcile_pending_workspace_owner_releases();
     reconcile_terminal_workspace_owner_leases(&job_store);
     if let Some(stopped_lease) = read_termination_evidence()
@@ -3905,16 +3849,67 @@ fn enqueue_exec_job(
     enqueue_exec_request(request, job_store, None)
 }
 
+/// Startup recovery of every dead daemon generation in this scope (#17429).
+///
+/// Serve holds the exclusive owner lock, and only the lock holder writes the
+/// lease, so every in-scope lease other than `current_lease_id` belongs to a
+/// generation that is gone, whether or not its `state.json` survived. Jobs of
+/// other scopes in the shared ledger are never selected.
+///
+/// Staged direct `runner.exec` handoffs run first: no child ever existed, so
+/// they are requeued under this generation. The store then reconciles the
+/// rest: a running child is protected, a dead child is terminalized with its
+/// evidence, controller jobs are left to `recover_controller_jobs` for resume,
+/// and a running job with no child identity is left untouched for
+/// `homeboy daemon recover --attest-absent`.
+fn recover_dead_generations(
+    job_store: &JobStore,
+    current_lease_id: &str,
+) -> Result<crate::api_jobs::DaemonLeaseJobDiagnostics> {
+    recover_dead_generations_with(job_store, current_lease_id, |store, lease| {
+        store.reconcile_dead_generation_jobs(lease)
+    })
+}
+
+/// Startup recovery's single path: staged direct `runner.exec` jobs are
+/// requeued for this generation first, then every other active in-scope job of
+/// a dead generation is reconciled against its recorded child.
+fn recover_dead_generations_with(
+    job_store: &JobStore,
+    current_lease_id: &str,
+    reconcile: impl FnOnce(&JobStore, &str) -> Result<crate::api_jobs::DaemonLeaseJobDiagnostics>,
+) -> Result<crate::api_jobs::DaemonLeaseJobDiagnostics> {
+    recover_staged_direct_jobs_after_owner_death(job_store, current_lease_id)?;
+    let diagnostics = reconcile(job_store, current_lease_id)?;
+    if !diagnostics.needs_attestation_job_ids.is_empty() {
+        eprintln!(
+            "daemon startup recovery left {} dead-generation job(s) without child identity; run `homeboy daemon recover --attest-absent <job-id>...` once their workload is gone: {}",
+            diagnostics.needs_attestation_job_ids.len(),
+            diagnostics
+                .needs_attestation_job_ids
+                .iter()
+                .map(Uuid::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    Ok(diagnostics)
+}
+
 fn recover_staged_direct_jobs_after_owner_death(
     job_store: &JobStore,
-    proven_dead_lease: &str,
+    current_lease_id: &str,
 ) -> Result<()> {
+    let dead_generation = job_store.active_dead_generation_job_ids(current_lease_id);
     for job in job_store.list().into_iter().filter(|job| {
         job.status == JobStatus::Queued
             && job.operation == "runner.exec"
-            && job.daemon_lease_id.as_deref() == Some(proven_dead_lease)
+            && dead_generation.contains(&job.id)
     }) {
         let Some(runner_id) = job.target_runner_id.as_deref() else {
+            continue;
+        };
+        let Some(proven_dead_lease) = job.daemon_lease_id.clone() else {
             continue;
         };
         let Some(envelope) = job_store.staged_direct_execution_envelope(job.id, runner_id)? else {
@@ -3933,7 +3928,7 @@ fn recover_staged_direct_jobs_after_owner_death(
             Some(StagedDirectExecution::Recovered(
                 job.id,
                 envelope,
-                proven_dead_lease.to_string(),
+                proven_dead_lease.clone(),
             )),
         ) {
             // No child existed at the proven-dead boundary. A preparation

@@ -767,7 +767,6 @@ mod tests {
             work_evidence: RemoteDaemonWorkEvidence::Unknown,
             endpoint_probe_error: None,
             termination_evidence: None,
-            daemon_freshness: None,
         }
     }
 
@@ -1104,7 +1103,6 @@ mod tests {
                 os_evidence: "test".to_string(),
                 stop_requested: true,
             }),
-            daemon_freshness: None,
         };
 
         confirm_remote_daemon_stopped_after_transport_error(&session, &status)
@@ -1139,7 +1137,6 @@ mod tests {
             work_evidence: RemoteDaemonWorkEvidence::Unknown,
             endpoint_probe_error: None,
             termination_evidence: None,
-            daemon_freshness: None,
         };
 
         confirm_remote_daemon_stopped_after_transport_error(&session, &status)

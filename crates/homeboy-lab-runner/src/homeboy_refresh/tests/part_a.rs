@@ -225,7 +225,6 @@ fn refresh_preserves_only_its_direct_controller_lease_for_orphan_recovery() {
         worker_identity: None,
         worker_pid: None,
         last_seen_at: None,
-        leaseless_recovery_evidence: None,
     };
 
     assert_eq!(
@@ -315,7 +314,6 @@ fn connected_refresh_rotates_before_connecting_the_promoted_binary() {
         worker_identity: None,
         worker_pid: None,
         last_seen_at: None,
-        leaseless_recovery_evidence: None,
     };
     let operations = std::cell::RefCell::new(Vec::new());
 
@@ -410,7 +408,6 @@ fn refreshed_daemon_status(connected: bool, identity: Option<&str>) -> RunnerSta
             worker_identity: None,
             worker_pid: None,
             last_seen_at: None,
-            leaseless_recovery_evidence: None,
         }),
         stale_daemon: None,
         configured_job_binary_build_identity: identity.map(str::to_string),
@@ -911,7 +908,6 @@ fn stale_daemon_admission_snapshot(
         pid,
         recovery_evidence: None,
         ownership_evidence: None,
-        adoption_command: None,
         binary_hash: None,
         daemon_version: None,
         daemon_build_identity: None,

@@ -103,8 +103,8 @@ pub(crate) fn validate_lease_file(path: &Path) -> Result<DaemonLeaseValidation> 
 
     let running = pid_is_running(state.pid);
     // A dead owner is safe to recover even when its persisted schema is
-    // unsupported. Keeping the parsed lease identity makes explicit adoption
-    // possible; a live invalid lease remains protected by schema validation.
+    // unsupported. Keeping the parsed lease identity lets startup recovery
+    // name the dead generation; a live invalid lease remains protected by schema validation.
     if !running {
         return Ok(stale_lease(
             state,
@@ -199,7 +199,7 @@ pub(crate) fn stale_lease(
 /// convenient: a report with half the contract populated forces consumers to
 /// special-case which producer built it.
 ///
-/// The `repair_plan` and `adoption_command` are in this daemon's own local
+/// The `repair_plan` is in this daemon's own local
 /// frame (`homeboy daemon …`), which is correct for `homeboy daemon status` and
 /// wrong anywhere the report is read over a transport. A remote reader must
 /// restate them against whatever handle it uses to reach this machine.
@@ -226,16 +226,16 @@ pub(crate) fn freshness_report_from_validation(
         );
     let lease_id = state.map(|state| state.lease_id.clone());
     let pid = state.map(|state| state.pid);
-    // The lease names an exact PID the local kernel proved is gone, so its
-    // durable jobs can be reconciled against that one lease rather than guessed
-    // at. `DaemonFreshnessReport` has a second producer that observes a daemon
+    // The lease names an exact PID the local kernel proved is gone. Starting a
+    // replacement runs its startup recovery of this dead generation's jobs.
+    // `DaemonFreshnessReport` has a second producer that observes a daemon
     // over a transport; both classify this evidence identically so a consumer
     // can rely on the field regardless of which one filled it in.
     let proven_dead = validation.stale_reason_code == Some(DaemonStaleReasonCode::PidDead)
         && lease_id.is_some()
         && pid.is_some();
-    // No lease owns the store, yet durable jobs remain: the only safe action is
-    // explicit lease-less reconciliation, never an implicit replacement.
+    // No lease owns the store, yet durable jobs remain. A started daemon
+    // recovers every foreign lease in its scope, state record or not.
     let leaseless_reconciliation_available = validation.stale_reason_code
         == Some(DaemonStaleReasonCode::LeaseMissing)
         && active_jobs > 0;
@@ -249,7 +249,7 @@ pub(crate) fn freshness_report_from_validation(
         ))
     } else if leaseless_reconciliation_available {
         Some(format!(
-            "daemon state records no lease while {active_jobs} durable job(s) remain; they require explicit reconciliation before replacement"
+            "daemon state records no lease while {active_jobs} durable job(s) remain; a started daemon's startup recovery reconciles them"
         ))
     } else if recoverable_fresh_idle {
         Some("daemon lease is fresh with zero active jobs".to_string())
@@ -265,44 +265,18 @@ pub(crate) fn freshness_report_from_validation(
         ));
     }
 
-    // One definition of each recovery invocation, as argv. The adoption command
-    // and the repair step are the same action in two shapes, so both are
-    // rendered from the action rather than written out twice.
-    let adoption_action = if proven_dead {
-        Some(recovery_actions::adopt_orphan(
-            lease_id.as_deref().expect("proven dead lease"),
-        ))
-    } else if leaseless_reconciliation_available {
-        Some(recovery_actions::reconcile_leaseless_orphans())
-    } else {
-        None
-    };
-    let adoption_command = adoption_action
-        .as_ref()
-        .map(crate::error::ExecutableAction::render_command);
-
-    // A restartable lease has nothing durable to protect. Ask the lifecycle
-    // resolver to rotate the selected authority instead of stopping first and
-    // accidentally starting in the caller's legacy state directory. Otherwise
-    // the repair is exactly the explicit
-    // reconciliation the evidence authorizes; anything else would be prose. The
-    // last case is deliberately empty here: a local report that authorizes no
-    // mutation is completed by the dispatcher, which owns the diagnostic step.
-    //
-    let repair_plan = if restartable {
+    // A restartable lease has nothing durable to protect, and a dead or
+    // missing daemon is recovered by starting one: serve's startup recovery
+    // reconciles every dead generation in its scope (#17429). Ask the
+    // lifecycle resolver to rotate the selected authority instead of stopping
+    // first and accidentally starting in the caller's legacy state directory.
+    // The last case is deliberately empty here: a local report that authorizes
+    // no mutation is completed by the dispatcher, which owns the diagnostic
+    // step.
+    let repair_plan = if restartable || proven_dead || leaseless_reconciliation_available {
         vec![DaemonRepairStep::executable(
             recovery_actions::DAEMON_ENSURE_RUNNING,
             recovery_actions::ensure_running(),
-        )]
-    } else if proven_dead {
-        vec![DaemonRepairStep::executable(
-            recovery_actions::DAEMON_ADOPT_ORPHAN,
-            adoption_action.clone().expect("proven dead adoption"),
-        )]
-    } else if leaseless_reconciliation_available {
-        vec![DaemonRepairStep::executable(
-            recovery_actions::DAEMON_RECONCILE_LEASELESS_ORPHANS,
-            adoption_action.clone().expect("leaseless adoption"),
         )]
     } else {
         Vec::new()
@@ -322,7 +296,6 @@ pub(crate) fn freshness_report_from_validation(
             DaemonRecoveryEvidence::Unavailable
         }),
         ownership_evidence,
-        adoption_command,
         binary_hash: state.and_then(|state| state.binary_sha256.clone()),
         daemon_version: state.map(|state| state.build_identity.version.clone()),
         daemon_build_identity: state.map(|state| state.build_identity.display.clone()),

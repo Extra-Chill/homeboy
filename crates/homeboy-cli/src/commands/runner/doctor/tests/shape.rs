@@ -284,7 +284,7 @@ fn doctor_failure_projection_lifts_actionable_root_causes_in_compact_and_full_mo
         (
             "daemon.recovery",
             Some("pid_dead"),
-            "homeboy runner connect local --adopt-orphan-lease lease-dead",
+            "homeboy runner connect local",
             "runner.doctor.daemon_recovery.pid_dead",
         ),
         (

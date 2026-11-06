@@ -1,8 +1,8 @@
 //! Daemon-lease reconciliation and recovery for `JobStore`.
 //!
-//! Split from the `api_jobs::store` god file: the daemon-lease job diagnostics,
-//! active-job recovery evidence, and the family of dead / exact-loss / terminal
-//! / leaseless reconciliation routines. Implemented as a second `impl JobStore`
+//! Split from the `api_jobs::store` god file: active-job recovery evidence,
+//! dead-generation startup reconciliation, operator-attested absence, and
+//! terminal-evidence reconciliation. Implemented as a second `impl JobStore`
 //! block over the same type; `use super::*` inherits the parent module's local
 //! helper types/functions and its private `JobStore` fields remain reachable.
 
@@ -16,8 +16,7 @@ use super::super::persistence::{
 };
 use super::super::types::{
     DaemonActiveJobRecoveryDisposition, DaemonActiveJobRecoveryEvidence, DaemonLeaseJobDiagnostics,
-    Job, JobEvent, JobEventKind, JobStatus, LeaselessOrphanAffectedJob,
-    LeaselessOrphanJobDiagnostics,
+    Job, JobEvent, JobEventKind, JobStatus,
 };
 use super::JobStore;
 use super::*;
@@ -111,38 +110,6 @@ impl JobStore {
         ))
     }
 
-    pub fn daemon_lease_job_diagnostics(
-        &self,
-        expected_lease_id: &str,
-    ) -> DaemonLeaseJobDiagnostics {
-        let mut diagnostics = DaemonLeaseJobDiagnostics {
-            expected_lease_id: expected_lease_id.to_string(),
-            ..DaemonLeaseJobDiagnostics::default()
-        };
-        let inner = self.inner.lock().expect("job store mutex poisoned");
-        for stored in inner.jobs.values() {
-            if !matches!(stored.job.status, JobStatus::Queued | JobStatus::Running) {
-                continue;
-            }
-            match stored.job.daemon_lease_id.as_deref() {
-                Some(lease_id) if lease_id == expected_lease_id => {
-                    diagnostics.matching_job_ids.push(stored.job.id)
-                }
-                Some(_) => diagnostics.other_lease_job_ids.push(stored.job.id),
-                // The empty lease selector is private to lease-less recovery.
-                // It routes pre-lease records through this exact typed engine.
-                None if expected_lease_id.is_empty() => {
-                    diagnostics.matching_job_ids.push(stored.job.id)
-                }
-                None => diagnostics.unowned_job_ids.push(stored.job.id),
-            }
-        }
-        diagnostics.matching_job_ids.sort();
-        diagnostics.other_lease_job_ids.sort();
-        diagnostics.unowned_job_ids.sort();
-        diagnostics
-    }
-
     /// Read active-job recovery evidence without reconciling or persisting jobs.
     /// Typed execution-owner identity is authoritative; legacy progress payloads are
     /// intentionally not used to infer ownership. A terminal linked durable run
@@ -220,6 +187,14 @@ impl JobStore {
                     .is_some_and(|lease| job.daemon_lease_id.as_deref() == Some(lease))
                 {
                     DaemonActiveJobRecoveryDisposition::MissingChildIdentityRecoverable
+                } else if self.owns(stored)
+                    && stored.remote_runner.is_none()
+                    && (stored.controller_job.is_some() || job.status == JobStatus::Running)
+                {
+                    // A dead generation's in-scope job with no recorded child
+                    // identity: startup recovery leaves it untouched, and only
+                    // `daemon recover --attest-absent` terminalizes it.
+                    DaemonActiveJobRecoveryDisposition::NeedsAttestation
                 } else {
                     DaemonActiveJobRecoveryDisposition::BlockingAmbiguous
                 };
@@ -261,12 +236,6 @@ impl JobStore {
             let stored = inner.jobs.get(&item.job_id).expect("evidence job exists");
             match resolve_linked(stored) {
                 LinkedDurableRunResolution::None => {}
-                LinkedDurableRunResolution::Terminal(recovered) => {
-                    item.linked_durable_run_id = Some(recovered.run_id);
-                    item.linked_durable_run_state = Some(DaemonLinkedDurableRunState::Terminal);
-                    item.linked_durable_run_terminal_status = Some(recovered.status);
-                    item.disposition = DaemonActiveJobRecoveryDisposition::TerminalEvidence;
-                }
                 LinkedDurableRunResolution::Active(run_id) => {
                     item.linked_durable_run_id = Some(run_id);
                     item.linked_durable_run_state = Some(DaemonLinkedDurableRunState::Active);
@@ -282,265 +251,162 @@ impl JobStore {
         evidence
     }
 
-    pub fn reconcile_dead_daemon_lease_jobs(
+    /// Reconcile every active job of a dead daemon generation in this store's
+    /// scope: each in-scope job whose lease is not `current_lease_id`.
+    ///
+    /// The caller holds the daemon owner lock. Only the lock holder writes the
+    /// lease, so while it is held every other lease in this scope belongs to a
+    /// generation that is gone, whether or not its `state.json` survived. Jobs
+    /// of another scope in the shared ledger are never selected.
+    ///
+    /// A job whose recorded child still runs is protected; one whose recorded
+    /// child is dead is terminalized with its retained evidence. Controller
+    /// jobs are left to `recover_controller_jobs`, which owns their resume.
+    /// A running job with no recorded child identity is left untouched and
+    /// reported in `needs_attestation_job_ids`: nothing in process can prove
+    /// its workload is gone.
+    pub fn reconcile_dead_generation_jobs(
         &self,
-        expected_lease_id: &str,
+        current_lease_id: &str,
     ) -> Result<DaemonLeaseJobDiagnostics> {
-        self.reconcile_dead_daemon_lease_jobs_with_local_child_liveness(
-            expected_lease_id,
+        self.reconcile_dead_generation_jobs_with_local_child_liveness(
+            current_lease_id,
             local_child_liveness,
             recovered_terminal_agent_task_result,
         )
     }
 
-    /// Terminalize an operator-supplied, complete set of PID-less jobs after a
-    /// daemon's unexpected death has been proven by the lifecycle controller.
-    /// This is deliberately separate from automatic reconciliation: every
-    /// active job must be named, owned by the exact lease, and have no child
-    /// identity that could contradict the operator's absence confirmation.
-    pub fn reconcile_exact_daemon_loss_jobs(
+    /// Active in-scope jobs stamped with a lease other than `current_lease_id`:
+    /// while the caller holds the owner lock, these are dead generations' work.
+    pub(crate) fn active_dead_generation_job_ids(
         &self,
-        expected_lease_id: &str,
-        expected_job_ids: &[Uuid],
-        daemon_pid: u32,
-    ) -> Result<DaemonLeaseJobDiagnostics> {
-        self.reconcile_exact_daemon_loss_jobs_with_child_liveness(
-            expected_lease_id,
-            expected_job_ids,
-            daemon_pid,
-            local_child_liveness,
-        )
-    }
-
-    /// Implementation of [`Self::reconcile_exact_daemon_loss_jobs`] with an
-    /// injectable child-liveness probe (tests supply a fixed answer).
-    #[allow(private_bounds)]
-    pub(crate) fn reconcile_exact_daemon_loss_jobs_with_child_liveness(
-        &self,
-        expected_lease_id: &str,
-        expected_job_ids: &[Uuid],
-        daemon_pid: u32,
-        inspect_local_child: impl Fn(&LocalChildExecution) -> LocalChildLiveness,
-    ) -> Result<DaemonLeaseJobDiagnostics> {
-        let expected = expected_job_ids
-            .iter()
-            .copied()
-            .collect::<std::collections::BTreeSet<_>>();
-        if expected.is_empty() || expected.len() != expected_job_ids.len() {
-            return Err(Error::validation_invalid_argument(
-                "job_id",
-                "dead-daemon recovery requires a non-empty, unique exact active job set",
-                None,
-                None,
-            ));
-        }
-        self.durable_transaction(|inner| {
-        let active = inner
-            .jobs
-            .values()
-            .filter(|stored| matches!(stored.job.status, JobStatus::Queued | JobStatus::Running))
-            .map(|stored| stored.job.id)
-            .collect::<std::collections::BTreeSet<_>>();
-        if active != expected {
-            return Err(Error::validation_invalid_argument(
-                "job_id",
-                format!(
-                    "dead-daemon recovery job IDs must name the exact active durable-job set; expected {:?}, found {:?}",
-                    expected, active
-                ),
-                Some(expected_lease_id.to_string()),
-                None,
-            ));
-        }
-        for job_id in &expected {
-            let stored = inner.jobs.get(job_id).expect("active job exists");
-            if stored.job.daemon_lease_id.as_deref() != Some(expected_lease_id) {
-                return Err(Error::validation_invalid_argument(
-                    "job_id",
-                    format!("job `{job_id}` is not owned by daemon lease `{expected_lease_id}`"),
-                    Some(job_id.to_string()),
-                    None,
-                ));
-            }
-            if matches!(
-                stored_job_execution_liveness(stored, &inspect_local_child).state,
-                Some(LocalChildLiveness::Live | LocalChildLiveness::Unsupported(_))
-            ) {
-                return Err(Error::validation_invalid_argument(
-                    "job_id",
-                    format!("job `{job_id}` has live or unverifiable workload-process evidence; refusing operator no-PID recovery"),
-                    Some(job_id.to_string()),
-                    None,
-                ));
-            }
-        }
-        let now = timestamp_ms();
-        for job_id in &expected {
-            // The operator attestation also covers work a linked durable run
-            // may still own elsewhere; record that link so the evidence shows
-            // exactly what was vouched for (#15556).
-            let linked_durable_run = inner
-                .jobs
-                .get(job_id)
-                .and_then(stored_job_durable_run_id)
-                .map(|run_id| {
-                    let state = super::super::agent_task_terminal_recovery::linked_durable_run_state(&run_id);
-                    serde_json::json!({ "run_id": run_id, "state": state })
-                });
-            let stored = inner.jobs.get_mut(job_id).expect("active job exists");
-            stored.job.status = JobStatus::Failed;
-            stored.job.updated_at_ms = now;
-            stored.job.finished_at_ms = Some(now);
-            stored.job.stale_reason = Some(
-                "daemon lost after unexpected termination; operator confirmed workloads absent"
-                    .to_string(),
-            );
-            let data = serde_json::json!({
-                "status": JobStatus::Failed,
-                "reason": "operator_confirmed_daemon_loss_after_unexpected_termination",
-                "daemon_lease_id": expected_lease_id,
-                "daemon_pid": daemon_pid,
-                "operator_confirmed_workload_processes_absent": true,
-                "exact_active_job_set": expected,
-                "linked_durable_run": linked_durable_run,
-            });
-            for (kind, message) in [
-                (
-                    JobEventKind::Error,
-                    "daemon lost after unexpected termination",
-                ),
-                (
-                    JobEventKind::Status,
-                    "job marked failed after exact operator daemon-loss reconciliation",
-                ),
-            ] {
-                let sequence = self.next_event_sequence.fetch_add(1, Ordering::SeqCst) + 1;
-                stored.events.push(JobEvent {
-                    sequence,
-                    job_id: *job_id,
-                    kind,
-                    timestamp_ms: now,
-                    message: Some(message.to_string()),
-                    data: Some(data.clone()),
-                });
-            }
-            apply_event_retention(&mut stored.events, self.event_retention_limit());
-            stored.job.event_count = stored.events.len();
-        }
-        Ok(DaemonLeaseJobDiagnostics {
-            expected_lease_id: expected_lease_id.to_string(),
-            matching_job_ids: expected.into_iter().collect(),
-            ..DaemonLeaseJobDiagnostics::default()
-        })
-        })
-    }
-
-    /// Terminalize one explicitly confirmed pre-spawn reservation after its
-    /// daemon owner is proven dead. This intentionally refuses every other
-    /// active job so orphan adoption cannot infer ownership or bulk-recover.
-    pub fn recover_expired_pidless_reservation_for_dead_daemon_lease(
-        &self,
-        expected_lease_id: &str,
-        confirmed_job_ids: &[Uuid],
-    ) -> Result<DaemonLeaseJobDiagnostics> {
-        let [job_id] = confirmed_job_ids else {
-            return Err(Error::validation_invalid_argument(
-                "confirm_untracked_child_dead",
-                "exactly one job ID must be confirmed for expired PID-less reservation recovery",
-                Some(expected_lease_id.to_string()),
-                None,
-            ));
-        };
-        let now = timestamp_ms();
-        self.durable_transaction(|inner| {
-        let active_job_ids = inner
+        current_lease_id: &str,
+    ) -> std::collections::BTreeSet<Uuid> {
+        let inner = self.inner.lock().expect("job store mutex poisoned");
+        inner
             .jobs
             .values()
             .filter(|stored| {
                 matches!(stored.job.status, JobStatus::Queued | JobStatus::Running)
-                    && stored.job.daemon_lease_id.as_deref() == Some(expected_lease_id)
+                    && self.owns(stored)
+                    && stored.job.daemon_lease_id.as_deref() != Some(current_lease_id)
             })
             .map(|stored| stored.job.id)
-            .collect::<Vec<_>>();
-        if active_job_ids.as_slice() != [*job_id] {
+            .collect()
+    }
+
+    /// Terminalize exactly `job_ids` on an operator's attestation that their
+    /// workload is gone. Each job must be active, in this store's scope, owned
+    /// by a dead generation (any lease other than `live_lease_id`, which the
+    /// caller proves by holding or probing the owner lock), and have no recorded
+    /// child identity that could contradict the attestation. Any failed check
+    /// refuses the whole set; the attestation is persisted on every job.
+    pub fn attest_dead_generation_jobs_absent(
+        &self,
+        live_lease_id: Option<&str>,
+        job_ids: &[Uuid],
+    ) -> Result<Vec<Uuid>> {
+        let attested = job_ids
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>();
+        if attested.is_empty() || attested.len() != job_ids.len() {
             return Err(Error::validation_invalid_argument(
-                "confirm_untracked_child_dead",
-                format!(
-                    "expired PID-less reservation recovery requires the only active job for lease `{expected_lease_id}`; active jobs: {}",
-                    active_job_ids.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
-                ),
-                Some(job_id.to_string()),
+                "attest_absent",
+                "--attest-absent requires a non-empty set of unique job IDs",
+                None,
                 None,
             ));
         }
-        let stored = inner
-            .jobs
-            .get_mut(job_id)
-            .expect("confirmed active job exists");
-        let reservation = stored.local_child.as_ref().ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "confirm_untracked_child_dead",
-                "confirmed job has no local child reservation",
-                Some(job_id.to_string()),
-                None,
-            )
-        })?;
-        if stored.job.status != JobStatus::Queued
-            || reservation.process.is_some()
-            || reservation.reservation_expires_at_ms > now
-        {
-            return Err(Error::validation_invalid_argument(
-                "confirm_untracked_child_dead",
-                "confirmed job is not an expired PID-less pre-spawn reservation",
-                Some(job_id.to_string()),
-                None,
-            ));
-        }
-        let terminal_result = serde_json::json!({
-            "status": JobStatus::Failed,
-            "reason": "operator_confirmed_expired_pidless_reservation_after_dead_daemon_lease",
-            "retryable": true,
-            "expected_lease_id": expected_lease_id,
-            "reservation_id": reservation.reservation_id,
-            "reservation_expires_at_ms": reservation.reservation_expires_at_ms,
-            "operator_confirmation": true,
-        });
-        stored.job.status = JobStatus::Failed;
-        stored.job.updated_at_ms = now;
-        stored.job.finished_at_ms = Some(now);
-        stored.job.stale_reason =
-            Some("local child reservation lease expired before spawn".to_string());
-        for (kind, message) in [
-            (
-                JobEventKind::Error,
-                "expired PID-less reservation recovered after dead daemon lease",
-            ),
-            (
-                JobEventKind::Result,
-                "retryable terminal reservation recovery",
-            ),
-            (
-                JobEventKind::Status,
-                "job marked failed after explicit expired reservation recovery",
-            ),
-        ] {
-            let sequence = self.next_event_sequence.fetch_add(1, Ordering::SeqCst) + 1;
-            stored.events.push(JobEvent {
-                sequence,
-                job_id: *job_id,
-                kind,
-                timestamp_ms: now,
-                message: Some(message.to_string()),
-                data: Some(terminal_result.clone()),
-            });
-        }
-        apply_event_retention(&mut stored.events, self.event_retention_limit());
-        stored.job.event_count = stored.events.len();
-        Ok(DaemonLeaseJobDiagnostics {
-            expected_lease_id: expected_lease_id.to_string(),
-            matching_job_ids: vec![*job_id],
-            ..DaemonLeaseJobDiagnostics::default()
-        })
+        self.durable_transaction(|inner| {
+            for job_id in &attested {
+                let refuse = |reason: String| {
+                    Err(Error::validation_invalid_argument(
+                        "attest_absent",
+                        format!("refusing the attested job set: job `{job_id}` {reason}"),
+                        Some(job_id.to_string()),
+                        None,
+                    ))
+                };
+                let Some(stored) = inner.jobs.get(job_id) else {
+                    return refuse("does not exist".to_string());
+                };
+                if !matches!(stored.job.status, JobStatus::Queued | JobStatus::Running) {
+                    return refuse("is not active".to_string());
+                }
+                if !self.owns(stored) {
+                    return refuse("belongs to another daemon scope".to_string());
+                }
+                if live_lease_id.is_some() && stored.job.daemon_lease_id.as_deref() == live_lease_id
+                {
+                    return refuse("belongs to the live daemon generation".to_string());
+                }
+                if stored_job_execution_liveness(stored, &local_child_liveness)
+                    .state
+                    .is_some()
+                {
+                    return refuse(
+                        "has a recorded child identity; daemon startup recovery proves its state"
+                            .to_string(),
+                    );
+                }
+            }
+            let now = timestamp_ms();
+            for job_id in &attested {
+                // The attestation also covers work a linked durable run may
+                // still own elsewhere; record that link so the evidence shows
+                // exactly what was vouched for (#15556).
+                let linked_durable_run = inner
+                    .jobs
+                    .get(job_id)
+                    .and_then(stored_job_durable_run_id)
+                    .map(|run_id| {
+                        let state =
+                            super::super::agent_task_terminal_recovery::linked_durable_run_state(
+                                &run_id,
+                            );
+                        serde_json::json!({ "run_id": run_id, "state": state })
+                    });
+                let stored = inner.jobs.get_mut(job_id).expect("attested job exists");
+                stored.job.status = JobStatus::Failed;
+                stored.job.updated_at_ms = now;
+                stored.job.finished_at_ms = Some(now);
+                stored.job.stale_reason = Some(
+                    "daemon generation died; operator attested its workload absent".to_string(),
+                );
+                let data = serde_json::json!({
+                    "status": JobStatus::Failed,
+                    "reason": "operator_attested_workload_absent_after_daemon_death",
+                    "retryable": true,
+                    "daemon_lease_id": stored.job.daemon_lease_id,
+                    "operator_confirmed_workload_processes_absent": true,
+                    "attested_job_ids": attested,
+                    "linked_durable_run": linked_durable_run,
+                });
+                for (kind, message) in [
+                    (
+                        JobEventKind::Error,
+                        "daemon generation died before recording a child identity",
+                    ),
+                    (
+                        JobEventKind::Status,
+                        "job marked failed after operator attested its workload absent",
+                    ),
+                ] {
+                    let sequence = self.next_event_sequence.fetch_add(1, Ordering::SeqCst) + 1;
+                    stored.events.push(JobEvent {
+                        sequence,
+                        job_id: *job_id,
+                        kind,
+                        timestamp_ms: now,
+                        message: Some(message.to_string()),
+                        data: Some(data.clone()),
+                    });
+                }
+                apply_event_retention(&mut stored.events, self.event_retention_limit());
+                stored.job.event_count = stored.events.len();
+            }
+            Ok(attested.iter().copied().collect())
         })
     }
 
@@ -613,178 +479,13 @@ impl JobStore {
     }
 
     #[cfg(test)]
-    pub(crate) fn reconcile_dead_daemon_lease_jobs_with_confirmed_no_pid_jobs(
+    pub(crate) fn reconcile_dead_generation_jobs_with_child_liveness(
         &self,
-        expected_lease_id: &str,
-        confirmed_no_pid_job_ids: &[Uuid],
-    ) -> Result<DaemonLeaseJobDiagnostics> {
-        self.reconcile_dead_daemon_lease_jobs_with_confirmed_no_pid_jobs_and_linked_resolver(
-            expected_lease_id,
-            confirmed_no_pid_job_ids,
-            |_| false,
-            |stored| {
-                stored
-                    .remote_runner
-                    .as_ref()
-                    .and_then(|remote| remote.envelope.lifecycle.as_ref())
-                    .and_then(|lifecycle| lifecycle.durable_run_id.clone())
-                    .map(LinkedDurableRunResolution::Unresolved)
-                    .unwrap_or(LinkedDurableRunResolution::None)
-            },
-        )
-    }
-
-    #[cfg(test)]
-    pub(crate) fn reconcile_dead_daemon_lease_jobs_with_confirmed_no_pid_jobs_and_linked_resolver(
-        &self,
-        expected_lease_id: &str,
-        confirmed_no_pid_job_ids: &[Uuid],
-        pid_is_alive: impl Fn(u32) -> bool,
-        resolve_linked: impl Fn(&StoredJob) -> LinkedDurableRunResolution,
-    ) -> Result<DaemonLeaseJobDiagnostics> {
-        let inner = self.inner.lock().expect("job store mutex poisoned");
-        let matching = inner
-            .jobs
-            .values()
-            .filter(|stored| {
-                matches!(stored.job.status, JobStatus::Queued | JobStatus::Running)
-                    && stored.job.daemon_lease_id.as_deref() == Some(expected_lease_id)
-            })
-            .map(|stored| (stored.job.id, resolve_linked(stored)))
-            .collect::<Vec<_>>();
-        drop(inner);
-        if let Some((job_id, LinkedDurableRunResolution::Unresolved(run_id))) = matching
-            .iter()
-            .find(|(_, resolution)| matches!(resolution, LinkedDurableRunResolution::Unresolved(_)))
-        {
-            return Err(Error::validation_invalid_argument(
-                "expected-lease-id",
-                format!("refusing dead-daemon recovery because linked durable run `{run_id}` for job `{job_id}` cannot be safely resolved"),
-                Some(expected_lease_id.to_string()),
-                None,
-            ));
-        }
-        let protected_job_ids = matching
-            .iter()
-            .filter_map(|(job_id, resolution)| {
-                matches!(resolution, LinkedDurableRunResolution::Active(_)).then_some(*job_id)
-            })
-            .collect::<Vec<_>>();
-        if !protected_job_ids.is_empty() {
-            return Ok(DaemonLeaseJobDiagnostics {
-                expected_lease_id: expected_lease_id.to_string(),
-                matching_job_ids: matching.iter().map(|(job_id, _)| *job_id).collect(),
-                protected_job_ids,
-                ..DaemonLeaseJobDiagnostics::default()
-            });
-        }
-        let live_progress_job_ids = {
-            let inner = self.inner.lock().expect("job store mutex poisoned");
-            matching
-                .iter()
-                .filter_map(|(job_id, resolution)| {
-                    if !matches!(resolution, LinkedDurableRunResolution::None) {
-                        return None;
-                    }
-                    let stored = inner.jobs.get(job_id).expect("job exists");
-                    stored
-                        .events
-                        .iter()
-                        .rev()
-                        .find_map(|event| {
-                            event
-                                .data
-                                .as_ref()
-                                .and_then(|data| data["process"]["root_pid"].as_u64())
-                                .and_then(|pid| u32::try_from(pid).ok())
-                        })
-                        .filter(|pid| pid_is_alive(*pid))
-                        .map(|_| *job_id)
-                })
-                .collect::<Vec<_>>()
-        };
-        if !live_progress_job_ids.is_empty() {
-            return Ok(DaemonLeaseJobDiagnostics {
-                expected_lease_id: expected_lease_id.to_string(),
-                matching_job_ids: matching.iter().map(|(job_id, _)| *job_id).collect(),
-                protected_job_ids: live_progress_job_ids,
-                ..DaemonLeaseJobDiagnostics::default()
-            });
-        }
-        for (job_id, resolution) in &matching {
-            if let LinkedDurableRunResolution::Terminal(recovered) = resolution {
-                self.durable_transaction(|inner| {
-                    let stored = inner.jobs.get_mut(job_id).expect("job exists");
-                    stored.job.status = recovered.status;
-                    stored.job.finished_at_ms = Some(timestamp_ms());
-                    stored.job.updated_at_ms = stored.job.finished_at_ms.expect("timestamp");
-                    Ok(())
-                })?;
-            }
-        }
-        if matching
-            .iter()
-            .any(|(_, resolution)| matches!(resolution, LinkedDurableRunResolution::Terminal(_)))
-        {
-            return Ok(DaemonLeaseJobDiagnostics {
-                expected_lease_id: expected_lease_id.to_string(),
-                matching_job_ids: matching.iter().map(|(job_id, _)| *job_id).collect(),
-                ..DaemonLeaseJobDiagnostics::default()
-            });
-        }
-        let unresolved_job_ids = matching
-            .iter()
-            .filter_map(|(job_id, resolution)| {
-                matches!(resolution, LinkedDurableRunResolution::None).then_some(*job_id)
-            })
-            .collect::<std::collections::BTreeSet<_>>();
-        let confirmed_job_ids = confirmed_no_pid_job_ids
-            .iter()
-            .copied()
-            .collect::<std::collections::BTreeSet<_>>();
-        if confirmed_job_ids != unresolved_job_ids {
-            let invalid = confirmed_job_ids
-                .symmetric_difference(&unresolved_job_ids)
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join(", ");
-            return Err(Error::validation_invalid_argument(
-                "confirm_untracked_child_dead",
-                format!("exact confirmation is required for unresolved active job(s) {invalid}"),
-                Some(expected_lease_id.to_string()),
-                None,
-            ));
-        }
-        if !confirmed_job_ids.is_empty() {
-            for job_id in confirmed_job_ids {
-                self.fail(job_id, "operator confirmed untracked child is dead")?;
-                self.append_status_event_with_data(
-                    job_id,
-                    JobStatus::Failed,
-                    "job marked failed after operator confirmation",
-                    serde_json::json!({
-                        "reason": "operator_confirmed_untracked_child_dead_after_dead_daemon_lease",
-                        "operator_confirmation": true,
-                    }),
-                )?;
-            }
-            return Ok(DaemonLeaseJobDiagnostics {
-                expected_lease_id: expected_lease_id.to_string(),
-                matching_job_ids: matching.iter().map(|(job_id, _)| *job_id).collect(),
-                ..DaemonLeaseJobDiagnostics::default()
-            });
-        }
-        self.reconcile_dead_daemon_lease_jobs(expected_lease_id)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn reconcile_dead_daemon_lease_jobs_with_child_liveness(
-        &self,
-        expected_lease_id: &str,
+        current_lease_id: &str,
         pid_is_alive: impl Fn(u32) -> bool,
     ) -> Result<DaemonLeaseJobDiagnostics> {
-        self.reconcile_dead_daemon_lease_jobs_with_child_liveness_and_terminal_result(
-            expected_lease_id,
+        self.reconcile_dead_generation_jobs_with_child_liveness_and_terminal_result(
+            current_lease_id,
             pid_is_alive,
             recovered_terminal_agent_task_result,
         )
@@ -814,14 +515,14 @@ impl JobStore {
     }
 
     #[cfg(test)]
-    pub(crate) fn reconcile_dead_daemon_lease_jobs_with_child_liveness_and_terminal_result(
+    pub(crate) fn reconcile_dead_generation_jobs_with_child_liveness_and_terminal_result(
         &self,
-        expected_lease_id: &str,
+        current_lease_id: &str,
         pid_is_alive: impl Fn(u32) -> bool,
         terminal_child_result: impl Fn(&StoredJob) -> Option<RecoveredTerminalJob>,
     ) -> Result<DaemonLeaseJobDiagnostics> {
-        self.reconcile_dead_daemon_lease_jobs_with_local_child_liveness(
-            expected_lease_id,
+        self.reconcile_dead_generation_jobs_with_local_child_liveness(
+            current_lease_id,
             |child| match child.process.as_ref() {
                 Some(process) if pid_is_alive(process.pid) => LocalChildLiveness::Live,
                 Some(_) => LocalChildLiveness::Dead,
@@ -833,33 +534,36 @@ impl JobStore {
         )
     }
 
-    fn reconcile_dead_daemon_lease_jobs_with_local_child_liveness(
+    fn reconcile_dead_generation_jobs_with_local_child_liveness(
         &self,
-        expected_lease_id: &str,
+        current_lease_id: &str,
         inspect_local_child: impl Fn(&LocalChildExecution) -> LocalChildLiveness,
         terminal_child_result: impl Fn(&StoredJob) -> Option<RecoveredTerminalJob>,
     ) -> Result<DaemonLeaseJobDiagnostics> {
-        let diagnostics = self.daemon_lease_job_diagnostics(expected_lease_id);
-        if diagnostics.unowned_count() > 0 {
-            return Err(Error::validation_invalid_argument(
-                "expected-lease-id",
-                format!(
-                    "refusing automatic dead-daemon recovery: {} legacy unowned active job(s) {}; inspect them with `homeboy daemon status` and reconcile after operator review",
-                    diagnostics.unowned_count(),
-                    diagnostics.unowned_job_ids.iter().map(ToString::to_string).collect::<Vec<_>>().join(", "),
-                ),
-                Some(expected_lease_id.to_string()),
-                None,
-            ));
-        }
-
         self.durable_transaction(|inner| {
-        let mut diagnostics = diagnostics;
-        let mut dispositions = Vec::with_capacity(diagnostics.matching_job_ids.len());
-        let mut ambiguous_job_ids = Vec::new();
+        let mut diagnostics = DaemonLeaseJobDiagnostics::default();
+        let mut selected = inner
+            .jobs
+            .values()
+            .filter(|stored| {
+                matches!(stored.job.status, JobStatus::Queued | JobStatus::Running)
+                    && self.owns(stored)
+                    && stored.job.daemon_lease_id.as_deref() != Some(current_lease_id)
+            })
+            .map(|stored| stored.job.id)
+            .collect::<Vec<_>>();
+        selected.sort();
+        let mut dispositions = Vec::with_capacity(selected.len());
         let reconciliation_now = timestamp_ms();
-        for job_id in &diagnostics.matching_job_ids {
-            let stored = inner.jobs.get(job_id).expect("diagnosed job exists");
+        for job_id in &selected {
+            let stored = inner.jobs.get(job_id).expect("selected job exists");
+            diagnostics.matching_job_ids.push(*job_id);
+            // Driver-owned work resumes, or stays protected, through
+            // `recover_controller_jobs`; generic reconciliation never fails it.
+            if stored.controller_job.is_some() {
+                diagnostics.preserved_controller_job_ids.push(*job_id);
+                continue;
+            }
             let disposition =
                 if let Some((status, exit_code)) = recovered_terminal_from_result(&stored.events) {
                     DeadLeaseJobDisposition::RecoveredOuterResult(status, exit_code)
@@ -884,10 +588,7 @@ impl JobStore {
                             DeadLeaseJobDisposition::ProtectedLive
                         }
                         LocalChildLiveness::Dead | LocalChildLiveness::IdentityMismatch => {
-                            if stored.controller_job.is_some() {
-                                diagnostics.preserved_controller_job_ids.push(*job_id);
-                                DeadLeaseJobDisposition::PreservedController
-                            } else if let Some(recovered) = terminal_child_result(stored) {
+                            if let Some(recovered) = terminal_child_result(stored) {
                                 DeadLeaseJobDisposition::RecoveredLinkedRun(recovered)
                             } else {
                                 DeadLeaseJobDisposition::TerminalizeDead
@@ -898,37 +599,21 @@ impl JobStore {
                             DeadLeaseJobDisposition::ProtectedUnsupported(evidence)
                         }
                     }
-                } else if resumable_in_daemon_controller_work(stored) {
-                    // The lease owner is proven dead and was this job's only
-                    // executor. Preserve the checkpointed driver work for the
-                    // replacement daemon's controller recovery to resume
-                    // (#15420).
-                    diagnostics.preserved_controller_job_ids.push(*job_id);
-                    DeadLeaseJobDisposition::PreservedController
+                } else if stored.job.status == JobStatus::Queued {
+                    DeadLeaseJobDisposition::TerminalizeDead
                 } else {
-                    if stored.job.status == JobStatus::Queued {
-                        DeadLeaseJobDisposition::TerminalizeDead
-                    } else {
-                        ambiguous_job_ids.push(*job_id);
-                        continue;
-                    }
+                    // Running with no recorded child identity: nothing can
+                    // prove the workload is gone (#15556 chaos case 2).
+                    diagnostics.needs_attestation_job_ids.push(*job_id);
+                    continue;
                 };
             dispositions.push((*job_id, disposition));
-        }
-        if !ambiguous_job_ids.is_empty() {
-            return Err(Error::validation_invalid_argument(
-                "expected-lease-id",
-                format!(
-                    "refusing automatic dead-daemon recovery: active job(s) {} have no authoritative terminal result or recorded child PID; inspect durable lifecycle/process evidence with `homeboy daemon status` before retrying",
-                    ambiguous_job_ids.iter().map(ToString::to_string).collect::<Vec<_>>().join(", "),
-                ),
-                Some(expected_lease_id.to_string()),
-                None,
-            ));
         }
 
         let now = timestamp_ms();
         for (job_id, disposition) in dispositions {
+            let stored = inner.jobs.get_mut(&job_id).expect("selected job exists");
+            let dead_lease_id = stored.job.daemon_lease_id.clone();
             let stored = inner.jobs.get_mut(&job_id).expect("diagnosed job exists");
             if let DeadLeaseJobDisposition::RecoveredOuterResult(status, exit_code) = disposition {
                 stored.job.status = status;
@@ -949,7 +634,7 @@ impl JobStore {
                         "status": status,
                         "reason": "recovered_after_dead_daemon_lease",
                         "exit_code": exit_code,
-                        "daemon_lease_id": expected_lease_id,
+                        "daemon_lease_id": dead_lease_id,
                     })),
                 });
                 apply_event_retention(&mut stored.events, self.event_retention_limit());
@@ -984,7 +669,7 @@ impl JobStore {
                     data: Some(serde_json::json!({
                         "status": recovered.status,
                         "reason": "recovered_after_dead_daemon_lease",
-                        "daemon_lease_id": expected_lease_id,
+                        "daemon_lease_id": dead_lease_id,
                         "child_terminal_result": recovered.terminal_result,
                     })),
                 });
@@ -993,11 +678,7 @@ impl JobStore {
                 continue;
             }
             if let DeadLeaseJobDisposition::ProtectedUnsupported(evidence) = disposition {
-                let reason = if stored.controller_job.is_some() {
-                    "controller_execution_owner_unavailable"
-                } else {
-                    "local_child_identity_unsupported"
-                };
+                let reason = "local_child_identity_unsupported";
                 let duplicate = stored.events.last().is_some_and(|event| {
                     event.data.as_ref().is_some_and(|data| {
                         data["reason"] == reason
@@ -1028,9 +709,6 @@ impl JobStore {
             if matches!(disposition, DeadLeaseJobDisposition::PreservedRemote) {
                 continue;
             }
-            if matches!(disposition, DeadLeaseJobDisposition::PreservedController) {
-                continue;
-            }
             let reason = "daemon lease owner process was not running".to_string();
             stored.job.status = JobStatus::Failed;
             stored.job.updated_at_ms = now;
@@ -1044,7 +722,7 @@ impl JobStore {
                     serde_json::json!({
                         "reason": "dead_daemon_lease",
                         "classification": classification,
-                        "daemon_lease_id": expected_lease_id,
+                        "daemon_lease_id": dead_lease_id,
                     }),
                 ),
                 (
@@ -1053,7 +731,7 @@ impl JobStore {
                     serde_json::json!({
                         "status": JobStatus::Failed,
                         "reason": "dead_daemon_lease",
-                        "daemon_lease_id": expected_lease_id,
+                        "daemon_lease_id": dead_lease_id,
                     }),
                 ),
             ] {
@@ -1073,81 +751,9 @@ impl JobStore {
         diagnostics.protected_job_ids.sort();
         diagnostics.preserved_remote_job_ids.sort();
         diagnostics.preserved_controller_job_ids.sort();
+        diagnostics.needs_attestation_job_ids.sort();
         Ok(diagnostics)
         })
-    }
-
-    /// Terminalize all active jobs after an operator has proved that no daemon
-    /// owns a store whose current daemon lease is missing. Historical job leases
-    /// remain evidence; they cannot prove a current owner or be adopted as one.
-    pub fn reconcile_leaseless_orphan_jobs(&self) -> Result<LeaselessOrphanJobDiagnostics> {
-        // The per-lease call below is the same typed disposition engine used by
-        // dead-lease recovery.
-        let (historical_lease_ids, has_unowned_jobs) = {
-            let inner = self.inner.lock().expect("job store mutex poisoned");
-            let mut leases = Vec::new();
-            let mut has_unowned = false;
-            for stored in inner.jobs.values().filter(|stored| {
-                matches!(stored.job.status, JobStatus::Queued | JobStatus::Running)
-            }) {
-                if let Some(lease_id) = &stored.job.daemon_lease_id {
-                    leases.push(lease_id.clone());
-                } else {
-                    has_unowned = true;
-                }
-            }
-            (leases, has_unowned)
-        };
-
-        let mut diagnostics = LeaselessOrphanJobDiagnostics {
-            historical_lease_ids,
-            ..LeaselessOrphanJobDiagnostics::default()
-        };
-        diagnostics.historical_lease_ids.sort();
-        diagnostics.historical_lease_ids.dedup();
-        let mut selectors = Vec::with_capacity(
-            diagnostics.historical_lease_ids.len() + usize::from(has_unowned_jobs),
-        );
-        if has_unowned_jobs {
-            selectors.push(String::new());
-        }
-        selectors.extend(diagnostics.historical_lease_ids.clone());
-        for lease_id in selectors {
-            let lease = self.reconcile_dead_daemon_lease_jobs(&lease_id)?;
-            diagnostics
-                .protected_job_ids
-                .extend(lease.protected_job_ids.iter().copied());
-            diagnostics
-                .preserved_remote_job_ids
-                .extend(lease.preserved_remote_job_ids.iter().copied());
-            diagnostics
-                .preserved_controller_job_ids
-                .extend(lease.preserved_controller_job_ids.iter().copied());
-            for job_id in lease.matching_job_ids {
-                if lease.protected_job_ids.contains(&job_id)
-                    || lease.preserved_remote_job_ids.contains(&job_id)
-                    || lease.preserved_controller_job_ids.contains(&job_id)
-                {
-                    continue;
-                }
-                diagnostics.reconciled_job_ids.push(job_id);
-                diagnostics.affected_jobs.push(LeaselessOrphanAffectedJob {
-                    job_id,
-                    original_daemon_lease_id: (!lease_id.is_empty()).then(|| lease_id.clone()),
-                });
-            }
-        }
-        diagnostics.reconciled_job_ids.sort();
-        diagnostics.reconciled_job_ids.dedup();
-        diagnostics.affected_jobs.sort_by_key(|job| job.job_id);
-        diagnostics.affected_jobs.dedup_by_key(|job| job.job_id);
-        diagnostics.protected_job_ids.sort();
-        diagnostics.protected_job_ids.dedup();
-        diagnostics.preserved_remote_job_ids.sort();
-        diagnostics.preserved_remote_job_ids.dedup();
-        diagnostics.preserved_controller_job_ids.sort();
-        diagnostics.preserved_controller_job_ids.dedup();
-        Ok(diagnostics)
     }
 
     /// Whether this store's daemon executes a job stamped with `job_lease_id`.

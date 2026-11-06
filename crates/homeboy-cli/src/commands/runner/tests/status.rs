@@ -62,7 +62,6 @@ fn runner_session_fixture() -> RunnerSession {
         worker_identity: None,
         worker_pid: None,
         last_seen_at: None,
-        leaseless_recovery_evidence: None,
     }
 }
 
@@ -109,7 +108,6 @@ fn reconcile_reports_remaining_daemon_skew() {
         pid: None,
         recovery_evidence: Some(DaemonRecoveryEvidence::Recoverable),
         ownership_evidence: None,
-        adoption_command: None,
         binary_hash: None,
         daemon_version: None,
         daemon_build_identity: None,
@@ -217,7 +215,6 @@ fn runner_command_failure_next_action_is_never_the_failed_command() {
         pid: None,
         recovery_evidence: Some(DaemonRecoveryEvidence::Recoverable),
         ownership_evidence: None,
-        adoption_command: None,
         binary_hash: None,
         daemon_version: None,
         daemon_build_identity: None,
@@ -253,7 +250,6 @@ fn reconcile_uses_authoritative_non_version_freshness_blocker() {
         pid: None,
         recovery_evidence: Some(DaemonRecoveryEvidence::ProvenDead),
         ownership_evidence: None,
-        adoption_command: None,
         binary_hash: None,
         daemon_version: None,
         daemon_build_identity: None,
@@ -261,8 +257,8 @@ fn reconcile_uses_authoritative_non_version_freshness_blocker() {
         active_jobs: 0,
         termination_evidence: None,
         repair_plan: vec![DaemonRepairStep::text(
-            "runner_reconcile_leaseless_orphans",
-            "homeboy runner connect homeboy-lab --reconcile-leaseless-orphans",
+            "runner_connect",
+            "homeboy runner connect homeboy-lab",
         )],
     });
     let mut admission = admission_fixture();
@@ -290,7 +286,6 @@ fn unavailable_daemon_ownership_is_terminal_across_status_and_reconcile() {
         ownership_evidence: Some(
             "remote daemon lease ownership could not be established".to_string(),
         ),
-        adoption_command: None,
         binary_hash: None,
         daemon_version: Some("0.349.0".to_string()),
         daemon_build_identity: Some("homeboy 0.349.0+incompatible".to_string()),
@@ -298,8 +293,8 @@ fn unavailable_daemon_ownership_is_terminal_across_status_and_reconcile() {
         active_jobs: 0,
         termination_evidence: None,
         repair_plan: vec![DaemonRepairStep::text(
-            "runner_reconcile_leaseless_orphans",
-            "homeboy runner connect 'homeboy lab' --reconcile-leaseless-orphans",
+            "runner_connect",
+            "homeboy runner connect 'homeboy lab'",
         )],
     });
 
@@ -316,7 +311,7 @@ fn unavailable_daemon_ownership_is_terminal_across_status_and_reconcile() {
     // that would apply (#15556).
     assert_eq!(
         outcome.next_action.as_deref(),
-        Some("homeboy runner reconcile 'homeboy lab' --confirm-workload-processes-absent")
+        Some("homeboy runner reconcile 'homeboy lab' --attest-absent")
     );
     assert_eq!(
         outcome.retry_predicate.as_deref(),
@@ -338,7 +333,7 @@ fn unavailable_daemon_ownership_is_terminal_across_status_and_reconcile() {
     let outcome = reconciliation_outcome("homeboy lab", &report, &admission);
     assert_eq!(
         outcome.next_action.as_deref(),
-        Some("homeboy runner reconcile 'homeboy lab' --confirm-workload-processes-absent")
+        Some("homeboy runner reconcile 'homeboy lab' --attest-absent")
     );
     assert_eq!(
         operator_summary(&report).next_action,
@@ -361,7 +356,6 @@ fn terminal_ownership_dominates_status_followups() {
         pid: None,
         recovery_evidence: Some(DaemonRecoveryEvidence::Unavailable),
         ownership_evidence: Some("ambiguous remote daemon candidates".to_string()),
-        adoption_command: None,
         binary_hash: None,
         daemon_version: None,
         daemon_build_identity: None,
@@ -495,7 +489,6 @@ fn direct_runner_status_commands_include_lifecycle_operations() {
             worker_identity: None,
             worker_pid: None,
             last_seen_at: Some("2026-06-19T00:00:01Z".to_string()),
-            leaseless_recovery_evidence: None,
             ..runner_session_fixture()
         }),
         stale_daemon: None,
@@ -621,7 +614,6 @@ fn direct_runner_status_exposes_the_explicit_session_reconcile_command() {
             worker_identity: None,
             worker_pid: None,
             last_seen_at: None,
-            leaseless_recovery_evidence: None,
             ..runner_session_fixture()
         }),
         stale_daemon: None,
@@ -674,7 +666,6 @@ fn disconnected_split_view_status_exposes_bounded_reconciliation_command() {
             worker_identity: None,
             worker_pid: None,
             last_seen_at: None,
-            leaseless_recovery_evidence: None,
             ..runner_session_fixture()
         }),
         stale_daemon: None,
@@ -687,16 +678,16 @@ fn disconnected_split_view_status_exposes_bounded_reconciliation_command() {
             pid: Some(23456),
             recovery_evidence: Some(DaemonRecoveryEvidence::ProvenDead),
             ownership_evidence: None,
-            adoption_command: Some(
-                "homeboy runner connect homeboy-lab --reconcile-leaseless-orphans".to_string(),
-            ),
             binary_hash: None,
             daemon_version: None,
             daemon_build_identity: None,
             runtime_paths: None,
             active_jobs: 1,
             termination_evidence: None,
-            repair_plan: Vec::new(),
+            repair_plan: vec![DaemonRepairStep::text(
+                "runner_connect",
+                "homeboy runner connect homeboy-lab",
+            )],
         }),
         active_jobs: Vec::new(),
         active_runner_jobs: Vec::new(),
@@ -717,8 +708,8 @@ fn disconnected_split_view_status_exposes_bounded_reconciliation_command() {
 
     assert!(commands.iter().any(|command| {
         command.scope == "daemon_reconcile_split_view"
-            && command.command.contains("--reconcile-leaseless-orphans")
-            && command.description.contains("process")
+            && command.command == "homeboy runner connect homeboy-lab"
+            && command.description.contains("owner lock")
     }));
 
     report
@@ -807,7 +798,6 @@ fn admission_followups_replace_generic_restart_for_ambiguous_missing_lease() {
         pid: None,
         recovery_evidence: Some(homeboy::core::daemon::DaemonRecoveryEvidence::Unavailable),
         ownership_evidence: Some("ambiguous foreground daemon candidates".to_string()),
-        adoption_command: None,
         binary_hash: None,
         daemon_version: None,
         daemon_build_identity: None,
@@ -858,7 +848,6 @@ fn terminal_ownership_suppresses_mutating_full_status_guidance_across_projection
         pid: None,
         recovery_evidence: Some(DaemonRecoveryEvidence::Unavailable),
         ownership_evidence: Some("ambiguous remote daemon candidates".to_string()),
-        adoption_command: None,
         binary_hash: None,
         daemon_version: Some("0.320.0".to_string()),
         daemon_build_identity: Some("homeboy 0.320.0+runner".to_string()),
@@ -866,8 +855,8 @@ fn terminal_ownership_suppresses_mutating_full_status_guidance_across_projection
         active_jobs: 0,
         termination_evidence: None,
         repair_plan: vec![DaemonRepairStep::text(
-            "runner_reconcile_leaseless_orphans",
-            "homeboy runner connect homeboy-lab --reconcile-leaseless-orphans",
+            "runner_connect",
+            "homeboy runner connect homeboy-lab",
         )],
     });
     let admission = report.admission_summary();
@@ -884,7 +873,7 @@ fn terminal_ownership_suppresses_mutating_full_status_guidance_across_projection
     );
     assert_eq!(
         outcome.next_action.as_deref(),
-        Some("homeboy runner reconcile homeboy-lab --confirm-workload-processes-absent")
+        Some("homeboy runner reconcile homeboy-lab --attest-absent")
     );
     assert!(followups.iter().all(|followup| {
         !matches!(
@@ -935,7 +924,6 @@ fn unqualified_status_followups_use_selected_admission_action() {
         pid: None,
         recovery_evidence: Some(homeboy::core::daemon::DaemonRecoveryEvidence::Unavailable),
         ownership_evidence: Some("ambiguous foreground daemon candidates".to_string()),
-        adoption_command: None,
         binary_hash: None,
         daemon_version: None,
         daemon_build_identity: None,
@@ -1026,7 +1014,6 @@ fn runner_status_artifact_diagnostics_surface_controller_runner_checks_and_drift
             worker_identity: None,
             worker_pid: None,
             last_seen_at: Some("2026-06-19T00:00:01Z".to_string()),
-            leaseless_recovery_evidence: None,
             ..runner_session_fixture()
         }),
         stale_daemon: None,
@@ -1092,7 +1079,6 @@ fn runner_homeboy_status_distinguishes_daemon_and_job_binary_roles() {
             worker_identity: None,
             worker_pid: None,
             last_seen_at: None,
-            leaseless_recovery_evidence: None,
             ..runner_session_fixture()
         }),
         stale_daemon: None,

@@ -2,9 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::ser::{SerializeStruct, Serializer};
 use serde::{Deserialize, Serialize};
 
-use homeboy_core::daemon::{
-    DaemonFreshnessReport, DaemonLeaselessRecoveryResult, DaemonStateLossRecoveryResult,
-};
+use homeboy_core::daemon::DaemonFreshnessReport;
 
 use homeboy_core::engine::shell;
 use homeboy_core::error::{ActionSafety, ExecutableAction};
@@ -150,22 +148,6 @@ pub struct RunnerActiveJobRecoveryEvidence {
     pub reconciled_job_ids: Vec<String>,
     pub prior_active_job_count: usize,
     pub active_job_count: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum RunnerLeaselessRecoveryContract {
-    ConfirmNoDaemonOwner,
-    ReconcileLeaselessOrphansAndConfirmNoDaemonOwner,
-    ConfirmControlPlaneLost,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RunnerLeaselessRecoveryEvidence {
-    pub contract: RunnerLeaselessRecoveryContract,
-    pub remote_command_identity: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub recovery: Option<DaemonLeaselessRecoveryResult>,
 }
 
 // RunnerArtifactRef is behavior-free data; it now lives in the shared
@@ -511,12 +493,6 @@ pub struct RunnerConnectReport {
     pub homeboy_build_identity: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_path: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub leaseless_recovery: Option<DaemonLeaselessRecoveryResult>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub state_loss_recovery: Option<DaemonStateLossRecoveryResult>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub leaseless_recovery_evidence: Option<RunnerLeaselessRecoveryEvidence>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failure_kind: Option<RunnerFailureKind>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1021,7 +997,6 @@ mod status_serialization_tests {
             pid: Some(1234),
             recovery_evidence: None,
             ownership_evidence: None,
-            adoption_command: None,
             binary_hash: None,
             daemon_version: None,
             daemon_build_identity: None,
@@ -1054,7 +1029,6 @@ mod status_serialization_tests {
             worker_identity: Some("worker".to_string()),
             worker_pid: Some(43),
             last_seen_at: Some("2026-09-24T00:00:01Z".to_string()),
-            leaseless_recovery_evidence: None,
         }
     }
 
@@ -1348,7 +1322,6 @@ mod status_serialization_tests {
             pid: None,
             recovery_evidence: Some(homeboy_core::daemon::DaemonRecoveryEvidence::Unavailable),
             ownership_evidence: Some("ambiguous foreground daemon candidates".to_string()),
-            adoption_command: None,
             binary_hash: None,
             daemon_version: None,
             daemon_build_identity: None,
@@ -1356,8 +1329,8 @@ mod status_serialization_tests {
             active_jobs: 0,
             termination_evidence: None,
             repair_plan: vec![homeboy_core::daemon::DaemonRepairStep::text(
-                "runner_reconcile_leaseless_orphans",
-                "homeboy runner connect homeboy-lab --reconcile-leaseless-orphans",
+                "runner_connect",
+                "homeboy runner connect homeboy-lab",
             )],
         });
 
@@ -1381,7 +1354,6 @@ mod status_serialization_tests {
             pid: Some(1234),
             recovery_evidence: None,
             ownership_evidence: Some("reachable daemon lease and PID verified".to_string()),
-            adoption_command: None,
             binary_hash: None,
             daemon_version: Some("0.1.0".to_string()),
             daemon_build_identity: None,
@@ -1420,7 +1392,6 @@ mod status_serialization_tests {
             pid: Some(1234),
             recovery_evidence: Some(homeboy_core::daemon::DaemonRecoveryEvidence::Recoverable),
             ownership_evidence: Some("reachable daemon lease and PID verified".to_string()),
-            adoption_command: None,
             binary_hash: None,
             daemon_version: Some("0.428.0".to_string()),
             daemon_build_identity: Some(
@@ -1476,7 +1447,6 @@ mod status_serialization_tests {
             pid: Some(1234),
             recovery_evidence: Some(homeboy_core::daemon::DaemonRecoveryEvidence::Recoverable),
             ownership_evidence: Some("reachable daemon lease and PID verified".to_string()),
-            adoption_command: None,
             binary_hash: None,
             daemon_version: Some("0.370.1".to_string()),
             daemon_build_identity: Some(
@@ -1539,7 +1509,6 @@ mod status_serialization_tests {
             pid: None,
             recovery_evidence: None,
             ownership_evidence: None,
-            adoption_command: None,
             binary_hash: None,
             daemon_version: Some("0.374.5".to_string()),
             daemon_build_identity: None,
@@ -1570,7 +1539,6 @@ mod status_serialization_tests {
             pid: None,
             recovery_evidence: Some(homeboy_core::daemon::DaemonRecoveryEvidence::Unavailable),
             ownership_evidence: Some("ambiguous remote daemon candidates".to_string()),
-            adoption_command: None,
             binary_hash: None,
             daemon_version: None,
             daemon_build_identity: None,

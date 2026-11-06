@@ -64,7 +64,6 @@ fn health_session(addr: std::net::SocketAddr) -> RunnerSession {
         worker_identity: None,
         worker_pid: None,
         last_seen_at: None,
-        leaseless_recovery_evidence: None,
     }
 }
 
@@ -515,16 +514,16 @@ fn disconnected_lab_doctor_reuses_daemon_recovery_envelope() {
         ownership_evidence: Some(
             "remote daemon status over SSH proved PID 4545 is dead".to_string(),
         ),
-        adoption_command: Some(
-            "homeboy runner connect lab --adopt-orphan-lease lease-dead".to_string(),
-        ),
         binary_hash: None,
         daemon_version: Some("0.284.0".to_string()),
         daemon_build_identity: Some("homeboy 0.284.0+live".to_string()),
         runtime_paths: None,
         active_jobs: 1,
         termination_evidence: None,
-        repair_plan: Vec::new(),
+        repair_plan: vec![homeboy::core::daemon::DaemonRepairStep::text(
+            daemon_repair_codes::RUNNER_CONNECT,
+            "homeboy runner connect lab",
+        )],
     };
     let runner = Runner {
         id: "lab".to_string(),
@@ -576,7 +575,7 @@ fn disconnected_lab_doctor_reuses_daemon_recovery_envelope() {
     assert_eq!(compact["failure"]["details"]["lease_id"], "lease-dead");
     assert_eq!(
         compact["failure"]["next_actions"][0]["command"],
-        "homeboy runner connect lab --adopt-orphan-lease lease-dead"
+        "homeboy runner connect lab"
     );
 }
 
@@ -592,7 +591,6 @@ fn disconnected_incompatible_daemon_with_unavailable_ownership_is_terminal() {
         ownership_evidence: Some(
             "remote daemon lease ownership could not be established".to_string(),
         ),
-        adoption_command: None,
         binary_hash: None,
         daemon_version: Some("0.349.0".to_string()),
         daemon_build_identity: Some("homeboy 0.349.0+incompatible".to_string()),
@@ -689,7 +687,7 @@ mod repair_dispatch {
         );
 
         assert_eq!(
-            dispatch_for(&step, Some("lease-live")),
+            dispatch_for(&step),
             DaemonRepairDispatch::RefreshHomeboy {
                 git_ref: None,
                 allow_downgrade: false,
@@ -715,42 +713,12 @@ mod repair_dispatch {
         );
 
         assert_eq!(
-            dispatch_for(&step, None),
+            dispatch_for(&step),
             DaemonRepairDispatch::RefreshHomeboy {
                 git_ref: Some("abc123".to_string()),
                 allow_downgrade: true,
             }
         );
-    }
-
-    /// The lease comes from the report's typed evidence, never from the text.
-    #[test]
-    fn an_adoption_step_takes_its_lease_from_the_report() {
-        let step = DaemonRepairStep::text(
-            daemon_repair_codes::RUNNER_ADOPT_ORPHAN_LEASE,
-            "homeboy runner connect lab --adopt-orphan-lease lease-in-text",
-        );
-
-        assert_eq!(
-            dispatch_for(&step, Some("lease-from-report")),
-            DaemonRepairDispatch::AdoptOrphanLease {
-                lease_id: "lease-from-report".to_string(),
-            },
-            "the lease must come from typed evidence, not from the command string"
-        );
-    }
-
-    #[test]
-    fn an_adoption_step_without_a_lease_refuses_rather_than_guessing() {
-        let step = DaemonRepairStep::text(
-            daemon_repair_codes::RUNNER_ADOPT_ORPHAN_LEASE,
-            "homeboy runner connect lab --adopt-orphan-lease lease-in-text",
-        );
-
-        let DaemonRepairDispatch::NotAutomatable { reason } = dispatch_for(&step, None) else {
-            panic!("an adoption with no lease must not be executed");
-        };
-        assert!(reason.contains("no lease id"), "{reason}");
     }
 
     /// The empty-plan case. A report matching no repair branch now yields a
@@ -763,9 +731,7 @@ mod repair_dispatch {
             "homeboy runner doctor lab --scope lab-offload",
         );
 
-        let DaemonRepairDispatch::NotAutomatable { reason } =
-            dispatch_for(&step, Some("lease-live"))
-        else {
+        let DaemonRepairDispatch::NotAutomatable { reason } = dispatch_for(&step) else {
             panic!("a read-only diagnosis is not a repair to apply");
         };
         assert!(reason.contains("authorizes no mutation"), "{reason}");
@@ -781,7 +747,7 @@ mod repair_dispatch {
             "homeboy runner refresh-homeboy lab --ref abc123 --reconnect",
         );
 
-        let DaemonRepairDispatch::NotAutomatable { reason } = dispatch_for(&step, None) else {
+        let DaemonRepairDispatch::NotAutomatable { reason } = dispatch_for(&step) else {
             panic!("an untyped step must never be shell-parsed into an execution");
         };
         assert!(
@@ -793,34 +759,18 @@ mod repair_dispatch {
     #[test]
     fn the_generic_reconnect_plan_still_dispatches_step_by_step() {
         assert_eq!(
-            dispatch_for(
-                &DaemonRepairStep::text(
-                    daemon_repair_codes::RUNNER_DISCONNECT,
-                    "homeboy runner disconnect lab"
-                ),
-                None
-            ),
+            dispatch_for(&DaemonRepairStep::text(
+                daemon_repair_codes::RUNNER_DISCONNECT,
+                "homeboy runner disconnect lab"
+            )),
             DaemonRepairDispatch::Disconnect
         );
         assert_eq!(
-            dispatch_for(
-                &DaemonRepairStep::text(
-                    daemon_repair_codes::RUNNER_CONNECT,
-                    "homeboy runner connect lab"
-                ),
-                None
-            ),
+            dispatch_for(&DaemonRepairStep::text(
+                daemon_repair_codes::RUNNER_CONNECT,
+                "homeboy runner connect lab"
+            )),
             DaemonRepairDispatch::Connect
-        );
-        assert_eq!(
-            dispatch_for(
-                &DaemonRepairStep::text(
-                    daemon_repair_codes::RUNNER_RECONCILE_LEASELESS_ORPHANS,
-                    "homeboy runner connect lab --reconcile-leaseless-orphans"
-                ),
-                None
-            ),
-            DaemonRepairDispatch::ReconcileLeaselessOrphans
         );
     }
 }
@@ -839,7 +789,6 @@ mod repair_readiness {
             pid: Some(4242),
             recovery_evidence: Some(homeboy::core::daemon::DaemonRecoveryEvidence::Recoverable),
             ownership_evidence: None,
-            adoption_command: None,
             binary_hash: None,
             daemon_version: None,
             daemon_build_identity: None,

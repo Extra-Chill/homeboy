@@ -9,9 +9,8 @@
 //! commands bound to an explicit runner id.
 //!
 //! Each builder produces an [`ExecutableAction`] — argv, not text. The command
-//! string a report carries is rendered from that argv, so the `adoption_command`
-//! a report advertises, the `repair_plan` step an operator reads, and the
-//! arguments an executor would run can never drift apart, and no consumer has to
+//! string a report carries is rendered from that argv, so the `repair_plan`
+//! step an operator reads and the arguments an executor would run can never drift apart, and no consumer has to
 //! parse a rendered shell command back into arguments to act on it (#11103).
 
 use homeboy_core::daemon::{DaemonFreshnessReport, DaemonRepairStep, DaemonStaleReasonCode};
@@ -27,8 +26,6 @@ pub mod codes {
     pub const RUNNER_DISCONNECT: &str = "runner_disconnect";
     pub const RUNNER_CONNECT: &str = "runner_connect";
     pub const RUNNER_REFRESH_HOMEBOY: &str = "runner_refresh_homeboy";
-    pub const RUNNER_ADOPT_ORPHAN_LEASE: &str = "runner_adopt_orphan_lease";
-    pub const RUNNER_RECONCILE_LEASELESS_ORPHANS: &str = "runner_reconcile_leaseless_orphans";
     /// A recovery command a runner advertised as text. It has no argv behind it,
     /// so it is surfaced to the operator rather than executed.
     pub const STALE_DAEMON_RECOVERY: &str = "stale_daemon_recovery";
@@ -38,8 +35,8 @@ pub mod codes {
 }
 
 pub(crate) use codes::{
-    RUNNER_ADOPT_ORPHAN_LEASE, RUNNER_CONNECT, RUNNER_DIAGNOSE, RUNNER_DISCONNECT,
-    RUNNER_RECONCILE_LEASELESS_ORPHANS, RUNNER_REFRESH_HOMEBOY, STALE_DAEMON_RECOVERY,
+    RUNNER_CONNECT, RUNNER_DIAGNOSE, RUNNER_DISCONNECT, RUNNER_REFRESH_HOMEBOY,
+    STALE_DAEMON_RECOVERY,
 };
 
 /// A step whose argv is authoritative; its text is rendered from the action.
@@ -79,37 +76,6 @@ pub(crate) fn connect_action(runner_id: &str) -> ExecutableAction {
             "runner".to_string(),
             "connect".to_string(),
             runner_id.to_string(),
-        ],
-        ActionSafety::Mutating,
-    )
-}
-
-/// `homeboy runner connect <id> --adopt-orphan-lease <lease>`.
-pub(crate) fn adopt_orphan_lease_action(runner_id: &str, lease_id: &str) -> ExecutableAction {
-    runner_action(
-        "runner.adopt_orphan_lease",
-        format!("adopt proven-dead lease {lease_id} on runner {runner_id}"),
-        [
-            "runner".to_string(),
-            "connect".to_string(),
-            runner_id.to_string(),
-            "--adopt-orphan-lease".to_string(),
-            lease_id.to_string(),
-        ],
-        ActionSafety::Mutating,
-    )
-}
-
-/// `homeboy runner connect <id> --reconcile-leaseless-orphans`.
-pub(crate) fn reconcile_leaseless_orphans_action(runner_id: &str) -> ExecutableAction {
-    runner_action(
-        "runner.reconcile_leaseless_orphans",
-        format!("reconcile lease-less durable jobs on runner {runner_id}"),
-        [
-            "runner".to_string(),
-            "connect".to_string(),
-            runner_id.to_string(),
-            "--reconcile-leaseless-orphans".to_string(),
         ],
         ActionSafety::Mutating,
     )
@@ -195,37 +161,20 @@ pub(crate) fn controller_frame_plan(
     if !report.has_recovery_ownership_proof() {
         return Vec::new();
     }
-    // Adoption eligibility is authored by the daemon after its owner-lock
-    // check. `PidDead` alone is insufficient once the report has crossed the
-    // runner boundary: a held owner lock deliberately clears this command and
-    // it must not be reconstructed here.
-    if report.stale_reason_code == Some(DaemonStaleReasonCode::PidDead)
-        && report.adoption_command.is_some()
-    {
-        if let Some(lease_id) = report.lease_id.as_deref().filter(|_| report.pid.is_some()) {
-            return vec![action_step(
-                RUNNER_ADOPT_ORPHAN_LEASE,
-                adopt_orphan_lease_action(runner_id, lease_id),
-            )];
-        }
-    }
-    // Durable jobs outlived the lease that owned them. Reconciliation is the
-    // only action that can retire them, and it is the same explicit,
-    // operator-confirmed command the disconnected remote-recovery path emits.
-    if report.active_jobs > 0
+    // A dead generation, or durable jobs that outlived the lease that owned
+    // them, is repaired by starting the runner's daemon: its startup
+    // recovery reconciles every in-scope job its dead predecessor left,
+    // under the owner lock (#17429). `runner connect` is that start.
+    let proven_dead = report.stale_reason_code == Some(DaemonStaleReasonCode::PidDead)
+        && report.lease_id.is_some()
+        && report.pid.is_some();
+    let orphaned_jobs = report.active_jobs > 0
         && matches!(
             report.stale_reason_code,
-            Some(
-                DaemonStaleReasonCode::LeaseMissing
-                    | DaemonStaleReasonCode::LeaseCorrupt
-                    | DaemonStaleReasonCode::VersionMismatch
-            )
-        )
-    {
-        return vec![action_step(
-            RUNNER_RECONCILE_LEASELESS_ORPHANS,
-            reconcile_leaseless_orphans_action(runner_id),
-        )];
+            Some(DaemonStaleReasonCode::LeaseMissing | DaemonStaleReasonCode::LeaseCorrupt)
+        );
+    if proven_dead || orphaned_jobs {
+        return vec![action_step(RUNNER_CONNECT, connect_action(runner_id))];
     }
     // An identity drift is a binary problem, not a lease problem: reconnecting
     // the same runner-side binary would reproduce the mismatch.
@@ -280,7 +229,6 @@ mod tests {
             pid: Some(4545),
             recovery_evidence: None,
             ownership_evidence: None,
-            adoption_command: None,
             binary_hash: None,
             daemon_version: None,
             daemon_build_identity: None,
@@ -310,38 +258,27 @@ mod tests {
     }
 
     #[test]
-    fn a_dead_lease_becomes_an_explicit_runner_side_adoption() {
+    fn a_dead_generation_is_repaired_by_starting_its_successor() {
         let mut report = report(Some(DaemonStaleReasonCode::PidDead), 1, false);
         report.recovery_evidence = Some(DaemonRecoveryEvidence::ProvenDead);
-        report.adoption_command =
-            Some("homeboy daemon adopt-orphan --lease-id lease-remote".to_string());
         assert_eq!(
             plan(&report),
             vec![(
-                RUNNER_ADOPT_ORPHAN_LEASE.to_string(),
-                "homeboy runner connect homeboy-lab --adopt-orphan-lease lease-remote".to_string()
+                RUNNER_CONNECT.to_string(),
+                "homeboy runner connect homeboy-lab".to_string()
             )]
         );
     }
 
     #[test]
-    fn a_dead_lease_without_an_adoption_command_does_not_rebuild_adoption() {
-        assert!(
-            plan(&report(Some(DaemonStaleReasonCode::PidDead), 0, false))
-                .iter()
-                .all(|(code, _)| code != RUNNER_ADOPT_ORPHAN_LEASE)
-        );
-    }
-
-    #[test]
-    fn durable_jobs_without_an_owning_lease_become_explicit_reconciliation() {
+    fn durable_jobs_without_an_owning_lease_are_repaired_by_starting_the_daemon() {
         let mut report = report(Some(DaemonStaleReasonCode::LeaseMissing), 2, false);
         report.recovery_evidence = Some(DaemonRecoveryEvidence::ProvenDead);
         assert_eq!(
             plan(&report),
             vec![(
-                RUNNER_RECONCILE_LEASELESS_ORPHANS.to_string(),
-                "homeboy runner connect homeboy-lab --reconcile-leaseless-orphans".to_string()
+                RUNNER_CONNECT.to_string(),
+                "homeboy runner connect homeboy-lab".to_string()
             )]
         );
     }
@@ -423,7 +360,6 @@ mod tests {
             for restartable in [true, false] {
                 for active_jobs in [0, 1] {
                     let mut report = report(Some(code), active_jobs, restartable);
-                    report.adoption_command = Some("daemon-authored".to_string());
                     report.recovery_evidence = Some(DaemonRecoveryEvidence::ProvenDead);
                     let plan = controller_frame_plan("homeboy-lab", &report);
                     if plan.is_empty() {

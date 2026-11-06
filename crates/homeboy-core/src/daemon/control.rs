@@ -7,7 +7,6 @@
 
 use std::collections::VecDeque;
 use std::io::Read;
-use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -19,14 +18,13 @@ use crate::process::{
     pid_has_ownership_token, pid_is_running, signal_pid, wait_for_pid_exit, SIGNAL_KILL,
     SIGNAL_TERMINATE,
 };
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use super::acquire_daemon_job_admission_fence;
 use super::{
     acquire_daemon_operation_lock, acquire_daemon_operation_lock_for_ensure, parse_bind_addr,
-    read_status, stop_unlocked, try_acquire_daemon_owner_lock, DaemonExactOrphanRecoveryResult,
-    DaemonLeaselessRecoveryResult, DaemonOrphanAdoptionResult, DaemonStaleReasonCode,
-    DaemonStartResult, DaemonTerminationClassification, DAEMON_STARTUP_TOKEN_ENV,
+    read_status, stop_unlocked, try_acquire_daemon_owner_lock, DaemonStartResult,
+    DAEMON_STARTUP_TOKEN_ENV,
 };
 
 const TEST_KEEP_DAEMON_IN_PROCESS_GROUP_ENV: &str = "HOMEBOY_TEST_KEEP_DAEMON_IN_PROCESS_GROUP";
@@ -169,659 +167,6 @@ pub struct ArtifactFetchOutcome {
     pub content_type: Option<String>,
     pub size_bytes: u64,
     pub sha256: Option<String>,
-}
-
-/// Recover active jobs from an absent daemon-state record only when an operator
-/// supplies the exact lease and dead PID recorded before control-plane loss.
-///
-/// PID death and control-plane loss are not operator assertions: both are
-/// established here. `validate_state_loss_preconditions` requires an absent
-/// state record, a `LeaseMissing` freshness code, an unreachable daemon, and a
-/// non-running recorded PID, and then `probe_recorded_daemon_endpoint` must
-/// fail to connect to the recorded endpoint.
-pub fn recover_missing_lease_state(
-    lease_id: &str,
-    recorded_pid: u32,
-    recorded_endpoint: &str,
-    addr: &str,
-    replacement_operation_id: Option<&str>,
-) -> Result<super::DaemonStateLossRecoveryResult> {
-    parse_bind_addr(addr)?;
-    let recorded_endpoint = parse_recorded_daemon_endpoint(recorded_endpoint)?;
-    let _lock = acquire_daemon_operation_lock()?;
-    let receipt_path = crate::paths::daemon_state_loss_recovery_receipt_file(lease_id)?;
-    let status = read_status()?;
-    let mut existing = read_state_loss_receipt(&receipt_path)?;
-    if let Some(receipt) = existing.as_mut() {
-        validate_state_loss_receipt(
-            receipt,
-            lease_id,
-            recorded_pid,
-            recorded_endpoint,
-            replacement_operation_id,
-        )?;
-        // Receipts created before operation IDs were introduced are safe to
-        // adopt only after the immutable recovery inputs above matched.
-        if receipt.replacement_operation_id.is_none() {
-            if let Some(operation_id) = replacement_operation_id {
-                receipt.replacement_operation_id = Some(operation_id.to_string());
-                write_state_loss_receipt(&receipt_path, receipt)?;
-            }
-        }
-        if receipt.phase == StateLossRecoveryPhase::ReplacementStarted {
-            return receipt.clone().into_result();
-        }
-        if receipt.phase == StateLossRecoveryPhase::ReplacementStarting {
-            if pid_is_running(recorded_pid) {
-                return Err(Error::validation_invalid_argument(
-                    "recorded_pid",
-                    format!("recorded daemon PID `{recorded_pid}` is still running"),
-                    Some(recorded_pid.to_string()),
-                    None,
-                ));
-            }
-            probe_recorded_daemon_endpoint(recorded_endpoint)?;
-            return replay_replacement_starting(receipt.clone(), &receipt_path, &status, addr);
-        }
-    }
-    let endpoint_probe = validate_state_loss_preconditions(
-        lease_id,
-        recorded_pid,
-        recorded_endpoint,
-        &status,
-        existing.as_ref(),
-    )?;
-    if let Some(mut receipt) = existing {
-        let owner_lock = try_acquire_daemon_owner_lock()?.ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "lease_id",
-                "daemon owner lock is held; refusing state-loss recovery",
-                Some(lease_id.to_string()),
-                None,
-            )
-        })?;
-        if receipt.phase == StateLossRecoveryPhase::Prepared {
-            drop(owner_lock);
-            return Err(Error::validation_invalid_argument(
-                "lease_id",
-                "state-loss receipt is prepared but reconciliation did not complete; inspect the durable jobs before retrying",
-                Some(lease_id.to_string()),
-                None,
-            ));
-        }
-        drop(owner_lock);
-        start_state_loss_replacement(&mut receipt, &receipt_path, addr)
-    } else {
-        let owner_lock = try_acquire_daemon_owner_lock()?.ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "lease_id",
-                "daemon owner lock is held; refusing state-loss recovery",
-                Some(lease_id.to_string()),
-                None,
-            )
-        })?;
-        let jobs_path = crate::paths::observation_db()?;
-        let snapshot_path = snapshot_job_store(&jobs_path)?;
-        let store = super::JobStore::open_without_reconciliation(&jobs_path)?;
-        let diagnostics = store.daemon_lease_job_diagnostics(lease_id);
-        if diagnostics.unowned_count() > 0
-            || !diagnostics.other_lease_job_ids.is_empty()
-            || diagnostics.matching_count() == 0
-        {
-            return Err(Error::validation_invalid_argument(
-                "lease_id",
-                "active durable jobs are not exclusively owned by the exact recovery lease",
-                Some(lease_id.to_string()),
-                None,
-            ));
-        }
-        let mut receipt = StateLossRecoveryReceipt {
-            lease_id: lease_id.to_string(),
-            recorded_pid,
-            recorded_endpoint: recorded_endpoint.to_string(),
-            affected_job_ids: diagnostics.matching_job_ids.clone(),
-            evidence_snapshot_path: snapshot_path.display().to_string(),
-            ownership_proof: vec![
-                format!("operator supplied exact missing lease `{lease_id}`"),
-                format!("recorded daemon PID `{recorded_pid}` was not running"),
-                "daemon owner lock acquired non-destructively".to_string(),
-                endpoint_probe,
-            ],
-            phase: StateLossRecoveryPhase::Prepared,
-            replacement: None,
-            replacement_startup_token: None,
-            replacement_operation_id: replacement_operation_id.map(str::to_string),
-        };
-        write_state_loss_receipt(&receipt_path, &receipt)?;
-        let reconciled = store.reconcile_dead_daemon_lease_jobs(lease_id)?;
-        if reconciled.protected_count() > 0 {
-            let _ = std::fs::remove_file(&receipt_path);
-            return Err(Error::validation_invalid_argument(
-                "lease_id",
-                format!(
-                    "deferred missing-lease recovery because {} active child process(es) are still running: {}",
-                    reconciled.protected_count(),
-                    reconciled.protected_job_ids.iter().map(ToString::to_string).collect::<Vec<_>>().join(", "),
-                ),
-                Some(lease_id.to_string()),
-                Some(vec!["Wait for the recorded child process to finish, then retry recovery.".to_string()]),
-            ));
-        }
-        receipt.phase = StateLossRecoveryPhase::Reconciled;
-        write_state_loss_receipt(&receipt_path, &receipt)?;
-        drop(owner_lock);
-        start_state_loss_replacement(&mut receipt, &receipt_path, addr)
-    }
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-enum StateLossRecoveryPhase {
-    Prepared,
-    Reconciled,
-    ReplacementStarting,
-    ReplacementStarted,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-struct StateLossRecoveryReceipt {
-    lease_id: String,
-    recorded_pid: u32,
-    recorded_endpoint: String,
-    affected_job_ids: Vec<uuid::Uuid>,
-    evidence_snapshot_path: String,
-    ownership_proof: Vec<String>,
-    phase: StateLossRecoveryPhase,
-    replacement: Option<super::DaemonStartResult>,
-    #[serde(default)]
-    replacement_startup_token: Option<String>,
-    #[serde(default)]
-    replacement_operation_id: Option<String>,
-}
-
-impl StateLossRecoveryReceipt {
-    fn into_result(self) -> Result<super::DaemonStateLossRecoveryResult> {
-        let replacement = self.replacement.ok_or_else(|| {
-            Error::internal_unexpected("state-loss receipt has no replacement daemon identity")
-        })?;
-        Ok(super::DaemonStateLossRecoveryResult { recovered_lease_id: self.lease_id, recorded_dead_pid: self.recorded_pid, recorded_endpoint: self.recorded_endpoint, affected_job_count: self.affected_job_ids.len(), affected_job_ids: self.affected_job_ids, evidence_snapshot_path: self.evidence_snapshot_path, ownership_proof: self.ownership_proof, retry_guidance: "Recorded outcomes were retained. Retry unfinished eligible work through its original command or workflow.".to_string(), replacement })
-    }
-}
-
-fn validate_state_loss_preconditions(
-    lease_id: &str,
-    recorded_pid: u32,
-    recorded_endpoint: SocketAddr,
-    status: &super::DaemonStatus,
-    receipt: Option<&StateLossRecoveryReceipt>,
-) -> Result<String> {
-    if status.state.is_some()
-        || status.freshness.stale_reason_code != Some(DaemonStaleReasonCode::LeaseMissing)
-        || status.reachable
-        || (receipt.is_none() && status.freshness.active_jobs == 0)
-    {
-        return Err(Error::validation_invalid_argument(
-            "lease_id",
-            "state-loss recovery requires an absent daemon state, unreachable endpoint, and active jobs or an exact recovery receipt",
-            Some(lease_id.to_string()),
-            None,
-        ));
-    }
-    if pid_is_running(recorded_pid) {
-        return Err(Error::validation_invalid_argument(
-            "recorded_pid",
-            format!("recorded daemon PID `{recorded_pid}` is still running"),
-            Some(recorded_pid.to_string()),
-            None,
-        ));
-    }
-    probe_recorded_daemon_endpoint(recorded_endpoint)
-}
-
-fn validate_state_loss_receipt(
-    receipt: &StateLossRecoveryReceipt,
-    lease_id: &str,
-    recorded_pid: u32,
-    recorded_endpoint: SocketAddr,
-    replacement_operation_id: Option<&str>,
-) -> Result<()> {
-    if receipt.lease_id != lease_id
-        || receipt.recorded_pid != recorded_pid
-        || receipt.recorded_endpoint != recorded_endpoint.to_string()
-    {
-        return Err(Error::validation_invalid_argument(
-            "lease_id",
-            "state-loss recovery receipt does not match the exact supplied lease, PID, and endpoint",
-            Some(lease_id.to_string()),
-            None,
-        ));
-    }
-    if let Some(operation_id) = replacement_operation_id {
-        if receipt.replacement_operation_id.is_some()
-            && receipt.replacement_operation_id.as_deref() != Some(operation_id)
-        {
-            return Err(Error::validation_invalid_argument(
-                "replacement_operation_id",
-                "state-loss recovery receipt belongs to a different replacement operation",
-                Some(operation_id.to_string()),
-                None,
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn read_state_loss_receipt(path: &Path) -> Result<Option<StateLossRecoveryReceipt>> {
-    match std::fs::read(path) {
-        Ok(raw) => serde_json::from_slice(&raw).map(Some).map_err(|error| {
-            Error::internal_json(error.to_string(), Some(format!("read {}", path.display())))
-        }),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(Error::internal_io(
-            error.to_string(),
-            Some(format!("read {}", path.display())),
-        )),
-    }
-}
-
-fn write_state_loss_receipt(path: &Path, receipt: &StateLossRecoveryReceipt) -> Result<()> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| Error::internal_unexpected("state-loss receipt path has no parent"))?;
-    std::fs::create_dir_all(parent).map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some(format!("create {}", parent.display())),
-        )
-    })?;
-    let temporary = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
-    let body = serde_json::to_vec_pretty(receipt).map_err(|error| {
-        Error::internal_json(
-            error.to_string(),
-            Some("serialize state-loss receipt".to_string()),
-        )
-    })?;
-    let mut file = std::fs::File::create(&temporary).map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some(format!("create {}", temporary.display())),
-        )
-    })?;
-    use std::io::Write;
-    file.write_all(&body)
-        .and_then(|_| file.sync_all())
-        .map_err(|error| {
-            Error::internal_io(
-                error.to_string(),
-                Some(format!("write {}", temporary.display())),
-            )
-        })?;
-    std::fs::rename(&temporary, path).map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some(format!("rename {}", path.display())),
-        )
-    })?;
-    std::fs::File::open(parent)
-        .and_then(|directory| directory.sync_all())
-        .map_err(|error| {
-            Error::internal_io(
-                error.to_string(),
-                Some(format!("sync {}", parent.display())),
-            )
-        })
-}
-
-fn state_loss_replacement_error(
-    mut error: Error,
-    receipt: &StateLossRecoveryReceipt,
-    receipt_path: &Path,
-) -> Error {
-    error.details["state_loss_recovery"] = serde_json::json!({
-        "receipt_path": receipt_path,
-        "phase": receipt.phase,
-        "lease_id": receipt.lease_id,
-        "recorded_pid": receipt.recorded_pid,
-        "recorded_endpoint": receipt.recorded_endpoint,
-        "affected_job_ids": receipt.affected_job_ids,
-        "evidence_snapshot_path": receipt.evidence_snapshot_path,
-        "ownership_proof": receipt.ownership_proof,
-    });
-    error
-}
-
-fn start_state_loss_replacement(
-    receipt: &mut StateLossRecoveryReceipt,
-    receipt_path: &Path,
-    addr: &str,
-) -> Result<super::DaemonStateLossRecoveryResult> {
-    start_state_loss_replacement_with(receipt, receipt_path, |startup_token| {
-        let replacement = start_or_return_live_unlocked_with_startup_token(addr, startup_token)?;
-        let status = read_status()?;
-        if status.admits_work()
-            && status
-                .state
-                .as_ref()
-                .is_some_and(|state| state.startup_token == startup_token)
-        {
-            Ok(replacement)
-        } else {
-            Err(Error::validation_invalid_argument(
-                "lease_id",
-                "replacement startup did not publish the expected state-loss startup token",
-                None,
-                None,
-            ))
-        }
-    })
-}
-
-fn start_state_loss_replacement_with<Start>(
-    receipt: &mut StateLossRecoveryReceipt,
-    receipt_path: &Path,
-    start: Start,
-) -> Result<super::DaemonStateLossRecoveryResult>
-where
-    Start: FnOnce(&str) -> Result<super::DaemonStartResult>,
-{
-    let startup_token = receipt
-        .replacement_startup_token
-        .clone()
-        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    receipt.phase = StateLossRecoveryPhase::ReplacementStarting;
-    receipt.replacement_startup_token = Some(startup_token.clone());
-    write_state_loss_receipt(receipt_path, receipt)?;
-    complete_state_loss_replacement(receipt, receipt_path, || start(&startup_token))
-}
-
-fn replay_replacement_starting(
-    mut receipt: StateLossRecoveryReceipt,
-    receipt_path: &Path,
-    status: &super::DaemonStatus,
-    addr: &str,
-) -> Result<super::DaemonStateLossRecoveryResult> {
-    let token = receipt
-        .replacement_startup_token
-        .as_deref()
-        .ok_or_else(|| {
-            Error::internal_unexpected("replacement-starting receipt has no startup token")
-        })?;
-    if let Some(state) = status.state.as_ref() {
-        if status.admits_work() && state.startup_token == token {
-            receipt.phase = StateLossRecoveryPhase::ReplacementStarted;
-            receipt.replacement = Some(super::DaemonStartResult {
-                pid: state.pid,
-                address: state.address.clone(),
-                state_path: state.state_path.clone(),
-                lease_id: state.lease_id.clone(),
-            });
-            write_state_loss_receipt(receipt_path, &receipt)?;
-            return receipt.into_result();
-        }
-        return Err(Error::validation_invalid_argument(
-            "lease_id",
-            "state-loss replay found an ambiguous or mismatched live daemon",
-            Some(receipt.lease_id),
-            None,
-        ));
-    }
-    start_state_loss_replacement(&mut receipt, receipt_path, addr)
-}
-
-fn complete_state_loss_replacement<Start>(
-    receipt: &mut StateLossRecoveryReceipt,
-    receipt_path: &Path,
-    start: Start,
-) -> Result<super::DaemonStateLossRecoveryResult>
-where
-    Start: FnOnce() -> Result<super::DaemonStartResult>,
-{
-    match start() {
-        Ok(replacement) => {
-            let previous_phase = receipt.phase.clone();
-            receipt.phase = StateLossRecoveryPhase::ReplacementStarted;
-            receipt.replacement = Some(replacement);
-            if let Err(error) = write_state_loss_receipt(receipt_path, receipt) {
-                receipt.phase = previous_phase;
-                receipt.replacement = None;
-                return Err(state_loss_replacement_error(error, receipt, receipt_path));
-            }
-            receipt.clone().into_result()
-        }
-        Err(error) => Err(state_loss_replacement_error(error, receipt, receipt_path)),
-    }
-}
-
-fn parse_recorded_daemon_endpoint(value: &str) -> Result<SocketAddr> {
-    let endpoint = value.parse::<SocketAddr>().map_err(|_| {
-        Error::validation_invalid_argument(
-            "recorded_endpoint",
-            "state-loss recovery requires a concrete recorded loopback endpoint",
-            Some(value.to_string()),
-            None,
-        )
-    })?;
-    if endpoint.port() == 0 || endpoint.ip().is_unspecified() || !endpoint.ip().is_loopback() {
-        return Err(Error::validation_invalid_argument(
-            "recorded_endpoint",
-            "recorded daemon endpoint must be a non-zero loopback address",
-            Some(value.to_string()),
-            None,
-        ));
-    }
-    Ok(endpoint)
-}
-
-fn probe_recorded_daemon_endpoint(endpoint: SocketAddr) -> Result<String> {
-    match TcpStream::connect_timeout(&endpoint, Duration::from_millis(200)) {
-        Ok(_) => Err(Error::validation_invalid_argument(
-            "recorded_endpoint",
-            format!("recorded daemon endpoint `{endpoint}` is reachable"),
-            Some(endpoint.to_string()),
-            None,
-        )),
-        Err(error) => Ok(format!(
-            "recorded daemon endpoint `{endpoint}` was unreachable: {error}"
-        )),
-    }
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-struct LeaselessRecoveryReceipt {
-    affected_job_ids: Vec<uuid::Uuid>,
-    affected_jobs: Vec<crate::api_jobs::LeaselessOrphanAffectedJob>,
-    historical_lease_ids: Vec<String>,
-    evidence_snapshot_path: String,
-    ownership_proof: Vec<String>,
-    phase: StateLossRecoveryPhase,
-    replacement: Option<DaemonStartResult>,
-    replacement_startup_token: Option<String>,
-    #[serde(default)]
-    replacement_operation_id: Option<String>,
-}
-
-impl LeaselessRecoveryReceipt {
-    fn into_result(self) -> Result<DaemonLeaselessRecoveryResult> {
-        let replacement = self.replacement.ok_or_else(|| {
-            Error::internal_unexpected("lease-less receipt has no replacement daemon identity")
-        })?;
-        Ok(DaemonLeaselessRecoveryResult {
-            affected_job_count: self.affected_job_ids.len(),
-            affected_job_ids: self.affected_job_ids,
-            affected_jobs: self.affected_jobs,
-            historical_lease_ids: self.historical_lease_ids,
-            evidence_snapshot_path: self.evidence_snapshot_path,
-            ownership_proof: self.ownership_proof,
-            retry_guidance: "Recovery already completed for this exact replacement daemon; no additional daemon was started.".to_string(),
-            replacement,
-        })
-    }
-}
-
-fn replay_leaseless_recovery(
-    status: &super::DaemonStatus,
-    addr: &str,
-    replacement_operation_id: Option<&str>,
-) -> Result<Option<DaemonLeaselessRecoveryResult>> {
-    let receipt_path = crate::paths::daemon_leaseless_recovery_receipt_file()?;
-    let Some(mut receipt) = read_leaseless_recovery_receipt(&receipt_path)? else {
-        return Ok(None);
-    };
-    if let Some(operation_id) = replacement_operation_id {
-        if receipt.replacement_operation_id.is_some()
-            && receipt.replacement_operation_id.as_deref() != Some(operation_id)
-        {
-            return Err(Error::validation_invalid_argument(
-                "replacement_operation_id",
-                "lease-less recovery receipt belongs to a different replacement operation",
-                Some(operation_id.to_string()),
-                None,
-            ));
-        }
-        if receipt.replacement_operation_id.is_none() {
-            receipt.replacement_operation_id = Some(operation_id.to_string());
-            write_leaseless_recovery_receipt(&receipt_path, &receipt)?;
-        }
-    }
-    if receipt.phase == StateLossRecoveryPhase::Prepared {
-        if status.freshness.active_jobs > 0 {
-            return Ok(None);
-        }
-        receipt.phase = StateLossRecoveryPhase::Reconciled;
-        write_leaseless_recovery_receipt(&receipt_path, &receipt)?;
-    }
-    if receipt.phase == StateLossRecoveryPhase::Reconciled {
-        receipt.phase = StateLossRecoveryPhase::ReplacementStarting;
-        receipt.replacement_startup_token = Some(uuid::Uuid::new_v4().to_string());
-        write_leaseless_recovery_receipt(&receipt_path, &receipt)?;
-        return replay_leaseless_recovery(status, addr, replacement_operation_id);
-    }
-    if receipt.phase == StateLossRecoveryPhase::ReplacementStarting {
-        if let Some(state) = status.state.as_ref().filter(|_| status.admits_work()) {
-            if receipt.replacement_startup_token.as_deref() != Some(&state.startup_token) {
-                return Err(Error::validation_invalid_argument(
-                    "reconcile_leaseless_orphans",
-                    "lease-less recovery replay found a mismatched live daemon",
-                    None,
-                    None,
-                ));
-            }
-            receipt.phase = StateLossRecoveryPhase::ReplacementStarted;
-            receipt.replacement = Some(DaemonStartResult {
-                pid: state.pid,
-                address: state.address.clone(),
-                state_path: state.state_path.clone(),
-                lease_id: state.lease_id.clone(),
-            });
-            write_leaseless_recovery_receipt(&receipt_path, &receipt)?;
-        } else {
-            let token = receipt
-                .replacement_startup_token
-                .as_deref()
-                .ok_or_else(|| {
-                    Error::internal_unexpected(
-                        "lease-less replacement-starting receipt has no startup token",
-                    )
-                })?;
-            let replacement = start_or_return_live_unlocked_with_startup_token(addr, token)?;
-            let started = read_status()?;
-            if !started.admits_work()
-                || started
-                    .state
-                    .as_ref()
-                    .is_none_or(|state| state.startup_token != token)
-            {
-                return Err(Error::validation_invalid_argument(
-                    "reconcile_leaseless_orphans",
-                    "replacement replay did not publish its expected startup token",
-                    None,
-                    None,
-                ));
-            }
-            receipt.phase = StateLossRecoveryPhase::ReplacementStarted;
-            receipt.replacement = Some(replacement);
-            write_leaseless_recovery_receipt(&receipt_path, &receipt)?;
-            return Ok(Some(receipt.into_result()?));
-        }
-    }
-    let Some(state) = status.state.as_ref() else {
-        return Ok(None);
-    };
-    if status.freshness.active_jobs != 0 || !status.admits_work() {
-        return Ok(None);
-    }
-    let replacement = receipt.replacement.as_ref().ok_or_else(|| {
-        Error::internal_unexpected("completed lease-less receipt has no replacement")
-    })?;
-    if receipt.phase != StateLossRecoveryPhase::ReplacementStarted
-        || replacement.lease_id != state.lease_id
-        || replacement.pid != state.pid
-        || replacement.address != state.address
-    {
-        return Ok(None);
-    }
-    Ok(Some(receipt.into_result()?))
-}
-
-fn read_leaseless_recovery_receipt(path: &Path) -> Result<Option<LeaselessRecoveryReceipt>> {
-    match std::fs::read(path) {
-        Ok(raw) => serde_json::from_slice(&raw).map(Some).map_err(|error| {
-            Error::internal_json(error.to_string(), Some(format!("read {}", path.display())))
-        }),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(Error::internal_io(
-            error.to_string(),
-            Some(format!("read {}", path.display())),
-        )),
-    }
-}
-
-fn write_leaseless_recovery_receipt(path: &Path, receipt: &LeaselessRecoveryReceipt) -> Result<()> {
-    let parent = path.parent().ok_or_else(|| {
-        Error::internal_unexpected("lease-less recovery receipt path has no parent")
-    })?;
-    std::fs::create_dir_all(parent).map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some(format!("create {}", parent.display())),
-        )
-    })?;
-    let temporary = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
-    let body = serde_json::to_vec_pretty(receipt).map_err(|error| {
-        Error::internal_json(
-            error.to_string(),
-            Some("serialize lease-less recovery receipt".to_string()),
-        )
-    })?;
-    let mut file = std::fs::File::create(&temporary).map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some(format!("create {}", temporary.display())),
-        )
-    })?;
-    use std::io::Write;
-    file.write_all(&body)
-        .and_then(|_| file.sync_all())
-        .map_err(|error| {
-            Error::internal_io(
-                error.to_string(),
-                Some(format!("write {}", temporary.display())),
-            )
-        })?;
-    std::fs::rename(&temporary, path).map_err(|error| {
-        Error::internal_io(
-            error.to_string(),
-            Some(format!("rename {}", path.display())),
-        )
-    })?;
-    std::fs::File::open(parent)
-        .and_then(|directory| directory.sync_all())
-        .map_err(|error| {
-            Error::internal_io(
-                error.to_string(),
-                Some(format!("sync {}", parent.display())),
-            )
-        })
 }
 
 /// Spawn the daemon in the background, then poll the state file until the new
@@ -1044,466 +389,87 @@ pub fn ensure_running_with_replacement_operation(
     start_or_return_live_unlocked_with_startup_token(addr, operation_id)
 }
 
-/// Replace one explicitly identified, provably dead daemon lease. The operation
-/// lock covers validation, durable-job reconciliation, and replacement startup.
+/// What `daemon recover --attest-absent` terminalized, and why it was allowed.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct DaemonAttestAbsentResult {
+    pub attested_job_ids: Vec<uuid::Uuid>,
+    /// The live daemon generation, when one serves this scope. Every attested
+    /// job carries another lease.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub live_lease_id: Option<String>,
+    pub ownership_proof: Vec<String>,
+}
+
+/// Terminalize exactly `job_ids`, each a dead generation's in-scope job with
+/// no recorded child identity, on the operator's attestation that its
+/// workload is gone (#17429, #15556 chaos case 2).
 ///
-/// The exact `lease_id` is the operator's destructive-action target; PID death
-/// is proven here rather than asserted. `adopt_orphaned_lease_with_operations`
-/// requires a `PidDead` freshness code, re-proves the recorded PID dead *under
-/// the owner lock* (so a reused PID cannot slip through), and refuses when any
-/// active child process survives.
-pub fn adopt_orphaned_lease(
-    lease_id: &str,
-    confirmed_no_pid_job_ids: &[uuid::Uuid],
-    addr: &str,
-) -> Result<DaemonOrphanAdoptionResult> {
-    parse_bind_addr(addr)?;
+/// Startup recovery cannot prove such a job's workload absent, so it leaves it
+/// untouched and status reports it; this is the one way to retire it. The
+/// store refuses the whole set if any job fails a check, and persists the
+/// attestation on every job it terminalizes.
+///
+/// Dead-generation proof comes from the owner lock. Free: no daemon serves
+/// this scope, so every lease is dead; this process keeps the lock for the
+/// mutation so no daemon can start underneath it. Held: the holder must have
+/// identified itself and published the lease in `state.json` (only the lock
+/// holder writes it); that lease is the live generation, and every other lease
+/// is dead. A holder that has not published yet is still starting and running
+/// its own startup recovery, so the attestation is refused until it finishes.
+///
+/// With a live daemon this runs here rather than through the daemon: the
+/// mutation touches only jobs the live generation never schedules or
+/// supervises, it is one durable-store transaction (the store's file lock
+/// serializes it with the daemon's own writes), and it takes the same
+/// operation lock and admission fence as every other lifecycle mutation, so no
+/// stop, replacement, or new admission interleaves with it. Routing through
+/// the daemon would add an HTTP surface for no extra exclusion.
+pub fn attest_absent(job_ids: &[uuid::Uuid]) -> Result<DaemonAttestAbsentResult> {
     let _lock = acquire_daemon_operation_lock()?;
-    adopt_orphaned_lease_with_operations(
-        lease_id,
-        read_status,
-        pid_is_running,
-        try_acquire_daemon_owner_lock,
-        || {
-            let store =
-                super::JobStore::open_without_reconciliation(crate::paths::observation_db()?)?;
-            if confirmed_no_pid_job_ids.is_empty() {
-                store.reconcile_dead_daemon_lease_jobs(lease_id)
-            } else {
-                store.recover_expired_pidless_reservation_for_dead_daemon_lease(
-                    lease_id,
-                    confirmed_no_pid_job_ids,
-                )
-            }
-        },
-        || start_or_return_live_unlocked(addr),
-    )
-}
-
-/// Explicit recovery for the otherwise irreconcilable case where a proven-dead
-/// daemon lost jobs before it could persist a child identity. This never widens
-/// automatic adoption: the operator must name every active job and attest that
-/// workload processes were inspected and are absent.
-///
-/// `confirm_workload_processes_absent` is deliberately retained. This command
-/// exists precisely because the daemon died before persisting child identity,
-/// so the store holds no PID for the named jobs and nothing in this process can
-/// observe whether their workloads are still running. The store-side check only
-/// proves the *absence of recorded* child evidence — the very condition that
-/// makes the operator's inspection the sole source of truth — and it persists
-/// the attestation as durable provenance on every affected job.
-///
-/// PID death, by contrast, is proven here:
-/// `reconcile_dead_lease_orphans_with_operations` requires a `PidDead` freshness
-/// code, a non-running recorded PID, and a second liveness proof taken under
-/// the owner lock. Launcher termination evidence is retained when it proves this
-/// lease, but is not a prerequisite because the launcher may be the component
-/// that was lost. The operator attestation, exact active-job compare-and-swap,
-/// and owner probe are the explicit authority for that gap.
-pub fn reconcile_dead_lease_orphans(
-    lease_id: &str,
-    job_ids: &[uuid::Uuid],
-    confirm_workload_processes_absent: bool,
-    addr: &str,
-    start_replacement: bool,
-) -> Result<DaemonExactOrphanRecoveryResult> {
-    if !confirm_workload_processes_absent {
-        return Err(Error::validation_invalid_argument("confirm_workload_processes_absent", "exact dead-lease recovery requires --confirm-workload-processes-absent after inspecting workload processes", None, None));
-    }
-    parse_bind_addr(addr)?;
-    let _lock = acquire_daemon_operation_lock()?;
-    reconcile_dead_lease_orphans_with_operations(
-        lease_id,
-        DeadLeaseOrphanRecoveryOperations {
-            status: read_status,
-            pid_is_running,
-            acquire_owner: try_acquire_daemon_owner_lock,
-            prove_no_owner: || Ok(owner_lock_proof()),
-            reconcile: |pid| {
-                let store =
-                    super::JobStore::open_without_reconciliation(crate::paths::observation_db()?)?;
-                store.reconcile_exact_daemon_loss_jobs(lease_id, job_ids, pid)
-            },
-            // A remote attested reconcile only terminalizes one dead lease's
-            // exact job set; the controller's own reconcile owns what serves
-            // next (#15556), so it may ask for no replacement here.
-            start: || {
-                if start_replacement {
-                    start_or_return_live_unlocked(addr).map(Some)
-                } else {
-                    Ok(None)
-                }
-            },
-        },
-    )
-}
-
-struct DeadLeaseOrphanRecoveryOperations<
-    Status,
-    PidIsRunning,
-    AcquireOwner,
-    ProveNoOwner,
-    Reconcile,
-    Start,
-> {
-    status: Status,
-    pid_is_running: PidIsRunning,
-    acquire_owner: AcquireOwner,
-    prove_no_owner: ProveNoOwner,
-    reconcile: Reconcile,
-    start: Start,
-}
-
-fn reconcile_dead_lease_orphans_with_operations<
-    Status,
-    PidIsRunning,
-    AcquireOwner,
-    OwnerLock,
-    ProveNoOwner,
-    Reconcile,
-    Start,
->(
-    lease_id: &str,
-    operations: DeadLeaseOrphanRecoveryOperations<
-        Status,
-        PidIsRunning,
-        AcquireOwner,
-        ProveNoOwner,
-        Reconcile,
-        Start,
-    >,
-) -> Result<DaemonExactOrphanRecoveryResult>
-where
-    Status: FnOnce() -> Result<super::DaemonStatus>,
-    PidIsRunning: Fn(u32) -> bool,
-    AcquireOwner: FnOnce() -> Result<Option<OwnerLock>>,
-    ProveNoOwner: FnOnce() -> Result<Vec<String>>,
-    Reconcile: FnOnce(u32) -> Result<crate::api_jobs::DaemonLeaseJobDiagnostics>,
-    Start: FnOnce() -> Result<Option<super::DaemonStartResult>>,
-{
-    let DeadLeaseOrphanRecoveryOperations {
-        status,
-        pid_is_running,
-        acquire_owner,
-        prove_no_owner,
-        reconcile,
-        start,
-    } = operations;
-    let status = status()?;
-    let state = status.state.ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "lease_id",
-            "exact dead-lease recovery requires a persisted daemon lease",
-            Some(lease_id.to_string()),
+    let _admission_fence = acquire_daemon_job_admission_fence()?;
+    let state_path = super::state_path()?;
+    let owner_lock = try_acquire_daemon_owner_lock()?;
+    let (live_lease_id, ownership_proof) = if owner_lock.is_some() {
+        (
             None,
+            vec!["daemon owner lock acquired; no daemon generation serves this scope".to_string()],
         )
-    })?;
-    if state.lease_id != lease_id {
-        return Err(Error::validation_invalid_argument(
-            "lease_id",
-            "recorded daemon lease does not match requested dead lease",
-            Some(lease_id.to_string()),
-            None,
-        ));
-    }
-    if status.freshness.stale_reason_code != Some(DaemonStaleReasonCode::PidDead)
-        || pid_is_running(state.pid)
-    {
-        return Err(Error::validation_invalid_argument(
-            "lease_id",
-            "recorded daemon PID is live or not proven dead",
-            Some(lease_id.to_string()),
-            None,
-        ));
-    }
-    let termination = status.termination_evidence.filter(|evidence| {
-        evidence.classification == DaemonTerminationClassification::UnexpectedExit
-            && !evidence.stop_requested
-            && evidence.lease_id.as_deref() == Some(lease_id)
-            && evidence.pid == Some(state.pid)
-    });
-    let owner_lock = acquire_owner()?.ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "lease_id",
-            "daemon owner lock is held; refusing exact dead-lease recovery",
-            Some(lease_id.to_string()),
-            None,
-        )
-    })?;
-    if pid_is_running(state.pid) {
-        return Err(Error::validation_invalid_argument(
-            "lease_id",
-            "recorded daemon PID became live or was reused during recovery",
-            Some(lease_id.to_string()),
-            None,
-        ));
-    }
-    let mut ownership_proof = prove_no_owner()?;
-    ownership_proof.push(
-        "operator supplied --confirm-workload-processes-absent; current lease and dead PID were re-proven under the owner lock".to_string(),
-    );
-    let reconciled = reconcile(state.pid)?;
-    drop(owner_lock);
-    let replacement = start()?;
-    Ok(DaemonExactOrphanRecoveryResult {
-        recovered_lease_id: lease_id.to_string(),
-        dead_pid: state.pid,
-        reconciled_job_ids: reconciled.matching_job_ids,
-        termination_evidence: termination,
-        ownership_proof,
-        replacement,
-    })
-}
-
-fn adopt_orphaned_lease_with_operations<
-    Status,
-    PidIsRunning,
-    AcquireOwner,
-    OwnerLock,
-    Reconcile,
-    Start,
->(
-    lease_id: &str,
-    status: Status,
-    pid_is_running: PidIsRunning,
-    acquire_owner: AcquireOwner,
-    reconcile: Reconcile,
-    start: Start,
-) -> Result<DaemonOrphanAdoptionResult>
-where
-    Status: FnOnce() -> Result<super::DaemonStatus>,
-    PidIsRunning: Fn(u32) -> bool,
-    AcquireOwner: FnOnce() -> Result<Option<OwnerLock>>,
-    Reconcile: FnOnce() -> Result<crate::api_jobs::DaemonLeaseJobDiagnostics>,
-    Start: FnOnce() -> Result<super::DaemonStartResult>,
-{
-    let status = status()?;
-    let state = status.state.ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "lease_id",
-            "orphan adoption requires a persisted daemon lease",
-            Some(lease_id.to_string()),
-            None,
-        )
-    })?;
-    if state.lease_id != lease_id {
-        return Err(Error::validation_invalid_argument(
-            "lease_id",
-            format!(
-                "recorded daemon lease `{}` does not match requested orphan lease `{lease_id}`",
-                state.lease_id
-            ),
-            Some(lease_id.to_string()),
-            Some(vec![
-                "Run `homeboy daemon status` and adopt only its exact dead lease.".to_string(),
-            ]),
-        ));
-    }
-    if status.freshness.stale_reason_code != Some(DaemonStaleReasonCode::PidDead) {
-        return Err(Error::validation_invalid_argument(
-            "lease_id",
-            format!("daemon lease `{lease_id}` is not proven dead"),
-            Some(lease_id.to_string()),
-            Some(vec!["Live or ambiguous daemon ownership is protected; inspect `homeboy daemon status` before retrying.".to_string()]),
-        ));
-    }
-
-    let owner_lock = acquire_owner()?.ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "lease_id",
-            "daemon owner lock is held; refusing exact dead-lease adoption",
-            Some(lease_id.to_string()),
-            None,
-        )
-    })?;
-    // The held owner lock is the no-owner proof: no daemon serves this store.
-    // Revalidate after taking the lifecycle-critical lock: a PID can be reused
-    // between status inspection and exact orphan adoption.
-    if !pid_is_proven_dead(state.pid, &pid_is_running) {
-        return Err(Error::validation_invalid_argument(
-            "lease_id",
-            format!("recorded daemon PID {} is live or has been reused", state.pid),
-            Some(lease_id.to_string()),
-            Some(vec!["Refusing adoption until the exact recorded PID is proven dead under the lifecycle lock.".to_string()]),
-        ));
-    }
-    let reconciled = reconcile()?;
-    if reconciled.protected_count() > 0 {
-        return Err(Error::validation_invalid_argument(
-            "lease_id",
-            format!(
-                "deferred exact dead-lease adoption because {} active child process(es) are still running: {}",
-                reconciled.protected_count(),
-                reconciled.protected_job_ids.iter().map(ToString::to_string).collect::<Vec<_>>().join(", "),
-            ),
-            Some(lease_id.to_string()),
-            Some(vec!["Wait for the recorded child process to finish, then retry adoption.".to_string()]),
-        ));
-    }
-    drop(owner_lock);
-    let replacement = start()?;
-    Ok(DaemonOrphanAdoptionResult {
-        adopted_lease_id: lease_id.to_string(),
-        dead_pid: state.pid,
-        active_jobs_terminalized: reconciled.terminalized_count(),
-        retry_guidance: "Inspect the retained job events, then retry eligible work through its original command or workflow.".to_string(),
-        replacement,
-    })
-}
-
-/// Explicitly recover durable jobs when no daemon owner can be proven. This
-/// covers missing lease metadata and stale version-mismatched daemons whose
-/// typed `/jobs` view no longer accounts for their durable active jobs.
-///
-/// Absence of a daemon owner is proven, not asserted: the daemon owner lock is
-/// refused while any daemon is live or starting, and only a lock holder serves
-/// the store.
-pub fn reconcile_leaseless_orphans(
-    addr: &str,
-    replacement_operation_id: Option<&str>,
-) -> Result<DaemonLeaselessRecoveryResult> {
-    parse_bind_addr(addr)?;
-    let _lock = acquire_daemon_operation_lock()?;
-    let status = read_status()?;
-    if let Some(result) = replay_leaseless_recovery(&status, addr, replacement_operation_id)? {
-        return Ok(result);
-    }
-    if status.freshness.active_jobs == 0
-        || !matches!(
-            status.freshness.stale_reason_code,
-            Some(
-                DaemonStaleReasonCode::LeaseMissing
-                    | DaemonStaleReasonCode::LeaseCorrupt
-                    | DaemonStaleReasonCode::VersionMismatch
-            )
-        )
-    {
-        return Err(Error::validation_invalid_argument(
-            "reconcile_leaseless_orphans",
-            "recovery requires active jobs with missing, corrupt, or version-mismatched daemon freshness; use exact lease recovery for recorded dead leases",
-            None,
-            None,
-        ));
-    }
-    let owner_lock = try_acquire_daemon_owner_lock()?.ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "reconcile_leaseless_orphans",
-            "daemon owner lock is held; a daemon is live or starting",
-            None,
-            None,
-        )
-    })?;
-    let ownership_proof = owner_lock_proof();
-    let jobs_path = crate::paths::observation_db()?;
-    let snapshot_path = snapshot_job_store(&jobs_path)?;
-    let store = super::JobStore::open_without_reconciliation(&jobs_path)?;
-    let receipt_path = crate::paths::daemon_leaseless_recovery_receipt_file()?;
-    let mut receipt = LeaselessRecoveryReceipt {
-        affected_job_ids: Vec::new(),
-        affected_jobs: Vec::new(),
-        historical_lease_ids: Vec::new(),
-        evidence_snapshot_path: snapshot_path.display().to_string(),
-        ownership_proof: ownership_proof.clone(),
-        phase: StateLossRecoveryPhase::Prepared,
-        replacement: None,
-        replacement_startup_token: None,
-        replacement_operation_id: replacement_operation_id.map(str::to_string),
-    };
-    write_leaseless_recovery_receipt(&receipt_path, &receipt)?;
-    let reconciled = store.reconcile_leaseless_orphan_jobs()?;
-    if !reconciled.protected_job_ids.is_empty() {
-        return Err(Error::validation_invalid_argument(
-            "reconcile_leaseless_orphans",
-            format!(
-                "deferred lease-less recovery because {} active child process(es) are still running: {}",
-                reconciled.protected_job_ids.len(),
-                reconciled.protected_job_ids.iter().map(ToString::to_string).collect::<Vec<_>>().join(", "),
-            ),
-            None,
-            Some(vec!["Wait for the recorded child process to finish, then retry recovery.".to_string()]),
-        ));
-    }
-    if !reconciled.preserved_remote_job_ids.is_empty() {
-        return Err(Error::validation_invalid_argument(
-            "reconcile_leaseless_orphans",
-            format!(
-                "deferred lease-less recovery because {} broker-owned remote job(s) remain active or unexpired: {}",
-                reconciled.preserved_remote_job_ids.len(),
-                reconciled.preserved_remote_job_ids.iter().map(ToString::to_string).collect::<Vec<_>>().join(", "),
-            ),
-            None,
-            Some(vec!["Wait for each broker-owned claim to expire or reach a terminal state, then retry recovery.".to_string()]),
-        ));
-    }
-    let affected_job_count = reconciled.reconciled_count();
-    drop(owner_lock);
-    receipt = LeaselessRecoveryReceipt {
-        affected_job_ids: reconciled.reconciled_job_ids,
-        affected_jobs: reconciled.affected_jobs,
-        historical_lease_ids: reconciled.historical_lease_ids,
-        evidence_snapshot_path: snapshot_path.display().to_string(),
-        ownership_proof,
-        phase: StateLossRecoveryPhase::Reconciled,
-        replacement: None,
-        replacement_startup_token: None,
-        replacement_operation_id: replacement_operation_id.map(str::to_string),
-    };
-    write_leaseless_recovery_receipt(&receipt_path, &receipt)?;
-    let startup_token = replacement_operation_id
-        .map(str::to_string)
-        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    receipt.phase = StateLossRecoveryPhase::ReplacementStarting;
-    receipt.replacement_startup_token = Some(startup_token.clone());
-    write_leaseless_recovery_receipt(&receipt_path, &receipt)?;
-    let replacement = start_or_return_live_unlocked_with_startup_token(addr, &startup_token)?;
-    let status = read_status()?;
-    if !status.admits_work()
-        || status
+    } else {
+        let probe = super::probe_daemon_owner_lock_at(&state_path)?;
+        let holder = probe.holder().cloned().ok_or_else(|| {
+            attest_refused("the daemon owner lock is held by a starting daemon or a recovery operation; retry once it publishes its lease")
+        })?;
+        let state = super::daemon_lease::validate_lease_file(&state_path)?
             .state
-            .as_ref()
-            .is_none_or(|state| state.startup_token != startup_token)
-    {
-        return Err(Error::validation_invalid_argument(
-            "reconcile_leaseless_orphans",
-            "replacement startup did not publish the expected lease-less recovery startup token",
-            None,
-            None,
-        ));
-    }
-    receipt.phase = StateLossRecoveryPhase::ReplacementStarted;
-    receipt.replacement = Some(replacement);
-    write_leaseless_recovery_receipt(&receipt_path, &receipt)?;
-    let mut result = receipt.into_result()?;
-    result.affected_job_count = affected_job_count;
-    result.retry_guidance = "Recorded job output and artifacts were retained. Retry eligible work through its original command or workflow.".to_string();
-    Ok(result)
-}
-
-/// The free owner lock, already held by the caller, is the proof that no
-/// daemon owns this store: only a lock holder serves it.
-fn owner_lock_proof() -> Vec<String> {
-    vec!["daemon owner lock acquired non-destructively; no daemon serves this store".to_string()]
-}
-
-fn pid_is_proven_dead(pid: u32, is_running: impl FnOnce(u32) -> bool) -> bool {
-    !is_running(pid)
-}
-
-/// Write the durable job ledger as one JSON evidence document beside the
-/// daemon lease, before recovery mutates it.
-fn snapshot_job_store(path: &Path) -> Result<PathBuf> {
-    let raw = super::JobStore::ledger_snapshot_at_path(path)?;
-    let snapshot = crate::paths::daemon_state_file()?.with_file_name(format!(
-        "daemon-jobs.leaseless-orphan-{}.snapshot.json",
-        uuid::Uuid::new_v4()
-    ));
-    std::fs::write(&snapshot, raw).map_err(|err| {
-        Error::internal_io(
-            err.to_string(),
-            Some(format!("snapshot {}", snapshot.display())),
+            .filter(|state| state.pid == holder.pid)
+            .ok_or_else(|| {
+                attest_refused(&format!(
+                    "daemon PID {} holds the owner lock but has not published its lease; retry once startup recovery finishes",
+                    holder.pid
+                ))
+            })?;
+        (
+            Some(state.lease_id.clone()),
+            vec![format!(
+                "daemon PID {} holds the owner lock and published lease `{}`; every other lease in this scope is a dead generation",
+                holder.pid, state.lease_id
+            )],
         )
-    })?;
-    Ok(snapshot)
+    };
+    let store = super::JobStore::open_without_reconciliation(crate::paths::observation_db()?)?
+        .with_daemon_scope(super::daemon_scope()?);
+    let attested_job_ids =
+        store.attest_dead_generation_jobs_absent(live_lease_id.as_deref(), job_ids)?;
+    drop(owner_lock);
+    Ok(DaemonAttestAbsentResult {
+        attested_job_ids,
+        live_lease_id,
+        ownership_proof,
+    })
+}
+
+fn attest_refused(reason: &str) -> Error {
+    Error::validation_invalid_argument("attest_absent", reason.to_string(), None, None)
 }
 
 fn ensure_running_with_wait(addr: &str, wait: Duration) -> Result<DaemonStartResult> {
@@ -2468,8 +1434,8 @@ mod termination_tests {
     #[test]
     fn requested_stop_is_distinct_from_unexpected_exit() {
         assert_ne!(
-            DaemonTerminationClassification::CleanStop,
-            DaemonTerminationClassification::UnexpectedExit
+            crate::daemon::DaemonTerminationClassification::CleanStop,
+            crate::daemon::DaemonTerminationClassification::UnexpectedExit
         );
     }
 }

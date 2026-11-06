@@ -1,8 +1,7 @@
 //! The controller's durable journal of one runner's daemon replacement.
 //!
-//! A remote lifecycle mutation (start, state-loss or lease-less recovery) is
-//! journaled under a stable operation id before
-//! it crosses the remote boundary, so a lost response is replayed rather than
+//! A remote lifecycle mutation (a daemon start) is journaled under a stable
+//! operation id before it crosses the remote boundary, so a lost response is replayed rather than
 //! repeated. A recovery-created daemon's coordinates are journaled as the
 //! pending replacement until a controller authenticates it. Every journal is
 //! keyed by the runner and guarded by the runner state lock.
@@ -41,12 +40,6 @@ fn replacement_operation_path(runner_id: &str) -> Result<PathBuf> {
     ))
 }
 
-fn rejected_replacement_path_in_root(config_root: &Path, runner_id: &str) -> PathBuf {
-    runner_state_dir_in_root(config_root, runner_id)
-        .join("rejected-replacements")
-        .join(format!("{}.json", uuid::Uuid::new_v4()))
-}
-
 fn superseded_replacement_path_in_root(config_root: &Path, runner_id: &str) -> PathBuf {
     runner_state_dir_in_root(config_root, runner_id)
         .join("superseded-replacements")
@@ -59,20 +52,6 @@ struct ReplacementOperation {
     operation_id: String,
     replay_command: Option<String>,
     kind: Option<String>,
-}
-
-#[derive(serde::Serialize)]
-struct RejectedReplacementEvidence<'a> {
-    schema: &'static str,
-    runner_id: &'a str,
-    operation_id: &'a str,
-    kind: &'a str,
-    replay_command: Option<&'a str>,
-    rejected_at: String,
-    exit_code: i32,
-    timed_out: bool,
-    stdout: &'a str,
-    stderr: &'a str,
 }
 
 #[derive(serde::Serialize)]
@@ -276,86 +255,6 @@ fn retire_replacement(runner_id: &str) -> Result<String> {
             })?;
         }
         Ok(operation_id)
-    })
-}
-
-/// Retire a remote policy or validation refusal after preserving the exact
-/// terminal response. Unlike an interrupted mutation, this operation cannot
-/// become publishable by replaying the same authority.
-pub(super) fn retire_rejected_state_loss_replacement(
-    runner_id: &str,
-    output: &homeboy_core::server::CommandOutput,
-) -> Result<()> {
-    retire_rejected_replacement(
-        runner_id,
-        "state-loss",
-        output.exit_code,
-        output.timed_out,
-        &output.stdout,
-        &output.stderr,
-    )
-}
-
-fn retire_rejected_replacement(
-    runner_id: &str,
-    kind: &str,
-    exit_code: i32,
-    timed_out: bool,
-    stdout: &str,
-    stderr: &str,
-) -> Result<()> {
-    with_rooted_runner_registry_lock(runner_id, |config_root| {
-        let operation_path = replacement_operation_path_in_root(config_root, runner_id);
-        let operation: ReplacementOperation =
-            serde_json::from_slice(&std::fs::read(&operation_path).map_err(|error| {
-                Error::internal_io(
-                    error.to_string(),
-                    Some(format!("read {}", operation_path.display())),
-                )
-            })?)
-            .map_err(|error| {
-                Error::config_invalid_json(operation_path.display().to_string(), error)
-            })?;
-        if operation.runner_id != runner_id || operation.kind.as_deref() != Some(kind) {
-            return Err(Error::internal_unexpected(format!(
-                "refusing to retire a replacement operation that is not the rejected {kind} recovery"
-            )));
-        }
-        let evidence_path = rejected_replacement_path_in_root(config_root, runner_id);
-        write_durable_json(
-            &evidence_path,
-            &RejectedReplacementEvidence {
-                schema: "homeboy/runner-rejected-replacement/v1",
-                runner_id,
-                operation_id: &operation.operation_id,
-                kind,
-                replay_command: operation.replay_command.as_deref(),
-                rejected_at: Utc::now().to_rfc3339(),
-                exit_code,
-                timed_out,
-                stdout,
-                stderr,
-            },
-        )?;
-        write_durable_json(
-            &operation_path,
-            &ReplacementOperation {
-                runner_id: runner_id.to_string(),
-                operation_id: uuid::Uuid::new_v4().to_string(),
-                replay_command: None,
-                kind: None,
-            },
-        )?;
-        let pending_path = pending_replacement_path_in_root(config_root, runner_id);
-        if pending_path.exists() {
-            std::fs::remove_file(&pending_path).map_err(|error| {
-                Error::internal_io(
-                    error.to_string(),
-                    Some(format!("remove {}", pending_path.display())),
-                )
-            })?;
-        }
-        Ok(())
     })
 }
 

@@ -65,9 +65,6 @@ fn lab_runner_preparation_falls_back_for_unreachable_default_runner() {
                     homeboy_version: None,
                     homeboy_build_identity: None,
                     session_path: Some("/tmp/lab.json".to_string()),
-                    leaseless_recovery: None,
-                    state_loss_recovery: None,
-                    leaseless_recovery_evidence: None,
                     failure_kind: Some(super::super::RunnerFailureKind::SshFailure),
                     failure_message: Some("SSH connectivity check failed".to_string()),
                     failure_evidence: None,
@@ -98,7 +95,7 @@ fn successful_auto_connect_authorizes_the_stale_disconnected_projection_for_this
         for (path, body) in [
             (
                 "/health",
-                r#"{"freshness":{"fresh":true,"stale_reason_code":null,"restartable":false,"lease_id":"lease-fresh","pid":1467759,"recovery_evidence":null,"ownership_evidence":null,"adoption_command":null,"binary_hash":null,"daemon_version":null,"daemon_build_identity":null,"runtime_paths":null,"active_jobs":0,"termination_evidence":null,"repair_plan":[]},"pid":1467759,"build_identity":{"display":"homeboy 0.0.0+test"}}"#,
+                r#"{"freshness":{"fresh":true,"stale_reason_code":null,"restartable":false,"lease_id":"lease-fresh","pid":1467759,"recovery_evidence":null,"ownership_evidence":null,"binary_hash":null,"daemon_version":null,"daemon_build_identity":null,"runtime_paths":null,"active_jobs":0,"termination_evidence":null,"repair_plan":[]},"pid":1467759,"build_identity":{"display":"homeboy 0.0.0+test"}}"#,
             ),
             (
                 "/jobs",
@@ -139,7 +136,6 @@ fn successful_auto_connect_authorizes_the_stale_disconnected_projection_for_this
         pid: Some(1467759),
         recovery_evidence: None,
         ownership_evidence: None,
-        adoption_command: None,
         binary_hash: None,
         daemon_version: None,
         daemon_build_identity: None,
@@ -257,7 +253,7 @@ fn in_process_connect_authority_keeps_its_owned_tunnel_alive_through_admission_a
         for (path, body) in [
             (
                 "/health",
-                r#"{"freshness":{"fresh":true,"stale_reason_code":null,"restartable":false,"lease_id":"lease-fresh","pid":1467759,"recovery_evidence":null,"ownership_evidence":null,"adoption_command":null,"binary_hash":null,"daemon_version":null,"daemon_build_identity":null,"runtime_paths":null,"active_jobs":0,"termination_evidence":null,"repair_plan":[]},"pid":1467759,"build_identity":{"display":"homeboy 0.0.0+test"}}"#,
+                r#"{"freshness":{"fresh":true,"stale_reason_code":null,"restartable":false,"lease_id":"lease-fresh","pid":1467759,"recovery_evidence":null,"ownership_evidence":null,"binary_hash":null,"daemon_version":null,"daemon_build_identity":null,"runtime_paths":null,"active_jobs":0,"termination_evidence":null,"repair_plan":[]},"pid":1467759,"build_identity":{"display":"homeboy 0.0.0+test"}}"#,
             ),
             (
                 "/jobs",
@@ -292,7 +288,6 @@ fn in_process_connect_authority_keeps_its_owned_tunnel_alive_through_admission_a
         pid: Some(1467759),
         recovery_evidence: None,
         ownership_evidence: None,
-        adoption_command: None,
         binary_hash: None,
         daemon_version: None,
         daemon_build_identity: None,
@@ -443,7 +438,6 @@ fn stale_disconnected_projection_rejects_reused_tunnel_identity_before_health() 
         pid: Some(1467759),
         recovery_evidence: None,
         ownership_evidence: None,
-        adoption_command: None,
         binary_hash: None,
         daemon_version: None,
         daemon_build_identity: None,
@@ -476,7 +470,7 @@ fn stale_disconnected_projection_rejects_mismatched_typed_health() {
         let length = stream.read(&mut request).expect("read request");
         assert!(String::from_utf8_lossy(&request[..length]).starts_with("GET /health HTTP/1.1"));
         stream
-            .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"freshness\":{\"fresh\":true,\"stale_reason_code\":null,\"restartable\":false,\"lease_id\":\"lease-other\",\"pid\":1467759,\"recovery_evidence\":null,\"ownership_evidence\":null,\"adoption_command\":null,\"binary_hash\":null,\"daemon_version\":null,\"daemon_build_identity\":null,\"runtime_paths\":null,\"active_jobs\":0,\"termination_evidence\":null,\"repair_plan\":[]},\"pid\":1467759}")
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"freshness\":{\"fresh\":true,\"stale_reason_code\":null,\"restartable\":false,\"lease_id\":\"lease-other\",\"pid\":1467759,\"recovery_evidence\":null,\"ownership_evidence\":null,\"binary_hash\":null,\"daemon_version\":null,\"daemon_build_identity\":null,\"runtime_paths\":null,\"active_jobs\":0,\"termination_evidence\":null,\"repair_plan\":[]},\"pid\":1467759}")
             .expect("health response");
     });
     let mut status = connected_direct_status("lab", None);
@@ -500,7 +494,6 @@ fn stale_disconnected_projection_rejects_mismatched_typed_health() {
         pid: Some(1467759),
         recovery_evidence: None,
         ownership_evidence: None,
-        adoption_command: None,
         binary_hash: None,
         daemon_version: None,
         daemon_build_identity: None,
@@ -540,15 +533,15 @@ fn stale_disconnected_projection_rejects_omitted_recorded_health_coordinates() {
     for (coordinate, health) in [
         (
             "lease",
-            r#"{"freshness":{"fresh":true,"stale_reason_code":null,"restartable":false,"lease_id":null,"pid":1467759,"recovery_evidence":null,"ownership_evidence":null,"adoption_command":null,"binary_hash":null,"daemon_version":null,"daemon_build_identity":null,"runtime_paths":null,"active_jobs":0,"termination_evidence":null,"repair_plan":[]},"pid":1467759,"build_identity":{"display":"homeboy 0.0.0+test"}}"#,
+            r#"{"freshness":{"fresh":true,"stale_reason_code":null,"restartable":false,"lease_id":null,"pid":1467759,"recovery_evidence":null,"ownership_evidence":null,"binary_hash":null,"daemon_version":null,"daemon_build_identity":null,"runtime_paths":null,"active_jobs":0,"termination_evidence":null,"repair_plan":[]},"pid":1467759,"build_identity":{"display":"homeboy 0.0.0+test"}}"#,
         ),
         (
             "pid",
-            r#"{"freshness":{"fresh":true,"stale_reason_code":null,"restartable":false,"lease_id":"lease-fresh","pid":null,"recovery_evidence":null,"ownership_evidence":null,"adoption_command":null,"binary_hash":null,"daemon_version":null,"daemon_build_identity":null,"runtime_paths":null,"active_jobs":0,"termination_evidence":null,"repair_plan":[]},"pid":null,"build_identity":{"display":"homeboy 0.0.0+test"}}"#,
+            r#"{"freshness":{"fresh":true,"stale_reason_code":null,"restartable":false,"lease_id":"lease-fresh","pid":null,"recovery_evidence":null,"ownership_evidence":null,"binary_hash":null,"daemon_version":null,"daemon_build_identity":null,"runtime_paths":null,"active_jobs":0,"termination_evidence":null,"repair_plan":[]},"pid":null,"build_identity":{"display":"homeboy 0.0.0+test"}}"#,
         ),
         (
             "build identity",
-            r#"{"freshness":{"fresh":true,"stale_reason_code":null,"restartable":false,"lease_id":"lease-fresh","pid":1467759,"recovery_evidence":null,"ownership_evidence":null,"adoption_command":null,"binary_hash":null,"daemon_version":null,"daemon_build_identity":null,"runtime_paths":null,"active_jobs":0,"termination_evidence":null,"repair_plan":[]},"pid":1467759}"#,
+            r#"{"freshness":{"fresh":true,"stale_reason_code":null,"restartable":false,"lease_id":"lease-fresh","pid":1467759,"recovery_evidence":null,"ownership_evidence":null,"binary_hash":null,"daemon_version":null,"daemon_build_identity":null,"runtime_paths":null,"active_jobs":0,"termination_evidence":null,"repair_plan":[]},"pid":1467759}"#,
         ),
     ] {
         let listener = TcpListener::bind("127.0.0.1:0").expect("daemon listener");
@@ -581,7 +574,6 @@ fn stale_disconnected_projection_rejects_omitted_recorded_health_coordinates() {
             pid: Some(1467759),
             recovery_evidence: None,
             ownership_evidence: None,
-            adoption_command: None,
             binary_hash: None,
             daemon_version: None,
             daemon_build_identity: None,
@@ -844,8 +836,8 @@ fn lab_preparation_does_not_offer_an_unavailable_reconciliation_plan() {
     freshness.recovery_evidence = Some(DaemonRecoveryEvidence::Unavailable);
     freshness.ownership_evidence = Some("ambiguous remote daemon candidates".to_string());
     freshness.repair_plan = vec![DaemonRepairStep::text(
-        "runner_reconcile_leaseless_orphans",
-        "homeboy runner connect lab --reconcile-leaseless-orphans",
+        "runner_connect",
+        "homeboy runner connect lab",
     )];
 
     let error = prepare_lab_runner_for_offload_with(
@@ -885,7 +877,7 @@ fn lab_preparation_does_not_offer_an_unavailable_reconciliation_plan() {
     );
     assert!(rendered.contains("typed ownership evidence is insufficient"));
     assert!(rendered.contains("ambiguous remote daemon candidates"));
-    assert!(!rendered.contains("reconcile-leaseless-orphans"));
+    assert!(!rendered.contains("runner_connect"));
 }
 
 #[test]
@@ -1281,9 +1273,6 @@ fn lab_runner_preparation_connects_disconnected_runner() {
                     homeboy_version: Some("homeboy 0.0.0".to_string()),
                     homeboy_build_identity: Some("homeboy 0.0.0+test".to_string()),
                     session_path: Some("/tmp/lab.json".to_string()),
-                    leaseless_recovery: None,
-                    state_loss_recovery: None,
-                    leaseless_recovery_evidence: None,
                     failure_evidence: None,
                     binary_convergence: None,
                     failure_kind: None,
@@ -1347,9 +1336,6 @@ fn lab_runner_preparation_errors_for_unreachable_explicit_runner() {
                     homeboy_version: None,
                     homeboy_build_identity: None,
                     session_path: Some("/tmp/lab.json".to_string()),
-                    leaseless_recovery: None,
-                    state_loss_recovery: None,
-                    leaseless_recovery_evidence: None,
                     failure_kind: Some(super::super::RunnerFailureKind::SshFailure),
                     failure_message: Some("SSH connectivity check failed".to_string()),
                     failure_evidence: None,
@@ -1389,7 +1375,6 @@ fn connected_direct_session(
         worker_identity: None,
         worker_pid: None,
         last_seen_at: None,
-        leaseless_recovery_evidence: None,
     }
 }
 
@@ -1422,7 +1407,6 @@ fn connected_direct_status(
             worker_identity: Some("worker-1".to_string()),
             worker_pid: Some(1234),
             last_seen_at: Some(chrono::Utc::now().to_rfc3339()),
-            leaseless_recovery_evidence: None,
         }),
         stale_daemon,
         configured_job_binary_build_identity: None,
@@ -1486,9 +1470,6 @@ fn connected_direct_connect_report(runner_id: &str) -> RunnerConnectReport {
         homeboy_version: Some("homeboy 0.0.0".to_string()),
         homeboy_build_identity: Some("homeboy 0.0.0+test".to_string()),
         session_path: Some("/tmp/lab-unreachable-health.json".to_string()),
-        leaseless_recovery: None,
-        state_loss_recovery: None,
-        leaseless_recovery_evidence: None,
         failure_kind: None,
         failure_message: None,
         failure_evidence: None,
@@ -1533,7 +1514,6 @@ fn restartable_daemon_freshness() -> DaemonFreshnessReport {
         pid: None,
         recovery_evidence: None,
         ownership_evidence: None,
-        adoption_command: None,
         binary_hash: None,
         daemon_version: None,
         daemon_build_identity: None,
@@ -1553,7 +1533,6 @@ fn fresh_daemon_freshness() -> DaemonFreshnessReport {
         pid: Some(1467759),
         recovery_evidence: None,
         ownership_evidence: None,
-        adoption_command: None,
         binary_hash: None,
         daemon_version: None,
         daemon_build_identity: None,

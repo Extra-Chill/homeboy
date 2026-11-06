@@ -101,7 +101,6 @@ control-plane
 control-plane provider-effects
 control-plane provider-effects reconcile
 daemon
-daemon adopt-orphan
 daemon artifact-get
 daemon broker-config
 daemon ensure-running
@@ -111,10 +110,7 @@ daemon jobs prune
 daemon jobs show
 daemon jobs watch
 daemon plan
-daemon reconcile-dead-lease-orphans
-daemon reconcile-leaseless-orphans
 daemon recover
-daemon recover-missing-lease-state
 daemon serve
 daemon start
 daemon status

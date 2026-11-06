@@ -363,7 +363,7 @@ fn dead_daemon_recovery_preserves_queued_remote_work() {
         .expect("second remote job queues");
 
     let diagnostics = store
-        .reconcile_dead_daemon_lease_jobs("lease-dead")
+        .reconcile_dead_generation_jobs("successor-lease")
         .expect("remote jobs never block daemon replacement");
     assert_eq!(
         diagnostics.preserved_remote_job_ids,

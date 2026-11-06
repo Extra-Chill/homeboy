@@ -15,7 +15,6 @@ use crate::api_jobs::{JobStatus, JobStore};
 use crate::build_identity::BuildIdentity;
 use crate::daemon::{
     DaemonFreshnessReport, DaemonRuntimeSnapshot, DaemonStaleReasonCode, DaemonState, DaemonStatus,
-    DaemonTerminationClassification, DaemonTerminationEvidence,
 };
 use crate::process::{SIGNAL_KILL, SIGNAL_TERMINATE};
 use crate::test_support::with_isolated_home;
@@ -90,72 +89,6 @@ fn stale_start_cleanup_waits_for_cook_generation_admission() {
 }
 
 #[test]
-fn completed_leaseless_recovery_replays_the_exact_replacement_without_starting_another() {
-    with_isolated_home(|_| {
-        let replacement = fake_daemon(4343, "replacement-lease");
-        let state = fake_daemon_state(replacement.clone());
-        let mut status = DaemonStatus {
-            running: true,
-            fresh: true,
-            reachable: true,
-            freshness: DaemonFreshnessReport {
-                fresh: true,
-                stale_reason_code: None,
-                restartable: false,
-                lease_id: Some(replacement.lease_id.clone()),
-                pid: Some(replacement.pid),
-                recovery_evidence: None,
-                ownership_evidence: None,
-                adoption_command: None,
-                binary_hash: None,
-                daemon_version: None,
-                daemon_build_identity: None,
-                runtime_paths: None,
-                active_jobs: 0,
-                termination_evidence: None,
-                repair_plan: Vec::new(),
-            },
-            stale_reason: None,
-            replacement_blocked: false,
-            replacement_blocked_reason: None,
-            summary: String::new(),
-            state: Some(state),
-            state_path: "/fake/daemon-state.json".to_string(),
-            state_identity: "fresh-replacement".to_string(),
-            owner_lock: crate::daemon::DaemonOwnerLockProbe::Free,
-            competing_serve: None,
-            active_job_recovery_evidence: Vec::new(),
-            termination_evidence: None,
-        };
-        status.summary = status.render_summary();
-        let status = status;
-        let receipt = super::LeaselessRecoveryReceipt {
-            affected_job_ids: Vec::new(),
-            affected_jobs: Vec::new(),
-            historical_lease_ids: vec!["stale-lease".to_string()],
-            evidence_snapshot_path: "/fake/recovery.snapshot".to_string(),
-            ownership_proof: vec!["owner lock was acquired".to_string()],
-            phase: super::StateLossRecoveryPhase::ReplacementStarted,
-            replacement: Some(replacement.clone()),
-            replacement_startup_token: Some("fake-startup-token".to_string()),
-            replacement_operation_id: None,
-        };
-        let path = crate::paths::daemon_leaseless_recovery_receipt_file().expect("receipt path");
-        super::write_leaseless_recovery_receipt(&path, &receipt).expect("write receipt");
-
-        let replay = super::replay_leaseless_recovery(&status, "127.0.0.1:0", None)
-            .expect("replay lookup")
-            .expect("exact completed recovery replays");
-
-        assert_eq!(replay.replacement, replacement);
-        assert_eq!(replay.affected_job_count, 0);
-        assert!(replay
-            .retry_guidance
-            .contains("no additional daemon was started"));
-    });
-}
-
-#[test]
 fn artifact_content_url_builds_encoded_daemon_byte_alias() {
     let url = artifact_content_url(
         "http://127.0.0.1:7421/base?ignored=true",
@@ -170,209 +103,112 @@ fn artifact_content_url_builds_encoded_daemon_byte_alias() {
     );
 }
 
+/// A store over the shared ledger stamped with `lease_id` and `scope`.
+fn attest_store(lease_id: &str, scope: crate::api_jobs::DaemonScope) -> JobStore {
+    JobStore::open_without_reconciliation(crate::paths::observation_db().expect("jobs path"))
+        .expect("store")
+        .with_daemon_lease(lease_id.to_string())
+        .with_daemon_scope(scope)
+}
+
+fn running_job(store: &JobStore) -> uuid::Uuid {
+    let job = store.create("runner.exec");
+    store.start(job.id).expect("start job");
+    job.id
+}
+
+fn ledger_status(job_id: uuid::Uuid) -> JobStatus {
+    JobStore::open_without_reconciliation(crate::paths::observation_db().expect("jobs path"))
+        .expect("store")
+        .get(job_id)
+        .expect("job")
+        .status
+}
+
+/// #17429: `--attest-absent` names exact jobs. A job with a recorded child
+/// (startup recovery proves its state) or of another daemon scope refuses the
+/// whole set; a valid set is terminalized together, with the attestation
+/// persisted on each job.
 #[test]
-fn leaseless_snapshot_records_the_ledger_before_reconciliation() {
+fn attest_absent_refuses_any_unprovable_job_and_terminalizes_a_valid_set_atomically() {
     with_isolated_home(|_| {
-        let path = crate::paths::observation_db().expect("observation db");
-        let store = JobStore::open_without_reconciliation(&path).expect("store");
-        let job = store.create("runner.exec");
-        let snapshot = super::snapshot_job_store(&path).expect("snapshot");
-        let recorded: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(snapshot).expect("read snapshot"))
-                .expect("snapshot JSON");
-        assert_eq!(recorded["jobs"][0]["job"]["id"], serde_json::json!(job.id));
+        let scope = super::super::daemon_scope().expect("scope");
+        let dead = attest_store("lease-dead", scope);
+        let first = running_job(&dead);
+        let second = running_job(&dead);
+        let with_child = dead.create("runner.exec").id;
+        dead.start_with_child_identity(with_child, 999_999, "2026-01-01T00:00:00Z".into())
+            .expect("child identity");
+        let foreign = running_job(&attest_store(
+            "lease-dead",
+            crate::api_jobs::DaemonScope::from_state_dir(std::path::Path::new("/other/scope")),
+        ));
+
+        for (refused, reason) in [
+            (with_child, "recorded child identity"),
+            (foreign, "another daemon scope"),
+        ] {
+            let error = super::attest_absent(&[first, refused]).expect_err("refused set");
+            assert!(error.message.contains(reason), "{}", error.message);
+            assert_eq!(
+                ledger_status(first),
+                JobStatus::Running,
+                "nothing is mutated"
+            );
+            assert_eq!(ledger_status(refused), JobStatus::Running);
+        }
+
+        let attested = super::attest_absent(&[second, first]).expect("valid set");
+        let mut expected = vec![first, second];
+        expected.sort();
+        assert_eq!(attested.attested_job_ids, expected);
+        assert_eq!(attested.live_lease_id, None);
+        assert_eq!(ledger_status(first), JobStatus::Failed);
+        assert_eq!(ledger_status(second), JobStatus::Failed);
+        let events = attest_store("lease-dead", super::super::daemon_scope().expect("scope"))
+            .events(first)
+            .expect("events");
+        assert!(events.iter().any(|event| event
+            .data
+            .as_ref()
+            .is_some_and(|data| data["operator_confirmed_workload_processes_absent"] == true)));
     });
 }
 
+/// #17429: with a live daemon, its own generation is never attestable; only
+/// other leases in the scope are dead.
 #[test]
-fn exact_lease_adoption_refuses_owner_lock_and_preserves_store() {
+fn attest_absent_refuses_the_live_generation_while_its_daemon_holds_the_lock() {
     with_isolated_home(|_| {
         let state_path = crate::paths::daemon_state_file().expect("state path");
-        let mut state = fake_daemon_state(fake_daemon(999_999, "lease-dead"));
-        state.state_path = state_path.display().to_string();
-        std::fs::create_dir_all(state_path.parent().expect("state parent")).expect("state parent");
-        std::fs::write(&state_path, serde_json::to_vec(&state).expect("state json"))
-            .expect("state");
+        let owner = super::super::acquire_daemon_owner_lock_at(&state_path, Duration::ZERO)
+            .expect("hold the owner lock as the live daemon");
+        let mut daemon = fake_daemon(std::process::id(), "lease-live");
+        daemon.state_path = state_path.display().to_string();
+        std::fs::write(
+            &state_path,
+            serde_json::to_vec(&fake_daemon_state(daemon)).expect("state json"),
+        )
+        .expect("state");
+        let scope = super::super::daemon_scope().expect("scope");
+        let live = running_job(&attest_store("lease-live", scope.clone()));
+        let dead = running_job(&attest_store("lease-dead", scope));
 
-        let jobs_path = crate::paths::observation_db().expect("jobs path");
-        let store = JobStore::open_without_reconciliation(&jobs_path)
-            .expect("store")
-            .with_daemon_lease("lease-dead".to_string());
-        let job = store.create("runner.exec");
-        store.start(job.id).expect("start job");
-        let before = JobStore::store_generation_at_path(&jobs_path).expect("generation");
-        let owner = super::super::try_acquire_daemon_owner_lock()
-            .expect("owner lock")
-            .expect("owner acquired");
-
-        let error = super::adopt_orphaned_lease("lease-dead", &[], "127.0.0.1:0")
-            .expect_err("owner lock blocks adoption");
-        assert!(error.message.contains("owner lock is held"));
-        assert_eq!(
-            JobStore::store_generation_at_path(&jobs_path).expect("generation"),
-            before
+        let error = super::attest_absent(&[live]).expect_err("live generation");
+        assert!(
+            error.message.contains("live daemon generation"),
+            "{}",
+            error.message
         );
-        assert_eq!(store.get(job.id).expect("job").status, JobStatus::Running);
+        assert_eq!(ledger_status(live), JobStatus::Running);
+
+        let attested = super::attest_absent(&[dead]).expect("dead generation");
+        assert_eq!(attested.attested_job_ids, vec![dead]);
+        assert_eq!(attested.live_lease_id.as_deref(), Some("lease-live"));
+        assert_eq!(ledger_status(dead), JobStatus::Failed);
+        assert_eq!(ledger_status(live), JobStatus::Running);
         drop(owner);
     });
-}
-
-#[test]
-fn exact_no_pid_recovery_uses_current_lease_authority_when_launcher_evidence_is_stale() {
-    let daemon = fake_daemon(4242, "lease-dead");
-    let mismatch = super::reconcile_dead_lease_orphans_with_operations(
-        "other-lease",
-        super::DeadLeaseOrphanRecoveryOperations {
-            status: || Ok(dead_status_with_unexpected_termination(daemon.clone())),
-            pid_is_running: |_| false,
-            acquire_owner: || Ok(Some(())),
-            prove_no_owner: || unreachable!("lease mismatch blocks owner probe"),
-            reconcile: |_| unreachable!("lease mismatch blocks mutation"),
-            start: || unreachable!("lease mismatch blocks replacement"),
-        },
-    )
-    .expect_err("mismatched lease is refused");
-    assert!(mismatch.message.contains("does not match"));
-
-    let missing = super::reconcile_dead_lease_orphans_with_operations(
-        "lease-dead",
-        super::DeadLeaseOrphanRecoveryOperations {
-            status: || Ok(fake_dead_status(daemon.clone())),
-            pid_is_running: |_| false,
-            acquire_owner: || Ok(Some(())),
-            prove_no_owner: || Ok(vec!["no owner".to_string()]),
-            reconcile: |_| {
-                Ok(crate::api_jobs::DaemonLeaseJobDiagnostics {
-                    expected_lease_id: "lease-dead".to_string(),
-                    matching_job_ids: vec![uuid::Uuid::nil()],
-                    ..Default::default()
-                })
-            },
-            start: || Ok(Some(fake_daemon(4343, "replacement"))),
-        },
-    )
-    .expect("operator authority does not depend on the lost launcher's record");
-    assert!(missing.termination_evidence.is_none());
-    assert!(missing
-        .ownership_proof
-        .iter()
-        .any(|proof| proof.contains("confirm-workload-processes-absent")));
-
-    let stale = super::reconcile_dead_lease_orphans_with_operations(
-        "lease-dead",
-        super::DeadLeaseOrphanRecoveryOperations {
-            status: || {
-                let mut status = dead_status_with_unexpected_termination(daemon.clone());
-                status.termination_evidence.as_mut().unwrap().lease_id =
-                    Some("old-lease".to_string());
-                Ok(status)
-            },
-            pid_is_running: |_| false,
-            acquire_owner: || Ok(Some(())),
-            prove_no_owner: || Ok(vec!["no owner".to_string()]),
-            reconcile: |_| {
-                Ok(crate::api_jobs::DaemonLeaseJobDiagnostics {
-                    expected_lease_id: "lease-dead".to_string(),
-                    matching_job_ids: vec![uuid::Uuid::nil()],
-                    ..Default::default()
-                })
-            },
-            start: || Ok(Some(fake_daemon(4344, "replacement-2"))),
-        },
-    )
-    .expect("stale launcher evidence does not block current proof");
-    assert!(stale.termination_evidence.is_none());
-
-    let status = dead_status_with_unexpected_termination(daemon.clone());
-    let contradiction = super::reconcile_dead_lease_orphans_with_operations(
-        "lease-dead",
-        super::DeadLeaseOrphanRecoveryOperations {
-            status: || Ok(status),
-            pid_is_running: |_| false,
-            acquire_owner: || Ok(Some(())),
-            prove_no_owner: || {
-                Err(crate::error::Error::validation_invalid_argument(
-                    "owner_probe",
-                    "live workload process evidence contradicts operator confirmation",
-                    None,
-                    None,
-                ))
-            },
-            reconcile: |_| unreachable!("contradictory process evidence blocks mutation"),
-            start: || unreachable!("contradictory process evidence blocks replacement"),
-        },
-    )
-    .expect_err("contradictory process evidence is refused");
-    assert!(contradiction.message.contains("contradicts"));
-}
-
-#[test]
-fn exact_no_pid_recovery_starts_only_after_reconciliation() {
-    let daemon = fake_daemon(4242, "lease-dead");
-    let job = uuid::Uuid::new_v4();
-    let result = super::reconcile_dead_lease_orphans_with_operations(
-        "lease-dead",
-        super::DeadLeaseOrphanRecoveryOperations {
-            status: || Ok(dead_status_with_unexpected_termination(daemon)),
-            pid_is_running: |_| false,
-            acquire_owner: || Ok(Some(())),
-            prove_no_owner: || Ok(vec!["owner lock acquired".to_string()]),
-            reconcile: |_| {
-                Ok(crate::api_jobs::DaemonLeaseJobDiagnostics {
-                    expected_lease_id: "lease-dead".to_string(),
-                    matching_job_ids: vec![job],
-                    ..Default::default()
-                })
-            },
-            start: || Ok(Some(fake_daemon(4343, "replacement"))),
-        },
-    )
-    .expect("exact reconciliation succeeds before replacement");
-    assert_eq!(result.reconciled_job_ids, vec![job]);
-    assert_eq!(
-        result
-            .termination_evidence
-            .expect("valid termination evidence is retained")
-            .classification,
-        DaemonTerminationClassification::UnexpectedExit
-    );
-    assert_eq!(
-        result
-            .replacement
-            .as_ref()
-            .map(|daemon| daemon.lease_id.as_str()),
-        Some("replacement")
-    );
-}
-
-/// #15556: the remote attested reconcile retires a dead generation, so it
-/// terminalizes the exact job set and starts nothing in that directory.
-#[test]
-fn exact_no_pid_recovery_without_replacement_reconciles_and_starts_nothing() {
-    let daemon = fake_daemon(4242, "lease-dead");
-    let job = uuid::Uuid::new_v4();
-    let result = super::reconcile_dead_lease_orphans_with_operations(
-        "lease-dead",
-        super::DeadLeaseOrphanRecoveryOperations {
-            status: || Ok(dead_status_with_unexpected_termination(daemon)),
-            pid_is_running: |_| false,
-            acquire_owner: || Ok(Some(())),
-            prove_no_owner: || Ok(vec!["owner lock acquired".to_string()]),
-            reconcile: |_| {
-                Ok(crate::api_jobs::DaemonLeaseJobDiagnostics {
-                    expected_lease_id: "lease-dead".to_string(),
-                    matching_job_ids: vec![job],
-                    ..Default::default()
-                })
-            },
-            start: || Ok(None),
-        },
-    )
-    .expect("exact reconciliation succeeds without a replacement");
-    assert_eq!(result.reconciled_job_ids, vec![job]);
-    assert_eq!(result.replacement, None);
-    let serialized = serde_json::to_value(&result).expect("serializes");
-    assert!(serialized.get("replacement").is_none());
 }
 
 #[test]
@@ -804,18 +640,6 @@ fn locked_start_operations_publish_once_and_converge_concurrent_callers() {
     });
 }
 
-#[test]
-fn state_loss_recovery_requires_a_concrete_unreachable_recorded_endpoint() {
-    for endpoint in ["127.0.0.1:0", "0.0.0.0:7421", "not-an-endpoint"] {
-        assert!(super::parse_recorded_daemon_endpoint(endpoint).is_err());
-    }
-    let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
-    let endpoint = listener.local_addr().expect("endpoint");
-    let error = super::probe_recorded_daemon_endpoint(endpoint)
-        .expect_err("reachable recorded endpoint must block recovery");
-    assert!(error.message.contains("is reachable"));
-}
-
 fn ensure_with_fake_operations(
     barrier: Arc<Barrier>,
     state: Arc<Mutex<FakeEnsureState>>,
@@ -945,7 +769,6 @@ fn fake_status(daemon: Option<super::DaemonStartResult>, fresh: bool) -> DaemonS
             pid: daemon.as_ref().map(|daemon| daemon.pid),
             recovery_evidence: None,
             ownership_evidence: None,
-            adoption_command: None,
             binary_hash: None,
             daemon_version: None,
             daemon_build_identity: None,
@@ -968,62 +791,6 @@ fn fake_status(daemon: Option<super::DaemonStartResult>, fresh: bool) -> DaemonS
         termination_evidence: None,
     };
     status.summary = status.render_summary();
-    status
-}
-
-fn fake_dead_status(daemon: super::DaemonStartResult) -> DaemonStatus {
-    let mut status = DaemonStatus {
-        running: false,
-        fresh: false,
-        reachable: false,
-        freshness: DaemonFreshnessReport {
-            fresh: false,
-            stale_reason_code: Some(DaemonStaleReasonCode::PidDead),
-            restartable: false,
-            lease_id: Some(daemon.lease_id.clone()),
-            pid: Some(daemon.pid),
-            recovery_evidence: None,
-            ownership_evidence: None,
-            adoption_command: None,
-            binary_hash: None,
-            daemon_version: None,
-            daemon_build_identity: None,
-            runtime_paths: None,
-            active_jobs: 1,
-            termination_evidence: None,
-            repair_plan: Vec::new(),
-        },
-        stale_reason: Some("daemon lease pid is not running".to_string()),
-        replacement_blocked: true,
-        replacement_blocked_reason: Some(
-            "1 active durable job(s) are protected from implicit replacement".to_string(),
-        ),
-        summary: String::new(),
-        state: Some(fake_daemon_state(daemon)),
-        state_path: "/fake/daemon-state.json".to_string(),
-        state_identity: "sha256:fake".to_string(),
-        owner_lock: crate::daemon::DaemonOwnerLockProbe::Free,
-        competing_serve: None,
-        active_job_recovery_evidence: Vec::new(),
-        termination_evidence: None,
-    };
-    status.summary = status.render_summary();
-    status
-}
-
-fn dead_status_with_unexpected_termination(daemon: super::DaemonStartResult) -> DaemonStatus {
-    let mut status = fake_dead_status(daemon.clone());
-    status.termination_evidence = Some(DaemonTerminationEvidence {
-        classification: DaemonTerminationClassification::UnexpectedExit,
-        observed_at: "2026-01-01T00:00:00Z".to_string(),
-        lease_id: Some(daemon.lease_id),
-        pid: Some(daemon.pid),
-        binary_identity: None,
-        active_jobs: 1,
-        resource_evidence: "test".to_string(),
-        os_evidence: "test".to_string(),
-        stop_requested: false,
-    });
     status
 }
 

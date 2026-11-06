@@ -1201,11 +1201,6 @@ fn connected_runner_connect_report(
             homeboy_version: Some(session.homeboy_version),
             homeboy_build_identity: session.homeboy_build_identity,
             session_path: Some(status.session_path),
-            leaseless_recovery: None,
-            state_loss_recovery: None,
-            leaseless_recovery_evidence: session
-                .leaseless_recovery_evidence
-                .and_then(|value| serde_json::from_value(value).ok()),
             failure_kind: None,
             failure_message: None,
             failure_evidence: None,
@@ -1570,7 +1565,6 @@ mod daemon_repair_step_tests {
             pid: Some(4545),
             recovery_evidence: Some(homeboy_core::daemon::DaemonRecoveryEvidence::ProvenDead),
             ownership_evidence: None,
-            adoption_command: None,
             binary_hash: None,
             daemon_version: None,
             daemon_build_identity: None,
@@ -1589,8 +1583,8 @@ mod daemon_repair_step_tests {
         let report = status_report(
             "homeboy-lab",
             Some(freshness_with_plan(vec![daemon_repair::action_step(
-                daemon_repair::RUNNER_ADOPT_ORPHAN_LEASE,
-                daemon_repair::adopt_orphan_lease_action("homeboy-lab", "lease-dead"),
+                daemon_repair::RUNNER_CONNECT,
+                daemon_repair::connect_action("homeboy-lab"),
             )])),
             None,
         );
@@ -1598,11 +1592,8 @@ mod daemon_repair_step_tests {
         let steps = daemon_repair_steps("homeboy-lab", &report);
 
         assert_eq!(steps.len(), 1);
-        assert_eq!(steps[0].code, daemon_repair::RUNNER_ADOPT_ORPHAN_LEASE);
-        assert_eq!(
-            steps[0].command,
-            "homeboy runner connect homeboy-lab --adopt-orphan-lease lease-dead"
-        );
+        assert_eq!(steps[0].code, daemon_repair::RUNNER_CONNECT);
+        assert_eq!(steps[0].command, "homeboy runner connect homeboy-lab");
         assert_eq!(
             daemon_repair_command("homeboy-lab", &report),
             steps[0].command
@@ -1672,8 +1663,8 @@ mod daemon_repair_step_tests {
     #[test]
     fn unavailable_ownership_plan_offers_a_non_circular_terminal_diagnostic() {
         let mut freshness = freshness_with_plan(vec![daemon_repair::action_step(
-            daemon_repair::RUNNER_RECONCILE_LEASELESS_ORPHANS,
-            daemon_repair::reconcile_leaseless_orphans_action("homeboy-lab"),
+            daemon_repair::RUNNER_CONNECT,
+            daemon_repair::connect_action("homeboy-lab"),
         )]);
         freshness.stale_reason_code =
             Some(homeboy_core::daemon::DaemonStaleReasonCode::LeaseMissing);

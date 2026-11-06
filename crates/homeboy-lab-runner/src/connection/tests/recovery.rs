@@ -857,15 +857,17 @@ fn stale_active_daemon_without_a_matching_session_fails_closed_without_replacing
     assert!(warning.contains(
         "Continue with `homeboy runner refresh-homeboy homeboy-lab --reconnect` when its work is complete."
     ));
-    assert_eq!(
-        recovery.adoption_command.as_deref(),
-        Some("homeboy runner connect homeboy-lab --reconcile-leaseless-orphans")
+    assert!(
+        recovery.repair_plan.is_empty(),
+        "a live busy daemon is refreshed, not reconnected over"
     );
 }
 
 #[test]
-fn recorded_dead_daemon_with_active_jobs_refuses_implicit_replacement() {
-    let session = direct_ssh_session("lease-dead");
+fn proven_dead_daemon_with_active_jobs_starts_its_successor() {
+    // #17429: the successor's startup recovery reconciles every in-scope job
+    // the dead generation left, so durable work never blocks the start. Its
+    // owner lock refuses a still-running holder.
     let status = remote_daemon_status_for_test_with_reason(
         false,
         false,
@@ -875,17 +877,20 @@ fn recorded_dead_daemon_with_active_jobs_refuses_implicit_replacement() {
         Some(DaemonStaleReasonCode::PidDead),
     );
 
-    let err = remote_daemon_connect_action(Some(&session), &status)
-        .expect_err("require explicit orphan adoption");
-
-    assert!(err.contains("unreachable"));
-    assert!(err.contains("1 active job(s) were not replaced"));
-    assert!(err.contains("active-job recovery guidance"));
-    assert!(err.contains("Inspect `homeboy daemon status`"));
+    for session in [
+        Some(direct_ssh_session("lease-dead")),
+        Some(direct_ssh_session("lease-recorded")),
+        None,
+    ] {
+        assert_eq!(
+            remote_daemon_connect_action(session.as_ref(), &status).expect("start successor"),
+            RemoteDaemonConnectAction::Start
+        );
+    }
 }
 
 #[test]
-fn remote_dead_lease_recovery_exposes_exact_adoption_command() {
+fn remote_dead_lease_recovery_is_repaired_by_reconnecting() {
     let status = remote_daemon_status_for_test_with_reason(
         false,
         false,
@@ -905,31 +910,9 @@ fn remote_dead_lease_recovery_exposes_exact_adoption_command() {
         Some(homeboy_core::daemon::DaemonRecoveryEvidence::ProvenDead)
     );
     assert_eq!(
-        recovery.adoption_command.as_deref(),
-        Some("homeboy runner connect homeboy-lab --adopt-orphan-lease lease-dead")
+        plan_of(&recovery),
+        vec![("runner_connect", "homeboy runner connect homeboy-lab")]
     );
-}
-
-#[test]
-fn remote_conflicted_dead_lease_preserves_no_adoption_command() {
-    let mut status = remote_daemon_status_for_test_with_reason(
-        false,
-        false,
-        0,
-        "lease-dead",
-        4545,
-        Some(DaemonStaleReasonCode::PidDead),
-    );
-    status
-        .daemon_freshness
-        .as_mut()
-        .expect("daemon-authored freshness")
-        .adoption_command = None;
-
-    let recovery = remote_daemon_recovery_freshness_from_status("homeboy-lab", &status);
-
-    assert!(recovery.adoption_command.is_none());
-    assert!(recovery.repair_plan.is_empty());
 }
 
 #[test]
@@ -945,7 +928,7 @@ fn remote_status_without_reason_is_evidence_unavailable_and_non_adoptable() {
         recovery.recovery_evidence,
         Some(homeboy_core::daemon::DaemonRecoveryEvidence::Unavailable)
     );
-    assert!(recovery.adoption_command.is_none());
+    assert!(recovery.repair_plan.is_empty());
 }
 
 #[test]
@@ -966,8 +949,8 @@ fn fresh_idle_remote_daemon_is_recoverable_by_reconnect() {
         Some(homeboy_core::daemon::DaemonRecoveryEvidence::Recoverable)
     );
     assert_eq!(
-        recovery.adoption_command.as_deref(),
-        Some("homeboy runner connect homeboy-lab")
+        plan_of(&recovery),
+        vec![("runner_connect", "homeboy runner connect homeboy-lab")]
     );
     let ownership = recovery
         .ownership_evidence
@@ -984,7 +967,7 @@ fn fresh_idle_remote_daemon_is_recoverable_by_reconnect() {
 }
 
 #[test]
-fn remote_missing_or_corrupt_lease_with_active_jobs_exposes_bounded_reconciliation() {
+fn remote_missing_or_corrupt_lease_with_active_jobs_is_repaired_by_starting_the_daemon() {
     for reason in [
         DaemonStaleReasonCode::LeaseMissing,
         DaemonStaleReasonCode::LeaseCorrupt,
@@ -1008,15 +991,15 @@ fn remote_missing_or_corrupt_lease_with_active_jobs_exposes_bounded_reconciliati
             "recovery remains explicit until remote ownership probes pass ({reason:?})"
         );
         assert_eq!(
-            recovery.adoption_command.as_deref(),
-            Some("homeboy runner connect homeboy-lab --reconcile-leaseless-orphans"),
+            plan_of(&recovery),
+            vec![("runner_connect", "homeboy runner connect homeboy-lab")],
             "{reason:?}"
         );
         assert!(recovery
             .ownership_evidence
             .as_deref()
             .expect("recovery guidance")
-            .contains("explicit reconciliation"));
+            .contains("owner lock"));
     }
 }
 
@@ -1044,16 +1027,7 @@ fn remote_recovery_repair_plan_carries_the_lease_specific_action() {
     let recovery = remote_daemon_recovery_freshness_from_status("homeboy-lab", &proven_dead);
     assert_eq!(
         plan_of(&recovery),
-        vec![(
-            "runner_adopt_orphan_lease",
-            "homeboy runner connect homeboy-lab --adopt-orphan-lease lease-dead"
-        )]
-    );
-    // The plan and the adoption command are one action in two shapes; they must
-    // never disagree.
-    assert_eq!(
-        recovery.adoption_command.as_deref(),
-        Some(recovery.repair_plan[0].command.as_str())
+        vec![("runner_connect", "homeboy runner connect homeboy-lab")]
     );
 
     let mut leaseless = remote_daemon_status_for_test_with_reason(
@@ -1068,10 +1042,7 @@ fn remote_recovery_repair_plan_carries_the_lease_specific_action() {
     let recovery = remote_daemon_recovery_freshness_from_status("homeboy-lab", &leaseless);
     assert_eq!(
         plan_of(&recovery),
-        vec![(
-            "runner_reconcile_leaseless_orphans",
-            "homeboy runner connect homeboy-lab --reconcile-leaseless-orphans"
-        )]
+        vec![("runner_connect", "homeboy runner connect homeboy-lab")]
     );
 
     let mut fresh_idle = remote_daemon_status_for_test(true, true, 0, "lease-live", 4545);
@@ -1093,7 +1064,6 @@ fn remote_recovery_without_evidence_emits_no_repair_plan() {
     let recovery = remote_daemon_recovery_freshness_from_status("homeboy-lab", &status);
 
     assert!(recovery.repair_plan.is_empty());
-    assert!(recovery.adoption_command.is_none());
 }
 
 #[test]
@@ -1110,7 +1080,6 @@ fn unavailable_remote_recovery_is_fail_closed() {
     );
     assert!(recovery.lease_id.is_none());
     assert!(recovery.pid.is_none());
-    assert!(recovery.adoption_command.is_none());
     assert!(recovery.repair_plan.is_empty());
 }
 
@@ -1122,114 +1091,9 @@ fn remote_daemon_status_probe_has_a_bounded_deadline() {
     );
 }
 
-#[test]
-fn remote_leaseless_recovery_decodes_and_propagates_report() {
-    let envelope = parse_envelope(
-        r#"{"success":true,"data":{
-        "affected_job_ids": [],
-        "affected_job_count": 0,
-        "evidence_snapshot_path": "/evidence/jobs.snapshot",
-        "ownership_proof": ["owner lock acquired"],
-        "retry_guidance": "retry",
-        "replacement": {
-            "pid": 42,
-            "address": "127.0.0.1:7421",
-            "state_path": "/state.json",
-            "lease_id": "lease-new"
-        }
-    }}"#,
-    )
-    .expect("parse daemon envelope");
-    let recovery = decode_leaseless_recovery(envelope.data).expect("decode recovery report");
-    assert_eq!(recovery.replacement.lease_id, "lease-new");
-    assert_eq!(recovery.evidence_snapshot_path, "/evidence/jobs.snapshot");
-    assert_eq!(recovery.ownership_proof, vec!["owner lock acquired"]);
-}
-
-#[test]
-fn state_loss_recovery_delegation_decodes_and_serializes_auditable_evidence() {
-    let command = remote_state_loss_recovery_command(
-        "/opt/homeboy",
-        "lease-old",
-        4242,
-        "127.0.0.1:7421",
-        "operation-1",
-    );
-    assert!(command.contains("--recorded-endpoint 127.0.0.1:7421"));
-    let envelope = parse_envelope(
-        r#"{"success":true,"data":{
-        "recovered_lease_id":"lease-old",
-        "recorded_dead_pid":4242,
-        "recorded_endpoint":"127.0.0.1:7421",
-        "affected_job_ids":["7ab96605-38b7-4a6a-bbb8-99db839fa6dc"],
-        "affected_job_count":1,
-        "evidence_snapshot_path":"/evidence/jobs.snapshot",
-        "ownership_proof":["owner lock acquired","endpoint unreachable"],
-        "retry_guidance":"retry",
-        "replacement":{"pid":43,"address":"127.0.0.1:7422","state_path":"/state.json","lease_id":"lease-new"}
-    }}"#,
-    )
-    .expect("parse daemon envelope");
-    let recovery = decode_state_loss_recovery(envelope.data).expect("decode recovery report");
-    let (mut report, _) = failed_connect(
-        "runner",
-        std::path::PathBuf::from("/session.json"),
-        RunnerFailureKind::DaemonStartupFailure,
-        "test".to_string(),
-    );
-    report.state_loss_recovery = Some(recovery);
-    let data = serde_json::to_value(report).expect("serialize controller report");
-    assert_eq!(
-        data["state_loss_recovery"]["recovered_lease_id"],
-        "lease-old"
-    );
-    assert_eq!(
-        data["state_loss_recovery"]["affected_job_ids"][0],
-        "7ab96605-38b7-4a6a-bbb8-99db839fa6dc"
-    );
-    assert_eq!(
-        data["state_loss_recovery"]["replacement"]["lease_id"],
-        "lease-new"
-    );
-}
-
-#[test]
-fn ensure_or_tunnel_failure_report_retains_completed_state_loss_recovery() {
-    let envelope = parse_envelope(r#"{"success":true,"data":{"recovered_lease_id":"lease-old","recorded_dead_pid":42,"recorded_endpoint":"127.0.0.1:7421","affected_job_ids":[],"affected_job_count":0,"evidence_snapshot_path":"/snapshot","ownership_proof":[],"retry_guidance":"retry","replacement":{"pid":43,"address":"127.0.0.1:7422","state_path":"/state","lease_id":"lease-new"}}}"#).expect("envelope");
-    let recovery = decode_state_loss_recovery(envelope.data).expect("recovery");
-    let (mut report, _) = failed_connect(
-        "runner",
-        std::path::PathBuf::from("/session"),
-        RunnerFailureKind::TunnelFailure,
-        "tunnel failed".to_string(),
-    );
-    attach_state_loss_recovery(&mut report, Some(recovery));
-    assert_eq!(
-        report
-            .state_loss_recovery
-            .as_ref()
-            .map(|value| value.replacement.lease_id.as_str()),
-        Some("lease-new")
-    );
-}
-
-#[test]
-fn remote_leaseless_recovery_timeout_is_actionable() {
-    let message = leaseless_recovery_failure_message(&homeboy_core::server::CommandOutput {
-        stdout: String::new(),
-        stderr: String::new(),
-        success: false,
-        exit_code: 124,
-        timed_out: true,
-        observation: Default::default(),
-        child_resource: None,
-    });
-    assert!(message.contains("daemon status"));
-}
-
 #[cfg(unix)]
 #[test]
-fn runner_connect_persists_recovery_evidence_after_daemon_failure() {
+fn runner_connect_starts_a_missing_daemon_and_invalidates_cached_probes() {
     crate::test_support::with_isolated_home(|home| {
         let daemon = home.path().join("remote-homeboy");
         let argv_path = home.path().join("recovery-argv");
@@ -1264,16 +1128,19 @@ fn runner_connect_persists_recovery_evidence_after_daemon_failure() {
                 r#"#!/bin/sh
 case "$1 $2" in
   "self identity")
-printf '%s\n' '{{"success":true,"data":{{"version":"0.284.0","display":"homeboy 0.284.0+test","daemon_recovery_capabilities":[{{"id":"daemon-recovery-leaseless","version":1}},{{"id":"daemon-recovery-state-loss","version":1}}]}}}}'
+printf '%s\n' '{{"success":true,"data":{{"version":"0.284.0","display":"homeboy 0.284.0+test","daemon_recovery_capabilities":[{{"id":"daemon-ensure-running-operation-id","version":1}}]}}}}'
 ;;
-"daemon reconcile-leaseless-orphans")
-  printf '%s\n' "$@" > "$HOMEBOY_TEST_RECOVERY_ARGV"
-   printf '%s\n' '{{"success":true,"data":{{"affected_job_ids":[],"affected_job_count":0,"affected_jobs":[],"historical_lease_ids":[],"evidence_snapshot_path":"/tmp/jobs.snapshot","ownership_proof":["owner lock acquired"],"retry_guidance":"retry","replacement":{{"pid":42,"address":"{address}","state_path":"/tmp/state.json","lease_id":"lease-new"}}}}}}'
- ;;
-"daemon recover-missing-lease-state")
-   printf '%s\n' '{{"success":true,"data":{{"recovered_lease_id":"lease-interrupted","recorded_dead_pid":41,"recorded_endpoint":"127.0.0.1:7419","affected_job_ids":[],"affected_job_count":0,"evidence_snapshot_path":"/tmp/jobs.snapshot","ownership_proof":["owner lock acquired"],"retry_guidance":"retry","replacement":{{"pid":42,"address":"{address}","state_path":"/tmp/state.json","lease_id":"lease-new"}}}}}}'
- ;;
-   "daemon status") exit 99 ;;
+"daemon status")
+  printf '%s\n' '{{"success":true,"data":{{"running":false,"fresh":false,"reachable":false,"freshness":{{"active_jobs":1}}}}}}'
+;;
+"daemon ensure-running")
+  if [ "$3" = "--help" ]; then
+    printf '%s\n' 'OPTIONS:' '    --replacement-operation-id <ID>'
+  else
+    printf '%s\n' "$@" > "$HOMEBOY_TEST_RECOVERY_ARGV"
+    printf '%s\n' '{{"success":true,"data":{{"pid":42,"address":"{address}","state_path":"/tmp/state.json","lease_id":"lease-new"}}}}'
+  fi
+;;
 esac
 "#,
                 address = address,
@@ -1317,9 +1184,7 @@ esac
         .expect("cache pre-connect capability answer");
         assert_eq!(cached, "missing");
 
-        let (report, exit_code) =
-            connect_with_orphan_adoption("local-runner", None, &[], true, None, None, None)
-                .expect("connect result");
+        let (report, exit_code) = connect("local-runner").expect("connect result");
 
         assert_eq!(exit_code, 0);
         assert!(report.connected);
@@ -1340,33 +1205,6 @@ esac
             report.remote_daemon_address.as_deref(),
             Some(expected_address.as_str())
         );
-        assert_eq!(
-            report
-                .leaseless_recovery
-                .as_ref()
-                .expect("recovery report")
-                .replacement
-                .lease_id,
-            "lease-new"
-        );
-        let evidence = report
-            .leaseless_recovery_evidence
-            .as_ref()
-            .expect("recovery evidence");
-        assert_eq!(
-            evidence.contract,
-            RunnerLeaselessRecoveryContract::ConfirmNoDaemonOwner
-        );
-        assert_eq!(evidence.remote_command_identity, "homeboy 0.284.0+test");
-        assert_eq!(
-            evidence
-                .recovery
-                .as_ref()
-                .expect("recovery evidence result")
-                .replacement
-                .lease_id,
-            "lease-new"
-        );
         let session = read_session("local-runner")
             .expect("read recovery session")
             .expect("recovery session");
@@ -1378,209 +1216,11 @@ esac
         assert_eq!(session.remote_daemon_pid, Some(42));
         assert!(session.local_url.is_some());
         assert_eq!(session.local_port, Some(address.port()));
-        let recovery_evidence: crate::RunnerLeaselessRecoveryEvidence = serde_json::from_value(
-            session
-                .leaseless_recovery_evidence
-                .clone()
-                .expect("persisted recovery evidence"),
-        )
-        .expect("typed recovery evidence");
-        assert_eq!(
-            recovery_evidence
-                .recovery
-                .as_ref()
-                .expect("persisted recovery result")
-                .replacement
-                .lease_id,
-            "lease-new"
-        );
         let argv = std::fs::read_to_string(argv_path).expect("read dispatched recovery argv");
-        assert!(
-            argv.starts_with("daemon\nreconcile-leaseless-orphans\n--replacement-operation-id\n")
-        );
-        assert!(argv.ends_with("\n--addr\n127.0.0.1:0\n"));
-        let (state_loss_report, state_loss_exit) = connect_with_orphan_adoption(
-            "local-runner",
-            None,
-            &[],
-            false,
-            Some("lease-interrupted"),
-            Some(41),
-            Some("127.0.0.1:7419"),
-        )
-        .expect("state-loss reconnect result");
-        assert_eq!(state_loss_exit, 0);
-        assert!(state_loss_report.connected);
-        assert_eq!(state_loss_report.remote_daemon_pid, Some(42));
-        assert_eq!(
-            state_loss_report
-                .state_loss_recovery
-                .as_ref()
-                .map(|recovery| recovery.replacement.lease_id.as_str()),
-            Some("lease-new")
-        );
+        assert!(argv.starts_with("daemon\nensure-running\n"), "{argv}");
+        assert!(argv.contains("\n--replacement-operation-id\n"), "{argv}");
         drop(endpoint);
     });
-}
-
-#[cfg(unix)]
-fn rejected_state_loss_refusal_is_retired_before_plain_connect_retries(
-    legacy_replay: bool,
-    transport_success: bool,
-) {
-    crate::test_support::with_isolated_home(|home| {
-        let daemon = home.path().join("remote-homeboy");
-        let start_count = home.path().join("daemon-start-count");
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
-        let address = listener.local_addr().expect("address");
-        let endpoint = std::thread::spawn(move || {
-            for _ in 0..16 {
-                let (mut stream, _) = listener.accept().expect("endpoint request");
-                let mut request = [0; 4096];
-                let length = stream.read(&mut request).expect("read endpoint request");
-                let request = String::from_utf8_lossy(&request[..length]);
-                let body = if request.starts_with("GET /health ") {
-                    r#"{"freshness":{"fresh":true,"restartable":true,"lease_id":"lease-b","pid":4242,"active_jobs":0},"pid":4242}"#
-                } else {
-                    r#"{"version":"0.284.0","build_identity":{"display":"homeboy 0.284.0+test"},"lease":{"lease_id":"lease-b"}}"#
-                };
-                stream
-                    .write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes())
-                    .expect("endpoint response");
-            }
-        });
-        homeboy_test_support::write_executable(&daemon, format!(
-                r#"#!/bin/sh
-case "$1 $2" in
-  "self identity")
-    printf '%s\n' '{{"success":true,"data":{{"version":"0.284.0","display":"homeboy 0.284.0+test","daemon_recovery_capabilities":[{{"id":"daemon-recovery-leaseless","version":1}},{{"id":"daemon-recovery-state-loss","version":1}},{{"id":"daemon-ensure-running-operation-id","version":1}}]}}}}'
-    ;;
-  "daemon status")
-    printf '%s\n' '{{"success":true,"data":{{"running":false,"fresh":false,"reachable":false,"freshness":{{"active_jobs":0}}}}}}'
-    ;;
-  "daemon recover-missing-lease-state")
-    if [ "$3" = "--help" ]; then
-      printf '%s\n' 'OPTIONS:' '    --replacement-operation-id <ID>'
-    else
-      printf '%s\n' '{{"success":false,"diagnostics":{{"code":"validation.invalid_argument"}}}}'
-{rejection_exit}
-    fi
-    ;;
-  "daemon ensure-running")
-    if [ "$3" = "--help" ]; then
-      printf '%s\n' 'OPTIONS:' '    --replacement-operation-id <ID>'
-    else
-      printf '%s' '1' > "{start_count}"
-      printf '%s\n' '{{"success":true,"data":{{"pid":4242,"address":"{address}","state_path":"/tmp/state-b.json","lease_id":"lease-b"}}}}'
-    fi
-    ;;
-esac
-"#,
-                address = address,
-                start_count = start_count.display(),
-                rejection_exit = if transport_success { "" } else { "      exit 2" },
-            ), 0o755)
-        .expect("write remote Homeboy shim");
-
-        server::create(
-            &serde_json::json!({ "id": "local-runner", "host": "localhost", "user": "test" })
-                .to_string(),
-            false,
-        )
-        .expect("create local server");
-        crate::create(
-            &serde_json::json!({ "id": "local-runner", "kind": "ssh", "homeboy_path": daemon })
-                .to_string(),
-            false,
-        )
-        .expect("enable local runner");
-
-        if legacy_replay {
-            let operation_id =
-                crate::connection::replacement_journal::replacement_operation("local-runner")
-                    .expect("create legacy operation");
-            crate::connection::replacement_journal::record_replacement_operation_replay(
-                "local-runner",
-                "state-loss",
-                &remote_state_loss_recovery_command(
-                    daemon.to_str().expect("daemon path"),
-                    "lease-lost",
-                    41,
-                    "127.0.0.1:7419",
-                    &operation_id,
-                ),
-            )
-            .expect("write legacy state-loss replay");
-        }
-
-        let (_rejected, exit_code) = connect_with_orphan_adoption(
-            "local-runner",
-            None,
-            &[],
-            false,
-            (!legacy_replay).then_some("lease-lost"),
-            (!legacy_replay).then_some(41),
-            (!legacy_replay).then_some("127.0.0.1:7419"),
-        )
-        .expect("rejected state-loss result");
-        assert_eq!(exit_code, 20);
-        let journal_dir = homeboy_core::paths::runner_sessions_dir()
-            .expect("runner sessions")
-            .join("local-runner");
-        assert!(!journal_dir.join("pending-replacement.json").exists());
-        let operation: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(journal_dir.join("replacement-operation.json"))
-                .expect("replacement operation"),
-        )
-        .expect("replacement operation JSON");
-        assert!(operation["kind"].is_null());
-        assert!(operation["replay_command"].is_null());
-        let evidence = std::fs::read_dir(journal_dir.join("rejected-replacements"))
-            .expect("rejection evidence")
-            .next()
-            .expect("one rejection evidence")
-            .expect("evidence entry");
-        let evidence: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(evidence.path()).expect("read rejection evidence"),
-        )
-        .expect("rejection evidence JSON");
-        assert_eq!(evidence["kind"], "state-loss");
-        assert_eq!(evidence["exit_code"], if transport_success { 0 } else { 2 });
-
-        let (connected, exit_code) =
-            connect_with_orphan_adoption("local-runner", None, &[], false, None, None, None)
-                .expect("plain connect result");
-        assert_eq!(
-            exit_code, 0,
-            "plain connect: {:?}",
-            connected.failure_message
-        );
-        assert!(connected.connected);
-        assert_eq!(connected.remote_daemon_pid, Some(4242));
-        assert_eq!(
-            std::fs::read_to_string(start_count).expect("start count"),
-            "1"
-        );
-        drop(endpoint);
-    });
-}
-
-/// #11901: a legacy replay journal can contain an already-refused exact
-/// recovery. Its evidence is retained, but its pending authority must not block
-/// a retry of plain connect.
-#[cfg(unix)]
-#[test]
-fn rejected_legacy_state_loss_replay_is_retired_before_plain_connect_retries() {
-    rejected_state_loss_refusal_is_retired_before_plain_connect_retries(true, false);
-}
-
-/// #11901: the fresh exact state-loss command can receive a typed failure
-/// envelope over a successful transport. That terminal refusal must retire its
-/// replay authority before the next plain connect.
-#[cfg(unix)]
-#[test]
-fn rejected_fresh_state_loss_envelope_is_retired_before_plain_connect_retries() {
-    rejected_state_loss_refusal_is_retired_before_plain_connect_retries(false, true);
 }
 
 /// #10430: once recovery creates B, losing the controller's bounded health
@@ -1633,16 +1273,22 @@ fn recovery_retry_reattaches_journaled_b_after_four_lost_health_requests() {
                 r#"#!/bin/sh
 case "$1 $2" in
   "self identity")
-    printf '%s\n' '{{"success":true,"data":{{"version":"0.284.0","display":"homeboy 0.284.0+test","daemon_recovery_capabilities":[{{"id":"daemon-recovery-leaseless","version":1}}]}}}}'
+    printf '%s\n' '{{"success":true,"data":{{"version":"0.284.0","display":"homeboy 0.284.0+test","daemon_recovery_capabilities":[{{"id":"daemon-ensure-running-operation-id","version":1}}]}}}}'
     ;;
-  "daemon reconcile-leaseless-orphans")
+  "daemon status")
+    printf '%s\n' '{{"success":true,"data":{{"running":false,"fresh":false,"reachable":false,"freshness":{{"active_jobs":1}}}}}}'
+    ;;
+  "daemon ensure-running")
+    if [ "$3" = "--help" ]; then
+      printf '%s\n' 'OPTIONS:' '    --replacement-operation-id <ID>'
+      exit 0
+    fi
       count=0
       if [ -f "{start_count}" ]; then count=$(cat "{start_count}"); fi
       count=$((count + 1))
       printf '%s' "$count" > "{start_count}"
-      printf '%s\n' '{{"success":true,"data":{{"affected_job_ids":[],"affected_job_count":0,"affected_jobs":[],"historical_lease_ids":[],"evidence_snapshot_path":"/tmp/jobs.snapshot","ownership_proof":["owner lock acquired"],"retry_guidance":"retry","replacement":{{"pid":4242,"address":"{address}","state_path":"/tmp/state-b.json","lease_id":"lease-b"}}}}}}'
+      printf '%s\n' '{{"success":true,"data":{{"pid":4242,"address":"{address}","state_path":"/tmp/state-b.json","lease_id":"lease-b"}}}}'
     ;;
-  "daemon status") exit 99 ;;
 esac
 "#,
                 address = address,
@@ -1667,9 +1313,7 @@ esac
         )
         .expect("enable local runner");
 
-        let (first, first_exit) =
-            connect_with_orphan_adoption("local-runner", None, &[], true, None, None, None)
-                .expect("first connect result");
+        let (first, first_exit) = connect("local-runner").expect("first connect result");
         assert_eq!(first_exit, 20);
         let evidence = first.failure_evidence.expect("known B failure evidence");
         assert_eq!(evidence.known_remote_lease_id.as_deref(), Some("lease-b"));
@@ -1697,9 +1341,7 @@ esac
         assert_eq!(pending["remote_daemon_pid"], 4242);
         assert!(journal_dir.join("replacement-operation.json").exists());
 
-        let (second, second_exit) =
-            connect_with_orphan_adoption("local-runner", None, &[], true, None, None, None)
-                .expect("second connect result");
+        let (second, second_exit) = connect("local-runner").expect("second connect result");
         assert_eq!(
             second_exit, 0,
             "second connect failed: {:?}",
@@ -1833,9 +1475,7 @@ esac
         )
         .expect("enable local runner");
 
-        let (_first, first_exit) =
-            connect_with_orphan_adoption("local-runner", None, &[], false, None, None, None)
-                .expect("first connect result");
+        let (_first, first_exit) = connect("local-runner").expect("first connect result");
         assert_eq!(first_exit, 20);
         assert_eq!(
             std::fs::read_to_string(&start_count).expect("B start count"),
@@ -1866,9 +1506,7 @@ esac
         )
         .expect("select refreshed remote Homeboy");
 
-        let (second, second_exit) =
-            connect_with_orphan_adoption("local-runner", None, &[], false, None, None, None)
-                .expect("second connect result");
+        let (second, second_exit) = connect("local-runner").expect("second connect result");
         assert_eq!(
             second_exit, 0,
             "second connect failed: {:?}",
@@ -1909,76 +1547,11 @@ esac
     });
 }
 
-#[test]
-fn state_loss_recovery_delegation_uses_the_canonical_exact_contract() {
-    let command = remote_state_loss_recovery_command(
-        "/opt/homeboy",
-        "lease exact",
-        4242,
-        "127.0.0.1:4242",
-        "operation-1",
-    );
-    assert_eq!(
-        command,
-        "/opt/homeboy daemon recover-missing-lease-state --lease-id 'lease exact' --recorded-pid 4242 --recorded-endpoint 127.0.0.1:4242 --replacement-operation-id operation-1 --addr 127.0.0.1:0"
-    );
-}
-
-#[test]
-fn leaseless_recovery_evidence_records_selected_contract_and_command_identity() {
-    let evidence = leaseless_recovery_evidence(
-        RunnerLeaselessRecoveryContract::ConfirmNoDaemonOwner,
-        "homeboy 0.284.1+abc123",
-        sample_leaseless_recovery(),
-    );
-
-    assert_eq!(
-        evidence.contract,
-        RunnerLeaselessRecoveryContract::ConfirmNoDaemonOwner
-    );
-    assert_eq!(evidence.remote_command_identity, "homeboy 0.284.1+abc123");
-    assert_eq!(
-        evidence
-            .recovery
-            .as_ref()
-            .expect("recovery result")
-            .replacement
-            .lease_id,
-        "lease-new"
-    );
-}
-
 // NOTE: the test asserting generated recovery commands parse against the real
 // CLI (`cli_surface::Cli`) was removed as part of extracting homeboy-core:
 // parser correctness is covered by the CLI layer's own tests, and keeping it
 // here forced core to depend upward on the CLI parser. The command builders
 // themselves remain covered by the surrounding recovery tests.
-
-#[test]
-fn persisted_session_without_leaseless_recovery_evidence_deserializes() {
-    let session: RunnerSession = serde_json::from_value(serde_json::json!({
-        "runner_id": "homeboy-lab",
-        "server_id": null,
-        "tunnel_pid": null,
-        "remote_daemon_pid": null,
-        "homeboy_version": "test",
-        "connected_at": "2026-07-14T00:00:00Z"
-    }))
-    .expect("legacy session");
-
-    assert!(session.leaseless_recovery_evidence.is_none());
-}
-
-#[test]
-fn persisted_recovery_evidence_without_result_deserializes() {
-    let evidence: RunnerLeaselessRecoveryEvidence = serde_json::from_value(serde_json::json!({
-        "contract": "reconcile_leaseless_orphans_and_confirm_no_daemon_owner",
-        "remote_command_identity": "homeboy 0.284.1+abc123"
-    }))
-    .expect("prior recovery evidence");
-
-    assert!(evidence.recovery.is_none());
-}
 
 #[test]
 fn failed_connect_without_recovery_omits_recovery_evidence() {
@@ -1990,7 +1563,6 @@ fn failed_connect_without_recovery_omits_recovery_evidence() {
     );
 
     let serialized = serde_json::to_value(report).expect("serialize failed connect");
-    assert!(serialized.get("leaseless_recovery_evidence").is_none());
     assert_eq!(
         serialized["failure_evidence"]["tunnel_state"],
         "not_established"
@@ -2020,55 +1592,6 @@ fn hanging_ssh_connect_is_classified_as_a_timeout() {
     );
     assert!(message.contains("timed out"));
     assert!(message.contains("runner connect"));
-}
-
-#[test]
-fn leaseless_recovery_requires_typed_capability_before_mutation() {
-    let recovered = std::cell::Cell::new(false);
-    let result = execute_remote_leaseless_recovery(None, |_| {
-        recovered.set(true);
-        command_output(true, String::new(), false)
-    });
-
-    assert!(result.is_err());
-    assert!(!recovered.get());
-}
-
-#[test]
-fn lost_local_session_refuses_unreachable_daemon_with_active_jobs() {
-    let status = remote_daemon_status_for_test_with_reason(
-        false,
-        false,
-        1,
-        "lease-dead",
-        4545,
-        Some(DaemonStaleReasonCode::PidDead),
-    );
-
-    let err = remote_daemon_connect_action(None, &status).expect_err("unreachable daemon");
-
-    assert!(err.contains("unreachable"));
-}
-
-#[test]
-fn refuses_to_replace_proven_dead_daemon_with_active_jobs_when_lease_mismatches() {
-    let session = direct_ssh_session("lease-recorded");
-    let status = remote_daemon_status_for_test_with_reason(
-        false,
-        false,
-        1,
-        "lease-dead",
-        4545,
-        Some(DaemonStaleReasonCode::PidDead),
-    );
-
-    let err = remote_daemon_connect_action(Some(&session), &status)
-        .expect_err("refuse mismatched dead lease");
-
-    assert!(err.contains("1 active job(s)"));
-    assert!(err.contains("unreachable"));
-    assert!(err.contains("1 active job(s) were not replaced"));
-    assert!(err.contains("active-job recovery guidance"));
 }
 
 #[test]
@@ -2206,8 +1729,6 @@ fn idle_stale_replacement_uses_actual_endpoint_envelopes_and_reprobes_the_new_ow
                 runner_id: "homeboy-lab",
                 previous_session: None,
                 configured_identity,
-                orphan_lease_id: None,
-                confirmed_no_pid_job_ids: &[],
                 live_lease_expectation: None,
                 replacement_operation_id: None,
                 admission_fence: None,
@@ -2239,8 +1760,6 @@ fn idle_stale_replacement_refuses_a_post_stop_owner_or_identity_change() {
                 runner_id: "homeboy-lab",
                 previous_session: None,
                 configured_identity,
-                orphan_lease_id: None,
-                confirmed_no_pid_job_ids: &[],
                 live_lease_expectation: None,
                 replacement_operation_id: None,
                 admission_fence: None,
@@ -2266,8 +1785,6 @@ fn idle_stale_replacement_refuses_a_post_stop_identity_change() {
                 runner_id: "homeboy-lab",
                 previous_session: None,
                 configured_identity,
-                orphan_lease_id: None,
-                confirmed_no_pid_job_ids: &[],
                 live_lease_expectation: None,
                 replacement_operation_id: None,
                 admission_fence: None,

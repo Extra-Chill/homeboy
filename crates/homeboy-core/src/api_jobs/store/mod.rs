@@ -734,8 +734,9 @@ impl JobStore {
     }
 
     /// The durable job ledger rendered as one JSON document, without
-    /// initializing or reconciling it. Used for operator evidence snapshots;
-    /// it is not a persistence format.
+    /// initializing or reconciling it, for test assertions; it is not a
+    /// persistence format.
+    #[cfg(test)]
     pub(crate) fn ledger_snapshot_at_path(path: &Path) -> Result<Vec<u8>> {
         sql_store::ledger_snapshot(path)
     }
@@ -3315,7 +3316,6 @@ enum DeadLeaseJobDisposition {
     RecoveredLinkedRun(RecoveredTerminalJob),
     ProtectedLive,
     PreservedRemote,
-    PreservedController,
     ProtectedUnsupported(String),
     TerminalizeDead,
 }
@@ -3506,7 +3506,6 @@ impl RecoveredTerminalJob {
 #[derive(Clone)]
 pub(crate) enum LinkedDurableRunResolution {
     None,
-    Terminal(RecoveredTerminalJob),
     Active(String),
     Unresolved(String),
 }
@@ -3897,11 +3896,11 @@ mod local_child_tests {
             .expect("persist unsupported identity");
 
         let first = store
-            .reconcile_dead_daemon_lease_jobs("dead-lease")
+            .reconcile_dead_generation_jobs("successor-lease")
             .expect("live PID blocks recovery");
         let event_count = store.events(job.id).expect("events").len();
         let second = store
-            .reconcile_dead_daemon_lease_jobs("dead-lease")
+            .reconcile_dead_generation_jobs("successor-lease")
             .expect("repeated recovery stays blocked");
 
         assert_eq!(first.protected_job_ids, vec![job.id]);
@@ -3930,7 +3929,7 @@ mod local_child_tests {
             .expect("persist unsupported identity");
 
         let diagnostics = store
-            .reconcile_dead_daemon_lease_jobs("dead-lease")
+            .reconcile_dead_generation_jobs("successor-lease")
             .expect("absent PID is safe proof of death");
         assert!(diagnostics.protected_job_ids.is_empty());
         assert_eq!(store.get(job.id).expect("job").status, JobStatus::Failed);
@@ -3960,7 +3959,7 @@ mod local_child_tests {
             .expect("record mismatched identity");
 
         store
-            .reconcile_dead_daemon_lease_jobs("dead-lease")
+            .reconcile_dead_generation_jobs("successor-lease")
             .expect("reconcile PID reuse mismatch");
         assert_eq!(store.get(job.id).expect("job").status, JobStatus::Failed);
         assert!(crate::process::pid_is_running(std::process::id()));

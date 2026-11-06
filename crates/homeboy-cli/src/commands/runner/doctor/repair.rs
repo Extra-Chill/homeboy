@@ -378,7 +378,6 @@ mod tests {
                     pid: None,
                     recovery_evidence,
                     ownership_evidence: Some("remote lease ownership unavailable".to_string()),
-                    adoption_command: None,
                     binary_hash: None,
                     daemon_version: Some("0.349.0".to_string()),
                     daemon_build_identity: Some("homeboy 0.349.0+incompatible".to_string()),
@@ -386,8 +385,8 @@ mod tests {
                     active_jobs: 0,
                     termination_evidence: None,
                     repair_plan: vec![homeboy::core::daemon::DaemonRepairStep::text(
-                        "runner_reconcile_leaseless_orphans",
-                        "homeboy runner connect lab --reconcile-leaseless-orphans",
+                        "runner_connect",
+                        "homeboy runner connect lab",
                     )],
                 }),
                 admission_summary: None,
@@ -443,7 +442,6 @@ mod tests {
                 pid: None,
                 recovery_evidence: Some(homeboy::core::daemon::DaemonRecoveryEvidence::Recoverable),
                 ownership_evidence: Some("no validated recovery action".to_string()),
-                adoption_command: None,
                 binary_hash: None,
                 daemon_version: None,
                 daemon_build_identity: None,
@@ -594,10 +592,6 @@ mod tests {
 pub(super) enum DaemonRepairDispatch {
     Disconnect,
     Connect,
-    AdoptOrphanLease {
-        lease_id: String,
-    },
-    ReconcileLeaselessOrphans,
     RefreshHomeboy {
         git_ref: Option<String>,
         allow_downgrade: bool,
@@ -608,29 +602,10 @@ pub(super) enum DaemonRepairDispatch {
     },
 }
 
-pub(super) fn dispatch_for(
-    step: &homeboy::core::daemon::DaemonRepairStep,
-    lease_id: Option<&str>,
-) -> DaemonRepairDispatch {
+pub(super) fn dispatch_for(step: &homeboy::core::daemon::DaemonRepairStep) -> DaemonRepairDispatch {
     match step.code.as_str() {
         code if code == daemon_repair_codes::RUNNER_DISCONNECT => DaemonRepairDispatch::Disconnect,
         code if code == daemon_repair_codes::RUNNER_CONNECT => DaemonRepairDispatch::Connect,
-        code if code == daemon_repair_codes::RUNNER_ADOPT_ORPHAN_LEASE => {
-            // The lease is read off the report, never scraped out of the
-            // rendered command. Without one there is nothing to adopt.
-            match lease_id {
-                Some(lease_id) => DaemonRepairDispatch::AdoptOrphanLease {
-                    lease_id: lease_id.to_string(),
-                },
-                None => DaemonRepairDispatch::NotAutomatable {
-                    reason: "the report named an orphan-lease adoption but carried no lease id"
-                        .to_string(),
-                },
-            }
-        }
-        code if code == daemon_repair_codes::RUNNER_RECONCILE_LEASELESS_ORPHANS => {
-            DaemonRepairDispatch::ReconcileLeaselessOrphans
-        }
         code if code == daemon_repair_codes::RUNNER_REFRESH_HOMEBOY => match step.action.as_ref() {
             // The recovery ref is a property of the plan rather than of the
             // daemon's lease, so it is the one value taken from the step's argv.
@@ -678,12 +653,11 @@ fn apply_daemon_repair_plan(
     }
 
     let plan = recovery.repair_plan.clone();
-    let lease_id = recovery.lease_id.clone();
     let commands: Vec<String> = plan.iter().map(|step| step.command.clone()).collect();
 
     let mut applied = 0usize;
     for step in &plan {
-        let outcome = match dispatch_for(step, lease_id.as_deref()) {
+        let outcome = match dispatch_for(step) {
             DaemonRepairDispatch::Disconnect => target
                 .ensure_current()
                 .and_then(|_| runner::disconnect(runner_id))
@@ -694,36 +668,6 @@ fn apply_daemon_repair_plan(
                     .ensure_current()
                     .and_then(|_| runner::connect(runner_id))
             }),
-            DaemonRepairDispatch::AdoptOrphanLease { lease_id } => {
-                connect_outcome_after_promotion_wait(target, || {
-                    target.ensure_current().and_then(|_| {
-                        runner::connect_with_orphan_adoption(
-                            runner_id,
-                            Some(&lease_id),
-                            &[],
-                            false,
-                            None,
-                            None,
-                            None,
-                        )
-                    })
-                })
-            }
-            DaemonRepairDispatch::ReconcileLeaselessOrphans => {
-                connect_outcome_after_promotion_wait(target, || {
-                    target.ensure_current().and_then(|_| {
-                        runner::connect_with_orphan_adoption(
-                            runner_id,
-                            None,
-                            &[],
-                            true,
-                            None,
-                            None,
-                            None,
-                        )
-                    })
-                })
-            }
             DaemonRepairDispatch::RefreshHomeboy {
                 git_ref,
                 allow_downgrade,

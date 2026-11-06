@@ -5,7 +5,7 @@ use std::fs;
 use serde_json::json;
 
 use super::persistence::recovered_terminal_from_result;
-use super::store::{LinkedDurableRunResolution, RecoveredTerminalJob};
+use super::store::RecoveredTerminalJob;
 use super::*;
 use uuid::Uuid;
 
@@ -158,64 +158,6 @@ fn exact_terminal_controller_prune_fences_active_jobs_and_preserves_replay_tombs
         "legacy-first".to_string(),
         submission(),
     ).expect("lost response replay"), ControllerJobSubmissionOutcome::Existing(job) if job.id == first));
-}
-
-#[test]
-fn confirmed_recovery_fails_closed_for_unresolved_linked_durable_run() {
-    let store = JobStore::default().with_daemon_lease("lease-dead".to_string());
-    let mut request = remote_runner_request("homeboy-lab", None);
-    request.lifecycle = Some(RunnerJobLifecycleMetadata {
-        source: Some("runner-daemon".to_string()),
-        kind: Some("runner.exec".to_string()),
-        durable_run_id: Some("missing-linked-run".to_string()),
-        active_child_count: None,
-        active_cell_count: None,
-    });
-    let job = store
-        .submit_runner_api_fixture(request)
-        .expect("queue linked job");
-
-    let error = store
-        .reconcile_dead_daemon_lease_jobs_with_confirmed_no_pid_jobs("lease-dead", &[job.id])
-        .expect_err("unresolved linked run blocks confirmation");
-
-    assert!(error.message.contains("cannot be safely resolved"));
-    assert_eq!(store.get(job.id).expect("job").status, JobStatus::Queued);
-}
-
-#[test]
-fn terminal_linked_run_is_authoritative_for_confirmed_recovery() {
-    let temp = tempfile::tempdir().expect("temp dir");
-    let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
-    let store = JobStore::open_without_reconciliation(&path)
-        .expect("store")
-        .with_daemon_lease("lease-dead".to_string());
-    let selected = store.create("runner.exec");
-    store.start(selected.id).expect("start selected");
-    let before = super::durable_snapshot(&path);
-
-    let diagnostics = store
-        .reconcile_dead_daemon_lease_jobs_with_confirmed_no_pid_jobs_and_linked_resolver(
-            "lease-dead",
-            &[],
-            |_| false,
-            |_| {
-                LinkedDurableRunResolution::Terminal(RecoveredTerminalJob::test_result(
-                    JobStatus::Succeeded,
-                    "run-terminal",
-                    json!({ "status": "succeeded" }),
-                    Vec::new(),
-                ))
-            },
-        )
-        .expect("linked terminal evidence is reconciled authoritatively");
-
-    assert_eq!(diagnostics.terminalized_count(), 1);
-    assert_eq!(
-        store.get(selected.id).expect("job").status,
-        JobStatus::Succeeded
-    );
-    assert_ne!(super::durable_snapshot(&path), before);
 }
 
 #[test]
@@ -665,8 +607,8 @@ fn checkpointed_in_daemon_staging_dispatch_is_preserved_for_resume_after_dead_le
     );
 
     let diagnostics = store
-        .reconcile_dead_daemon_lease_jobs("lease-dead")
-        .expect("dead-lease reconciliation must not refuse resumable driver work");
+        .reconcile_dead_generation_jobs("lease-live")
+        .expect("dead-generation reconciliation must not refuse resumable driver work");
     assert_eq!(diagnostics.preserved_controller_job_ids, vec![job_id]);
     assert_eq!(diagnostics.terminalized_count(), 0);
     assert!(diagnostics.protected_job_ids.is_empty());
@@ -681,7 +623,7 @@ fn checkpointed_in_daemon_staging_dispatch_is_preserved_for_resume_after_dead_le
 /// The fence #15420 must not loosen: without a published checkpoint, an
 /// in-daemon staging dispatch keeps its fail-closed classification.
 #[test]
-fn uncheckpointed_in_daemon_staging_dispatch_still_blocks_dead_lease_recovery() {
+fn uncheckpointed_in_daemon_staging_dispatch_is_left_for_attestation_after_dead_lease() {
     let fixtures = crate::test_support::AgentTaskTerminalRunFixtures::install();
     let run_id = format!("run-15420-unchecked-{}", Uuid::new_v4());
     fixtures.active_run(&run_id);
@@ -700,21 +642,24 @@ fn uncheckpointed_in_daemon_staging_dispatch_still_blocks_dead_lease_recovery() 
         item.disposition,
         DaemonActiveJobRecoveryDisposition::DriverRecovery
     );
-    assert!(store
-        .reconcile_dead_daemon_lease_jobs("lease-dead")
-        .is_err());
+    let diagnostics = store
+        .reconcile_dead_generation_jobs("lease-live")
+        .expect("startup recovery never fails driver work");
+    assert_eq!(diagnostics.preserved_controller_job_ids, vec![job_id]);
     assert_eq!(
         store.get(job_id).expect("still running").status,
         JobStatus::Running
     );
 
-    // Chaos case 2 (#15556): the automatic path above refuses, and one
-    // operator attestation over the exact job set terminalizes this
-    // driver-owned job with the attestation recorded as evidence.
-    let diagnostics = store
-        .reconcile_exact_daemon_loss_jobs("lease-dead", &[job_id], 4242)
-        .expect("one attestation recovers uncheckpointed driver work");
-    assert_eq!(diagnostics.matching_job_ids, vec![job_id]);
+    // Chaos case 2 (#15556): startup recovery cannot prove this job's
+    // workload gone, and one operator attestation naming it terminalizes it
+    // with the attestation recorded as evidence.
+    assert_eq!(
+        store
+            .attest_dead_generation_jobs_absent(Some("lease-live"), &[job_id])
+            .expect("one attestation recovers uncheckpointed driver work"),
+        vec![job_id]
+    );
     assert_eq!(
         store.get(job_id).expect("terminal job").status,
         JobStatus::Failed
@@ -736,7 +681,7 @@ fn reused_pid_with_a_different_start_identity_is_terminalized() {
     record_test_local_child(&store, job.id, std::process::id());
 
     let diagnostics = store
-        .reconcile_dead_daemon_lease_jobs_with_child_liveness("lease-dead", |_| false)
+        .reconcile_dead_generation_jobs_with_child_liveness("lease-live", |_| false)
         .expect("reconcile reused PID");
 
     assert!(diagnostics.protected_job_ids.is_empty());
@@ -749,8 +694,8 @@ fn dead_child_recovers_linked_terminal_result_and_artifacts() {
     let job = store.create("runner.exec");
     record_test_local_child(&store, job.id, 4242);
     store
-        .reconcile_dead_daemon_lease_jobs_with_child_liveness_and_terminal_result(
-            "lease-dead",
+        .reconcile_dead_generation_jobs_with_child_liveness_and_terminal_result(
+            "lease-live",
             |_| false,
             |_| {
                 Some(RecoveredTerminalJob::test_result(
@@ -792,16 +737,16 @@ fn dead_child_recovers_linked_terminal_failure_and_live_child_skips_resolver() {
     let job = store.create("runner.exec");
     record_test_local_child(&store, job.id, 4242);
     store
-        .reconcile_dead_daemon_lease_jobs_with_child_liveness_and_terminal_result(
-            "lease-dead",
+        .reconcile_dead_generation_jobs_with_child_liveness_and_terminal_result(
+            "lease-live",
             |_| true,
             |_| panic!("live child must win"),
         )
         .expect("live child deferred");
     assert_eq!(store.get(job.id).expect("job").status, JobStatus::Running);
     store
-        .reconcile_dead_daemon_lease_jobs_with_child_liveness_and_terminal_result(
-            "lease-dead",
+        .reconcile_dead_generation_jobs_with_child_liveness_and_terminal_result(
+            "lease-live",
             |_| false,
             |_| {
                 Some(RecoveredTerminalJob::test_result(
@@ -818,178 +763,17 @@ fn dead_child_recovers_linked_terminal_failure_and_live_child_skips_resolver() {
 }
 
 #[test]
-fn dead_lease_reconciliation_refuses_ambiguous_child_state_without_mutation() {
-    let store = JobStore::default().with_daemon_lease("lease-dead".to_string());
-    let job = store.create("runner.exec");
-    store.start(job.id).expect("start job");
-    let event_count = store.events(job.id).expect("events").len();
-
-    let error = store
-        .reconcile_dead_daemon_lease_jobs_with_child_liveness("lease-dead", |_| false)
-        .expect_err("missing child evidence must fail closed");
-
-    assert!(error.message.contains(&job.id.to_string()));
-    assert!(error
-        .message
-        .contains("authoritative terminal result or recorded child PID"));
-    assert_eq!(store.get(job.id).expect("job").status, JobStatus::Running);
-    assert_eq!(store.events(job.id).expect("events").len(), event_count);
-}
-
-#[test]
-fn dead_lease_reconciliation_requires_exact_confirmation_for_untracked_children() {
-    let store = JobStore::default().with_daemon_lease("lease-dead".to_string());
-    let confirmed = store.create("runner.exec");
-    store.start(confirmed.id).expect("start confirmed job");
-    let unconfirmed = store.create("runner.exec");
-    store.start(unconfirmed.id).expect("start unconfirmed job");
-    let unrelated = Uuid::new_v4();
-
-    let error = store
-        .reconcile_dead_daemon_lease_jobs_with_confirmed_no_pid_jobs("lease-dead", &[confirmed.id])
-        .expect_err("every unresolved no-PID job needs exact confirmation");
-    assert!(error.message.contains(&unconfirmed.id.to_string()));
-    assert_eq!(
-        store.get(confirmed.id).expect("confirmed job").status,
-        JobStatus::Running
-    );
-
-    let error = store
-        .reconcile_dead_daemon_lease_jobs_with_confirmed_no_pid_jobs(
-            "lease-dead",
-            &[confirmed.id, unrelated],
-        )
-        .expect_err("unknown confirmation must fail closed");
-    assert!(error.message.contains(&unrelated.to_string()));
-    assert_eq!(
-        store.get(confirmed.id).expect("confirmed job").status,
-        JobStatus::Running
-    );
-
-    let diagnostics = store
-        .reconcile_dead_daemon_lease_jobs_with_confirmed_no_pid_jobs(
-            "lease-dead",
-            &[confirmed.id, unconfirmed.id],
-        )
-        .expect("exact confirmations terminalize only the confirmed no-PID jobs");
-    assert_eq!(diagnostics.terminalized_count(), 2);
-    for job_id in [confirmed.id, unconfirmed.id] {
-        assert_eq!(store.get(job_id).expect("job").status, JobStatus::Failed);
-        assert!(store.events(job_id).expect("events").iter().any(|event| {
-            event.data.as_ref().is_some_and(|data| {
-                data["reason"]
-                    == json!("operator_confirmed_untracked_child_dead_after_dead_daemon_lease")
-                    && data["operator_confirmation"] == json!(true)
-            })
-        }));
-    }
-}
-
-#[test]
-fn exact_daemon_loss_recovery_requires_the_complete_pidless_active_set_and_persists_evidence() {
-    let store = JobStore::default().with_daemon_lease("lease-dead".to_string());
-    let first = store.create("runner.exec");
-    store.start(first.id).expect("first starts");
-    let second = store.create("runner.exec");
-    store.start(second.id).expect("second starts");
-
-    for ids in [&[first.id][..], &[first.id, Uuid::new_v4()][..]] {
-        let error = store
-            .reconcile_exact_daemon_loss_jobs("lease-dead", ids, 4242)
-            .expect_err("omitted or unknown active jobs are refused");
-        assert!(error.message.contains("exact active durable-job set"));
-    }
-    assert_eq!(
-        store.get(first.id).expect("first").status,
-        JobStatus::Running
-    );
-
-    let diagnostics = store
-        .reconcile_exact_daemon_loss_jobs("lease-dead", &[first.id, second.id], 4242)
-        .expect("the exact complete set reconciles");
-    assert_eq!(
-        diagnostics.matching_job_ids,
-        [first.id, second.id]
-            .into_iter()
-            .collect::<std::collections::BTreeSet<_>>()
-            .into_iter()
-            .collect::<Vec<_>>()
-    );
-    for id in [first.id, second.id] {
-        assert_eq!(
-            store.get(id).expect("terminal job").status,
-            JobStatus::Failed
-        );
-        assert!(store
-            .events(id)
-            .expect("durable events")
-            .iter()
-            .any(|event| {
-                event.data.as_ref().is_some_and(|data| {
-                    data["reason"] == "operator_confirmed_daemon_loss_after_unexpected_termination"
-                        && data["daemon_lease_id"] == "lease-dead"
-                        && data["daemon_pid"] == 4242
-                        && data["operator_confirmed_workload_processes_absent"] == true
-                })
-            }));
-    }
-    assert!(store
-        .reconcile_exact_daemon_loss_jobs("lease-dead", &[first.id, second.id], 4242)
-        .expect_err("replay refuses because the named jobs are no longer active")
-        .message
-        .contains("exact active durable-job set"));
-}
-
-#[test]
-fn exact_daemon_loss_recovery_accepts_dead_persisted_child_process_evidence() {
-    let store = JobStore::default().with_daemon_lease("lease-dead".to_string());
-    let job = store.create("runner.exec");
-    record_test_local_child(&store, job.id, u32::MAX);
-
-    let diagnostics = store
-        .reconcile_exact_daemon_loss_jobs("lease-dead", &[job.id], 4242)
-        .expect("a dead or reused child PID is covered by the operator attestation");
-
-    assert_eq!(diagnostics.terminalized_count(), 1);
-    assert_eq!(
-        store.get(job.id).expect("terminalized job").status,
-        JobStatus::Failed
-    );
-}
-
-#[test]
-fn exact_daemon_loss_recovery_refuses_a_live_recorded_child() {
-    let store = JobStore::default().with_daemon_lease("lease-dead".to_string());
-    let job = store.create("runner.exec");
-    record_test_local_child(&store, job.id, std::process::id());
-
-    let error = store
-        .reconcile_exact_daemon_loss_jobs_with_child_liveness("lease-dead", &[job.id], 4242, |_| {
-            super::super::store::LocalChildLiveness::Live
-        })
-        .expect_err("live-process evidence contradicts no-PID recovery");
-
-    assert!(error
-        .message
-        .contains("live or unverifiable workload-process evidence"));
-    assert_eq!(
-        store.get(job.id).expect("protected job").status,
-        JobStatus::Running
-    );
-}
-
-#[test]
 fn dead_lease_reconciliation_is_idempotent_after_terminalizing_a_dead_child() {
     let store = JobStore::default().with_daemon_lease("lease-dead".to_string());
     let job = store.create("runner.exec");
     record_test_local_child(&store, job.id, 4242);
 
     let first = store
-        .reconcile_dead_daemon_lease_jobs_with_child_liveness("lease-dead", |_| false)
+        .reconcile_dead_generation_jobs_with_child_liveness("lease-live", |_| false)
         .expect("first reconciliation");
     let event_count = store.events(job.id).expect("events").len();
     let second = store
-        .reconcile_dead_daemon_lease_jobs_with_child_liveness("lease-dead", |_| false)
+        .reconcile_dead_generation_jobs_with_child_liveness("lease-live", |_| false)
         .expect("repeated reconciliation");
 
     assert_eq!(first.terminalized_count(), 1);
@@ -999,52 +783,7 @@ fn dead_lease_reconciliation_is_idempotent_after_terminalizing_a_dead_child() {
 }
 
 #[test]
-fn leaseless_recovery_terminalizes_one_historical_lease_and_retains_evidence() {
-    let temp = tempfile::tempdir().expect("temp dir");
-    let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
-    let leased = JobStore::open_without_reconciliation(&path)
-        .expect("open leased store")
-        .with_daemon_lease("lease-owned".to_string());
-    let succeeded = leased.create("runner.exec");
-    leased.start(succeeded.id).expect("start succeeded job");
-    leased
-        .append_event(
-            succeeded.id,
-            JobEventKind::Result,
-            None,
-            Some(json!({ "exit_code": 0 })),
-        )
-        .expect("record result");
-    let unfinished = leased.create("runner.exec");
-    record_test_local_child(&leased, unfinished.id, u32::MAX);
-
-    let recovery = JobStore::open_without_reconciliation(&path).expect("open recovery");
-    let diagnostics = recovery
-        .reconcile_leaseless_orphan_jobs()
-        .expect("reconcile legacy jobs");
-    assert_eq!(diagnostics.reconciled_count(), 2);
-    assert!(diagnostics.reconciled_job_ids.contains(&succeeded.id));
-    assert!(diagnostics.reconciled_job_ids.contains(&unfinished.id));
-    assert_eq!(
-        recovery.get(succeeded.id).expect("succeeded").status,
-        JobStatus::Succeeded
-    );
-    assert_eq!(
-        recovery.get(unfinished.id).expect("unfinished").status,
-        JobStatus::Failed
-    );
-    assert!(recovery
-        .events(unfinished.id)
-        .expect("events")
-        .iter()
-        .any(|event| event
-            .data
-            .as_ref()
-            .is_some_and(|data| data["reason"] == json!("dead_daemon_lease"))));
-}
-
-#[test]
-fn leaseless_recovery_enumerates_and_terminalizes_multiple_historical_leases() {
+fn dead_generation_recovery_terminalizes_every_historical_lease() {
     let temp = tempfile::tempdir().expect("temp dir");
     let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
     let first = JobStore::open_without_reconciliation(&path)
@@ -1068,14 +807,10 @@ fn leaseless_recovery_enumerates_and_terminalizes_multiple_historical_leases() {
 
     let recovery = JobStore::open_without_reconciliation(&path).expect("open recovery");
     let diagnostics = recovery
-        .reconcile_leaseless_orphan_jobs()
+        .reconcile_dead_generation_jobs("lease-live")
         .expect("reconcile");
 
-    assert_eq!(
-        diagnostics.historical_lease_ids,
-        vec!["lease-first", "lease-second"]
-    );
-    assert_eq!(diagnostics.affected_jobs.len(), 2);
+    assert_eq!(diagnostics.terminalized_count(), 2);
     assert_eq!(
         recovery.get(first_job.id).expect("first job").status,
         JobStatus::Failed
@@ -1092,7 +827,7 @@ fn leaseless_recovery_enumerates_and_terminalizes_multiple_historical_leases() {
 }
 
 #[test]
-fn leaseless_recovery_reconciles_proven_dead_unowned_before_historical_lease_once() {
+fn dead_generation_recovery_reconciles_unowned_and_historical_jobs_once() {
     let temp = tempfile::tempdir().expect("temp dir");
     let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
     let unowned = JobStore::open_without_reconciliation(&path).expect("open unowned store");
@@ -1106,7 +841,7 @@ fn leaseless_recovery_reconciles_proven_dead_unowned_before_historical_lease_onc
 
     let recovery = JobStore::open_without_reconciliation(&path).expect("open recovery");
     let first = recovery
-        .reconcile_leaseless_orphan_jobs()
+        .reconcile_dead_generation_jobs("lease-live")
         .expect("proven-dead mixed store reconciles");
     let unowned_events = recovery
         .events(unowned_job.id)
@@ -1114,11 +849,11 @@ fn leaseless_recovery_reconciles_proven_dead_unowned_before_historical_lease_onc
         .len();
     let leased_events = recovery.events(leased_job.id).expect("leased events").len();
     let replay = recovery
-        .reconcile_leaseless_orphan_jobs()
+        .reconcile_dead_generation_jobs("lease-live")
         .expect("replay is idempotent");
 
-    assert_eq!(first.reconciled_count(), 2);
-    assert_eq!(replay.reconciled_count(), 0);
+    assert_eq!(first.terminalized_count(), 2);
+    assert_eq!(replay.matching_count(), 0);
     assert_eq!(
         recovery.get(unowned_job.id).expect("unowned").status,
         JobStatus::Failed
@@ -1137,58 +872,6 @@ fn leaseless_recovery_reconciles_proven_dead_unowned_before_historical_lease_onc
     assert_eq!(
         recovery.events(leased_job.id).expect("leased events").len(),
         leased_events
-    );
-}
-
-#[test]
-fn leaseless_recovery_fails_before_historical_mutation_when_unowned_work_is_ambiguous() {
-    let temp = tempfile::tempdir().expect("temp dir");
-    let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
-    let unowned = JobStore::open_without_reconciliation(&path).expect("open unowned store");
-    let unowned_job = unowned.create("runner.exec");
-    unowned.start(unowned_job.id).expect("start unowned job");
-    let leased = JobStore::open_without_reconciliation(&path)
-        .expect("open leased store")
-        .with_daemon_lease("lease-historical".to_string());
-    let leased_job = leased.create("runner.exec");
-    record_test_local_child(&leased, leased_job.id, u32::MAX);
-    let leased_events = leased.events(leased_job.id).expect("leased events").len();
-
-    let recovery = JobStore::open_without_reconciliation(&path).expect("open recovery");
-    let error = recovery
-        .reconcile_leaseless_orphan_jobs()
-        .expect_err("ambiguous unowned work fails closed");
-
-    assert!(error.message.contains("no authoritative terminal result"));
-    assert_eq!(
-        recovery.get(unowned_job.id).expect("unowned").status,
-        JobStatus::Running
-    );
-    assert_eq!(
-        recovery.get(leased_job.id).expect("leased").status,
-        JobStatus::Running
-    );
-    assert_eq!(
-        recovery.events(leased_job.id).expect("leased events").len(),
-        leased_events
-    );
-}
-
-#[test]
-fn leaseless_recovery_preserves_queued_remote_jobs() {
-    let queued = JobStore::default().with_daemon_lease("lease-remote".to_string());
-    let queued_job = queued
-        .submit_runner_api_fixture(remote_runner_request("homeboy-lab", None))
-        .expect("queue remote job");
-
-    let preserved = queued
-        .reconcile_leaseless_orphan_jobs()
-        .expect("queued remote job is broker-owned");
-    assert_eq!(preserved.preserved_remote_job_ids, vec![queued_job.id]);
-    assert!(preserved.protected_job_ids.is_empty());
-    assert_eq!(
-        queued.get(queued_job.id).expect("job").status,
-        JobStatus::Queued
     );
 }
 

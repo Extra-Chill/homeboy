@@ -1377,7 +1377,6 @@ fn stale_session_refresh_blocker_starts_the_newly_selected_binary() {
             worker_identity: None,
             worker_pid: None,
             last_seen_at: None,
-            leaseless_recovery_evidence: None,
         };
         let session_path = homeboy_core::paths::runner_controller_session_file_in_root(
             roots.config(),

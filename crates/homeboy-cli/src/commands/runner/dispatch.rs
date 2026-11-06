@@ -160,25 +160,13 @@ pub fn run(args: RunnerArgs) -> CmdResult<RunnerCommandOutput> {
         )),
         RunnerCommand::Connect {
             id,
-            adopt_orphan_lease,
             adopt_live_lease,
             expected_live_pid,
-            confirm_untracked_child_dead,
-            reconcile_leaseless_orphans,
-            recover_missing_lease_state,
-            recorded_pid,
-            recorded_endpoint,
         } => map_registry(connect(
             &id,
             registry::RunnerConnectInput {
-                adopt_orphan_lease,
                 adopt_live_lease,
                 expected_live_pid,
-                confirm_untracked_child_dead,
-                reconcile_leaseless_orphans,
-                recover_missing_lease_state,
-                recorded_pid,
-                recorded_endpoint,
             },
         )),
         RunnerCommand::Status { id, full } => map_registry(status_mod::status(id.as_deref(), full)),
@@ -198,13 +186,9 @@ pub fn run(args: RunnerArgs) -> CmdResult<RunnerCommandOutput> {
             },
             0,
         ))),
-        RunnerCommand::Reconcile {
-            id,
-            confirm_workload_processes_absent,
-        } => map_registry(status_mod::reconcile(
-            &id,
-            confirm_workload_processes_absent,
-        )),
+        RunnerCommand::Reconcile { id, attest_absent } => {
+            map_registry(status_mod::reconcile(&id, attest_absent))
+        }
         RunnerCommand::Disconnect { id, local_recovery } => {
             map_registry(registry::disconnect(&id, local_recovery))
         }

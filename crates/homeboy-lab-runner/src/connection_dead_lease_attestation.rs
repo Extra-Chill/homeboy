@@ -1,10 +1,9 @@
-//! Operator-attested remote dead-lease recovery (#15556).
+//! Operator-attested remote workload absence (#15556, #17429).
 //!
-//! `runner reconcile <runner> --confirm-workload-processes-absent` runs the
-//! existing attested `daemon reconcile-dead-lease-orphans` on the runner, bound
-//! to the exact dead lease the runner's own lifecycle plan names: its lease,
-//! state directory, and complete active job set. Every refusal — a live daemon
-//! PID, a live or unverifiable recorded child, or a changed job set — is
+//! `runner reconcile <runner> --attest-absent` runs `daemon recover
+//! --attest-absent <job-id>...` on the runner, bound to the exact state
+//! directory and job set the runner's own lifecycle plan names. Every refusal —
+//! a recorded child identity, a live generation, an out-of-scope job — is
 //! proven and enforced by the remote store itself; this module only runs the
 //! planned attestation and surfaces refusals verbatim.
 
@@ -82,7 +81,6 @@ impl RemoteDeadLeaseAttestationTransport for SshRemoteDeadLeaseAttestationTransp
 /// was bound to and the verbatim remote result.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RemoteAttestedReconcileApplied {
-    pub lease_id: String,
     pub state_dir: String,
     pub job_ids: Vec<Uuid>,
     pub command: String,
@@ -95,7 +93,7 @@ fn run_attested_reconcile_with_transport(
     transport: &dyn RemoteDeadLeaseAttestationTransport,
 ) -> Result<RemoteAttestedReconcileApplied> {
     // The runner's own lifecycle plan is authoritative (#15557 C5): it names
-    // the exact dead lease, its state directory, and its complete job set, or
+    // the state directory and the exact jobs that need attestation, or
     // says why nothing may be attested.
     let planned = transport
         .lifecycle_plan(runner_id)
@@ -116,14 +114,12 @@ fn run_attested_reconcile_with_transport(
     let command = remote_daemon_attested_reconcile_command(
         transport.homeboy(),
         &state_dir,
-        &attestation.lease_id,
         &attestation.job_ids,
     );
     let result = transport
         .execute_command(&command)
         .map_err(|error| attestation_refused(runner_id, &error, &command))?;
     Ok(RemoteAttestedReconcileApplied {
-        lease_id: attestation.lease_id,
         state_dir,
         job_ids: attestation.job_ids,
         command,
@@ -208,21 +204,18 @@ mod tests {
     }
 
     impl FakeTransport {
-        /// A runner whose own plan calls for attesting `job_ids` of a dead lease.
-        fn dead_lease(lease_id: &str, job_ids: &[u128]) -> Self {
+        /// A runner whose own plan calls for attesting `job_ids`.
+        fn dead_lease(job_ids: &[u128]) -> Self {
             let job_ids: Vec<Uuid> = job_ids.iter().map(|id| Uuid::from_u128(*id)).collect();
             Self {
                 homeboy_path: "/opt/homeboy".to_string(),
                 lifecycle: Ok(Plan::NeedsAttestation(Attestation {
-                    lease_id: lease_id.to_string(),
                     state_dir: std::path::PathBuf::from(STATE_DIR),
                     job_ids: job_ids.clone(),
-                    confirmation: "confirm-workload-processes-absent".to_string(),
                 })),
                 executed: RefCell::new(Vec::new()),
                 execute_result: RefCell::new(Ok(serde_json::json!({
-                    "recovered_lease_id": lease_id,
-                    "reconciled_job_ids": job_ids,
+                    "attested_job_ids": job_ids,
                 }))),
             }
         }
@@ -249,11 +242,10 @@ mod tests {
 
     #[test]
     fn the_constructed_command_targets_the_planned_state_dir_lease_and_jobs() {
-        let transport = FakeTransport::dead_lease("lease-lab", &[1, 2]);
+        let transport = FakeTransport::dead_lease(&[1, 2]);
         let applied =
             run_attested_reconcile_with_transport("homeboy-lab", &transport).expect("applied");
 
-        assert_eq!(applied.lease_id, "lease-lab");
         assert_eq!(applied.state_dir, STATE_DIR);
         assert_eq!(
             applied.job_ids,
@@ -264,7 +256,7 @@ mod tests {
         assert_eq!(
             commands[0],
             format!(
-                "HOMEBOY_DAEMON_STATE_DIR={STATE_DIR} /opt/homeboy daemon reconcile-dead-lease-orphans --lease-id lease-lab --job-id {} --job-id {} --confirm-workload-processes-absent --no-replacement",
+                "HOMEBOY_DAEMON_STATE_DIR={STATE_DIR} /opt/homeboy daemon recover --attest-absent {} {}",
                 Uuid::from_u128(1),
                 Uuid::from_u128(2)
             )
@@ -274,11 +266,11 @@ mod tests {
 
     #[test]
     fn a_refusal_from_the_runner_side_is_surfaced_not_swallowed() {
-        let transport = FakeTransport::dead_lease("lease-lab", &[1]);
+        let transport = FakeTransport::dead_lease(&[1]);
         *transport.execute_result.borrow_mut() = Err(
-            "remote attested dead-lease reconcile refused: Invalid argument 'job_id': dead-daemon \
-             recovery job IDs must name the exact active durable-job set; command: \
-             HOMEBOY_DAEMON_STATE_DIR=... daemon reconcile-dead-lease-orphans"
+            "remote attested dead-lease reconcile refused: Invalid argument 'attest_absent': job \
+             has a recorded child identity; command: \
+             HOMEBOY_DAEMON_STATE_DIR=... daemon recover --attest-absent"
                 .to_string(),
         );
 
@@ -286,9 +278,7 @@ mod tests {
             .expect_err("the remote refusal must fail the operation");
 
         assert!(
-            error.message.contains(
-                "dead-daemon recovery job IDs must name the exact active durable-job set"
-            ),
+            error.message.contains("job has a recorded child identity"),
             "the runner-side refusal must survive verbatim: {}",
             error.message
         );
@@ -299,8 +289,8 @@ mod tests {
     fn a_runner_plan_that_waits_or_blocks_is_refused_with_its_reason() {
         for plan in [
             Plan::Wait {
-                cause: homeboy_core::daemon::lifecycle_plan::WaitCause::LiveWorkload,
-                reason: "job 9 still has a live workload process".to_string(),
+                cause: homeboy_core::daemon::lifecycle_plan::WaitCause::BusyStaleDaemon,
+                reason: "the stale daemon still owns job 9".to_string(),
             },
             Plan::Blocked {
                 cause: homeboy_core::daemon::lifecycle_plan::BlockCause::UnleasedProcess,
@@ -308,7 +298,7 @@ mod tests {
             },
             Plan::Converged,
         ] {
-            let mut transport = FakeTransport::dead_lease("lease-lab", &[1]);
+            let mut transport = FakeTransport::dead_lease(&[1]);
             transport.lifecycle = Ok(plan.clone());
             let error = run_attested_reconcile_with_transport("homeboy-lab", &transport)
                 .expect_err("refused");

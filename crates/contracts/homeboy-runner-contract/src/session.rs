@@ -82,8 +82,7 @@ pub struct RunnerProxyForward {
     pub tunnel_process_start_identity: Option<RunnerTunnelProcessStartIdentity>,
 }
 
-/// A persisted runner session record. `leaseless_recovery_evidence` remains
-/// opaque JSON because the runner implementation owns its typed representation.
+/// A persisted runner session record.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RunnerSession {
     pub runner_id: String,
@@ -120,8 +119,6 @@ pub struct RunnerSession {
     pub worker_pid: Option<u32>,
     #[serde(default)]
     pub last_seen_at: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub leaseless_recovery_evidence: Option<serde_json::Value>,
 }
 
 impl RunnerSession {
@@ -214,8 +211,7 @@ mod tests {
             "connected_at": "2026-08-30T00:00:00Z",
             "worker_identity": "worker-1",
             "worker_pid": 104,
-            "last_seen_at": "2026-08-30T00:01:00Z",
-            "leaseless_recovery_evidence": { "reason": "state-loss" }
+            "last_seen_at": "2026-08-30T00:01:00Z"
         });
 
         let session = serde_json::from_value::<RunnerSession>(value.clone()).expect("deserialize");

@@ -976,7 +976,6 @@ fn persist_direct_daemon_cancel_session(daemon_url: &str) {
         worker_identity: None,
         worker_pid: None,
         last_seen_at: Some(chrono::Utc::now().to_rfc3339()),
-        leaseless_recovery_evidence: None,
     };
     let path = homeboy_core::paths::runner_controller_session_file("lab", "handoff-cancel-test")
         .expect("session path");

@@ -621,8 +621,8 @@ pub(super) fn pending_step_delivery_count_readonly(
         .map_err(|error| store_error(path, "count pending terminal deliveries", error))
 }
 
-/// The durable job ledger as one JSON document, for operator evidence
-/// snapshots and tests. Not a persistence format.
+/// The durable job ledger as one JSON document, for tests. Not a persistence format.
+#[cfg(test)]
 pub(super) fn ledger_snapshot(path: &Path) -> Result<Vec<u8>> {
     match read_durable_store_readonly(path)? {
         Some(mut durable) => {
