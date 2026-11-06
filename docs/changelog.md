@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.446.5] - 2026-11-06
+
+### Changed
+- one detached entry admitted like every other Lab run
+- one detached staging submit and drop the identity retry-hint wrapper
+
+### Fixed
+- make the hermetic test runner isolate host state so the suite passes on Lab hosts
+
 ## [0.446.4] - 2026-11-06
 
 ### Changed
