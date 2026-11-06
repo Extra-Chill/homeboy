@@ -195,6 +195,14 @@ impl Commands {
                 AGENT_TASK_FANOUT_COOK_BATCH_LAB_LABEL,
                 AGENT_TASK_FANOUT_COORDINATOR_CONTROLLER_REASON,
             ),
+            Commands::Runs(args)
+                if args.workflow_reader_id().is_some() || args.workflow_discovery() =>
+            {
+                LabCommandContract::local_only(
+                    "workflow instance reads",
+                    "workflow instances belong to the serving controller daemon",
+                )
+            }
             Commands::Runs(args) if args.cook_reader_id().is_some() || args.cook_discovery() => {
                 LabCommandContract::runner_resident_read_polling(AGENT_TASK_STATUS_LAB_LABEL)
             }

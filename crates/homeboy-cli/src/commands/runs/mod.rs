@@ -31,6 +31,7 @@ mod handlers;
 mod hotspots;
 mod latest;
 mod logs;
+pub(crate) mod workflow;
 pub(crate) use logs::{logs, RunsLogsArgs};
 mod proof;
 pub(crate) mod reconcile;

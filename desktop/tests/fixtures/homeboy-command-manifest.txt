@@ -444,7 +444,6 @@ workflow approve
 workflow cancel
 workflow list
 workflow run
-workflow status
 workflow validate
 workload
 workload compare

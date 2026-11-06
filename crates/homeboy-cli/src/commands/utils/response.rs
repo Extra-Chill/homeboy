@@ -699,10 +699,14 @@ fn unnamed_failure_diagnostics(
             .and_then(Value::as_str)
             .map(str::to_string)
     });
-    let reason = (identity.command == "workflow")
-        .then(|| data.get("reason").and_then(Value::as_str))
-        .flatten()
-        .filter(|reason| !reason.trim().is_empty());
+    let reason = (identity.command == "workflow"
+        || (identity.command == "runs"
+            && data["instance"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("wf-"))))
+    .then(|| data.get("reason").and_then(Value::as_str))
+    .flatten()
+    .filter(|reason| !reason.trim().is_empty());
     let message = match (reason, subject) {
         (Some(reason), _) => reason.to_string(),
         (None, Some(subject)) => {
@@ -3273,12 +3277,12 @@ mod tests {
     }
 
     #[test]
-    fn workflow_status_summarizes_the_failure_reason() {
+    fn workflow_run_view_summarizes_the_failure_reason() {
         let reason = "step `prepare` did not succeed: repository does not exist";
         let response = cli_response_for_json_result_for_identity(
-            &Ok(json!({ "status": "failed", "reason": reason })),
+            &Ok(json!({ "instance": "wf-example-hash", "status": "failed", "reason": reason })),
             1,
-            &CommandIdentity::with_operation("workflow", "status"),
+            &CommandIdentity::with_operation("runs", "show"),
             None,
         );
         let value = serde_json::to_value(response).unwrap();

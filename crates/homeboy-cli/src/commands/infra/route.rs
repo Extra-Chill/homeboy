@@ -4921,6 +4921,9 @@ fn controller_owns_agent_task_lifecycle_command(cli: &Cli) -> homeboy::core::Res
     use crate::commands::agent_task::AgentTaskCommand;
 
     if let Commands::Runs(args) = &cli.command {
+        if args.workflow_reader_id().is_some() || args.workflow_discovery() {
+            return Ok(true);
+        }
         if let Some(run_id) = args.logs_run_id() {
             let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
             return agent_task_lifecycle::run_record_exists_resolved_in_store(&store, run_id);
@@ -5192,3 +5195,33 @@ fn strip_component_target_args(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod workflow_read_routing_tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn parsed_workflow_reads_are_controller_local_and_observations_are_unchanged() {
+        for argv in [
+            vec!["homeboy", "runs", "show", "wf-x"],
+            vec!["homeboy", "runs", "watch", "wf-x"],
+            vec!["homeboy", "runs", "list", "--kind", "workflow"],
+        ] {
+            let cli = Cli::try_parse_from(&argv).unwrap();
+            assert!(controller_owns_agent_task_lifecycle_command(&cli).unwrap());
+            let normalized = argv.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+            assert_eq!(
+                route_after_parse_with_provenance(&cli, &normalized, None, None).unwrap(),
+                None
+            );
+        }
+        let cli = Cli::try_parse_from(["homeboy", "runs", "show", "observation-x"]).unwrap();
+        assert!(!controller_owns_agent_task_lifecycle_command(&cli).unwrap());
+        let Commands::Runs(args) = cli.command else {
+            unreachable!()
+        };
+        assert!(args.workflow_reader_id().is_none());
+        assert!(!args.workflow_discovery());
+    }
+}

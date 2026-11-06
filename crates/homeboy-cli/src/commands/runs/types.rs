@@ -69,7 +69,7 @@ pub struct RunsArgs {
 pub(super) enum RunsCommand {
     /// Read the canonical durable event stream for a run.
     Logs(super::RunsLogsArgs),
-    /// List persisted observation runs
+    /// List persisted runs, including workflow instances with --kind workflow
     List(RunsListArgs),
     /// Aggregate persisted run metadata
     Distribution(RunsDistributionArgs),
@@ -94,7 +94,7 @@ pub(super) enum RunsCommand {
     Watch(RunsWatchArgs),
     /// Cooperatively cancel a persisted foreground run before its next stage.
     Cancel { run_id: String },
-    /// Show one persisted observation run
+    /// Show one persisted run or workflow instance (wf- id)
     Show {
         run_id: String,
         /// Print the full JSON output instead of the compact human summary.
@@ -290,7 +290,7 @@ pub enum RunsOutput {
     Refs(RunsRefsOutput),
     Resources(RunsResourcesOutput),
     Report(ReportOutput),
-    /// Lifecycle-owned Cook payload, preserving the domain reader schema.
+    /// Domain-owned Cook or workflow payload, preserving the reader schema.
     #[serde(untagged)]
     Cook(Value),
 }

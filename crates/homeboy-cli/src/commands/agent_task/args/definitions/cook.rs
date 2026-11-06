@@ -1171,7 +1171,7 @@ mod tests {
             "--run-plan",
             "--placement <PLACEMENT>",
             "One repository per batch",
-            "homeboy workflow status <instance> --watch",
+            "homeboy runs watch <instance>",
             "Two phases:",
             "Verification is required:",
             "--placement lab",

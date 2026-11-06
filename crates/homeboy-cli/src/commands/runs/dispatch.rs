@@ -29,6 +29,9 @@ impl RunsArgs {
     /// compact human summary (i.e. the caller asked for neither `--json`
     /// nor `--format json`).
     pub(crate) fn show_summary_eligible(&self) -> bool {
+        if self.workflow_reader_id().is_some() {
+            return false;
+        }
         match &self.command {
             RunsCommand::Show {
                 json,
@@ -195,6 +198,9 @@ impl RunsArgs {
 }
 
 pub fn run(args: RunsArgs) -> CmdResult<RunsOutput> {
+    if args.workflow_reader_id().is_some() || args.workflow_discovery() {
+        return super::workflow::run(args);
+    }
     if let RunsCommand::List(list) = &args.command {
         super::cook::validate_discovery(list)?;
     }

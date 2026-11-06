@@ -12,7 +12,7 @@
 //!   `--max-concurrency` at a time, and its `join` decides the batch outcome.
 //!
 //! Status, per-child progress, and cancellation are the workflow's own
-//! (`homeboy workflow status|cancel <instance>`).
+//! (`homeboy runs show <instance>` / `homeboy workflow cancel <instance>`).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
