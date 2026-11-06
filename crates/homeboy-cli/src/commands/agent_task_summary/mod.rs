@@ -7,6 +7,7 @@ use super::summary_json::{array_len, string_value, u64_value, usize_value, value
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AgentTaskSummaryKind {
     Cook,
+    Recover,
     Status,
     Logs,
     Review,
@@ -17,6 +18,7 @@ pub(crate) enum AgentTaskSummaryKind {
 pub(crate) fn agent_task_summary_kind(args: &AgentTaskArgs) -> Option<AgentTaskSummaryKind> {
     match &args.command {
         AgentTaskCommand::Cook(_) => Some(AgentTaskSummaryKind::Cook),
+        AgentTaskCommand::Recover(_) => Some(AgentTaskSummaryKind::Recover),
         AgentTaskCommand::Status(_) => Some(AgentTaskSummaryKind::Status),
         AgentTaskCommand::Review(_) => Some(AgentTaskSummaryKind::Review),
         AgentTaskCommand::Providers(_) => Some(AgentTaskSummaryKind::Providers),
@@ -31,12 +33,37 @@ pub(crate) fn render_agent_task_summary(
 ) -> Option<String> {
     match kind {
         AgentTaskSummaryKind::Cook => render_cook_summary(payload),
+        AgentTaskSummaryKind::Recover => Some(format!(
+            "Recovery step: {}\nAttempt: {}\nStatus: {}",
+            payload
+                .pointer("/step/kind")
+                .or_else(|| payload.get("step"))
+                .and_then(Value::as_str)
+                .unwrap_or("none"),
+            string_value(payload, &["run_id"]).unwrap_or("unknown"),
+            string_value(payload, &["status"]).unwrap_or("unknown"),
+        )),
         AgentTaskSummaryKind::Status => render_status_summary(payload),
         AgentTaskSummaryKind::Logs => render_logs_summary(payload),
         AgentTaskSummaryKind::Review => render_review_summary(payload),
         AgentTaskSummaryKind::Providers => render_providers_summary(payload),
         AgentTaskSummaryKind::Capacity => render_capacity_summary(payload),
     }
+}
+
+#[cfg(test)]
+#[test]
+fn recover_summary_names_step_attempt_and_state() {
+    let summary = render_agent_task_summary(
+        AgentTaskSummaryKind::Recover,
+        &serde_json::json!({
+            "step": {"kind": "continue"}, "run_id": "cook-attempt-2", "status": "running"
+        }),
+    )
+    .unwrap();
+    assert!(summary.contains("Recovery step: continue"));
+    assert!(summary.contains("Attempt: cook-attempt-2"));
+    assert!(summary.contains("Status: running"));
 }
 
 fn render_providers_summary(payload: &Value) -> Option<String> {

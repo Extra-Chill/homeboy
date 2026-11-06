@@ -783,6 +783,24 @@ fn finish_performed_step(
             if report.preflight {
                 report.admission = Some(value);
             } else {
+                // Continuations and retries may start or adopt a successor. The
+                // report describes that attempt, not the recovery's source.
+                if let Some(run_id) = value
+                    .get("latest_run_id")
+                    .or_else(|| value.get("run_id"))
+                    .or_else(|| value.pointer("/run/id"))
+                    .and_then(Value::as_str)
+                {
+                    report.run_id = run_id.to_string();
+                }
+                if let Some(status) = value
+                    .get("status")
+                    .or_else(|| value.get("state"))
+                    .or_else(|| value.pointer("/run/state"))
+                    .and_then(Value::as_str)
+                {
+                    report.status = status.to_string();
+                }
                 report.result = Some(value);
             }
             (report, exit_code)
@@ -1450,6 +1468,25 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn recovery_reports_the_started_attempt() {
+        let mut report = no_step_report("candidate_recoverable", "fixture");
+        report.step = CookRecoveryStep::Continue;
+        let (report, code) = finish_performed_step(
+            report,
+            Ok((
+                serde_json::json!({
+                    "latest_run_id": "cook-attempt-2", "status": "running"
+                }),
+                0,
+            )),
+        );
+        assert_eq!(code, 0);
+        assert_eq!(report.run_id, "cook-attempt-2");
+        assert_eq!(report.status, "running");
+        assert_eq!(report.step, CookRecoveryStep::Continue);
     }
 
     #[test]
