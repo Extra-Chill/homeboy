@@ -20,7 +20,6 @@ use super::super::types::{
 };
 use super::JobStore;
 use super::*;
-#[cfg(test)]
 use crate::api_jobs::types::DaemonLinkedDurableRunState;
 use crate::error::{Error, Result};
 
