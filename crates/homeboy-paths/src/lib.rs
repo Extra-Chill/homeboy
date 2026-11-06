@@ -440,13 +440,16 @@ fn assert_ambient_root_allowed(what: &str) {
     // `#[track_caller]` stops at the first wrapper that lacks it, so name the
     // workspace frames that led here: the escape is usually several calls up.
     let backtrace = std::backtrace::Backtrace::force_capture().to_string();
-    let frames: Vec<&str> = backtrace
+    let mut frames: Vec<&str> = backtrace
         .lines()
         .map(str::trim)
         .filter(|line| line.starts_with("at ") && line.contains("crates/homeboy"))
         .filter(|line| !line.contains("crates/homeboy-paths/"))
-        .take(12)
+        .take(16)
         .collect();
+    if frames.is_empty() {
+        frames = backtrace.lines().map(str::trim).take(60).collect();
+    }
     panic!(
         "ambient Homeboy {what} resolved under test isolation at {caller}; inject a store/root instead\n  via:\n    {}",
         frames.join("\n    ")
