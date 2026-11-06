@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.446.9] - 2026-11-06
+
+### Changed
+- Report stalled gate dependency setup as unavailable after one warm retry
+
 ## [0.446.8] - 2026-11-06
 
 ### Changed
