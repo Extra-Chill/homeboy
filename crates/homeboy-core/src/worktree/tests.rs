@@ -4782,6 +4782,28 @@ fn cleanup_nominates_squash_merged_clean_owned_worktree_without_succeeded_finali
     dirty_record.terminal_disposition = Some("failed".to_string());
     write_record(&store, &dirty_record).unwrap();
 
+    // Pristine + owned: a Lab Cook destination stays at its base until
+    // promotion. Its tip is trivially "merged", but no work exists to have
+    // landed, so it waits for its owner like any in-flight work.
+    let pristine_worktree = sibling_worktree_path(source.path(), "owned-pristine");
+    run_git(
+        source.path(),
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "task-pristine",
+            &pristine_worktree.to_string_lossy(),
+        ],
+    );
+    let mut pristine_record = fixture_record(source.path(), &pristine_worktree);
+    rebind_handle(&mut pristine_record, "fixture@task-pristine".to_string());
+    pristine_record.branch = "task-pristine".to_string();
+    pristine_record.base_ref = main.to_string();
+    pristine_record.run_id = Some("cook-owner-4".to_string());
+    pristine_record.terminal_disposition = None;
+    write_record(&store, &pristine_record).unwrap();
+
     // Plain `remove` (no --force) accepts the merged, clean worktree: the
     // shared predicate `cleanup` must nominate the same set.
     let merged_safety = safety_report(&merged_record).unwrap();
@@ -4798,7 +4820,7 @@ fn cleanup_nominates_squash_merged_clean_owned_worktree_without_succeeded_finali
     assert_eq!(plan.counts.candidates, 1, "skipped: {:?}", plan.skipped);
     assert_eq!(plan.candidates[0].record.id, "fixture@task-merged");
     assert_eq!(plan.counts.removed, 0, "dry run must not remove");
-    assert_eq!(plan.counts.skipped, 2);
+    assert_eq!(plan.counts.skipped, 3);
     assert!(merged_worktree.exists());
 
     let applied = cleanup_with_store(
@@ -4818,7 +4840,7 @@ fn cleanup_nominates_squash_merged_clean_owned_worktree_without_succeeded_finali
         "merged, clean worktree must be reclaimed without a succeeded finalization"
     );
 
-    assert_eq!(applied.counts.skipped, 2);
+    assert_eq!(applied.counts.skipped, 3);
     let skipped_reasons = |id: &str| -> Vec<String> {
         applied
             .skipped
@@ -4835,6 +4857,13 @@ fn cleanup_nominates_squash_merged_clean_owned_worktree_without_succeeded_finali
         "unmerged owned work still waits for its lifecycle owner"
     );
     assert!(unmerged_worktree.exists());
+    assert!(
+        skipped_reasons("fixture@task-pristine")
+            .iter()
+            .any(|reason| reason.contains("explicit succeeded finalization from lifecycle owner")),
+        "a branch that never moved is no evidence that work landed"
+    );
+    assert!(pristine_worktree.exists());
     assert!(
         skipped_reasons("fixture@task-dirty")
             .iter()
