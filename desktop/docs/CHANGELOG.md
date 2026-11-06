@@ -6,6 +6,11 @@ The desktop app currently shells out to the standalone Rust CLI (`homeboy`) for 
 
 For current behavior, prefer the code and other documentation (for example `docs/CLI.md`).
 
+## [0.13.0] - 2026-11-06
+
+### Added
+- fold workflow instance readers into runs
+
 ## [0.12.4] - 2026-11-05
 
 ### Changed
