@@ -801,7 +801,6 @@ pub(crate) fn adopt_candidate(args: AdoptArgs) -> CmdResult<Value> {
             agent_task_service::AgentTaskCandidateAdoptionOptions {
                 ai_model: args.ai_model.clone(),
                 replace_interrupted: args.replace_interrupted,
-                accept_inherited_failures: args.accept_inherited_failures,
             },
             crate::commands::infra::route::reconstruct_cook_attempt_dispatcher,
             Arc::new(ExtensionProviderAgentTaskExecutor::discover()),
@@ -841,7 +840,6 @@ fn adoption_envelope(
         "candidate_ref": args.candidate_ref,
         "ai_model": args.ai_model,
         "replace_interrupted": args.replace_interrupted,
-        "accept_inherited_failures": args.accept_inherited_failures,
         "controller_owned": true,
     })
 }
@@ -979,7 +977,7 @@ pub(crate) fn finalize_pull_request(mut args: FinalizePrArgs) -> CmdResult<Value
         commit_message,
         gate_results,
         normalized_gate_results,
-        accept_inherited_failures: false,
+
         changed_files: args.changed_files,
         evidence,
         review_dossier,
@@ -3055,7 +3053,7 @@ mod tests {
             candidate_ref: "deadbeef".to_string(),
             ai_model: Some("openai/gpt-5.6-terra".to_string()),
             replace_interrupted: false,
-            accept_inherited_failures: false,
+
             full: false,
         };
 

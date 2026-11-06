@@ -822,7 +822,7 @@ mod committed_harvest_tests {
                 repository_integrity_evidence: None,
             })
             .unwrap();
-            assert!(promotion.finalization_eligible(true), "{promotion:?}");
+            assert!(promotion.finalization_eligible(), "{promotion:?}");
             assert!(!workspace.join("install-ran").exists());
         });
     }

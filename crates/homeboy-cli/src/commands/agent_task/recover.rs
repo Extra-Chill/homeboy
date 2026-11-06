@@ -76,15 +76,12 @@ fn recovery_request(mut args: RecoverArgs) -> homeboy::core::Result<CookRecovery
 /// The replace-gates inputs: an explicit authorization plus either corrected
 /// gates executed against the applied candidate or external candidate-bound
 /// proof. Any one of them without the others is refused, never ignored.
-fn replace_gates_request(
+pub(super) fn replace_gates_request(
     args: &mut RecoverArgs,
 ) -> homeboy::core::Result<Option<CookReplaceGatesRequest>> {
     let has_gates = args.gates.has_deterministic_gate();
-    if args.authorize_external_proof.is_none()
-        && args.promotion.is_none()
-        && !has_gates
-        && !args.gates.accept_inherited_failures
-    {
+    // Authorization does not replace already durable, eligible gate evidence.
+    if args.promotion.is_none() && !has_gates {
         return Ok(None);
     }
     let invalid = |message: &str| {
@@ -108,7 +105,7 @@ fn replace_gates_request(
         }
         (Some(spec), false) => CookReplacementProof::External {
             promotion: Box::new(super::review::replacement_gate_proof(spec)?),
-            accept_inherited_failures: args.gates.accept_inherited_failures,
+
         },
         (None, true) => {
             args.gates.snapshot_file_inputs()?;

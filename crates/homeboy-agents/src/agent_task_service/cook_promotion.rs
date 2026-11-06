@@ -1172,21 +1172,20 @@ pub(crate) fn persisted_promotion_for_attempt_in_store(
 /// finalization-eligible. This is the only state replacement gates accept.
 pub(crate) fn applied_candidate_needs_replacement_gates(
     promotion: &AgentTaskPromotionReport,
-    accept_inherited_failures: bool,
 ) -> bool {
     matches!(
         promotion.status,
         AgentTaskPromotionStatus::GateFailed | AgentTaskPromotionStatus::VerificationPending
     ) && promotion.status.patch_promoted()
         && promotion.provenance.get("replacement_gate_proof").is_none()
-        && !promotion.finalization_eligible(accept_inherited_failures)
+        && !promotion.finalization_eligible()
 }
 
 /// Read-only admission for `recover --preflight` with replacement-gate
 /// inputs: the attempt must hold an applied candidate whose gates failed.
 pub(crate) fn ensure_replacement_gate_candidate(run_id: &str) -> Result<()> {
     let admitted = persisted_promotion_for_attempt(run_id)?
-        .is_some_and(|promotion| applied_candidate_needs_replacement_gates(&promotion, false));
+        .is_some_and(|promotion| applied_candidate_needs_replacement_gates(&promotion));
     if admitted {
         return Ok(());
     }
@@ -1224,7 +1223,6 @@ pub fn record_replacement_gate_proof(
     run_id: &str,
     mut replacement: AgentTaskPromotionReport,
     external_authorization: Option<String>,
-    accept_inherited_failures: bool,
 ) -> Result<AgentTaskPromotionReport> {
     let original = persisted_promotion_for_attempt(run_id)?.ok_or_else(|| {
         Error::validation_invalid_argument(
@@ -1235,7 +1233,7 @@ pub fn record_replacement_gate_proof(
         )
     })?;
     if original.provenance.get("replacement_gate_proof").is_some() {
-        if original.finalization_eligible(accept_inherited_failures)
+        if original.finalization_eligible()
             && replacement.source == original.source
             && replacement.target == original.target
             && replacement.to_worktree == original.to_worktree
@@ -1249,7 +1247,7 @@ pub fn record_replacement_gate_proof(
         }
         return Err(Error::validation_invalid_argument(
             "replacement_gate_proof",
-            "replacement proof is already recorded; replay its exact evidence and inherited-failure policy",
+            "replacement proof is already recorded; replay its exact evidence",
             Some(run_id.to_string()),
             None,
         ));
@@ -1281,11 +1279,7 @@ pub fn record_replacement_gate_proof(
     // never replace or discard the policy evidence bound at original promotion.
     replacement.repository_integrity_evidence = original.repository_integrity_evidence.clone();
     replacement.normalize_gate_outcome();
-    validate_replacement_proof_finalization_eligibility(
-        run_id,
-        &replacement,
-        accept_inherited_failures,
-    )?;
+    validate_replacement_proof_finalization_eligibility(run_id, &replacement)?;
     validate_legacy_replacement_candidate_checkout(run_id, &original, &replacement)?;
     let expected_candidate = original.provenance.get("candidate_commit").cloned();
     let observed_candidate = replacement.provenance.get("candidate_commit").cloned();
@@ -1359,7 +1353,7 @@ pub fn record_replacement_gate_proof(
         "reason": reason,
         "operator_authorization": external_authorization,
         "externally_produced": true,
-        "accept_inherited_failures": accept_inherited_failures,
+
         // `Inherit` serializes as the default in gate reports; recording the
         // resolved policy here keeps that valid standard policy explicit.
         "environment_policy": replacement.deterministic_gates.iter().map(|gate| serde_json::json!({
@@ -1438,13 +1432,7 @@ pub(super) fn validate_replacement_promotion_in_store(
             None,
         ));
     }
-    validate_replacement_proof_finalization_eligibility(
-        run_id,
-        promotion,
-        proof["accept_inherited_failures"]
-            .as_bool()
-            .unwrap_or(false),
-    )?;
+    validate_replacement_proof_finalization_eligibility(run_id, promotion)?;
     // A completed publication can change HEAD and consume the dirty candidate.
     // Its durable receipt, rather than the pre-publication tree, owns replay.
     if !super::CookDelivery::from_run_metadata(&record.metadata)
@@ -1541,11 +1529,10 @@ fn validate_legacy_replacement_candidate_checkout(
 fn replacement_green_gate_status_error(
     run_id: &str,
     replacement: &AgentTaskPromotionReport,
-    accept_inherited_failures: bool,
 ) -> Error {
     const TAIL_LINES: usize = 40;
     let failing = replacement
-        .finalization_blocking_gates(accept_inherited_failures)
+        .finalization_blocking_gates()
         .collect::<Vec<_>>();
     let tail = |captured: &str, evidence: Option<&str>| {
         let source = if captured.is_empty() {
@@ -1603,7 +1590,6 @@ fn replacement_green_gate_status_error(
 fn validate_replacement_proof_finalization_eligibility(
     run_id: &str,
     replacement: &AgentTaskPromotionReport,
-    accept_inherited_failures: bool,
 ) -> Result<()> {
     let failed = |predicate: &'static str, gate_id: Option<&str>| {
         let mut error = Error::validation_invalid_argument(
@@ -1628,12 +1614,8 @@ fn validate_replacement_proof_finalization_eligibility(
     if replacement.verified_base.is_none() {
         return Err(failed("verified_base", None));
     }
-    if !replacement.finalization_eligible(accept_inherited_failures) {
-        return Err(replacement_green_gate_status_error(
-            run_id,
-            replacement,
-            accept_inherited_failures,
-        ));
+    if !replacement.finalization_eligible() {
+        return Err(replacement_green_gate_status_error(run_id, replacement));
     }
     let candidate_checkout = replacement.provenance.get("candidate_checkout");
     for gate in &replacement.deterministic_gates {
@@ -1647,7 +1629,7 @@ fn validate_replacement_proof_finalization_eligibility(
                         evidence.exit_code == 0
                     }
                     crate::agent_task_gate::AgentTaskGateStatus::AcceptedInheritedFailure => {
-                        accept_inherited_failures && evidence.exit_code == gate.exit_code
+                        evidence.exit_code == gate.exit_code
                     }
                     _ => false,
                 }
@@ -1678,9 +1660,7 @@ fn validate_replacement_proof_finalization_eligibility(
         .copied()
         .filter(|gate| match gate.status {
             crate::agent_task_gate::AgentTaskGateStatus::Succeeded => gate.exit_code == 0,
-            crate::agent_task_gate::AgentTaskGateStatus::AcceptedInheritedFailure => {
-                accept_inherited_failures
-            }
+            crate::agent_task_gate::AgentTaskGateStatus::AcceptedInheritedFailure => true,
             _ => false,
         })
         .collect::<Vec<_>>();
@@ -1728,10 +1708,10 @@ pub fn verify_replacement_gates(
                         Some("deserialize completed replacement gate proof".to_string()),
                     )
                 })?;
-            if !report.finalization_eligible(gates.accept_inherited_failures) {
+            if !report.finalization_eligible() {
                 return Err(Error::validation_invalid_argument(
-                    "accept_inherited_failures",
-                    "completed replacement proof contains accepted inherited failures; reauthorize them explicitly",
+                    "replacement_gate_proof",
+                    "completed replacement proof is not finalization-eligible; inspect the persisted evidence with agent-task status",
                     Some(run_id),
                     None,
                 ));
@@ -1811,7 +1791,6 @@ fn verify_replacement_gates_owned(
             &recipe.promotion_transport["attempt_dispatch"],
         );
     }
-    let accept_inherited_failures = gates.accept_inherited_failures;
     let gate_timeout = gates.gate_timeout();
     let admitted_component_id = gates.gate_environment.admitted_component_id.clone();
     let original = persisted_promotion_for_attempt(&run_id)?.ok_or_else(|| {
@@ -1826,12 +1805,12 @@ fn verify_replacement_gates_owned(
     // before its operation claim is completed. Recover that durable success
     // without repeating the gate execution that produced the proof.
     if original.provenance.get("replacement_gate_proof").is_some() {
-        if original.finalization_eligible(accept_inherited_failures) {
+        if original.finalization_eligible() {
             return Ok(original);
         }
         return Err(Error::validation_invalid_argument(
-            "accept_inherited_failures",
-            "completed replacement proof contains accepted inherited failures; reauthorize them explicitly",
+            "replacement_gate_proof",
+            "completed replacement proof is not finalization-eligible; inspect the persisted evidence with agent-task status",
             Some(run_id.to_string()),
             None,
         ));
@@ -1978,9 +1957,8 @@ fn verify_replacement_gates_owned(
                 // Exit 0 alone is not proof: unexecuted gates also carry it.
                 (gate.status == crate::agent_task_gate::AgentTaskGateStatus::Succeeded
                     && gate.exit_code == 0)
-                    || (accept_inherited_failures
-                        && gate.status
-                            == crate::agent_task_gate::AgentTaskGateStatus::AcceptedInheritedFailure)
+                    || gate.status
+                        == crate::agent_task_gate::AgentTaskGateStatus::AcceptedInheritedFailure
             })
             .map(
                 |gate| crate::agent_task_promotion::AgentTaskPromotionCommandReport {
@@ -2001,12 +1979,7 @@ fn verify_replacement_gates_owned(
             "automatic_rerun": false,
         });
     }
-    record_replacement_gate_proof(
-        &run_id,
-        replacement,
-        Some(external_authorization),
-        accept_inherited_failures,
-    )
+    record_replacement_gate_proof(&run_id, replacement, Some(external_authorization))
 }
 
 fn bind_persisted_promotion_artifact(
@@ -3010,7 +2983,7 @@ pub(crate) fn finalize_cook_pr_with_backend_with_stores<B: AgentTaskPrFinalizati
 ) -> Result<Value> {
     let mut promotion = promotion.clone();
     promotion.normalize_gate_outcome();
-    if !promotion.finalization_eligible(options.gates.accept_inherited_failures) {
+    if !promotion.finalization_eligible() {
         return Err(Error::validation_invalid_argument(
             "promotion",
             "agent-task cook finalization requires green gates or explicitly accepted inherited baseline failures",
@@ -3215,7 +3188,7 @@ fn cook_finalization_options_with_stores_and_review_form(
         commit_message,
         gate_results: Vec::new(),
         normalized_gate_results: promotion.gate_results.clone(),
-        accept_inherited_failures: options.gates.accept_inherited_failures,
+
         changed_files: promotion.changed_files.clone(),
         evidence: AgentTaskPrEvidence {
             source_refs,
@@ -3555,7 +3528,7 @@ fn manual_candidate_binding(
     if promotion.source.run_id.as_deref() != Some(run_id)
         || selection.selected_task_id.as_deref() != Some(promotion.source.task_id.as_str())
         || promotion.provenance.get("replacement_gate_proof").is_none()
-        || !promotion.finalization_eligible(false)
+        || !promotion.finalization_eligible()
         || fingerprint.head != commit
         || fingerprint.changed_files != report.changed_files
         || report.evidence.ai_model.as_deref() != Some(disclosure)
@@ -3847,22 +3820,20 @@ pub(crate) fn recover_cook_pr_with_backend_and_review_form<B: AgentTaskPrFinaliz
         options.finalization.base = verified_base.base.clone();
         options.finalization.head = promotion.target.branch.clone();
     }
-    // An explicitly accepted inherited baseline failure is finalizable (#11460),
-    // so it is recoverable too. Judge it with the cook's own
-    // accept_inherited_failures rather than requiring a green-gate Applied.
+    // Normalize historical status from the same authoritative eligibility rule
+    // used by fresh Cook; recovery never executes gates to refresh this view.
     let recovery_outcome = promotion.gate_outcome();
-    if recovery_outcome.status != AgentTaskPromotionStatus::Applied
-        && !(recovery_outcome.status == AgentTaskPromotionStatus::VerifiedNoChanges
-            && !promotion.changed_files.is_empty()
-            && promotion.finalization_eligible(options.gates.accept_inherited_failures))
-        && !(recovery_outcome.status == AgentTaskPromotionStatus::GateFailed
-            && promotion.finalization_eligible(options.gates.accept_inherited_failures))
+    if !promotion.finalization_eligible()
+        || !(recovery_outcome.status == AgentTaskPromotionStatus::Applied
+            || (recovery_outcome.status == AgentTaskPromotionStatus::VerifiedNoChanges
+                && !promotion.changed_files.is_empty()))
     {
+        let next_command = format!("homeboy agent-task status {run_id}");
         return Err(Error::validation_invalid_argument(
             "cook_delivery.artifacts.promotion.status",
-            "recovery requires an applied promotion, a verified existing-candidate delta, or an explicitly accepted inherited baseline failure",
-            Some(run_id),
-            None,
+            format!("persisted gates are not finalization-eligible; inspect the blocking gate evidence with `{next_command}`"),
+            Some(run_id.clone()),
+            Some(vec![next_command]),
         ));
     }
     // A supplied form replaces the agent's form whatever its state; the
@@ -4036,7 +4007,7 @@ fn recover_verified_no_change_finalization(
                 None,
             )
         })?;
-    if !promotion.finalization_eligible(false) {
+    if !promotion.finalization_eligible() {
         return Err(Error::validation_invalid_argument(
             "cook_delivery.artifacts.promotion",
             "verified no-change recovery requires green deterministic gates",
@@ -4847,7 +4818,7 @@ fn manual_finalization_options(
         commit_message: "recovered manual finalization".to_string(),
         gate_results: report.gate_results,
         normalized_gate_results: report.normalized_gate_results,
-        accept_inherited_failures: report.accept_inherited_failures,
+
         changed_files: report.changed_files,
         evidence: report.evidence,
         review_dossier: report.review_dossier,
@@ -6722,8 +6693,7 @@ pub(crate) fn cook_failure_context_with_stores(
                     .as_ref()
                     .is_some_and(cancelled_without_operator_request);
             let retry_refusal = retry_refusal.flatten();
-            let delivered_candidate =
-                delivered_candidate_facts(&recipe, record.as_ref(), delivery.as_ref());
+            let delivered_candidate = delivered_candidate_facts(record.as_ref(), delivery.as_ref());
             // The adopt observation only matters for a terminal `no_changes`
             // attempt; skip the worktree inspection for every other state.
             let adoptable_candidate_ref = (status == "no_changes")
@@ -7265,7 +7235,6 @@ fn git_stdout(dir: &std::path::Path, args: &[&str]) -> Option<String> {
 }
 
 fn delivered_candidate_facts(
-    recipe: &super::AgentTaskCookRecipe,
     record: Option<&agent_task_lifecycle::AgentTaskRunRecord>,
     delivery: Option<&super::CookDelivery>,
 ) -> DeliveredCandidateFacts {
@@ -7278,16 +7247,11 @@ fn delivered_candidate_facts(
     else {
         return DeliveredCandidateFacts::default();
     };
-    let accept_inherited_failures =
-        super::cook_recipe::reconstruct_options_without_dispatcher(recipe)
-            .map(|options| options.gates.accept_inherited_failures)
-            .unwrap_or(false);
-    let applied_gate_failure =
-        applied_candidate_needs_replacement_gates(&promotion, accept_inherited_failures);
+    let applied_gate_failure = applied_candidate_needs_replacement_gates(&promotion);
     let verified_unpublished = matches!(
         promotion.status,
         AgentTaskPromotionStatus::Applied | AgentTaskPromotionStatus::GateFailed
-    ) && promotion.finalization_eligible(accept_inherited_failures)
+    ) && promotion.finalization_eligible()
         && promotion
             .candidate
             .as_ref()
@@ -8002,9 +7966,8 @@ mod replacement_green_gate_status_tests {
              "stderr": "thread 'it_breaks' panicked: marker-16236"}
         ]));
 
-        let error =
-            validate_replacement_proof_finalization_eligibility("run-16236", &report, false)
-                .expect_err("non-green replacement gate is rejected");
+        let error = validate_replacement_proof_finalization_eligibility("run-16236", &report)
+            .expect_err("non-green replacement gate is rejected");
 
         assert!(
             error
@@ -8044,9 +8007,8 @@ mod replacement_green_gate_status_tests {
              "exit_code": 101, "stderr": huge}
         ]));
 
-        let error =
-            validate_replacement_proof_finalization_eligibility("run-16236", &report, false)
-                .expect_err("non-green replacement gate is rejected");
+        let error = validate_replacement_proof_finalization_eligibility("run-16236", &report)
+            .expect_err("non-green replacement gate is rejected");
 
         let tail = error.details["failing_gates"][0]["stderr_tail"]
             .as_str()

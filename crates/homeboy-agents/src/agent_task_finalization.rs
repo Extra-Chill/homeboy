@@ -272,10 +272,7 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
         }
         options.evidence.lifecycle = Some(lifecycle);
     }
-    validate_finalization_gates(
-        &options.normalized_gate_results,
-        options.accept_inherited_failures,
-    )?;
+    validate_finalization_gates(&options.normalized_gate_results)?;
     options.review_dossier.apply_overrides()?;
     let current_branch = backend.current_branch(&options.path)?;
     let head = options
@@ -984,7 +981,7 @@ fn validate_gate_proof_binding(
     if gate_proof.promotion.status != AgentTaskPromotionStatus::Applied
         && !(gate_proof.promotion.status == AgentTaskPromotionStatus::VerifiedNoChanges
             && !gate_proof.promotion.changed_files.is_empty()
-            && gate_proof.promotion.finalization_eligible(false))
+            && gate_proof.promotion.finalization_eligible())
     {
         return Err(Error::validation_invalid_argument(
             "run_id",
@@ -1047,7 +1044,7 @@ fn inherit_promotion_gates(
             None,
         ));
     }
-    if !promotion.finalization_eligible(false)
+    if !promotion.finalization_eligible()
         || promotion.gate_outcome().gate_results != promotion.gate_results
     {
         return Err(Error::validation_invalid_argument(
@@ -1192,10 +1189,7 @@ fn is_review_form_only_follow_up(promotion: &AgentTaskPromotionReport, run_id: &
             .is_some_and(|source_run_id| !source_run_id.is_empty() && source_run_id != run_id)
 }
 
-fn validate_finalization_gates(
-    gates: &[HomeboyGateResult],
-    _accept_inherited_failures: bool,
-) -> Result<()> {
+fn validate_finalization_gates(gates: &[HomeboyGateResult]) -> Result<()> {
     if gates.is_empty() {
         return Err(Error::validation_invalid_argument(
             "gate_results",
@@ -1667,7 +1661,7 @@ fn report(
         changed_files,
         gate_results: options.gate_results.clone(),
         normalized_gate_results,
-        accept_inherited_failures: options.accept_inherited_failures,
+
         proof,
         publication_intent,
         publication_proof,
@@ -1699,11 +1693,7 @@ pub(crate) fn authorized_replacement_gate_proof(promotion: &AgentTaskPromotionRe
         && proof["original_history"]["sha256"]
             .as_str()
             .is_some_and(|digest| digest.len() == 64)
-        && promotion.finalization_eligible(
-            proof["accept_inherited_failures"]
-                .as_bool()
-                .unwrap_or(false),
-        )
+        && promotion.finalization_eligible()
 }
 
 fn validate_durable_publication_eligibility(

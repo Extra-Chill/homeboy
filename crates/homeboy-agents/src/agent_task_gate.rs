@@ -134,11 +134,7 @@ pub struct VerifyGateOptions {
     /// rerunning them after restart.
     #[serde(default)]
     pub rerun_completed_gates: bool,
-    /// Allow finalization after a required gate is proven red on both candidate
-    /// and immutable baseline. The gate remains explicitly baseline-red in all
-    /// reports; this only authorizes the finalization policy boundary.
-    #[serde(default)]
-    pub accept_inherited_failures: bool,
+
     /// Declarative, non-secret process environment policy for every gate.
     #[serde(default)]
     pub gate_environment: AgentTaskGateEnvironmentPolicy,
@@ -495,7 +491,7 @@ impl Default for VerifyGateOptions {
             gate_heartbeat_interval_seconds: default_gate_heartbeat_interval_seconds(),
             gate_no_progress_timeout_seconds: default_gate_no_progress_timeout_seconds(),
             rerun_completed_gates: false,
-            accept_inherited_failures: false,
+
             gate_environment: AgentTaskGateEnvironmentPolicy::default(),
             gate_toolchains: Vec::new(),
             gate_package_artifacts: Vec::new(),
