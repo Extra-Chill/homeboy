@@ -414,66 +414,36 @@ pub trait AgentTaskPrFinalizationBackend {
     fn publication_route(&mut self, _path: &str) -> Result<Option<AgentTaskPublicationRoute>> {
         Ok(None)
     }
-    fn hydrate_run(&mut self, run_id: &str) -> Result<RunLifecycleRecord>;
-    fn hydrate_gate_proof(&mut self, run_id: &str) -> Result<AgentTaskPrDurableGateProof>;
-    fn hydrate_optional_gate_proof(
+    fn hydrate_run_in_store(
         &mut self,
+        lifecycle_store: &crate::agent_task_lifecycle::AgentTaskLifecycleStore,
+        run_id: &str,
+    ) -> Result<RunLifecycleRecord>;
+    fn hydrate_gate_proof_in_store(
+        &mut self,
+        lifecycle_store: &crate::agent_task_lifecycle::AgentTaskLifecycleStore,
+        run_id: &str,
+    ) -> Result<AgentTaskPrDurableGateProof>;
+    fn hydrate_optional_gate_proof_in_store(
+        &mut self,
+        _lifecycle_store: &crate::agent_task_lifecycle::AgentTaskLifecycleStore,
         _run_id: &str,
     ) -> Result<Option<AgentTaskPrDurableGateProof>> {
         Ok(None)
     }
-    fn hydrate_run_in_store(
-        &mut self,
-        _lifecycle_store: &crate::agent_task_lifecycle::AgentTaskLifecycleStore,
-        _run_id: &str,
-    ) -> Result<RunLifecycleRecord> {
-        Err(Error::validation_invalid_argument(
-            "finalization_backend",
-            "backend does not support explicit lifecycle-store hydration",
-            None,
-            None,
-        ))
-    }
-    fn hydrate_gate_proof_in_store(
-        &mut self,
-        _lifecycle_store: &crate::agent_task_lifecycle::AgentTaskLifecycleStore,
-        _run_id: &str,
-    ) -> Result<AgentTaskPrDurableGateProof> {
-        Err(Error::validation_invalid_argument(
-            "finalization_backend",
-            "backend does not support explicit lifecycle-store gate-proof hydration",
-            None,
-            None,
-        ))
-    }
-    fn hydrate_optional_gate_proof_in_store(
-        &mut self,
-        _lifecycle_store: &crate::agent_task_lifecycle::AgentTaskLifecycleStore,
-        run_id: &str,
-    ) -> Result<Option<AgentTaskPrDurableGateProof>> {
-        self.hydrate_optional_gate_proof(run_id)
-    }
     /// Real finalization binds the exact promoted bytes immediately before the
     /// first mutation. Test backends can focus on publication behavior.
-    fn validate_candidate(&mut self, _options: &AgentTaskPrFinalizationOptions) -> Result<()> {
-        Ok(())
-    }
     fn validate_candidate_in_store(
         &mut self,
         _lifecycle_store: &crate::agent_task_lifecycle::AgentTaskLifecycleStore,
         _options: &AgentTaskPrFinalizationOptions,
     ) -> Result<()> {
-        Err(Error::validation_invalid_argument(
-            "finalization_backend",
-            "backend does not support explicit lifecycle-store candidate validation",
-            None,
-            None,
-        ))
+        Ok(())
     }
     fn publication_context(
         &mut self,
         _run_id: &str,
-        _store: Option<&crate::agent_task_lifecycle::AgentTaskLifecycleStore>,
+        _lifecycle_store: &crate::agent_task_lifecycle::AgentTaskLifecycleStore,
     ) -> Result<(String, Option<String>)> {
         Ok(("ambient_gh".into(), None))
     }

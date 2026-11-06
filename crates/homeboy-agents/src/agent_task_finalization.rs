@@ -30,14 +30,22 @@ pub use types::*;
 pub fn finalize_pr(
     options: AgentTaskPrFinalizationOptions,
 ) -> Result<AgentTaskPrFinalizationReport> {
-    finalize_pr_with_backend(options, &mut RealAgentTaskPrFinalizationBackend)
+    finalize_pr_with_backend(
+        options,
+        &mut RealAgentTaskPrFinalizationBackend,
+        &crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?,
+    )
 }
 
 /// Validate a finalization dossier and its durable candidate without mutation.
 pub fn preflight_pr(
     options: AgentTaskPrFinalizationOptions,
 ) -> Result<AgentTaskPrFinalizationReport> {
-    preflight_pr_with_backend(options, &mut RealAgentTaskPrFinalizationBackend)
+    preflight_pr_with_backend(
+        options,
+        &mut RealAgentTaskPrFinalizationBackend,
+        &crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?,
+    )
 }
 
 /// Hydrate dependencies for fresh manual gates in their immutable checkout:
@@ -59,23 +67,17 @@ pub fn hydrate_manual_verification_dependencies(
 pub fn finalize_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
     options: AgentTaskPrFinalizationOptions,
     backend: &mut B,
-) -> Result<AgentTaskPrFinalizationReport> {
-    finalize_pr_with_backend_mode(options, backend, true, None)
-}
-
-pub fn finalize_pr_with_backend_in_store<B: AgentTaskPrFinalizationBackend>(
-    options: AgentTaskPrFinalizationOptions,
-    backend: &mut B,
     lifecycle_store: &crate::agent_task_lifecycle::AgentTaskLifecycleStore,
 ) -> Result<AgentTaskPrFinalizationReport> {
-    finalize_pr_with_backend_mode(options, backend, true, Some(lifecycle_store))
+    finalize_pr_with_backend_mode(options, backend, true, lifecycle_store)
 }
 
 pub fn preflight_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
     options: AgentTaskPrFinalizationOptions,
     backend: &mut B,
+    lifecycle_store: &crate::agent_task_lifecycle::AgentTaskLifecycleStore,
 ) -> Result<AgentTaskPrFinalizationReport> {
-    finalize_pr_with_backend_mode(options, backend, false, None)
+    finalize_pr_with_backend_mode(options, backend, false, lifecycle_store)
 }
 
 /// The quarantine transition for this publication, refusing a PR mutation
@@ -164,7 +166,7 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
     mut options: AgentTaskPrFinalizationOptions,
     backend: &mut B,
     publish: bool,
-    lifecycle_store: Option<&crate::agent_task_lifecycle::AgentTaskLifecycleStore>,
+    lifecycle_store: &crate::agent_task_lifecycle::AgentTaskLifecycleStore,
 ) -> Result<AgentTaskPrFinalizationReport> {
     let mut durable_changed_files = Vec::new();
     let (publication_identity, _requester) =
@@ -179,18 +181,14 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
     );
     let durable_acceptance;
     if options.manual_finalization {
-        durable_acceptance = validate_manual_finalization_policy(&options.run_id)?;
+        durable_acceptance = validate_manual_finalization_policy(lifecycle_store, &options.run_id)?;
         if options.inherited_gate_evidence.is_some()
             || (options.normalized_gate_results.is_empty()
                 && options.verified_candidate_sha.is_none())
         {
             let claimed_evidence = options.inherited_gate_evidence.take();
-            let inherited = match lifecycle_store {
-                Some(store) => {
-                    backend.hydrate_optional_gate_proof_in_store(store, &options.run_id)?
-                }
-                None => backend.hydrate_optional_gate_proof(&options.run_id)?,
-            };
+            let inherited =
+                backend.hydrate_optional_gate_proof_in_store(lifecycle_store, &options.run_id)?;
             if let Some(gate_proof) = inherited {
                 inherit_promotion_gates(&mut options, gate_proof)?;
                 if claimed_evidence.is_some()
@@ -213,14 +211,8 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
             }
         }
     } else {
-        let lifecycle = match lifecycle_store {
-            Some(store) => backend.hydrate_run_in_store(store, &options.run_id)?,
-            None => backend.hydrate_run(&options.run_id)?,
-        };
-        let gate_proof = match lifecycle_store {
-            Some(store) => backend.hydrate_gate_proof_in_store(store, &options.run_id)?,
-            None => backend.hydrate_gate_proof(&options.run_id)?,
-        };
+        let lifecycle = backend.hydrate_run_in_store(lifecycle_store, &options.run_id)?;
+        let gate_proof = backend.hydrate_gate_proof_in_store(lifecycle_store, &options.run_id)?;
         let review_form_only_follow_up =
             is_review_form_only_follow_up(&gate_proof.promotion, &gate_proof.run_id);
         let authenticated_follow_up = review_form_only_follow_up
@@ -470,10 +462,7 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
     }
 
     if binds_promoted_candidate {
-        match lifecycle_store {
-            Some(store) => backend.validate_candidate_in_store(store, &options)?,
-            None => backend.validate_candidate(&options)?,
-        }
+        backend.validate_candidate_in_store(lifecycle_store, &options)?;
     }
     if options.manual_finalization && !publish && !commit_required && push_required {
         return Err(Error::validation_invalid_argument(
@@ -800,9 +789,10 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
 /// Manual finalization deliberately has no promotion lineage. It still cannot
 /// replace an acceptance decision that the durable run's policy requires.
 fn validate_manual_finalization_policy(
+    lifecycle_store: &crate::agent_task_lifecycle::AgentTaskLifecycleStore,
     run_id: &str,
 ) -> Result<Option<crate::agent_task_lifecycle::AgentTaskAcceptanceRecord>> {
-    let record = match crate::agent_task_lifecycle::status(run_id) {
+    let record = match lifecycle_store.read_record(run_id) {
         Ok(record) => record,
         Err(error) if error.message.contains("agent-task run record not found") => return Ok(None),
         Err(error) => return Err(error),
@@ -821,12 +811,9 @@ fn validate_manual_finalization_policy(
 fn validate_durable_acceptance(
     run_id: &str,
     promotion: &AgentTaskPromotionReport,
-    lifecycle_store: Option<&crate::agent_task_lifecycle::AgentTaskLifecycleStore>,
+    lifecycle_store: &crate::agent_task_lifecycle::AgentTaskLifecycleStore,
 ) -> Result<Option<crate::agent_task_lifecycle::AgentTaskAcceptanceRecord>> {
-    let record = match lifecycle_store.map_or_else(
-        || crate::agent_task_lifecycle::status(run_id),
-        |store| store.read_record(run_id),
-    ) {
+    let record = match lifecycle_store.read_record(run_id) {
         Ok(record) => record,
         // Durable proofs created before acceptance existed have no lifecycle
         // record to carry an acceptance requirement. Preserve that established

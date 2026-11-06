@@ -1,6 +1,6 @@
 #![cfg(test)]
 
-use super::backend::validate_real_candidate_fingerprint;
+use super::backend::validate_real_candidate_fingerprint_in_store;
 use super::*;
 use crate::{
     agent_task::{
@@ -31,7 +31,7 @@ fn finalize_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
     backend: &mut B,
 ) -> Result<AgentTaskPrFinalizationReport> {
     homeboy_core::test_support::with_isolated_home(|_| {
-        super::finalize_pr_with_backend(options, backend)
+        super::finalize_pr_with_backend(options, backend, &ambient_store()?)
     })
 }
 
@@ -41,8 +41,16 @@ fn preflight_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
     backend: &mut B,
 ) -> Result<AgentTaskPrFinalizationReport> {
     homeboy_core::test_support::with_isolated_home(|_| {
-        super::preflight_pr_with_backend(options, backend)
+        super::preflight_pr_with_backend(options, backend, &ambient_store()?)
     })
+}
+
+fn ambient_store() -> Result<crate::agent_task_lifecycle::AgentTaskLifecycleStore> {
+    crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
+}
+
+fn validate_real_candidate_fingerprint(options: &AgentTaskPrFinalizationOptions) -> Result<()> {
+    validate_real_candidate_fingerprint_in_store(&ambient_store()?, options)
 }
 
 #[derive(Default)]
@@ -94,7 +102,6 @@ struct MockBackend {
     quarantine_error: bool,
     quarantine_calls: u8,
     candidate_validation_calls: u8,
-    rooted_candidate_validation_calls: u8,
     component_ids: Vec<Option<String>>,
     /// Classify and converge the candidate against the real worktree, so a
     /// test observes exactly what finalization would do to the destination.
@@ -126,7 +133,11 @@ impl MockBackend {
 }
 
 impl AgentTaskPrFinalizationBackend for MockBackend {
-    fn hydrate_run(&mut self, _run_id: &str) -> Result<RunLifecycleRecord> {
+    fn hydrate_run_in_store(
+        &mut self,
+        lifecycle_store: &crate::agent_task_lifecycle::AgentTaskLifecycleStore,
+        _run_id: &str,
+    ) -> Result<RunLifecycleRecord> {
         if self.hydrate_error {
             return Err(Error::validation_invalid_argument(
                 "run_id",
@@ -136,11 +147,16 @@ impl AgentTaskPrFinalizationBackend for MockBackend {
             ));
         }
         if let Some(run_id) = self.hydrate_run_id.as_deref() {
-            return RealAgentTaskPrFinalizationBackend.hydrate_run(run_id);
+            return RealAgentTaskPrFinalizationBackend
+                .hydrate_run_in_store(lifecycle_store, run_id);
         }
         Ok(self.lifecycle.clone().unwrap_or_default())
     }
-    fn hydrate_gate_proof(&mut self, _run_id: &str) -> Result<AgentTaskPrDurableGateProof> {
+    fn hydrate_gate_proof_in_store(
+        &mut self,
+        _lifecycle_store: &crate::agent_task_lifecycle::AgentTaskLifecycleStore,
+        _run_id: &str,
+    ) -> Result<AgentTaskPrDurableGateProof> {
         self.gate_proof.clone().ok_or_else(|| {
             Error::validation_invalid_argument(
                 "run_id",
@@ -150,40 +166,19 @@ impl AgentTaskPrFinalizationBackend for MockBackend {
             )
         })
     }
-    fn hydrate_optional_gate_proof(
+    fn hydrate_optional_gate_proof_in_store(
         &mut self,
+        _lifecycle_store: &crate::agent_task_lifecycle::AgentTaskLifecycleStore,
         _run_id: &str,
     ) -> Result<Option<AgentTaskPrDurableGateProof>> {
         Ok(self.gate_proof.clone())
-    }
-    fn hydrate_run_in_store(
-        &mut self,
-        lifecycle_store: &crate::agent_task_lifecycle::AgentTaskLifecycleStore,
-        run_id: &str,
-    ) -> Result<RunLifecycleRecord> {
-        if self.hydrate_run_id.is_some() {
-            return RealAgentTaskPrFinalizationBackend
-                .hydrate_run_in_store(lifecycle_store, run_id);
-        }
-        self.hydrate_run(run_id)
-    }
-    fn hydrate_gate_proof_in_store(
-        &mut self,
-        _lifecycle_store: &crate::agent_task_lifecycle::AgentTaskLifecycleStore,
-        run_id: &str,
-    ) -> Result<AgentTaskPrDurableGateProof> {
-        self.hydrate_gate_proof(run_id)
-    }
-    fn validate_candidate(&mut self, options: &AgentTaskPrFinalizationOptions) -> Result<()> {
-        self.candidate_validation_calls += 1;
-        self.validate_candidate_value(options)
     }
     fn validate_candidate_in_store(
         &mut self,
         _lifecycle_store: &crate::agent_task_lifecycle::AgentTaskLifecycleStore,
         options: &AgentTaskPrFinalizationOptions,
     ) -> Result<()> {
-        self.rooted_candidate_validation_calls += 1;
+        self.candidate_validation_calls += 1;
         self.validate_candidate_value(options)
     }
     fn current_branch(&mut self, _path: &str) -> Result<String> {
@@ -2000,11 +1995,10 @@ fn rooted_finalization_dispatches_candidate_validation_through_the_explicit_stor
     finalization_options.manual_finalization = false;
     finalization_options.changed_files = vec!["src/lib.rs".to_string()];
 
-    finalize_pr_with_backend_in_store(finalization_options, &mut backend, &lifecycle_store)
+    super::finalize_pr_with_backend(finalization_options, &mut backend, &lifecycle_store)
         .expect("rooted finalization");
 
-    assert_eq!(backend.rooted_candidate_validation_calls, 1);
-    assert_eq!(backend.candidate_validation_calls, 0);
+    assert_eq!(backend.candidate_validation_calls, 1);
 }
 
 #[test]
@@ -2042,7 +2036,9 @@ fn manual_finalization_cannot_bypass_acceptance_for_an_existing_run_id() {
             gate_proof: Some(proof),
             ..Default::default()
         };
-        let error = super::finalize_pr_with_backend(options, &mut backend).unwrap_err();
+        let error =
+            super::finalize_pr_with_backend(options, &mut backend, &ambient_store().unwrap())
+                .unwrap_err();
         assert!(error.message.contains("awaiting_acceptance"));
         assert!(!backend.committed && !backend.pushed && !backend.created);
     });
@@ -2783,8 +2779,12 @@ fn durable_finalization_rejects_model_less_terminal_record_without_mutation() {
         finalization_options.run_id = record.run_id.clone();
         finalization_options.manual_finalization = false;
 
-        let error = super::finalize_pr_with_backend(finalization_options, &mut backend)
-            .expect_err("model-less terminal record is rejected");
+        let error = super::finalize_pr_with_backend(
+            finalization_options,
+            &mut backend,
+            &ambient_store().unwrap(),
+        )
+        .expect_err("model-less terminal record is rejected");
         let after = crate::agent_task_lifecycle::reconcile_status(&record.run_id)
             .expect("obsolete record remains readable");
 
@@ -2875,8 +2875,12 @@ fn durable_finalization_accepts_native_and_generic_evidence_but_omits_skipped_wo
         finalization_options.manual_finalization = false;
         finalization_options.changed_files = vec!["src/lib.rs".to_string()];
 
-        let report = super::finalize_pr_with_backend(finalization_options.clone(), &mut backend)
-            .expect("mixed durable evidence finalizes");
+        let report = super::finalize_pr_with_backend(
+            finalization_options.clone(),
+            &mut backend,
+            &ambient_store().unwrap(),
+        )
+        .expect("mixed durable evidence finalizes");
         assert_eq!(report.pr_action, "created");
         assert_eq!(backend.create_calls, 1);
 
@@ -2885,8 +2889,12 @@ fn durable_finalization_accepts_native_and_generic_evidence_but_omits_skipped_wo
             url: "https://github.com/Extra-Chill/homeboy/pull/123".to_string(),
             is_draft: false,
         });
-        let repeated = super::finalize_pr_with_backend(finalization_options, &mut backend)
-            .expect("existing PR is reused");
+        let repeated = super::finalize_pr_with_backend(
+            finalization_options,
+            &mut backend,
+            &ambient_store().unwrap(),
+        )
+        .expect("existing PR is reused");
         assert_eq!(repeated.pr_action, "updated");
         assert_eq!(backend.create_calls, 1);
         assert!(backend.updated);
