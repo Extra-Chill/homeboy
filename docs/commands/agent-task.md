@@ -606,9 +606,9 @@ With `--run-plan` it admits the instance and returns its status plus
 compiled definition, so re-running the same command reports the same instance;
 `--fanout-id NAME` runs the same batch as a separate instance.
 
-Observe and control the batch through the workflow verbs:
+Observe the batch through `runs` and control it through `workflow`:
 
-- `homeboy workflow status <instance> [--watch]` shows each child's phase,
+- `homeboy runs show <instance>` (or `homeboy runs watch <instance>`) shows each child's phase,
   outcome, step job, Cook run id, and the live state of its running Cook.
 - `homeboy workflow cancel <instance>` cancels the instance and every child step
   it is running; no further child starts.

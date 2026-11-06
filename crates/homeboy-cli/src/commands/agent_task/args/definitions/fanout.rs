@@ -19,14 +19,14 @@ pub enum AgentTaskFanoutCommand {
     /// `--max-concurrency` at a time, and its `--join` decides whether the batch
     /// succeeded. Without `--run-plan` the command prints the compiled workflow
     /// and admits nothing. Observe and cancel the instance with `homeboy
-    /// workflow status|cancel <instance>`; re-running the same command reports
+    /// runs show <instance>` / `homeboy workflow cancel <instance>`; re-running the same command reports
     /// the same instance.
     ///
     /// Every child requires a deterministic gate from shared --verify/
     /// --private-verify inputs. A child that cannot verify its work cannot
     /// promote it (#9838).
     #[command(
-        after_help = "Quick start:\n  homeboy agent-task fanout cook-batch --repo REPO --verify 'homeboy review test REPO' ISSUE_URL...\n\nOne repository per batch: every issue in a cook-batch belongs to --repo.\n\nTwo phases: without --run-plan, cook-batch validates the batch and prints the compiled workflow. Add --run-plan to admit it; then follow it with `homeboy workflow status <instance> --watch` and stop it with `homeboy workflow cancel <instance>`.\n\nVerification is required: every child needs a shared --verify/--private-verify gate.\n\nPlacement: run every child on Lab with:\n  homeboy --placement lab agent-task fanout cook-batch --repo REPO --verify 'homeboy review test REPO' ISSUE_URL... --run-plan\n\nJoin: `--join all` (default) needs every child to succeed; `--join any` one; `--join N` at least N.\n\nUse --help-full for provider, gate, and environment controls."
+        after_help = "Quick start:\n  homeboy agent-task fanout cook-batch --repo REPO --verify 'homeboy review test REPO' ISSUE_URL...\n\nOne repository per batch: every issue in a cook-batch belongs to --repo.\n\nTwo phases: without --run-plan, cook-batch validates the batch and prints the compiled workflow. Add --run-plan to admit it; then follow it with `homeboy runs watch <instance>` and stop it with `homeboy workflow cancel <instance>`.\n\nVerification is required: every child needs a shared --verify/--private-verify gate.\n\nPlacement: run every child on Lab with:\n  homeboy --placement lab agent-task fanout cook-batch --repo REPO --verify 'homeboy review test REPO' ISSUE_URL... --run-plan\n\nJoin: `--join all` (default) needs every child to succeed; `--join any` one; `--join N` at least N.\n\nUse --help-full for provider, gate, and environment controls."
     )]
     CookBatch(Box<AgentTaskFanoutCookBatchArgs>),
 }

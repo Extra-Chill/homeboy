@@ -383,7 +383,7 @@ fn stop_and_restart_in_place_resumes_in_flight_work_every_time() {
     let deadline = Instant::now() + Duration::from_secs(60);
     let mut last = serde_json::Value::Null;
     while Instant::now() < deadline {
-        last = json_output(&bin, home.path(), &["workflow", "status", &instance]);
+        last = json_output(&bin, home.path(), &["runs", "show", &instance]);
         if last["data"]["status"] == "succeeded" {
             break;
         }

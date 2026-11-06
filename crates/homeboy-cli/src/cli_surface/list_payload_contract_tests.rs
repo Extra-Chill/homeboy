@@ -79,7 +79,7 @@ const EXEMPT_LIST_COMMANDS: &[(&str, &str)] = &[
     ),
     (
         "runs list",
-        "report-shaped observation runs, or schema-versioned lifecycle discovery with --kind agent-task",
+        "report-shaped observation runs, schema-versioned lifecycle discovery with --kind agent-task, or daemon workflow instances with --kind workflow",
     ),
     (
         "ssh list",

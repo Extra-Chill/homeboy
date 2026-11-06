@@ -8,11 +8,10 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use clap::{Args, CommandFactory, Subcommand};
 use homeboy::core::daemon::workflow_job::{
-    chain_successor, WorkflowJobRequest, WORKFLOW_INSTANCE_ENV, WORKFLOW_JOB_REQUEST_SCHEMA,
+    WorkflowJobRequest, WORKFLOW_INSTANCE_ENV, WORKFLOW_JOB_REQUEST_SCHEMA,
 };
 use homeboy::core::daemon::LocalControllerJobClient;
 use homeboy::core::env_materialization_plan::{EnvMaterializationPlan, EnvSecretRef};
@@ -23,7 +22,7 @@ use serde_json::{json, Value};
 
 use super::CmdResult;
 
-const WATCH_POLL: Duration = Duration::from_secs(2);
+use super::runs::workflow::{exit_code, watch_instance};
 
 #[derive(Args)]
 pub struct WorkflowArgs {
@@ -40,14 +39,6 @@ enum WorkflowCommand {
     },
     /// Admit a workflow instance; the same definition and inputs return the existing instance
     Run(RunArgs),
-    /// Show one instance (or all) as a projection of the daemon job ledger
-    Status {
-        /// Instance id (`wf-<id>-<hash>`); omit to list every instance
-        instance: Option<String>,
-        /// Poll until the instance is terminal
-        #[arg(long)]
-        watch: bool,
-    },
     /// Cancel an instance and every step it is running, or stop a registered cadence
     Cancel {
         /// Instance id, or the workflow id of a registered cadence
@@ -67,12 +58,8 @@ enum WorkflowCommand {
         #[arg(long)]
         reason: Option<String>,
     },
-    /// List instances, or registered definitions and cadences with `--registered`
-    List {
-        /// List registry definitions, built-ins, and daemon cadences instead of instances
-        #[arg(long)]
-        registered: bool,
-    },
+    /// List registered definitions, built-ins, and daemon cadences
+    List,
 }
 
 #[derive(Args)]
@@ -129,19 +116,6 @@ pub fn run(args: WorkflowArgs) -> CmdResult<Value> {
             ))
         }
         WorkflowCommand::Run(run) => run_workflow(run),
-        WorkflowCommand::Status { instance, watch } => {
-            let client = LocalControllerJobClient::connect()?;
-            let Some(instance) = instance else {
-                return Ok((client.workflow_list()?, 0));
-            };
-            let view = if watch {
-                watch_instance(&client, &instance)?
-            } else {
-                client.workflow(&instance)?
-            };
-            let code = exit_code(&view);
-            Ok((view, code))
-        }
         WorkflowCommand::Cancel { instance } => {
             let client = LocalControllerJobClient::connect()?;
             let view = match client.workflow(&instance) {
@@ -156,7 +130,7 @@ pub fn run(args: WorkflowArgs) -> CmdResult<Value> {
             };
             let job_id = view["job"]["job_id"]
                 .as_str()
-                .ok_or_else(|| Error::internal_unexpected("workflow status has no job id"))?;
+                .ok_or_else(|| Error::internal_unexpected("runs show has no job id"))?;
             client.cancel(job_id, &format!("workflow `{instance}` cancelled"))?;
             Ok((client.workflow(&instance)?, 0))
         }
@@ -175,14 +149,11 @@ pub fn run(args: WorkflowArgs) -> CmdResult<Value> {
                 0,
             ))
         }
-        WorkflowCommand::List { registered } => {
-            if registered {
-                let mut listed = registered_workflows()?;
-                listed["cadences"] =
-                    LocalControllerJobClient::connect()?.workflow_cadences()?["entities"].clone();
-                return Ok((listed, 0));
-            }
-            Ok((LocalControllerJobClient::connect()?.workflow_list()?, 0))
+        WorkflowCommand::List => {
+            let mut listed = registered_workflows()?;
+            listed["cadences"] =
+                LocalControllerJobClient::connect()?.workflow_cadences()?["entities"].clone();
+            Ok((listed, 0))
         }
     }
 }
@@ -276,12 +247,12 @@ fn admit_with_resume(
         }
     };
     let mut view = if wait {
-        watch_instance(&client, &instance)?
+        watch_instance(&client, &instance, std::time::Duration::from_secs(2), None)?.0
     } else {
         client.workflow(&instance)?
     };
     view["submission"] = json!({ "disposition": disposition, "source": source });
-    view["status_command"] = json!(format!("homeboy workflow status {instance}"));
+    view["status_command"] = json!(format!("homeboy runs show {instance}"));
     view["cancel_command"] = json!(format!("homeboy workflow cancel {instance}"));
     let code = if wait { exit_code(&view) } else { 0 };
     Ok((view, code))
@@ -305,7 +276,7 @@ fn register_cadence(
     let client = LocalControllerJobClient::connect_current_build()?;
     let mut view = json!({ "cadence": client.register_workflow_cadence(&request)? });
     view["submission"] = json!({ "disposition": view["cadence"]["disposition"], "source": source });
-    view["status_command"] = json!("homeboy workflow list --registered");
+    view["status_command"] = json!("homeboy workflow list");
     Ok((view, 0))
 }
 
@@ -540,9 +511,8 @@ fn run_on_runner(
     data["remote_exit_code"] = json!(remote_exit);
     data["runner"] = json!(runner);
     data["status_command"] = json!(match data["instance"].as_str() {
-        Some(instance) =>
-            format!("homeboy runner exec {runner} -- homeboy workflow status {instance}"),
-        None => format!("homeboy runner exec {runner} -- homeboy workflow list --registered"),
+        Some(instance) => format!("homeboy runner exec {runner} -- homeboy runs show {instance}"),
+        None => format!("homeboy runner exec {runner} -- homeboy workflow list"),
     });
     let code = envelope_exit_code(&data, output.status.code());
     Ok((data, code))
@@ -564,84 +534,6 @@ fn parent_from_env() -> Option<String> {
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
-}
-
-fn watch_instance(client: &LocalControllerJobClient, instance: &str) -> Result<Value> {
-    let mut last = String::new();
-    let mut watched = instance.to_string();
-    loop {
-        let view = client.workflow(&watched)?;
-        let line = progress_line(&view);
-        if line != last {
-            eprintln!("{line}");
-            last = line;
-        }
-        if let Some(child) = chain_successor(&view) {
-            // The chain re-admitted itself: follow it to the last instance.
-            watched = child;
-            last.clear();
-            continue;
-        }
-        if is_terminal(&view) {
-            return Ok(view);
-        }
-        std::thread::sleep(WATCH_POLL);
-    }
-}
-
-fn progress_line(view: &Value) -> String {
-    let steps = view["steps"]
-        .as_object()
-        .map(|steps| {
-            steps
-                .iter()
-                .map(|(id, step)| {
-                    let state = step["outcome"]
-                        .as_str()
-                        .filter(|_| step["phase"] == "done")
-                        .unwrap_or_else(|| step["phase"].as_str().unwrap_or("?"));
-                    let items = step["items"].as_array().filter(|items| !items.is_empty());
-                    match items {
-                        // Per-child progress of a fan-out (#15689).
-                        Some(items) => format!(
-                            "{id}={state}[{}]",
-                            items
-                                .iter()
-                                .map(|item| {
-                                    let phase = item["outcome"]
-                                        .as_str()
-                                        .filter(|_| item["phase"] == "done")
-                                        .or_else(|| item["run"]["phase"].as_str())
-                                        .unwrap_or_else(|| item["phase"].as_str().unwrap_or("?"));
-                                    phase.to_string()
-                                })
-                                .collect::<Vec<_>>()
-                                .join(",")
-                        ),
-                        None => format!("{id}={state}"),
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join(" ")
-        })
-        .unwrap_or_default();
-    format!(
-        "{} {} ({} step runs): {steps}",
-        view["instance"].as_str().unwrap_or_default(),
-        view["status"].as_str().unwrap_or_default(),
-        view["step_runs"],
-    )
-}
-
-fn is_terminal(view: &Value) -> bool {
-    !matches!(view["status"].as_str(), Some("running" | "queued"))
-}
-
-fn exit_code(view: &Value) -> i32 {
-    match view["status"].as_str() {
-        Some("succeeded" | "running" | "queued") => 0,
-        _ => 1,
-    }
 }
 
 fn kind_name(kind: StepKind<'_>) -> &'static str {

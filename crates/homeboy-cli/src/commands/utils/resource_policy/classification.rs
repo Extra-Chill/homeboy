@@ -52,7 +52,7 @@ pub(super) enum AgentTaskResourceBehavior {
 pub(super) fn agent_task_resource_behavior(
     command: &Commands,
 ) -> Option<AgentTaskResourceBehavior> {
-    if matches!(command, Commands::Runs(args) if args.logs_run_id().is_some() || args.cook_reader_id().is_some() || args.cook_discovery())
+    if matches!(command, Commands::Runs(args) if args.logs_run_id().is_some() || args.cook_reader_id().is_some() || args.cook_discovery() || args.workflow_reader_id().is_some() || args.workflow_discovery())
     {
         return Some(AgentTaskResourceBehavior::BoundedMetadataRead);
     }

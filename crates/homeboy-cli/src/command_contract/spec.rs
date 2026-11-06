@@ -740,7 +740,18 @@ const AGENT_TASK_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
     ),
 ];
 
+const WORKFLOW_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[paths_safety(
+    &["list", "validate"],
+    CommandSafetySpec::read_only(),
+    "reads registered workflow definitions and daemon cadences or validates a definition",
+)];
+
 const RUNS_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
+    paths_safety(
+        &["show", "watch", "list"],
+        CommandSafetySpec::read_only(),
+        "reads persisted runs or controller-local workflow instances; workflow watch follows chains without mutations",
+    ),
     paths_safety(
         &["report failure-digest"],
         CommandSafetySpec::read_only(),

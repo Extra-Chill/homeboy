@@ -1036,7 +1036,7 @@ pub(crate) fn workflow_status(store: &JobStore, instance: &str) -> Result<Value>
 }
 
 /// The instance a watcher moves to next: the last child of a terminal
-/// instance. `workflow run --wait` and `workflow status --watch` follow these
+/// instance. `workflow run --wait` and `runs watch <instance>` follow these
 /// links, so watching a self-admitting chain reports its last instance's
 /// terminal status.
 pub fn chain_successor(view: &Value) -> Option<String> {

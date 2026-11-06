@@ -231,7 +231,7 @@ Starting the Homeboy daemon installs the bounded retention pass by default:
 homeboy daemon ensure-running
 ```
 
-The daemon registers the built-in `homeboy.retention` [workflow](workflow.md) cadence: every hour it admits one workflow instance whose single step runs `homeboy cleanup automatic-retention`, and it skips a slot while the previous instance is still running. No external timer is needed. Each pass is a workflow instance in the daemon job ledger (`homeboy workflow list`); `homeboy workflow list --registered` shows the cadence and its next due time. Cancel the cadence to opt out:
+The daemon registers the built-in `homeboy.retention` [workflow](workflow.md) cadence: every hour it admits one workflow instance whose single step runs `homeboy cleanup automatic-retention`, and it skips a slot while the previous instance is still running. No external timer is needed. Each pass is a workflow instance in the daemon job ledger (`homeboy runs list --kind workflow`); `homeboy workflow list` shows the cadence and its next due time. Cancel the cadence to opt out:
 
 ```bash
 homeboy workflow cancel homeboy.retention

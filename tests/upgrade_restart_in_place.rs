@@ -44,7 +44,7 @@ fn upgrade_daemon_step_resumes_live_controller_work() {
         }
         let deadline = Instant::now() + Duration::from_secs(60);
         loop {
-            let status = invoke(&["workflow", "status", instance]);
+            let status = invoke(&["runs", "show", instance]);
             if status["data"]["status"] == "succeeded" {
                 break;
             }
