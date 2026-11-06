@@ -12,8 +12,7 @@ use super::super::cook_pre_execution::recover_recipe_attempt_with_stores;
 use super::super::cook_promotion::{
     bind_report_to_stores, canonical_cook_recovery_run_id,
     catch_up_cook_candidate_to_base_in_store, cook_candidate_base_sha, cook_finalization_options,
-    cook_finalization_options_with_stores, cook_report, finalize_cook_pr_with_backend,
-    finalize_cook_pr_with_backend_with_stores, finalize_or_load_cook_pr_with_backend,
+    cook_finalization_options_with_stores, cook_report, finalize_or_load_cook_pr_with_backend,
     finalize_or_load_cook_pr_with_backend_with_stores, mark_replacement_gate_execution_started,
     persist_manual_finalization_intent, persist_manual_finalization_receipt,
     persisted_promotion_for_attempt, persisted_promotion_for_attempt_in_store,
@@ -15817,7 +15816,7 @@ fn detached_adoption_follow_up_records_before_dispatch_then_finalizes_once_witho
             |options| {
                 let result = run_cook(CookContext {
                     side_effects: Some(CookSideEffects::new(|_, options, run_id, promotion| {
-                        finalize_cook_pr_with_backend(
+                        finalize_or_load_cook_pr_with_backend(
                             options,
                             run_id,
                             promotion,
@@ -15937,7 +15936,7 @@ fn detached_adoption_follow_up_failure_stays_non_green_and_skips_finalization() 
             |options| {
                 run_cook(CookContext {
                     side_effects: Some(CookSideEffects::new(|_, options, run_id, promotion| {
-                        finalize_cook_pr_with_backend(
+                        finalize_or_load_cook_pr_with_backend(
                             options,
                             run_id,
                             promotion,
@@ -21455,7 +21454,7 @@ fn cook_real_pi_response_persists_served_model_through_published_body() {
             synthetic_gate_proof: Some(promotion.clone()),
             ..Default::default()
         };
-        finalize_cook_pr_with_backend(&options, run_id, &promotion, &mut backend).unwrap();
+        finalize_or_load_cook_pr_with_backend(&options, run_id, &promotion, &mut backend).unwrap();
         for section in [
             "Relates to Extra-Chill/homeboy#8058\n",
             "## What changed",
@@ -22844,7 +22843,7 @@ fn interrupted_attempt_does_not_change_the_only_substantive_disclosure() {
         seed_review_form_aggregate(second_run_id, &options.identity.initial_plan);
 
         let mut backend = CaptureBackend::default();
-        finalize_cook_pr_with_backend(
+        finalize_or_load_cook_pr_with_backend(
             &options,
             second_run_id,
             &promotion(second_run_id),
@@ -22924,7 +22923,7 @@ fn substantive_retry_discloses_each_authenticated_contribution() {
         .expect("persist authenticated source promotion");
 
         let mut backend = CaptureBackend::default();
-        finalize_cook_pr_with_backend(
+        finalize_or_load_cook_pr_with_backend(
             &options,
             second_run_id,
             &promotion(second_run_id),
@@ -23032,7 +23031,7 @@ fn green_retry_after_verified_no_change_attempt_finalizes_its_contribution_chain
             .expect("persist no-change promotion");
         };
         let assert_binding_fails_closed = |reason: &str| {
-            let error = finalize_cook_pr_with_backend(
+            let error = finalize_or_load_cook_pr_with_backend(
                 &options,
                 green_run_id,
                 &promotion(green_run_id),
@@ -23068,7 +23067,7 @@ fn green_retry_after_verified_no_change_attempt_finalizes_its_contribution_chain
         record_unchanged_promotion(&unchanged_promotion);
 
         let mut backend = CaptureBackend::default();
-        finalize_cook_pr_with_backend(
+        finalize_or_load_cook_pr_with_backend(
             &options,
             green_run_id,
             &promotion(green_run_id),
@@ -24748,7 +24747,7 @@ fn cook_rejects_test_claim_without_matching_durable_gate() {
     let mut unsupported = promotion(run_id);
     unsupported.deterministic_gates[0].visibility =
         homeboy_core::gate::HomeboyGateVisibility::Private;
-    let error = finalize_cook_pr_with_backend_with_stores(
+    let error = finalize_or_load_cook_pr_with_backend_with_stores(
         &recipe_store,
         &lifecycle_store,
         &options,

@@ -4,7 +4,7 @@
 //! (`promotion_source`/`source_spec_path`/`source_worktree_path`), the durable
 //! promote-or-load boundary (`promote_attempt`/`promote_or_load_attempt_in_store`/
 //! `persisted_promotion_for_attempt`), PR finalization
-//! (`finalize_or_load_cook_pr*`/`finalize_cook_pr_with_backend`), the
+//! (`finalize_or_load_cook_pr*` and the shared `publish_cook_finalization`), the
 //! `cook_report` builder, and small spec helpers. These sit downstream of a
 //! terminal provider result and publish controller-owned state; grouping them
 //! keeps the promote → finalize boundary in one place.
@@ -2969,45 +2969,6 @@ pub(crate) fn finalize_or_load_cook_pr_with_backend_with_stores<
     promotion: &AgentTaskPromotionReport,
     backend: &mut B,
 ) -> Result<Value> {
-    let finalization = finalize_cook_pr_with_backend_with_stores(
-        store,
-        lifecycle_store,
-        options,
-        successful_run_id,
-        promotion,
-        backend,
-    )?;
-    lifecycle_store.record_cook_finalization(successful_run_id, finalization.clone())?;
-    Ok(finalization)
-}
-
-#[cfg(test)]
-pub(crate) fn finalize_cook_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
-    options: &CookRequest,
-    successful_run_id: &str,
-    promotion: &AgentTaskPromotionReport,
-    backend: &mut B,
-) -> Result<Value> {
-    let store = super::cook_recipe::CookRecipeStore::from_current_data_root()?;
-    let lifecycle_store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
-    finalize_cook_pr_with_backend_with_stores(
-        &store,
-        &lifecycle_store,
-        options,
-        successful_run_id,
-        promotion,
-        backend,
-    )
-}
-
-pub(crate) fn finalize_cook_pr_with_backend_with_stores<B: AgentTaskPrFinalizationBackend>(
-    store: &super::cook_recipe::CookRecipeStore,
-    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
-    options: &CookRequest,
-    successful_run_id: &str,
-    promotion: &AgentTaskPromotionReport,
-    backend: &mut B,
-) -> Result<Value> {
     let mut promotion = promotion.clone();
     promotion.normalize_gate_outcome();
     if !promotion.finalization_eligible(options.gates.accept_inherited_failures) {
@@ -3027,12 +2988,40 @@ pub(crate) fn finalize_cook_pr_with_backend_with_stores<B: AgentTaskPrFinalizati
         Vec::new(),
         None,
     )?;
-    lifecycle_store.record_promotion(
+    publish_cook_finalization(
+        lifecycle_store,
         successful_run_id,
-        serde_json::to_value(&promotion).unwrap_or(Value::Null),
+        &promotion,
+        finalization,
+        backend,
+        false,
+    )
+}
+
+/// The one finalize-and-record tail shared by automatic Cook finalization and
+/// `--recover`. Publication persists the promotion it publishes, runs the
+/// engine, and records the receipt on the attempt's Cook delivery; a preflight
+/// mutates nothing.
+fn publish_cook_finalization<B: AgentTaskPrFinalizationBackend>(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    run_id: &str,
+    promotion: &AgentTaskPromotionReport,
+    finalization: AgentTaskPrFinalizationOptions,
+    backend: &mut B,
+    preflight: bool,
+) -> Result<Value> {
+    if preflight {
+        return preflight_pr_with_backend(finalization, backend, lifecycle_store)
+            .map(|report| serde_json::to_value(report).unwrap_or(Value::Null));
+    }
+    lifecycle_store.record_promotion(
+        run_id,
+        serde_json::to_value(promotion).unwrap_or(Value::Null),
     )?;
-    finalize_pr_with_backend(finalization, backend, lifecycle_store)
-        .map(|report| serde_json::to_value(report).unwrap_or(Value::Null))
+    let report = finalize_pr_with_backend(finalization, backend, lifecycle_store)?;
+    let value = serde_json::to_value(&report).unwrap_or(Value::Null);
+    lifecycle_store.record_cook_finalization(run_id, value.clone())?;
+    Ok(value)
 }
 
 #[cfg(test)]
@@ -3835,38 +3824,30 @@ pub(crate) fn recover_cook_pr_with_backend_and_review_form<B: AgentTaskPrFinaliz
     // A supplied form replaces the agent's form whatever its state; the
     // agent's form is never consulted alongside it (#16441).
     let supplied_review_form = resolve_supplied_recovery_review_form(&run_id, review_form)?;
+    let lifecycle_store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
     let finalization = cook_finalization_options_with_stores(
         &super::cook_recipe::CookRecipeStore::from_current_data_root()?,
-        &agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?,
+        &lifecycle_store,
         &options,
         &run_id,
         &promotion,
         overrides,
         supplied_review_form.as_ref(),
     )?;
-    if !preflight {
-        if let Some(submission) = &supplied_review_form {
-            // Record the exact validated submission before publication. A retry
-            // reuses this immutable receipt rather than losing provenance after
-            // an interrupted finalization.
-            persist_supplied_recovery_review_form(&run_id, submission, &promotion, &options)?;
-        }
-        agent_task_lifecycle::record_promotion(
-            &run_id,
-            serde_json::to_value(&promotion).unwrap_or(Value::Null),
-        )?;
+    if let (false, Some(submission)) = (preflight, &supplied_review_form) {
+        // Record the exact validated submission before publication. A retry
+        // reuses this immutable receipt rather than losing provenance after
+        // an interrupted finalization.
+        persist_supplied_recovery_review_form(&run_id, submission, &promotion, &options)?;
     }
-    let lifecycle_store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
-    let report = if preflight {
-        preflight_pr_with_backend(finalization, backend, &lifecycle_store)?
-    } else {
-        finalize_pr_with_backend(finalization, backend, &lifecycle_store)?
-    };
-    let value = serde_json::to_value(&report).unwrap_or(Value::Null);
-    if !preflight {
-        lifecycle_store.record_cook_finalization(&run_id, value.clone())?;
-    }
-    Ok(value)
+    publish_cook_finalization(
+        &lifecycle_store,
+        &run_id,
+        &promotion,
+        finalization,
+        backend,
+        preflight,
+    )
 }
 
 fn resolve_supplied_recovery_review_form(
