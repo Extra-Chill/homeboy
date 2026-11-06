@@ -2,6 +2,11 @@
 
 All notable changes to the **nodejs** extension will be documented in this file.
 
+## [3.9.6] - 2026-11-06
+
+### Changed
+- Declare bundled dependency adapter download caches
+
 ## [3.9.5] - 2026-11-02
 
 ### Fixed
