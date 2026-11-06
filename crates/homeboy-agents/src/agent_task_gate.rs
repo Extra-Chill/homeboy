@@ -8717,7 +8717,9 @@ mod tests {
             fs::write(adapters.join("index.json"), r#"{"schema":"homeboy-extension/dependency-adapter-index/v1","manifests":[{"id":"fixture","ecosystem":"fixture","path":"fixture.json"}]}"#).unwrap();
             let secret = "fixture-download-credential-unique";
             let source = home.path().join("credentials.json");
-            let content = format!(r#"{{"token":"{secret}"}}"#);
+            // Shaped like a real auth.json: structural lines must not become redaction terms.
+            let content =
+                format!("{{\n  \"github-oauth\": {{\n    \"github.com\": \"{secret}\"\n  }}\n}}\n");
             fs::write(&source, &content).unwrap();
             for (mode, file, explicit, isolated, succeeds) in [
                 ("content", "credentials.json", None, true, true),
@@ -8734,7 +8736,7 @@ mod tests {
                 ("content", "credentials.json", None, true, false),
             ] {
                 let command = format!(
-                    r#"printf '%s' "${{FIXTURE_DOWNLOAD_AUTH:+present}}" > observed-present; printf '%s' "${{#FIXTURE_DOWNLOAD_AUTH}}" > observed-length; if [ '{mode}' = path ] && [ -n "$FIXTURE_DOWNLOAD_AUTH" ]; then cat "$FIXTURE_DOWNLOAD_AUTH"; else printf '%s' "$FIXTURE_DOWNLOAD_AUTH"; fi; printf '\nHOMEBOY_PROGRESS {{"phase":"install","current":"%s"}}\n' "$FIXTURE_DOWNLOAD_AUTH"; sleep 0.05; exit {}"#,
+                    r#"printf 'ordinary {{output}}\n'; printf '%s' "${{FIXTURE_DOWNLOAD_AUTH:+present}}" > observed-present; printf '%s' "${{#FIXTURE_DOWNLOAD_AUTH}}" > observed-length; if [ '{mode}' = path ] && [ -n "$FIXTURE_DOWNLOAD_AUTH" ]; then cat "$FIXTURE_DOWNLOAD_AUTH"; else printf '%s' "$FIXTURE_DOWNLOAD_AUTH"; fi; printf '\nHOMEBOY_PROGRESS {{"phase":"install","current":"%s"}}\n' "$FIXTURE_DOWNLOAD_AUTH"; sleep 0.05; exit {}"#,
                     if succeeds { 0 } else { 1 }
                 );
                 let manifest = serde_json::json!({
@@ -8807,6 +8809,10 @@ mod tests {
                     );
                 } else {
                     assert!(outcomes[0].download_auth.is_empty());
+                }
+                if !succeeds {
+                    // Failed outcomes keep output; redaction must leave ordinary text intact.
+                    assert!(outcomes[0].stdout.contains("ordinary {output}"));
                 }
                 let evidence = serde_json::to_string(&outcomes).unwrap();
                 let progress = progress.lock().unwrap().join("\n");

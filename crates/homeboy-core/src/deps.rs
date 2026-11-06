@@ -502,6 +502,10 @@ fn hydrate_declared_dependencies_unlocked(
     Ok(outcomes)
 }
 
+/// Shorter fragments are not credentials and would redact
+/// ordinary output text.
+const MIN_SECRET_FRAGMENT_LEN: usize = 8;
+
 #[derive(Default)]
 struct HydrationSecrets {
     names: Vec<String>,
@@ -511,26 +515,32 @@ struct HydrationSecrets {
 impl HydrationSecrets {
     fn register(&mut self, name: &str, value: &str) {
         self.names.push(name.to_string());
-        if !value.is_empty() {
-            self.values.push(value.to_string());
-            // Tools may print one line or one JSON credential rather than the envelope.
-            self.values.extend(
-                value
-                    .lines()
-                    .filter(|line| !line.is_empty())
-                    .map(str::to_string),
-            );
-            if let Ok(json) = serde_json::from_str::<serde_json::Value>(value) {
-                self.register_json_values(&json);
+        if value.is_empty() {
+            return;
+        }
+        self.values.push(value.to_string());
+        // Tools may echo one credential rather than the whole envelope. Register
+        // credential-bearing fragments only: JSON string leaves, or `key=value`
+        // values. Structural lines such as `{` must never become redaction terms.
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(value) {
+            self.register_json_values(&json);
+        } else {
+            for line in value.lines() {
+                let fragment = line.split_once('=').map_or(line, |(_, value)| value);
+                self.register_fragment(fragment.trim());
             }
+        }
+    }
+
+    fn register_fragment(&mut self, fragment: &str) {
+        if fragment.len() >= MIN_SECRET_FRAGMENT_LEN {
+            self.values.push(fragment.to_string());
         }
     }
 
     fn register_json_values(&mut self, value: &serde_json::Value) {
         match value {
-            serde_json::Value::String(value) if !value.is_empty() => {
-                self.values.push(value.clone())
-            }
+            serde_json::Value::String(value) => self.register_fragment(value),
             serde_json::Value::Object(values) => {
                 for value in values.values() {
                     self.register_json_values(value);
