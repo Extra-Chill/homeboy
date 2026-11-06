@@ -61,7 +61,6 @@ fn freshness(
         pid: Some(1234),
         recovery_evidence: None,
         ownership_evidence: None,
-        adoption_command: None,
         binary_hash: None,
         daemon_version: None,
         daemon_build_identity: None,

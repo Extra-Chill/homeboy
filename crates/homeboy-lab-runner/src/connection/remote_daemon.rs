@@ -635,9 +635,6 @@ pub(super) struct RemoteDaemonStatus {
     pub(super) work_evidence: RemoteDaemonWorkEvidence,
     pub(super) endpoint_probe_error: Option<String>,
     pub(super) termination_evidence: Option<homeboy_core::daemon::DaemonTerminationEvidence>,
-    /// The daemon's own recovery authorization survives SSH status parsing.
-    /// Callers must not recreate a destructive action from stale reason alone.
-    pub(super) daemon_freshness: Option<DaemonFreshnessReport>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -765,21 +762,13 @@ pub(super) fn remote_daemon_recovery_freshness_from_status(
     let daemon = status.daemon.as_ref();
     let lease_id = daemon.and_then(|daemon| daemon.lease_id.clone());
     let pid = daemon.and_then(|daemon| daemon.pid);
-    let adoption_eligible = status
-        .daemon_freshness
-        .as_ref()
-        .is_some_and(|freshness| freshness.adoption_command.is_some());
     let proven_dead = status.stale_reason_code == Some(DaemonStaleReasonCode::PidDead)
         && lease_id.is_some()
         && pid.is_some();
     let leaseless_reconciliation_available = status.active_jobs > 0
         && matches!(
             status.stale_reason_code,
-            Some(
-                DaemonStaleReasonCode::LeaseMissing
-                    | DaemonStaleReasonCode::LeaseCorrupt
-                    | DaemonStaleReasonCode::VersionMismatch
-            )
+            Some(DaemonStaleReasonCode::LeaseMissing | DaemonStaleReasonCode::LeaseCorrupt)
         );
     // A remote daemon that self-reports fresh and authoritatively idle (zero
     // active jobs proven via its typed `/jobs` view) is not a recovery hazard:
@@ -801,7 +790,7 @@ pub(super) fn remote_daemon_recovery_freshness_from_status(
             lease_id.as_deref().expect("proven dead lease")
         ))
     } else if leaseless_reconciliation_available {
-        Some("active durable jobs require explicit reconciliation; it will verify the owner lock, process list, and configured listener before terminalizing them".to_string())
+        Some("active durable jobs outlived their daemon lease; starting the runner daemon recovers them under its owner lock".to_string())
     } else if recoverable_fresh_idle {
         Some(format!(
             "{} proved the remote daemon is fresh with zero authoritatively idle jobs; the controller session can be safely reconnected",
@@ -822,25 +811,14 @@ pub(super) fn remote_daemon_recovery_freshness_from_status(
             ownership_evidence.unwrap_or_default()
         ));
     }
-    // The repair plan and the adoption command are the same action in two
-    // shapes, so they are built from one command and one code. A remote runner
+    // A dead generation, or durable jobs that outlived their lease, is
+    // repaired by starting the runner daemon: its startup recovery reconciles
+    // every in-scope job its predecessor left (#17429). A remote runner
     // is exactly the daemon an operator cannot look at, so leaving this empty
     // and falling back to generic reconnect prose discards the evidence the SSH
     // probe just paid for (#10302).
-    let repair_step = if proven_dead && adoption_eligible {
-        Some(daemon_repair::action_step(
-            daemon_repair::RUNNER_ADOPT_ORPHAN_LEASE,
-            daemon_repair::adopt_orphan_lease_action(
-                runner_id,
-                lease_id.as_deref().expect("proven dead lease"),
-            ),
-        ))
-    } else if leaseless_reconciliation_available {
-        Some(daemon_repair::action_step(
-            daemon_repair::RUNNER_RECONCILE_LEASELESS_ORPHANS,
-            daemon_repair::reconcile_leaseless_orphans_action(runner_id),
-        ))
-    } else if recoverable_fresh_idle {
+    let repair_step = if proven_dead || leaseless_reconciliation_available || recoverable_fresh_idle
+    {
         Some(daemon_repair::action_step(
             daemon_repair::RUNNER_CONNECT,
             daemon_repair::connect_action(runner_id),
@@ -848,7 +826,6 @@ pub(super) fn remote_daemon_recovery_freshness_from_status(
     } else {
         None
     };
-    let adoption_command = repair_step.as_ref().map(|step| step.command.clone());
     let repair_plan: Vec<_> = repair_step.into_iter().collect();
     DaemonFreshnessReport {
         fresh: status.fresh,
@@ -864,7 +841,6 @@ pub(super) fn remote_daemon_recovery_freshness_from_status(
             DaemonRecoveryEvidence::Unavailable
         }),
         ownership_evidence,
-        adoption_command,
         binary_hash: None,
         daemon_version: daemon.and_then(|daemon| daemon.version.clone()),
         daemon_build_identity: daemon.and_then(|daemon| daemon.build_identity.clone()),
@@ -893,7 +869,6 @@ pub(super) fn unavailable_recovery_freshness(
         // No lease, PID, or job count survived the transport failure, so no
         // controller mutation is authorized. A later probe must establish typed
         // ownership before any reconnect can be proposed.
-        adoption_command: None,
         binary_hash: None,
         daemon_version: None,
         daemon_build_identity: None,
@@ -918,8 +893,6 @@ pub(super) struct RemoteDaemonEnsureRequest<'a> {
     pub(super) runner_id: &'a str,
     pub(super) previous_session: Option<&'a RunnerSession>,
     pub(super) configured_identity: &'a str,
-    pub(super) orphan_lease_id: Option<&'a str>,
-    pub(super) confirmed_no_pid_job_ids: &'a [uuid::Uuid],
     pub(super) live_lease_expectation: Option<(&'a str, u32)>,
     pub(super) replacement_operation_id: Option<&'a str>,
     pub(super) admission_fence: Option<&'a crate::admission_fence::AdmissionFence>,
@@ -957,8 +930,6 @@ fn ensure_remote_daemon_inner(
         runner_id,
         previous_session,
         configured_identity,
-        orphan_lease_id,
-        confirmed_no_pid_job_ids,
         live_lease_expectation,
         replacement_operation_id,
         admission_fence,
@@ -967,35 +938,6 @@ fn ensure_remote_daemon_inner(
     } = request;
     let mut status = remote_daemon_status(client, homeboy, runner_id)?;
     probe_remote_daemon_endpoint(client, &mut status, Some(runner_id));
-    if let Some(lease_id) = orphan_lease_id {
-        if let Some(fence) = admission_fence {
-            return Err(RemoteDaemonEnsureError::Other(format!(
-                "runner `{runner_id}` has {} unresolved active job(s); refusing orphan adoption before terminal job evidence is available",
-                fence.active_job_count,
-            )));
-        }
-        if status.stale_reason_code == Some(DaemonStaleReasonCode::PidDead)
-            && status
-                .daemon
-                .as_ref()
-                .and_then(|daemon| daemon.lease_id.as_deref())
-                == Some(lease_id)
-        {
-            return Ok(remote_daemon_adopt_orphan(
-                client,
-                homeboy,
-                runner_id,
-                lease_id,
-                confirmed_no_pid_job_ids,
-            )?);
-        }
-    }
-    if !confirmed_no_pid_job_ids.is_empty() {
-        return Err(RemoteDaemonEnsureError::Other(
-            "--confirm-untracked-child-dead applies only when the remote daemon reports the exact requested lease as PID-dead"
-                .to_string(),
-        ));
-    }
     // The real runner id, not a `<runner-id>` placeholder: this report now
     // carries an executable repair plan, and a plan naming a command that does
     // not exist is worse than no plan at all (#10302).
@@ -1146,20 +1088,14 @@ pub(super) fn remote_daemon_connect_action_for_runner(
     runner_id: &str,
     live_lease_expectation: Option<(&str, u32)>,
 ) -> std::result::Result<RemoteDaemonConnectAction, String> {
+    // No daemon state, or a recorded PID `daemon status` proves dead: start
+    // the successor. Its owner lock refuses a still-running holder, and its
+    // startup recovery reconciles every in-scope job the dead generation left
+    // (#17429), so durable work is no reason to refuse the start.
     let Some(daemon) = status.daemon.as_ref() else {
-        if status.active_jobs > 0 {
-            return Err(format!(
-                "remote daemon status has {} active job(s) but no daemon state; refusing ensure-running or implicit replacement. Inspect `homeboy daemon status` and use the explicit active-job recovery guidance before retrying.",
-                status.active_jobs
-            ));
-        }
         return Ok(RemoteDaemonConnectAction::Start);
     };
-
-    // `daemon status` proves this exact recorded PID is no longer running.
-    // With no durable work left to reconcile, ensure-running can safely replace
-    // the stale lease without requiring another orphan-adoption cycle.
-    if status.stale_reason_code == Some(DaemonStaleReasonCode::PidDead) && status.active_jobs == 0 {
+    if status.stale_reason_code == Some(DaemonStaleReasonCode::PidDead) {
         return Ok(RemoteDaemonConnectAction::Start);
     }
 
@@ -1490,10 +1426,6 @@ pub(super) fn remote_daemon_status_from_data(data: &Value) -> RemoteDaemonStatus
         .get("termination_evidence")
         .cloned()
         .and_then(|value| serde_json::from_value(value).ok());
-    let daemon_freshness = data
-        .pointer("/freshness")
-        .cloned()
-        .and_then(|value| serde_json::from_value(value).ok());
     let daemon = data
         .get("state")
         .filter(|state| !state.is_null())
@@ -1529,7 +1461,6 @@ pub(super) fn remote_daemon_status_from_data(data: &Value) -> RemoteDaemonStatus
             work_evidence: RemoteDaemonWorkEvidence::Unknown,
             endpoint_probe_error: None,
             termination_evidence,
-            daemon_freshness,
         };
     }
     let Some(daemon) = daemon else {
@@ -1549,7 +1480,6 @@ pub(super) fn remote_daemon_status_from_data(data: &Value) -> RemoteDaemonStatus
             work_evidence: RemoteDaemonWorkEvidence::Unknown,
             endpoint_probe_error: None,
             termination_evidence,
-            daemon_freshness,
         };
     };
     RemoteDaemonStatus {
@@ -1565,7 +1495,6 @@ pub(super) fn remote_daemon_status_from_data(data: &Value) -> RemoteDaemonStatus
         work_evidence: RemoteDaemonWorkEvidence::Unknown,
         endpoint_probe_error: None,
         termination_evidence,
-        daemon_freshness,
     }
 }
 
@@ -1741,17 +1670,15 @@ mod tests {
             "schema": "homeboy/daemon-lifecycle-plan/v1",
             "plan": {
                 "plan": "needs_attestation",
-                "lease_id": "lease-lab",
                 "state_dir": "/lab/runner-daemons/lab/ctrl",
-                "job_ids": [uuid::Uuid::nil()],
-                "confirmation": "confirm-workload-processes-absent"
+                "job_ids": [uuid::Uuid::nil()]
             },
             "view": {}
         });
         assert!(matches!(
             parse_remote_lifecycle_plan(&attest).expect("parse"),
             homeboy_core::daemon::lifecycle_plan::Plan::NeedsAttestation(attestation)
-                if attestation.lease_id == "lease-lab"
+                if attestation.job_ids == vec![uuid::Uuid::nil()]
         ));
         let foreign = serde_json::json!({ "schema": "other", "plan": { "plan": "converged" } });
         assert!(parse_remote_lifecycle_plan(&foreign)
@@ -1766,13 +1693,12 @@ mod tests {
         let command = remote_daemon_attested_reconcile_command(
             "/opt/homeboy",
             "/home/lab/.config/homeboy/runner-daemons/lab/ctrl",
-            "lease-lab",
             &[first, second],
         );
         assert_eq!(
             command,
             format!(
-                "HOMEBOY_DAEMON_STATE_DIR=/home/lab/.config/homeboy/runner-daemons/lab/ctrl /opt/homeboy daemon reconcile-dead-lease-orphans --lease-id lease-lab --job-id {first} --job-id {second} --confirm-workload-processes-absent --no-replacement"
+                "HOMEBOY_DAEMON_STATE_DIR=/home/lab/.config/homeboy/runner-daemons/lab/ctrl /opt/homeboy daemon recover --attest-absent {first} {second}"
             )
         );
     }
@@ -1784,7 +1710,6 @@ mod tests {
         let command = remote_daemon_attested_reconcile_command(
             "/opt/homeboy",
             "/opt/evil dir'; daemon stop --lease-id other; '",
-            "lease-lab",
             &[uuid::Uuid::nil()],
         );
         assert!(
@@ -1793,7 +1718,7 @@ mod tests {
             ),
             "state directory must stay one quoted argv/environment token: {command}"
         );
-        assert!(command.ends_with("--confirm-workload-processes-absent --no-replacement"));
+        assert!(command.ends_with(&format!("--attest-absent {}", uuid::Uuid::nil())));
     }
 }
 
@@ -2481,33 +2406,24 @@ pub(crate) fn remote_state_dir_daemon_command(
     )
 }
 
-/// The state-dir-bound attested dead-lease reconcile, as one shell command.
+/// The state-dir-bound workload-absence attestation, as one shell command.
 ///
-/// This is the existing local attested recovery
-/// (`daemon reconcile-dead-lease-orphans`) executed on the runner in the exact
-/// state directory the runner's lifecycle plan named for `lease_id`. The
-/// remote store owns every refusal — live daemon PID, live or unverifiable
-/// child, and the exact active-job-set compare-and-swap — so nothing here
-/// relaxes #15560's gates; this frame only binds them to one exact lease.
+/// `daemon recover --attest-absent` executed on the runner in the exact state
+/// directory the runner's lifecycle plan named. The remote store owns every
+/// refusal — a recorded child identity, a live generation, an out-of-scope
+/// job — and refuses the whole set if any one fails, so this frame only binds
+/// the attestation to one exact scope.
 pub(crate) fn remote_daemon_attested_reconcile_command(
     homeboy: &str,
     state_dir: &str,
-    lease_id: &str,
     job_ids: &[uuid::Uuid],
 ) -> String {
     let mut args = vec![
         "daemon".to_string(),
-        "reconcile-dead-lease-orphans".to_string(),
-        "--lease-id".to_string(),
-        lease_id.to_string(),
+        "recover".to_string(),
+        "--attest-absent".to_string(),
     ];
-    for job_id in job_ids {
-        args.push("--job-id".to_string());
-        args.push(job_id.to_string());
-    }
-    args.push("--confirm-workload-processes-absent".to_string());
-    // Terminalize the dead lease's jobs without starting a daemon here.
-    args.push("--no-replacement".to_string());
+    args.extend(job_ids.iter().map(ToString::to_string));
     let rendered_args = args
         .iter()
         .map(|arg| shell::quote_arg(arg))
@@ -2686,74 +2602,6 @@ fn verify_remote_daemon_replacement(
         ));
     }
     Ok(daemon)
-}
-
-fn remote_daemon_adopt_orphan(
-    client: &SshClient,
-    homeboy: &str,
-    runner_id: &str,
-    lease_id: &str,
-    confirmed_no_pid_job_ids: &[uuid::Uuid],
-) -> std::result::Result<RemoteDaemon, String> {
-    let command = remote_daemon_command(
-        runner_id,
-        homeboy,
-        &remote_daemon_adopt_orphan_args(lease_id, confirmed_no_pid_job_ids),
-    );
-    let output = client.execute(&command);
-    if !output.success {
-        return Err(command_failure_message(
-            "remote daemon orphan adoption failed",
-            &output,
-        ));
-    }
-    let envelope = parse_envelope(&output.stdout)
-        .map_err(|err| format!("remote daemon orphan adoption returned invalid JSON: {err}"))?;
-    if !envelope.success {
-        return Err(format!(
-            "remote daemon orphan adoption failed: {}",
-            envelope.error.unwrap_or(Value::Null)
-        ));
-    }
-    let data = envelope
-        .data
-        .ok_or_else(|| "remote daemon orphan adoption returned no data".to_string())?;
-    let replacement = data
-        .get("replacement")
-        .ok_or_else(|| "remote daemon orphan adoption returned no replacement lease".to_string())?;
-    Ok(RemoteDaemon {
-        address: replacement
-            .get("address")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string(),
-        pid: replacement
-            .get("pid")
-            .and_then(Value::as_u64)
-            .and_then(|pid| u32::try_from(pid).ok()),
-        lease_id: replacement
-            .get("lease_id")
-            .and_then(Value::as_str)
-            .map(str::to_string),
-        version: None,
-        build_identity: None,
-        inspected_freshness: None,
-    })
-}
-
-fn remote_daemon_adopt_orphan_args(
-    lease_id: &str,
-    confirmed_no_pid_job_ids: &[uuid::Uuid],
-) -> String {
-    let confirmations = confirmed_no_pid_job_ids
-        .iter()
-        .map(|job_id| format!(" --confirm-untracked-child-dead {job_id}"))
-        .collect::<String>();
-    format!(
-        "daemon adopt-orphan --lease-id {}{} --addr 127.0.0.1:0",
-        shell::quote_arg(lease_id),
-        confirmations,
-    )
 }
 
 pub(super) fn parse_envelope(stdout: &str) -> serde_json::Result<CliEnvelope> {

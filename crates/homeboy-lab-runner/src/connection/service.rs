@@ -699,7 +699,6 @@ pub(crate) fn connect_service_runner(runner_id: &str) -> Result<(RunnerConnectRe
         worker_identity: None,
         worker_pid: None,
         last_seen_at: None,
-        leaseless_recovery_evidence: None,
     };
     super::replacement_journal::promote_pending_replacement(runner_id, &session)?;
     write_session(&session)?;
@@ -722,9 +721,6 @@ pub(crate) fn connect_service_runner(runner_id: &str) -> Result<(RunnerConnectRe
             homeboy_version: Some(session.homeboy_version.clone()),
             homeboy_build_identity: session.homeboy_build_identity.clone(),
             session_path: Some(session_path.display().to_string()),
-            leaseless_recovery: None,
-            state_loss_recovery: None,
-            leaseless_recovery_evidence: None,
             failure_kind: None,
             failure_message: None,
             failure_evidence: None,

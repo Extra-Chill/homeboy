@@ -584,7 +584,6 @@ fn direct_daemon_session(lease: &str, local_url: &str) -> RunnerSession {
         worker_identity: None,
         worker_pid: None,
         last_seen_at: None,
-        leaseless_recovery_evidence: None,
     }
 }
 
@@ -784,7 +783,6 @@ fn refresh_execution_uses_the_connected_preflight_session_without_a_second_looku
         worker_identity: None,
         worker_pid: None,
         last_seen_at: None,
-        leaseless_recovery_evidence: None,
     });
     let resolved = execution_status("unresolvable-runner", Some(status.clone()), false)
         .expect("the refresh transaction keeps its authoritative preflight session");
@@ -810,7 +808,6 @@ fn authoritative_drained_freshness() -> homeboy_core::daemon::DaemonFreshnessRep
         pid: Some(4242),
         recovery_evidence: None,
         ownership_evidence: None,
-        adoption_command: None,
         binary_hash: None,
         daemon_version: Some("0.288.8".to_string()),
         daemon_build_identity: Some("homeboy 0.288.8+stale".to_string()),

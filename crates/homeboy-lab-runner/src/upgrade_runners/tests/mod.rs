@@ -40,7 +40,6 @@ pub(super) fn runner_status(runner_id: &str) -> Result<RunnerStatusReport> {
             pid: Some(42),
             recovery_evidence: Some(homeboy_core::daemon::DaemonRecoveryEvidence::Recoverable),
             ownership_evidence: None,
-            adoption_command: None,
             binary_hash: None,
             daemon_version: None,
             daemon_build_identity: None,

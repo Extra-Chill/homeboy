@@ -299,10 +299,8 @@ pub struct RunnerJobLogSnapshot {
 
 #[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
 pub struct DaemonLeaseJobDiagnostics {
-    pub expected_lease_id: String,
+    /// Every active in-scope job of a dead generation that was examined.
     pub matching_job_ids: Vec<Uuid>,
-    pub other_lease_job_ids: Vec<Uuid>,
-    pub unowned_job_ids: Vec<Uuid>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub protected_job_ids: Vec<Uuid>,
     /// Broker-owned jobs preserved for the replacement daemon. These never
@@ -313,6 +311,10 @@ pub struct DaemonLeaseJobDiagnostics {
     /// by generic child reconciliation before its retained outcome is observed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub preserved_controller_job_ids: Vec<Uuid>,
+    /// Running jobs with no recorded child identity, left untouched until an
+    /// operator runs `homeboy daemon recover --attest-absent`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub needs_attestation_job_ids: Vec<Uuid>,
 }
 
 /// Read-only recovery evidence for one active daemon job.
@@ -355,51 +357,18 @@ pub enum DaemonActiveJobRecoveryDisposition {
     /// its durable state to publish the domain outcome.
     DriverRecovery,
     MissingChildIdentityRecoverable,
+    /// A dead generation's job with no recorded child identity. Nothing in
+    /// process can prove its workload is gone, so it waits for
+    /// `homeboy daemon recover --attest-absent <job-id>`.
+    NeedsAttestation,
     ProtectedLive,
     BlockingAmbiguous,
-}
-
-/// An active durable job terminalized after the daemon lease disappeared.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct LeaselessOrphanAffectedJob {
-    pub job_id: Uuid,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub original_daemon_lease_id: Option<String>,
-}
-
-/// Active durable jobs selected by the explicit missing-lease recovery operation.
-#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
-pub struct LeaselessOrphanJobDiagnostics {
-    pub reconciled_job_ids: Vec<Uuid>,
-    pub affected_jobs: Vec<LeaselessOrphanAffectedJob>,
-    pub historical_lease_ids: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub protected_job_ids: Vec<Uuid>,
-    /// Broker-owned queued or unexpired jobs preserved for their runner claim.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub preserved_remote_job_ids: Vec<Uuid>,
-    /// Work with no live external owner, retained for controller-driver resume.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub preserved_controller_job_ids: Vec<Uuid>,
-}
-
-impl LeaselessOrphanJobDiagnostics {
-    pub fn reconciled_count(&self) -> usize {
-        self.reconciled_job_ids.len()
-    }
 }
 
 impl DaemonLeaseJobDiagnostics {
     pub fn matching_count(&self) -> usize {
         self.matching_job_ids.len()
     }
-    pub fn other_lease_count(&self) -> usize {
-        self.other_lease_job_ids.len()
-    }
-    pub fn unowned_count(&self) -> usize {
-        self.unowned_job_ids.len()
-    }
-
     pub fn protected_count(&self) -> usize {
         self.protected_job_ids.len()
     }
@@ -409,6 +378,7 @@ impl DaemonLeaseJobDiagnostics {
             .saturating_sub(self.protected_count())
             .saturating_sub(self.preserved_remote_job_ids.len())
             .saturating_sub(self.preserved_controller_job_ids.len())
+            .saturating_sub(self.needs_attestation_job_ids.len())
     }
 }
 

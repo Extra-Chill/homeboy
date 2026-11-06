@@ -871,15 +871,7 @@ fn refresh_homeboy_binary_inner_in_roots(
             .inspect(|(_, exit_code)| {
                 phase_summary.push(refresh_phase("restart_in_place", true, *exit_code));
             }),
-            None => super::connection::connect_with_orphan_adoption(
-                &plan.runner_id,
-                refresh_owned_lease.as_deref(),
-                &[],
-                false,
-                None,
-                None,
-                None,
-            ),
+            None => super::connection::connect(&plan.runner_id),
         };
         let (report, connect_exit_code) = match reconnected {
             Ok(result) => result,

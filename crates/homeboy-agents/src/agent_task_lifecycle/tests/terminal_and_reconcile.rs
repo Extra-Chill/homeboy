@@ -2676,7 +2676,6 @@ fn timed_out_recoverable_lab_candidate_hydrates_a_pathless_patch_idempotently() 
             worker_identity: None,
             worker_pid: None,
             last_seen_at: None,
-            leaseless_recovery_evidence: None,
         };
         let session_path = homeboy_core::paths::runner_session_file("local").expect("session path");
         std::fs::create_dir_all(session_path.parent().expect("session parent"))

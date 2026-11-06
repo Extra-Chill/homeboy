@@ -11,7 +11,6 @@ use super::connection_daemon::{
     daemon_runtime_loaded_paths_from_body, daemon_runtime_stale_paths_from_body,
     daemon_version_from_body, versions_match,
 };
-use homeboy_core::daemon::{DaemonFreshnessReport, DaemonRecoveryEvidence};
 
 #[test]
 fn controller_proxy_url_rejects_userinfo_before_opening_a_forward() {
@@ -67,22 +66,6 @@ fn proxy_forward_reuse_rejects_a_reused_pid_with_a_different_start_identity() {
             start_microseconds: 4,
         }))
     }));
-}
-
-pub(super) fn command_output(
-    success: bool,
-    stdout: impl Into<String>,
-    timed_out: bool,
-) -> homeboy_core::server::CommandOutput {
-    homeboy_core::server::CommandOutput {
-        stdout: stdout.into(),
-        stderr: String::new(),
-        success,
-        exit_code: if success { 0 } else { 1 },
-        timed_out,
-        observation: Default::default(),
-        child_resource: None,
-    }
 }
 
 #[test]
@@ -528,23 +511,6 @@ fn bootstrap_transport_failure_keeps_bounded_original_diagnostic() {
     assert_eq!(retained["remote_command"], command);
 }
 
-pub(super) fn sample_leaseless_recovery() -> DaemonLeaselessRecoveryResult {
-    serde_json::from_value(serde_json::json!({
-        "affected_job_ids": [],
-        "affected_job_count": 0,
-        "evidence_snapshot_path": "/evidence/jobs.snapshot",
-        "ownership_proof": ["owner lock acquired"],
-        "retry_guidance": "retry",
-        "replacement": {
-            "pid": 42,
-            "address": "127.0.0.1:7421",
-            "state_path": "/state.json",
-            "lease_id": "lease-new"
-        }
-    }))
-    .expect("sample recovery")
-}
-
 pub(super) fn controller_session() -> RunnerSession {
     RunnerSession {
         runner_id: "homeboy-lab".to_string(),
@@ -567,7 +533,6 @@ pub(super) fn controller_session() -> RunnerSession {
         worker_identity: Some("worker-1".to_string()),
         worker_pid: Some(1234),
         last_seen_at: Some(Utc::now().to_rfc3339()),
-        leaseless_recovery_evidence: None,
     }
 }
 
@@ -656,26 +621,5 @@ pub(super) fn remote_daemon_status_for_test_with_reason(
         work_evidence: RemoteDaemonWorkEvidence::Unknown,
         endpoint_probe_error: None,
         termination_evidence: None,
-        daemon_freshness: (stale_reason_code == Some(DaemonStaleReasonCode::PidDead)).then(|| {
-            DaemonFreshnessReport {
-                fresh: false,
-                stale_reason_code,
-                restartable: false,
-                lease_id: Some(lease_id.to_string()),
-                pid: Some(pid),
-                recovery_evidence: Some(DaemonRecoveryEvidence::ProvenDead),
-                ownership_evidence: None,
-                adoption_command: Some(format!(
-                    "homeboy daemon adopt-orphan --lease-id {lease_id}"
-                )),
-                binary_hash: None,
-                daemon_version: None,
-                daemon_build_identity: None,
-                runtime_paths: None,
-                active_jobs,
-                termination_evidence: None,
-                repair_plan: Vec::new(),
-            }
-        }),
     }
 }

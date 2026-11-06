@@ -5,33 +5,24 @@ use std::path::PathBuf;
 
 fn attestation() -> Plan {
     Plan::NeedsAttestation(Attestation {
-        lease_id: "DEAD".to_string(),
         state_dir: PathBuf::from("/daemon"),
         job_ids: vec![Uuid::nil()],
-        confirmation: CONFIRM_WORKLOAD_PROCESSES_ABSENT.to_string(),
     })
 }
 
 #[test]
-fn live_workload_and_unleased_processes_refuse_mutation() {
-    for planned in [
-        Plan::Wait {
-            cause: WaitCause::LiveWorkload,
-            reason: "child 9 is live".to_string(),
-        },
-        Plan::Blocked {
-            cause: BlockCause::UnleasedProcess,
-            reason: "pid 7 holds no lease".to_string(),
-        },
-    ] {
-        assert!(mutation_refusal(&planned).is_some(), "{planned:?}");
-        let error = ensure_mutation_allowed_with("daemon adopt-orphan", || planned.clone())
-            .expect_err("refused");
-        assert_eq!(error.details["classification"], "lifecycle_refused");
-        assert!(error
-            .message
-            .contains("daemon adopt-orphan refused by the daemon lifecycle plan"));
-    }
+fn unleased_processes_refuse_mutation() {
+    let planned = Plan::Blocked {
+        cause: BlockCause::UnleasedProcess,
+        reason: "pid 7 holds no lease".to_string(),
+    };
+    assert!(mutation_refusal(&planned).is_some(), "{planned:?}");
+    let error =
+        ensure_mutation_allowed_with("daemon start", || planned.clone()).expect_err("refused");
+    assert_eq!(error.details["classification"], "lifecycle_refused");
+    assert!(error
+        .message
+        .contains("daemon start refused by the daemon lifecycle plan"));
 }
 
 #[test]
@@ -70,10 +61,8 @@ fn plans_serialize_with_stable_tags() {
         serde_json::to_value(attestation()).unwrap(),
         serde_json::json!({
             "plan": "needs_attestation",
-            "lease_id": "DEAD",
             "state_dir": "/daemon",
             "job_ids": [Uuid::nil()],
-            "confirmation": "confirm-workload-processes-absent",
         })
     );
     assert_eq!(

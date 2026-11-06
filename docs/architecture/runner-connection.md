@@ -44,9 +44,8 @@ health probes and failed durability observations, not successful observations.
 
 A plain `homeboy runner connect <runner-id>` first brings the runner's
 configured Homeboy binary to the controller's release (#16825), then attaches
-on the direct or service-managed path. Explicit recovery flags
-(`--adopt-orphan-lease`, `--adopt-live-lease`, `--reconcile-*`,
-`--recover-missing-lease-state`) skip convergence, as do placement reconnects.
+on the direct or service-managed path. `--adopt-live-lease` skips
+convergence, as do placement reconnects.
 
 Convergence compares the configured binary's `self identity` version with the
 controller's build:

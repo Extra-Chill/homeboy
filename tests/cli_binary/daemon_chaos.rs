@@ -7,13 +7,13 @@
 //! | # | Incident | Where it is covered |
 //! |---|----------|---------------------|
 //! | 1 | SIGKILL mid checkpointed in-daemon job resumes (#15420) | in-process: `checkpointed_in_daemon_staging_dispatch_is_preserved_for_resume_after_dead_lease` |
-//! | 2 | SIGKILL mid uncheckpointed job, one attestation terminalizes (#15556) | in-process: `uncheckpointed_in_daemon_staging_dispatch_still_blocks_dead_lease_recovery` (automatic refusal, then one attestation) |
+//! | 2 | SIGKILL mid uncheckpointed job, one attestation terminalizes (#15556, #17429) | in-process: `uncheckpointed_in_daemon_staging_dispatch_is_left_for_attestation_after_dead_lease` and `startup_recovery_leaves_a_pidless_job_untouched_and_reports_it` (startup leaves it, then `daemon recover --attest-absent <job-id>`) |
 //! | 3 | Binary replaced under an idle daemon converges (#15403) | `replaced_binary_under_an_idle_daemon_converges` |
 //! | 4 | Binary replaced under a busy daemon waits for work | in-process: `daemon::lifetime` tests (`a_replaced_binary_stops_an_idle_daemon_early_but_waits_for_work`) |
 //! | 5 | Foreground `daemon serve`: SIGTERM and stop-by-lease (#15436) | `daemon_serve_lifecycle.rs` |
 //! | 6 | Accepted stop with a helper mid-pass exits in bound (#15443) | in-process: `helper_drain_tests` |
 //! | 7 | Restart in place over a dead admission owner (#15456) | `restart_in_place_takes_admission_from_a_dead_generation` |
-//! | 8 | Dead remote generation with a stale job reconciles (#15556) | in-process: `connection_dead_lease_attestation` tests (`runner reconcile --confirm-workload-processes-absent`) |
+//! | 8 | Dead remote generation with a stale job reconciles (#15556, #17429) | in-process: `connection_dead_lease_attestation` tests (`runner reconcile --attest-absent`) |
 //! | 9 | Host-service teardown (whole process group SIGKILL) recovers | `whole_daemon_process_group_killed_recovers_without_edits` |
 //! | 10 | Stop and restart in place mid-workflow, twice, resumes in one store (#15936) | `stop_and_restart_in_place_resumes_in_flight_work_every_time` |
 //! | 11 | Cook intent committed, daemon SIGKILL before delivery (#15804) | `execution_step_chaos::committed_execution_intent_survives_daemon_sigkill_before_delivery` (fixture binary target) |

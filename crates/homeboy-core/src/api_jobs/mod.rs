@@ -30,8 +30,7 @@ pub use summary::{active_runner_job_run_summary, active_runner_job_run_summary_i
 pub use types::{
     ActiveRunnerJobRunSummary, ActiveRunnerJobSummary, DaemonActiveJobRecoveryDisposition,
     DaemonActiveJobRecoveryEvidence, DaemonLeaseJobDiagnostics, DaemonLinkedDurableRunState,
-    DaemonScope, Job, JobClaimMetadata, JobEvent, JobEventKind, JobStatus,
-    LeaselessOrphanAffectedJob, LeaselessOrphanJobDiagnostics, RunnerJobLogSnapshot,
+    DaemonScope, Job, JobClaimMetadata, JobEvent, JobEventKind, JobStatus, RunnerJobLogSnapshot,
     RunnerJobProjection, RunnerJobSource,
 };
 

@@ -1784,7 +1784,7 @@ fn test_pid_is_running_rejects_impossible_pid_and_drives_status() {
 
 #[test]
 fn local_freshness_report_carries_the_same_evidence_fields_as_the_remote_producer() {
-    // #10302: `recovery_evidence` / `ownership_evidence` / `adoption_command`
+    // #10302: `recovery_evidence` / `ownership_evidence` / `repair_plan`
     // used to be hardcoded `None` on the local path and populated only across
     // SSH, so no consumer could rely on either half of the one contract.
     let _home = HomeGuard::new();
@@ -1811,8 +1811,14 @@ fn local_freshness_report_carries_the_same_evidence_fields_as_the_remote_produce
         "ownership evidence must name the exact lease and PID it proved dead: {ownership}"
     );
     assert_eq!(
-        status.freshness.adoption_command.as_deref(),
-        Some("homeboy daemon adopt-orphan --lease-id test-lease")
+        status
+            .freshness
+            .repair_plan
+            .iter()
+            .map(|step| step.code.as_str())
+            .collect::<Vec<_>>(),
+        vec!["daemon_ensure_running"],
+        "a dead generation is repaired by starting its successor"
     );
 }
 
@@ -3453,4 +3459,162 @@ fn an_unowned_daemon_operation_lock_is_reclaimable() {
     drop(reclaim_unowned_daemon_operation_lock(&path).expect("reclaim unowned lock file"));
     let reacquired = acquire_daemon_operation_lock().expect("acquire reclaimed lock");
     drop(reacquired);
+}
+
+/// One ledger shared by a dead predecessor, a generation that died before its
+/// `state.json` survived, another daemon scope, and the successor (#17429).
+struct StartupRecoveryLedger {
+    _temp: tempfile::TempDir,
+    successor: JobStore,
+    dead_child: uuid::Uuid,
+    live_child: uuid::Uuid,
+    pidless: uuid::Uuid,
+    unpublished_generation: uuid::Uuid,
+    other_scope: uuid::Uuid,
+}
+
+const STARTUP_LIVE_CHILD_PID: u32 = 4343;
+
+fn startup_recovery_ledger() -> StartupRecoveryLedger {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let path = temp.path().join(crate::paths::OBSERVATION_DB_FILENAME);
+    let scope = crate::api_jobs::DaemonScope::from_state_dir(temp.path());
+    let store = |lease: &str, scope: crate::api_jobs::DaemonScope| {
+        JobStore::open_without_reconciliation(&path)
+            .expect("open ledger")
+            .with_daemon_lease(lease.to_string())
+            .with_daemon_scope(scope)
+    };
+    let with_child = |store: &JobStore, pid: u32| {
+        let job = store.create("runner.exec");
+        store
+            .start_with_child_identity(job.id, pid, "2026-01-01T00:00:00Z".to_string())
+            .expect("record child identity");
+        job.id
+    };
+    let predecessor = store("lease-dead", scope.clone());
+    let dead_child = with_child(&predecessor, 4242);
+    let live_child = with_child(&predecessor, STARTUP_LIVE_CHILD_PID);
+    let pidless = predecessor.create("runner.exec").id;
+    predecessor.start(pidless).expect("start pid-less job");
+    // Only the lock holder writes `state.json`; this generation's lease
+    // survives solely as the stamp on its job.
+    let unpublished_generation = with_child(&store("lease-never-published", scope.clone()), 4244);
+    let other_scope = with_child(
+        &store(
+            "lease-dead",
+            crate::api_jobs::DaemonScope::from_state_dir(&temp.path().join("other-scope")),
+        ),
+        4242,
+    );
+    StartupRecoveryLedger {
+        successor: store("lease-successor", scope),
+        _temp: temp,
+        dead_child,
+        live_child,
+        pidless,
+        unpublished_generation,
+        other_scope,
+    }
+}
+
+fn run_startup_recovery(
+    ledger: &StartupRecoveryLedger,
+) -> crate::api_jobs::DaemonLeaseJobDiagnostics {
+    recover_dead_generations_with(&ledger.successor, "lease-successor", |store, lease| {
+        store.reconcile_dead_generation_jobs_with_child_liveness(lease, |pid| {
+            pid == STARTUP_LIVE_CHILD_PID
+        })
+    })
+    .expect("startup recovery")
+}
+
+fn ledger_status(ledger: &StartupRecoveryLedger, job_id: uuid::Uuid) -> JobStatus {
+    ledger.successor.get(job_id).expect("job").status
+}
+
+#[test]
+fn startup_recovery_terminalizes_a_predecessor_job_whose_child_is_dead() {
+    let ledger = startup_recovery_ledger();
+    run_startup_recovery(&ledger);
+    assert_eq!(ledger_status(&ledger, ledger.dead_child), JobStatus::Failed);
+    assert!(ledger
+        .successor
+        .events(ledger.dead_child)
+        .expect("events")
+        .iter()
+        .any(|event| event.data.as_ref().is_some_and(|data| {
+            data["reason"] == "dead_daemon_lease" && data["daemon_lease_id"] == "lease-dead"
+        })));
+}
+
+#[test]
+fn startup_recovery_protects_a_running_child() {
+    let ledger = startup_recovery_ledger();
+    let diagnostics = run_startup_recovery(&ledger);
+    assert_eq!(diagnostics.protected_job_ids, vec![ledger.live_child]);
+    assert_eq!(
+        ledger_status(&ledger, ledger.live_child),
+        JobStatus::Running
+    );
+}
+
+#[test]
+fn startup_recovery_leaves_a_pidless_job_untouched_and_reports_it() {
+    let ledger = startup_recovery_ledger();
+    let events = ledger
+        .successor
+        .events(ledger.pidless)
+        .expect("events")
+        .len();
+    let diagnostics = run_startup_recovery(&ledger);
+    assert_eq!(diagnostics.needs_attestation_job_ids, vec![ledger.pidless]);
+    assert_eq!(ledger_status(&ledger, ledger.pidless), JobStatus::Running);
+    assert_eq!(
+        ledger
+            .successor
+            .events(ledger.pidless)
+            .expect("events")
+            .len(),
+        events
+    );
+}
+
+#[test]
+fn startup_recovery_reconciles_a_generation_whose_state_never_survived() {
+    let ledger = startup_recovery_ledger();
+    let _home = HomeGuard::new();
+    assert!(!state_path().expect("state path").exists());
+    let diagnostics = run_startup_recovery(&ledger);
+    assert!(diagnostics
+        .matching_job_ids
+        .contains(&ledger.unpublished_generation));
+    assert_eq!(
+        ledger_status(&ledger, ledger.unpublished_generation),
+        JobStatus::Failed
+    );
+}
+
+#[test]
+fn startup_recovery_never_touches_another_scopes_jobs() {
+    let ledger = startup_recovery_ledger();
+    let events = ledger
+        .successor
+        .events(ledger.other_scope)
+        .expect("events")
+        .len();
+    let diagnostics = run_startup_recovery(&ledger);
+    assert!(!diagnostics.matching_job_ids.contains(&ledger.other_scope));
+    assert_eq!(
+        ledger_status(&ledger, ledger.other_scope),
+        JobStatus::Running
+    );
+    assert_eq!(
+        ledger
+            .successor
+            .events(ledger.other_scope)
+            .expect("events")
+            .len(),
+        events
+    );
 }

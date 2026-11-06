@@ -171,42 +171,61 @@ evidence's own words why no mutation was resolved.
 One planner decides both the executable steps and the single next lifecycle
 action. `recover` reports that action as `lifecycle_plan`, and `homeboy daemon
 plan` prints it: `converged`, `transition` (the authorized repair),
-`needs_attestation` (the exact dead-lease job set), `wait` (a live workload
-process, or a busy stale daemon), or `blocked`. The explicit mutating
-subcommands (`adopt-orphan`, `reconcile-dead-lease-orphans`,
-`reconcile-leaseless-orphans`) refuse while that plan waits on a live workload
-or is blocked by a live daemon process that holds no lease.
+`needs_attestation` (the exact dead-generation jobs startup recovery could not
+prove gone), `wait` (a busy stale daemon), or `blocked`. `recover` is the only
+recovery verb.
 
-The explicit subcommands below remain available as escape hatches for cases the
-dispatcher cannot resolve — notably `recover-missing-lease-state`, whose
-required values (a recorded lease ID, PID, and endpoint) are precisely the ones
-that no longer exist in any report by the time they are needed.
+### Startup recovers its dead predecessor
 
-`--confirm-workload-processes-absent` is never supplied automatically. When the
-resolved plan is a dead-lease reconciliation, `recover` reports it under
-`blocked_on` and refuses to execute until the operator passes it. See the
-reasoning in the dead-lease recovery section below: the attestation is
-unverifiable in process by construction, so a dispatcher supplying it would be
-fabricating evidence.
+Only the daemon holding `owner.lock` writes `state.json`. So while a `serve`
+holds the lock, every other lease stamped on a job in its scope belongs to a
+generation that is gone, whether or not that generation's `state.json`
+survived. Right after it publishes its own lease, and before it resumes
+controller jobs, a starting daemon reconciles every active job in its scope
+whose lease is not its own:
 
-### A dead daemon restarts in place
+- staged direct `runner.exec` jobs are requeued under the new lease;
+- a job whose recorded child still runs is protected;
+- a job whose recorded child is dead is terminalized with its retained
+  evidence, or with the terminal result it recorded;
+- controller jobs keep their resume semantics (`recover_controller_jobs`);
+- a running job with no recorded child identity is left untouched and reported
+  as needing attestation, because nothing in process can prove its workload is
+  gone.
 
-Homeboy runs one daemon per state directory, with one job store. A daemon that
-died with durable work in its store is replaced in the same directory: the
-lease is re-proven dead, jobs proven gone are reconciled, and the replacement's
-startup recovery resumes checkpointed driver work such as `workflow` instances
-and `lab.staging-dispatch` jobs. An upgrade is the same restart: a stale daemon
-is stopped and its replacement resumes the work in the same store. A job's lease is
-the lease that last claimed its execution. The directory's exclusive owner lock
-admits one replacement, so concurrent adopters converge on one driver.
+Jobs of another daemon scope in the shared ledger are never touched.
 
-The next daemon-backed command starts the replacement, and its startup
-recovery adopts the dead lease's work. `homeboy daemon recover --yes` applies
-the status report's repair (orphan adoption or `ensure-running`) immediately,
-and `homeboy daemon adopt-orphan
---lease-id <lease>` adopts one exact dead lease. A dead daemon with a live
-workload process waits for it; one that needs an operator attestation still
-requires `--confirm-workload-processes-absent`.
+A dead daemon is therefore repaired by starting its successor: the next
+daemon-backed command does it, `homeboy daemon recover --yes` does it at once
+(its plan is `ensure-running`, or a restart of a stale daemon), and on a
+controller `homeboy runner connect <runner>` does it for the remote runner.
+
+### `--attest-absent`: jobs with no child identity
+
+A daemon that died before recording a job's child PID leaves that job running
+in the store with nothing to check. Startup recovery reports it in
+`needs_attestation_job_ids`, `status` lists it with the `needs_attestation`
+disposition, and `plan` reports `needs_attestation` with the exact job IDs.
+Once you have inspected the host and the workload is gone, attest it:
+
+```sh
+homeboy daemon recover --attest-absent <job-id> [<job-id>...]
+```
+
+This terminalizes exactly the named jobs and nothing else. Each must be
+active, in this daemon scope, owned by a dead generation, and carry no recorded
+child identity; if any named job fails a check, the whole set is refused and
+nothing changes. The attestation is written into every affected job's durable
+event data as `operator_confirmed_workload_processes_absent`, together with any
+linked durable run.
+
+It works with or without a live daemon. With the owner lock free, no
+generation serves the scope and the command holds the lock for the mutation.
+With the lock held, the holder must have published its lease in `state.json`;
+that lease is the live generation and its jobs are refused. A holder that has
+not published yet is still running its own startup recovery, so the
+attestation is refused until it finishes. The attestation is never supplied
+automatically: it is unverifiable in process by construction.
 
 ## Local HTTP API
 
@@ -238,37 +257,9 @@ and `linked_durable_run_id` plus `linked_durable_run_state` (`terminal`,
 blocking evidence. Status is read-only: it never reconciles or changes durable
 jobs.
 
-For a proven unexpected daemon exit where exact active jobs have no persisted
-child identity, use the explicit all-active-job-set recovery command. It requires
-the dead lease, every active job ID, and an operator attestation that workload
-processes were inspected and absent. It refuses a live or reused daemon PID,
-missing or mismatched unexpected-exit evidence, a held daemon owner lock,
-conflicting daemon-process evidence, child identities, or an omitted/extra/
-non-active job ID. Each named job receives durable typed daemon-loss failure
-evidence before the replacement daemon starts:
-
-```sh
-homeboy daemon reconcile-dead-lease-orphans \
-  --lease-id <exact-dead-lease> \
-  --job-id <active-job-id> \
-  --confirm-workload-processes-absent
-```
-
-`--job-id` is not a transcription of `status` output. The store recomputes the
-active durable-job set and refuses any mismatch, so the repeated flag is a
-compare-and-swap over the exact destructive scope — omit a job, name an extra
-one, or race a change and the command aborts instead of terminalizing work you
-never saw. The named set is persisted with the reconciliation as
-`exact_active_job_set`.
-
-`--confirm-workload-processes-absent` stays required. This command exists
-precisely because the daemon died before persisting any child identity, so the
-store holds no PID for the named jobs and homeboy cannot observe whether their
-workloads are still running. The check that refuses jobs carrying recorded child
-evidence proves only that no such record exists — which is what makes the
-operator's inspection the sole source of truth. The attestation is written into
-every affected job's durable event data as
-`operator_confirmed_workload_processes_absent`.
+A dead lease's jobs are reconciled by the next daemon's startup recovery; see
+[Startup recovers its dead predecessor](#startup-recovers-its-dead-predecessor)
+and [`--attest-absent`](#--attest-absent-jobs-with-no-child-identity).
 
 ## Endpoints
 

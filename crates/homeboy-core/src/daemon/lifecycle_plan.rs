@@ -13,8 +13,9 @@
 //! 1. [`Plan::Blocked`]: something could not be read, a live daemon process
 //!    owns no lease, or the evidence authorizes no recovery.
 //! 2. [`Plan::Wait`]: live work stands in the way of the next step.
-//! 3. [`Plan::NeedsAttestation`]: a dead lease's jobs have no proof that their
-//!    workload is gone. Only an operator can supply it.
+//! 3. [`Plan::NeedsAttestation`]: dead-generation jobs that startup recovery
+//!    left untouched have no proof that their workload is gone. Only an
+//!    operator can supply it, with `homeboy daemon recover --attest-absent`.
 //! 4. [`Plan::Transition`]: the repair the status report authorizes.
 //! 5. [`Plan::Converged`]: nothing to do.
 
@@ -39,8 +40,6 @@ pub enum Plan {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum WaitCause {
-    /// A dead lease's job still has a live workload process.
-    LiveWorkload,
     /// A stale daemon still owns jobs; it is replaced when they finish.
     BusyStaleDaemon,
 }
@@ -74,16 +73,11 @@ pub enum Step {
 /// The one operator confirmation the status report cannot prove itself.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Attestation {
-    pub lease_id: String,
     pub state_dir: std::path::PathBuf,
-    /// The dead lease's complete active job set (compare-and-swap scope).
+    /// The dead-generation jobs with no recorded child identity, each named to
+    /// `homeboy daemon recover --attest-absent`.
     pub job_ids: Vec<Uuid>,
-    pub confirmation: String,
 }
-
-/// The confirmation flag an attestation requires.
-pub const CONFIRM_WORKLOAD_PROCESSES_ABSENT: &str =
-    super::recovery_actions::CONFIRM_WORKLOAD_PROCESSES_ABSENT;
 
 /// The lifecycle plan for one authoritative status report.
 pub fn plan(status: &DaemonStatus) -> Plan {
@@ -105,15 +99,10 @@ pub fn plan_local() -> Plan {
 /// The shared safety gate for every mutating daemon entry point.
 ///
 /// Returns why `planned` forbids a lease or job-store mutation right now: a
-/// dead lease still has a live workload process, or a live daemon process
-/// holds no lease and could own the store being changed. Everything else is
-/// left to the entry point's own, narrower preconditions.
+/// live daemon process holds no lease and could own the store being changed.
+/// Everything else is left to the entry point's own, narrower preconditions.
 pub fn mutation_refusal(planned: &Plan) -> Option<String> {
     match planned {
-        Plan::Wait {
-            cause: WaitCause::LiveWorkload,
-            reason,
-        } => Some(format!("live workload: {reason}")),
         Plan::Blocked {
             cause: BlockCause::UnleasedProcess,
             reason,

@@ -104,6 +104,5 @@ pub(crate) fn direct_ssh_session(lease_id: &str) -> RunnerSession {
         worker_identity: None,
         worker_pid: None,
         last_seen_at: None,
-        leaseless_recovery_evidence: None,
     }
 }

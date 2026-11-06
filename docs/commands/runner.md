@@ -437,19 +437,8 @@ produced artifact.
 
 ```sh
 homeboy runner connect <runner-id>
-homeboy runner connect <runner-id> --adopt-orphan-lease <lease-id>
-homeboy runner connect <runner-id> --adopt-orphan-lease <lease-id> --confirm-untracked-child-dead <job-id>
-homeboy runner connect <runner-id> --reconcile-leaseless-orphans
-homeboy daemon reconcile-leaseless-orphans
-homeboy runner connect <runner-id> --recover-missing-lease-state <lease-id> --recorded-pid <pid> --recorded-endpoint <loopback-host:port>
-homeboy daemon recover-missing-lease-state --lease-id <lease-id> --recorded-pid <pid> --recorded-endpoint <loopback-host:port>
+homeboy runner connect <runner-id> --adopt-live-lease <lease-id> --expected-live-pid <pid>
 ```
-
-`--recorded-pid` and `--recorded-endpoint` stay required because once a runner's
-state record is gone it cannot recompute them.
-`--confirm-untracked-child-dead <job-id>` also stays required where it applies —
-it names an exact job with no recorded child PID, which is evidence homeboy does
-not have.
 
 Starts a loopback-only Homeboy daemon on the runner and opens an SSH tunnel to
 it. Connect dials the configured server host and does not discover a new LAN
@@ -488,46 +477,19 @@ replacement. The lease-bound stop rechecks the startup ownership token and job
 store before every signal. Active work, PID/lease drift, and ambiguous listener
 ownership remain fail-closed.
 
-When a controller session was lost while a remote daemon lease is dead and its
-durable jobs remain, inspect the remote `homeboy daemon status` first. Recovery
-requires the explicit exact-lease form shown above. It verifies the recorded PID
-is dead itself — that is not an operator assertion. If a listed active job has
-neither a terminal result nor a recorded
-child PID, inspect its process identity independently and supply one repeated
-`--confirm-untracked-child-dead <job-id>` value for every such exact job. The
-confirmation is rejected for terminal, PID-backed, foreign-lease, or unknown
-jobs; it records an operator-confirmed interruption in each reconciled job's
-durable events.
-It probes the supplied concrete loopback endpoint and requires it to be
-unreachable, then acquires the remote daemon lifecycle lock before preserving job
-events and terminalizing jobs from that dead control plane. The response retains
-the exact lease, affected job IDs, endpoint probe, owner-lock proof, snapshot,
-and replacement identity before the fresh local session is recorded. Exact,
-lease-less, and orphan-adoption recovery modes are mutually exclusive. Ordinary
-`runner connect` never infers orphan ownership; live, ambiguous, and
-lease-mismatched daemon records remain protected.
-
-Exact state-loss recovery writes a lease-keyed receipt before terminalizing jobs.
-If replacement startup fails, the receipt retains the reconciled evidence and the
-same exact lease, PID, and endpoint inputs resume only replacement startup on
-retry. Different replay inputs fail closed, and a zero-active-job invocation
-without a matching receipt remains invalid.
+When a remote daemon is dead, or its state record is missing, `runner connect`
+starts its successor. The successor's owner lock refuses a still-live holder,
+and its startup recovery reconciles every job the dead generation left in its
+scope (see `homeboy daemon` [startup recovery](daemon.md#startup-recovers-its-dead-predecessor)),
+so durable work never blocks the start. Jobs that recorded no child identity
+are left for `homeboy runner reconcile <runner-id> --attest-absent`. Live,
+ambiguous, and lease-mismatched daemon records remain protected.
 
 Every daemon returned by a replacement operation is journaled before tunnel
 health and endpoint identity checks. A retry authenticates and publishes those
 exact coordinates. If the recorded PID has died, a newer lease has superseded
 it, or the exact idle replacement listener is unhealthy, the stale journal is
 retired under the runner lock so it cannot pin a dead endpoint.
-
-When `daemon status` reports `stale_reason_code: lease_missing`, active jobs,
-and unavailable recovery evidence, run the explicit daemon reconciliation on the
-configured runner host. It acquires the daemon lifecycle lock, requires the
-affirmative confirmation flag, independently checks for a `homeboy daemon serve`
-process and Homeboy TCP listener, snapshots the durable job ledger, retains all job events
-and artifact references, terminalizes every active job as control-plane-lost, and
-returns each original lease ID plus the affected job mapping before starting one
-replacement daemon. Historical lease IDs do not establish a current owner. Live
-or ambiguous probes abort without changing the store.
 
 #### Broker authentication and pairing
 
@@ -772,6 +734,7 @@ result set.
 
 ```sh
 homeboy runner reconcile <runner-id>
+homeboy runner reconcile <runner-id> --attest-absent
 ```
 
 Reconciles one direct runner's current daemon session: it refreshes the
@@ -779,11 +742,12 @@ session metadata from the observed daemon and settles jobs that reached a
 terminal state. A disconnected runner is reported as-is. Successful refresh,
 reconnect, and runner upgrade observe the same session.
 
-`--confirm-workload-processes-absent` records the operator's attestation that
-no workload process from a dead daemon survives. It runs the remote
-`daemon reconcile-dead-lease-orphans` only when reconcile is blocked by
-missing daemon ownership evidence, bound to that daemon's state directory,
-lease, and active job set, and then reconciles again.
+`--attest-absent` records the operator's attestation that no workload process
+from a dead daemon generation survives. It runs the remote `daemon recover
+--attest-absent <job-id>...` only when reconcile is blocked on jobs startup
+recovery could not prove gone, naming exactly those jobs, and then reconciles
+again. The runner refuses the whole set if any job has a recorded child, belongs
+to the live generation, or is out of scope.
 
 The command succeeds only when its postcondition has converged: the runner's
 current daemon session is accepting jobs. A blocked result exits non-zero and

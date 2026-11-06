@@ -260,10 +260,6 @@ pub(super) enum RunnerCommand {
         /// Runner ID
         id: String,
 
-        /// Explicitly adopt this exact remote daemon lease after confirming its PID is dead
-        #[arg(long)]
-        adopt_orphan_lease: Option<String>,
-
         /// Operator-confirm a live lease/PID/build adoption within the trusted remote SSH UID boundary; never stops or replaces a daemon
         #[arg(long)]
         adopt_live_lease: Option<String>,
@@ -271,26 +267,6 @@ pub(super) enum RunnerCommand {
         /// Current remote daemon PID paired with --adopt-live-lease
         #[arg(long)]
         expected_live_pid: Option<u32>,
-
-        /// Confirm one exact unresolved job has no live untracked child; repeat for each job
-        #[arg(long = "confirm-untracked-child-dead")]
-        confirm_untracked_child_dead: Vec<uuid::Uuid>,
-
-        /// Explicitly reconcile active jobs after proving the missing-lease remote store has no daemon owner
-        #[arg(long)]
-        reconcile_leaseless_orphans: bool,
-
-        /// Recover this exact lease after the remote daemon state record was lost
-        #[arg(long)]
-        recover_missing_lease_state: Option<String>,
-
-        /// Recorded remote daemon PID paired with --recover-missing-lease-state
-        #[arg(long)]
-        recorded_pid: Option<u32>,
-
-        /// Recorded concrete remote daemon endpoint paired with --recover-missing-lease-state
-        #[arg(long)]
-        recorded_endpoint: Option<String>,
     },
     /// Show persisted runner tunnel status
     Status {
@@ -321,17 +297,16 @@ pub(super) enum RunnerCommand {
         /// Runner ID
         id: String,
 
-        /// Attest that the workload processes of the blocked remote daemon
-        /// were inspected and are absent. When the reconcile is blocked by a
-        /// daemon whose PID is dead and whose active jobs lack automatic
-        /// proof, this runs the attested
-        /// `daemon reconcile-dead-lease-orphans` on the runner — bound to that
-        /// exact daemon's state directory, lease, and active job set — and
-        /// then re-runs the reconcile. A live daemon PID, a live recorded
-        /// child, or a changed job set is still refused, with the runner-side
-        /// refusal surfaced verbatim (#15556).
+        /// Attest that the workload processes of the runner's dead daemon
+        /// generation were inspected and are absent. When the reconcile is
+        /// blocked by jobs whose dead daemon recorded no child identity, this
+        /// runs `daemon recover --attest-absent <job-id>...` on the runner —
+        /// bound to the state directory and exact jobs its lifecycle plan
+        /// names — and then re-runs the reconcile. A recorded child, a live
+        /// generation, or an out-of-scope job is still refused, with the
+        /// runner-side refusal surfaced verbatim (#15556, #17429).
         #[arg(long)]
-        confirm_workload_processes_absent: bool,
+        attest_absent: bool,
     },
     /// Close a runner tunnel and remove its persisted session state
     Disconnect {

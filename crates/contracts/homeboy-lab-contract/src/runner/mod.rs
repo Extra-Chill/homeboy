@@ -142,12 +142,6 @@ pub fn required_lab_handoff_capabilities() -> Vec<LabCapabilityVersion> {
     .collect()
 }
 
-/// Capability id for the lease-less daemon orphan reconciliation contract.
-pub const DAEMON_RECOVERY_LEASELESS_CAPABILITY: &str = "daemon-recovery-leaseless";
-
-/// Capability id for the exact state-loss daemon recovery contract.
-pub const DAEMON_RECOVERY_STATE_LOSS_CAPABILITY: &str = "daemon-recovery-state-loss";
-
 /// Capability id for `daemon ensure-running --replacement-operation-id`.
 pub const DAEMON_ENSURE_RUNNING_OPERATION_ID_CAPABILITY: &str =
     "daemon-ensure-running-operation-id";
@@ -160,17 +154,13 @@ pub const DAEMON_ENSURE_RUNNING_OPERATION_ID_CAPABILITY: &str =
 /// that omits them can still execute work; controllers that need the recovery
 /// path require the typed capability. Keep these names protocol-focused.
 pub fn daemon_recovery_capabilities() -> Vec<LabCapabilityVersion> {
-    [
-        DAEMON_RECOVERY_LEASELESS_CAPABILITY,
-        DAEMON_RECOVERY_STATE_LOSS_CAPABILITY,
-        DAEMON_ENSURE_RUNNING_OPERATION_ID_CAPABILITY,
-    ]
-    .into_iter()
-    .map(|id| LabCapabilityVersion {
-        id: id.to_string(),
-        version: 1,
-    })
-    .collect()
+    [DAEMON_ENSURE_RUNNING_OPERATION_ID_CAPABILITY]
+        .into_iter()
+        .map(|id| LabCapabilityVersion {
+            id: id.to_string(),
+            version: 1,
+        })
+        .collect()
 }
 
 /// Decide whether a remote daemon advertises a recovery capability.
@@ -563,11 +553,7 @@ mod daemon_recovery_capability_tests {
             .iter()
             .map(|capability| capability.id.as_str())
             .collect();
-        let expected = BTreeSet::from([
-            DAEMON_RECOVERY_LEASELESS_CAPABILITY,
-            DAEMON_RECOVERY_STATE_LOSS_CAPABILITY,
-            DAEMON_ENSURE_RUNNING_OPERATION_ID_CAPABILITY,
-        ]);
+        let expected = BTreeSet::from([DAEMON_ENSURE_RUNNING_OPERATION_ID_CAPABILITY]);
         assert_eq!(ids, expected);
         assert!(recovery.iter().all(|capability| capability.version == 1));
 
@@ -585,20 +571,20 @@ mod daemon_recovery_capability_tests {
     #[test]
     fn recovery_capability_requires_typed_advertisement() {
         let advertised: [LabCapabilityVersion; 1] = [LabCapabilityVersion {
-            id: DAEMON_RECOVERY_LEASELESS_CAPABILITY.to_string(),
+            id: DAEMON_ENSURE_RUNNING_OPERATION_ID_CAPABILITY.to_string(),
             version: 1,
         }];
         assert!(daemon_recovery_capability_advertised(
             Some(advertised.as_slice()),
-            DAEMON_RECOVERY_LEASELESS_CAPABILITY,
+            DAEMON_ENSURE_RUNNING_OPERATION_ID_CAPABILITY,
         ));
         assert!(!daemon_recovery_capability_advertised(
-            Some(advertised.as_slice()),
-            DAEMON_RECOVERY_STATE_LOSS_CAPABILITY,
+            Some(&[]),
+            DAEMON_ENSURE_RUNNING_OPERATION_ID_CAPABILITY,
         ));
         assert!(!daemon_recovery_capability_advertised(
             None,
-            DAEMON_RECOVERY_LEASELESS_CAPABILITY,
+            DAEMON_ENSURE_RUNNING_OPERATION_ID_CAPABILITY,
         ));
     }
 }

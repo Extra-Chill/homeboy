@@ -101,18 +101,6 @@ pub fn daemon_termination_file() -> Result<PathBuf> {
     Ok(daemon_state_dir_in_root(&ambient_daemon_config_root()?).join("termination.json"))
 }
 
-/// Exact state-loss recovery receipt keyed by the operator-supplied lease.
-pub fn daemon_state_loss_recovery_receipt_file(lease_id: &str) -> Result<PathBuf> {
-    Ok(daemon_state_dir_in_root(&ambient_daemon_config_root()?)
-        .join("state-loss-recovery")
-        .join(format!("{}.json", sanitize_path_segment(lease_id))))
-}
-
-/// Exact replacement receipt for an approved lease-less recovery.
-pub fn daemon_leaseless_recovery_receipt_file() -> Result<PathBuf> {
-    Ok(daemon_state_dir_in_root(&ambient_daemon_config_root()?).join("leaseless-recovery.json"))
-}
-
 /// Runner connection session state directory below an already-resolved config root.
 pub fn runner_sessions_dir_in_root(config_root: &Path) -> PathBuf {
     config_root.join("runner-sessions")

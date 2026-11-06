@@ -28,24 +28,21 @@ use crate::error::{ActionSafety, ExecutableAction};
 pub const DAEMON_STOP: &str = "daemon_stop";
 /// Start a replacement daemon.
 pub const DAEMON_START: &str = "daemon_start";
-/// Replace or reuse the daemon that owns the local store.
+/// Replace or reuse the daemon that owns the local store. Starting a daemon
+/// runs its startup recovery of every dead generation in its scope.
 pub const DAEMON_ENSURE_RUNNING: &str = "daemon_ensure_running";
-/// Adopt one proven-dead lease and reconcile the jobs it owned.
-pub const DAEMON_ADOPT_ORPHAN: &str = "daemon_adopt_orphan";
-/// Reconcile durable jobs that outlived the lease that owned them.
-pub const DAEMON_RECONCILE_LEASELESS_ORPHANS: &str = "daemon_reconcile_leaseless_orphans";
-/// Reconcile an exact PID-less job set after an operator-authorized daemon loss.
-pub const DAEMON_RECONCILE_DEAD_LEASE_ORPHANS: &str = "daemon_reconcile_dead_lease_orphans";
+/// Terminalize named dead-generation jobs on the operator's workload-absence
+/// attestation.
+pub const DAEMON_ATTEST_ABSENT: &str = "daemon_attest_absent";
 /// Re-read daemon evidence. The step emitted when nothing else is authorized.
 pub const DAEMON_DIAGNOSE: &str = "daemon_diagnose";
 
 /// The operator attestation that cannot be synthesized from any report.
 ///
-/// `reconcile-dead-lease-orphans` exists precisely because the daemon died
-/// before persisting any child identity, so the store holds no PID to inspect
-/// and nothing in-process can observe whether the workloads are still running.
+/// A dead generation's job with no recorded child identity has no PID to
+/// inspect, so nothing in process can observe whether its workload still runs.
 /// A dispatcher must surface this as a required confirmation, never supply it.
-pub const CONFIRM_WORKLOAD_PROCESSES_ABSENT: &str = "confirm-workload-processes-absent";
+pub const ATTEST_ABSENT: &str = "attest-absent";
 
 fn action(
     id: &str,
@@ -119,57 +116,27 @@ pub fn recover() -> ExecutableAction {
     )
 }
 
-pub fn adopt_orphan(lease_id: &str) -> ExecutableAction {
-    action(
-        "daemon.adopt_orphan",
-        format!("adopt proven-dead daemon lease {lease_id}"),
-        [
-            "daemon".to_string(),
-            "adopt-orphan".to_string(),
-            "--lease-id".to_string(),
-            lease_id.to_string(),
-        ],
-        ActionSafety::Mutating,
-    )
-}
-
-pub fn reconcile_leaseless_orphans() -> ExecutableAction {
-    action(
-        "daemon.reconcile_leaseless_orphans",
-        "reconcile durable jobs with no owning daemon lease".to_string(),
-        [
-            "daemon".to_string(),
-            "reconcile-leaseless-orphans".to_string(),
-        ],
-        ActionSafety::Mutating,
-    )
-}
-
-/// The exact PID-less job set is a compare-and-swap over the destructive scope,
-/// so every job id is named. The store recomputes the active set and refuses any
-/// mismatch; a dispatcher may therefore fill the ids from the report it read.
-pub fn reconcile_dead_lease_orphans(lease_id: &str, job_ids: &[Uuid]) -> ExecutableAction {
+/// `homeboy daemon recover --attest-absent <job-id>...`. The store re-checks
+/// every named job and refuses the whole set if any is not a dead generation's
+/// in-scope job without child identity; a dispatcher may therefore fill the
+/// ids from the report it read, but never the attestation itself.
+pub fn attest_absent(job_ids: &[Uuid]) -> ExecutableAction {
     let mut args = vec![
         "daemon".to_string(),
-        "reconcile-dead-lease-orphans".to_string(),
-        "--lease-id".to_string(),
-        lease_id.to_string(),
+        "recover".to_string(),
+        format!("--{ATTEST_ABSENT}"),
     ];
-    for job_id in job_ids {
-        args.push("--job-id".to_string());
-        args.push(job_id.to_string());
-    }
-    args.push(format!("--{CONFIRM_WORKLOAD_PROCESSES_ABSENT}"));
+    args.extend(job_ids.iter().map(Uuid::to_string));
     action(
-        "daemon.reconcile_dead_lease_orphans",
+        "daemon.attest_absent",
         format!(
-            "reconcile {} PID-less durable job(s) owned by dead lease {lease_id}",
+            "terminalize {} dead-generation job(s) whose workload an operator attests is gone",
             job_ids.len()
         ),
         args,
         ActionSafety::Mutating,
     )
-    .requiring_confirmation(CONFIRM_WORKLOAD_PROCESSES_ABSENT)
+    .requiring_confirmation(ATTEST_ABSENT)
 }
 
 /// Read-only. Emitted when the evidence authorizes no mutation, so that a
@@ -233,14 +200,16 @@ impl DaemonRecoveryPlan {
 
 /// Resolve the recovery for one daemon status report.
 ///
-/// This is the one daemon recovery planner. The freshness report already
-/// computes the local-frame repair for every case it can authorize, so this
-/// dispatches to that plan rather than restating the table. It adds what the
-/// freshness report deliberately leaves out: a dead lease whose workload is
-/// still running (wait), a live daemon process that holds no lease (blocked),
-/// an exact PID-less job set behind a dead lease (operator attestation), and
-/// the unauthorized remainder, which gets an explicit reason and a read-only
-/// step instead of nothing at all. Each outcome carries its lifecycle verdict.
+/// This is the one daemon recovery planner. A dead or missing daemon is
+/// recovered by starting one: serve's startup recovery reconciles every dead
+/// generation in its scope, protecting running children, terminalizing dead
+/// ones, and resuming controller work. The freshness report already computes
+/// that local-frame repair, so this dispatches to it rather than restating the
+/// table. What startup cannot prove is a dead generation's job with no
+/// recorded child identity: that needs `daemon recover --attest-absent`. A
+/// live daemon process that holds no lease blocks everything, and the
+/// unauthorized remainder gets an explicit reason and a read-only step instead
+/// of nothing at all. Each outcome carries its lifecycle verdict.
 pub fn plan_recovery(status: &DaemonStatus) -> DaemonRecoveryPlan {
     let mut plan = plan_recovery_steps(status);
     // A lease that cannot be decoded is not a lifecycle verdict anyone may
@@ -254,6 +223,46 @@ pub fn plan_recovery(status: &DaemonStatus) -> DaemonRecoveryPlan {
         };
     }
     plan
+}
+
+/// Dead-generation jobs startup recovery left untouched: no recorded child
+/// identity proves their workload gone.
+fn needs_attestation(status: &DaemonStatus) -> Vec<Uuid> {
+    status
+        .active_job_recovery_evidence
+        .iter()
+        .filter(|evidence| {
+            evidence.disposition
+                == crate::api_jobs::DaemonActiveJobRecoveryDisposition::NeedsAttestation
+        })
+        .map(|evidence| evidence.job_id)
+        .collect()
+}
+
+fn attestation_plan(status: &DaemonStatus, job_ids: Vec<Uuid>) -> DaemonRecoveryPlan {
+    let action = attest_absent(&job_ids);
+    let required_confirmations = action.required_confirmations.clone();
+    DaemonRecoveryPlan {
+        lifecycle: Plan::NeedsAttestation(Attestation {
+            state_dir: std::path::Path::new(&status.state_path)
+                .parent()
+                .map(std::path::Path::to_path_buf)
+                .unwrap_or_default(),
+            job_ids: job_ids.clone(),
+        }),
+        steps: vec![DaemonRepairStep::executable(DAEMON_ATTEST_ABSENT, action)],
+        reason: format!(
+            "{} dead-generation job(s) have no recorded child identity ({}); startup recovery cannot prove their workload gone, so an operator must attest it",
+            job_ids.len(),
+            job_ids
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        required_confirmations,
+        executable: true,
+    }
 }
 
 fn plan_recovery_steps(status: &DaemonStatus) -> DaemonRecoveryPlan {
@@ -273,52 +282,11 @@ fn plan_recovery_steps(status: &DaemonStatus) -> DaemonRecoveryPlan {
             },
         );
     }
-    if freshness.fresh && freshness.stale_reason_code.is_none() {
-        return DaemonRecoveryPlan::nothing(
-            "daemon lease is fresh; there is nothing to recover".to_string(),
-            |_| Plan::Converged,
-        );
-    }
-    let pid_dead = freshness.stale_reason_code == Some(DaemonStaleReasonCode::PidDead);
-
-    // A live or unverifiable recorded owner is never eligible for automatic
-    // adoption or operator-attested PID-less recovery. The freshness report
-    // cannot see that per-job distinction, so apply the evidence predicate the
-    // store enforces during apply.
-    // A job whose recorded child process is still alive is not orphaned: it is
-    // finishing. Recommending the attested reconcile would only be refused at
-    // apply, so say what to wait for instead (#15556).
-    if pid_dead {
-        let live = status
-            .active_job_recovery_evidence
-            .iter()
-            .filter(|evidence| {
-                evidence.disposition
-                    == crate::api_jobs::DaemonActiveJobRecoveryDisposition::ProtectedLive
-            })
-            .map(|evidence| match evidence.child_pid {
-                Some(pid) => format!("{} (child pid {pid})", evidence.job_id),
-                None => evidence.job_id.to_string(),
-            })
-            .collect::<Vec<_>>();
-        if !live.is_empty() {
-            return DaemonRecoveryPlan::diagnose(
-                format!(
-                    "dead daemon lease still has running workload process(es) for job(s) {}; wait for them to exit, then recover",
-                    live.join(", ")
-                ),
-                |reason| Plan::Wait {
-                    cause: WaitCause::LiveWorkload,
-                    reason,
-                },
-            );
-        }
-    }
 
     // The owner lock is held, yet no live lease names its holder: a daemon is
-    // starting, or a recovery operation holds the store. Any start, adoption,
-    // or stop could race it, so nothing proceeds until the holder publishes a
-    // lease or releases the lock.
+    // starting (and running its startup recovery), or a recovery operation
+    // holds the store. Any start or stop could race it, so nothing proceeds
+    // until the holder publishes a lease or releases the lock.
     if !status.running
         && status.owner_lock.is_held()
         && freshness.stale_reason_code != Some(DaemonStaleReasonCode::LeaseCorrupt)
@@ -338,15 +306,20 @@ fn plan_recovery_steps(status: &DaemonStatus) -> DaemonRecoveryPlan {
         );
     }
 
-    let requires_exact_dead_lease_recovery = pid_dead
-        && status.active_job_recovery_evidence.iter().any(|evidence| {
-            matches!(
-                evidence.disposition,
-                crate::api_jobs::DaemonActiveJobRecoveryDisposition::MissingChildIdentityRecoverable
-                    | crate::api_jobs::DaemonActiveJobRecoveryDisposition::BlockingAmbiguous
-            )
-        });
-    if !freshness.repair_plan.is_empty() && !requires_exact_dead_lease_recovery {
+    let attestation = needs_attestation(status);
+    if freshness.fresh && freshness.stale_reason_code.is_none() {
+        if !attestation.is_empty() {
+            return attestation_plan(status, attestation);
+        }
+        return DaemonRecoveryPlan::nothing(
+            "daemon lease is fresh; there is nothing to recover".to_string(),
+            |_| Plan::Converged,
+        );
+    }
+
+    // Starting (or restarting) the daemon runs startup recovery, so it comes
+    // before any attestation: jobs it can prove are reconciled without one.
+    if !freshness.repair_plan.is_empty() {
         let reason = match freshness.stale_reason_code {
             Some(code) => format!(
                 "daemon is stale ({code:?}) with {} active job(s); the freshness report authorizes this repair",
@@ -377,66 +350,8 @@ fn plan_recovery_steps(status: &DaemonStatus) -> DaemonRecoveryPlan {
             executable: true,
         };
     }
-
-    // The lease named a daemon that is gone and durable jobs outlived it, but
-    // the daemon died before persisting any child identity, so the store holds
-    // no PID to check. The exact job set is a compare-and-swap over the
-    // destructive scope, and the store refuses any mismatch — so the ids can be
-    // filled from the report, while the workload attestation cannot be.
-    //
-    // Jobs with durable terminal evidence (a terminal linked durable run or a
-    // recorded terminal result) prove no workload remains, so they never
-    // require the attestation on their own. They are still active in the
-    // store, so the compare-and-swap names them with the rest.
-    let unproven = status.active_job_recovery_evidence.iter().any(|evidence| {
-        evidence.disposition
-            != crate::api_jobs::DaemonActiveJobRecoveryDisposition::TerminalEvidence
-    });
-    if pid_dead {
-        let Some(lease_id) = freshness.lease_id.as_deref() else {
-            return DaemonRecoveryPlan::nothing(
-                "daemon PID is dead but the recorded lease identity is unavailable".to_string(),
-                |reason| Plan::Blocked {
-                    cause: BlockCause::Unreadable,
-                    reason,
-                },
-            );
-        };
-        if unproven {
-            let job_ids: Vec<Uuid> = status
-                .active_job_recovery_evidence
-                .iter()
-                .map(|evidence| evidence.job_id)
-                .collect();
-            let action = reconcile_dead_lease_orphans(lease_id, &job_ids);
-            let required_confirmations = action.required_confirmations.clone();
-            return DaemonRecoveryPlan {
-                lifecycle: Plan::NeedsAttestation(Attestation {
-                    lease_id: lease_id.to_string(),
-                    state_dir: std::path::Path::new(&status.state_path)
-                        .parent()
-                        .map(std::path::Path::to_path_buf)
-                        .unwrap_or_default(),
-                    job_ids: job_ids.clone(),
-                    confirmation: CONFIRM_WORKLOAD_PROCESSES_ABSENT.to_string(),
-                }),
-                steps: vec![DaemonRepairStep::executable(
-                    DAEMON_RECONCILE_DEAD_LEASE_ORPHANS,
-                    action,
-                )],
-                reason: format!(
-                    "lease `{lease_id}` is gone and {} durable job(s) have no recorded child identity ({}); the exact job set is named from the report, but workload absence is unverifiable in process",
-                    job_ids.len(),
-                    job_ids
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ),
-                required_confirmations,
-                executable: true,
-            };
-        }
+    if !attestation.is_empty() {
+        return attestation_plan(status, attestation);
     }
 
     // Nothing is authorized. Say so, and hand back the read-only step that
@@ -485,9 +400,14 @@ pub fn authorizes_automatic_idle_restart(status: &DaemonStatus) -> bool {
     let plan = plan_recovery(status);
     !status.fresh
         && status.freshness.active_jobs == 0
+        // Dead-generation jobs awaiting attestation are not this daemon's
+        // work; its replacement leaves them untouched, as it did.
         && status.active_job_recovery_evidence.iter().all(|evidence| {
-            evidence.disposition
-                == crate::api_jobs::DaemonActiveJobRecoveryDisposition::TerminalEvidence
+            matches!(
+                evidence.disposition,
+                crate::api_jobs::DaemonActiveJobRecoveryDisposition::TerminalEvidence
+                    | crate::api_jobs::DaemonActiveJobRecoveryDisposition::NeedsAttestation
+            )
         })
         && status.freshness.restartable
         && plan.executable
@@ -514,36 +434,14 @@ mod tests {
         );
         assert_eq!(start().render_command(), "homeboy daemon start");
         assert_eq!(
-            adopt_orphan("lease-dead").render_command(),
-            "homeboy daemon adopt-orphan --lease-id lease-dead"
-        );
-        assert_eq!(
-            reconcile_leaseless_orphans().render_command(),
-            "homeboy daemon reconcile-leaseless-orphans"
+            attest_absent(&[Uuid::nil(), Uuid::from_u128(2)]).render_command(),
+            format!(
+                "homeboy daemon recover --attest-absent {} {}",
+                Uuid::nil(),
+                Uuid::from_u128(2)
+            )
         );
         assert_eq!(diagnose().render_command(), "homeboy daemon status");
-    }
-
-    #[test]
-    fn an_exact_job_set_is_named_argument_by_argument() {
-        let first = Uuid::nil();
-        let second = Uuid::from_u128(2);
-        let action = reconcile_dead_lease_orphans("lease-dead", &[first, second]);
-
-        assert_eq!(
-            action.args,
-            vec![
-                "daemon",
-                "reconcile-dead-lease-orphans",
-                "--lease-id",
-                "lease-dead",
-                "--job-id",
-                &first.to_string(),
-                "--job-id",
-                &second.to_string(),
-                "--confirm-workload-processes-absent",
-            ]
-        );
     }
 
     /// The workload attestation is unverifiable by construction, so it must
@@ -552,8 +450,8 @@ mod tests {
     #[test]
     fn the_workload_attestation_is_declared_as_an_operator_confirmation() {
         assert_eq!(
-            reconcile_dead_lease_orphans("lease-dead", &[Uuid::nil()]).required_confirmations,
-            vec![CONFIRM_WORKLOAD_PROCESSES_ABSENT.to_string()]
+            attest_absent(&[Uuid::nil()]).required_confirmations,
+            vec![ATTEST_ABSENT.to_string()]
         );
         assert!(stop().required_confirmations.is_empty());
     }
@@ -586,7 +484,6 @@ mod tests {
                 pid: Some(3_572_046),
                 recovery_evidence: None,
                 ownership_evidence: Some("daemon lease evidence is inconclusive".to_string()),
-                adoption_command: None,
                 binary_hash: None,
                 daemon_version: Some("0.326.1".to_string()),
                 daemon_build_identity: Some("homeboy 0.326.1+8755ba48288f".to_string()),
@@ -726,37 +623,63 @@ mod tests {
         );
     }
 
-    /// Every `--job-id` is filled from a proven-dead lease report; only the
-    /// attestation that no report can contain is demanded from the operator.
+    /// A dead daemon is recovered by starting one: its startup recovery
+    /// reconciles the predecessor's jobs, so no lease-specific verb exists.
     #[test]
-    fn a_pidless_job_set_is_filled_from_the_report_but_still_demands_the_attestation() {
+    fn a_dead_daemon_with_jobs_is_recovered_by_starting_a_replacement() {
         let mut status = status(
             Some(super::super::DaemonStaleReasonCode::PidDead),
-            Vec::new(),
-            2,
+            vec![DaemonRepairStep::executable(
+                DAEMON_ENSURE_RUNNING,
+                ensure_running(),
+            )],
+            1,
         );
+        status.running = false;
+        status.active_job_recovery_evidence = vec![recovery_evidence(Uuid::from_u128(1))];
+
+        let plan = plan_recovery(&status);
+
+        assert!(plan.executable);
+        assert!(plan.required_confirmations.is_empty());
+        assert_eq!(plan.steps[0].code, DAEMON_ENSURE_RUNNING);
+        assert_eq!(
+            plan.lifecycle,
+            Plan::Transition {
+                step: Step::Repair {
+                    lease_id: Some(LEASE_ID.to_string()),
+                    codes: vec![DAEMON_ENSURE_RUNNING.to_string()],
+                },
+            }
+        );
+    }
+
+    /// Every job id is filled from the report; only the attestation that no
+    /// report can contain is demanded from the operator (#15556 chaos case 2).
+    #[test]
+    fn pidless_dead_generation_jobs_demand_the_attestation() {
+        let mut status = status(None, Vec::new(), 0);
+        let live = recovery_evidence(Uuid::from_u128(3));
         status.active_job_recovery_evidence = vec![
-            recovery_evidence(Uuid::from_u128(1)),
-            recovery_evidence(Uuid::from_u128(2)),
+            attestation_evidence(Uuid::from_u128(1)),
+            attestation_evidence(Uuid::from_u128(2)),
+            live,
         ];
 
         let plan = plan_recovery(&status);
 
         assert_eq!(plan.steps.len(), 1);
-        assert_eq!(plan.steps[0].code, DAEMON_RECONCILE_DEAD_LEASE_ORPHANS);
+        assert_eq!(plan.steps[0].code, DAEMON_ATTEST_ABSENT);
         let args = &plan.steps[0].action.as_ref().expect("argv").args;
-        assert_eq!(
-            args.iter().filter(|arg| *arg == "--job-id").count(),
-            2,
-            "every durable job id is named: {args:?}"
-        );
         assert!(args.contains(&Uuid::from_u128(1).to_string()));
-        assert!(args.contains(&LEASE_ID.to_string()));
-        // The lifecycle verdict names the same exact set in the store's frame.
+        assert!(args.contains(&Uuid::from_u128(2).to_string()));
+        assert!(
+            !args.contains(&Uuid::from_u128(3).to_string()),
+            "only jobs awaiting attestation are named: {args:?}"
+        );
         let Plan::NeedsAttestation(attestation) = &plan.lifecycle else {
             panic!("expected an attestation verdict: {:?}", plan.lifecycle);
         };
-        assert_eq!(attestation.lease_id, LEASE_ID);
         assert_eq!(
             attestation.job_ids,
             vec![Uuid::from_u128(1), Uuid::from_u128(2)]
@@ -767,174 +690,41 @@ mod tests {
         );
         assert_eq!(
             plan.required_confirmations,
-            vec![CONFIRM_WORKLOAD_PROCESSES_ABSENT.to_string()],
+            vec![ATTEST_ABSENT.to_string()],
             "workload absence is unverifiable and stays operator-supplied"
         );
     }
 
-    /// #13619: durable terminal evidence proves no workload remains, so those
-    /// jobs never demand an operator attestation on their own. Only the
-    /// genuinely ambiguous live workload does. The store's compare-and-swap
-    /// covers the complete active set, so once an attestation is required it
-    /// names the terminal-evidence job too.
+    /// Startup recovery may prove jobs an attestation would otherwise cover,
+    /// so a dead daemon is started before anything is attested.
     #[test]
-    fn terminal_evidence_jobs_are_reconciled_without_workload_attestation() {
-        let mut status = status(
-            Some(super::super::DaemonStaleReasonCode::PidDead),
-            Vec::new(),
-            1,
-        );
-        let terminal = terminal_recovery_evidence(Uuid::from_u128(7));
-        let blocking = recovery_evidence(Uuid::from_u128(8));
-        status.active_job_recovery_evidence = vec![terminal, blocking];
-
-        let plan = plan_recovery(&status);
-
-        assert_eq!(plan.steps.len(), 1);
-        assert_eq!(plan.steps[0].code, DAEMON_RECONCILE_DEAD_LEASE_ORPHANS);
-        let args = &plan.steps[0].action.as_ref().expect("argv").args;
-        assert!(
-            args.contains(&Uuid::from_u128(7).to_string()),
-            "the compare-and-swap names the complete active set: {args:?}"
-        );
-        assert!(
-            args.contains(&Uuid::from_u128(8).to_string()),
-            "the ambiguous live workload is still named: {args:?}"
-        );
-        assert_eq!(
-            plan.required_confirmations,
-            vec![CONFIRM_WORKLOAD_PROCESSES_ABSENT.to_string()],
-            "the ambiguous workload keeps the operator attestation"
-        );
-    }
-
-    #[test]
-    fn dead_lease_pidless_jobs_advertise_exact_attested_recovery() {
+    fn a_dead_daemon_is_started_before_any_attestation() {
         let mut status = status(
             Some(super::super::DaemonStaleReasonCode::PidDead),
             vec![DaemonRepairStep::executable(
-                DAEMON_ADOPT_ORPHAN,
-                adopt_orphan(LEASE_ID),
+                DAEMON_ENSURE_RUNNING,
+                ensure_running(),
             )],
             1,
         );
-        let job_id = Uuid::from_u128(42);
-        status.active_job_recovery_evidence =
-            vec![crate::api_jobs::DaemonActiveJobRecoveryEvidence {
-                disposition: crate::api_jobs::DaemonActiveJobRecoveryDisposition::BlockingAmbiguous,
-                ..recovery_evidence(job_id)
-            }];
+        status.running = false;
+        status.active_job_recovery_evidence = vec![attestation_evidence(Uuid::from_u128(1))];
 
         let plan = plan_recovery(&status);
 
-        assert!(plan.executable);
-        assert_eq!(plan.steps[0].code, DAEMON_RECONCILE_DEAD_LEASE_ORPHANS);
-        assert!(plan.reason.contains(&job_id.to_string()), "{}", plan.reason);
-        assert_eq!(
-            plan.required_confirmations,
-            vec![CONFIRM_WORKLOAD_PROCESSES_ABSENT.to_string()]
-        );
-        assert!(plan.steps[0]
-            .command
-            .contains("--confirm-workload-processes-absent"));
-    }
-
-    #[test]
-    fn dead_lease_jobs_without_automatic_proof_offer_attested_exact_reconciliation() {
-        for (controller_owned, child_pid, disposition) in [
-            (true, None, crate::api_jobs::DaemonActiveJobRecoveryDisposition::BlockingAmbiguous),
-            (true, None, crate::api_jobs::DaemonActiveJobRecoveryDisposition::MissingChildIdentityRecoverable),
-            (false, Some(42), crate::api_jobs::DaemonActiveJobRecoveryDisposition::BlockingAmbiguous),
-        ] {
-            let mut status = status(
-                Some(super::super::DaemonStaleReasonCode::PidDead),
-                vec![DaemonRepairStep::executable(
-                    DAEMON_ADOPT_ORPHAN,
-                    adopt_orphan(LEASE_ID),
-                )],
-                1,
-            );
-            status.active_job_recovery_evidence =
-                vec![crate::api_jobs::DaemonActiveJobRecoveryEvidence {
-                    controller_owned,
-                    child_pid,
-                    disposition,
-                    ..recovery_evidence(Uuid::from_u128(44))
-                }];
-            let plan = plan_recovery(&status);
-            assert!(plan.executable);
-            assert_eq!(plan.steps[0].code, DAEMON_RECONCILE_DEAD_LEASE_ORPHANS);
-            assert_eq!(plan.required_confirmations, vec![CONFIRM_WORKLOAD_PROCESSES_ABSENT]);
-            assert!(plan.steps[0].command.contains(&Uuid::from_u128(44).to_string()));
-        }
-    }
-
-    /// A live child is finishing, not orphaned: the plan says what to wait for
-    /// instead of recommending a reconcile the store will refuse (#15556).
-    #[test]
-    fn dead_lease_with_a_live_child_waits_instead_of_recommending_a_refused_reconcile() {
-        let mut status = status(
-            Some(super::super::DaemonStaleReasonCode::PidDead),
-            vec![DaemonRepairStep::executable(
-                DAEMON_ADOPT_ORPHAN,
-                adopt_orphan(LEASE_ID),
-            )],
-            1,
-        );
-        status.active_job_recovery_evidence =
-            vec![crate::api_jobs::DaemonActiveJobRecoveryEvidence {
-                child_pid: Some(4242),
-                disposition: crate::api_jobs::DaemonActiveJobRecoveryDisposition::ProtectedLive,
-                ..recovery_evidence(Uuid::from_u128(45))
-            }];
-        let plan = plan_recovery(&status);
-        assert!(!plan.executable);
-        assert_eq!(plan.steps[0].code, DAEMON_DIAGNOSE);
-        assert!(plan.reason.contains("child pid 4242"), "{}", plan.reason);
+        assert_eq!(plan.steps[0].code, DAEMON_ENSURE_RUNNING);
         assert!(plan.required_confirmations.is_empty());
-        assert!(super::super::lifecycle_plan::mutation_refusal(&plan.lifecycle).is_some());
     }
 
     #[test]
-    fn dead_lease_with_linked_terminal_child_keeps_adoption_eligible() {
-        let mut status = status(
-            Some(super::super::DaemonStaleReasonCode::PidDead),
-            vec![DaemonRepairStep::executable(
-                DAEMON_ADOPT_ORPHAN,
-                adopt_orphan(LEASE_ID),
-            )],
-            0,
-        );
-        status.active_job_recovery_evidence = vec![terminal_recovery_evidence(Uuid::from_u128(43))];
-
-        let plan = plan_recovery(&status);
-
-        assert!(plan.executable);
-        assert_eq!(plan.steps[0].code, DAEMON_ADOPT_ORPHAN);
-        assert!(plan.required_confirmations.is_empty());
-        assert_eq!(
-            plan.lifecycle,
-            Plan::Transition {
-                step: Step::Repair {
-                    lease_id: Some(LEASE_ID.to_string()),
-                    codes: vec![DAEMON_ADOPT_ORPHAN.to_string()],
-                },
-            }
-        );
-    }
-
-    #[test]
-    fn reachable_version_mismatch_with_active_jobs_never_offers_dead_lease_reconciliation() {
+    fn reachable_version_mismatch_with_active_jobs_never_offers_attestation() {
         let mut status = status(
             Some(super::super::DaemonStaleReasonCode::VersionMismatch),
             Vec::new(),
             2,
         );
         status.active_job_recovery_evidence = vec![
-            crate::api_jobs::DaemonActiveJobRecoveryEvidence {
-                operation: "controller.work".to_string(),
-                ..recovery_evidence(Uuid::from_u128(1))
-            },
+            recovery_evidence(Uuid::from_u128(1)),
             crate::api_jobs::DaemonActiveJobRecoveryEvidence {
                 operation: "controller.lab.staging-dispatch".to_string(),
                 linked_durable_run_id: Some("active-staging-dispatch".to_string()),
@@ -958,10 +748,6 @@ mod tests {
                 ..
             }
         ));
-        assert!(plan.steps.iter().all(|step| {
-            step.code != DAEMON_RECONCILE_DEAD_LEASE_ORPHANS
-                && !step.command.contains(CONFIRM_WORKLOAD_PROCESSES_ABSENT)
-        }));
     }
 
     /// Replacement may proceed without any attestation when every active job
@@ -1017,16 +803,24 @@ mod tests {
         }
     }
 
+    fn attestation_evidence(job_id: Uuid) -> crate::api_jobs::DaemonActiveJobRecoveryEvidence {
+        crate::api_jobs::DaemonActiveJobRecoveryEvidence {
+            daemon_lease_id: Some("lease-dead".to_string()),
+            disposition: crate::api_jobs::DaemonActiveJobRecoveryDisposition::NeedsAttestation,
+            ..recovery_evidence(job_id)
+        }
+    }
+
     /// The owner lock is held but no live lease names its holder (a daemon is
-    /// starting): the adoption the freshness report offers would race that
+    /// starting): the start the freshness report offers would race that
     /// holder, so the one planner blocks it and the mutation gate refuses.
     #[test]
     fn a_held_owner_lock_blocks_a_dead_lease_without_jobs() {
         let mut status = status(
             Some(super::super::DaemonStaleReasonCode::PidDead),
             vec![DaemonRepairStep::executable(
-                DAEMON_ADOPT_ORPHAN,
-                adopt_orphan(LEASE_ID),
+                DAEMON_ENSURE_RUNNING,
+                ensure_running(),
             )],
             0,
         );
@@ -1054,8 +848,8 @@ mod tests {
             stop(),
             stop_for_lease("lease"),
             start(),
-            adopt_orphan("lease"),
-            reconcile_leaseless_orphans(),
+            ensure_running(),
+            attest_absent(&[Uuid::nil()]),
         ] {
             assert_eq!(action.safety, ActionSafety::Mutating, "{}", action.id);
         }

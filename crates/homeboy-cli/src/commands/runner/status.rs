@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use homeboy::core::daemon::{DaemonRecoveryEvidence, DaemonStaleReasonCode};
+use homeboy::core::daemon::{DaemonFreshnessReport, DaemonRecoveryEvidence, DaemonStaleReasonCode};
 use homeboy::runner::readonly_probe;
 use homeboy::runner::runners::{
     self as runner, Runner, RunnerActiveJobState, RunnerStatusReport, RuntimeMaterializationStatus,
@@ -308,11 +308,8 @@ pub(super) fn execution_capabilities_with_local_placement(
     }
 }
 
-pub(super) fn reconcile(
-    id: &str,
-    confirm_workload_processes_absent: bool,
-) -> CmdResult<RunnerOutput> {
-    let (report, attested_recovery) = if confirm_workload_processes_absent {
+pub(super) fn reconcile(id: &str, attest_absent: bool) -> CmdResult<RunnerOutput> {
+    let (report, attested_recovery) = if attest_absent {
         // The attestation runs only when the runner's lifecycle plan is blocked
         // by daemon ownership evidence; otherwise this is the plain reconcile.
         let outcome = runner::reconcile_status_with_remote_attestation(id)?;
@@ -323,8 +320,7 @@ pub(super) fn reconcile(
     let (mut output, exit_code) = reconcile_output(id, report)?;
     if let Some(applied) = attested_recovery {
         output.extra.operator_hints.push(format!(
-            "applied remote attested dead-lease recovery for lease `{}` in `{}` ({} job(s) terminalized): {}",
-            applied.lease_id,
+            "applied remote workload-absence attestation in `{}` ({} job(s) terminalized): {}",
             applied.state_dir,
             applied.job_ids.len(),
             applied.command
@@ -391,7 +387,7 @@ pub(crate) fn reconciliation_outcome(
 
     let reconcile_command = format!("homeboy runner reconcile {}", shell_arg(runner_id));
     let attested_reconcile_command = format!(
-        "homeboy runner reconcile {} --confirm-workload-processes-absent",
+        "homeboy runner reconcile {} --attest-absent",
         shell_arg(runner_id)
     );
     let (remaining_blocker, next_action, retry_predicate) =
@@ -1255,6 +1251,17 @@ pub(super) fn runner_status_operator_hints(report: &RunnerStatusReport) -> Vec<S
     hints
 }
 
+/// The one executable repair a freshness report names, when its plan is a
+/// single mutating step rather than a multi-step restart or a diagnosis.
+fn single_repair_command(freshness: &DaemonFreshnessReport) -> Option<String> {
+    match freshness.repair_plan.as_slice() {
+        [step] if step.code != homeboy::runner::runners::daemon_repair_codes::RUNNER_DIAGNOSE => {
+            Some(step.command.clone())
+        }
+        _ => None,
+    }
+}
+
 pub(super) fn runner_status_operator_commands(
     report: &RunnerStatusReport,
 ) -> Vec<RunnerOperatorCommand> {
@@ -1412,13 +1419,13 @@ fn runner_status_operator_commands_with_recovery_guidance(
             && freshness.active_jobs > 0
             && freshness.stale_reason_code == Some(DaemonStaleReasonCode::VersionMismatch)
     }) {
-        if let Some(command) = freshness.adoption_command.as_ref() {
+        if let Some(command) = single_repair_command(freshness) {
             commands.push(RunnerOperatorCommand {
                 scope: "daemon_reconcile_split_view",
                 runner_id: report.runner_id.clone(),
                 job_id: None,
-                command: command.clone(),
-                description: "Reconcile the stale daemon split view only after the remote owner-lock, process, and listener probes prove no daemon-owned process remains alive.".to_string(),
+                command,
+                description: "Start the runner daemon so its startup recovery reconciles the stale split view under its owner lock; a still-live owner refuses the start.".to_string(),
             });
         }
     }
@@ -1430,12 +1437,12 @@ fn runner_status_operator_commands_with_recovery_guidance(
     if let Some(freshness) = report.daemon_freshness.as_ref().filter(|freshness| {
         freshness.recovery_evidence == Some(DaemonRecoveryEvidence::Recoverable)
     }) {
-        if let Some(command) = freshness.adoption_command.as_ref() {
+        if let Some(command) = single_repair_command(freshness) {
             commands.push(RunnerOperatorCommand {
                 scope: "daemon_reconnect_fresh_idle",
                 runner_id: report.runner_id.clone(),
                 job_id: None,
-                command: command.clone(),
+                command,
                 description: "Reconnect the controller session to the fresh, idle remote daemon; it reports zero authoritatively idle jobs and needs no replacement.".to_string(),
             });
         }
@@ -1737,7 +1744,6 @@ mod tests {
                 worker_identity: None,
                 worker_pid: None,
                 last_seen_at: None,
-                leaseless_recovery_evidence: None,
             }),
             stale_daemon: Some(
                 RunnerStaleDaemonWarning::new(

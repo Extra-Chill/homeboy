@@ -1030,7 +1030,6 @@ mod tests {
             worker_identity: None,
             worker_pid: None,
             last_seen_at: None,
-            leaseless_recovery_evidence: None,
         }
     }
 
@@ -1081,7 +1080,6 @@ mod tests {
             pid: Some(pid),
             recovery_evidence: None,
             ownership_evidence: None,
-            adoption_command: None,
             binary_hash: None,
             daemon_version: Some("test".to_string()),
             daemon_build_identity: Some("homeboy test".to_string()),
@@ -1985,9 +1983,6 @@ pub(super) fn failed_connect(
             homeboy_version: None,
             homeboy_build_identity: None,
             session_path: Some(session_path.display().to_string()),
-            leaseless_recovery: None,
-            state_loss_recovery: None,
-            leaseless_recovery_evidence: None,
             failure_kind: Some(failure_kind.clone()),
             failure_message: Some(failure_message),
             failure_evidence: Some(RunnerConnectFailureEvidence {
@@ -2078,32 +2073,6 @@ fn transport_unreachable_message(server_id: &str, host: &str, detail: &str) -> S
     format!(
         "SSH transport_unreachable for recorded host `{host}` ({line}). Next check: confirm `{host}` answers on SSH. {remedy} SSH host key verification stays on; do not accept a new key."
     )
-}
-
-pub(super) fn failed_connect_after_recovery(
-    runner_id: &str,
-    session_path: PathBuf,
-    failure_kind: RunnerFailureKind,
-    failure_message: String,
-    leaseless_recovery: Option<DaemonLeaselessRecoveryResult>,
-    leaseless_recovery_evidence: Option<RunnerLeaselessRecoveryEvidence>,
-) -> (RunnerConnectReport, i32) {
-    let mut failure = failed_connect(runner_id, session_path, failure_kind, failure_message);
-    attach_leaseless_recovery(
-        &mut failure.0,
-        leaseless_recovery,
-        leaseless_recovery_evidence,
-    );
-    failure
-}
-
-pub(super) fn attach_leaseless_recovery(
-    report: &mut RunnerConnectReport,
-    leaseless_recovery: Option<DaemonLeaselessRecoveryResult>,
-    leaseless_recovery_evidence: Option<RunnerLeaselessRecoveryEvidence>,
-) {
-    report.leaseless_recovery = leaseless_recovery;
-    report.leaseless_recovery_evidence = leaseless_recovery_evidence;
 }
 
 pub(super) fn command_failure_message(

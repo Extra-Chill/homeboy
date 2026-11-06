@@ -451,65 +451,17 @@ pub(super) fn remove(id: &str) -> CmdResult<RunnerOutput> {
 }
 
 pub(super) struct RunnerConnectInput {
-    pub(super) adopt_orphan_lease: Option<String>,
     pub(super) adopt_live_lease: Option<String>,
     pub(super) expected_live_pid: Option<u32>,
-    pub(super) confirm_untracked_child_dead: Vec<uuid::Uuid>,
-    pub(super) reconcile_leaseless_orphans: bool,
-    pub(super) recover_missing_lease_state: Option<String>,
-    pub(super) recorded_pid: Option<u32>,
-    pub(super) recorded_endpoint: Option<String>,
 }
 
 /// Argument-shape validation for `runner connect`, split out so it can be
 /// exercised without attempting an SSH connection.
 pub(super) fn validate_connect_input(input: &RunnerConnectInput) -> homeboy::core::Result<()> {
-    let RunnerConnectInput {
-        adopt_orphan_lease,
-        adopt_live_lease,
-        expected_live_pid,
-        confirm_untracked_child_dead,
-        reconcile_leaseless_orphans,
-        recover_missing_lease_state,
-        recorded_pid,
-        recorded_endpoint,
-    } = input;
-    if adopt_live_lease.is_some() != expected_live_pid.is_some() {
+    if input.adopt_live_lease.is_some() != input.expected_live_pid.is_some() {
         return Err(homeboy::core::Error::validation_invalid_argument(
             "adopt_live_lease",
             "--adopt-live-lease requires --expected-live-pid, and vice versa",
-            None,
-            None,
-        ));
-    }
-    if !confirm_untracked_child_dead.is_empty() && adopt_orphan_lease.is_none() {
-        return Err(homeboy::core::Error::validation_invalid_argument(
-            "confirm_untracked_child_dead",
-            "--confirm-untracked-child-dead requires --adopt-orphan-lease",
-            None,
-            None,
-        ));
-    }
-    let recovery_mode_count = usize::from(adopt_orphan_lease.is_some())
-        + usize::from(*reconcile_leaseless_orphans)
-        + usize::from(recover_missing_lease_state.is_some())
-        + usize::from(adopt_live_lease.is_some());
-    if recovery_mode_count > 1 {
-        return Err(homeboy::core::Error::validation_invalid_argument(
-            "recovery_mode",
-            "--adopt-orphan-lease, --adopt-live-lease, --reconcile-leaseless-orphans, and --recover-missing-lease-state are mutually exclusive",
-            None,
-            None,
-        ));
-    }
-    // `--recorded-pid` and `--recorded-endpoint` are evidence the runner cannot
-    // reconstruct once its state record is gone, so they remain required.
-    if recover_missing_lease_state.is_some()
-        && (recorded_pid.is_none() || recorded_endpoint.is_none())
-    {
-        return Err(homeboy::core::Error::validation_invalid_argument(
-            "recover_missing_lease_state",
-            "--recover-missing-lease-state requires --recorded-pid and --recorded-endpoint",
             None,
             None,
         ));
@@ -519,37 +471,12 @@ pub(super) fn validate_connect_input(input: &RunnerConnectInput) -> homeboy::cor
 
 pub(super) fn connect(id: &str, input: RunnerConnectInput) -> CmdResult<RunnerOutput> {
     validate_connect_input(&input)?;
-    let RunnerConnectInput {
-        adopt_orphan_lease,
-        adopt_live_lease,
-        expected_live_pid,
-        confirm_untracked_child_dead,
-        reconcile_leaseless_orphans,
-        recover_missing_lease_state,
-        recorded_pid,
-        recorded_endpoint,
-    } = input;
-    let (report, exit_code) = match (adopt_live_lease.as_deref(), expected_live_pid) {
+    let (report, exit_code) = match (input.adopt_live_lease.as_deref(), input.expected_live_pid) {
         (Some(lease_id), Some(pid)) => runner::connect_with_live_lease_adoption(id, lease_id, pid)?,
         // A plain connect brings the runner binary to the controller's
-        // release first. Explicit recovery adopts exact daemons and keeps the
-        // configured binary untouched.
-        _ if adopt_orphan_lease.is_none()
-            && confirm_untracked_child_dead.is_empty()
-            && !reconcile_leaseless_orphans
-            && recover_missing_lease_state.is_none() =>
-        {
-            runner::connect_converging_binary(id)?
-        }
-        _ => runner::connect_with_orphan_adoption(
-            id,
-            adopt_orphan_lease.as_deref(),
-            &confirm_untracked_child_dead,
-            reconcile_leaseless_orphans,
-            recover_missing_lease_state.as_deref(),
-            recorded_pid,
-            recorded_endpoint.as_deref(),
-        )?,
+        // release first. A dead daemon generation needs no recovery mode: the
+        // daemon this starts recovers its predecessor's jobs (#17429).
+        _ => runner::connect_converging_binary(id)?,
     };
     Ok((
         RunnerOutput {
@@ -1019,89 +946,49 @@ mod tests {
     // than `connect` so no test can fall through to a real SSH attempt.
     use super::{validate_connect_input, RunnerConnectInput};
 
-    fn input() -> RunnerConnectInput {
-        RunnerConnectInput {
-            adopt_orphan_lease: None,
-            adopt_live_lease: None,
-            expected_live_pid: None,
-            confirm_untracked_child_dead: Vec::new(),
-            reconcile_leaseless_orphans: false,
-            recover_missing_lease_state: None,
-            recorded_pid: None,
-            recorded_endpoint: None,
-        }
-    }
-
     #[test]
-    fn recovery_modes_validate_with_their_required_evidence() {
+    fn live_lease_adoption_requires_its_exact_pid() {
         for input in [
             RunnerConnectInput {
-                adopt_orphan_lease: Some("lease-dead".to_string()),
-                ..input()
+                adopt_live_lease: Some("lease".to_string()),
+                expected_live_pid: None,
             },
             RunnerConnectInput {
-                reconcile_leaseless_orphans: true,
-                ..input()
-            },
-            RunnerConnectInput {
-                recover_missing_lease_state: Some("lease".to_string()),
-                recorded_pid: Some(42),
-                recorded_endpoint: Some("127.0.0.1:7421".to_string()),
-                ..input()
+                adopt_live_lease: None,
+                expected_live_pid: Some(42),
             },
         ] {
-            validate_connect_input(&input).expect("valid recovery mode");
-        }
-    }
-
-    #[test]
-    fn untracked_child_confirmation_requires_exact_orphan_lease_mode() {
-        let error = validate_connect_input(&RunnerConnectInput {
-            confirm_untracked_child_dead: vec![uuid::Uuid::new_v4()],
-            ..input()
-        })
-        .expect_err("untracked child confirmation is only valid for exact adoption");
-        assert!(error.message.contains("requires --adopt-orphan-lease"));
-    }
-
-    #[test]
-    fn state_loss_recovery_still_requires_unreconstructable_evidence() {
-        // Once the state record is gone the runner cannot recompute these.
-        let error = validate_connect_input(&RunnerConnectInput {
-            recover_missing_lease_state: Some("lease".to_string()),
-            ..input()
-        })
-        .expect_err("partial state-loss evidence must fail before connecting");
-        assert!(error.message.contains("--recorded-pid"));
-    }
-
-    #[test]
-    fn recovery_modes_are_mutually_exclusive_before_connecting() {
-        let conflicting_inputs = [
-            RunnerConnectInput {
-                adopt_orphan_lease: Some("lease".to_string()),
-                reconcile_leaseless_orphans: true,
-                ..input()
-            },
-            RunnerConnectInput {
-                adopt_orphan_lease: Some("lease".to_string()),
-                recover_missing_lease_state: Some("lease".to_string()),
-                recorded_pid: Some(42),
-                recorded_endpoint: Some("127.0.0.1:7421".to_string()),
-                ..input()
-            },
-            RunnerConnectInput {
-                reconcile_leaseless_orphans: true,
-                recover_missing_lease_state: Some("lease".to_string()),
-                recorded_pid: Some(42),
-                recorded_endpoint: Some("127.0.0.1:7421".to_string()),
-                ..input()
-            },
-        ];
-        for input in conflicting_inputs {
             let error = validate_connect_input(&input)
-                .expect_err("multiple recovery modes must fail before SSH");
-            assert!(error.message.contains("mutually exclusive"));
+                .expect_err("a half-specified live adoption must fail before SSH");
+            assert!(error.message.contains("--expected-live-pid"));
+        }
+        validate_connect_input(&RunnerConnectInput {
+            adopt_live_lease: Some("lease".to_string()),
+            expected_live_pid: Some(42),
+        })
+        .expect("an exact live adoption validates");
+    }
+
+    /// The per-case dead-daemon recovery flags are gone: a plain connect
+    /// starts a daemon whose startup recovers its predecessor (#17429).
+    #[test]
+    fn dead_daemon_recovery_flags_do_not_parse() {
+        use clap::Parser;
+        for flags in [
+            &["--adopt-orphan-lease", "lease"][..],
+            &["--reconcile-leaseless-orphans"][..],
+            &["--recover-missing-lease-state", "lease"][..],
+            &[
+                "--confirm-untracked-child-dead",
+                "00000000-0000-0000-0000-000000000001",
+            ][..],
+        ] {
+            let mut argv = vec!["homeboy", "runner", "connect", "lab"];
+            argv.extend_from_slice(flags);
+            assert!(
+                crate::cli_surface::Cli::try_parse_from(argv).is_err(),
+                "{flags:?} must not parse"
+            );
         }
     }
 }

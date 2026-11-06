@@ -19,7 +19,6 @@ fn first_connect_routes_to_idempotent_ensure_start_when_no_daemon_exists() {
         work_evidence: RemoteDaemonWorkEvidence::Unknown,
         endpoint_probe_error: None,
         termination_evidence: None,
-        daemon_freshness: None,
     };
 
     assert_eq!(
@@ -148,7 +147,7 @@ fn active_job_fence_allows_reattach_but_rejects_new_admission() {
 }
 
 #[test]
-fn missing_daemon_state_with_active_jobs_refuses_ensure_running() {
+fn missing_daemon_state_with_active_jobs_starts_the_recovering_successor() {
     let status = RemoteDaemonStatus {
         daemon: None,
         stale_reason: Some("daemon state is unavailable".to_string()),
@@ -159,15 +158,14 @@ fn missing_daemon_state_with_active_jobs_refuses_ensure_running() {
         work_evidence: RemoteDaemonWorkEvidence::Unknown,
         endpoint_probe_error: None,
         termination_evidence: None,
-        daemon_freshness: None,
     };
 
-    let error = remote_daemon_connect_action(None, &status)
-        .expect_err("active jobs require explicit recovery");
-
-    assert!(error.contains("1 active job(s)"));
-    assert!(error.contains("refusing ensure-running"));
-    assert!(error.contains("active-job recovery guidance"));
+    // The successor's owner lock refuses a still-running holder, and its
+    // startup recovery reconciles the dead generation's jobs (#17429).
+    assert_eq!(
+        remote_daemon_connect_action(None, &status).unwrap(),
+        RemoteDaemonConnectAction::Start
+    );
 }
 
 #[test]
@@ -656,7 +654,7 @@ fn parses_self_identity_json_envelope() {
 #[test]
 fn parses_advertised_daemon_recovery_capabilities() {
     let identity = parse_self_identity_output(
-        r#"{"success":true,"data":{"version":"0.330.0","display":"homeboy 0.330.0+19a41cd5102d","daemon_recovery_capabilities":[{"id":"daemon-recovery-leaseless","version":1},{"id":"daemon-recovery-state-loss","version":1}]}}"#,
+        r#"{"success":true,"data":{"version":"0.330.0","display":"homeboy 0.330.0+19a41cd5102d","daemon_recovery_capabilities":[{"id":"daemon-ensure-running-operation-id","version":1},{"id":"a-capability-from-the-future","version":1}]}}"#,
     )
     .expect("identity");
 
@@ -669,7 +667,10 @@ fn parses_advertised_daemon_recovery_capabilities() {
         .collect::<Vec<_>>();
     assert_eq!(
         ids,
-        vec!["daemon-recovery-leaseless", "daemon-recovery-state-loss"]
+        vec![
+            "daemon-ensure-running-operation-id",
+            "a-capability-from-the-future"
+        ]
     );
 }
 
@@ -695,7 +696,7 @@ fn malformed_capability_fields_degrade_to_the_scrape_fallback() {
     for body in [
         r#"{"success":true,"data":{"version":"0.330.0","display":"homeboy 0.330.0+19a41cd5102d","daemon_recovery_capabilities":null}}"#,
         r#"{"success":true,"data":{"version":"0.330.0","display":"homeboy 0.330.0+19a41cd5102d","daemon_recovery_capabilities":"leaseless"}}"#,
-        r#"{"success":true,"data":{"version":"0.330.0","display":"homeboy 0.330.0+19a41cd5102d","daemon_recovery_capabilities":[{"id":"daemon-recovery-leaseless"}]}}"#,
+        r#"{"success":true,"data":{"version":"0.330.0","display":"homeboy 0.330.0+19a41cd5102d","daemon_recovery_capabilities":[{"id":"daemon-ensure-running-operation-id"}]}}"#,
     ] {
         let identity = parse_self_identity_output(body).expect("identity still parses");
         assert_eq!(identity.version, "0.330.0");
@@ -712,7 +713,7 @@ fn malformed_capability_fields_degrade_to_the_scrape_fallback() {
 #[test]
 fn unknown_ids_and_future_versions_are_preserved() {
     let identity = parse_self_identity_output(
-        r#"{"success":true,"data":{"version":"9.9.9","display":"homeboy 9.9.9+19a41cd5102d","daemon_recovery_capabilities":[{"id":"daemon-recovery-leaseless","version":7},{"id":"a-capability-from-the-future","version":2}]}}"#,
+        r#"{"success":true,"data":{"version":"9.9.9","display":"homeboy 9.9.9+19a41cd5102d","daemon_recovery_capabilities":[{"id":"daemon-ensure-running-operation-id","version":7},{"id":"a-capability-from-the-future","version":2}]}}"#,
     )
     .expect("identity");
 
@@ -722,7 +723,7 @@ fn unknown_ids_and_future_versions_are_preserved() {
     assert_eq!(advertised.len(), 2);
     assert!(homeboy_lab_contract::daemon_recovery_capability_advertised(
         Some(advertised.as_slice()),
-        homeboy_lab_contract::DAEMON_RECOVERY_LEASELESS_CAPABILITY,
+        homeboy_lab_contract::DAEMON_ENSURE_RUNNING_OPERATION_ID_CAPABILITY,
     ));
 }
 
@@ -1303,14 +1304,17 @@ fn remote_daemon_status_running_or_reachable_ambiguous_summary_retains_owner_and
 }
 
 #[test]
-fn remote_daemon_status_unleased_summary_with_active_work_is_not_cold_start_authority() {
+fn remote_daemon_status_unleased_summary_with_active_work_starts_the_recovering_successor() {
     let status = remote_daemon::remote_daemon_status_from_data(&serde_json::json!({
         "running":false,"reachable":false,"fresh":false,"active_jobs":[{"id":"retained-work"}],
         "truncation":{"active_jobs":{"omitted":2}},
         "daemon":{"address":null,"lease_id":null,"pid":null}
     }));
     assert_eq!(status.active_jobs, 3);
-    assert!(remote_daemon::remote_daemon_connect_action(None, &status).is_err());
+    assert_eq!(
+        remote_daemon::remote_daemon_connect_action(None, &status).unwrap(),
+        RemoteDaemonConnectAction::Start
+    );
 }
 
 #[test]

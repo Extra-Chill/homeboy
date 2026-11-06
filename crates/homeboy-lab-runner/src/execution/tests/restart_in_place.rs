@@ -379,7 +379,6 @@ fn connected_runner_with_re_adoptable_job(
         worker_identity: None,
         worker_pid: None,
         last_seen_at: None,
-        leaseless_recovery_evidence: None,
     };
     let roots = homeboy_core::paths::PathRoots::from_environment().expect("roots");
     let session_path = homeboy_core::paths::runner_controller_session_file_in_root(
