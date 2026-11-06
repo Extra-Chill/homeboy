@@ -522,6 +522,11 @@ fn plan_recovery_steps(status: &DaemonStatus) -> DaemonRecoveryPlan {
     // Nothing is authorized. Say so, and hand back the read-only step that
     // produces the evidence a later pass would need, rather than an empty plan.
     let reason = match freshness.stale_reason_code {
+        Some(super::DaemonStaleReasonCode::VersionMismatch)
+            if status.running && status.reachable =>
+        {
+            status.render_summary()
+        }
         Some(code) => format!(
             "daemon is stale ({code:?}) but the evidence authorizes no automatic recovery: {}",
             freshness

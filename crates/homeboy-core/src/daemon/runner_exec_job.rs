@@ -508,10 +508,15 @@ mod tests {
                 1,
                 "re-adoption must not spawn the child again"
             );
-            assert!(
-                !job_dir(job_id).unwrap().exists(),
-                "custody files are released"
-            );
+            // Terminal status is persisted before the supervisor returns and
+            // drops custody. Wait for that asynchronous cleanup as well, rather
+            // than racing the supervisor immediately after observing status.
+            let custody_dir = job_dir(job_id).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while custody_dir.exists() {
+                assert!(Instant::now() < deadline, "custody files are released");
+                std::thread::sleep(Duration::from_millis(20));
+            }
         });
     }
 

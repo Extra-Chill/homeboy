@@ -89,7 +89,7 @@ pub(super) fn configured_idle_timeout() -> Result<Option<Duration>> {
 /// Installers replace a binary by renaming a new file over its path, so the
 /// path keeps resolving while its `(dev, ino)` changes. Comparing the two is a
 /// portable replacement check that needs no `/proc`.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ExecutableIdentity {
     pub path: std::path::PathBuf,
     pub dev: u64,

@@ -866,6 +866,9 @@ pub struct DaemonState {
     pub binary_sha256: Option<String>,
     /// The executable the daemon started from, so any reader can tell when
     /// an upgrade has since replaced it on disk.
+    // v0.445.4 (v1) did not record executable identity. An empty identity
+    // means unknown, not replaced; build identity/hash still determine freshness.
+    #[serde(default)]
     pub executable: ExecutableIdentity,
     pub runtime_paths: DaemonRuntimeSnapshot,
     /// The service manager that runs and restarts this daemon. Homeboy never
@@ -969,7 +972,15 @@ impl DaemonStatus {
     /// Render [`DaemonStatus::summary`] from the status's own evidence.
     pub fn render_summary(&self) -> String {
         let mut summary = if self.running && self.reachable {
-            "daemon process is live and its API is reachable".to_string()
+            if self.freshness.stale_reason_code == Some(DaemonStaleReasonCode::VersionMismatch) {
+                format!(
+                    "daemon process is live and its API is reachable; live daemon from an older build ({}), with {} active job(s); replacement planned when idle",
+                    self.freshness.daemon_version.as_deref().unwrap_or("unknown"),
+                    self.freshness.active_jobs
+                )
+            } else {
+                "daemon process is live and its API is reachable".to_string()
+            }
         } else if self.running {
             "daemon process is live but its API is unreachable".to_string()
         } else if self.state.is_some() {
@@ -5530,6 +5541,65 @@ mod tests {
                 .expect("durable handoff releases the client's admission guard");
             assert_eq!(client.status(&job_id.to_string()).unwrap().id, job_id);
             drop(fence);
+            server.join().unwrap();
+        });
+    }
+
+    #[test]
+    fn workflow_status_routes_to_previous_release_v1_lease() {
+        crate::test_support::with_isolated_home(|_| {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let path = state_path().unwrap();
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            // Exact v0.445.4 field set: no executable or service_manager.
+            // Do not serialize DaemonState here: that would hide new required fields.
+            let lease = json!({
+                "schema": "homeboy.daemon.session_lease.v1",
+                "lease_id": "previous-release",
+                "startup_token": "previous-token",
+                "address": address.to_string(),
+                "pid": std::process::id(),
+                "state_path": path.to_string_lossy(),
+                "started_at": "2026-01-01T00:00:00Z",
+                "last_seen_at": "2026-01-01T00:00:00Z",
+                "build_identity": {
+                    "version": "0.445.4", "display": "0.445.4"
+                },
+                "binary_sha256": null,
+                "runtime_paths": { "loaded_at": "2026-01-01T00:00:00Z", "paths": [] }
+            });
+            fs::write(&path, serde_json::to_vec(&lease).unwrap()).unwrap();
+            let validation = validate_lease_file(&path).unwrap();
+            assert!(validation.running && validation.reachable);
+            assert!(!validation.fresh);
+            assert_eq!(
+                validation.stale_reason_code,
+                Some(DaemonStaleReasonCode::VersionMismatch)
+            );
+            let report = freshness_report_from_validation(&validation, 8);
+            assert_eq!(report.daemon_version.as_deref(), Some("0.445.4"));
+            assert!(!report.restartable);
+            assert!(freshness_report_from_validation(&validation, 0).restartable);
+
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut request = [0_u8; 4096];
+                let length = stream.read(&mut request).unwrap();
+                assert!(std::str::from_utf8(&request[..length])
+                    .unwrap()
+                    .starts_with("GET /workflows/legacy-instance HTTP/1.1"));
+                let body =
+                    json!({"success": true, "data": {"body": {"instance": "legacy-instance"}}})
+                        .to_string();
+                write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
+            });
+            let client = LocalControllerJobClient::connect_existing_job("legacy-instance").unwrap();
+            let result = client.workflow("legacy-instance").unwrap();
+            assert_eq!(result["instance"], "legacy-instance");
             server.join().unwrap();
         });
     }
