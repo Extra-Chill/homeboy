@@ -675,7 +675,13 @@ fn hermetic_default_observation_store_fails_closed() {
     let panic = std::panic::catch_unwind(|| crate::paths::observation_db())
         .expect_err("ambient store resolution must fail closed");
     let message = panic.downcast_ref::<String>().expect("panic message");
-    assert!(message.contains("default observation store resolved under test isolation"));
+    assert!(message.contains("ambient Homeboy data root resolved under test isolation"));
+    assert!(message.contains(file!()), "missing call site: {message}");
+    // The fence covers the data root itself, so every default store below it
+    // fails closed too, not only the observation database (#17293).
+    let panic = std::panic::catch_unwind(|| crate::paths::homeboy_data())
+        .expect_err("ambient data-root resolution must fail closed");
+    let message = panic.downcast_ref::<String>().expect("panic message");
     assert!(message.contains(file!()), "missing call site: {message}");
 }
 

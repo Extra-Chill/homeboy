@@ -326,7 +326,13 @@ pub fn homeboy_json() -> Result<PathBuf> {
 ///
 /// Config/spec files remain under `homeboy()` (`~/.config/homeboy`). This
 /// directory is for machine-local observations such as the SQLite store.
+///
+/// Fenced under test isolation: inside a [`ObservationStoreIsolation`] scope
+/// (every `HermeticTestContext`) resolving the ambient data root panics, so a
+/// single-root test proves its code never escapes the injected roots (#17293).
+#[track_caller]
 pub fn homeboy_data() -> Result<PathBuf> {
+    assert_ambient_root_allowed("data root");
     if let Ok(path) = env::var(HOMEBOY_DATA_DIR_ENV) {
         if !path.trim().is_empty() {
             return Ok(expand_tilde_path(path));
@@ -394,7 +400,8 @@ thread_local! {
     static HERMETIC_CONTEXTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// Test-isolation lifetime; default observation stores must not escape injection.
+/// Test-isolation lifetime: while one is alive on this thread, the ambient
+/// data root (and every default store below it) must not be resolved.
 #[doc(hidden)]
 pub struct ObservationStoreIsolation(std::marker::PhantomData<std::rc::Rc<()>>);
 
@@ -411,22 +418,31 @@ impl Drop for ObservationStoreIsolation {
     }
 }
 
-/// Local SQLite observation-store path.
+/// Panic when ambient Homeboy state is resolved inside test isolation.
+///
+/// A `HermeticTestContext` hands its code explicit roots; reaching the
+/// process-global root from inside one is exactly the escape that second-root
+/// isolation tests used to probe for. Legacy `HomeGuard` explicitly injects a
+/// process-wide home, so ambient resolution is the point there and is allowed.
 #[track_caller]
-pub fn observation_db() -> Result<PathBuf> {
+fn assert_ambient_root_allowed(what: &str) {
     let caller = std::panic::Location::caller();
-    // Legacy HomeGuard explicitly injects a process-wide home root.
+    if HERMETIC_CONTEXTS.with(|count| count.get()) == 0 {
+        return;
+    }
     let explicit_home = home_root_override()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .is_some();
-    HERMETIC_CONTEXTS.with(|count| {
-        assert!(
-            count.get() == 0 || explicit_home,
-            "default observation store resolved under test isolation at {}; inject a store/root instead",
-            caller
-        );
-    });
+    assert!(
+        explicit_home,
+        "ambient Homeboy {what} resolved under test isolation at {caller}; inject a store/root instead"
+    );
+}
+
+/// Local SQLite observation-store path.
+#[track_caller]
+pub fn observation_db() -> Result<PathBuf> {
     Ok(observation_db_in_root(&homeboy_data()?))
 }
 
@@ -434,6 +450,7 @@ pub fn observation_db() -> Result<PathBuf> {
 ///
 /// Storage owners use this rather than rebuilding paths so reporting and future
 /// placement policy can refer to the same stable store identities.
+#[track_caller]
 pub fn homeboy_data_store(name: &str) -> Result<PathBuf> {
     Ok(homeboy_data()?.join(name))
 }
