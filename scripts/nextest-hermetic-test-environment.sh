@@ -74,7 +74,10 @@ hermetic_tmp_parent=""
 # roots there makes short-path aliases resolve to a different physical path and
 # lets invocation cleanup own the parent of live test state. Prefer canonical
 # system roots; retain an unrelated caller TMPDIR as a portable fallback.
-for hermetic_candidate in /tmp /var/tmp /dev/shm "${TMPDIR:-}"; do
+# Prefer disk-backed scratch: /tmp and /dev/shm can be small, shared tmpfs
+# volumes. Build/deploy fixtures exercise real capacity admission and must not
+# compete with the host's RAM-backed scratch for their filesystem reserve.
+for hermetic_candidate in /var/tmp /tmp /dev/shm "${TMPDIR:-}"; do
     [ -n "$hermetic_candidate" ] || continue
     if hermetic_exec_probe "$hermetic_candidate"; then
         hermetic_tmp_parent="$(CDPATH= cd -- "$hermetic_candidate" && pwd -P)"
@@ -106,6 +109,30 @@ TMP="$TMPDIR"
 TEMP="$TMPDIR"
 export TMP TEMP
 
+# Isolate the entire test binary, including tests which only read defaults and
+# never construct a HomeGuard. Preserve toolchain locations before replacing
+# HOME so fixture commands can still find the installed Rust toolchain.
+CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
+RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
+export CARGO_HOME RUSTUP_HOME
+# Only test-runner controls belong to the outer invocation. Tests may explicitly
+# inject any product context after startup; none comes from the operator job.
+for hermetic_name in $(env | cut -d= -f1 | grep '^HOMEBOY_' || true); do
+    case "$hermetic_name" in
+        HOMEBOY_TEST_*) ;;
+        *) unset "$hermetic_name" ;;
+    esac
+done
+HOME="$TMPDIR/home"
+XDG_CONFIG_HOME="$HOME/.config"
+XDG_DATA_HOME="$HOME/.local/share"
+XDG_CACHE_HOME="$HOME/.cache"
+XDG_STATE_HOME="$HOME/.local/state"
+XDG_RUNTIME_DIR="$HOME/run"
+export HOME XDG_CONFIG_HOME XDG_DATA_HOME XDG_CACHE_HOME XDG_STATE_HOME XDG_RUNTIME_DIR
+mkdir -p "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_CACHE_HOME" "$XDG_STATE_HOME" "$XDG_RUNTIME_DIR"
+chmod 700 "$HOME" "$XDG_RUNTIME_DIR"
+
 # Git 2.47+ runs auto maintenance detached after fetch, commit and similar
 # commands. That background git escapes the fixture's process group, outlives
 # the fixture, and keeps writing into temp repositories the test is removing.
@@ -118,6 +145,9 @@ GIT_CONFIG_SYSTEM="$TMPDIR/.hermetic-gitconfig"
 printf '[include]\n\tpath = %s\n[maintenance]\n\tautoDetach = false\n[gc]\n\tautoDetach = false\n' \
     "$hermetic_git_system_config" > "$GIT_CONFIG_SYSTEM"
 export GIT_CONFIG_SYSTEM
+# Runner transport may disable system config. Our private system layer is
+# intentional and must reach fixture git, including transport-replaced envs.
+unset GIT_CONFIG_NOSYSTEM
 unset hermetic_git_system_config
 
 # Cargo's runner is the last parent guaranteed to receive cancellation when a

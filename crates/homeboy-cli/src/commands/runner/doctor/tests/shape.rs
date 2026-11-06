@@ -19,6 +19,20 @@ fn local_alias_report_has_stable_top_level_shape() {
 }
 
 #[test]
+fn artifact_store_probe_accepts_missing_intermediate_directories_without_creating_them() {
+    let root = tempfile::tempdir().expect("fixture root");
+    let store = root.path().join("missing/data/homeboy/artifacts");
+    assert!(probes::local_path_or_parent_writable(&store));
+    assert!(!root.path().join("missing").exists());
+    let file = root.path().join("file");
+    std::fs::write(&file, b"not a directory").unwrap();
+    assert!(!probes::local_path_or_parent_writable(&file));
+    assert!(!probes::local_path_or_parent_writable(
+        &file.join("artifacts")
+    ));
+}
+
+#[test]
 fn doctor_options_default_to_general_read_only_scope() {
     let options = RunnerDoctorOptions::default();
 

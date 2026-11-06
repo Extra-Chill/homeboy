@@ -346,7 +346,7 @@ fn retry_of_a_cook_id_with_a_recovery_step_is_refused_toward_recover() {
     assert_eq!(envelope["data"]["step"]["kind"], "retry", "{envelope:#}");
 
     for extra in [&[][..], &["--run", "--force"][..]] {
-        let mut args = vec!["agent-task", "retry", cook_id];
+        let mut args = vec!["--placement", "local", "agent-task", "retry", cook_id];
         args.extend_from_slice(extra);
         let (code, envelope, _) = run_json(&context, &args);
         assert_eq!(code, Some(2), "{extra:?}: {envelope:#}");
