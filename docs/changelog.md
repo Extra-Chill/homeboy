@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.446.11] - 2026-11-06
+
+### Changed
+- store-explicit Cook PR finalization engine
+
 ## [0.446.10] - 2026-11-06
 
 ### Changed
