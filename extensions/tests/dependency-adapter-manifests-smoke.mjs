@@ -83,6 +83,17 @@ for (const invalid of [{ env: 'bad-env' }, { env: '1CACHE' }, { env: '' }, {}, {
 	assert.throws(() => validateAgainstSchema(downloadCacheSchema, invalid, 'download_cache'));
 }
 
+const downloadAuthSchema = schema.$defs.package_manager.properties.download_auth;
+const downloadAuth = { env: 'COMPOSER_AUTH', file: '.config/composer/auth.json', as: 'content' };
+validateAgainstSchema(downloadAuthSchema, downloadAuth, 'download_auth');
+for (const invalid of [
+	{ ...downloadAuth, as: 'invalid' },
+	{ ...downloadAuth, file: '/etc/auth.json' },
+	{ ...downloadAuth, file: '' },
+]) {
+	assert.throws(() => validateAgainstSchema(downloadAuthSchema, invalid, 'download_auth'));
+}
+
 assert.equal(schema.properties.schema.const, 'homeboy-extension/dependency-adapter-manifest/v1');
 assert.ok(schema.required.includes('ecosystem'));
 assert.ok(schema.required.includes('project_signals'));
@@ -165,6 +176,10 @@ assert.deepEqual(
 	'npm recognizes both authoritative lockfile names'
 );
 
+assert.deepEqual(nodeManifest.package_managers.find((manager) => manager.id === 'npm').download_auth, {
+	env: 'NPM_CONFIG_USERCONFIG', file: '.npmrc', as: 'path',
+});
+
 const npmStatusCommand = nodeManifest.package_managers.find((manager) => manager.id === 'npm').commands.status.command;
 assert.equal(npmStatusCommand, 'npm ci --dry-run --ignore-scripts');
 
@@ -197,6 +212,7 @@ try {
 const composerManifest = JSON.parse(fs.readFileSync(path.join(exampleDir, 'composer.json'), 'utf8'));
 assert.deepEqual(composerManifest.lockfile_priority, ['composer.lock']);
 assert.equal(composerManifest.package_managers[0].download_cache.env, 'COMPOSER_CACHE_DIR');
+assert.deepEqual(composerManifest.package_managers[0].download_auth, downloadAuth);
 
 const adapterModule = await import(path.join(manifestRoot, 'index.mjs'));
 assert.deepEqual(

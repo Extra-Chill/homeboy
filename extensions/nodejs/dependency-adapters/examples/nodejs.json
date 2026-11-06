@@ -105,6 +105,7 @@
     {
       "id": "npm",
       "download_cache": { "env": "npm_config_cache" },
+      "download_auth": { "env": "NPM_CONFIG_USERCONFIG", "file": ".npmrc", "as": "path" },
       "selection": {
         "priority": 3,
         "search": "project-root",
