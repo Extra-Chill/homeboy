@@ -46,7 +46,9 @@ pub use runs::{
 pub use work_intents::{WorkIntent, WorkIntentDeferral};
 
 pub(crate) use helpers::*;
-pub(crate) use schema::{open_initialized_connection, open_readonly_connection};
+pub(crate) use schema::{
+    open_initialized_connection, open_readonly_connection, read_only_busy_evidence,
+};
 
 /// The only schema version this binary creates or opens.
 ///

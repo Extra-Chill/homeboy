@@ -712,6 +712,62 @@ pub(crate) fn open_readonly_connection(path: &Path) -> Result<Connection> {
     Ok(connection)
 }
 
+/// Lock-free evidence about a store a read-only open found busy (#17410).
+///
+/// Everything here is read without SQLite: the journal mode from the file
+/// header (bytes 18-19 are 1 for a rollback journal, 2 for WAL), the WAL and
+/// shared-memory sidecars, and whether a writer holds the initialization
+/// lock. `elapsed` distinguishes a spent busy budget from an immediate busy
+/// result that never reached the busy handler (for example WAL recovery).
+/// `None` when `error` is not a busy or locked result.
+pub(crate) fn read_only_busy_evidence(
+    path: &Path,
+    elapsed: Duration,
+    error: &rusqlite::Error,
+) -> Option<serde_json::Value> {
+    let rusqlite::Error::SqliteFailure(failure, _) = error else {
+        return None;
+    };
+    if !super::is_transient_lock_error(error) {
+        return None;
+    }
+    let sidecar = |suffix: &str| {
+        let mut name = path.as_os_str().to_owned();
+        name.push(suffix);
+        std::fs::metadata(PathBuf::from(name))
+            .ok()
+            .map(|metadata| metadata.len())
+    };
+    let mut header = [0u8; 20];
+    let journal_mode = match std::fs::File::open(path)
+        .and_then(|mut file| std::io::Read::read_exact(&mut file, &mut header))
+    {
+        Ok(()) => match (header[18], header[19]) {
+            (1, 1) => "rollback",
+            (2, 2) => "wal",
+            _ => "unknown",
+        },
+        Err(_) => "no_header",
+    };
+    let initialization_lock_held = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path.with_extension("sqlite.init.lock"))
+        .ok()
+        .and_then(|lock| lock.try_lock_exclusive().ok())
+        .map(|acquired| !acquired);
+    Some(serde_json::json!({
+        "elapsed_ms": elapsed.as_millis() as u64,
+        "budget_ms": super::SQLITE_READ_ONLY_TIMEOUT.as_millis() as u64,
+        "extended_code": failure.extended_code,
+        "journal_mode": journal_mode,
+        "file_bytes": std::fs::metadata(path).ok().map(|metadata| metadata.len()),
+        "wal_bytes": sidecar("-wal"),
+        "shm_bytes": sidecar("-shm"),
+        "initialization_lock_held": initialization_lock_held,
+    }))
+}
+
 /// Open an existing store for a bounded scheduler write. This deliberately
 /// avoids schema initialization, pragma maintenance, and artifact reconciliation: a
 /// scheduler may only claim or terminalize its own durable work.
@@ -810,6 +866,28 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn read_only_busy_evidence_reads_the_store_without_sqlite() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let path = directory.path().join("observations.sqlite");
+        let busy = rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(5), None);
+
+        let missing =
+            read_only_busy_evidence(&path, Duration::from_millis(3), &busy).expect("busy evidence");
+        assert_eq!(missing["journal_mode"], "no_header");
+        assert_eq!(missing["elapsed_ms"], 3);
+        assert_eq!(missing["extended_code"], 5);
+
+        let _connection = open_initialized_connection(&path).expect("open");
+        let wal = read_only_busy_evidence(&path, Duration::ZERO, &busy).expect("busy evidence");
+        assert_eq!(wal["journal_mode"], "wal");
+        assert_eq!(wal["initialization_lock_held"], false);
+        assert!(wal["wal_bytes"].is_u64(), "{wal}");
+
+        let not_busy = rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(1), None);
+        assert!(read_only_busy_evidence(&path, Duration::ZERO, &not_busy).is_none());
+    }
 
     /// An initializing open must persist WAL before it exposes the store.
     #[test]

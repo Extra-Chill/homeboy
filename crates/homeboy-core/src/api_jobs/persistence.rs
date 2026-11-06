@@ -89,6 +89,7 @@ pub(super) fn open_ledger_readonly(path: &Path) -> Result<Option<Connection>> {
     let connection = crate::observation::store::open_readonly_connection(path)?;
     // The baseline schema is created in one transaction, so one ledger table
     // stands for all of them.
+    let started = std::time::Instant::now();
     let initialized = connection
         .query_row(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'daemon_store_state'",
@@ -96,7 +97,15 @@ pub(super) fn open_ledger_readonly(path: &Path) -> Result<Option<Connection>> {
             |_| Ok(()),
         )
         .optional()
-        .map_err(|error| tombstone_error(path, "inspect daemon job ledger", error))?
+        .map_err(|error| {
+            let evidence =
+                crate::observation::store::read_only_busy_evidence(path, started.elapsed(), &error);
+            let mut error = tombstone_error(path, "inspect daemon job ledger", error);
+            if let Some(evidence) = evidence {
+                error.details["ledger_busy"] = evidence;
+            }
+            error
+        })?
         .is_some();
     Ok(initialized.then_some(connection))
 }
