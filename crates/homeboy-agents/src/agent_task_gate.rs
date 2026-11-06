@@ -2893,6 +2893,7 @@ struct SelectedGateEnvironment {
     report: AgentTaskGateEnvironment,
     values: BTreeMap<String, String>,
     hydrate_rust_cache: bool,
+    isolate_download_cache: bool,
     admitted_component_id: Option<String>,
     /// Isolated HOME, when the policy isolates it.
     isolated_home: Option<PathBuf>,
@@ -3019,6 +3020,7 @@ impl SelectedGateEnvironment {
 
     fn hydration_environment(&self) -> homeboy_core::deps::DependencyHydrationEnvironment {
         homeboy_core::deps::DependencyHydrationEnvironment {
+            isolate_download_cache: self.isolate_download_cache,
             clear: self.report.mode == AgentTaskGateEnvironmentMode::Replace,
             remove: self
                 .report
@@ -4224,6 +4226,7 @@ fn selected_gate_environment(
         report,
         values,
         hydrate_rust_cache: policy.hydrate_rust_cache,
+        isolate_download_cache: policy.isolate_home || policy.isolate_xdg,
         admitted_component_id: policy.admitted_component_id.clone(),
         isolated_home,
         _rust_overlay: None,
@@ -8699,6 +8702,63 @@ mod tests {
                 assert!(!root.join("tool/sub/deps").exists(), "{gate}");
             });
         }
+    }
+
+    #[test]
+    fn isolated_gate_setup_shares_declared_download_cache_and_honors_override() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let checkout = tempfile::tempdir().unwrap();
+            let root = checkout.path();
+            fs::write(root.join("project.json"), "{}").unwrap();
+            let adapters = home
+                .path()
+                .join(".config/homeboy/extensions/dependency-adapters");
+            fs::create_dir_all(&adapters).unwrap();
+            fs::write(adapters.join("index.json"), r#"{"schema":"homeboy-extension/dependency-adapter-index/v1","manifests":[{"id":"fixture","ecosystem":"fixture","path":"fixture.json"}]}"#).unwrap();
+            fs::write(adapters.join("fixture.json"), r#"{"schema":"homeboy-extension/dependency-adapter-manifest/v1","id":"fixture","version":1,"ecosystem":"fixture","project_signals":{"root_files":["project.json"]},"package_managers":[{"id":"fixture","download_cache":{"env":"FIXTURE_DOWNLOAD_CACHE"},"selection":{"priority":1,"files":["project.json"],"search":"upward"},"commands":{"install":{"command":"printf '%s' \"$FIXTURE_DOWNLOAD_CACHE\" > observed-cache; printf '%s' \"$HOME\" > observed-home"}}}]}"#).unwrap();
+            let expected = homeboy_core::paths::homeboy_data()
+                .unwrap()
+                .join("controller-state/dependency-download-cache/fixture");
+            for explicit in [None, None, Some("/operator/cache")] {
+                let mut gate_policy = AgentTaskGateEnvironmentPolicy::default();
+                if let Some(value) = explicit {
+                    gate_policy
+                        .variables
+                        .insert("FIXTURE_DOWNLOAD_CACHE".to_string(), value.to_string());
+                }
+                let selected = selected_gate_environment(&gate_policy, None).unwrap();
+                let home = selected.values.get("HOME").unwrap();
+                let policy = homeboy_core::deps::DependencyHydrationPolicy {
+                    environment: selected.hydration_environment(),
+                    ..Default::default()
+                };
+                let outcomes = hydrate_gate_dependency_roots_for_component(
+                    root, true, "fixture", &policy, None, None,
+                )
+                .unwrap();
+                assert_eq!(outcomes.len(), 1);
+                assert_eq!(
+                    outcomes[0].status,
+                    homeboy_core::deps::DependencyHydrationStatus::Succeeded
+                );
+                let expected = explicit
+                    .map(str::to_string)
+                    .unwrap_or_else(|| expected.display().to_string());
+                assert_eq!(
+                    fs::read_to_string(root.join("observed-cache")).unwrap(),
+                    expected
+                );
+                assert_eq!(
+                    outcomes[0].download_cache["FIXTURE_DOWNLOAD_CACHE"],
+                    expected
+                );
+                assert_eq!(
+                    fs::read_to_string(root.join("observed-home")).unwrap(),
+                    *home
+                );
+            }
+            assert!(expected.is_dir());
+        });
     }
 
     #[cfg(unix)]

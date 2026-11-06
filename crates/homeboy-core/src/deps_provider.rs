@@ -72,6 +72,12 @@ pub(crate) struct DependencyProviderHydrationPlan {
     pub install_success_exit_codes: Vec<i32>,
     pub reusable: Option<DependencyProviderReusableState>,
     pub outputs: Vec<DependencyInstallOutput>,
+    pub download_cache: Option<DependencyDownloadCache>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct DependencyDownloadCache {
+    pub env: String,
 }
 
 impl DependencyProviderCommand {
@@ -597,6 +603,7 @@ impl AdapterDependencyProvider {
                 });
         Ok(Some(DependencyProviderHydrationPlan {
             provider_id: manager.id.clone(),
+            download_cache: manager.download_cache.clone(),
             install: self.install_command(install),
             install_success_exit_codes: install.success_codes(),
             reusable,
@@ -950,6 +957,8 @@ struct AdapterProjectSignals {
 #[derive(Debug, Clone, Deserialize)]
 struct AdapterPackageManager {
     id: String,
+    #[serde(default)]
+    download_cache: Option<DependencyDownloadCache>,
     selection: AdapterSelection,
     #[serde(default)]
     commands: AdapterCommands,
@@ -1254,6 +1263,7 @@ impl ManifestDependencyProvider {
         });
         Ok(Some(DependencyProviderHydrationPlan {
             provider_id: self.manifest.provider.clone(),
+            download_cache: None,
             install: self.command(install, context, None, None),
             install_success_exit_codes: install.success_codes(),
             reusable,
@@ -1928,6 +1938,7 @@ fn hydration_plan_from_extension_output(
     });
     Ok(Some(DependencyProviderHydrationPlan {
         provider_id,
+        download_cache: None,
         install: DependencyProviderCommand::new(
             plan.command.first().cloned().unwrap_or_default(),
             plan.command.into_iter().skip(1).collect(),

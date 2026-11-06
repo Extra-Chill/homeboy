@@ -1977,6 +1977,7 @@ mod tests {
                         command: vec!["sh".to_string(), "-c".to_string(), "exit 3".to_string()],
                         cwd: "/runner/workspaces/candidate".to_string(),
                         reason: "install_failed".to_string(),
+                        download_cache: Default::default(),
                         termination: homeboy_core::deps::DependencyHydrationTermination::ExitFailure,
                         status: homeboy_core::deps::DependencyHydrationStatus::Failed,
                         exit_code: Some(3),
