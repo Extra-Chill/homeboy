@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.446.12] - 2026-11-06
+
+### Changed
+- one finalize-and-record tail for auto and recovered Cooks
+- Keep concurrent cooks from blocking config reads
+
 ## [0.446.11] - 2026-11-06
 
 ### Changed
