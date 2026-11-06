@@ -344,10 +344,13 @@ pub(super) fn cleanup_with_store_page(
             continuation = Some(cleanup_continuation(&page, next_cursor.as_deref()));
             break;
         }
+        let branch_never_moved = branch_cleanup.status == BranchCleanupStatus::Merged
+            && branch_never_moved_since_creation(&record, page.deadline);
         let skip_reasons = cleanup_skip_reasons(
             &record,
             &safety,
             &branch_cleanup,
+            branch_never_moved,
             options.force,
             &live_owners,
         );
@@ -463,6 +466,7 @@ fn cleanup_skip_reasons(
     record: &TaskWorktreeRecord,
     safety: &WorktreeSafetyReport,
     branch_cleanup: &WorktreeBranchCleanupReport,
+    branch_never_moved: bool,
     force: bool,
     live_owners: &[String],
 ) -> Vec<String> {
@@ -473,8 +477,12 @@ fn cleanup_skip_reasons(
     // merges, via the shared content-containment probe), so cleanup nominates
     // the worktree whether or not its lifecycle owner recorded a succeeded
     // finalization. Unmerged owned work still waits for that finalization so
-    // in-flight loops are never reaped out from under their owner.
-    let branch_merged = branch_cleanup.status == BranchCleanupStatus::Merged;
+    // in-flight loops are never reaped out from under their owner. A branch
+    // that never moved since it was created is "merged" only because its tip
+    // is the base it started from: no work exists yet, so it is no evidence
+    // that anything landed. That is the Lab Cook destination, which stays
+    // pristine until promotion and must survive until its owner finalizes.
+    let branch_merged = branch_cleanup.status == BranchCleanupStatus::Merged && !branch_never_moved;
     if let Some(owner) = record
         .run_id
         .as_deref()
@@ -2552,6 +2560,36 @@ pub(super) fn workspace_claim_store_for_worktrees(
     Ok(crate::workspace_claim::WorkspaceClaimStore::in_data_root(
         data_root,
     ))
+}
+
+/// True when the branch reflog holds only its creation entry, so the branch
+/// has never moved since it was created. Unknown (no reflog, git failure)
+/// answers false.
+fn branch_never_moved_since_creation(
+    record: &TaskWorktreeRecord,
+    deadline: Option<std::time::Instant>,
+) -> bool {
+    let Ok(source) = resolved_source_checkout(record) else {
+        return false;
+    };
+    let reflog = run_inventory_git_until(
+        &source,
+        &[
+            "reflog",
+            "show",
+            "--format=%gs",
+            &format!("refs/heads/{}", record.branch),
+            "--",
+        ],
+        "git reflog task branch",
+        deadline,
+    )
+    .unwrap_or_default();
+    let mut entries = reflog.lines().filter(|line| !line.trim().is_empty());
+    matches!(
+        (entries.next(), entries.next()),
+        (Some(only), None) if only.starts_with("branch: Created from")
+    )
 }
 
 fn owners_display(owners: &[String]) -> String {
