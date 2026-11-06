@@ -20,7 +20,11 @@ fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
-fn externalize(value: &mut Value, root: &Path) -> Result<()> {
+/// The artifact root resolves only once a value actually leaves the row, so a
+/// store opened at a bare path never consults an ambient root for small rows.
+type PayloadRoot<'a> = &'a dyn Fn() -> Result<PathBuf>;
+
+fn externalize(value: &mut Value, root: PayloadRoot) -> Result<()> {
     if value.get(REFERENCE).is_some() {
         return Ok(());
     }
@@ -29,7 +33,7 @@ fn externalize(value: &mut Value, root: &Path) -> Result<()> {
         return Ok(());
     }
     let sha256 = digest(&bytes);
-    let directory = root.join("metadata-payloads");
+    let directory = root()?.join("metadata-payloads");
     fs::create_dir_all(&directory).map_err(io)?;
     let path = directory.join(&sha256);
     if !path.exists() {
@@ -46,7 +50,7 @@ fn externalize(value: &mut Value, root: &Path) -> Result<()> {
     Ok(())
 }
 
-fn prepare(value: &mut Value, root: &Path) -> Result<()> {
+fn prepare(value: &mut Value, root: PayloadRoot) -> Result<()> {
     match value {
         Value::Object(object) => {
             // Process reports before their nested diffs so identical reports at
@@ -207,7 +211,7 @@ impl ObservationStore {
     }
     pub(crate) fn serialize_run_metadata(&self, value: &Value) -> Result<String> {
         let mut value = value.clone();
-        let root = self.artifact_root()?;
+        let root = || self.artifact_root();
         prepare(&mut value, &root)?;
         let mut serialized = serialize_metadata(&value)?;
         // Any other oversized value moves to the same content-addressed store,
