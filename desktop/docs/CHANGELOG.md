@@ -6,6 +6,11 @@ The desktop app currently shells out to the standalone Rust CLI (`homeboy`) for 
 
 For current behavior, prefer the code and other documentation (for example `docs/CLI.md`).
 
+## [0.13.3] - 2026-11-06
+
+### Changed
+- fold daemon start into ensure-running; drop binary_sha256 staleness
+
 ## [0.13.2] - 2026-11-06
 
 ### Changed
