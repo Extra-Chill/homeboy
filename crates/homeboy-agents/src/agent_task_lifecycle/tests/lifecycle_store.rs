@@ -208,7 +208,7 @@ fn lifecycle_stores_isolate_identical_ids_and_lock_domains() {
         let left_store = left.clone();
         scope.spawn(move || {
             left_store
-                .with_config_lock(|| {
+                .with_store_lock(|| {
                     left_barrier.wait();
                     Ok(())
                 })
@@ -218,12 +218,45 @@ fn lifecycle_stores_isolate_identical_ids_and_lock_domains() {
         let right_store = right.clone();
         scope.spawn(move || {
             right_store
-                .with_config_lock(|| {
+                .with_store_lock(|| {
                     right_barrier.wait();
                     Ok(())
                 })
                 .expect("right lock");
         });
+    });
+}
+
+#[test]
+fn lifecycle_write_does_not_block_config_reads() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let store = AgentTaskLifecycleStore::from_environment().unwrap();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            store
+                .with_store_lock(|| {
+                    // A separately constructed store must join the same lock.
+                    AgentTaskLifecycleStore::new(store.roots().clone())
+                        .with_store_lock(|| Ok(()))?;
+                    entered_tx.send(()).unwrap();
+                    release_rx
+                        .recv_timeout(std::time::Duration::from_secs(15))
+                        .unwrap();
+                    Ok(())
+                })
+                .unwrap();
+        });
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap();
+        let started = std::time::Instant::now();
+        let result = homeboy_core::defaults::load_config_for_read();
+        let elapsed = started.elapsed();
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
+        result.expect("config read is independent of a long lifecycle write");
+        assert!(elapsed < std::time::Duration::from_secs(5));
     });
 }
 

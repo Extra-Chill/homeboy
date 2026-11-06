@@ -117,7 +117,7 @@ impl CookRecipeStore {
 
     /// Bind Cook storage to a self-contained data root, deriving its config
     /// root exactly as [`agent_task_lifecycle::AgentTaskLifecycleStore::from_data_root`]
-    /// does, so both stores agree on the lock that guards their records.
+    /// does, so both stores agree on the roots that hold their records.
     pub fn from_data_root(data: PathBuf) -> Self {
         Self::new(
             agent_task_lifecycle::AgentTaskLifecycleStore::from_data_root(data)
@@ -132,7 +132,7 @@ impl CookRecipeStore {
     }
 
     /// Bind Cook storage to the roots of the lifecycle store that owns its
-    /// attempts, so recipe and record writes serialize on one config lock.
+    /// attempts, so recipe and record writes serialize on one lifecycle lock.
     pub fn for_lifecycle_store(
         lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     ) -> Self {
@@ -3606,12 +3606,12 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// A lifecycle store reached through a Cook recipe store must serialize on
-    /// the same config lock as the lifecycle store that owns the records.
+    /// the same lifecycle lock as the lifecycle store that owns the records.
     /// Re-deriving it from the data root alone locks a different config root,
     /// so its record writes raced every correctly locked writer and lost with a
     /// spurious revision conflict.
     #[test]
-    fn recipe_store_lifecycle_writes_share_the_record_owner_config_lock() {
+    fn recipe_store_lifecycle_writes_share_the_record_owner_store_lock() {
         homeboy_core::test_support::with_isolated_home(|_| {
             let roots = paths::PathRoots::from_environment().expect("isolated roots");
             let lifecycle_store = agent_task_lifecycle::AgentTaskLifecycleStore::new(roots.clone());
@@ -3628,7 +3628,7 @@ mod tests {
                     let owner = &lifecycle_store;
                     scope.spawn(move || {
                         owner
-                            .with_config_lock(|| {
+                            .with_store_lock(|| {
                                 held.send(()).expect("signal holder");
                                 std::thread::sleep(hold);
                                 Ok(())
@@ -3638,7 +3638,7 @@ mod tests {
                     wait_for_holder.recv().expect("holder took the lock");
                     let started = std::time::Instant::now();
                     derived
-                        .with_config_lock(|| Ok(()))
+                        .with_store_lock(|| Ok(()))
                         .expect("derived store takes the lock");
                     started.elapsed()
                 });

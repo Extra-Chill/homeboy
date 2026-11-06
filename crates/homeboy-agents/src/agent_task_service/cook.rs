@@ -3888,7 +3888,7 @@ pub(crate) fn ensure_cook_attempt_admitted(
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     cook_id: &str,
 ) -> Result<()> {
-    lifecycle_store.with_config_lock(|| {
+    lifecycle_store.with_store_lock(|| {
         if lifecycle_store
             .read_cook_index(cook_id)
             .ok()

@@ -43,7 +43,7 @@ pub fn record_pre_execution_failure_in_store(
     // Cancellation and aggregate projection both own a terminal transition.
     // Re-read and arbitrate while holding the record/aggregate transaction lock
     // so a retry launcher failure cannot overwrite a cancellation winner.
-    let (mut record, aggregate) = lifecycle_store.with_config_lock(|| {
+    let (mut record, aggregate) = lifecycle_store.with_store_lock(|| {
         let record = lifecycle_store.read_record(&run_id)?;
         // A completed provider candidate still needs its non-terminal transport
         // follow-up marker. Bare cancellation and other terminal winners are
@@ -79,7 +79,7 @@ pub fn record_interrupted_local_owner_in_store(
     run_id: &str,
 ) -> Result<AgentTaskRunRecord> {
     let run_id = sanitize_run_id(run_id);
-    let (mut record, aggregate) = lifecycle_store.with_config_lock(|| {
+    let (mut record, aggregate) = lifecycle_store.with_store_lock(|| {
         let mut record = lifecycle_store.read_record(&run_id)?;
         // A remote owner settles its own attempt; losing a local observer
         // (a detached launcher or execution step) never interrupts it.
@@ -282,7 +282,7 @@ fn record_interrupted_local_owner_locked(
             "updated_at": now,
         }),
     );
-    // Decided under the config lock from the record read at `record.revision`;
+    // Decided under the lifecycle lock from the record read at `record.revision`;
     // the compare-and-swap refuses it if a writer outside the lock moved the
     // run since (#15718).
     let record = lifecycle_store
@@ -503,7 +503,7 @@ pub fn record_workspace_snapshot_fence_invalidation_in_store(
     error: &Error,
 ) -> Result<AgentTaskRunRecord> {
     let run_id = sanitize_run_id(run_id);
-    let (mut record, aggregate) = lifecycle_store.with_config_lock(|| {
+    let (mut record, aggregate) = lifecycle_store.with_store_lock(|| {
         let record = lifecycle_store.read_record(&run_id)?;
         let is_snapshot_invalidated =
             lifecycle_store
