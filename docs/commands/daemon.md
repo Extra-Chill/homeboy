@@ -80,11 +80,17 @@ spawns another daemon beside it:
   appears, the command fails instead of starting one. The unit must restart on
   exit (for example `Restart=always`).
 - `daemon status` and `daemon plan` name the owning manager. If another
-  `daemon serve` process targets the same store, they report it as a
-  conflict, and recovery stays blocked until one of the processes is gone.
+  `daemon serve` lost the owner lock to the current holder, status reports it
+  as `competing_serve` (the contender, its manager, and the holder that
+  refused it) for as long as that holder is current.
 
 On any host, while a live or starting daemon holds `owner.lock`, every start
-path refuses to spawn another daemon.
+path refuses to spawn another daemon. The serving daemon records its holder
+identity (PID, process start identity, startup token) in `owner.lock`, and
+`daemon status` derives liveness from it as `owner_lock`: a free lock with a
+present `state.json` proves the lease writer is dead; a held lock names the
+live owner. Holding the lock without a live lease blocks replacement. Homeboy
+does not scan the process table for daemon candidates.
 
 ## One daemon store
 
@@ -131,10 +137,9 @@ rate without pretending that unavailable storage durably recorded an outcome.
 
 `homeboy daemon status` is a bounded operator projection by default. It reports
 daemon liveness, reachability, build freshness, active-job summaries,
-replacement blockers, and exact authorized recovery commands. It summarizes
-unrelated process candidates by count and includes only ownership-relevant
-coordinates. Use `homeboy daemon status --full` to inspect the complete state,
-candidate command lines, runtime-path, termination, and job-recovery evidence.
+replacement blockers, and exact authorized recovery commands. It includes only
+ownership-relevant coordinates. Use `homeboy daemon status --full` to inspect
+the complete state, runtime-path, termination, and job-recovery evidence.
 
 `homeboy daemon status` already computes the repair its own evidence
 authorizes and reports it as `freshness.repair_plan`. `homeboy daemon recover`

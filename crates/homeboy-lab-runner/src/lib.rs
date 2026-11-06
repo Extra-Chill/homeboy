@@ -304,13 +304,12 @@ pub use command_path::preflight_remote_argv_path_translation;
 pub(crate) use command_path::set_homeboy_command_selection;
 pub use connection::{
     close_transport, connect, connect_converging_binary, connect_with_live_lease_adoption,
-    connect_with_orphan_adoption, connect_with_unleased_candidate_reconciliation,
-    diagnostic_status, disconnect, disconnect_local_recovery, ensure_transport,
-    peer_session_maintenance, persisted_status, persisted_status_until, persisted_statuses,
-    reconcile_status, reconcile_status_with_remote_attestation, reconcile_terminal_jobs,
-    remote_lifecycle_plan, status, statuses, statuses_indexed, transport_is_live,
-    PeerSessionMaintenanceReport, RunnerReconcileWithAttestationOutcome, TransportFailure,
-    TransportLifetime,
+    connect_with_orphan_adoption, diagnostic_status, disconnect, disconnect_local_recovery,
+    ensure_transport, peer_session_maintenance, persisted_status, persisted_status_until,
+    persisted_statuses, reconcile_status, reconcile_status_with_remote_attestation,
+    reconcile_terminal_jobs, remote_lifecycle_plan, status, statuses, statuses_indexed,
+    transport_is_live, PeerSessionMaintenanceReport, RunnerReconcileWithAttestationOutcome,
+    TransportFailure, TransportLifetime,
 };
 pub(crate) use connection::{
     configured_runner_homeboy_build_identity, configured_runner_homeboy_handshake_evidence,

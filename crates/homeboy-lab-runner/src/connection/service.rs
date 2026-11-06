@@ -875,10 +875,10 @@ mod tests {
     }
 
     /// The service-owned daemon must publish an attributable startup token in
-    /// its own lease. Without this, `daemon status`/`ensure-running`/
-    /// `reconcile-unleased-candidates` can never tell this process apart from
-    /// an unrelated foreground `daemon serve`, and every controller operation
-    /// that inspects ownership fails closed (#15087).
+    /// its own lease. Without this, `daemon status`/`ensure-running` can never
+    /// tell this process apart from an unrelated foreground `daemon serve`,
+    /// and every controller operation that inspects ownership fails closed
+    /// (#15087).
     #[test]
     fn unit_carries_the_daemon_startup_token_env_var() {
         let unit = render_service_unit("homeboy-lab", "a-fresh-token");

@@ -221,22 +221,9 @@ fn explicit_live_lease_adoption_requires_the_exact_current_lease_and_pid() {
 
 #[test]
 fn explicit_live_lease_adoption_precedes_only_stale_ensure_running_replay() {
-    assert!(!should_replay_pending_replacement(
-        "ensure-running",
-        false,
-        true
-    ));
-    assert!(!should_replay_pending_replacement(
-        "ensure-running",
-        true,
-        false
-    ));
-    assert!(should_replay_pending_replacement(
-        "ensure-running",
-        false,
-        false
-    ));
-    assert!(should_replay_pending_replacement("state-loss", false, true));
+    assert!(!should_replay_pending_replacement("ensure-running", true));
+    assert!(should_replay_pending_replacement("ensure-running", false));
+    assert!(should_replay_pending_replacement("state-loss", true));
 }
 
 #[test]
@@ -1282,7 +1269,7 @@ fn remote_daemon_status_compact_dead_pid_lease_allows_replacement() {
         "daemon":{"active_build":"homeboy fixture+source","active_version":"0.417.16",
             "address":"127.0.0.1:38315","desired_build":"homeboy fixture+source",
             "lease_id":"lease-dead","pid":859022},
-        "process_candidates":[],
+        "owner_lock":{"state":"free"},
         "recovery":{"blocker":null,"replacement_blocked":false,"restartable":true,
             "stale_reason_code":"pid_dead"}
     }));

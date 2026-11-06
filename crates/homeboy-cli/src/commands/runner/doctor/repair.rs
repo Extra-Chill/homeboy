@@ -598,7 +598,6 @@ pub(super) enum DaemonRepairDispatch {
         lease_id: String,
     },
     ReconcileLeaselessOrphans,
-    ReconcileUnleasedCandidates,
     RefreshHomeboy {
         git_ref: Option<String>,
         allow_downgrade: bool,
@@ -631,9 +630,6 @@ pub(super) fn dispatch_for(
         }
         code if code == daemon_repair_codes::RUNNER_RECONCILE_LEASELESS_ORPHANS => {
             DaemonRepairDispatch::ReconcileLeaselessOrphans
-        }
-        code if code == daemon_repair_codes::RUNNER_RECONCILE_UNLEASED_CANDIDATES => {
-            DaemonRepairDispatch::ReconcileUnleasedCandidates
         }
         code if code == daemon_repair_codes::RUNNER_REFRESH_HOMEBOY => match step.action.as_ref() {
             // The recovery ref is a property of the plan rather than of the
@@ -725,13 +721,6 @@ fn apply_daemon_repair_plan(
                             None,
                             None,
                         )
-                    })
-                })
-            }
-            DaemonRepairDispatch::ReconcileUnleasedCandidates => {
-                connect_outcome_after_promotion_wait(target, || {
-                    target.ensure_current().and_then(|_| {
-                        runner::connect_with_unleased_candidate_reconciliation(runner_id)
                     })
                 })
             }
