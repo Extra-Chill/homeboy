@@ -239,10 +239,17 @@ fn a_scopeless_running_instance_is_recovered_instead_of_skipping_forever() {
 fn wait_terminal(store: &JobStore, instance: &str) {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        if store
+        if let Some(job) = store
             .controller_job_for_key(instance)
-            .is_some_and(|job| job.status.is_terminal())
+            .filter(|job| job.status.is_terminal())
         {
+            // A terminal instance that never ran its step would otherwise show
+            // up only as a short runs.log (#17410).
+            assert_eq!(
+                job.status,
+                crate::api_jobs::JobStatus::Succeeded,
+                "instance {instance} finished without succeeding: {job:?}"
+            );
             return;
         }
         assert!(

@@ -1726,10 +1726,14 @@ fn a_bare_rate_limit_without_a_recognizable_usage_cap_reset_stays_plain_rate_lim
 
 #[test]
 fn a_provider_still_making_progress_is_extended_past_its_base_timeout() {
-    let fake = node_pi("let t=setInterval(()=>process.stderr.write('.'),20); setTimeout(()=>{clearInterval(t);answer('finished after the base deadline');},600);");
+    // The base deadline must leave room for interpreter startup and the first
+    // progress write. A provider that has shown no progress by its base
+    // deadline is correctly not extended, so a 150ms base raced node startup
+    // on loaded CI runners (#17410). The answer still lands well past it.
+    let fake = node_pi("let t=setInterval(()=>process.stderr.write('.'),20); setTimeout(()=>{clearInterval(t);answer('finished after the base deadline');},2500);");
     let mut request = fake.request("task-timeout-extended");
     let provider = fake.provider();
-    request.limits.timeout_ms = Some(150);
+    request.limits.timeout_ms = Some(1_000);
     request.limits.max_timeout_ms = Some(5_000);
     request.limits.liveness_timeout_ms = Some(2_000);
 
