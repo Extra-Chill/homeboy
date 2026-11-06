@@ -18,7 +18,9 @@ use serde::de::DeserializeOwned;
 use std::path::Path;
 
 fn publication_route(path: &str) -> Result<super::AgentTaskPublicationRoute> {
-    let config = homeboy_core::defaults::load_config_for_read()?;
+    let config = homeboy_core::defaults::load_config_for_read().map_err(|error| {
+        publication_observation_context(error, "publication route: read config")
+    })?;
     resolve_publication_route(path, &config.git_hosts)
 }
 
@@ -100,14 +102,19 @@ fn publication_credential(
         homeboy_core::git::github_app::PublicationCredential,
     )>,
 > {
-    let config = homeboy_core::defaults::load_config_for_read()?;
+    let config = homeboy_core::defaults::load_config_for_read().map_err(|error| {
+        publication_observation_context(error, "publication credential: read config")
+    })?;
     if config.github_app.is_none() || publication_route(path)?.route == "fork" {
         return Ok(None);
     }
     let remote = homeboy_core::git::release_download::detect_remote_url(Path::new(path))
         .and_then(|url| homeboy_core::git::release_download::parse_github_url(&url))
         .ok_or_else(|| Error::git_command_failed("Cannot resolve publication repository"))?;
-    let credential = homeboy_core::git::github_app::mint(config.github_app.as_ref(), &remote)?;
+    let credential = homeboy_core::git::github_app::mint(config.github_app.as_ref(), &remote)
+        .map_err(|error| {
+            publication_observation_context(error, "publication credential: mint GitHub App token")
+        })?;
     Ok(credential.map(|credential| (remote, credential)))
 }
 
@@ -823,7 +830,9 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
         changed_files: &[String],
         pr: &AgentTaskPrRef,
     ) -> Result<AgentTaskPublicationBinding> {
-        let dirty = self.changed_files(path)?;
+        let dirty = self
+            .changed_files(path)
+            .map_err(|error| publication_observation_context(error, "binding: changed files"))?;
         if !dirty.is_empty() || git_output(path, &["rev-parse", "HEAD"])? != candidate_sha {
             return Err(Error::validation_invalid_argument(
                 "publication_binding",
@@ -853,7 +862,22 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
             .as_str()
             .unwrap_or_default()
             .to_string();
+        // Incomplete JSON is unavailable evidence, not an observed ref mismatch.
+        if repository.is_empty()
+            || pr_head_sha.is_empty()
+            || pr_value["baseRefName"].as_str().is_none()
+            || pr_value["headRefName"].as_str().is_none()
+        {
+            return Err(Error::git_command_failed(
+                "binding: gh returned incomplete repository or PR identity",
+            ));
+        }
         let head_repository = pr_head_repository_from_json(&pr_value);
+        if head_repository.is_empty() {
+            return Err(Error::git_command_failed(
+                "binding: gh returned incomplete PR head repository",
+            ));
+        }
         let route = publication_route(path)?;
         if pr_value["baseRefName"].as_str() != Some(base)
             || pr_value["headRefName"].as_str() != Some(head)
@@ -868,7 +892,9 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
             ));
         }
         // Re-read after GitHub observation to reject a force-update race.
-        let remote_sha = remote_branch_head(path, head)?.unwrap_or_default();
+        let remote_sha = remote_branch_head(path, head)
+            .map_err(|error| publication_observation_context(error, "binding: remote branch head"))?
+            .unwrap_or_default();
         Ok(AgentTaskPublicationBinding {
             candidate_sha: candidate_sha.to_string(),
             candidate_tree,
@@ -1180,6 +1206,19 @@ fn git_output(path: &str, args: &[&str]) -> Result<String> {
         &format!("git {}", args.join(" ")),
     )
     .map(|stdout| stdout.trim().to_string())
+    .map_err(|error| publication_observation_context(error, &format!("git {}", args.join(" "))))
+}
+
+/// Tags an observation failure with the step that produced it, so a bare
+/// `IO error` still names where publication evidence became unavailable.
+fn publication_observation_context(mut error: Error, stage: &str) -> Error {
+    if error.details.is_null() {
+        error.details = serde_json::json!({});
+    }
+    if let Some(details) = error.details.as_object_mut() {
+        details.insert("publication_observation".into(), serde_json::json!(stage));
+    }
+    error
 }
 
 fn publication_gh_output(path: &str, args: &[&str]) -> Result<std::process::Output> {
@@ -1218,8 +1257,9 @@ fn publication_gh_output(path: &str, args: &[&str]) -> Result<std::process::Outp
 }
 
 fn gh_json(path: &str, args: &[&str]) -> Result<serde_json::Value> {
-    let output = publication_gh_output(path, args)
-        .map_err(|error| Error::git_command_failed(error.to_string()))?;
+    let output = publication_gh_output(path, args).map_err(|error| {
+        publication_observation_context(error, &format!("gh {}", args.join(" ")))
+    })?;
     if !output.status.success() {
         return Err(Error::git_command_failed(format!(
             "gh {} failed: {}",

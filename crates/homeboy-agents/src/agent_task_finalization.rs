@@ -587,14 +587,16 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
                     "no PR mutation performed",
                 ));
             }
-            let binding = backend.verify_publication_binding(
-                &options.path,
-                &options.base,
-                &head,
-                commit_sha,
-                &changed_files,
-                &merged,
-            )?;
+            let binding = observe_publication_binding(|| {
+                backend.verify_publication_binding(
+                    &options.path,
+                    &options.base,
+                    &head,
+                    commit_sha,
+                    &changed_files,
+                    &merged,
+                )
+            })?;
             // A different merged head is a prior publication, not this candidate.
             if binding.pr_head_sha == commit_sha {
                 if let Err(error) = validate_publication_binding(
@@ -701,15 +703,46 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
         draft
     };
 
-    let binding = match backend.verify_publication_binding(
-        &options.path,
-        &options.base,
-        &head,
-        commit_sha,
-        &changed_files,
-        &pr,
-    ) {
+    let binding = match observe_publication_binding(|| {
+        backend.verify_publication_binding(
+            &options.path,
+            &options.base,
+            &head,
+            commit_sha,
+            &changed_files,
+            &pr,
+        )
+    }) {
         Ok(binding) => binding,
+        Err(error) if !is_observed_binding_drift(&error) => {
+            // Unavailable evidence cannot justify destructive quarantine. Keep
+            // the PR discoverable by recover, but not ready for review.
+            let capability = if published_draft {
+                AgentTaskPrQuarantineCapability::PreserveExistingDraft
+            } else {
+                AgentTaskPrQuarantineCapability::ConvertExistingReadyPrToDraft
+            };
+            let state = match backend.quarantine_pr(&options.path, &pr, capability) {
+                Ok(state) => state,
+                Err(cleanup) => format!(
+                    "PR left open; draft conversion failed: {}",
+                    publication_error_diagnostic(&cleanup)
+                ),
+            };
+            let diagnostic = publication_error_diagnostic(&error);
+            let mut failure = Error::validation_invalid_argument(
+                "publication_binding",
+                format!("publication binding observation unavailable (recoverable); PR #{} left open; cleanup_state={state}; binding_error={diagnostic}; retry with `homeboy agent-task recover {}`", pr.number, options.run_id),
+                None,
+                None,
+            );
+            if let Some(details) = failure.details.as_object_mut() {
+                details.insert("binding_error".into(), serde_json::json!(diagnostic));
+                details.insert("recoverable".into(), serde_json::json!(true));
+            }
+            failure.retryable = Some(true);
+            return Err(failure);
+        }
         Err(error) => {
             return Err(publication_drift_with_cleanup_error(
                 backend,
@@ -719,7 +752,7 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
                 "not_observed",
                 None,
                 quarantine_capability,
-                &error.message,
+                &publication_error_diagnostic(&error),
             ));
         }
     };
@@ -1437,7 +1470,7 @@ fn publication_drift_with_cleanup_error<B: AgentTaskPrFinalizationBackend>(
         Err(error) => format!(
             "failed; cleanup_capability={}; cleanup_error={}",
             quarantine_capability_name(capability),
-            bounded_publication_diagnostic(&error.message)
+            publication_error_diagnostic(&error)
         ),
     };
     let drift = publication_drift_error(
@@ -1454,7 +1487,7 @@ fn publication_drift_with_cleanup_error<B: AgentTaskPrFinalizationBackend>(
 /// forward onto a drift error, so operators can see which field differed
 /// instead of a generic mismatch notice.
 fn append_binding_error(error: Error, binding_error: &str) -> Error {
-    Error::validation_invalid_argument(
+    let mut failure = Error::validation_invalid_argument(
         "publication_binding",
         format!(
             "{}; binding_error={}",
@@ -1463,24 +1496,60 @@ fn append_binding_error(error: Error, binding_error: &str) -> Error {
         ),
         None,
         None,
-    )
+    );
+    if let Some(details) = failure.details.as_object_mut() {
+        details.insert(
+            "binding_error".into(),
+            serde_json::json!(bounded_publication_diagnostic(binding_error)),
+        );
+    }
+    failure
 }
 
 fn bounded_publication_diagnostic(value: &str) -> String {
-    let value = value.trim();
+    let redacted = homeboy_core::redaction::redact_string(value);
+    let value = redacted.trim();
     let characters = value.chars().count();
-    if characters <= PUBLICATION_IDENTITY_DIAGNOSTIC_LIMIT {
+    const DIAGNOSTIC_LIMIT: usize = 2048;
+    if characters <= DIAGNOSTIC_LIMIT {
         value.to_string()
     } else {
         format!(
             "{}...(+{} chars)",
-            value
-                .chars()
-                .take(PUBLICATION_IDENTITY_DIAGNOSTIC_LIMIT)
-                .collect::<String>(),
-            characters - PUBLICATION_IDENTITY_DIAGNOSTIC_LIMIT
+            value.chars().take(DIAGNOSTIC_LIMIT).collect::<String>(),
+            characters - DIAGNOSTIC_LIMIT
         )
     }
+}
+
+/// Only explicit local/ref validation is observed drift. Process, config,
+/// authentication and transport errors leave the binding unobserved.
+fn is_observed_binding_drift(error: &Error) -> bool {
+    error
+        .message
+        .starts_with("Invalid argument 'publication_binding': ")
+}
+
+fn observe_publication_binding(
+    mut observe: impl FnMut() -> Result<AgentTaskPublicationBinding>,
+) -> Result<AgentTaskPublicationBinding> {
+    for attempt in 0..3 {
+        match observe() {
+            Err(error) if !is_observed_binding_drift(&error) && attempt < 2 => {
+                std::thread::sleep(std::time::Duration::from_millis(100 * (attempt + 1)));
+            }
+            result => return result,
+        }
+    }
+    unreachable!("bounded observation always returns")
+}
+
+fn publication_error_diagnostic(error: &Error) -> String {
+    let mut diagnostic = error.message.clone();
+    if !error.details.is_null() {
+        diagnostic.push_str(&format!("; details={}", error.details));
+    }
+    bounded_publication_diagnostic(&diagnostic)
 }
 
 fn build_pr_publication_intent(
@@ -1823,7 +1892,10 @@ fn finalization_outcome(
     committed: bool,
     pushed: bool,
 ) -> AgentTaskPrFinalizationOutcome {
-    let published = matches!(pr_action, "created" | "updated" | "already_merged");
+    let published = matches!(
+        pr_action,
+        "created" | "updated" | "ready" | "already_merged"
+    );
     AgentTaskPrFinalizationOutcome {
         schema: AGENT_TASK_PR_FINALIZATION_OUTCOME_SCHEMA.to_string(),
         run_id: intent.run_id.clone(),
