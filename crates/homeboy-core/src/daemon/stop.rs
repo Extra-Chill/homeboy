@@ -432,7 +432,7 @@ pub(super) fn stop_unlocked_with_force(force: bool) -> Result<DaemonStopResult> 
             ),
             Some(path.display().to_string()),
             Some(vec![
-                "Start the daemon with `homeboy daemon start` so lifecycle ownership is tokenized"
+                "Start the daemon with `homeboy daemon ensure-running` so lifecycle ownership is tokenized"
                     .to_string(),
                 format!(
                     "If this lease is stale, remove {} manually after verifying the pid",
@@ -534,7 +534,6 @@ mod tests {
             started_at: "now".to_string(),
             last_seen_at: "now".to_string(),
             build_identity: build_identity::current(),
-            binary_sha256: None,
             service_manager: None,
             executable: crate::daemon::ExecutableIdentity {
                 path: "/usr/local/bin/homeboy".into(),

@@ -10,7 +10,7 @@ homeboy daemon <COMMAND>
 
 ## Subcommands
 
-- `start` — start the local daemon in the background
+- `ensure-running` — return the live, fresh daemon, or start or replace one in the background
 - `serve` — run the daemon in this process (what a service manager's unit runs)
 - `stop` — gracefully stop the background daemon recorded in the state file
 - `status` — show bounded daemon health, active jobs, blockers, and recovery actions; use `--full` for complete evidence
@@ -31,10 +31,11 @@ lock, it retries after another idle window. An idle daemon whose binary was
 replaced stops after 30 seconds instead, and a daemon whose state directory
 was removed stops at once. A subsequent command starts a new daemon using the retained durable store. Disposable clients do not need to leave a resident process behind.
 
-`homeboy daemon start` and `serve` are explicitly resident launches,
-appropriate for workflow cadences and services. Set
+`serve` is an explicitly resident launch, appropriate for services. Set
 `HOMEBOY_DAEMON_IDLE_TIMEOUT_SECS` to a positive number to select another idle
-window for a CLI-launched daemon, or `0` for a resident automatic launch. A
+window for a CLI-launched daemon, or `0` for a resident launch (for example
+`HOMEBOY_DAEMON_IDLE_TIMEOUT_SECS=0 homeboy daemon ensure-running` for
+workflow cadences). A
 `serve` started directly by a service manager lives as long as that manager
 keeps it, and runs none of the self-stop checks above. A `serve` started by
 hand with no startup token stays resident too.
@@ -72,8 +73,7 @@ this field existed read as unmanaged.
 Only the manager starts or replaces a service-managed daemon. Homeboy never
 spawns another daemon beside it:
 
-- `daemon start` reports which manager owns the running daemon and does
-  nothing.
+- `daemon ensure-running` returns a fresh managed daemon as it is.
 - `daemon ensure-running` and `homeboy upgrade` restart a stale managed daemon
   in place. They send SIGTERM to the exact leased process and wait for the
   manager's replacement lease to report the expected build. If no replacement
@@ -229,7 +229,7 @@ automatically: it is unverifiable in process by construction.
 
 ## Local HTTP API
 
-The daemon binds to loopback only. `homeboy daemon start` writes the selected
+The daemon binds to loopback only. `homeboy daemon ensure-running` writes the selected
 address and PID to the daemon state file so headless clients can discover it via
 `homeboy daemon status`.
 

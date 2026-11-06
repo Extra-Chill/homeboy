@@ -169,53 +169,62 @@ pub struct ArtifactFetchOutcome {
     pub sha256: Option<String>,
 }
 
-/// Spawn the daemon in the background, then poll the state file until the new
-/// process publishes its address (or a timeout elapses).
-pub fn start_background(addr: &str) -> Result<DaemonStartResult> {
-    parse_bind_addr(addr)?;
-    let _lock = acquire_daemon_operation_lock()?;
-    start_or_return_live_unlocked_with_idle_timeout(addr, &uuid::Uuid::new_v4().to_string(), 0)
-}
-
 /// Return a live daemon under the lifecycle lock, or start one when its lease
 /// is absent or its recorded PID is dead. A live daemon on another build is
 /// restarted in place: the stop interrupts its in-flight work and the
 /// replacement resumes that work from the same store (#15936).
 pub fn ensure_running(addr: &str) -> Result<DaemonStartResult> {
     let status = read_status()?;
-    if let Some(state) = status
-        .state
-        .as_ref()
-        .filter(|_| status.running && !status.fresh)
-    {
-        // A binary upgrade must not strand control of jobs on the previous
-        // build. Keep routing to its recorded, reachable endpoint while busy;
-        // status/plan retain the mismatch and defer replacement until idle.
-        if status.reachable
-            && status.freshness.active_jobs > 0
-            && matches!(
-                status.freshness.stale_reason_code,
-                Some(
-                    DaemonStaleReasonCode::VersionMismatch
-                        | DaemonStaleReasonCode::BinaryHashMismatch
-                )
-            )
-        {
-            return Ok(DaemonStartResult {
-                pid: state.pid,
-                address: state.address.clone(),
-                state_path: state.state_path.clone(),
-                lease_id: state.lease_id.clone(),
-            });
-        }
+    match stale_daemon_action(&status) {
+        Some(StaleDaemonAction::KeepRouting(daemon)) => return Ok(daemon),
         // A service manager starts the replacement itself; spawning one here
         // would race it for the owner lock (#17387).
-        if state.service_manager.is_some() {
-            return restart_service_managed(&state.lease_id, super::DaemonStatus::admits_work);
+        Some(StaleDaemonAction::RestartServiceManaged(lease_id)) => {
+            return restart_service_managed(lease_id, super::DaemonStatus::admits_work);
         }
-        restart_in_place(&state.lease_id)?;
+        Some(StaleDaemonAction::RestartInPlace(lease_id)) => restart_in_place(lease_id)?,
+        None => {}
     }
     ensure_running_with_wait(addr, ENSURE_RUNNING_STARTUP_WAIT)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum StaleDaemonAction<'a> {
+    KeepRouting(DaemonStartResult),
+    RestartServiceManaged(&'a str),
+    RestartInPlace(&'a str),
+}
+
+/// What `ensure_running` does about a live daemon that is not fresh.
+fn stale_daemon_action(status: &super::DaemonStatus) -> Option<StaleDaemonAction<'_>> {
+    let state = status
+        .state
+        .as_ref()
+        .filter(|_| status.running && !status.fresh)?;
+    // A binary upgrade must not strand control of jobs on the previous
+    // build. Keep routing to its recorded, reachable endpoint while busy;
+    // status/plan retain the mismatch and defer replacement until idle.
+    if status.reachable
+        && status.freshness.active_jobs > 0
+        && matches!(
+            status.freshness.stale_reason_code,
+            Some(
+                DaemonStaleReasonCode::VersionMismatch | DaemonStaleReasonCode::ExecutableReplaced
+            )
+        )
+    {
+        return Some(StaleDaemonAction::KeepRouting(DaemonStartResult {
+            pid: state.pid,
+            address: state.address.clone(),
+            state_path: state.state_path.clone(),
+            lease_id: state.lease_id.clone(),
+        }));
+    }
+    Some(if state.service_manager.is_some() {
+        StaleDaemonAction::RestartServiceManaged(&state.lease_id)
+    } else {
+        StaleDaemonAction::RestartInPlace(&state.lease_id)
+    })
 }
 
 const SERVICE_MANAGED_RESTART_POLL: Duration = Duration::from_millis(250);
@@ -522,19 +531,8 @@ fn start_or_return_live_unlocked_with_startup_token(
     addr: &str,
     startup_token: &str,
 ) -> Result<DaemonStartResult> {
-    start_or_return_live_unlocked_with_idle_timeout(
-        addr,
-        startup_token,
-        super::lifetime::DEFAULT_IDLE_TIMEOUT_SECS,
-    )
-}
-
-fn start_or_return_live_unlocked_with_idle_timeout(
-    addr: &str,
-    startup_token: &str,
-    default_idle_timeout: u64,
-) -> Result<DaemonStartResult> {
-    let idle_timeout = super::lifetime::launch_idle_timeout(default_idle_timeout)?;
+    let idle_timeout =
+        super::lifetime::launch_idle_timeout(super::lifetime::DEFAULT_IDLE_TIMEOUT_SECS)?;
     start_or_return_live_with_operations(
         read_status,
         try_acquire_daemon_owner_lock,
@@ -1238,7 +1236,7 @@ fn resolve_daemon_url(daemon_url: Option<String>) -> Result<String> {
     let Some(state) = status.state.filter(|_| admits_work) else {
         return Err(Error::validation_invalid_argument(
             "daemon-url",
-            "daemon is not running; pass --daemon-url or start it with `homeboy daemon start`",
+            "daemon is not running; pass --daemon-url or start it with `homeboy daemon ensure-running`",
             None,
             None,
         ));

@@ -58,7 +58,7 @@ mod workflow_notify;
 pub use artifact_download::ArtifactDownload;
 pub use control::{
     artifact_content_url, attest_absent, ensure_running, ensure_running_with_replacement_operation,
-    fetch_artifact_to_path, restart_service_managed, start_background, ArtifactFetchOutcome,
+    fetch_artifact_to_path, restart_service_managed, ArtifactFetchOutcome,
     DaemonAttestAbsentResult,
 };
 use daemon_lease::{
@@ -800,11 +800,11 @@ pub fn converge_current_build_idle_daemon() -> Result<bool> {
         }
         (Some(lease_id), None) => {
             stop_for_lease(lease_id)?;
-            start_background(DEFAULT_ADDR)?;
+            ensure_running(DEFAULT_ADDR)?;
         }
         (None, _) => {
             stop()?;
-            start_background(DEFAULT_ADDR)?;
+            ensure_running(DEFAULT_ADDR)?;
         }
     }
 
@@ -865,11 +865,10 @@ pub struct DaemonState {
     pub started_at: String,
     pub last_seen_at: String,
     pub build_identity: build_identity::BuildIdentity,
-    pub binary_sha256: Option<String>,
     /// The executable the daemon started from, so any reader can tell when
     /// an upgrade has since replaced it on disk.
     // v0.445.4 (v1) did not record executable identity. An empty identity
-    // means unknown, not replaced; build identity/hash still determine freshness.
+    // means unknown, not replaced; build identity still determines freshness.
     #[serde(default)]
     pub executable: ExecutableIdentity,
     pub runtime_paths: DaemonRuntimeSnapshot,
@@ -1131,7 +1130,7 @@ pub enum DaemonStaleReasonCode {
     LeaseSchemaMismatch,
     PidDead,
     BuildIdentityMismatch,
-    BinaryHashMismatch,
+    ExecutableReplaced,
     VersionMismatch,
     RuntimePathsDrift,
     TransportUnreachable,
@@ -1202,8 +1201,6 @@ pub struct DaemonFreshnessReport {
     pub recovery_evidence: Option<DaemonRecoveryEvidence>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ownership_evidence: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub binary_hash: Option<String>,
     /// Version observed from the reachable daemon endpoint, rather than inferred
     /// from the selected runner executable or a persisted controller session.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1495,7 +1492,6 @@ fn legacy_owner_published(path: &Path, lock: &DaemonOwnerLockProbe, state: &Daem
         && serving.state_path == state.state_path
         && serving.schema == state.schema
         && serving.build_identity == state.build_identity
-        && serving.binary_sha256 == state.binary_sha256
 }
 
 /// Read daemon ownership against explicitly injected state and observation paths.
@@ -5595,6 +5591,7 @@ mod tests {
             );
             // Exact v0.445.4 field set: no executable or service_manager.
             // Do not serialize DaemonState here: that would hide new required fields.
+            // `binary_sha256` is no longer read; it must still parse (#17437, #17490).
             let lease = json!({
                 "schema": "homeboy.daemon.session_lease.v1",
                 "lease_id": "previous-release",
@@ -7365,7 +7362,6 @@ mod tests {
             started_at: now.clone(),
             last_seen_at: now,
             build_identity: build_identity::current(),
-            binary_sha256: current_binary_sha256().expect("binary hash"),
             executable: lifetime::running_executable()
                 .expect("test executable identity")
                 .clone(),
@@ -8021,7 +8017,6 @@ fn write_state(
         started_at: now.clone(),
         last_seen_at: now,
         build_identity: build_identity::current(),
-        binary_sha256: current_binary_sha256()?,
         executable: lifetime::running_executable()
             .map_err(|e| {
                 Error::internal_io(
@@ -8577,7 +8572,7 @@ fn daemon_admission_fence_timeout_error_at(path: &Path, wait: Duration) -> Error
         if status.running && !status.fresh && status.freshness.active_jobs > 0 {
             error.details["restart_required"] = serde_json::json!(true);
             error.details["protected_job_count"] = serde_json::json!(status.freshness.active_jobs);
-            error.details["recovery_command"] = serde_json::json!("homeboy daemon start");
+            error.details["recovery_command"] = serde_json::json!("homeboy daemon ensure-running");
         }
     }
     error
@@ -8930,157 +8925,6 @@ fn read_lease_if_identity_matches(
         )));
     }
     Ok(state)
-}
-
-/// Test-only override for the current-binary hash. Hashing the running
-/// executable is cheap for a released ~30-50 MB binary but pathologically slow
-/// for a multi-hundred-MB debug test binary — slow enough to make an in-process
-/// mock-daemon server (which computes it during startup) miss a client's
-/// connect timeout. Tests set this to a fixed value to keep daemon startup fast
-/// and deterministic; it is never consulted in a released binary run.
-pub const DAEMON_BINARY_SHA_OVERRIDE_ENV: &str = "HOMEBOY_TEST_DAEMON_BINARY_SHA";
-
-pub(crate) fn current_binary_sha256() -> Result<Option<String>> {
-    if let Ok(value) = std::env::var(DAEMON_BINARY_SHA_OVERRIDE_ENV) {
-        return Ok((!value.is_empty()).then_some(value));
-    }
-    let exe = std::env::current_exe().map_err(|e| {
-        Error::internal_io(
-            e.to_string(),
-            Some("resolve current executable for daemon lease".to_string()),
-        )
-    })?;
-    sha256_file_optional_cached(&exe)
-}
-
-/// File identity that changes whenever the bytes at a path can have changed:
-/// replacing the file (a new inode) or writing it in place (size or mtime).
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct FileIdentity {
-    path: PathBuf,
-    len: u64,
-    modified: Option<std::time::SystemTime>,
-    #[cfg(unix)]
-    device_inode: (u64, u64),
-}
-
-impl FileIdentity {
-    fn of(path: &Path) -> std::io::Result<Self> {
-        let metadata = fs::metadata(path)?;
-        Ok(Self {
-            path: path.to_path_buf(),
-            len: metadata.len(),
-            modified: metadata.modified().ok(),
-            #[cfg(unix)]
-            device_inode: {
-                use std::os::unix::fs::MetadataExt;
-                (metadata.dev(), metadata.ino())
-            },
-        })
-    }
-}
-
-/// [`sha256_file_optional`], reusing the previous digest while the file's
-/// identity is unchanged. Lease validation runs on every daemon request and
-/// hashed the whole executable each time, which dominated request latency.
-fn sha256_file_optional_cached(path: &Path) -> Result<Option<String>> {
-    static CACHE: OnceLock<Mutex<std::collections::HashMap<PathBuf, (FileIdentity, String)>>> =
-        OnceLock::new();
-    let identity = match FileIdentity::of(path) {
-        Ok(identity) => identity,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(_) => return sha256_file_optional(path),
-    };
-    let cache = CACHE.get_or_init(Default::default);
-    let lock = || {
-        cache
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    };
-    if let Some((cached, digest)) = lock().get(path) {
-        if *cached == identity {
-            return Ok(Some(digest.clone()));
-        }
-    }
-    #[cfg(test)]
-    BINARY_DIGEST_COMPUTATIONS.with(|count| count.set(count.get() + 1));
-    let digest = sha256_file_optional(path)?;
-    // Only cache a digest whose file did not change while it was being read.
-    if let Some(digest) = &digest {
-        if FileIdentity::of(path).is_ok_and(|after| after == identity) {
-            lock().insert(path.to_path_buf(), (identity, digest.clone()));
-        }
-    }
-    Ok(digest)
-}
-
-#[cfg(test)]
-thread_local! {
-    static BINARY_DIGEST_COMPUTATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
-#[cfg(test)]
-mod cached_digest_tests {
-    use super::*;
-
-    fn computations() -> usize {
-        BINARY_DIGEST_COMPUTATIONS.with(std::cell::Cell::get)
-    }
-
-    #[test]
-    fn unchanged_file_is_hashed_once_and_any_change_is_rehashed() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("homeboy");
-        fs::write(&path, b"first binary").unwrap();
-        let first = sha256_file_optional(&path).unwrap();
-
-        let before = computations();
-        for _ in 0..5 {
-            assert_eq!(sha256_file_optional_cached(&path).unwrap(), first);
-        }
-        assert_eq!(
-            computations() - before,
-            1,
-            "an unchanged binary is hashed once"
-        );
-
-        // An in-place rewrite of a different size invalidates the digest.
-        fs::write(&path, b"second binary, longer").unwrap();
-        assert_eq!(
-            sha256_file_optional_cached(&path).unwrap(),
-            sha256_file_optional(&path).unwrap()
-        );
-        assert_ne!(sha256_file_optional_cached(&path).unwrap(), first);
-
-        // Replacing the file with same-size bytes (an upgrade by rename)
-        // changes its identity and is rehashed too.
-        let replacement = dir.path().join("replacement");
-        fs::write(&replacement, b"third binary, longer!").unwrap();
-        let expected = sha256_file_optional(&replacement).unwrap();
-        fs::rename(&replacement, &path).unwrap();
-        assert_eq!(sha256_file_optional_cached(&path).unwrap(), expected);
-
-        fs::remove_file(&path).unwrap();
-        assert_eq!(sha256_file_optional_cached(&path).unwrap(), None);
-    }
-}
-
-/// Hash a file, treating "does not exist" as absence rather than failure.
-///
-/// The absent-is-not-an-error contract is this call site's own; the digest
-/// itself comes from the shared primitive.
-fn sha256_file_optional(path: &Path) -> Result<Option<String>> {
-    match fs::File::open(path) {
-        Ok(_) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => {
-            return Err(Error::internal_io(
-                error.to_string(),
-                Some(format!("open {}", path.display())),
-            ))
-        }
-    }
-    content_hash::sha256_file(path).map(Some)
 }
 
 fn handle_connection<R>(

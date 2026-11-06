@@ -2049,7 +2049,7 @@ const INSTALLED_DAEMON_START_WAIT: Duration = Duration::from_secs(45);
 /// promote.
 ///
 /// After an on-disk swap this process can still be the previous generation.
-/// In-process `daemon start` then admits against that generation and reports a
+/// In-process `daemon ensure-running` then admits against that generation and reports a
 /// Lab Cook timeout for a daemon that already matches the installed binary.
 fn converge_resident_daemon_after_controller_reconciliation(
     completion: &ControllerCompletionIdentity,
@@ -2076,7 +2076,8 @@ fn converge_resident_daemon_after_controller_reconciliation(
                 .replacement_blocked_reason
                 .clone()
                 .unwrap_or_else(|| "protected jobs hold the resident daemon".to_string()),
-            recovery_command: homeboy_core::daemon::recovery_actions::start().render_command(),
+            recovery_command: homeboy_core::daemon::recovery_actions::ensure_running()
+                .render_command(),
             protected_job_count: Some(status.freshness.active_jobs),
         }));
     }
@@ -2148,7 +2149,7 @@ fn daemon_convergence_result(result: Result<bool>) -> Result<Option<DaemonPendin
             reason: error.message,
             recovery_command: error.details["recovery_command"]
                 .as_str()
-                .unwrap_or("homeboy daemon start")
+                .unwrap_or("homeboy daemon ensure-running")
                 .to_string(),
             protected_job_count: error.details["protected_job_count"]
                 .as_u64()
@@ -2159,7 +2160,7 @@ fn daemon_convergence_result(result: Result<bool>) -> Result<Option<DaemonPendin
 }
 
 fn upgrade_daemon_start_required(cause: &str) -> Error {
-    let command = homeboy_core::daemon::recovery_actions::start().render_command();
+    let command = homeboy_core::daemon::recovery_actions::ensure_running().render_command();
     let mut error = Error::validation_invalid_argument(
         "daemon_build_identity",
         format!(
@@ -2181,7 +2182,7 @@ pub fn start_installed_daemon(
 ) -> Result<bool> {
     if let Some(lease_id) = stop_lease_id {
         // A service manager restarts its daemon from the binary it runs; a
-        // `daemon start` here would race that restart for the owner lock and
+        // `daemon ensure-running` here would race that restart for the owner lock and
         // crash-loop the unit (#17387). Stop it and wait for the new build.
         let status = homeboy_core::daemon::read_status()?;
         if status
@@ -2212,17 +2213,17 @@ pub fn start_installed_daemon(
     }
     let binary = active_binary_path()?;
     let mut command = Command::new(&binary);
-    command.args(["daemon", "start"]);
+    command.args(["daemon", "ensure-running"]);
     let output = command_output_with_timeout(
         &mut command,
         INSTALLED_DAEMON_START_WAIT,
-        "installed controller daemon start",
+        "installed controller daemon ensure-running",
     )?;
     if output.status.success() && installed_daemon_matches(installed_identity) {
         return Ok(true);
     }
     Err(Error::internal_unexpected(
-        "installed controller daemon start did not admit a lease for the promoted binary",
+        "installed controller daemon ensure-running did not admit a lease for the promoted binary",
     ))
 }
 
@@ -5263,7 +5264,7 @@ mod promoted_daemon_tests {
             .unwrap()
             .unwrap();
         assert!(pending.reason.contains("protected jobs"));
-        assert_eq!(pending.recovery_command, "homeboy daemon start");
+        assert_eq!(pending.recovery_command, "homeboy daemon ensure-running");
         assert_eq!(pending.protected_job_count, Some(15));
     }
 

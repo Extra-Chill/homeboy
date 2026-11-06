@@ -26,8 +26,6 @@ use crate::error::{ActionSafety, ExecutableAction};
 
 /// Stop the daemon recorded in the local state file.
 pub const DAEMON_STOP: &str = "daemon_stop";
-/// Start a replacement daemon.
-pub const DAEMON_START: &str = "daemon_start";
 /// Replace or reuse the daemon that owns the local store. Starting a daemon
 /// runs its startup recovery of every dead generation in its scope.
 pub const DAEMON_ENSURE_RUNNING: &str = "daemon_ensure_running";
@@ -78,15 +76,6 @@ pub fn stop_for_lease(lease_id: &str) -> ExecutableAction {
             "--lease-id".to_string(),
             lease_id.to_string(),
         ],
-        ActionSafety::Mutating,
-    )
-}
-
-pub fn start() -> ExecutableAction {
-    action(
-        "daemon.start",
-        "start a replacement local daemon".to_string(),
-        ["daemon".to_string(), "start".to_string()],
         ActionSafety::Mutating,
     )
 }
@@ -432,7 +421,10 @@ mod tests {
             stop_for_lease("lease-live").render_command(),
             "homeboy daemon stop --lease-id lease-live"
         );
-        assert_eq!(start().render_command(), "homeboy daemon start");
+        assert_eq!(
+            ensure_running().render_command(),
+            "homeboy daemon ensure-running"
+        );
         assert_eq!(
             attest_absent(&[Uuid::nil(), Uuid::from_u128(2)]).render_command(),
             format!(
@@ -484,7 +476,6 @@ mod tests {
                 pid: Some(3_572_046),
                 recovery_evidence: None,
                 ownership_evidence: Some("daemon lease evidence is inconclusive".to_string()),
-                binary_hash: None,
                 daemon_version: Some("0.326.1".to_string()),
                 daemon_build_identity: Some("homeboy 0.326.1+8755ba48288f".to_string()),
                 runtime_paths: None,
@@ -847,7 +838,6 @@ mod tests {
         for action in [
             stop(),
             stop_for_lease("lease"),
-            start(),
             ensure_running(),
             attest_absent(&[Uuid::nil()]),
         ] {

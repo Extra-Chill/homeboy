@@ -514,7 +514,6 @@ fn disconnected_lab_doctor_reuses_daemon_recovery_envelope() {
         ownership_evidence: Some(
             "remote daemon status over SSH proved PID 4545 is dead".to_string(),
         ),
-        binary_hash: None,
         daemon_version: Some("0.284.0".to_string()),
         daemon_build_identity: Some("homeboy 0.284.0+live".to_string()),
         runtime_paths: None,
@@ -591,7 +590,6 @@ fn disconnected_incompatible_daemon_with_unavailable_ownership_is_terminal() {
         ownership_evidence: Some(
             "remote daemon lease ownership could not be established".to_string(),
         ),
-        binary_hash: None,
         daemon_version: Some("0.349.0".to_string()),
         daemon_build_identity: Some("homeboy 0.349.0+incompatible".to_string()),
         runtime_paths: None,
@@ -789,7 +787,6 @@ mod repair_readiness {
             pid: Some(4242),
             recovery_evidence: Some(homeboy::core::daemon::DaemonRecoveryEvidence::Recoverable),
             ownership_evidence: None,
-            binary_hash: None,
             daemon_version: None,
             daemon_build_identity: None,
             runtime_paths: None,

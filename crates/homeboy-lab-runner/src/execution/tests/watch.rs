@@ -25,13 +25,8 @@ fn allow_unauthenticated_loopback_broker() {
     // The in-process daemon's /exec endpoint drives runner processes through
     // the RunnerExecDriver hook; register the runner-side driver so the
     // end-to-end tests here can run the child (production wires this at CLI
-    // startup). The fixed binary hash keeps in-process daemon startup off the
-    // multi-hundred-MB debug binary hashing path.
+    // startup).
     crate::register_runner_daemon_exec_driver();
-    std::env::set_var(
-        homeboy_core::daemon::DAEMON_BINARY_SHA_OVERRIDE_ENV,
-        "sha256:test-fixed-daemon-binary",
-    );
     homeboy_core::broker_auth::BrokerAuthStore {
         allow_unauthenticated_loopback: true,
         ..Default::default()

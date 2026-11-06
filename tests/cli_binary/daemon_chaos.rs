@@ -143,14 +143,14 @@ fn daemon_pid(data: &serde_json::Value) -> i64 {
 
 fn start_on_demand(bin: &Path, home: &Path, reaper: &mut Reaper) -> serde_json::Value {
     let started = homeboy_at(bin, home)
-        .args(["daemon", "start"])
+        .args(["daemon", "ensure-running"])
         .output()
-        .expect("daemon start");
-    // Keep the refusal evidence: a bare "daemon start failed" left the CI
+        .expect("daemon ensure-running");
+    // Keep the refusal evidence: a bare "daemon ensure-running failed" left the CI
     // failure in #15756 undiagnosable.
     assert!(
         started.status.success(),
-        "daemon start failed: stdout={} stderr={}",
+        "daemon ensure-running failed: stdout={} stderr={}",
         String::from_utf8_lossy(&started.stdout),
         String::from_utf8_lossy(&started.stderr)
     );
@@ -158,7 +158,7 @@ fn start_on_demand(bin: &Path, home: &Path, reaper: &mut Reaper) -> serde_json::
         bin,
         home,
         Duration::from_secs(60),
-        "daemon start",
+        "daemon ensure-running",
         serving_and_admitting,
     );
     reaper.track(daemon_pid(&current["data"]));
@@ -375,7 +375,7 @@ fn stop_and_restart_in_place_resumes_in_flight_work_every_time() {
             stopped["success"], true,
             "stop with work in flight: {stopped}"
         );
-        let restarted = json_output(&bin, home.path(), &["daemon", "start"]);
+        let restarted = json_output(&bin, home.path(), &["daemon", "ensure-running"]);
         assert_eq!(restarted["success"], true, "restart in place: {restarted}");
         reaper.track(restarted["data"]["pid"].as_i64().unwrap_or_default());
     }

@@ -109,7 +109,7 @@ fn runner_service_lease_publication_race_retries_denial_and_preserves_job_identi
             "--workspace-root",
             root.to_str().unwrap(),
         ]);
-        cli(&["daemon", "start"]);
+        cli(&["daemon", "ensure-running"]);
         let _daemon_guard = DaemonGuard {
             binary,
             home: root.to_path_buf(),

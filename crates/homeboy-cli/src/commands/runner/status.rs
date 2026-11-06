@@ -532,7 +532,7 @@ fn daemon_stale_reason_code(reason: DaemonStaleReasonCode) -> &'static str {
         DaemonStaleReasonCode::LeaseSchemaMismatch => "lease_schema_mismatch",
         DaemonStaleReasonCode::PidDead => "pid_dead",
         DaemonStaleReasonCode::BuildIdentityMismatch => "build_identity_mismatch",
-        DaemonStaleReasonCode::BinaryHashMismatch => "binary_hash_mismatch",
+        DaemonStaleReasonCode::ExecutableReplaced => "executable_replaced",
         DaemonStaleReasonCode::VersionMismatch => "version_mismatch",
         DaemonStaleReasonCode::RuntimePathsDrift => "runtime_paths_drift",
         DaemonStaleReasonCode::TransportUnreachable => "transport_unreachable",

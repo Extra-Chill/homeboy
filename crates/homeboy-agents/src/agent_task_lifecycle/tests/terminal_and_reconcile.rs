@@ -534,7 +534,6 @@ fn rooted_controller_staging_cancel_retains_blocker_until_job_is_terminal() {
         started_at: "now".to_string(),
         last_seen_at: "now".to_string(),
         build_identity: homeboy_core::build_identity::current(),
-        binary_sha256: None,
         service_manager: None,
         executable: homeboy_core::daemon::ExecutableIdentity::of(
             &std::env::current_exe().expect("test executable"),

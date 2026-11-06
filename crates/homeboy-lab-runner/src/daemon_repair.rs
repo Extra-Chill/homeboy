@@ -183,7 +183,7 @@ pub(crate) fn controller_frame_plan(
         Some(
             DaemonStaleReasonCode::VersionMismatch
                 | DaemonStaleReasonCode::BuildIdentityMismatch
-                | DaemonStaleReasonCode::BinaryHashMismatch
+                | DaemonStaleReasonCode::ExecutableReplaced
         )
     ) {
         return vec![action_step(
@@ -229,7 +229,6 @@ mod tests {
             pid: Some(4545),
             recovery_evidence: None,
             ownership_evidence: None,
-            binary_hash: None,
             daemon_version: None,
             daemon_build_identity: None,
             runtime_paths: None,
@@ -240,7 +239,10 @@ mod tests {
             // stops the controller's daemon.
             repair_plan: vec![
                 DaemonRepairStep::text("daemon_stop", "homeboy daemon stop".to_string()),
-                DaemonRepairStep::text("daemon_start", "homeboy daemon start".to_string()),
+                DaemonRepairStep::text(
+                    "daemon_ensure_running",
+                    "homeboy daemon ensure-running".to_string(),
+                ),
             ],
         }
     }
@@ -352,7 +354,7 @@ mod tests {
             DaemonStaleReasonCode::LeaseCorrupt,
             DaemonStaleReasonCode::VersionMismatch,
             DaemonStaleReasonCode::BuildIdentityMismatch,
-            DaemonStaleReasonCode::BinaryHashMismatch,
+            DaemonStaleReasonCode::ExecutableReplaced,
             DaemonStaleReasonCode::RuntimePathsDrift,
             DaemonStaleReasonCode::TransportUnreachable,
             DaemonStaleReasonCode::LeaseSchemaMismatch,

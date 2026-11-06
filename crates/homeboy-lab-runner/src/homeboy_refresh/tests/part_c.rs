@@ -61,7 +61,6 @@ fn freshness(
         pid: Some(1234),
         recovery_evidence: None,
         ownership_evidence: None,
-        binary_hash: None,
         daemon_version: None,
         daemon_build_identity: None,
         runtime_paths: None,
@@ -83,12 +82,12 @@ fn refresh_readiness_does_not_fence_a_ready_daemon_on_its_own_live_jobs() {
 }
 
 #[test]
-fn refresh_readiness_blocks_a_post_refresh_binary_hash_mismatch() {
+fn refresh_readiness_blocks_a_post_refresh_executable_replacement() {
     let readiness = refresh_readiness_from_status(
         "homeboy-lab",
         &readiness_report(freshness(
             false,
-            Some(DaemonStaleReasonCode::BinaryHashMismatch),
+            Some(DaemonStaleReasonCode::ExecutableReplaced),
         )),
     );
 

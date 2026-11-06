@@ -908,7 +908,6 @@ fn stale_daemon_admission_snapshot(
         pid,
         recovery_evidence: None,
         ownership_evidence: None,
-        binary_hash: None,
         daemon_version: None,
         daemon_build_identity: None,
         runtime_paths: None,

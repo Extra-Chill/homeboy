@@ -17,12 +17,12 @@ fn unleased_processes_refuse_mutation() {
         reason: "pid 7 holds no lease".to_string(),
     };
     assert!(mutation_refusal(&planned).is_some(), "{planned:?}");
-    let error =
-        ensure_mutation_allowed_with("daemon start", || planned.clone()).expect_err("refused");
+    let error = ensure_mutation_allowed_with("daemon ensure-running", || planned.clone())
+        .expect_err("refused");
     assert_eq!(error.details["classification"], "lifecycle_refused");
     assert!(error
         .message
-        .contains("daemon start refused by the daemon lifecycle plan"));
+        .contains("daemon ensure-running refused by the daemon lifecycle plan"));
 }
 
 #[test]

@@ -81,7 +81,7 @@ fn run(context: &HermeticTestContext, args: &[&str]) -> Value {
     serde_json::from_slice(&output.stdout).unwrap_or(Value::Null)
 }
 
-/// Start a tokenized daemon generation through the public `daemon start`.
+/// Start a tokenized daemon generation through the public `daemon ensure-running`.
 ///
 /// `bounded_output` reaps the whole process tree of its command, and hermetic
 /// daemons deliberately stay in their launcher's process group, so the
@@ -92,7 +92,7 @@ fn start_daemon(context: &HermeticTestContext, delivery_gate: bool) -> i32 {
     let stderr = context.root().join("daemon-start.stderr");
     let mut start = command(context);
     start
-        .args(["daemon", "start"])
+        .args(["daemon", "ensure-running"])
         // The fault signals the daemon's whole group, so it must be the
         // launcher's private group, never libtest's.
         .env(
@@ -118,7 +118,10 @@ fn start_daemon(context: &HermeticTestContext, delivery_gate: bool) -> i32 {
         if Instant::now() >= deadline {
             let _ = launcher.kill();
             let _ = launcher.wait();
-            panic!("daemon start did not return\n{}", evidence(context));
+            panic!(
+                "daemon ensure-running did not return\n{}",
+                evidence(context)
+            );
         }
         std::thread::sleep(Duration::from_millis(50));
     };
@@ -126,7 +129,7 @@ fn start_daemon(context: &HermeticTestContext, delivery_gate: bool) -> i32 {
         serde_json::from_slice(&std::fs::read(&stdout).unwrap_or_default()).unwrap_or(Value::Null);
     assert!(
         status.success() && started["data"]["pid"].is_u64(),
-        "daemon start: stdout={started} stderr={}\n{}",
+        "daemon ensure-running: stdout={started} stderr={}\n{}",
         std::fs::read_to_string(&stderr).unwrap_or_default(),
         evidence(context),
     );

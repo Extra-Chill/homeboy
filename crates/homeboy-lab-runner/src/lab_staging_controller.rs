@@ -6552,7 +6552,6 @@ mod tests {
                 pid: Some(1234),
                 recovery_evidence: None,
                 ownership_evidence: Some("reachable daemon lease and PID verified".to_string()),
-                binary_hash: None,
                 daemon_version: None,
                 daemon_build_identity: Some(daemon_identity.to_string()),
                 runtime_paths: None,
