@@ -1664,6 +1664,10 @@ pub struct CleanupInventoryOutput {
     /// Categories that executed and removed at least one resource. Counted in
     /// categories, never in resources.
     pub applied_category_count: usize,
+    /// The cause of a nonzero exit, lifted from the first failed category so
+    /// the command result names it instead of only nesting it (#17394).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure: Option<CleanupInventoryCategoryFailure>,
     pub estimated_bytes: u64,
     pub reclaimed_bytes: u64,
     pub retention: CleanupRetentionManifest,
@@ -2396,6 +2400,11 @@ impl<'a> CleanupSweep<'a> {
             .filter(|category| category.failure.is_some() && !is_bounded_continuation(category))
             .count();
         let actionable = cleanup_actionable(&categories, apply);
+        let failure = cleanup_inventory_failure(
+            &categories,
+            failed_category_count,
+            unsatisfied_native_contract_count,
+        );
         let output = serde_json::to_value(CleanupInventoryOutput {
             command: "cleanup.inventory",
             status: cleanup_inventory_status(
@@ -2414,6 +2423,7 @@ impl<'a> CleanupSweep<'a> {
             reconciliation_blocker_count,
             unsatisfied_native_contract_count,
             applied_category_count,
+            failure,
             estimated_bytes,
             reclaimed_bytes,
             retention: policy,
@@ -3034,6 +3044,44 @@ fn run_cleanup_category(
 /// a provider-declared capability could not run, which is a different repair
 /// (#14955). A bounded continuation alone -- no failures, no unsatisfied
 /// contracts -- stays `partial`, not a failure (#12727).
+/// Name the failure behind a nonzero inventory exit: the first failed
+/// category and its cause, or the unexecuted native contracts.
+fn cleanup_inventory_failure(
+    categories: &[CleanupInventoryCategory],
+    failed_category_count: usize,
+    unsatisfied_native_contract_count: usize,
+) -> Option<CleanupInventoryCategoryFailure> {
+    if let Some((category, failure)) = categories.iter().find_map(|category| {
+        category
+            .failure
+            .as_ref()
+            .filter(|_| !is_bounded_continuation(category))
+            .map(|failure| (category, failure))
+    }) {
+        return Some(CleanupInventoryCategoryFailure {
+            code: failure.code.clone(),
+            message: format!(
+                "{failed_category_count} cleanup categor{} failed; first: {}: {}",
+                if failed_category_count == 1 {
+                    "y"
+                } else {
+                    "ies"
+                },
+                category.category,
+                failure.message
+            ),
+            retryable: failure.retryable,
+        });
+    }
+    (unsatisfied_native_contract_count > 0).then(|| CleanupInventoryCategoryFailure {
+        code: "cleanup.native_contract_unsatisfied".to_string(),
+        message: format!(
+            "{unsatisfied_native_contract_count} provider-declared native cleanup contract(s) could not be executed"
+        ),
+        retryable: None,
+    })
+}
+
 fn cleanup_inventory_status(
     failed_category_count: usize,
     unsatisfied_native_contract_count: usize,
@@ -3911,6 +3959,8 @@ struct RepoArtifactRootDiagnostic {
     output: Option<cleanup::ArtifactCleanupOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    skip_reason: Option<String>,
 }
 
 fn repo_artifacts_category(
@@ -3957,11 +4007,13 @@ fn repo_artifacts_category(
     apply_repo_artifact_scan_budget(&mut collected_roots.roots, deadline);
     let mut output = cleanup_repo_artifact_roots(collected_roots.roots);
     output.diagnostics.extend(collected_roots.diagnostics);
+    // Fall back to the source checkout when no configured root was scanned,
+    // whether each one failed or was skipped as a non-git directory.
     if !include_source_checkout
         && output
             .diagnostics
             .iter()
-            .all(|diagnostic| !diagnostic.success)
+            .all(|diagnostic| diagnostic.output.is_none())
     {
         let mut source_roots = repo_artifact_roots(Vec::new(), true, apply, limit);
         apply_repo_artifact_scan_budget(&mut source_roots.roots, deadline);
@@ -3994,7 +4046,7 @@ fn repo_artifacts_category(
             && output
                 .diagnostics
                 .iter()
-                .all(|diagnostic| !diagnostic.success),
+                .all(|diagnostic| diagnostic.output.is_none()),
         skip_reason: (failure_count > 0)
             .then(|| format!("{failure_count} owned cleanup root(s) could not be inspected")),
         failure: (failure_count > 0 || partial_inventory).then(|| {
@@ -4003,7 +4055,7 @@ fn repo_artifacts_category(
                 message: if partial_inventory {
                     "repo artifact inventory reached its bounded worktree scan budget".to_string()
                 } else {
-                    format!("{failure_count} owned cleanup root(s) could not be inspected")
+                    repo_artifact_failure_message(failure_count, &output.diagnostics)
                 },
                 retryable: Some(true),
             }
@@ -4113,6 +4165,7 @@ fn cleanup_repo_artifact_roots(
                     success: true,
                     output: Some(root_output),
                     error: None,
+                    skip_reason: None,
                 });
                 if !scan_complete {
                     break;
@@ -4124,10 +4177,26 @@ fn cleanup_repo_artifact_roots(
                 success: false,
                 output: None,
                 error: Some(error.message),
+                skip_reason: None,
             }),
         }
     }
     output
+}
+
+fn repo_artifact_failure_message(
+    failure_count: usize,
+    diagnostics: &[RepoArtifactRootDiagnostic],
+) -> String {
+    let summary = format!("{failure_count} owned cleanup root(s) could not be inspected");
+    let Some(first) = diagnostics.iter().find(|diagnostic| !diagnostic.success) else {
+        return summary;
+    };
+    let error = first.error.as_deref().unwrap_or("unknown error");
+    match &first.path {
+        Some(path) => format!("{summary}; first: {path}: {error}"),
+        None => format!("{summary}; first: {error}"),
+    }
 }
 
 fn repo_artifact_roots(
@@ -4149,10 +4218,25 @@ fn repo_artifact_roots(
                 success: false,
                 output: None,
                 error: Some("configured component local_path must be absolute".to_string()),
+                skip_reason: None,
             });
             continue;
         }
-        let root = homeboy::core::git::repo_root(&path)
+        let repository_root = homeboy::core::git::repo_root(&path);
+        if repository_root.is_none() && path.is_dir() {
+            // A deployed plugin or other non-git component directory owns no
+            // repository artifacts; it is skipped, not a failed root (#17394).
+            collection.diagnostics.push(RepoArtifactRootDiagnostic {
+                scope: "configured_component",
+                path: Some(path.to_string_lossy().to_string()),
+                success: true,
+                output: None,
+                error: None,
+                skip_reason: Some("not a git checkout; no repository artifacts".to_string()),
+            });
+            continue;
+        }
+        let root = repository_root
             .and_then(|root| std::fs::canonicalize(root).ok())
             .unwrap_or(path);
         if seen.insert(root.clone()) {
@@ -4956,6 +5040,31 @@ mod count_unit_tests {
         assert_eq!(category("controller-scratch", 1, 1).outcome, "completed");
         // Nothing to do is a genuine clean pass, not a no-effect apply.
         assert_eq!(category("controller-scratch", 0, 0).outcome, "completed");
+    }
+
+    /// A nonzero inventory exit names its cause at the top level instead of
+    /// leaving it nested in one category (#17394).
+    #[test]
+    fn inventory_failure_lifts_the_first_failed_category_cause() {
+        let mut failed = category("repo_artifacts", 0, 0);
+        failed.failure = Some(CleanupInventoryCategoryFailure {
+            code: "cleanup.partial_inventory".to_string(),
+            message: "1 owned cleanup root(s) could not be inspected".to_string(),
+            retryable: Some(true),
+        });
+        let failure = cleanup_inventory_failure(&[category("other", 0, 0), failed], 1, 0)
+            .expect("failure is lifted");
+        assert_eq!(failure.code, "cleanup.partial_inventory");
+        assert_eq!(
+            failure.message,
+            "1 cleanup category failed; first: repo_artifacts: 1 owned cleanup root(s) could not be inspected"
+        );
+        assert_eq!(failure.retryable, Some(true));
+
+        let contract = cleanup_inventory_failure(&[category("other", 0, 0)], 0, 2)
+            .expect("unsatisfied contracts are named");
+        assert_eq!(contract.code, "cleanup.native_contract_unsatisfied");
+        assert!(cleanup_inventory_failure(&[category("other", 0, 0)], 0, 0).is_none());
     }
 
     /// A dry run applies nothing by definition, so naming candidates in one is
@@ -6785,6 +6894,54 @@ mod tests {
         assert!(!output.diagnostics[0].success);
         assert!(output.diagnostics[1].success);
         assert_eq!(output.candidate_count, 1);
+    }
+
+    /// A deployed plugin directory is a registered component with no git
+    /// checkout. It owns no repository artifacts, so it is a skip with a
+    /// reason rather than a failed root that makes every dry-run exit 1
+    /// (#17394). A path that does not exist at all still fails.
+    #[test]
+    fn non_git_component_directories_are_skipped_not_failed() {
+        let deployed = TempDir::new().expect("deployed plugin directory");
+        let roots = repo_artifact_roots(
+            vec![
+                deployed.path().to_path_buf(),
+                PathBuf::from("/does/not/exist"),
+            ],
+            false,
+            false,
+            100,
+        );
+
+        assert_eq!(roots.roots.len(), 1);
+        assert_eq!(
+            roots.roots[0].1.path,
+            Some(PathBuf::from("/does/not/exist"))
+        );
+        assert_eq!(roots.diagnostics.len(), 1);
+        let skipped = &roots.diagnostics[0];
+        assert!(skipped.success);
+        assert!(skipped.error.is_none() && skipped.output.is_none());
+        assert_eq!(
+            skipped.skip_reason.as_deref(),
+            Some("not a git checkout; no repository artifacts")
+        );
+    }
+
+    #[test]
+    fn repo_artifact_failure_message_names_the_first_failed_root() {
+        let diagnostics = vec![RepoArtifactRootDiagnostic {
+            scope: "configured_component",
+            path: Some("/srv/plugin".to_string()),
+            success: false,
+            output: None,
+            error: Some("not readable".to_string()),
+            skip_reason: None,
+        }];
+        assert_eq!(
+            repo_artifact_failure_message(1, &diagnostics),
+            "1 owned cleanup root(s) could not be inspected; first: /srv/plugin: not readable"
+        );
     }
 
     #[test]
