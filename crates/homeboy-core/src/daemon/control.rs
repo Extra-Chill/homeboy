@@ -23,8 +23,8 @@ use serde::Serialize;
 use super::acquire_daemon_job_admission_fence;
 use super::{
     acquire_daemon_operation_lock, acquire_daemon_operation_lock_for_ensure, parse_bind_addr,
-    read_status, stop_unlocked, try_acquire_daemon_owner_lock, DaemonStartResult,
-    DAEMON_STARTUP_TOKEN_ENV,
+    read_status, stop_unlocked, try_acquire_daemon_owner_lock, DaemonStaleReasonCode,
+    DaemonStartResult, DAEMON_STARTUP_TOKEN_ENV,
 };
 
 const TEST_KEEP_DAEMON_IN_PROCESS_GROUP_ENV: &str = "HOMEBOY_TEST_KEEP_DAEMON_IN_PROCESS_GROUP";
