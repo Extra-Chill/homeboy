@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.445.11] - 2026-11-06
+
+### Changed
+- remove the timing races behind four #17410 flakes; write termination.json atomically
+
 ## [0.445.10] - 2026-11-06
 
 ### Changed
