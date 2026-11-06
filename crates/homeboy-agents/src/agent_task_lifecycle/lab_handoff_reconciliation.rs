@@ -1,84 +1,13 @@
 //! Lab-runner handoff reconciliation.
 //!
-//! The volatile heart of the durable-run control plane: reconciling active lab
-//! handoffs, expiring unaccepted runner handoffs, terminalizing
-//! lost accepted lab jobs, and the handoff/candidate follow-up predicates.
+//! The volatile heart of the durable-run control plane: expiring unaccepted
+//! runner handoffs, terminalizing lost accepted lab jobs, and the
+//! handoff/candidate follow-up predicates. Fleet liveness is owned by
+//! `agent_task_service::reconcile::reconcile_stale_active_runs`.
 //! Extracted from the high-churn `lifecycle_ops` god file to isolate this
 //! reconciliation state machine into a named, testable seam.
 
 use super::*;
-
-// The ambient `reconcile_active_lab_runner_handoffs()` shim that used to sit
-// above this resolved a root and delegated straight here. It had no callers, so
-// it was a resolution point that existed for nobody (#7505).
-//
-// Worth naming rather than burying: the rooted form below is reached only by
-// `tests::terminal_and_reconcile`, so this scan currently has no production
-// caller either. That is a coverage question, not a rooting one, and deleting
-// the ambient half does not change it — but it is why the shim could rot here
-// unnoticed. The module carries `#[allow(dead_code)]` in `lib.rs`, so the
-// compiler was never going to say so.
-
-/// Reconcile every active lab-runner handoff inside an explicitly rooted store.
-///
-/// This is a queue scan that mutates every row it selects, so the scan and its
-/// consequences have to name one installation. The queue itself is read from
-/// this store's own observation database, and each of the two follow-ups is
-/// dispatched to the rooted sibling that takes its lock and commits its record
-/// in the same home:
-///
-/// * `expire_unaccepted_lab_handoff_in_store` takes `LabHandoffLock` on this
-///   store's `run_dir` and terminalizes;
-/// * `reconcile_status_in_store` takes two advisory locks of its own and has roughly
-///   twenty durable write sites.
-///
-/// Selecting a run from one installation's queue and then expiring or
-/// terminalizing it in another is the exact shape #7505 exists to stop: the
-/// handoff lock would be held where nobody contends for it, so an acceptance
-/// racing this expiry would not be excluded by it, and the terminal record
-/// would land beside a queue row that still reads `Running`.
-pub fn reconcile_active_lab_runner_handoffs_in_store(
-    lifecycle_store: &AgentTaskLifecycleStore,
-) -> Result<usize> {
-    let now = chrono::Utc::now();
-    let mut accepted_run_ids = Vec::new();
-    let mut expired_run_ids = Vec::new();
-    // Scan the stored snapshot so this operation owns and reports its expiry
-    // mutations. Reads never expire a handoff (#15718).
-    for record in lifecycle_store.read_records()? {
-        if record.state() == AgentTaskRunState::Running && record.has_accepted_lab_handoff() {
-            accepted_run_ids.push(record.run_id);
-        } else if has_expired_pending_runner_submission_intent(&record, now) {
-            expired_run_ids.push(record.run_id);
-        }
-    }
-
-    let mut reconciled = 0;
-    for run_id in expired_run_ids {
-        if expire_unaccepted_lab_handoff_in_store(lifecycle_store, &run_id)? {
-            reconciled += 1;
-        }
-    }
-    for run_id in accepted_run_ids {
-        // `reconcile_status_in_store` owns snapshot validation, persistence, and the exact
-        // no-PID daemon-loss projection. A bad remote record must not prevent
-        // unrelated activity from being listed. This is the rooted body the
-        // ambient `status` entry point delegates to, with its own defaults:
-        // `AgentTaskStatusOptions::default()` and a Cook-alias-resolving
-        // (non-exact) read, which is exactly what `status` passed.
-        if reconcile_status_in_store(
-            lifecycle_store,
-            &run_id,
-            AgentTaskStatusOptions::default(),
-            false,
-        )
-        .is_ok()
-        {
-            reconciled += 1;
-        }
-    }
-    Ok(reconciled)
-}
 
 pub(crate) fn has_expired_pending_runner_submission_intent(
     record: &AgentTaskRunRecord,

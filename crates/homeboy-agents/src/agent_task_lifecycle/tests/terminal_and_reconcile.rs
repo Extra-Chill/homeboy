@@ -913,12 +913,8 @@ fn controller_proxy_records_pre_execution_phase_progress() {
 }
 
 /// Rooted in an explicit store rather than a mutated process environment
-/// (#7505). `reconcile_active_lab_runner_handoffs_in_store` returning zero is
-/// an assertion about the *population* of one installation, so it has to sweep
-/// the same home the setup record lives in — an ambient sweep would count
-/// whatever handoffs the operator's real root holds. The closing equality
-/// between the terminal phase write and the cancellation is the same argument
-/// for a single record.
+/// (#7505). The closing equality between the terminal phase write and the
+/// cancellation is an assertion about a single record in that store.
 #[test]
 fn long_pre_submission_setup_survives_reconciliation_and_terminal_phase_writes_are_noops() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
@@ -945,11 +941,6 @@ fn long_pre_submission_setup_survives_reconciliation_and_terminal_phase_writes_a
     // request has crossed the durable submission boundary yet.
     assert!(materializing.lab_handoff.is_none());
     assert!(materializing.metadata.get("handoff_acceptance").is_none());
-    assert_eq!(
-        reconcile_active_lab_runner_handoffs_in_store(&lifecycle_store)
-            .expect("read-side reconciliation"),
-        0
-    );
     let hydrating = record_lab_offload_phase_with_submission_in_store(
         &lifecycle_store,
         LabOffloadPhaseRecord {
