@@ -4170,6 +4170,7 @@ mod gate_setup_message_tests {
             cwd: String::new(),
             reason: "lockfile present".to_string(),
             download_cache: Default::default(),
+            download_auth: Default::default(),
             termination,
             status: DependencyHydrationStatus::Failed,
             exit_code,

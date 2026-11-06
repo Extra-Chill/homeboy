@@ -8705,6 +8705,162 @@ mod tests {
     }
 
     #[test]
+    fn isolated_gate_setup_maps_declared_download_auth_without_exposing_secrets() {
+        homeboy_core::test_support::with_isolated_home(|home| {
+            let checkout = tempfile::tempdir().unwrap();
+            let root = checkout.path();
+            fs::write(root.join("project.json"), "{}").unwrap();
+            let adapters = home
+                .path()
+                .join(".config/homeboy/extensions/dependency-adapters");
+            fs::create_dir_all(&adapters).unwrap();
+            fs::write(adapters.join("index.json"), r#"{"schema":"homeboy-extension/dependency-adapter-index/v1","manifests":[{"id":"fixture","ecosystem":"fixture","path":"fixture.json"}]}"#).unwrap();
+            let secret = "fixture-download-credential-unique";
+            let source = home.path().join("credentials.json");
+            // Shaped like a real auth.json: structural lines must not become redaction terms.
+            let content =
+                format!("{{\n  \"github-oauth\": {{\n    \"github.com\": \"{secret}\"\n  }}\n}}\n");
+            fs::write(&source, &content).unwrap();
+            for (mode, file, explicit, isolated, succeeds) in [
+                ("content", "credentials.json", None, true, true),
+                ("path", "credentials.json", None, true, true),
+                (
+                    "content",
+                    "credentials.json",
+                    Some("operator-download-credential"),
+                    true,
+                    true,
+                ),
+                ("content", "absent.json", None, true, true),
+                ("content", "credentials.json", None, false, true),
+                ("content", "credentials.json", None, true, false),
+            ] {
+                let command = format!(
+                    r#"printf 'ordinary {{output}}\n'; printf '%s' "${{FIXTURE_DOWNLOAD_AUTH:+present}}" > observed-present; printf '%s' "${{#FIXTURE_DOWNLOAD_AUTH}}" > observed-length; if [ '{mode}' = path ] && [ -n "$FIXTURE_DOWNLOAD_AUTH" ]; then cat "$FIXTURE_DOWNLOAD_AUTH"; else printf '%s' "$FIXTURE_DOWNLOAD_AUTH"; fi; printf '\nHOMEBOY_PROGRESS {{"phase":"install","current":"%s"}}\n' "$FIXTURE_DOWNLOAD_AUTH"; sleep 0.05; exit {}"#,
+                    if succeeds { 0 } else { 1 }
+                );
+                let manifest = serde_json::json!({
+                    "schema":"homeboy-extension/dependency-adapter-manifest/v1", "id":"fixture", "version":1,
+                    "ecosystem":"fixture", "project_signals":{"root_files":["project.json"]},
+                    "package_managers":[{"id":"fixture", "download_auth":{"env":"FIXTURE_DOWNLOAD_AUTH","file":file,"as":mode},
+                        "selection":{"priority":1,"files":["project.json"],"search":"upward"},
+                        "commands":{"install":{"command":command}}}]
+                });
+                fs::write(adapters.join("fixture.json"), manifest.to_string()).unwrap();
+                let mut gate_policy = AgentTaskGateEnvironmentPolicy::default();
+                if let Some(value) = explicit {
+                    gate_policy
+                        .variables
+                        .insert("FIXTURE_DOWNLOAD_AUTH".into(), value.into());
+                }
+                let selected = selected_gate_environment(&gate_policy, None).unwrap();
+                let mut environment = selected.hydration_environment();
+                environment.isolate_download_cache = isolated;
+                let progress = Arc::new(Mutex::new(Vec::new()));
+                let policy = homeboy_core::deps::DependencyHydrationPolicy {
+                    environment,
+                    heartbeat_interval: Duration::from_millis(10),
+                    on_progress: Arc::new({
+                        let progress = Arc::clone(&progress);
+                        move |event| progress.lock().unwrap().push(format!("{event:?}"))
+                    }),
+                    ..Default::default()
+                };
+                let outcomes = hydrate_gate_dependency_roots_for_component(
+                    root, true, "fixture", &policy, None, None,
+                )
+                .unwrap();
+                assert_eq!(outcomes.len(), 1);
+                assert_eq!(
+                    outcomes[0].status,
+                    if succeeds {
+                        homeboy_core::deps::DependencyHydrationStatus::Succeeded
+                    } else {
+                        homeboy_core::deps::DependencyHydrationStatus::Failed
+                    }
+                );
+                let expected = if !isolated || file == "absent.json" {
+                    String::new()
+                } else if let Some(value) = explicit {
+                    value.to_string()
+                } else if mode == "path" {
+                    source.display().to_string()
+                } else {
+                    content.clone()
+                };
+                assert_eq!(
+                    fs::read_to_string(root.join("observed-length")).unwrap(),
+                    expected.len().to_string()
+                );
+                assert_eq!(
+                    fs::read_to_string(root.join("observed-present")).unwrap(),
+                    if expected.is_empty() { "" } else { "present" }
+                );
+                if isolated {
+                    assert_eq!(
+                        outcomes[0].download_auth["FIXTURE_DOWNLOAD_AUTH"],
+                        if file == "absent.json" {
+                            "unavailable".to_string()
+                        } else if explicit.is_some() {
+                            "operator_override".to_string()
+                        } else {
+                            source.display().to_string()
+                        }
+                    );
+                } else {
+                    assert!(outcomes[0].download_auth.is_empty());
+                }
+                if !succeeds {
+                    // Failed outcomes keep output; redaction must leave ordinary text intact.
+                    assert!(outcomes[0].stdout.contains("ordinary {output}"));
+                }
+                let evidence = serde_json::to_string(&outcomes).unwrap();
+                let progress = progress.lock().unwrap().join("\n");
+                for value in [secret, content.as_str(), "operator-download-credential"] {
+                    assert!(!evidence.contains(value), "secret in outcome");
+                    assert!(!progress.contains(value), "secret in progress");
+                }
+                assert!(!Path::new(selected.values.get("HOME").unwrap())
+                    .join("credentials.json")
+                    .exists());
+            }
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(&source, home.path().join("linked.json")).unwrap();
+            for file in [
+                "/absolute.json",
+                "../credentials.json",
+                ".config",
+                "linked.json",
+            ] {
+                if file == "linked.json" && !cfg!(unix) {
+                    continue;
+                }
+                let manifest = serde_json::json!({
+                    "schema":"homeboy-extension/dependency-adapter-manifest/v1", "id":"fixture", "version":1,
+                    "ecosystem":"fixture", "project_signals":{"root_files":["project.json"]},
+                    "package_managers":[{"id":"fixture", "download_auth":{"env":"FIXTURE_DOWNLOAD_AUTH","file":file,"as":"content"},
+                        "selection":{"priority":1,"files":["project.json"],"search":"upward"},
+                        "commands":{"install":{"command":"touch unsafe-install-ran"}}}]
+                });
+                fs::write(adapters.join("fixture.json"), manifest.to_string()).unwrap();
+                let selected =
+                    selected_gate_environment(&AgentTaskGateEnvironmentPolicy::default(), None)
+                        .unwrap();
+                let policy = homeboy_core::deps::DependencyHydrationPolicy {
+                    environment: selected.hydration_environment(),
+                    ..Default::default()
+                };
+                let error = hydrate_gate_dependency_roots_for_component(
+                    root, true, "fixture", &policy, None, None,
+                )
+                .unwrap_err();
+                assert!(!format!("{error:?}").contains(secret));
+                assert!(!root.join("unsafe-install-ran").exists());
+            }
+        });
+    }
+
+    #[test]
     fn isolated_gate_setup_shares_declared_download_cache_and_honors_override() {
         homeboy_core::test_support::with_isolated_home(|home| {
             let checkout = tempfile::tempdir().unwrap();

@@ -23262,6 +23262,7 @@ fn failed_attempt_manual_preflight_hydrates_serialized_intent_and_publishes() {
                 cwd: "/fixture".to_string(),
                 reason: "deterministic fixture".to_string(),
                 download_cache: Default::default(),
+                download_auth: Default::default(),
                 termination: homeboy_core::deps::DependencyHydrationTermination::Completed,
                 status: homeboy_core::deps::DependencyHydrationStatus::Succeeded,
                 exit_code: Some(0),
