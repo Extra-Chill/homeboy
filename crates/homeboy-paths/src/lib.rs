@@ -420,10 +420,22 @@ impl Drop for ObservationStoreIsolation {
     }
 }
 
-/// The runtime-temp root of the innermost test isolation on this thread.
+/// The runtime-temp root of the innermost test isolation on this thread, unless
+/// a legacy `HomeGuard` injected a process-wide home (where ambient resolution
+/// is the point).
 #[doc(hidden)]
 pub fn hermetic_runtime_root() -> Option<PathBuf> {
+    if explicit_home_injected() {
+        return None;
+    }
     HERMETIC_RUNTIME_ROOTS.with(|roots| roots.borrow().last().cloned())
+}
+
+fn explicit_home_injected() -> bool {
+    home_root_override()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .is_some()
 }
 
 /// Panic when ambient Homeboy state is resolved inside test isolation.
@@ -438,11 +450,7 @@ fn assert_ambient_root_allowed(what: &str) {
     if HERMETIC_RUNTIME_ROOTS.with(|roots| roots.borrow().is_empty()) {
         return;
     }
-    let explicit_home = home_root_override()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .is_some();
-    if explicit_home {
+    if explicit_home_injected() {
         return;
     }
     // `#[track_caller]` stops at the first wrapper that lacks it, so name the
