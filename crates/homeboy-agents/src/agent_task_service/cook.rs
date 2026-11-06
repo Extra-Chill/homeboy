@@ -6458,6 +6458,9 @@ fn run_cook_spine(
             Some(plan) => plan,
             None => lifecycle_store.read_controller_plan(&run_id)?,
         };
+        // A lost controller watch must adopt the existing daemon result, not
+        // consume another provider attempt or retain the transport failure.
+        agent_task_lifecycle::recover_disconnected_runner_in_store(lifecycle_store, &run_id)?;
         let needs_execution = cook_attempt_needs_execution_with_store(lifecycle_store, &run_id);
         if needs_execution {
             // The local detached launcher persists this fence before spawn.

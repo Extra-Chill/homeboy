@@ -120,6 +120,7 @@ pub(crate) struct CookRecoveryInputs<'a> {
     pub status: &'a str,
     /// A durable lifecycle record exists for the attempt.
     pub recovery_legal: bool,
+    pub disconnected_runner: bool,
     /// A promotion operation claim is still `running`.
     pub blocking_claim: bool,
     /// Retry (or continuation) admission accepted this attempt.
@@ -164,6 +165,9 @@ pub(crate) fn cook_recovery_step(inputs: &CookRecoveryInputs<'_>) -> CookRecover
         return CookRecoveryStep::none(
             "No recovery command is legal because the durable recipe has no lifecycle record. Start a fresh Cook after preserving the recipe reference for investigation.",
         );
+    }
+    if inputs.disconnected_runner {
+        return CookRecoveryStep::Continue;
     }
     let status = CookStatus::from_status(inputs.status);
     if status.is_in_flight() {

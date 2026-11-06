@@ -4275,6 +4275,16 @@ where
         })?;
     let run_id = agent_task_service::resolve_cook_continuation_run_id(&args.cook_or_attempt_id)?;
     let record = agent_task_service::reconcile_recipe_attempt_for_continuation(&recipe, &run_id)?;
+    let record =
+        if homeboy::agents::agent_task_lifecycle::disconnected_runner_recovery_available(&record) {
+            let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+            homeboy::agents::agent_task_lifecycle::recover_disconnected_runner_in_store(
+                &store, &run_id,
+            )?;
+            agent_task_service::reconcile_recipe_attempt_for_continuation(&recipe, &run_id)?
+        } else {
+            record
+        };
     let route_override = cook_provider_route_override(
         args.backend.clone(),
         args.selector.clone(),
@@ -4586,6 +4596,20 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
         };
     let lifecycle_store =
         agent_task_lifecycle::AgentTaskLifecycleStore::from_current_environment()?;
+    if lifecycle_store.read_record(&run_id).is_ok_and(|record| {
+        homeboy::agents::agent_task_lifecycle::disconnected_runner_recovery_available(&record)
+    }) {
+        return Ok((
+            serde_json::json!({
+                "run_id": run_id,
+                "admitted": true,
+                "recovery": "reattach_existing_runner_job",
+                "provider_redispatch": false,
+                "phases": phases,
+            }),
+            0,
+        ));
+    }
     let (record, aggregate) =
         match agent_task_service::preflight_recipe_attempt_for_continuation_in_store(
             &lifecycle_store,

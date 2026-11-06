@@ -632,6 +632,12 @@ fn project_terminal_runner_lifecycle_event_in_store(
     let aggregate = projected_runner_aggregate(record, &event.aggregate);
     let projection_plan = aggregate_projection_plan_from_outcomes(&aggregate);
     record_verified_lab_placement_outcome(record)?;
+    if disconnected_runner_recovery_available(record) {
+        let metadata = record.ensure_metadata_object();
+        if let Some(failure) = metadata.remove("pre_execution_failure") {
+            metadata.insert("recovered_controller_disconnect".to_string(), failure);
+        }
+    }
     // The aggregate is the task result. A successful enclosing daemon job only
     // proves transport completion, not task success.
     record_runner_job_terminal_metadata(record, snapshot.job.status, &snapshot.events);
@@ -1017,7 +1023,7 @@ fn merge_live_provider_handles(
     }
 }
 
-fn validate_runner_job_snapshot(
+pub(crate) fn validate_runner_job_snapshot(
     record: &AgentTaskRunRecord,
     snapshot: &homeboy_core::api_jobs::RunnerJobLogSnapshot,
 ) -> Result<()> {
