@@ -9259,27 +9259,6 @@ fn write_http_response(mut stream: TcpStream, response: &HttpResponse) -> std::i
     stream.flush()
 }
 
-fn terminate_pid(pid: u32) -> Result<()> {
-    #[cfg(unix)]
-    unsafe {
-        if libc::kill(pid as libc::pid_t, libc::SIGTERM) != 0 {
-            return Err(Error::internal_io(
-                std::io::Error::last_os_error().to_string(),
-                Some(format!("stop daemon pid {}", pid)),
-            ));
-        }
-        Ok(())
-    }
-
-    #[cfg(not(unix))]
-    {
-        let _ = pid;
-        Err(Error::internal_unexpected(
-            "daemon stop is not implemented on this platform",
-        ))
-    }
-}
-
 #[cfg(test)]
 #[path = "../../../../tests/core/daemon_test.rs"]
 mod daemon_test;

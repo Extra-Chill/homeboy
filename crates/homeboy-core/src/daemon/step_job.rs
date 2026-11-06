@@ -40,6 +40,9 @@ pub const STEP_JOB_VERSION: u32 = 1;
 pub const STEP_JOB_REQUEST_SCHEMA: &str = "homeboy/step-job-request/v1";
 const STEP_JOB_CHECKPOINT_SCHEMA: &str = "homeboy/step-job-checkpoint/v1";
 const STEP_EXIT_SCHEMA: &str = "homeboy/step-exit/v1";
+// Like runner_exec_job, keep an independent parent to reap the workload and
+// publish its real exit. Atomic rename prevents recovery reading partial JSON.
+const STEP_WRAPPER: &str = r#"exit_file=$1; shift; "$@"; status=$?; printf '{"schema":"homeboy/step-exit/v1","exit_code":%d}' "$status" > "$exit_file.tmp"; /bin/mv "$exit_file.tmp" "$exit_file"; exit "$status""#;
 
 /// The daemon job id, injected into every step child so the child can bind
 /// its own durable records to the job that supervises it.
@@ -54,8 +57,8 @@ pub const LOCAL_COOK_SUPERVISOR_JOB_ID_ENV: &str = "HOMEBOY_LOCAL_COOK_SUPERVISO
 pub const STEP_JOB_STORE_ENV: &str = "HOMEBOY_STEP_JOB_STORE";
 /// Combined stdout/stderr of the child, below the job's artifact directory.
 pub const STEP_LOG_FILE: &str = "step.log";
-/// The observed exit of a child this daemon reaped, below the job's artifact
-/// directory. Absent when the child was re-adopted after a daemon restart.
+/// Durable workload exit, written by its detached parent even while the
+/// daemon is down.
 pub const STEP_EXIT_FILE: &str = "exit.json";
 
 const WAIT_POLL: Duration = Duration::from_millis(250);
@@ -664,6 +667,12 @@ fn run_step(mut checkpoint: StepJobCheckpoint, job: &ControllerJobHandle) -> Res
             job.progress(checkpoint.progress())?;
             supervise_adopted(&child, job)?;
             checkpoint.exit_code = recorded_step_exit_code(&job_id);
+            if checkpoint.exit_code.is_none() && !job.is_cancelled() {
+                return Err(Error::internal_unexpected(format!(
+                    "step child {} died without a durable exit record while its daemon was unavailable; workload outcome is unknown",
+                    child.pid
+                )));
+            }
             checkpoint.phase = StepPhase::Exited;
             job.checkpoint(to_value(&checkpoint)?)?;
             return finish(&job_id, checkpoint);
@@ -696,8 +705,13 @@ fn run_step(mut checkpoint: StepJobCheckpoint, job: &ControllerJobHandle) -> Res
     checkpoint.phase = StepPhase::Spawning;
     job.checkpoint(to_value(&checkpoint)?)?;
 
-    let mut command = Command::new(&request.program);
+    let mut command = Command::new("/bin/sh");
     command
+        .arg("-c")
+        .arg(STEP_WRAPPER)
+        .arg("homeboy-step")
+        .arg(dir.join(STEP_EXIT_FILE))
+        .arg(&request.program)
         .args(&request.args)
         .current_dir(&request.cwd)
         .env_clear()
@@ -791,7 +805,10 @@ fn finish(job_id: &str, checkpoint: StepJobCheckpoint) -> Result<Value> {
             error.details["exit_code"] = json!(code);
             Err(error)
         }
-        _ => Ok(checkpoint.result()),
+        None => Err(Error::internal_unexpected(
+            "step child died without an exit status (signal or missing durable exit record)",
+        )),
+        Some(_) => Ok(checkpoint.result()),
     }
 }
 
@@ -1530,7 +1547,15 @@ mod tests {
             .unwrap();
             // Spawn the child the way the driver does, then record it as the
             // checkpoint a daemon would have published before it died.
-            let mut process = Command::new("/bin/sh").args(&request.args).spawn().unwrap();
+            let dir = step_job_dir(&harness.job().unwrap().id.to_string()).unwrap();
+            std::fs::create_dir_all(&dir).unwrap();
+            let mut process = Command::new("/bin/sh")
+                .args(["-c", STEP_WRAPPER, "homeboy-step"])
+                .arg(dir.join(STEP_EXIT_FILE))
+                .arg(&request.program)
+                .args(&request.args)
+                .spawn()
+                .unwrap();
             let child = StepChild {
                 pid: process.id(),
                 start_identity: crate::process::process_start_identity(process.id())
@@ -1554,6 +1579,41 @@ mod tests {
                 std::fs::read_to_string(&counter).unwrap().lines().count(),
                 1,
                 "re-adoption must not spawn the child again"
+            );
+        });
+    }
+
+    #[test]
+    fn a_dead_adopted_child_without_exit_evidence_fails_clearly() {
+        with_isolated_home(|home| {
+            register_step_job_driver();
+            let request = request("exit 0", Default::default());
+            let harness = ControllerJobHarness::durable(
+                Arc::new(StepJobDriver),
+                to_value(&request).unwrap(),
+                &home.path().join("lost.sqlite"),
+                "old-lease",
+            )
+            .unwrap();
+            let mut process = Command::new("/bin/sh")
+                .args(["-c", "sleep 30"])
+                .spawn()
+                .unwrap();
+            let child = StepChild {
+                pid: process.id(),
+                start_identity: crate::process::process_start_identity(process.id())
+                    .unwrap()
+                    .unwrap(),
+            };
+            process.kill().unwrap();
+            process.wait().unwrap();
+            let mut checkpoint = StepJobCheckpoint::waiting(request);
+            checkpoint.phase = StepPhase::Running;
+            checkpoint.child = Some(child);
+            let error = run_step(checkpoint, &harness.handle()).unwrap_err();
+            assert!(
+                error.message.contains("died without a durable exit record"),
+                "{error}"
             );
         });
     }
@@ -1825,7 +1885,7 @@ mod tests {
     }
 
     #[test]
-    fn pre_spawn_and_spawn_failures_deliver_without_a_child() {
+    fn pre_spawn_and_workload_launch_failures_deliver_terminal_evidence() {
         with_isolated_home(|home| {
             for before_spawn in [true, false] {
                 let mut request = request("true", Default::default());
@@ -1846,8 +1906,16 @@ mod tests {
                 );
                 let pending = harness.store().pending_step_terminal_deliveries().unwrap();
                 assert_eq!(pending.len(), 1);
-                assert!(pending[0].child.is_none());
-                assert_eq!(pending[0].outcome, StepTerminalOutcome::Failed);
+                if before_spawn {
+                    assert!(pending[0].child.is_none());
+                    assert_eq!(pending[0].outcome, StepTerminalOutcome::Failed);
+                } else {
+                    // The independent wrapper did spawn and retained the
+                    // shell's real command-not-found status for recovery.
+                    assert!(pending[0].child.is_some());
+                    assert_eq!(pending[0].exit_code, Some(127));
+                    assert_eq!(pending[0].outcome, StepTerminalOutcome::Exited);
+                }
                 assert!(pending[0].error.is_some());
             }
         });

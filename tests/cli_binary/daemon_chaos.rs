@@ -326,6 +326,66 @@ fn whole_daemon_process_group_killed_recovers_without_edits() {
         .status();
 }
 
+/// #17440: the old daemon cannot reap the step after exit. Its independent
+/// parent must retain the actual nonzero outcome, not synthesize success.
+#[test]
+fn workflow_step_retains_real_failure_across_daemon_restart() {
+    let home = tempfile::tempdir().expect("home");
+    let bin = homeboy_bin();
+    let mut reaper = Reaper::default();
+    start_on_demand(&bin, home.path(), &mut reaper);
+    let started = home.path().join("started");
+    let release = home.path().join("release");
+    let definition = home.path().join("outcome.json");
+    std::fs::write(&definition, serde_json::to_vec(&serde_json::json!({
+        "schema": "homeboy/workflow/v1", "id": "restart-outcome",
+        "steps": [{"id": "held", "exec": {"program": "sh", "args": ["-c",
+            format!("echo started > '{}'; while [ ! -e '{}' ]; do sleep 0.1; done; exit 23", started.display(), release.display())
+        ]}}]
+    })).unwrap()).unwrap();
+    let run = json_output(
+        &bin,
+        home.path(),
+        &["workflow", "run", definition.to_str().unwrap()],
+    );
+    let instance = run["data"]["instance"].as_str().expect("instance");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !started.exists() {
+        assert!(Instant::now() < deadline, "step did not start: {run}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let stopped = json_output(&bin, home.path(), &["daemon", "stop"]);
+    assert_eq!(stopped["success"], true, "{stopped}");
+    let restarted = json_output(&bin, home.path(), &["daemon", "start"]);
+    assert_eq!(restarted["success"], true, "{restarted}");
+    reaper.track(restarted["data"]["pid"].as_i64().unwrap_or_default());
+    std::fs::write(&release, "go").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let state = json_output(&bin, home.path(), &["runs", "show", instance]);
+        if state["data"]["status"] == "failed" {
+            // Cancellation or a missing exit record also fails the workflow.
+            // Require the workload's actual outcome, not just any failure.
+            assert!(
+                state
+                    .to_string()
+                    .contains("step child exited with status 23"),
+                "workload outcome was replaced during restart: {state}"
+            );
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "real step failure lost after restart: {state}"
+        );
+        assert_ne!(state["data"]["status"], "succeeded", "{state}");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let _ = homeboy_at(&bin, home.path())
+        .args(["daemon", "stop"])
+        .status();
+}
+
 /// Case 10 (#15936): stopping a daemon with work in flight interrupts it
 /// instead of refusing, and `ensure-running` restarts it in place. A workflow
 /// (an in-daemon driver) and its step children resume after every restart, not
