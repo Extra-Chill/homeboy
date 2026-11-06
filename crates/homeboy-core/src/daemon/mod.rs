@@ -1442,6 +1442,62 @@ pub(super) fn read_status_for_state_path(path: PathBuf) -> Result<DaemonStatus> 
     read_status_at_paths(path, paths::observation_db()?)
 }
 
+/// v0.445.4 holds an empty owner.lock: holder records arrived after v1.
+/// Require both that legacy lock shape and the serving endpoint's exact lease
+/// identity. A live PID or an unrelated listener alone proves no ownership.
+fn legacy_owner_published(path: &Path, lock: &DaemonOwnerLockProbe, state: &DaemonState) -> bool {
+    if state.schema != "homeboy.daemon.session_lease.v1"
+        || !matches!(lock, DaemonOwnerLockProbe::Held { holder: None })
+        || !fs::metadata(path.with_file_name("owner.lock")).is_ok_and(|m| m.len() == 0)
+    {
+        return false;
+    }
+    let Ok(address) = state.address.parse::<SocketAddr>() else {
+        return false;
+    };
+    if !address.ip().is_loopback() {
+        return false;
+    }
+    let response = (|| {
+        reqwest::blocking::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .ok()?
+            .get(format!("http://{address}/health"))
+            .send()
+            .ok()?
+            .error_for_status()
+            .ok()?
+            .json::<serde_json::Value>()
+            .ok()
+    })();
+    let Some(response) = response else {
+        return false;
+    };
+    let Some(data) = response.get("data") else {
+        return false;
+    };
+    let Some(serving) = data
+        .get("lease")
+        .and_then(|lease| serde_json::from_value::<DaemonState>(lease.clone()).ok())
+    else {
+        return false;
+    };
+    response["success"] == true
+        && data["status"] == "ok"
+        && data["pid"] == state.pid
+        && data["build_identity"]
+            == serde_json::to_value(&state.build_identity).unwrap_or(serde_json::Value::Null)
+        && DaemonLeaseIdentity::from_state(state).matches(&serving)
+        && serving.pid == state.pid
+        && serving.address == state.address
+        && serving.state_path == state.state_path
+        && serving.schema == state.schema
+        && serving.build_identity == state.build_identity
+        && serving.binary_sha256 == state.binary_sha256
+}
+
 /// Read daemon ownership against explicitly injected state and observation paths.
 pub fn read_status_at_paths(path: PathBuf, jobs_path: PathBuf) -> Result<DaemonStatus> {
     let state_path = path.display().to_string();
@@ -1455,7 +1511,8 @@ pub fn read_status_at_paths(path: PathBuf, jobs_path: PathBuf) -> Result<DaemonS
     if let Some(state) = validation.state.take() {
         let published = owner_lock
             .holder()
-            .is_some_and(|holder| holder.published(&state));
+            .is_some_and(|holder| holder.published(&state))
+            || (validation.running && legacy_owner_published(&path, &owner_lock, &state));
         validation = if validation.running && !published {
             daemon_lease::stale_lease(
                 state,
@@ -5526,6 +5583,16 @@ mod tests {
             let address = listener.local_addr().unwrap();
             let path = state_path().unwrap();
             fs::create_dir_all(path.parent().unwrap()).unwrap();
+            // v0.445.4 holds an EMPTY owner.lock for its lifetime, without
+            // the holder record introduced in v2. Exercise read_status, not
+            // just the lease parser (the original #17437 regression gap).
+            let _owner = try_acquire_daemon_owner_lock_at(&path).unwrap().unwrap();
+            assert_eq!(
+                fs::metadata(path.with_file_name("owner.lock"))
+                    .unwrap()
+                    .len(),
+                0
+            );
             // Exact v0.445.4 field set: no executable or service_manager.
             // Do not serialize DaemonState here: that would hide new required fields.
             let lease = json!({
@@ -5538,9 +5605,12 @@ mod tests {
                 "started_at": "2026-01-01T00:00:00Z",
                 "last_seen_at": "2026-01-01T00:00:00Z",
                 "build_identity": {
-                    "version": "0.445.4", "display": "0.445.4"
+                    "version": "0.445.4",
+                    "git_commit": "faff8cfc6be8c76a6dd249b94546dd9a6e084005",
+                    "git_dirty": false,
+                    "display": "homeboy 0.445.4+faff8cfc6be8c76a6dd249b94546dd9a6e084005"
                 },
-                "binary_sha256": null,
+                "binary_sha256": "6d840fb552c0baf2ecb5f50da108d8833f645df207f8422e60a2101954c2008f",
                 "runtime_paths": { "loaded_at": "2026-01-01T00:00:00Z", "paths": [] }
             });
             fs::write(&path, serde_json::to_vec(&lease).unwrap()).unwrap();
@@ -5556,7 +5626,43 @@ mod tests {
             assert!(!report.restartable);
             assert!(freshness_report_from_validation(&validation, 0).restartable);
 
+            // Replay the /health envelope served by the lab's pinned 0.445.4
+            // binary. Only the test's PID/address/path/lease IDs are substituted.
+            let health = json!({
+                "success": true,
+                "data": {
+                    "build_identity": lease["build_identity"],
+                    "freshness": {
+                        "active_jobs": 1,
+                        "binary_hash": lease["binary_sha256"],
+                        "daemon_build_identity": lease["build_identity"]["display"],
+                        "daemon_version": "0.445.4", "fresh": true,
+                        "lease_id": lease["lease_id"],
+                        "ownership_evidence": "daemon lease evidence is inconclusive; 1 active job(s) are protected from implicit replacement",
+                        "pid": lease["pid"], "recovery_evidence": "unavailable",
+                        "restartable": false, "runtime_paths": lease["runtime_paths"]
+                    },
+                    "lease": lease, "pid": std::process::id(),
+                    "status": "ok", "version": "0.445.4"
+                }
+            });
+            let store = JobStore::open_without_reconciliation(&paths::observation_db().unwrap())
+                .unwrap()
+                .with_daemon_scope(daemon_scope_for_state_path(&path))
+                .with_daemon_lease("previous-release".to_string());
+            let job = store.create("workflow.run");
+            store.start(job.id).unwrap();
             let server = std::thread::spawn(move || {
+                for _ in 0..2 {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    let mut request = [0_u8; 4096];
+                    let length = stream.read(&mut request).unwrap();
+                    assert!(std::str::from_utf8(&request[..length])
+                        .unwrap()
+                        .starts_with("GET /health HTTP/1.1"));
+                    let body = health.to_string();
+                    write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
+                }
                 let (mut stream, _) = listener.accept().unwrap();
                 stream
                     .set_read_timeout(Some(Duration::from_secs(5)))
@@ -5571,7 +5677,16 @@ mod tests {
                         .to_string();
                 write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
             });
-            let client = LocalControllerJobClient::connect_existing_job("legacy-instance").unwrap();
+            let status = read_status().unwrap();
+            assert!(status.running && status.reachable, "{status:?}");
+            assert!(!status.fresh);
+            assert!(!status.freshness.restartable);
+            assert_eq!(
+                status.owner_lock,
+                DaemonOwnerLockProbe::Held { holder: None }
+            );
+            // Normal new-command routing must attach, not attempt a replacement.
+            let client = LocalControllerJobClient::connect().unwrap();
             let result = client.workflow("legacy-instance").unwrap();
             assert_eq!(result["instance"], "legacy-instance");
             server.join().unwrap();
