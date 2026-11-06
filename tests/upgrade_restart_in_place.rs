@@ -20,7 +20,7 @@ fn upgrade_daemon_step_resumes_live_controller_work() {
             );
             serde_json::from_slice(&output.stdout).unwrap()
         };
-        invoke(&["daemon", "start"]);
+        invoke(&["daemon", "ensure-running"]);
         let definition = home.path().join("upgrade-work.json");
         std::fs::write(&definition, serde_json::json!({
             "schema": "homeboy/workflow/v1", "id": "upgrade-work",

@@ -16,9 +16,9 @@ use std::path::Path;
 use sha2::{Digest, Sha256};
 
 use super::{
-    current_binary_sha256, read_termination_evidence, recovery_actions, runtime_path_fingerprint,
-    DaemonFreshnessReport, DaemonRecoveryEvidence, DaemonRepairStep, DaemonRuntimeSnapshot,
-    DaemonStaleReasonCode, DaemonState, DAEMON_LEASE_SCHEMA,
+    read_termination_evidence, recovery_actions, runtime_path_fingerprint, DaemonFreshnessReport,
+    DaemonRecoveryEvidence, DaemonRepairStep, DaemonRuntimeSnapshot, DaemonStaleReasonCode,
+    DaemonState, DAEMON_LEASE_SCHEMA,
 };
 use crate::process::pid_is_running;
 use crate::{build_identity, Error, Result};
@@ -125,15 +125,14 @@ pub(crate) fn validate_lease_file(path: &Path) -> Result<DaemonLeaseValidation> 
     }
     // A daemon whose executable was replaced in place (e.g. by `homeboy
     // upgrade`) keeps running the old image. The on-disk binary can match
-    // this build while the live process does not, so the binary hash check
-    // below would report a fresh lease to the CLI while the daemon itself
-    // rejects work as stale (homeboy#15806). Compare the file identity the
-    // daemon recorded at startup with what its path names now.
+    // this build while the live process does not (homeboy#15806). Compare
+    // the file identity the daemon recorded at startup with what its path
+    // names now.
     if state.executable.replaced() {
         return Ok(stale_lease(
             state,
             true,
-            DaemonStaleReasonCode::BinaryHashMismatch,
+            DaemonStaleReasonCode::ExecutableReplaced,
             "daemon executable was replaced on disk since the daemon started; restart required",
         ));
     }
@@ -146,14 +145,6 @@ pub(crate) fn validate_lease_file(path: &Path) -> Result<DaemonLeaseValidation> 
             true,
             DaemonStaleReasonCode::VersionMismatch,
             "daemon build identity does not match current Homeboy binary",
-        ));
-    }
-    if state.binary_sha256 != current_binary_sha256()? {
-        return Ok(stale_lease(
-            state,
-            true,
-            DaemonStaleReasonCode::BinaryHashMismatch,
-            "daemon binary hash does not match current Homeboy binary",
         ));
     }
     if let Some(reason) = runtime_snapshot_stale_reason(&state.runtime_paths) {
@@ -296,7 +287,6 @@ pub(crate) fn freshness_report_from_validation(
             DaemonRecoveryEvidence::Unavailable
         }),
         ownership_evidence,
-        binary_hash: state.and_then(|state| state.binary_sha256.clone()),
         daemon_version: state.map(|state| state.build_identity.version.clone()),
         daemon_build_identity: state.map(|state| state.build_identity.display.clone()),
         runtime_paths: state.map(|state| state.runtime_paths.clone()),
@@ -345,7 +335,6 @@ mod tests {
             started_at: String::new(),
             last_seen_at: String::new(),
             build_identity: build_identity::current(),
-            binary_sha256: None,
             service_manager: None,
             executable: crate::daemon::ExecutableIdentity {
                 path: "/usr/local/bin/homeboy".into(),

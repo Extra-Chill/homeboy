@@ -25,7 +25,7 @@ execution metadata such as `workspace_root`, `concurrency_limit`, `env`, and
 
 ## Connection Shape
 
-The remote daemon is started with `homeboy daemon start --addr 127.0.0.1:0` and
+The remote daemon is started with `homeboy daemon ensure-running --addr 127.0.0.1:0` and
 the reported address is rejected unless it is loopback. The local client reaches
 the daemon through an SSH `-L 127.0.0.1:<local>:127.0.0.1:<remote>` tunnel.
 

@@ -724,7 +724,7 @@ fn daemon_freshness_report(
     local_url: &str,
     timeout: Duration,
 ) -> std::result::Result<DaemonFreshnessReport, String> {
-    // Freshness, including the immutable executable hash, is a daemon health
+    // Freshness, including executable replacement, is a daemon health
     // contract. A version response is only an identity compatibility fallback.
     let DaemonVersionResponse { body, raw_body } =
         daemon_http_body_at_with_timeout(local_url, "health", timeout)?;
@@ -732,7 +732,7 @@ fn daemon_freshness_report(
         if matches!(
             report.stale_reason_code,
             Some(
-                DaemonStaleReasonCode::VersionMismatch | DaemonStaleReasonCode::BinaryHashMismatch
+                DaemonStaleReasonCode::VersionMismatch | DaemonStaleReasonCode::ExecutableReplaced
             )
         ) {
             report.fresh = true;
@@ -762,7 +762,6 @@ fn daemon_freshness_report(
             pid: None,
             recovery_evidence: None,
             ownership_evidence: None,
-            binary_hash: None,
             daemon_version: daemon_version_from_body(&body).map(str::to_string),
             daemon_build_identity: daemon_identity_from_body(&body).map(str::to_string),
             runtime_paths: None,
@@ -849,7 +848,6 @@ mod tests {
                 pid: Some(pid),
                 recovery_evidence: None,
                 ownership_evidence: None,
-                binary_hash: None,
                 daemon_version: Some("0.1.0".to_string()),
                 daemon_build_identity: Some("homeboy 0.1.0+stale".to_string()),
                 runtime_paths: None,
@@ -874,13 +872,11 @@ mod tests {
     }
 
     #[test]
-    fn freshness_allows_an_unspecified_version_with_matching_identity_and_hash() {
+    fn freshness_allows_an_unspecified_version_with_matching_identity() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
         let address = listener.local_addr().expect("address");
-        let expected_hash = "a".repeat(64);
         let mut freshness = report("lease-candidate", 4242).freshness;
         freshness.fresh = true;
-        freshness.binary_hash = Some(expected_hash.clone());
         let body = serde_json::json!({
             "version": "test",
             "build_identity": { "display": "homeboy test+candidate" },
@@ -913,7 +909,6 @@ mod tests {
         )
         .expect("freshness report");
         assert!(report.fresh);
-        assert_eq!(report.binary_hash.as_deref(), Some(expected_hash.as_str()));
         server.join().expect("server");
     }
 

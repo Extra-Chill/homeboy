@@ -841,7 +841,6 @@ pub(super) fn remote_daemon_recovery_freshness_from_status(
             DaemonRecoveryEvidence::Unavailable
         }),
         ownership_evidence,
-        binary_hash: None,
         daemon_version: daemon.and_then(|daemon| daemon.version.clone()),
         daemon_build_identity: daemon.and_then(|daemon| daemon.build_identity.clone()),
         runtime_paths: None,
@@ -869,7 +868,6 @@ pub(super) fn unavailable_recovery_freshness(
         // No lease, PID, or job count survived the transport failure, so no
         // controller mutation is authorized. A later probe must establish typed
         // ownership before any reconnect can be proposed.
-        binary_hash: None,
         daemon_version: None,
         daemon_build_identity: None,
         runtime_paths: None,

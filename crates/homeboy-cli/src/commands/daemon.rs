@@ -22,12 +22,6 @@ pub struct DaemonArgs {
 
 #[derive(Subcommand)]
 enum DaemonCommand {
-    /// Start the local daemon in the background
-    Start {
-        /// Local bind address. Defaults to an OS-selected loopback port.
-        #[arg(long, default_value = daemon::DEFAULT_ADDR)]
-        addr: String,
-    },
     /// Return the current live daemon or start one when no live daemon exists
     EnsureRunning {
         #[arg(long, default_value = daemon::DEFAULT_ADDR)]
@@ -201,9 +195,6 @@ pub struct DaemonPlanOutput {
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum DaemonOutput {
     Plan(DaemonPlanOutput),
-    Start(DaemonStartResult),
-    /// `daemon start` found a daemon its service manager owns and did nothing.
-    ServiceManaged(DaemonServiceManagedOutput),
     EnsureRunning(DaemonStartResult),
     Recover(DaemonRecoverOutput),
     AttestAbsent(DaemonAttestAbsentResult),
@@ -215,42 +206,6 @@ pub enum DaemonOutput {
     JobsShow(DaemonJobsShowOutput),
     JobsWatch(DaemonJobsWatchOutput),
     JobsPrune(DaemonJobsPruneOutput),
-}
-
-#[derive(Debug, Serialize)]
-pub struct DaemonServiceManagedOutput {
-    pub service_manager: daemon::DaemonServiceManager,
-    pub pid: u32,
-    pub lease_id: String,
-    pub address: String,
-    pub fresh: bool,
-    pub message: String,
-}
-
-/// A live daemon its service manager owns is never started beside or replaced
-/// by `daemon start`; report the owner instead (#17387).
-fn service_managed_start(status: &DaemonStatus) -> Option<DaemonServiceManagedOutput> {
-    let manager = status.service_manager()?;
-    let state = status.state.as_ref()?;
-    let message = if status.admits_work() {
-        format!(
-            "service manager {} owns the running daemon; nothing was started",
-            manager.as_str()
-        )
-    } else {
-        format!(
-            "service manager {} owns the running daemon, which is stale; nothing was started. Run `homeboy daemon ensure-running` to restart it through the manager",
-            manager.as_str()
-        )
-    };
-    Some(DaemonServiceManagedOutput {
-        service_manager: manager,
-        pid: state.pid,
-        lease_id: state.lease_id.clone(),
-        address: state.address.clone(),
-        fresh: status.admits_work(),
-        message,
-    })
 }
 
 #[derive(Debug, Serialize)]
@@ -352,13 +307,6 @@ pub struct DaemonArtifactGetOutput {
 
 pub fn run(args: DaemonArgs) -> CmdResult<DaemonOutput> {
     match args.command {
-        DaemonCommand::Start { addr } => {
-            let status = daemon::read_status()?;
-            if let Some(owned) = service_managed_start(&status) {
-                return Ok((DaemonOutput::ServiceManaged(owned), 0));
-            }
-            Ok((DaemonOutput::Start(daemon::start_background(&addr)?), 0))
-        }
         DaemonCommand::EnsureRunning {
             addr,
             replacement_operation_id,
@@ -964,9 +912,6 @@ fn execute_recovery_plan(
                 })?;
                 daemon::stop_for_lease(lease_id)?;
             }
-            code if code == actions::DAEMON_START => {
-                daemon::start_background(addr)?;
-            }
             code if code == actions::DAEMON_ENSURE_RUNNING => {
                 daemon::ensure_running(addr)?;
             }
@@ -1392,7 +1337,6 @@ mod tests {
                 pid: Some(4242),
                 recovery_evidence: None,
                 ownership_evidence: Some("test recovery evidence".to_string()),
-                binary_hash: None,
                 daemon_version: None,
                 daemon_build_identity: None,
                 runtime_paths: None,
@@ -1583,16 +1527,16 @@ mod tests {
             false,
             Some(daemon::DaemonStaleReasonCode::VersionMismatch),
             vec![daemon::DaemonRepairStep::executable(
-                actions::DAEMON_START,
-                actions::start(),
+                actions::DAEMON_ENSURE_RUNNING,
+                actions::ensure_running(),
             )],
         );
         let (output, exit_code) = recover_from_status(
             initial,
             false,
             |plan, _, _| {
-                assert_eq!(plan.steps[0].code, actions::DAEMON_START);
-                Ok(vec![actions::DAEMON_START.to_string()])
+                assert_eq!(plan.steps[0].code, actions::DAEMON_ENSURE_RUNNING);
+                Ok(vec![actions::DAEMON_ENSURE_RUNNING.to_string()])
             },
             || Ok(recovery_status(true, None, Vec::new())),
         )
@@ -1605,7 +1549,7 @@ mod tests {
         assert!(output.executed);
         assert!(output.fresh);
         assert!(output.blocked_on.is_none());
-        assert_eq!(output.applied_steps, vec![actions::DAEMON_START]);
+        assert_eq!(output.applied_steps, vec![actions::DAEMON_ENSURE_RUNNING]);
         assert_recovery_json_agrees_with_command_outcome(&output, exit_code);
     }
 
@@ -1626,7 +1570,10 @@ mod tests {
                     actions::DAEMON_STOP,
                     actions::stop_for_lease(old_lease),
                 ),
-                daemon::DaemonRepairStep::executable(actions::DAEMON_START, actions::start()),
+                daemon::DaemonRepairStep::executable(
+                    actions::DAEMON_ENSURE_RUNNING,
+                    actions::ensure_running(),
+                ),
             ],
         );
         initial.freshness.lease_id = Some(old_lease.to_string());
@@ -1645,7 +1592,7 @@ mod tests {
                 assert!(plan.steps[0].command.contains(old_lease));
                 Ok(vec![
                     actions::DAEMON_STOP.to_string(),
-                    actions::DAEMON_START.to_string(),
+                    actions::DAEMON_ENSURE_RUNNING.to_string(),
                 ])
             },
             || Ok(postcondition),
@@ -1674,7 +1621,10 @@ mod tests {
                     actions::DAEMON_STOP,
                     actions::stop_for_lease("lease-test"),
                 ),
-                daemon::DaemonRepairStep::executable(actions::DAEMON_START, actions::start()),
+                daemon::DaemonRepairStep::executable(
+                    actions::DAEMON_ENSURE_RUNNING,
+                    actions::ensure_running(),
+                ),
             ],
         );
         let (output, exit_code) = recover_from_status(
@@ -1706,14 +1656,14 @@ mod tests {
             false,
             Some(daemon::DaemonStaleReasonCode::VersionMismatch),
             vec![daemon::DaemonRepairStep::executable(
-                actions::DAEMON_START,
-                actions::start(),
+                actions::DAEMON_ENSURE_RUNNING,
+                actions::ensure_running(),
             )],
         );
         let (output, exit_code) = recover_from_status(
             initial,
             false,
-            |_, _, _| Ok(vec![actions::DAEMON_START.to_string()]),
+            |_, _, _| Ok(vec![actions::DAEMON_ENSURE_RUNNING.to_string()]),
             || {
                 Ok(recovery_status(
                     false,
@@ -1745,14 +1695,14 @@ mod tests {
             false,
             Some(daemon::DaemonStaleReasonCode::VersionMismatch),
             vec![daemon::DaemonRepairStep::executable(
-                actions::DAEMON_START,
-                actions::start(),
+                actions::DAEMON_ENSURE_RUNNING,
+                actions::ensure_running(),
             )],
         );
         let (output, exit_code) = recover_from_status(
             initial,
             false,
-            |_, _, _| Ok(vec![actions::DAEMON_START.to_string()]),
+            |_, _, _| Ok(vec![actions::DAEMON_ENSURE_RUNNING.to_string()]),
             || {
                 Err(Error::internal_unexpected(
                     "postcondition daemon unavailable",
@@ -1770,7 +1720,7 @@ mod tests {
             !output.fresh,
             "the planning status remains the only evidence"
         );
-        assert_eq!(output.applied_steps, vec![actions::DAEMON_START]);
+        assert_eq!(output.applied_steps, vec![actions::DAEMON_ENSURE_RUNNING]);
         assert_eq!(output.next_command, "homeboy daemon status");
         assert!(output
             .blocked_on
@@ -1843,7 +1793,10 @@ mod tests {
         let plan = actions::DaemonRecoveryPlan {
             steps: vec![
                 daemon::DaemonRepairStep::executable(actions::DAEMON_STOP, actions::stop()),
-                daemon::DaemonRepairStep::executable(actions::DAEMON_START, actions::start()),
+                daemon::DaemonRepairStep::executable(
+                    actions::DAEMON_ENSURE_RUNNING,
+                    actions::ensure_running(),
+                ),
             ],
             reason: "version mismatch".to_string(),
             required_confirmations: Vec::new(),
@@ -1854,7 +1807,7 @@ mod tests {
         assert!(plan.required_confirmations.is_empty());
         assert_eq!(
             rendered_plan(&plan),
-            "homeboy daemon stop && homeboy daemon start"
+            "homeboy daemon stop && homeboy daemon ensure-running"
         );
     }
 

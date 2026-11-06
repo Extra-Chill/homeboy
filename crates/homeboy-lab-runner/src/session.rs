@@ -888,7 +888,7 @@ impl RunnerStatusReport {
                 Some(
                     homeboy_core::daemon::DaemonStaleReasonCode::VersionMismatch
                     | homeboy_core::daemon::DaemonStaleReasonCode::BuildIdentityMismatch
-                    | homeboy_core::daemon::DaemonStaleReasonCode::BinaryHashMismatch
+                    | homeboy_core::daemon::DaemonStaleReasonCode::ExecutableReplaced
                     | homeboy_core::daemon::DaemonStaleReasonCode::RuntimePathsDrift,
                 ),
             ) => {
@@ -997,7 +997,6 @@ mod status_serialization_tests {
             pid: Some(1234),
             recovery_evidence: None,
             ownership_evidence: None,
-            binary_hash: None,
             daemon_version: None,
             daemon_build_identity: None,
             runtime_paths: None,
@@ -1322,7 +1321,6 @@ mod status_serialization_tests {
             pid: None,
             recovery_evidence: Some(homeboy_core::daemon::DaemonRecoveryEvidence::Unavailable),
             ownership_evidence: Some("ambiguous foreground daemon candidates".to_string()),
-            binary_hash: None,
             daemon_version: None,
             daemon_build_identity: None,
             runtime_paths: None,
@@ -1354,7 +1352,6 @@ mod status_serialization_tests {
             pid: Some(1234),
             recovery_evidence: None,
             ownership_evidence: Some("reachable daemon lease and PID verified".to_string()),
-            binary_hash: None,
             daemon_version: Some("0.1.0".to_string()),
             daemon_build_identity: None,
             runtime_paths: None,
@@ -1392,7 +1389,6 @@ mod status_serialization_tests {
             pid: Some(1234),
             recovery_evidence: Some(homeboy_core::daemon::DaemonRecoveryEvidence::Recoverable),
             ownership_evidence: Some("reachable daemon lease and PID verified".to_string()),
-            binary_hash: None,
             daemon_version: Some("0.428.0".to_string()),
             daemon_build_identity: Some(
                 "homeboy 0.428.0+19c5f4e54f8e95cd31dd1dcb036e885770c36344".to_string(),
@@ -1447,7 +1443,6 @@ mod status_serialization_tests {
             pid: Some(1234),
             recovery_evidence: Some(homeboy_core::daemon::DaemonRecoveryEvidence::Recoverable),
             ownership_evidence: Some("reachable daemon lease and PID verified".to_string()),
-            binary_hash: None,
             daemon_version: Some("0.370.1".to_string()),
             daemon_build_identity: Some(
                 "homeboy 0.370.1+0732665ce13b8a70cbf8915b1c9c1ddc0fd5eb09".to_string(),
@@ -1509,7 +1504,6 @@ mod status_serialization_tests {
             pid: None,
             recovery_evidence: None,
             ownership_evidence: None,
-            binary_hash: None,
             daemon_version: Some("0.374.5".to_string()),
             daemon_build_identity: None,
             runtime_paths: None,
@@ -1539,7 +1533,6 @@ mod status_serialization_tests {
             pid: None,
             recovery_evidence: Some(homeboy_core::daemon::DaemonRecoveryEvidence::Unavailable),
             ownership_evidence: Some("ambiguous remote daemon candidates".to_string()),
-            binary_hash: None,
             daemon_version: None,
             daemon_build_identity: None,
             runtime_paths: None,

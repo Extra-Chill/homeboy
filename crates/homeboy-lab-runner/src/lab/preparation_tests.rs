@@ -95,7 +95,7 @@ fn successful_auto_connect_authorizes_the_stale_disconnected_projection_for_this
         for (path, body) in [
             (
                 "/health",
-                r#"{"freshness":{"fresh":true,"stale_reason_code":null,"restartable":false,"lease_id":"lease-fresh","pid":1467759,"recovery_evidence":null,"ownership_evidence":null,"binary_hash":null,"daemon_version":null,"daemon_build_identity":null,"runtime_paths":null,"active_jobs":0,"termination_evidence":null,"repair_plan":[]},"pid":1467759,"build_identity":{"display":"homeboy 0.0.0+test"}}"#,
+                r#"{"freshness":{"fresh":true,"stale_reason_code":null,"restartable":false,"lease_id":"lease-fresh","pid":1467759,"recovery_evidence":null,"ownership_evidence":null,"daemon_version":null,"daemon_build_identity":null,"runtime_paths":null,"active_jobs":0,"termination_evidence":null,"repair_plan":[]},"pid":1467759,"build_identity":{"display":"homeboy 0.0.0+test"}}"#,
             ),
             (
                 "/jobs",
@@ -136,7 +136,6 @@ fn successful_auto_connect_authorizes_the_stale_disconnected_projection_for_this
         pid: Some(1467759),
         recovery_evidence: None,
         ownership_evidence: None,
-        binary_hash: None,
         daemon_version: None,
         daemon_build_identity: None,
         runtime_paths: None,
@@ -253,7 +252,7 @@ fn in_process_connect_authority_keeps_its_owned_tunnel_alive_through_admission_a
         for (path, body) in [
             (
                 "/health",
-                r#"{"freshness":{"fresh":true,"stale_reason_code":null,"restartable":false,"lease_id":"lease-fresh","pid":1467759,"recovery_evidence":null,"ownership_evidence":null,"binary_hash":null,"daemon_version":null,"daemon_build_identity":null,"runtime_paths":null,"active_jobs":0,"termination_evidence":null,"repair_plan":[]},"pid":1467759,"build_identity":{"display":"homeboy 0.0.0+test"}}"#,
+                r#"{"freshness":{"fresh":true,"stale_reason_code":null,"restartable":false,"lease_id":"lease-fresh","pid":1467759,"recovery_evidence":null,"ownership_evidence":null,"daemon_version":null,"daemon_build_identity":null,"runtime_paths":null,"active_jobs":0,"termination_evidence":null,"repair_plan":[]},"pid":1467759,"build_identity":{"display":"homeboy 0.0.0+test"}}"#,
             ),
             (
                 "/jobs",
@@ -288,7 +287,6 @@ fn in_process_connect_authority_keeps_its_owned_tunnel_alive_through_admission_a
         pid: Some(1467759),
         recovery_evidence: None,
         ownership_evidence: None,
-        binary_hash: None,
         daemon_version: None,
         daemon_build_identity: None,
         runtime_paths: None,
@@ -438,7 +436,6 @@ fn stale_disconnected_projection_rejects_reused_tunnel_identity_before_health() 
         pid: Some(1467759),
         recovery_evidence: None,
         ownership_evidence: None,
-        binary_hash: None,
         daemon_version: None,
         daemon_build_identity: None,
         runtime_paths: None,
@@ -470,7 +467,7 @@ fn stale_disconnected_projection_rejects_mismatched_typed_health() {
         let length = stream.read(&mut request).expect("read request");
         assert!(String::from_utf8_lossy(&request[..length]).starts_with("GET /health HTTP/1.1"));
         stream
-            .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"freshness\":{\"fresh\":true,\"stale_reason_code\":null,\"restartable\":false,\"lease_id\":\"lease-other\",\"pid\":1467759,\"recovery_evidence\":null,\"ownership_evidence\":null,\"binary_hash\":null,\"daemon_version\":null,\"daemon_build_identity\":null,\"runtime_paths\":null,\"active_jobs\":0,\"termination_evidence\":null,\"repair_plan\":[]},\"pid\":1467759}")
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"freshness\":{\"fresh\":true,\"stale_reason_code\":null,\"restartable\":false,\"lease_id\":\"lease-other\",\"pid\":1467759,\"recovery_evidence\":null,\"ownership_evidence\":null,\"daemon_version\":null,\"daemon_build_identity\":null,\"runtime_paths\":null,\"active_jobs\":0,\"termination_evidence\":null,\"repair_plan\":[]},\"pid\":1467759}")
             .expect("health response");
     });
     let mut status = connected_direct_status("lab", None);
@@ -494,7 +491,6 @@ fn stale_disconnected_projection_rejects_mismatched_typed_health() {
         pid: Some(1467759),
         recovery_evidence: None,
         ownership_evidence: None,
-        binary_hash: None,
         daemon_version: None,
         daemon_build_identity: None,
         runtime_paths: None,
@@ -533,15 +529,15 @@ fn stale_disconnected_projection_rejects_omitted_recorded_health_coordinates() {
     for (coordinate, health) in [
         (
             "lease",
-            r#"{"freshness":{"fresh":true,"stale_reason_code":null,"restartable":false,"lease_id":null,"pid":1467759,"recovery_evidence":null,"ownership_evidence":null,"binary_hash":null,"daemon_version":null,"daemon_build_identity":null,"runtime_paths":null,"active_jobs":0,"termination_evidence":null,"repair_plan":[]},"pid":1467759,"build_identity":{"display":"homeboy 0.0.0+test"}}"#,
+            r#"{"freshness":{"fresh":true,"stale_reason_code":null,"restartable":false,"lease_id":null,"pid":1467759,"recovery_evidence":null,"ownership_evidence":null,"daemon_version":null,"daemon_build_identity":null,"runtime_paths":null,"active_jobs":0,"termination_evidence":null,"repair_plan":[]},"pid":1467759,"build_identity":{"display":"homeboy 0.0.0+test"}}"#,
         ),
         (
             "pid",
-            r#"{"freshness":{"fresh":true,"stale_reason_code":null,"restartable":false,"lease_id":"lease-fresh","pid":null,"recovery_evidence":null,"ownership_evidence":null,"binary_hash":null,"daemon_version":null,"daemon_build_identity":null,"runtime_paths":null,"active_jobs":0,"termination_evidence":null,"repair_plan":[]},"pid":null,"build_identity":{"display":"homeboy 0.0.0+test"}}"#,
+            r#"{"freshness":{"fresh":true,"stale_reason_code":null,"restartable":false,"lease_id":"lease-fresh","pid":null,"recovery_evidence":null,"ownership_evidence":null,"daemon_version":null,"daemon_build_identity":null,"runtime_paths":null,"active_jobs":0,"termination_evidence":null,"repair_plan":[]},"pid":null,"build_identity":{"display":"homeboy 0.0.0+test"}}"#,
         ),
         (
             "build identity",
-            r#"{"freshness":{"fresh":true,"stale_reason_code":null,"restartable":false,"lease_id":"lease-fresh","pid":1467759,"recovery_evidence":null,"ownership_evidence":null,"binary_hash":null,"daemon_version":null,"daemon_build_identity":null,"runtime_paths":null,"active_jobs":0,"termination_evidence":null,"repair_plan":[]},"pid":1467759}"#,
+            r#"{"freshness":{"fresh":true,"stale_reason_code":null,"restartable":false,"lease_id":"lease-fresh","pid":1467759,"recovery_evidence":null,"ownership_evidence":null,"daemon_version":null,"daemon_build_identity":null,"runtime_paths":null,"active_jobs":0,"termination_evidence":null,"repair_plan":[]},"pid":1467759}"#,
         ),
     ] {
         let listener = TcpListener::bind("127.0.0.1:0").expect("daemon listener");
@@ -574,7 +570,6 @@ fn stale_disconnected_projection_rejects_omitted_recorded_health_coordinates() {
             pid: Some(1467759),
             recovery_evidence: None,
             ownership_evidence: None,
-            binary_hash: None,
             daemon_version: None,
             daemon_build_identity: None,
             runtime_paths: None,
@@ -1514,7 +1509,6 @@ fn restartable_daemon_freshness() -> DaemonFreshnessReport {
         pid: None,
         recovery_evidence: None,
         ownership_evidence: None,
-        binary_hash: None,
         daemon_version: None,
         daemon_build_identity: None,
         runtime_paths: None,
@@ -1533,7 +1527,6 @@ fn fresh_daemon_freshness() -> DaemonFreshnessReport {
         pid: Some(1467759),
         recovery_evidence: None,
         ownership_evidence: None,
-        binary_hash: None,
         daemon_version: None,
         daemon_build_identity: None,
         runtime_paths: None,

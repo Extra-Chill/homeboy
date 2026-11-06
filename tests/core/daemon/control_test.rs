@@ -413,7 +413,7 @@ fn startup_observation_waits_for_delayed_token_without_provider_work() {
 #[test]
 fn startup_observation_stops_as_soon_as_the_child_exits() {
     // #17445: a `serve` that died on bind used to be polled for the whole
-    // observation budget, each poll hashing the binary for freshness.
+    // observation budget, re-reading status on every poll.
     let missing = fake_status(None, false);
     let mut reads = 0;
     let mut sleeps = 0;
@@ -838,7 +838,6 @@ fn fake_status(daemon: Option<super::DaemonStartResult>, fresh: bool) -> DaemonS
             pid: daemon.as_ref().map(|daemon| daemon.pid),
             recovery_evidence: None,
             ownership_evidence: None,
-            binary_hash: None,
             daemon_version: None,
             daemon_build_identity: None,
             runtime_paths: None,
@@ -879,7 +878,6 @@ fn fake_daemon_state(daemon: super::DaemonStartResult) -> DaemonState {
             git_dirty: None,
             display: "homeboy test".to_string(),
         },
-        binary_sha256: None,
         service_manager: None,
         executable: crate::daemon::ExecutableIdentity {
             path: "/usr/local/bin/homeboy".into(),
@@ -1021,6 +1019,26 @@ fn managed_status(daemon: Option<super::DaemonStartResult>, fresh: bool) -> Daem
         state.service_manager = Some(crate::daemon::DaemonServiceManager::Systemd);
     }
     status
+}
+
+/// #17387: `ensure-running` defers a stale service-managed daemon to its
+/// manager instead of stopping it and spawning a Homeboy-owned replacement.
+#[test]
+fn ensure_running_defers_a_stale_service_managed_daemon_to_its_manager() {
+    let managed = managed_status(Some(fake_daemon(4242, "lease-managed")), false);
+    assert_eq!(
+        super::stale_daemon_action(&managed),
+        Some(super::StaleDaemonAction::RestartServiceManaged(
+            "lease-managed"
+        ))
+    );
+    let plain = fake_status(Some(fake_daemon(4242, "lease-plain")), false);
+    assert_eq!(
+        super::stale_daemon_action(&plain),
+        Some(super::StaleDaemonAction::RestartInPlace("lease-plain"))
+    );
+    let fresh = managed_status(Some(fake_daemon(4242, "lease-fresh")), true);
+    assert_eq!(super::stale_daemon_action(&fresh), None);
 }
 
 /// #17387: restarting a service-managed daemon signals the exact leased

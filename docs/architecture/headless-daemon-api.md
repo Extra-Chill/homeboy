@@ -36,7 +36,7 @@ Clients discover a local daemon through the CLI-managed state file instead of a
 hardcoded public port.
 
 ```text
-homeboy daemon start
+homeboy daemon ensure-running
         |
         +-- binds 127.0.0.1:<port>
         +-- writes pid/address/token metadata to the daemon state file

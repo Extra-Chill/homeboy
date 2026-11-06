@@ -1080,7 +1080,6 @@ mod tests {
             pid: Some(pid),
             recovery_evidence: None,
             ownership_evidence: None,
-            binary_hash: None,
             daemon_version: Some("test".to_string()),
             daemon_build_identity: Some("homeboy test".to_string()),
             runtime_paths: None,

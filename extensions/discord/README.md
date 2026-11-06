@@ -114,7 +114,7 @@ homeboy --notification-transport discord.run-completion \
 Start the daemon after setting its service environment or shell:
 
 ```sh
-homeboy daemon start
+homeboy daemon ensure-running
 ```
 
 The helper emits one typed JSON envelope to stdout, for example:

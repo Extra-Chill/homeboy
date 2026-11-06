@@ -31,7 +31,7 @@
 //!
 //! - `status --refresh` — its descriptor is a bare `command_spec`,
 //!   so the manifest has no `--refresh` distinction and no subcommand table
-//! - `daemon start` — its descriptor likewise declares nothing
+//! - `daemon ensure-running` — its descriptor likewise declares nothing
 //! - `runtime promotion-takeover` — `RUNTIME_SUBCOMMAND_SAFETY` declares only
 //!   `refresh`
 //! - `agent-task retry <run> --run` — `AGENT_TASK_SUBCOMMAND_SAFETY` declares no
@@ -240,7 +240,7 @@ mod tests {
             args(&["homeboy", "runtime", "promotion-takeover"]),
             args(&["homeboy", "status", "--refresh"]),
             args(&["homeboy", "runs", "reconcile"]),
-            args(&["homeboy", "daemon", "start"]),
+            args(&["homeboy", "daemon", "ensure-running"]),
         ] {
             assert_eq!(classify(&command), CommandCapability::Mutation);
         }
@@ -284,12 +284,11 @@ mod tests {
         assert_eq!(classify(&command), CommandCapability::Mutation);
         assert!(!requires_startup_reconciliation(&command));
 
-        for command in [
-            args(&["homeboy", "daemon", "start"]),
-            args(&["homeboy", "daemon", "ensure-running"]),
-        ] {
-            assert!(!requires_startup_reconciliation(&command));
-        }
+        assert!(!requires_startup_reconciliation(&args(&[
+            "homeboy",
+            "daemon",
+            "ensure-running",
+        ])));
     }
 
     #[test]

@@ -1724,7 +1724,7 @@ mod tests {
             let mut result = completed_upgrade_result();
             result.daemon_pending_restart = Some(super::super::types::DaemonPendingRestart {
                 reason: "15 protected jobs hold the daemon".into(),
-                recovery_command: "homeboy daemon start".into(),
+                recovery_command: "homeboy daemon ensure-running".into(),
                 protected_job_count: Some(15),
             });
             assert_eq!(result.exit_code(), 0);

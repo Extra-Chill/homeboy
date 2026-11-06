@@ -1565,7 +1565,6 @@ mod daemon_repair_step_tests {
             pid: Some(4545),
             recovery_evidence: Some(homeboy_core::daemon::DaemonRecoveryEvidence::ProvenDead),
             ownership_evidence: None,
-            binary_hash: None,
             daemon_version: None,
             daemon_build_identity: None,
             runtime_paths: None,

@@ -808,7 +808,6 @@ fn authoritative_drained_freshness() -> homeboy_core::daemon::DaemonFreshnessRep
         pid: Some(4242),
         recovery_evidence: None,
         ownership_evidence: None,
-        binary_hash: None,
         daemon_version: Some("0.288.8".to_string()),
         daemon_build_identity: Some("homeboy 0.288.8+stale".to_string()),
         runtime_paths: None,
