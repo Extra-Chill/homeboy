@@ -4,6 +4,20 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.446.0] - 2026-11-06
+
+### Added
+- fold workflow instance readers into runs
+
+### Changed
+- the owner lock records its holder; delete process-candidate scanning
+- Keep in-flight runner watches attached to their accepting daemon
+
+### Fixed
+- Fix daemon lease upgrade compatibility and gate cleanup race
+- cleanup keeps a never-moved task branch's worktree for its owner
+- wait out control-plane outages on the Cook watch path
+
 ## [0.445.11] - 2026-11-06
 
 ### Changed
