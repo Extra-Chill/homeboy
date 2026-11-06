@@ -190,6 +190,10 @@ impl JobStore {
                 } else if self.owns(stored)
                     && stored.remote_runner.is_none()
                     && (stored.controller_job.is_some() || job.status == JobStatus::Running)
+                    // A linked attempt that is still active may be the live
+                    // workload (a detached Cook outlives its daemon); it stays
+                    // protected until that run terminalizes, then reconciles.
+                    && linked_durable_run_state != Some(DaemonLinkedDurableRunState::Active)
                 {
                     // A dead generation's in-scope job with no recorded child
                     // identity: startup recovery leaves it untouched, and only

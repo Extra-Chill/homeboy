@@ -536,9 +536,9 @@ fn terminal_linked_agent_task_cannot_leave_running_staging_dispatch_job() {
     );
 }
 
-/// The fail-closed fence: an unknown, unlinked live job keeps
-/// `blocking_ambiguous` classification, is never reconciled implicitly, and so
-/// still requires explicit operator attestation before replacement.
+/// The fail-closed fence: an unknown, unlinked job of a dead generation is
+/// never reconciled implicitly; it is classified `needs_attestation` and
+/// requires `daemon recover --attest-absent` before it is retired (#17429).
 #[test]
 fn unknown_unlinked_live_job_still_blocks_replacement() {
     crate::test_support::AgentTaskTerminalRunFixtures::install();
@@ -557,7 +557,7 @@ fn unknown_unlinked_live_job_still_blocks_replacement() {
     assert_eq!(item.terminal_evidence, None);
     assert_eq!(
         item.disposition,
-        DaemonActiveJobRecoveryDisposition::BlockingAmbiguous
+        DaemonActiveJobRecoveryDisposition::NeedsAttestation
     );
 
     assert!(store

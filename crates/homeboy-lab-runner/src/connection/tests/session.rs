@@ -147,7 +147,7 @@ fn active_job_fence_allows_reattach_but_rejects_new_admission() {
 }
 
 #[test]
-fn missing_daemon_state_with_active_jobs_refuses_ensure_running() {
+fn missing_daemon_state_with_active_jobs_starts_the_recovering_successor() {
     let status = RemoteDaemonStatus {
         daemon: None,
         stale_reason: Some("daemon state is unavailable".to_string()),
@@ -160,12 +160,12 @@ fn missing_daemon_state_with_active_jobs_refuses_ensure_running() {
         termination_evidence: None,
     };
 
-    let error = remote_daemon_connect_action(None, &status)
-        .expect_err("active jobs require explicit recovery");
-
-    assert!(error.contains("1 active job(s)"));
-    assert!(error.contains("refusing ensure-running"));
-    assert!(error.contains("active-job recovery guidance"));
+    // The successor's owner lock refuses a still-running holder, and its
+    // startup recovery reconciles the dead generation's jobs (#17429).
+    assert_eq!(
+        remote_daemon_connect_action(None, &status).unwrap(),
+        RemoteDaemonConnectAction::Start
+    );
 }
 
 #[test]
@@ -1304,14 +1304,17 @@ fn remote_daemon_status_running_or_reachable_ambiguous_summary_retains_owner_and
 }
 
 #[test]
-fn remote_daemon_status_unleased_summary_with_active_work_is_not_cold_start_authority() {
+fn remote_daemon_status_unleased_summary_with_active_work_starts_the_recovering_successor() {
     let status = remote_daemon::remote_daemon_status_from_data(&serde_json::json!({
         "running":false,"reachable":false,"fresh":false,"active_jobs":[{"id":"retained-work"}],
         "truncation":{"active_jobs":{"omitted":2}},
         "daemon":{"address":null,"lease_id":null,"pid":null}
     }));
     assert_eq!(status.active_jobs, 3);
-    assert!(remote_daemon::remote_daemon_connect_action(None, &status).is_err());
+    assert_eq!(
+        remote_daemon::remote_daemon_connect_action(None, &status).unwrap(),
+        RemoteDaemonConnectAction::Start
+    );
 }
 
 #[test]

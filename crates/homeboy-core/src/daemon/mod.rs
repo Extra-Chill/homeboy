@@ -5328,9 +5328,10 @@ mod tests {
             let reopened = JobStore::open_without_reconciliation(&path)
                 .unwrap()
                 .with_daemon_lease(replacement.lease_id.clone());
-            recover_staged_direct_jobs_after_owner_death(&reopened, "different-lease").unwrap();
-            assert_eq!(reopened.get(job.id).unwrap().status, JobStatus::Queued);
+            // The job's own generation is live: nothing to recover.
             recover_staged_direct_jobs_after_owner_death(&reopened, &old_state.lease_id).unwrap();
+            assert_eq!(reopened.get(job.id).unwrap().status, JobStatus::Queued);
+            recover_staged_direct_jobs_after_owner_death(&reopened, &replacement.lease_id).unwrap();
             assert_eq!(reopened.get(job.id).unwrap().status, JobStatus::Failed);
             assert!(reopened.events(job.id).unwrap().iter().any(|event| {
                 event.data.as_ref().is_some_and(|data| {
