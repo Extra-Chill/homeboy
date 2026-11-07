@@ -697,12 +697,10 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
 
     fn quarantine_capability(
         &mut self,
-        newly_created: bool,
+        _newly_created: bool,
         was_draft: bool,
     ) -> Result<AgentTaskPrQuarantineCapability> {
-        Ok(if newly_created {
-            AgentTaskPrQuarantineCapability::CloseNewPr
-        } else if was_draft {
+        Ok(if was_draft {
             AgentTaskPrQuarantineCapability::PreserveExistingDraft
         } else {
             AgentTaskPrQuarantineCapability::ConvertExistingReadyPrToDraft
@@ -877,10 +875,6 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
         capability: AgentTaskPrQuarantineCapability,
     ) -> Result<String> {
         let (args, state) = match capability {
-            AgentTaskPrQuarantineCapability::CloseNewPr => (
-                vec!["pr".to_string(), "close".to_string(), pr.number.to_string()],
-                "new_pr_closed",
-            ),
             AgentTaskPrQuarantineCapability::PreserveExistingDraft => {
                 return Ok("existing_pr_already_draft".to_string())
             }

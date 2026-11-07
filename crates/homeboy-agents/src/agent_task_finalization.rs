@@ -88,7 +88,7 @@ fn safe_quarantine_capability<B: AgentTaskPrFinalizationBackend>(
     draft: bool,
 ) -> Result<AgentTaskPrQuarantineCapability> {
     let capability = backend.quarantine_capability(newly_created, draft)?;
-    if !quarantine_capability_is_safe(capability, newly_created, draft) {
+    if !quarantine_capability_is_safe(capability, draft) {
         return Err(Error::validation_invalid_argument(
             "publication_quarantine",
             format!(
@@ -639,7 +639,7 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
         ));
     }
     let mut newly_created = existing.is_none();
-    let mut draft = existing.as_ref().is_some_and(|pr| pr.is_draft);
+    let mut draft = existing.as_ref().map_or(options.draft_pr, |pr| pr.is_draft);
     let mut quarantine_capability = safe_quarantine_capability(backend, newly_created, draft)?;
     let mut ready_transitioned = false;
     let (action, pr) = match existing {
@@ -732,7 +732,7 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
         Err(error) => {
             return Err(publication_drift_with_cleanup_error(
                 backend,
-                &options.path,
+                &options,
                 &pr,
                 commit_sha,
                 "not_observed",
@@ -750,7 +750,7 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
     ) {
         return Err(publication_drift_with_cleanup_error(
             backend,
-            &options.path,
+            &options,
             &pr,
             commit_sha,
             &binding.remote_sha,
@@ -1407,20 +1407,13 @@ fn publication_drift_error(
 
 fn quarantine_capability_is_safe(
     capability: AgentTaskPrQuarantineCapability,
-    newly_created: bool,
     was_draft: bool,
 ) -> bool {
     matches!(
-        (capability, newly_created, was_draft),
-        (AgentTaskPrQuarantineCapability::CloseNewPr, true, _)
-            | (
-                AgentTaskPrQuarantineCapability::PreserveExistingDraft,
-                false,
-                true
-            )
+        (capability, was_draft),
+        (AgentTaskPrQuarantineCapability::PreserveExistingDraft, true)
             | (
                 AgentTaskPrQuarantineCapability::ConvertExistingReadyPrToDraft,
-                false,
                 false
             )
     )
@@ -1428,7 +1421,6 @@ fn quarantine_capability_is_safe(
 
 fn quarantine_capability_name(capability: AgentTaskPrQuarantineCapability) -> &'static str {
     match capability {
-        AgentTaskPrQuarantineCapability::CloseNewPr => "close_new_pr",
         AgentTaskPrQuarantineCapability::PreserveExistingDraft => "preserve_existing_draft",
         AgentTaskPrQuarantineCapability::ConvertExistingReadyPrToDraft => {
             "convert_existing_ready_pr_to_draft"
@@ -1439,7 +1431,7 @@ fn quarantine_capability_name(capability: AgentTaskPrQuarantineCapability) -> &'
 
 fn publication_drift_with_cleanup_error<B: AgentTaskPrFinalizationBackend>(
     backend: &mut B,
-    path: &str,
+    options: &AgentTaskPrFinalizationOptions,
     pr: &AgentTaskPrRef,
     expected_candidate_sha: &str,
     observed_remote_sha: &str,
@@ -1447,12 +1439,15 @@ fn publication_drift_with_cleanup_error<B: AgentTaskPrFinalizationBackend>(
     capability: AgentTaskPrQuarantineCapability,
     binding_error: &str,
 ) -> Error {
-    let cleanup = match backend.quarantine_pr(path, pr, capability) {
-        Ok(state) => state,
-        Err(error) => format!(
-            "failed; cleanup_capability={}; cleanup_error={}",
-            quarantine_capability_name(capability),
-            publication_error_diagnostic(&error)
+    let (cleanup, pr_state) = match backend.quarantine_pr(&options.path, pr, capability) {
+        Ok(state) => (state, "left open as draft"),
+        Err(error) => (
+            format!(
+                "failed; cleanup_capability={}; cleanup_error={}",
+                quarantine_capability_name(capability),
+                publication_error_diagnostic(&error)
+            ),
+            "left open; draft conversion failed",
         ),
     };
     let drift = publication_drift_error(
@@ -1461,7 +1456,12 @@ fn publication_drift_with_cleanup_error<B: AgentTaskPrFinalizationBackend>(
         observed_pr_head_sha,
         &cleanup,
     );
-    append_binding_error(drift, binding_error)
+    let mut failure = append_binding_error(drift, binding_error);
+    failure.message.push_str(&format!(
+        "; PR #{} {}; retry with `homeboy agent-task recover {}`",
+        pr.number, pr_state, options.run_id
+    ));
+    failure
 }
 
 /// Carries `validate_publication_binding`'s specific failure reason (for
