@@ -27,7 +27,7 @@ pub(crate) fn lifecycle_action_eligibility_with_roots(
     };
     let resume = resume_availability(record);
     let placement_update = placement_update_availability(record);
-    let retry = retry_availability(record, plan);
+    let retry = retry_availability(record, plan, roots);
     let quarantine = if record.state() == AgentTaskRunState::Queued {
         available("queued run can be quarantined before admission")
     } else {
@@ -312,6 +312,7 @@ fn resume_availability(record: &AgentTaskRunRecord) -> (ControlPlaneActionAvaila
 fn retry_availability(
     record: &AgentTaskRunRecord,
     plan: Option<&AgentTaskPlan>,
+    roots: Option<&homeboy_core::paths::PathRoots>,
 ) -> (ControlPlaneActionAvailability, String) {
     if resource_guard_blocks_replay(record) {
         return unavailable(
@@ -347,7 +348,15 @@ fn retry_availability(
         );
     }
     if record.metadata["cook_id"].is_string() {
-        match crate::agent_task_service::retry_admission_for_projection(&record.run_id) {
+        // The projection reads the same installation the record came from.
+        let admission = match roots {
+            Some(roots) => Ok(super::AgentTaskLifecycleStore::new(roots.clone())),
+            None => super::AgentTaskLifecycleStore::from_environment(),
+        }
+        .and_then(|store| {
+            crate::agent_task_service::retry_admission_for_projection(&store, &record.run_id)
+        });
+        match admission {
             Ok(crate::agent_task_service::RetryProjectionAdmission::DurableCook) => {
                 return available(
                 "durable Cook retry is admitted; runtime admission will be revalidated before execution",

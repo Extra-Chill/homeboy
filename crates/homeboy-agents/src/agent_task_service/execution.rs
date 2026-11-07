@@ -2939,19 +2939,21 @@ pub(crate) enum RetryProjectionAdmission {
 
 /// Read-only retry admission for control-plane projections of records that
 /// carry Cook metadata.
-pub(crate) fn retry_admission_for_projection(run_id: &str) -> Result<RetryProjectionAdmission> {
-    let lifecycle_store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
+pub(crate) fn retry_admission_for_projection(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    run_id: &str,
+) -> Result<RetryProjectionAdmission> {
     // Eligibility is part of resource projection. Every durable read below must
     // stay non-initializing: reading through an ordinary lifecycle accessor can
     // backfill that same projection and recurse here until the stack
     // overflows (#14914).
     let source = lifecycle_store.read_record_bounded(run_id)?;
-    if let Some(retry) = retry_admission_in_store(&lifecycle_store, &source, true)? {
+    if let Some(retry) = retry_admission_in_store(lifecycle_store, &source, true)? {
         retry_plan_supported_by_generic_action(&retry.plan)?;
         return Ok(RetryProjectionAdmission::DurableCook);
     }
     let plan =
-        agent_task_lifecycle::load_controller_plan_in_store(&lifecycle_store, &source.run_id)?;
+        agent_task_lifecycle::load_controller_plan_in_store(lifecycle_store, &source.run_id)?;
     retry_plan_supported_by_generic_action(&plan)?;
     Ok(RetryProjectionAdmission::GenericLifecycle)
 }

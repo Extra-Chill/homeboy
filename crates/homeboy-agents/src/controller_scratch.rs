@@ -997,6 +997,7 @@ pub fn finalize_run(run_id: &str) -> Result<()> {
     finalize_run_at_index(index_path()?, paths::artifact_root, run_id)
 }
 
+#[cfg(test)]
 pub(crate) fn finalize_run_at(data_root: &Path, run_id: &str) -> Result<()> {
     finalize_run_at_index(
         data_root.join("controller-scratch/resources.json"),

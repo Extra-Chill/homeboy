@@ -39,8 +39,8 @@ use super::cook::{
     CookFollowUpBudgetScope, CookFollowUpDispatch,
 };
 use super::cook_promotion::{
-    cook_report, finalize_or_load_cook_pr_with_backend_with_stores,
-    persisted_promotion_for_attempt_in_store, promotion_source_in_store, CookReportInput,
+    finalize_or_load_cook_pr_with_backend_with_stores, persisted_promotion_for_attempt_in_store,
+    promotion_source_in_store, CookReportInput, CookStores,
 };
 use super::cook_recipe::CookRecipeStore;
 use super::AgentTaskRunResult;
@@ -271,6 +271,10 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
     executor: SharedAgentTaskExecutor,
     backend: &mut B,
 ) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
+    let stores = CookStores {
+        recipe: recipe_store,
+        lifecycle: lifecycle_store,
+    };
     super::cook::validate_cook_follow_up_stores(recipe_store, lifecycle_store)?;
     let (record, recipe) = resolve_adoption_target_with_attempt_in_stores(
         recipe_store,
@@ -385,7 +389,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
             // is the path that must not fall back to the cross-invocation Cook
             // index. Every sibling return in this file already reports the
             // adopted record's run id; this one did not.
-            return Ok(cook_report(CookReportInput {
+            return Ok(stores.report(CookReportInput {
                 cook_id: cook_id.to_string(),
                 status: &result.status,
                 disposition: CookDisposition::Terminal,
@@ -433,7 +437,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
             .and_then(|value| value["status"].as_str())
             .unwrap_or("green_no_finalize")
             .to_string();
-        return Ok(cook_report(CookReportInput {
+        return Ok(stores.report(CookReportInput {
             cook_id: cook_id.to_string(),
             status: &status,
             disposition: CookDisposition::Terminal,
@@ -705,7 +709,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
                 ),
                 false,
             )?;
-            let report = cook_report(CookReportInput {
+            let report = stores.report(CookReportInput {
                 cook_id: cook_id.to_string(),
                 status: "policy_failure",
                 disposition: CookDisposition::Terminal,
@@ -822,7 +826,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
                 Ok(result)
             }
             CookFollowUpDispatch::BudgetExhausted { reason } => {
-                let report = cook_report(CookReportInput {
+                let report = stores.report(CookReportInput {
                     cook_id: cook_id.to_string(),
                     status: "execution_budget_exhausted",
                     disposition: CookDisposition::Terminal,
@@ -846,7 +850,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
                 Ok(report)
             }
             CookFollowUpDispatch::PolicyFailure { reason } => {
-                let report = cook_report(CookReportInput {
+                let report = stores.report(CookReportInput {
                     cook_id: cook_id.to_string(),
                     status: "policy_failure",
                     disposition: CookDisposition::Terminal,
@@ -873,7 +877,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
                 Some(reason.to_string()),
                 false,
             )?;
-            return Ok(cook_report(CookReportInput {
+            return Ok(stores.report(CookReportInput {
                 cook_id: cook_id.to_string(),
                 status: "baseline_red",
                 disposition: CookDisposition::Terminal,
@@ -908,7 +912,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
             )
         };
         lifecycle_store.finish_candidate_adoption(&record.run_id, Some(reason.clone()), false)?;
-        return Ok(cook_report(CookReportInput {
+        return Ok(stores.report(CookReportInput {
             cook_id: cook_id.to_string(),
             status: &status,
             disposition: CookDisposition::Terminal,
@@ -921,7 +925,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
     }
     if options.finalization.no_finalize {
         lifecycle_store.finish_candidate_adoption(&record.run_id, None, true)?;
-        return Ok(cook_report(CookReportInput {
+        return Ok(stores.report(CookReportInput {
             cook_id: cook_id.to_string(),
             status: "green_no_finalize",
             disposition: CookDisposition::Terminal,
@@ -966,7 +970,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
     let publication_succeeded = matches!(status.as_str(), "review_ready" | "draft_published");
     lifecycle_store.finish_candidate_adoption(&record.run_id, None, publication_succeeded)?;
     let exit_code = if publication_succeeded { 0 } else { 1 };
-    Ok(cook_report(CookReportInput {
+    Ok(stores.report(CookReportInput {
         cook_id: cook_id.to_string(),
         status: &status,
         disposition: CookDisposition::Terminal,

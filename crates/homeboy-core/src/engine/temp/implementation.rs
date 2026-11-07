@@ -899,7 +899,7 @@ mod owner_support {
     /// storage to a large volume moved everything except the bytes that
     /// actually grow.
     pub(super) fn runtime_root() -> Result<PathBuf> {
-        if let Some(override_dir) = runtime_root_override() {
+        if let Some(override_dir) = runtime_root_override().or_else(paths::hermetic_runtime_root) {
             return Ok(override_dir);
         }
 

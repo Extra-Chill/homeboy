@@ -265,6 +265,7 @@ fn started_payload(
 
 /// The cook now has a durable identity and is addressable.
 pub(crate) fn cook_started(
+    lifecycle_store: &crate::agent_task_lifecycle::AgentTaskLifecycleStore,
     cook_id: &str,
     run_id: &str,
     title: &str,
@@ -277,12 +278,9 @@ pub(crate) fn cook_started(
     // Re-entry through an existing recipe reaches this boundary too. Claim by
     // Cook identity, not attempt or recipe creation: a crash before delivery
     // may retry, but a delivered (or queued) start must not be announced again.
-    let Some(route) = effective_route(run_id) else {
-        return;
-    };
-    let Ok(lifecycle_store) =
-        crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
-    else {
+    let Some(route) = notification_route::current().or_else(|| {
+        crate::agent_task_lifecycle::durable_notification_route_in_store(lifecycle_store, run_id)
+    }) else {
         return;
     };
     if !lifecycle_store

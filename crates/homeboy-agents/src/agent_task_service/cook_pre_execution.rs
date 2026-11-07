@@ -23,7 +23,7 @@ use homeboy_core::{Error, Result};
 use super::cook::{
     AgentTaskCookAttemptDispatcher, AgentTaskCookAttemptReport, AgentTaskCookReport, CookRequest,
 };
-use super::cook_promotion::{cook_report, CookReportInput};
+use super::cook_promotion::{CookReportInput, CookStores};
 use super::cook_recipe::CookRecipeStore;
 use super::AgentTaskRunResult;
 
@@ -625,6 +625,7 @@ fn pre_provider_outcome_failure_cause(
 }
 
 pub(crate) fn pre_execution_failure_report(
+    stores: CookStores<'_>,
     cook_id: String,
     attempts: Vec<AgentTaskCookAttemptReport>,
     failure: PreExecutionFailureDetails,
@@ -658,7 +659,7 @@ pub(crate) fn pre_execution_failure_report(
                 .join("; ")
         )
     };
-    let mut report = cook_report(CookReportInput {
+    let mut report = stores.report(CookReportInput {
         cook_id,
         status: "pre_execution_failure",
         disposition: CookDisposition::Terminal,

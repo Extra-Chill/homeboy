@@ -811,7 +811,14 @@ pub(super) struct CookDeliveryContext<'a, 'e> {
 /// A step's result: hand the value to the next step, or end the Cook.
 pub(super) type CookDeliveryStep<T> = ControlFlow<AgentTaskRunResult<AgentTaskCookReport>, T>;
 
-impl CookDeliveryContext<'_, '_> {
+impl<'a> CookDeliveryContext<'a, '_> {
+    fn stores(&self) -> CookStores<'a> {
+        CookStores {
+            recipe: self.store,
+            lifecycle: self.lifecycle_store,
+        }
+    }
+
     fn progress(&self, phase: &str, detail: Option<&str>) -> Result<()> {
         let (store, observer) = (self.lifecycle_store, self.observer);
         report_cook_progress(
@@ -848,7 +855,7 @@ impl CookDeliveryContext<'_, '_> {
         stop_reason: Option<&str>,
         exit_code: i32,
     ) -> AgentTaskRunResult<AgentTaskCookReport> {
-        cook_report(CookReportInput {
+        self.stores().report(CookReportInput {
             cook_id: self.cook_id.to_string(),
             status,
             disposition: CookDisposition::Terminal,
@@ -934,8 +941,14 @@ pub(super) fn ensure_verified(
         ctx.push_attempt(record, None);
         let boundary = format!("attempt {attempt} could enter promotion and run its gates");
         let attempts = std::mem::take(ctx.attempts);
-        let report =
-            cook_deadline_report(cook_id.to_string(), attempts, run_id, &deadline, &boundary);
+        let report = cook_deadline_report(
+            ctx.stores(),
+            cook_id.to_string(),
+            attempts,
+            run_id,
+            &deadline,
+            &boundary,
+        );
         return Ok(ControlFlow::Break(report));
     }
     ctx.progress("promotion", None)?;
@@ -967,7 +980,7 @@ pub(super) fn ensure_verified(
             // terminal notification; this pass must not record a
             // controller failure or declare the Cook terminal (#15472).
             ctx.push_attempt(record, None);
-            return Ok(ControlFlow::Break(cook_report(CookReportInput {
+            return Ok(ControlFlow::Break(ctx.stores().report(CookReportInput {
                 cook_id: cook_id.to_string(),
                 status: CookStatus::InFlight.as_str(),
                 disposition: CookDisposition::InFlight,

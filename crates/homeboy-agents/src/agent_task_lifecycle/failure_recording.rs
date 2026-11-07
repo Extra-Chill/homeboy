@@ -1469,7 +1469,11 @@ pub(crate) fn record_aggregate_in_store(
         &record.run_id,
         &aggregate.outcomes,
     )?;
-    crate::controller_scratch::finalize_run_at(&lifecycle_store.data_root(), &record.run_id)?;
+    crate::controller_scratch::finalize_run_at_explicit_roots(
+        &lifecycle_store.data_root(),
+        &lifecycle_store.artifact_root(),
+        &record.run_id,
+    )?;
     apply_aggregate_transition_in_store(
         lifecycle_store,
         AgentTaskAggregateTransition {

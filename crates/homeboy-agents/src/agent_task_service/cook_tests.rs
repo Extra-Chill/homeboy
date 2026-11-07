@@ -77,6 +77,14 @@ fn test_lifecycle_store() -> AgentTaskLifecycleStore {
     AgentTaskLifecycleStore::from_environment().expect("lifecycle store")
 }
 
+/// A Cook report over the isolated home's stores.
+fn ambient_cook_report(input: CookReportInput<'_>) -> AgentTaskRunResult<AgentTaskCookReport> {
+    let lifecycle_store = test_lifecycle_store();
+    let recipe_store =
+        super::super::cook_recipe::CookRecipeStore::for_lifecycle_store(&lifecycle_store);
+    cook_report(&recipe_store, &lifecycle_store, input)
+}
+
 #[test]
 fn deferred_materialization_binds_nested_component_without_replacing_repository_root() {
     homeboy_core::test_support::with_isolated_home(|home| {
@@ -884,16 +892,20 @@ fn provider_timeout_resume_is_not_offered_while_deferred_cleanup_is_pending() {
         data: serde_json::json!({ "timeout_ms": 1_200_000 }),
     }];
 
-    let mut report = cook_report(CookReportInput {
-        cook_id: "timeout-pending-cleanup".to_string(),
-        status: "provider_failure",
-        disposition: CookDisposition::Terminal,
-        attempts: Vec::new(),
-        finalization: None,
-        stop_reason: None,
-        exit_code: 1,
-        invocation_latest_run_id: Some("timeout-pending-run"),
-    });
+    let mut report = cook_report(
+        &recipe_store,
+        &lifecycle_store,
+        CookReportInput {
+            cook_id: "timeout-pending-cleanup".to_string(),
+            status: "provider_failure",
+            disposition: CookDisposition::Terminal,
+            attempts: Vec::new(),
+            finalization: None,
+            stop_reason: None,
+            exit_code: 1,
+            invocation_latest_run_id: Some("timeout-pending-run"),
+        },
+    );
     report.value.failure_context = Some(AgentTaskCookFailureContext {
         recovery_step: None,
         cook_id: "timeout-pending-cleanup".to_string(),
@@ -1056,7 +1068,7 @@ fn startup_without_output_liveness_is_projected_without_becoming_a_timeout() {
         }),
     }];
     aggregate.outcomes.push(startup_outcome);
-    let mut report = cook_report(CookReportInput {
+    let mut report = ambient_cook_report(CookReportInput {
         cook_id: "startup-without-output-report".to_string(),
         status: "provider_failure",
         disposition: CookDisposition::Terminal,
@@ -1165,7 +1177,7 @@ fn earlier_startup_liveness_diagnostic_does_not_overwrite_later_terminal_failure
         Some(crate::agent_task::AgentTaskFailureClassification::ExecutionFailed);
     later_failure.diagnostics.clear();
     aggregate.outcomes.push(later_failure);
-    let mut report = cook_report(CookReportInput {
+    let mut report = ambient_cook_report(CookReportInput {
         cook_id: "later-terminal-failure".to_string(),
         status: "provider_failure",
         disposition: CookDisposition::Terminal,
@@ -2186,8 +2198,8 @@ fn post_apply_promotion_failure_keeps_cause_and_bounded_resume_action() {
     .expect("persist causal controller failure");
 
     let context = super::super::cook_failure_context_with_stores(
-        Some(&recipe_store),
-        Some(&lifecycle_store),
+        &recipe_store,
+        &lifecycle_store,
         cook_id,
         Some(run_id),
         "durable_failure",
@@ -7048,7 +7060,7 @@ fn dirty_destination_recovery_actions_commit_review_and_adopt_through_publicatio
             record.metadata["pre_execution_failure"]["candidate_adoption_recovery"]["reason"],
             "dirty_destination_first_provider_admission"
         );
-        let context = cook_report(CookReportInput {
+        let context = ambient_cook_report(CookReportInput {
             cook_id: fixture.cook_id.clone(),
             status: "pre_execution_failure",
             disposition: CookDisposition::Terminal,
@@ -7204,7 +7216,7 @@ fn reserve_pressure_cook_context_forwards_only_the_scoped_inventory_action() {
         )
         .expect("persist capacity failure");
 
-        let report = cook_report(CookReportInput {
+        let report = ambient_cook_report(CookReportInput {
             cook_id: fixture.cook_id.clone(),
             status: "pre_execution_failure",
             disposition: CookDisposition::Terminal,
@@ -7286,7 +7298,7 @@ fn reserve_pressure_cook_context_forwards_the_shared_cargo_target_inventory() {
         )
         .expect("persist capacity failure");
 
-        let report = cook_report(CookReportInput {
+        let report = ambient_cook_report(CookReportInput {
             cook_id: fixture.cook_id.clone(),
             status: "pre_execution_failure",
             disposition: CookDisposition::Terminal,
@@ -9251,7 +9263,7 @@ fn cook_failure_context_counts_preflight_cook_alias_as_zero_execution() {
             agent_task_lifecycle::ProviderExecutionReservation::Acquired
         );
 
-        let report = cook_report(CookReportInput {
+        let report = ambient_cook_report(CookReportInput {
             cook_id: cook_id.to_string(),
             status: "gate_failed",
             disposition: CookDisposition::Terminal,
@@ -14056,7 +14068,7 @@ fn cook_ignores_untrusted_or_malformed_lab_runtime_recovery_metadata() {
                 },
             )
             .expect("persist adversarial metadata");
-            let report = cook_report(CookReportInput {
+            let report = ambient_cook_report(CookReportInput {
                 cook_id: cook_id.to_string(),
                 status: "pre_execution_failure",
                 disposition: CookDisposition::Terminal,
@@ -16695,7 +16707,7 @@ fn terminality_is_declared_by_the_exit_not_read_from_the_status_string() {
         let cook_id = "cook-disposition-authority";
         let unrecognized = "some_status_from_a_newer_binary";
 
-        let terminal = cook_report(CookReportInput {
+        let terminal = ambient_cook_report(CookReportInput {
             cook_id: cook_id.to_string(),
             status: unrecognized,
             disposition: CookDisposition::Terminal,
@@ -16712,7 +16724,7 @@ fn terminality_is_declared_by_the_exit_not_read_from_the_status_string() {
 
         // The one exit that hands work to a durable owner stays non-terminal,
         // so no completion is announced while that owner is still working.
-        let in_flight = cook_report(CookReportInput {
+        let in_flight = ambient_cook_report(CookReportInput {
             cook_id: cook_id.to_string(),
             status: "in_flight",
             disposition: CookDisposition::InFlight,
@@ -16736,7 +16748,7 @@ fn terminality_is_declared_by_the_exit_not_read_from_the_status_string() {
 
 #[test]
 fn selection_required_projects_terminal_nonretryable_partial_failure() {
-    let report = cook_report(CookReportInput {
+    let report = ambient_cook_report(CookReportInput {
         cook_id: "cook-selection-lifecycle".to_string(),
         status: "selection_required",
         disposition: CookDisposition::Terminal,
@@ -16808,7 +16820,7 @@ fn cook_report_emits_selected_candidate_provenance_without_redefining_latest_run
         )
         .expect("persist unrelated newer promotion");
 
-        let report = cook_report(CookReportInput {
+        let report = ambient_cook_report(CookReportInput {
             cook_id: cook_id.to_string(),
             status: "completed",
             disposition: CookDisposition::Terminal,
@@ -16957,7 +16969,7 @@ fn resume_promoted_patch_guidance_keeps_the_exhausted_zero_byte_attempt_as_lates
         assert_eq!(pointer.run_id, candidate_run_id);
         assert_eq!(pointer.attempt, 1);
 
-        let report = cook_report(CookReportInput {
+        let report = ambient_cook_report(CookReportInput {
             cook_id: cook_id.to_string(),
             status: "execution_budget_exhausted",
             disposition: CookDisposition::Terminal,
@@ -18075,9 +18087,9 @@ fn cook_report_surfaces_skipped_provider_routes_in_its_status_summary() {
         let recipe_store = super::super::cook_recipe::CookRecipeStore::from_current_data_root()
             .expect("recipe store");
         let lifecycle_store = AgentTaskLifecycleStore::from_environment().expect("lifecycle store");
-        let report = cook_report_with_stores(
-            Some(&recipe_store),
-            Some(&lifecycle_store),
+        let report = cook_report(
+            &recipe_store,
+            &lifecycle_store,
             CookReportInput {
                 cook_id: "skipped-route-report".to_string(),
                 status: "failed",
@@ -25204,7 +25216,7 @@ fn cook_report_latest_run_id_prefers_invocation_over_stale_cook_index() {
         let fresh_run_id = agent_task_lifecycle::cook_attempt_run_id(cook_id, 2);
         let invocation_run_ids = vec![fresh_run_id.clone()];
 
-        let report = cook_report(CookReportInput {
+        let report = ambient_cook_report(CookReportInput {
             cook_id: cook_id.to_string(),
             status: "execution_budget_exhausted",
             disposition: CookDisposition::Terminal,
@@ -25284,7 +25296,7 @@ fn runtime_report_binding_uses_only_its_injected_installation() {
             .expect("persist failure");
         }
 
-        let mut report = cook_report(CookReportInput {
+        let mut report = ambient_cook_report(CookReportInput {
             cook_id: cook_id.to_string(),
             status: "durable_failure",
             disposition: CookDisposition::Terminal,
@@ -25314,7 +25326,7 @@ fn runtime_report_binding_uses_only_its_injected_installation() {
             assert!(!action["command"].as_str().unwrap().contains(ambient_run));
         }
 
-        let mut successful = cook_report(CookReportInput {
+        let mut successful = ambient_cook_report(CookReportInput {
             cook_id: cook_id.to_string(),
             status: "intentional_no_change_finalized_existing_candidate",
             disposition: CookDisposition::Terminal,
@@ -25463,7 +25475,7 @@ fn recovery_context_uses_current_gate_and_finalization_evidence_not_an_older_can
         )
         .unwrap();
 
-        let gate_context = cook_report(CookReportInput {
+        let gate_context = ambient_cook_report(CookReportInput {
             cook_id: cook_id.to_string(),
             status: "durable_failure",
             disposition: CookDisposition::Terminal,
@@ -25505,7 +25517,7 @@ fn recovery_context_uses_current_gate_and_finalization_evidence_not_an_older_can
         )
         .unwrap();
 
-        let finalization_context = cook_report(CookReportInput {
+        let finalization_context = ambient_cook_report(CookReportInput {
             cook_id: cook_id.to_string(),
             status: "durable_failure",
             disposition: CookDisposition::Terminal,
@@ -25590,7 +25602,7 @@ fn exact_checkpoint_destination_mismatch_projects_a_fork_replacement_response() 
         )
         .expect("persist exact checkpoint rejection");
 
-        let context = cook_report(CookReportInput {
+        let context = ambient_cook_report(CookReportInput {
             cook_id: cook_id.to_string(),
             status: "durable_failure",
             disposition: CookDisposition::Terminal,
@@ -25688,7 +25700,7 @@ fn selected_candidate_provenance_flags_cross_invocation_selection() {
         )
         .expect("persist current admission failure");
 
-        let cross_invocation = cook_report(CookReportInput {
+        let cross_invocation = ambient_cook_report(CookReportInput {
             cook_id: cook_id.to_string(),
             status: "pre_execution_failure",
             disposition: CookDisposition::Terminal,
@@ -25707,7 +25719,7 @@ fn selected_candidate_provenance_flags_cross_invocation_selection() {
             serde_json::json!(false),
             "a candidate selected from a prior attempt must be flagged as out of invocation scope"
         );
-        let context = cook_report(CookReportInput {
+        let context = ambient_cook_report(CookReportInput {
             cook_id: cook_id.to_string(),
             status: "pre_execution_failure",
             disposition: CookDisposition::Terminal,
@@ -25735,7 +25747,7 @@ fn selected_candidate_provenance_flags_cross_invocation_selection() {
             .iter()
             .all(|action| action.action != "refresh_lab_runtime"));
 
-        let in_invocation = cook_report(CookReportInput {
+        let in_invocation = ambient_cook_report(CookReportInput {
             cook_id: cook_id.to_string(),
             status: "completed",
             disposition: CookDisposition::Terminal,
@@ -25787,7 +25799,7 @@ fn post_materialization_failure_families_expose_only_durable_identity_and_legal_
             "follow_up_materialization_failure",
             "finalization_failure",
         ] {
-            let report = cook_report(CookReportInput {
+            let report = ambient_cook_report(CookReportInput {
                 cook_id: cook_id.to_string(),
                 status,
                 disposition: CookDisposition::Terminal,
@@ -25977,7 +25989,7 @@ fn re_materialize_follow_up_baseline_recovers_after_worktree_deletion() {
 fn cook_report_invocation_run_ids_populated_for_policy_failure() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let fresh_run_id = "agent-task-fresh-abc123".to_string();
-        let report = cook_report(CookReportInput {
+        let report = ambient_cook_report(CookReportInput {
             cook_id: "cook-test".to_string(),
             status: "policy_failure",
             disposition: CookDisposition::Terminal,
