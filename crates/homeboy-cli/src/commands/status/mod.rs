@@ -681,6 +681,16 @@ fn global_status(
                 reachable: daemon_status.reachable,
                 active_jobs: daemon_status.freshness.active_jobs,
                 blocker,
+                failing_cadences: daemon::workflow_cadence::failing()
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|cadence| {
+                        let mut failure =
+                            daemon::workflow_cadence::view(cadence)["failing"].clone();
+                        failure["workflow"] = cadence.workflow.clone().into();
+                        failure
+                    })
+                    .collect(),
                 drill_down: "homeboy daemon status",
                 repair: (!admitting_work).then_some("homeboy daemon recover"),
             },

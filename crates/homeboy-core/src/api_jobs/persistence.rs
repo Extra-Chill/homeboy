@@ -82,7 +82,7 @@ pub(crate) fn open_ledger(path: &Path) -> Result<Connection> {
 
 /// Open the observation store at `path` read-only, without creating or
 /// initializing anything. `None` means there is no ledger yet: no jobs.
-pub(super) fn open_ledger_readonly(path: &Path) -> Result<Option<Connection>> {
+pub(crate) fn open_ledger_readonly(path: &Path) -> Result<Option<Connection>> {
     if !path.exists() {
         return Ok(None);
     }

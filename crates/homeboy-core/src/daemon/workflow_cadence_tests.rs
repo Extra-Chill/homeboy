@@ -69,6 +69,7 @@ fn cadence(anchor_ms: u64, interval_ms: u64, next_due_ms: u64) -> Cadence {
             skipped: 0,
             last_skipped_at_ms: None,
             last_error: None,
+            failing: None,
         }
     })
 }
@@ -300,6 +301,19 @@ fn the_list_reports_a_failed_last_instance() {
                 .as_str()
                 .is_some_and(|reason| reason.starts_with("step `run` did not succeed")),
             "{listed}"
+        );
+
+        // The next tick records the failure durably, where `status` reads it
+        // without the daemon.
+        assert!(admit_due(&store, base + 2_000).is_empty(), "not due again");
+        let failing = failing().unwrap();
+        assert_eq!(failing.len(), 1);
+        let failure = failing[0].failing.clone().unwrap();
+        assert_eq!(failure.instance, instance);
+        assert_eq!(Some(failure.since_slot_ms), failing[0].last_fired_at_ms);
+        assert_eq!(
+            failure.reason.as_deref(),
+            listed["last_outcome"]["reason"].as_str()
         );
     });
 }
