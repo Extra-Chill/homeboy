@@ -13,6 +13,7 @@ use homeboy_core::git;
 use homeboy_core::paths;
 
 use super::install_sources::{install_linked_shared_assets, rename_dir, resolve_cloned_extension};
+use super::source::{dirty_path_from_status_line, is_generated_extension_metadata_path};
 use super::{source_metadata, UpdateResult};
 use crate::extension::catalog::{is_extension_linked, load_extension};
 use homeboy_extension_contract::update_output::ExtensionSourceUpdate;
@@ -404,7 +405,7 @@ pub(crate) fn read_source_requested_ref(extension_dir: &Path) -> Option<String> 
 /// update would overwrite; `Err(dirty_paths)` names the repo-relative paths
 /// that block it. An unreadable git status also refuses (with no names) so an
 /// update never proceeds over unknown state. Only generated metadata Homeboy
-/// itself writes (`.source-url`, `.source-revision`) is tolerated.
+/// itself writes (see `is_generated_extension_metadata_path`) is tolerated.
 pub(crate) fn is_extension_update_workdir_clean(
     git_root: &Path,
     extension_dir: &Path,
@@ -418,7 +419,7 @@ pub(crate) fn is_extension_update_workdir_clean(
 
 /// Repo-relative paths with changes an extension update would overwrite,
 /// ignoring the generated metadata paths Homeboy itself writes
-/// (`.source-url`, `.source-revision`). `Some` when the worktree state is
+/// (see `is_generated_extension_metadata_path`). `Some` when the worktree state is
 /// known (empty means clean enough to refresh); `None` when it cannot be
 /// determined. Public so the upgrade path can reuse the exact gate tolerance
 /// when deciding whether a symlinked clone can be refreshed with a plain
@@ -453,15 +454,6 @@ pub fn extension_update_dirty_paths(git_root: &Path, extension_dir: &Path) -> Op
     Some(dirty)
 }
 
-fn dirty_path_from_status_line(line: &str) -> Option<String> {
-    let path = line.get(3..)?.trim();
-    let path = path
-        .rsplit_once(" -> ")
-        .map(|(_, new_path)| new_path)
-        .unwrap_or(path);
-    Some(path.trim_matches('"').replace('\\', "/"))
-}
-
 /// Human detail for the dirty paths blocking an update. Falls back to an
 /// explicit "cannot be verified" when the gate refused without names (e.g. git
 /// status unavailable), so the message never names an empty list.
@@ -471,15 +463,6 @@ fn dirty_path_detail(dirty_paths: &[String]) -> String {
     } else {
         dirty_paths.join(", ")
     }
-}
-
-fn is_generated_extension_metadata_path(path: &str, extension_rel: Option<&str>) -> bool {
-    [".source-url", ".source-revision"].iter().any(|name| {
-        path == *name
-            || extension_rel
-                .filter(|rel| !rel.is_empty())
-                .is_some_and(|rel| path == format!("{rel}/{name}"))
-    })
 }
 
 pub(crate) fn run_setup_if_configured(extension_id: &str) -> Result<()> {

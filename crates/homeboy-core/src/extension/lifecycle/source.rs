@@ -180,11 +180,23 @@ pub fn read_source_revision_at(extension_dir: &Path) -> Option<String> {
     read_source_metadata_value(extension_dir, "revision")
 }
 
-/// Files Homeboy generates inside an installed extension directory. They are
-/// install-local provenance, not extension source, so they never make a
-/// checkout dirty for parity purposes.
-const GENERATED_SOURCE_METADATA: [&str; 3] =
-    [".source-url", ".source-revision", ".source-requested-ref"];
+/// Whether `path` is provenance Homeboy itself writes into an installed
+/// extension directory rather than extension source.
+///
+/// `path` is relative to the repository root that contains the extension (or
+/// to the extension directory itself when `extension_rel` is `None`). Only the
+/// generated files at the extension root match: a same-named file nested
+/// deeper is extension source and must still count.
+pub fn is_generated_extension_metadata_path(path: &str, extension_rel: Option<&str>) -> bool {
+    [".source-url", ".source-revision", ".source-requested-ref"]
+        .iter()
+        .any(|name| {
+            path == *name
+                || extension_rel
+                    .filter(|rel| !rel.is_empty())
+                    .is_some_and(|rel| path == format!("{rel}/{name}"))
+        })
+}
 
 /// Whether a committed revision still describes the bytes on disk.
 ///
@@ -198,8 +210,13 @@ pub enum ExtensionSourceCleanliness {
     /// sound content identity.
     Clean,
     /// Git checkout with uncommitted changes: the revision is NOT a content
-    /// identity. `changed_paths` is repo-root-relative and capped for display.
-    Dirty { changed_paths: Vec<String> },
+    /// identity. `changed_paths` is repo-root-relative and capped for display;
+    /// `fingerprint` hashes the full in-scope status so overlay provenance can
+    /// tell two dirty states apart.
+    Dirty {
+        changed_paths: Vec<String>,
+        fingerprint: String,
+    },
     /// Not a git checkout, or git could not answer. Cleanliness is unknown, so
     /// the revision is provenance only and local edits cannot be detected.
     Unknown,
@@ -216,11 +233,13 @@ pub fn read_source_cleanliness(extension_id: &str) -> ExtensionSourceCleanliness
     read_source_cleanliness_at(&extension_dir)
 }
 
-/// Classify the extension checkout at an explicit path.
+/// Classify the extension checkout at an explicit path. This is the single
+/// dirtiness predicate: Lab parity gates on it and overlay provenance records
+/// it.
 ///
 /// Scoped to the extension directory itself: a monorepo of extensions must not
 /// report `rust` as dirty because `nodejs` was edited.
-fn read_source_cleanliness_at(extension_dir: &Path) -> ExtensionSourceCleanliness {
+pub fn read_source_cleanliness_at(extension_dir: &Path) -> ExtensionSourceCleanliness {
     if !extension_dir.exists() {
         return ExtensionSourceCleanliness::Unknown;
     }
@@ -238,22 +257,37 @@ fn read_source_cleanliness_at(extension_dir: &Path) -> ExtensionSourceCleanlines
     let Some(status) = git::status_porcelain_scoped(extension_dir) else {
         return ExtensionSourceCleanliness::Unknown;
     };
+    let Some(prefix) = git::output_allow_empty(extension_dir, &["rev-parse", "--show-prefix"])
+    else {
+        return ExtensionSourceCleanliness::Unknown;
+    };
+    let extension_rel = prefix.trim().trim_end_matches('/');
 
-    let changed_paths = status
+    let dirty_lines = status
         .lines()
-        .filter_map(dirty_path_from_status_line)
-        .filter(|path| !is_generated_source_metadata_path(path))
-        .take(MAX_REPORTED_DIRTY_PATHS)
+        .filter(|line| {
+            dirty_path_from_status_line(line).is_some_and(|path| {
+                !is_generated_extension_metadata_path(&path, Some(extension_rel))
+            })
+        })
         .collect::<Vec<_>>();
 
-    if changed_paths.is_empty() {
-        ExtensionSourceCleanliness::Clean
-    } else {
-        ExtensionSourceCleanliness::Dirty { changed_paths }
+    if dirty_lines.is_empty() {
+        return ExtensionSourceCleanliness::Clean;
+    }
+    ExtensionSourceCleanliness::Dirty {
+        changed_paths: dirty_lines
+            .iter()
+            .filter_map(|line| dirty_path_from_status_line(line))
+            .take(MAX_REPORTED_DIRTY_PATHS)
+            .collect(),
+        fingerprint: homeboy_engine_primitives::content_hash::sha256_hex(
+            dirty_lines.join("\n").as_bytes(),
+        ),
     }
 }
 
-fn dirty_path_from_status_line(line: &str) -> Option<String> {
+pub(super) fn dirty_path_from_status_line(line: &str) -> Option<String> {
     let path = line.get(3..)?.trim();
     if path.is_empty() {
         return None;
@@ -264,11 +298,6 @@ fn dirty_path_from_status_line(line: &str) -> Option<String> {
         .map(|(_, new_path)| new_path)
         .unwrap_or(path);
     Some(path.trim_matches('"').replace('\\', "/"))
-}
-
-fn is_generated_source_metadata_path(path: &str) -> bool {
-    let name = path.rsplit('/').next().unwrap_or(path);
-    GENERATED_SOURCE_METADATA.contains(&name)
 }
 
 pub(super) fn read_source_metadata_value(extension_dir: &Path, kind: &str) -> Option<String> {
@@ -348,14 +377,40 @@ mod cleanliness_tests {
     }
 
     #[test]
-    fn generated_install_metadata_is_not_extension_source() {
-        assert!(is_generated_source_metadata_path(".source-url"));
-        assert!(is_generated_source_metadata_path("rust/.source-revision"));
-        assert!(is_generated_source_metadata_path(
-            "rust/.source-requested-ref"
+    fn generated_install_metadata_is_only_the_extension_root_files() {
+        assert!(is_generated_extension_metadata_path(".source-url", None));
+        assert!(is_generated_extension_metadata_path(
+            "rust/.source-revision",
+            Some("rust")
         ));
-        assert!(!is_generated_source_metadata_path("rust/lint.sh"));
-        assert!(!is_generated_source_metadata_path("rust/source-url.md"));
+        assert!(is_generated_extension_metadata_path(
+            "rust/.source-requested-ref",
+            Some("rust")
+        ));
+        assert!(!is_generated_extension_metadata_path(
+            "rust/lint.sh",
+            Some("rust")
+        ));
+        assert!(!is_generated_extension_metadata_path(
+            "rust/source-url.md",
+            Some("rust")
+        ));
+        // A same-named file nested inside the extension is source, not metadata.
+        assert!(!is_generated_extension_metadata_path(
+            "rust/.source-url",
+            None
+        ));
+        assert!(!is_generated_extension_metadata_path(
+            "rust/fixtures/.source-url",
+            Some("rust")
+        ));
+    }
+
+    fn dirty_paths(cleanliness: ExtensionSourceCleanliness) -> Option<Vec<String>> {
+        match cleanliness {
+            ExtensionSourceCleanliness::Dirty { changed_paths, .. } => Some(changed_paths),
+            _ => None,
+        }
     }
 
     #[test]
@@ -410,10 +465,8 @@ mod cleanliness_tests {
         std::fs::write(dir.path().join("lint.sh"), "echo edited\n").expect("edit");
 
         assert_eq!(
-            read_source_cleanliness_at(dir.path()),
-            ExtensionSourceCleanliness::Dirty {
-                changed_paths: vec!["lint.sh".to_string()]
-            }
+            dirty_paths(read_source_cleanliness_at(dir.path())),
+            Some(vec!["lint.sh".to_string()])
         );
     }
 
@@ -431,6 +484,38 @@ mod cleanliness_tests {
             read_source_cleanliness_at(dir.path()),
             ExtensionSourceCleanliness::Clean
         );
+    }
+
+    #[test]
+    fn monorepo_install_metadata_is_ignored_but_setup_artifacts_are_dirty() {
+        let repo = tempfile::tempdir().expect("monorepo");
+        let rust = repo.path().join("rust");
+        std::fs::create_dir_all(&rust).expect("rust dir");
+        std::fs::write(rust.join("rust.json"), r#"{"id":"rust"}"#).expect("manifest");
+        commit_all(repo.path());
+        std::fs::write(rust.join(".source-url"), "https://example.test/x").expect("url");
+        std::fs::write(rust.join(".source-requested-ref"), "main").expect("ref");
+
+        assert_eq!(
+            read_source_cleanliness_at(&rust),
+            ExtensionSourceCleanliness::Clean
+        );
+
+        // Setup artifacts are not metadata Homeboy generates: they stay dirt.
+        std::fs::write(rust.join("setup-output.bin"), "built").expect("artifact");
+        let first = read_source_cleanliness_at(&rust);
+        assert_eq!(
+            dirty_paths(first.clone()),
+            Some(vec!["rust/setup-output.bin".to_string()])
+        );
+
+        std::fs::write(rust.join("other.bin"), "built").expect("artifact");
+        let second = read_source_cleanliness_at(&rust);
+        let fingerprint = |c: &ExtensionSourceCleanliness| match c {
+            ExtensionSourceCleanliness::Dirty { fingerprint, .. } => fingerprint.clone(),
+            _ => panic!("expected dirty"),
+        };
+        assert_ne!(fingerprint(&first), fingerprint(&second));
     }
 
     /// A repository that merely encloses the extension directory without
@@ -469,10 +554,8 @@ mod cleanliness_tests {
             ExtensionSourceCleanliness::Clean
         );
         assert_eq!(
-            read_source_cleanliness_at(&nodejs),
-            ExtensionSourceCleanliness::Dirty {
-                changed_paths: vec!["nodejs/lint.sh".to_string()]
-            }
+            dirty_paths(read_source_cleanliness_at(&nodejs)),
+            Some(vec!["nodejs/lint.sh".to_string()])
         );
     }
 }
