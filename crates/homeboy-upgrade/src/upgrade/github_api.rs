@@ -55,12 +55,10 @@ pub(super) fn fetch(url: &str, timeout: Duration) -> Result<Response> {
             serde_json::json!({"url": url, "status": status.as_u16(), "reset": reset}),
         ));
     }
-    let mut error = Error::internal_io(
+    Err(Error::internal_io(
         format!("GitHub API returned {status} for {url}"),
         Some("query GitHub releases".into()),
-    );
-    error.message = format!("GitHub API returned {status} for {url}");
-    Err(error)
+    ))
 }
 
 #[cfg(test)]
