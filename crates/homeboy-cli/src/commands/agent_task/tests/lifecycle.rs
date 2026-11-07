@@ -7033,3 +7033,81 @@ fn every_cook_read_surface_reports_the_same_canonical_verdict() {
         });
     }
 }
+
+#[test]
+fn cook_status_follows_recovery_attempt_instead_of_historical_candidate() {
+    with_temp_home(|| {
+        let cook = "status-current-cook";
+        let first = "status-current-attempt-1";
+        let second = "status-current-attempt-2";
+        persist_recipe_only_cook(cook, first);
+        let recipes =
+            homeboy::agents::agent_task_service::CookRecipeStore::from_current_data_root().unwrap();
+        let plan = recipes.load_recipe(cook).unwrap().attempts[0].plan.clone();
+        recipes
+            .record_recipe_attempt(cook, 2, second, &plan)
+            .unwrap();
+        for (number, id) in [(1, first), (2, second)] {
+            agent_task_lifecycle::submit_plan(&plan, Some(id)).unwrap();
+            agent_task_lifecycle::record_cook_attempt_in_store(
+                &test_lifecycle_store(),
+                cook,
+                number,
+                id,
+            )
+            .unwrap();
+        }
+        agent_task_lifecycle::rewrite_record_for_test(first, |record| {
+            record.set_state_for_test(AgentTaskRunState::CandidateRecoverable);
+        })
+        .unwrap();
+        agent_task_lifecycle::rewrite_record_for_test(second, |record| {
+            record.set_state_for_test(AgentTaskRunState::Running);
+        })
+        .unwrap();
+        let read = || {
+            status(StatusArgs {
+                run_id: cook.into(),
+                interval: "5s".into(),
+                timeout: "30m".into(),
+                ..Default::default()
+            })
+            .unwrap()
+            .0
+        };
+        let running = read();
+        assert_eq!(running["run"], second);
+        assert_eq!(running["state"], "running");
+        let summary = crate::commands::agent_task_summary::render_agent_task_summary(
+            crate::commands::agent_task_summary::AgentTaskSummaryKind::Status,
+            &running,
+        )
+        .unwrap();
+        assert!(
+            !summary.contains("Next: homeboy agent-task recover"),
+            "{summary}"
+        );
+        assert!(summary.contains("--watch"), "{summary}");
+        agent_task_lifecycle::rewrite_record_for_test(second, |record| {
+            record.set_state_for_test(AgentTaskRunState::Succeeded);
+        })
+        .unwrap();
+        agent_task_lifecycle::record_cook_finalization_in_store(
+            &test_lifecycle_store(),
+            second,
+            json!({"status":"review_ready","pr_url":"https://example.test/pull/16535"}),
+        )
+        .unwrap();
+        let ready = read();
+        let summary = crate::commands::agent_task_summary::render_agent_task_summary(
+            crate::commands::agent_task_summary::AgentTaskSummaryKind::Status,
+            &ready,
+        )
+        .unwrap();
+        assert!(summary.contains("review_ready"), "{summary}");
+        assert!(
+            summary.contains("https://example.test/pull/16535"),
+            "{summary}"
+        );
+    });
+}
