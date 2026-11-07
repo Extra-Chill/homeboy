@@ -2860,6 +2860,14 @@ fn provider_command_env_with_credentials(
                 .map_err(ProviderCommandEnvError::Secret)?,
         );
     }
+    // Agent-invoked declared gates share the controller's durable verdict store,
+    // even when the provider receives a per-attempt HOME/data root.
+    if let Ok(root) = homeboy_core::paths::homeboy_data() {
+        env.push((
+            "HOMEBOY_GATE_VERDICT_DATA_ROOT".into(),
+            root.display().to_string(),
+        ));
+    }
     // Enforce the executor git-mutation boundary: strip git push credentials so a
     // provider cannot push a candidate to a real remote from its isolated attempt
     // checkout before Homeboy's verification/promotion/finalization. Homeboy

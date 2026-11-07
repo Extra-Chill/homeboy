@@ -1770,6 +1770,76 @@ fn run_promotion_gates_inner(
         return Ok(PromotionGateRun::without_gates(options.dry_run));
     }
 
+    // Resolve exact passes at the candidate tree before materialization or
+    // dependency hydration. Retain reports so partial retries set up only misses.
+    let mut cached = std::collections::BTreeMap::new();
+    let offset = usize::from(options.gates.test_execution_plan.is_some());
+    if let Some(plan) = &options.gates.test_execution_plan {
+        if let Ok(argv) = plan.declared_command() {
+            if let Some(report) = crate::agent_task_gate::cached_gate(
+                worktree_path,
+                1,
+                argv,
+                Some(plan),
+                &options.gates,
+                AgentTaskGateVisibility::Visible,
+                AgentTaskGateRevealPolicy::FullEvidence,
+            ) {
+                cached.insert(1, report);
+            }
+        }
+    }
+    for (i, (command, visibility, reveal)) in options
+        .gates
+        .verify
+        .iter()
+        .map(|c| {
+            (
+                c,
+                AgentTaskGateVisibility::Visible,
+                AgentTaskGateRevealPolicy::FullEvidence,
+            )
+        })
+        .chain(options.gates.private_verify.iter().map(|c| {
+            (
+                c,
+                AgentTaskGateVisibility::Private,
+                options.gates.private_gate_reveal,
+            )
+        }))
+        .enumerate()
+    {
+        let index = i + offset + 1;
+        if let Some(report) = crate::agent_task_gate::cached_gate(
+            worktree_path,
+            index,
+            &crate::agent_task_gate::legacy_gate_argv(command),
+            None,
+            &options.gates,
+            visibility,
+            reveal,
+        ) {
+            cached.insert(index, report);
+        }
+    }
+    if cached.len() == offset + options.gates.verify.len() + options.gates.private_verify.len() {
+        let deterministic_gates: Vec<_> = cached.into_values().collect();
+        return Ok(PromotionGateRun {
+            gate_results: deterministic_gates
+                .iter()
+                .cloned()
+                .map(HomeboyGateResult::from)
+                .collect(),
+            deterministic_gates,
+            ..PromotionGateRun::without_gates(false)
+        });
+    }
+    let setup_commands: Vec<_> = promotion_gate_commands(&options.gates)
+        .into_iter()
+        .enumerate()
+        .filter(|(i, _)| !cached.contains_key(&(i + 1)))
+        .map(|(_, command)| command)
+        .collect();
     emit_promotion_progress(
         "gate_materialization",
         None,
@@ -1855,7 +1925,7 @@ fn run_promotion_gates_inner(
                         .gate_environment
                         .admitted_component_id
                         .as_deref(),
-                    Some(&promotion_gate_commands(&options.gates)),
+                    Some(&setup_commands),
                 )
                 .map_err(|error| {
                     gate_setup_failure(
@@ -1929,7 +1999,9 @@ fn run_promotion_gates_inner(
             Some("gate-1".to_string()),
             Some("starting declared test plan".to_string()),
         );
-        let gate = if let Some(error) = setup_error.as_ref() {
+        let gate = if let Some(report) = cached.remove(&1) {
+            report
+        } else if let Some(error) = setup_error.as_ref() {
             crate::agent_task_gate::placement::gate_non_execution_report(
                 1,
                 vec!["declared-test-plan".to_string()],
@@ -1966,7 +2038,9 @@ fn run_promotion_gates_inner(
         } else {
             &gate_workspace
         };
-        let gate = if let Some(error) = setup_error.as_ref() {
+        let gate = if let Some(report) = cached.remove(&index) {
+            report
+        } else if let Some(error) = setup_error.as_ref() {
             crate::agent_task_gate::placement::gate_non_execution_report(
                 index,
                 crate::agent_task_gate::legacy_gate_argv(command),

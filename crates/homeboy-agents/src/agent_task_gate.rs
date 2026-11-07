@@ -2354,7 +2354,7 @@ pub fn run_gate_command_with_supervision(
     clippy::too_many_arguments,
     reason = "supervision callbacks and durable gate inputs remain independently auditable"
 )]
-pub(crate) fn run_declared_test_with_supervision(
+pub fn run_declared_test_with_supervision(
     cwd: &Path,
     index: usize,
     plan: &homeboy_engine_primitives::test_execution::TestExecutionPlan,
@@ -2441,6 +2441,45 @@ fn run_gate_argv_with_supervision(
 
 /// Comparison base carried by generated component lint gates, also used by
 /// canonical Lab materialization to retain the commit object.
+/// Look up a verdict without dependency, toolchain, or workspace setup.
+/// Opaque package and extension inputs conservatively execute instead.
+pub(crate) fn cached_gate(
+    cwd: &Path,
+    index: usize,
+    argv: &[String],
+    plan: Option<&homeboy_engine_primitives::test_execution::TestExecutionPlan>,
+    gates: &VerifyGateOptions,
+    visibility: AgentTaskGateVisibility,
+    reveal: AgentTaskGateRevealPolicy,
+) -> Option<AgentTaskGateReport> {
+    if !gates.gate_package_artifacts.is_empty() || gates.gate_environment.lab_runner.is_some() {
+        return None;
+    }
+    let mut policy = gates.gate_environment.clone();
+    policy.hydrate_rust_cache &= gates.hydrate_dependencies;
+    policy.hydrate_dependencies &= gates.hydrate_dependencies;
+    let scratch = tempfile::tempdir().ok()?;
+    let selected = selected_gate_environment(&policy, Some(scratch.path())).ok()?;
+    let mut process = Command::new(argv.first()?);
+    process.args(&argv[1..]);
+    selected.apply(&mut process);
+    let timeout = homeboy_engine_primitives::test_execution::TestExecutionPlan::with_suite_timeout(
+        gates.gate_timeout(),
+    )
+    .ok()?;
+    let (name, value) = plan.unwrap_or(&timeout).suite_timeout_env();
+    process.env(name, value);
+    verdict::GateVerdict::prepare(
+        cwd,
+        &process,
+        &policy,
+        &selected.report,
+        Some(scratch.path()),
+        plan,
+    )?
+    .passed(index, visibility, reveal)
+}
+
 pub fn component_lint_base(command: &str) -> Option<&str> {
     command
         .split("HOMEBOY_LINT_BASE=")
@@ -2586,9 +2625,6 @@ fn run_gate_argv_local(
         validate_package_artifacts(cwd, gate_environment, package_artifacts)?;
     let mut selected_environment =
         selected_gate_environment(&gate_environment, execution.runtime_tmpdir)?;
-    selected_environment.configure_rust_cache(cwd)?;
-    selected_environment.configure_cargo_target(cwd, gate_environment.shared_cargo_target)?;
-    selected_environment.configure_component_inputs(cwd)?;
     selected_environment.report.package_artifacts = package_artifacts;
     selected_environment.apply(&mut process);
     if let Some(plan) = declared_plan {
@@ -2631,6 +2667,11 @@ fn run_gate_argv_local(
         return Ok(report);
     }
     let verdict_started = Instant::now();
+    selected_environment.configure_rust_cache(cwd)?;
+    selected_environment.configure_cargo_target(cwd, gate_environment.shared_cargo_target)?;
+    selected_environment.configure_component_inputs(cwd)?;
+    // Do not clear again: the declared suite deadline is already applied.
+    process.envs(&selected_environment.values);
     // Every deterministic gate is contained the same way regardless of
     // whether the caller supervises it: the gate spawns build/test tooling
     // (`cargo test -p ... --lib` and friends) that outlives a plain

@@ -77,32 +77,35 @@ impl GateVerdict {
                 env.insert((*name).to_string(), "<gate-temp>".to_string());
             }
         }
-        let mut provenance = environment.clone();
-        for extension in &mut provenance.extension_inputs {
-            extension.destination = format!("<isolated-extension:{}>", extension.id);
-        }
-        provenance.sanitized.clear();
-        if let Some(cache) = &mut provenance.rust_cache {
-            cache.state.clear();
-            cache.wait_ms = None;
-            cache.hydrate_ms = None;
-        }
-        if let Some(target) = &mut provenance.cargo_target {
-            target.state = None;
-            target.bytes_before = None;
-            target.bytes_after = None;
+        // Input policy, not setup output, defines the environment identity.
+        // Unknown external closures deliberately miss before touching setup.
+        if !policy.extension_inputs.is_empty() {
+            return None;
         }
         let argv: Vec<_> = std::iter::once(process.get_program())
             .chain(process.get_args())
             .map(|arg| arg.to_str())
             .collect::<Option<_>>()?;
-        let payload = serde_json::to_vec(&(1, &tree, argv, env, policy, provenance, plan)).ok()?;
+        // This locates storage, not a gate input; agent processes carry it
+        // through their isolated per-attempt environment.
+        env.remove("HOMEBOY_GATE_VERDICT_DATA_ROOT");
+        let payload = serde_json::to_vec(&(
+            2,
+            &tree,
+            argv,
+            env,
+            policy,
+            &environment.package_artifacts,
+            plan,
+        ))
+        .ok()?;
         let key = format!("{:x}", Sha256::digest(payload));
         Some(Self {
             key,
             tree,
-            root: homeboy_core::paths::homeboy_data()
-                .ok()?
+            root: std::env::var_os("HOMEBOY_GATE_VERDICT_DATA_ROOT")
+                .map(PathBuf::from)
+                .or_else(|| homeboy_core::paths::homeboy_data().ok())?
                 .join("controller-state/gate-verdicts"),
         })
     }

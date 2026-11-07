@@ -53,6 +53,49 @@ fn retry_executes_failed_gate_but_reuses_agent_pass() {
     // The agent and promotion call the same recorded executor.
     assert!(!run(&pass, 1).verdict.unwrap().reused);
     assert!(run(&pass, 1).verdict.unwrap().reused);
+    let gates = VerifyGateOptions {
+        hydrate_dependencies: false,
+        gate_environment: policy.clone(),
+        ..Default::default()
+    };
+    // Before any dependency/cache setup, promotion sees the same key when
+    // supervision sets its declared suite timeout.
+    let supervised = format!("{pass}; true");
+    let supervision = GateSupervision {
+        timeout: gates.gate_timeout(),
+        no_progress_timeout: gates.gate_no_progress_timeout(),
+        heartbeat_interval: gates.gate_heartbeat_interval(),
+        on_spawn: Arc::new(|_, _| Ok(())),
+        on_heartbeat: Arc::new(|_| Ok(())),
+        is_cancelled: Arc::new(|| false),
+    };
+    let runtime = tempfile::tempdir().unwrap();
+    let first = run_gate_command_with_supervision(
+        repo.path(),
+        1,
+        &supervised,
+        AgentTaskGateVisibility::Visible,
+        AgentTaskGateRevealPolicy::FullEvidence,
+        Some(runtime.path()),
+        Some(&supervision),
+        &policy,
+        &[],
+    )
+    .unwrap();
+    let preflight = cached_gate(
+        repo.path(),
+        1,
+        &legacy_gate_argv(&supervised),
+        None,
+        &gates,
+        AgentTaskGateVisibility::Visible,
+        AgentTaskGateRevealPolicy::FullEvidence,
+    )
+    .unwrap();
+    assert_eq!(first.verdict.unwrap().key, preflight.verdict.unwrap().key);
+    fs::remove_file(&passed_count).unwrap();
+    // Restore the original counter for the retry assertions below.
+    fs::write(&passed_count, "run\n").unwrap();
     assert_eq!(run(&fail, 2).status, AgentTaskGateStatus::Failed);
     // An unchanged retry executes only the failed gate.
     assert!(run(&pass, 1).verdict.unwrap().reused);
