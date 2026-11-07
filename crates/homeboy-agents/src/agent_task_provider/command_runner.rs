@@ -159,6 +159,7 @@ pub(super) fn run_materialized_provider_command(
             }
             outcome.metadata["served_models"] = json!(served_models);
         }
+        classify_environment_stop(&mut outcome);
         classify_provider_policy_denial(request, &mut outcome);
         classify_structured_runtime_failure(
             &mut outcome,
@@ -286,6 +287,58 @@ fn outcome_is_transient(outcome: &AgentTaskOutcome) -> bool {
 /// A provider policy rejecting a controller-projected evidence path is an
 /// execution-environment contract failure, not a task failure. Mark it
 /// explicitly so scheduler retry policy terminates without spending retries.
+/// A terminal provider report about a broken execution environment is not a
+/// substantive no-change candidate. Do not classify recovered tool errors from
+/// earlier turns: only the surfaced terminal report is authoritative here.
+fn classify_environment_stop(outcome: &mut AgentTaskOutcome) {
+    // A provider that explicitly completed despite a recovered tool error is
+    // not an environment-caused stop.
+    if outcome
+        .outputs
+        .to_string()
+        .contains("\"completion\":\"complete\"")
+    {
+        return;
+    }
+    let report = format!(
+        "{} {} {}",
+        outcome.summary.as_deref().unwrap_or_default(),
+        outcome.outputs,
+        outcome
+            .diagnostics
+            .iter()
+            .map(|d| d.message.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    let lower = report.to_ascii_lowercase();
+    let unusable_tool = lower.contains("exec format error")
+        || lower.contains("cannot execute binary file")
+        || (lower.contains("exit 126") && lower.contains("tool"));
+    let missing_base = lower.contains("origin/")
+        && (lower.contains("unknown revision")
+            || lower.contains("ambiguous argument")
+            || lower.contains("missing declared base")
+            || lower.contains("bad revision"));
+    if !unusable_tool && !missing_base {
+        return;
+    }
+    outcome.status = AgentTaskOutcomeStatus::Failed;
+    outcome.failure_classification = Some(AgentTaskFailureClassification::CapabilityMissing);
+    outcome.candidate = None;
+    if !outcome.metadata.is_object() {
+        outcome.metadata = json!({});
+    }
+    outcome.metadata["environment_setup_failure"] = json!(true);
+    let runner = std::env::var("HOMEBOY_RUNNER_ID").unwrap_or_else(|_| "<runner>".into());
+    outcome.metadata["next_action"] = json!(format!("homeboy runner doctor {runner}"));
+    outcome.diagnostics.push(AgentTaskDiagnostic {
+        class: "agent_task.environment_setup_failure".into(),
+        message: "Provider stopped because its runner environment is unusable.".into(),
+        data: json!({"next_action": format!("homeboy runner doctor {runner}"), "phase": "environment_setup"}),
+    });
+}
+
 fn classify_provider_policy_denial(
     request: &AgentTaskExecutorRequest,
     outcome: &mut AgentTaskOutcome,

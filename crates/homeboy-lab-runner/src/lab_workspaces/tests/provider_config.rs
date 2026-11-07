@@ -912,7 +912,8 @@ fn path_setting_workspace_ref_resolves_to_controller_path_and_syncs_workspace() 
                 "base_ref": "HEAD",
                 "cleanup_policy": "preserve_on_failure",
                 "created_at": "2026-01-01T00:00:00Z",
-                "state": "active"
+                "state": "active",
+                "workspace_identity": homeboy_core::worktree::task_worktree_workspace_identity("repo", "repo@cook").unwrap()
             })
             .to_string(),
         )
@@ -975,7 +976,8 @@ fn path_setting_workspace_ref_resolves_inside_setting_json() {
                 "base_ref": "HEAD",
                 "cleanup_policy": "preserve_on_failure",
                 "created_at": "2026-01-01T00:00:00Z",
-                "state": "active"
+                "state": "active",
+                "workspace_identity": homeboy_core::worktree::task_worktree_workspace_identity("repo", "repo@cook").unwrap()
             })
             .to_string(),
         )
