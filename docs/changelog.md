@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.446.15] - 2026-11-07
+
+### Changed
+- fence ambient data roots under hermetic test isolation and fix every escape
+- fold daemon start into ensure-running; drop binary_sha256 staleness
+
 ## [0.446.14] - 2026-11-06
 
 ### Changed
