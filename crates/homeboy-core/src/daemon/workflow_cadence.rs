@@ -552,9 +552,29 @@ pub fn view(cadence: &Cadence) -> Value {
     })
 }
 
+/// The last instance's terminal status and reason. `last_error` covers only
+/// admission, so a cadence whose every instance fails still looked healthy
+/// without this (#17234).
+fn last_outcome(cadence: &Cadence, store: &JobStore) -> Value {
+    let Some(instance) = cadence.last_instance.as_deref() else {
+        return Value::Null;
+    };
+    super::workflow_job::workflow_status(store, instance).map_or(Value::Null, |status| {
+        json!({ "instance": instance, "status": status["status"], "reason": status["reason"] })
+    })
+}
+
 /// `GET /workflows/cadences`.
-pub(crate) fn http_list() -> Result<Value> {
-    Ok(json!({ "entities": list()?.iter().map(view).collect::<Vec<_>>() }))
+pub(crate) fn http_list(store: &JobStore) -> Result<Value> {
+    let entities = list()?
+        .iter()
+        .map(|cadence| {
+            let mut view = view(cadence);
+            view["last_outcome"] = last_outcome(cadence, store);
+            view
+        })
+        .collect::<Vec<_>>();
+    Ok(json!({ "entities": entities }))
 }
 
 /// `POST /workflows/cadences`: the body is the admitted request template.
