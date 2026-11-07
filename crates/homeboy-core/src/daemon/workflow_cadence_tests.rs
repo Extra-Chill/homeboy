@@ -261,6 +261,49 @@ fn wait_terminal(store: &JobStore, instance: &str) {
     }
 }
 
+/// A cadence whose instance failed reports it in the list, even though the
+/// slot was admitted and `last_error` is clear (#17234).
+#[test]
+fn the_list_reports_a_failed_last_instance() {
+    with_isolated_home(|home| {
+        register_workflow_job_driver();
+        let store = JobStore::open_without_reconciliation(crate::paths::observation_db().unwrap())
+            .unwrap()
+            .with_daemon_lease("cadence-test".to_string());
+        let base = 1_791_900_000_000;
+        register(
+            template(json!({"interval": "1h"}), "exit 3", home.path()),
+            false,
+            base,
+        )
+        .unwrap();
+        assert_eq!(admit_due(&store, base + 1_000).len(), 1);
+        let instance = list().unwrap()[0].last_instance.clone().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !store
+            .controller_job_for_key(&instance)
+            .is_some_and(|job| job.status.is_terminal())
+        {
+            assert!(
+                Instant::now() < deadline,
+                "instance {instance} did not finish"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        let listed = http_list(&store).unwrap()["entities"][0].clone();
+        assert_eq!(listed["last_error"], Value::Null);
+        assert_eq!(listed["last_outcome"]["instance"], instance);
+        assert_eq!(listed["last_outcome"]["status"], "failed", "{listed}");
+        assert!(
+            listed["last_outcome"]["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.starts_with("step `run` did not succeed")),
+            "{listed}"
+        );
+    });
+}
+
 /// The tick against a real store: slot 1 fires, slot 2 is skipped while slot
 /// 1's instance runs, slot 3 fires after it finishes, and re-firing slot 3
 /// (a crash before the registration advanced) reuses its instance.
