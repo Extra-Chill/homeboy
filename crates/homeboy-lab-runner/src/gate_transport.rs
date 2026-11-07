@@ -38,7 +38,7 @@ impl LabGateTransport for NativeLabGateTransport {
             Ok(receipt) => Ok(receipt),
             Err(error) => {
                 use std::io::Write;
-                let mut file = tempfile::NamedTempFile::new()
+                let mut file = crate::staging_temp::file()
                     .map_err(|error| Error::internal_io(error.to_string(), None))?;
                 let diagnostic = homeboy_core::redaction::redact_json(
                     &serde_json::json!({"code":error.code.as_str(), "message":error.message, "details":error.details, "request_sha256":request.identity()?, "candidate":request.candidate}),
@@ -531,7 +531,14 @@ fn execute_owned(
         workspace.terminal(outcome);
     }
     let result = crate::execution::result_event_data(&terminal.events).ok_or_else(|| {
-        Error::invalid_argument("gate.receipt", "terminal runner gate has no result event")
+        // Setup may fail before the receipt-producing command starts.
+        let evidence = serde_json::to_string(&terminal.events).unwrap_or_default();
+        let storage = Error::internal_io(evidence, Some("runner gate materialization".into()));
+        if storage.is_storage_exhausted() {
+            storage.with_retryable(true)
+        } else {
+            Error::invalid_argument("gate.receipt", "terminal runner gate has no result event")
+        }
     })?;
     let stdout = result
         .get("stdout")

@@ -177,6 +177,14 @@ pub(crate) fn prepare_runner_process(
         })
         .map(Ok)
         .unwrap_or_else(|| load(&request.runner_id))?;
+    let _scratch = (runner.kind == RunnerKind::Local)
+        .then(|| {
+            runner
+                .workspace_root
+                .as_deref()
+                .map(|root| crate::staging_temp::Scope::new(Path::new(root)))
+        })
+        .flatten();
     let cwd = resolve_cwd(&runner, request.cwd.as_deref())?;
     validate_runner_process_cwd(&runner, &cwd)?;
     if runner.kind != RunnerKind::Local {

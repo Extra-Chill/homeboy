@@ -281,7 +281,7 @@ fn local_file_digest(local_path: &str) -> Result<(String, u64)> {
 }
 
 fn private_bytes_snapshot(content: &[u8]) -> Result<tempfile::NamedTempFile> {
-    let mut snapshot = tempfile::NamedTempFile::new().map_err(|err| {
+    let mut snapshot = crate::staging_temp::file().map_err(|err| {
         Error::internal_io(err.to_string(), Some("create private snapshot".into()))
     })?;
     snapshot
@@ -329,7 +329,7 @@ fn private_evidence_snapshot(
             None,
         ));
     }
-    let mut snapshot = tempfile::NamedTempFile::new().map_err(|error| {
+    let mut snapshot = crate::staging_temp::file().map_err(|error| {
         provider_evidence_io_error(error, "create evidence snapshot".to_string())
     })?;
     let mut digest = sha2::Sha256::new();

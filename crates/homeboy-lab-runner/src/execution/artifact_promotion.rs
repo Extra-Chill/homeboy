@@ -483,7 +483,7 @@ fn persist_json_artifact(
     value: &impl serde::Serialize,
     metadata: serde_json::Value,
 ) -> homeboy_core::Result<ArtifactRecord> {
-    let file = tempfile::NamedTempFile::new().map_err(|err| {
+    let file = crate::staging_temp::file().map_err(|err| {
         Error::internal_io(
             err.to_string(),
             Some(format!("create derived {kind} artifact")),

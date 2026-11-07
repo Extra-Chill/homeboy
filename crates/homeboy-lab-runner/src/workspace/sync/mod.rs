@@ -108,8 +108,10 @@ fn workspace_metadata_relative_to_checkout() -> String {
 pub(crate) fn workspace_state_dir(remote_path: &str) -> String {
     homeboy_lab_contract::lab::handoff::runner_workspace_state_dir(remote_path)
 }
-const MIN_RUNNER_WORKSPACE_FREE_BYTES: u64 = 1024 * 1024 * 1024;
-const MIN_RUNNER_WORKSPACE_FREE_RATIO: f64 = 0.01;
+use crate::staging_temp::{
+    MIN_STAGING_FREE_BYTES as MIN_RUNNER_WORKSPACE_FREE_BYTES,
+    MIN_STAGING_FREE_RATIO as MIN_RUNNER_WORKSPACE_FREE_RATIO,
+};
 const METADATA_SSH_RECOVERY_ATTEMPTS: usize = 2;
 const WORKSPACE_METADATA_TIMEOUT: Duration = Duration::from_secs(30);
 const WORKSPACE_METADATA_OUTPUT_LIMIT: usize = 4 * 1024;
@@ -2525,7 +2527,7 @@ pub(crate) fn write_runner_state_file(
         RunnerKind::Ssh => {
             let parent = parent_remote_path(&metadata_path);
             let staged_metadata_path = temp::unique_name(&metadata_path, ".tmp");
-            let metadata_file = tempfile::NamedTempFile::new().map_err(|err| {
+            let metadata_file = crate::staging_temp::file().map_err(|err| {
                 Error::internal_io(
                     err.to_string(),
                     Some("create workspace metadata staging file".to_string()),
@@ -2952,7 +2954,7 @@ fn snapshot_reservation_view(
     })
 }
 
-fn require_runner_workspace_disk_headroom(
+pub(crate) fn require_runner_workspace_disk_headroom(
     runner: &super::super::Runner,
     workspace_root: &str,
 ) -> Result<()> {
@@ -2965,7 +2967,8 @@ fn require_runner_workspace_disk_headroom(
     Err(Error::validation_invalid_argument(
         "workspace_root",
         format!(
-            "runner workspace filesystem for `{}` is critically low on free space: {} available of {} total; refusing to sync another Lab workspace",
+            "runner staging filesystem at `{}/.homeboy-tmp` for `{}` is critically low on free space: {} available of {} total; refusing to sync another Lab workspace",
+            workspace_root.trim_end_matches('/'),
             runner.id,
             human_bytes(probe.available_bytes),
             human_bytes(probe.total_bytes)
@@ -2998,9 +3001,10 @@ fn runner_workspace_disk_probe(
     runner: &super::super::Runner,
     workspace_root: &str,
 ) -> Result<Option<RunnerWorkspaceDiskProbe>> {
+    let staging = Path::new(workspace_root).join(".homeboy-tmp");
     match runner.kind {
-        RunnerKind::Local => Ok(local_runner_workspace_disk_probe(Path::new(workspace_root))),
-        RunnerKind::Ssh => ssh_runner_workspace_disk_probe(runner, workspace_root),
+        RunnerKind::Local => Ok(local_runner_workspace_disk_probe(&staging)),
+        RunnerKind::Ssh => ssh_runner_workspace_disk_probe(runner, &staging.to_string_lossy()),
     }
 }
 

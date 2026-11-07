@@ -110,9 +110,18 @@ pub fn runner_admission_snapshot_until(
     runner_id: &str,
     deadline: std::time::Instant,
 ) -> Result<RunnerAdmissionSnapshot> {
-    Ok(RunnerAdmissionSnapshot::from_status(
-        connection::status_until(runner_id, deadline)?,
-    ))
+    let mut snapshot =
+        RunnerAdmissionSnapshot::from_status(connection::status_until(runner_id, deadline)?);
+    if snapshot.summary.accepting_jobs {
+        let runner = load(runner_id)?;
+        if let Some(root) = runner.workspace_root.as_deref() {
+            if let Err(error) = workspace::require_runner_workspace_disk_headroom(&runner, root) {
+                snapshot.summary.accepting_jobs = false;
+                snapshot.summary.next_action = Some(error.message);
+            }
+        }
+    }
+    Ok(snapshot)
 }
 
 /// Build the admission projection from an already-observed status report.
@@ -174,6 +183,7 @@ pub use runner_probe_gate::{
 pub use validation_dependencies::RunnerValidationDependencySyncOutput;
 pub mod runners;
 mod staged_workspace;
+pub mod staging_temp;
 pub(crate) mod workload;
 mod workspace;
 pub(crate) use extension_materialization::materialize_lab_job_extension_overlays;

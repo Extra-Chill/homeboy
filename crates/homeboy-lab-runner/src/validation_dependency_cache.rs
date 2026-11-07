@@ -316,7 +316,7 @@ where
 }
 
 fn consumer_tempdir(component_id: &str) -> Result<tempfile::TempDir> {
-    tempfile::tempdir().map_err(|err| {
+    crate::staging_temp::dir().map_err(|err| {
         Error::internal_io(
             err.to_string(),
             Some(format!(
