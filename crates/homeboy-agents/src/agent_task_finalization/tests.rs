@@ -2441,7 +2441,7 @@ fn durable_finalization_accepts_only_authenticated_pre_provider_candidate_adopti
     rejected(failed_recovery_lifecycle.clone(), missing_model);
 
     let mut non_green = pre_provider_adoption_gate_proof();
-    non_green.promotion.gate_results[0].status = HomeboyGateStatus::Failed;
+    fail_gate(&mut non_green);
     rejected(failed_recovery_lifecycle, non_green);
 }
 
@@ -2525,7 +2525,7 @@ fn durable_finalization_accepts_only_authenticated_external_candidate_adoption()
     rejected(missing_commit_binding);
 
     let mut non_green = external_adoption_gate_proof();
-    non_green.promotion.gate_results[0].status = HomeboyGateStatus::Failed;
+    fail_gate(&mut non_green);
     rejected(non_green);
 }
 
@@ -2658,7 +2658,7 @@ fn durable_finalization_rejects_stale_success_when_latest_producer_failed_or_gat
         let mut gate_proof = successful_gate_proof();
         gate_proof.promotion.changed_files = vec!["src/lib.rs".to_string()];
         if !gates_green {
-            gate_proof.promotion.gate_results[0].status = HomeboyGateStatus::Failed;
+            fail_gate(&mut gate_proof);
         }
         let mut lifecycle = successful_lifecycle("openai/gpt-5.6-terra");
         lifecycle.provider_runtime.push(ProviderRuntimeLifecycle {
@@ -3788,9 +3788,19 @@ fn successful_gate_proof() -> AgentTaskPrDurableGateProof {
                     }
                 }
             },
+            "deterministic_gates": [{ "id": "gate", "status": "succeeded", "command": ["sh", "-c", "cargo test"], "exit_code": 0 }],
             "gate_results": [{ "id": "gate", "name": "cargo test", "kind": "command", "status": "passed" }]
         })).expect("promotion proof"),
     }
+}
+
+/// Turn the proof's only gate red in its authoritative detailed report and in
+/// the normalized result derived from it.
+fn fail_gate(proof: &mut AgentTaskPrDurableGateProof) {
+    let gate = &mut proof.promotion.deterministic_gates[0];
+    gate.status = crate::agent_task_gate::AgentTaskGateStatus::Failed;
+    gate.exit_code = 1;
+    proof.promotion.gate_results[0].status = HomeboyGateStatus::Failed;
 }
 
 fn pre_provider_adoption_gate_proof() -> AgentTaskPrDurableGateProof {

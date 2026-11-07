@@ -7149,10 +7149,7 @@ fn delivered_candidate_facts(
         return DeliveredCandidateFacts::default();
     };
     let applied_gate_failure = applied_candidate_needs_replacement_gates(&promotion);
-    let verified_unpublished = matches!(
-        promotion.status,
-        AgentTaskPromotionStatus::Applied | AgentTaskPromotionStatus::GateFailed
-    ) && promotion.finalization_eligible()
+    let verified_unpublished = promotion.applied_with_passing_verdict()
         && promotion
             .candidate
             .as_ref()

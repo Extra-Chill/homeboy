@@ -91,6 +91,18 @@ impl AgentTaskPromotionReport {
         !self.deterministic_gates.is_empty() && self.finalization_blocking_gates().next().is_none()
     }
 
+    /// Whether this report is an already-applied candidate carrying a passing
+    /// verdict: the one rule both recovery step selection and the publication
+    /// guard apply, so they cannot disagree about what may publish (#17508).
+    /// A proven inherited failure passes (see [`Self::finalization_eligible`])
+    /// while staying recorded as baseline-red evidence.
+    pub fn applied_with_passing_verdict(&self) -> bool {
+        matches!(
+            self.status,
+            AgentTaskPromotionStatus::Applied | AgentTaskPromotionStatus::GateFailed
+        ) && self.finalization_eligible()
+    }
+
     /// Gates that keep the report from crossing the finalization boundary,
     /// using the same per-gate rule as [`Self::finalization_eligible`].
     pub fn finalization_blocking_gates(&self) -> impl Iterator<Item = &AgentTaskGateReport> {
