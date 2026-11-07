@@ -651,6 +651,20 @@ impl PlacementDirective {
     }
 }
 
+/// The policy a recorded decision was routed under, without its bound identity.
+impl From<&ExecutionPlacementDecision> for PlacementDirective {
+    fn from(decision: &ExecutionPlacementDecision) -> Self {
+        Self {
+            requested: decision.requested,
+            required: decision.required,
+            selected: decision.selected,
+            runner: decision.runner.clone(),
+            fallback: decision.fallback.clone(),
+            override_authorization: decision.override_authorization.clone(),
+        }
+    }
+}
+
 /// The immutable controller-side decision consumed by execution and dispatch.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ParsedCommandPreflightResult {

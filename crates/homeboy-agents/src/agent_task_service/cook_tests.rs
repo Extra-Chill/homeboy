@@ -5088,6 +5088,117 @@ fn materialized_cook_queues_same_attempt_then_dispatches_once_after_upgrade_rele
     });
 }
 
+/// #17528: a Lab-pinned Cook attempt deferred behind a runtime owner resumes
+/// through its queued intent under its runner placement. The runner-owned
+/// provider command does not exist on the controller, so any controller-local
+/// readiness probe would reject the claim before dispatch.
+#[test]
+fn deferred_lab_cook_attempt_resumes_with_runner_placement_without_local_probe() {
+    use homeboy_lab_contract::{
+        EffectiveExecutionPlacement, ExecutionPlacementDecision, ExecutionPlacementFallback,
+        ExecutionPlacementIdentity, ExecutionPlacementOverrideAuthorization,
+        ExecutionPlacementRequirement, ExecutionPlacementRunnerSelection, Placement,
+        RunnerSelectionSource,
+    };
+    #[derive(Debug)]
+    struct LabPinnedDispatcher {
+        inner: RecordingDetachedAttemptDispatcher,
+        decision: ExecutionPlacementDecision,
+    }
+    impl AgentTaskCookAttemptDispatcher for LabPinnedDispatcher {
+        fn durable_recipe(&self) -> Result<Value> {
+            Ok(serde_json::json!({
+                "kind": "lab",
+                "runner_id": "homeboy-lab",
+                "execution_placement_decision": self.decision,
+            }))
+        }
+        fn dispatch_attempt(
+            &self,
+            plan: AgentTaskPlan,
+            run_id: &str,
+            baseline: Option<&DerivedCookBaselineCapability>,
+        ) -> Result<()> {
+            self.inner.dispatch_attempt(plan, run_id, baseline)
+        }
+    }
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "deferred-lab-cook-runner-placement";
+        let dispatches = Arc::new(AtomicUsize::new(0));
+        let runner = ExecutionPlacementRunnerSelection {
+            runner_id: "homeboy-lab".to_string(),
+            source: RunnerSelectionSource::Explicit,
+        };
+        let decision = homeboy_core::parsed_command_preflight::PlacementDirective {
+            requested: Placement::Auto,
+            required: ExecutionPlacementRequirement::Lab,
+            selected: EffectiveExecutionPlacement::Lab,
+            runner: Some(runner.clone()),
+            fallback: ExecutionPlacementFallback {
+                local_allowed: false,
+                reason: None,
+            },
+            override_authorization: ExecutionPlacementOverrideAuthorization {
+                authorized: false,
+                authority: None,
+            },
+        }
+        .finalize(ExecutionPlacementIdentity {
+            repository: "repo".to_string(),
+            workspace: "/ws/repo".to_string(),
+            task: "provider".to_string(),
+            candidate: None,
+            base: None,
+        });
+        let dispatcher = || LabPinnedDispatcher {
+            inner: RecordingDetachedAttemptDispatcher {
+                dispatches: Arc::clone(&dispatches),
+            },
+            decision: decision.clone(),
+        };
+        let missing_command = "/nonexistent/homeboy-17528/runner-owned/pi";
+        assert!(!Path::new(missing_command).exists());
+        let mut options = batch_cook_options(cook_id, Arc::new(dispatcher()));
+        let executor = &mut options.identity.initial_plan.tasks[0].executor;
+        executor.backend = "pi".to_string();
+        executor.model = Some("test/model".to_string());
+        executor.config = serde_json::json!({ "command": missing_command });
+        let run_id = options.identity.initial_run_id.clone();
+        let mut promotion = runtime_admission_owner_process();
+
+        let deferred = run_cook(CookContext::new(options, Arc::new(UnusedExecutor)))
+            .expect("Lab Cook defers behind the runtime owner");
+        assert_eq!(deferred.exit_code, 75, "deferred Cook result: {deferred:?}");
+        let record = agent_task_lifecycle::exact_record(&run_id).expect("deferred attempt");
+        assert_eq!(record.metadata["cook_runtime_admission"]["state"], "queued");
+
+        let release = homeboy_core::paths::runtime_promotion_dir()
+            .expect("runtime promotion directory")
+            .join("runtime-admission-test-release");
+        std::fs::write(release, b"release").expect("release runtime owner");
+        promotion.wait().expect("runtime owner exits");
+        let lifecycle = test_lifecycle_store();
+        let ready_id = current_intent(&lifecycle, &run_id).intent_id;
+        crate::agent_task_service::execute_execution_step(
+            &ready_id,
+            Arc::new(UnusedExecutor),
+            |_| Ok(Some(Arc::new(dispatcher()))),
+            &QueuedRunTransport,
+        )
+        .expect("queued Lab attempt is admitted without controller-local readiness");
+
+        assert_eq!(dispatches.load(Ordering::SeqCst), 1);
+        let resumed = agent_task_lifecycle::exact_record(&run_id).expect("resumed attempt");
+        assert_eq!(resumed.state(), AgentTaskRunState::Running);
+        assert!(resumed.metadata.get("queue_quarantine").is_none());
+        let placement = super::super::execution::queued_cook_placement(&resumed)
+            .expect("resumed attempt matches its recipe")
+            .expect("a Lab-pinned attempt resumes with its recorded placement");
+        assert_eq!(placement.selected, EffectiveExecutionPlacement::Lab);
+        assert_eq!(placement.runner, Some(runner));
+    });
+}
+
 #[test]
 fn cook_runtime_admission_cancellation_stops_wait_before_provider_execution() {
     homeboy_core::test_support::with_isolated_home(|_| {

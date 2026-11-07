@@ -3480,21 +3480,15 @@ fn finalize_replacement_attempt(
     task: &str,
     source_path: Option<&Path>,
 ) -> homeboy_lab_contract::ExecutionPlacementDecision {
-    let directive = homeboy::core::parsed_command_preflight::PlacementDirective {
-        requested: prior.requested,
-        required: prior.required,
-        selected: prior.selected,
-        runner: Some(homeboy_lab_contract::ExecutionPlacementRunnerSelection {
-            runner_id: runner_id.to_string(),
-            source: prior
-                .runner
-                .as_ref()
-                .map(|runner| runner.source)
-                .unwrap_or(homeboy_lab_contract::RunnerSelectionSource::Explicit),
-        }),
-        fallback: prior.fallback.clone(),
-        override_authorization: prior.override_authorization.clone(),
-    };
+    let mut directive = homeboy::core::parsed_command_preflight::PlacementDirective::from(prior);
+    directive.runner = Some(homeboy_lab_contract::ExecutionPlacementRunnerSelection {
+        runner_id: runner_id.to_string(),
+        source: prior
+            .runner
+            .as_ref()
+            .map(|runner| runner.source)
+            .unwrap_or(homeboy_lab_contract::RunnerSelectionSource::Explicit),
+    });
     directive.finalize(homeboy_lab_contract::ExecutionPlacementIdentity {
         repository: source_path
             .and_then(|path| path.file_name())
