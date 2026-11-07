@@ -998,15 +998,28 @@ pub fn recommended_bump_from_commits(commits: &[CommitInfo]) -> Option<SemverBum
     recommended
 }
 
+/// Commit types accepted for authored subjects such as Cook PR titles.
+pub const CONVENTIONAL_COMMIT_TYPES: &[&str] = &[
+    "feat", "fix", "refactor", "docs", "chore", "test", "perf", "ci", "build",
+];
+
+/// Whether `subject` is `type(scope)?!?: message` with a known type and a
+/// non-empty message. The type drives the release bump: `feat` is minor,
+/// `!` is major, everything else is patch.
+pub fn is_conventional_subject(subject: &str) -> bool {
+    let Some((prefix, message)) = subject.split_once(": ") else {
+        return false;
+    };
+    let kind = prefix.strip_suffix('!').unwrap_or(prefix);
+    let kind = kind.split_once('(').map_or(kind, |(kind, _)| kind);
+    !message.trim().is_empty()
+        && is_conventional_prefix(prefix)
+        && CONVENTIONAL_COMMIT_TYPES.contains(&kind)
+}
+
 /// Strip conventional commit prefix from a subject line.
 /// "feat: Add new feature" -> "Add new feature"
 /// "fix(scope): Fix bug" -> "Fix bug"
-pub fn is_conventional_subject(subject: &str) -> bool {
-    subject
-        .split_once(": ")
-        .is_some_and(|(prefix, message)| !message.is_empty() && is_conventional_prefix(prefix))
-}
-
 pub fn strip_conventional_prefix(subject: &str) -> &str {
     // Pattern: type(scope)?!?: message
     // The type is a short alphanumeric word (feat, fix, test, chore, ...).
@@ -1232,6 +1245,22 @@ mod tests {
             parse_conventional_commit("Random commit message"),
             CommitCategory::Other
         );
+    }
+
+    #[test]
+    fn is_conventional_subject_requires_known_type_and_message() {
+        for (subject, expected) in [
+            ("feat(release): add serial release mode", true),
+            ("fix(agent-task)!: drop legacy reader", true),
+            ("refactor: simplify signatures", true),
+            ("Add serial release mode", false),
+            ("Fix Cook classification", false),
+            ("wip: half done", false),
+            ("feat(): empty scope", false),
+            ("feat:   ", false),
+        ] {
+            assert_eq!(is_conventional_subject(subject), expected, "{subject}");
+        }
     }
 
     #[test]

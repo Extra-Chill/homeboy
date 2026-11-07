@@ -412,28 +412,7 @@ impl AiFilledReviewForm {
         {
             return Err(review_form_gap("review_form.pr_title", "pr_title must be a specific, bounded, single-line title for the actual change (not a placeholder or generic Cook title)"));
         }
-        let kind = title.split_once(": ").map(|(prefix, _)| {
-            prefix
-                .trim_end_matches('!')
-                .split_once('(')
-                .map_or(prefix.trim_end_matches('!'), |(kind, _)| kind)
-        });
-        if !is_conventional_subject(title)
-            || !matches!(
-                kind,
-                Some(
-                    "feat"
-                        | "fix"
-                        | "refactor"
-                        | "docs"
-                        | "chore"
-                        | "test"
-                        | "perf"
-                        | "ci"
-                        | "build"
-                )
-            )
-        {
+        if !is_conventional_subject(title) {
             return Err(review_form_gap("review_form.pr_title", "pr_title must be a conventional commit subject using feat/fix/refactor/docs/chore/test/perf/ci/build, optional scope and !, then : and a non-empty title"));
         }
         if self.summary.trim().is_empty() {
@@ -2176,7 +2155,7 @@ mod tests {
         let outputs = serde_json::json!({
             "review_form": {
                 "pr_title": "fix(agent-task): guard the reload render path",
-                "summary": "fix(agent-task): guard reload path.",
+                "summary": "Guard the reload path.",
                 "what_changed": ["Guard reloads"],
                 "compatibility": "Additive",
                 "used_for": "Traced the reload path, then implemented and verified the guard.",
@@ -2192,7 +2171,7 @@ mod tests {
             form.pr_title,
             "fix(agent-task): guard the reload render path"
         );
-        assert_eq!(form.summary, "fix(agent-task): guard reload path.");
+        assert_eq!(form.summary, "Guard the reload path.");
         assert_eq!(form.what_changed, vec!["Guard reloads".to_string()]);
         let gap = form
             .validate()
@@ -2381,6 +2360,7 @@ mod tests {
             "two\nlines",
             " padded ",
             &"x".repeat(257),
+            "Add serial release mode",
         ] {
             let mut form = valid_form();
             form.pr_title = title.to_string();
