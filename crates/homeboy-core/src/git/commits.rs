@@ -1001,6 +1001,12 @@ pub fn recommended_bump_from_commits(commits: &[CommitInfo]) -> Option<SemverBum
 /// Strip conventional commit prefix from a subject line.
 /// "feat: Add new feature" -> "Add new feature"
 /// "fix(scope): Fix bug" -> "Fix bug"
+pub fn is_conventional_subject(subject: &str) -> bool {
+    subject
+        .split_once(": ")
+        .is_some_and(|(prefix, message)| !message.is_empty() && is_conventional_prefix(prefix))
+}
+
 pub fn strip_conventional_prefix(subject: &str) -> &str {
     // Pattern: type(scope)?!?: message
     // The type is a short alphanumeric word (feat, fix, test, chore, ...).
