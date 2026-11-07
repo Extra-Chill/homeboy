@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.446.22] - 2026-11-07
+
+### Fixed
+- require conventional commit Cook PR titles
+- queued Cook admissions start and keep the on-demand daemon
+
 ## [0.446.21] - 2026-11-07
 
 ### Fixed
