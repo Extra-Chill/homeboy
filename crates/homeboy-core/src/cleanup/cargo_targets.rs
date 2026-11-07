@@ -152,12 +152,21 @@ impl ManagedCargoTarget {
     }
 
     /// Publish this completed run's cache projection. Build callers invoke this
-    /// explicitly so publication failures remain visible to the owning workflow.
+    /// explicitly so I/O failures remain visible to the owning workflow. Lock
+    /// contention only skips the warmth hand-off: publication is an
+    /// optimization and must not discard the finished run's result.
     pub fn publish(&mut self) -> Result<()> {
+        self.publish_until(Instant::now() + CARGO_TARGET_LEASE_WAIT)
+    }
+
+    fn publish_until(&mut self, deadline: Instant) -> Result<()> {
         let Some(base_dir) = self.promote_to.take() else {
             return Ok(());
         };
-        publish_cargo_cache(&self.target_dir, &base_dir)
+        optional_cargo_cache_transfer(
+            "publication skipped; the next run starts from the current cache",
+            || publish_cargo_cache(&self.target_dir, &base_dir, deadline),
+        )
     }
 }
 
@@ -369,7 +378,7 @@ fn acquire_managed_cargo_target_for_compatibility_in_until(
         std::process::id()
     );
     let lease = acquire_shared_cargo_target_in(&root, &run_owner, SystemTime::now())?;
-    optional_cargo_cache_seed(|| {
+    optional_cargo_cache_transfer("seed skipped; using cold private target", || {
         // Touch base liveness, then release it: nothing compiles there.
         drop(acquire_shared_cargo_target_in_until(
             root,
@@ -396,14 +405,15 @@ fn seed_worktree_cargo_target(base_dir: &Path, private_dir: &Path) -> Result<()>
     seed_worktree_cargo_target_until(base_dir, private_dir, None)
 }
 
-fn optional_cargo_cache_seed(operation: impl FnOnce() -> Result<()>) -> Result<()> {
+/// Warm-cache seeding and publication are optimizations: lock contention
+/// skips the transfer, real I/O errors still fail.
+fn optional_cargo_cache_transfer(
+    skipped: &str,
+    operation: impl FnOnce() -> Result<()>,
+) -> Result<()> {
     match operation() {
         Err(error) if error.details["reason"] == "deadline_exhausted" => {
-            crate::log_status!(
-                "cargo",
-                "Warm Cargo cache seed skipped; using cold private target: {}",
-                error
-            );
+            crate::log_status!("cargo", "Warm Cargo cache {}: {}", skipped, error);
             Ok(())
         }
         result => result,
@@ -416,7 +426,7 @@ fn seed_worktree_cargo_target_until(
     deadline: Option<Instant>,
 ) -> Result<()> {
     phase_timing::time("cargo_target.seed", || {
-        optional_cargo_cache_seed(|| {
+        optional_cargo_cache_transfer("seed skipped; using cold private target", || {
             if base_dir.exists() {
                 with_base_store_publication_lock(
                     base_dir,
@@ -472,7 +482,7 @@ fn cache_projection(base_dir: &Path) -> PathBuf {
 /// Materialize a complete cache projection before it becomes reachable by a
 /// reader. The base directory remains a lifecycle/lock container; its current
 /// cache is a separately published directory.
-fn publish_cargo_cache(from: &Path, base_dir: &Path) -> Result<()> {
+fn publish_cargo_cache(from: &Path, base_dir: &Path, deadline: Instant) -> Result<()> {
     phase_timing::time("cargo_target.publish", || {
         fs::create_dir_all(base_dir)
             .map_err(|error| io_error(error, "create Cargo cache base store"))?;
@@ -493,7 +503,7 @@ fn publish_cargo_cache(from: &Path, base_dir: &Path) -> Result<()> {
                     base_dir,
                     "warm-cache-snapshot",
                     false,
-                    None,
+                    Some(deadline),
                     || {
                         copy_cargo_cache(
                             &cache_projection(base_dir),
@@ -509,7 +519,7 @@ fn publish_cargo_cache(from: &Path, base_dir: &Path) -> Result<()> {
                     base_dir,
                     "warm-cache-publication",
                     true,
-                    None,
+                    Some(deadline),
                     || {
                         let current = fs::metadata(base_dir.join(CACHE_CURRENT)).ok();
                         #[cfg(unix)]
@@ -1839,7 +1849,7 @@ mod tests {
         let previous = File::open(base.join(CACHE_CURRENT).join("previous")).unwrap();
         fs::write(private.join("finished"), b"new").unwrap();
         let finished = File::open(private.join("finished")).unwrap();
-        publish_cargo_cache(&private, &base).unwrap();
+        publish_cargo_cache(&private, &base, Instant::now() + CARGO_TARGET_LEASE_WAIT).unwrap();
         let projection = base.join(CACHE_CURRENT);
         assert_eq!(fs::read(projection.join("finished")).unwrap(), b"new");
         assert_eq!(
@@ -1872,7 +1882,7 @@ mod tests {
         fs::create_dir_all(private.join("debug/incremental/c-2/s-y")).unwrap();
         fs::write(private.join("debug/incremental/c-2/s-y/q.bin"), b"new").unwrap();
         fs::write(private.join("debug/deps/b.rlib"), b"b").unwrap();
-        publish_cargo_cache(&private, &base).unwrap();
+        publish_cargo_cache(&private, &base, Instant::now() + CARGO_TARGET_LEASE_WAIT).unwrap();
 
         assert_eq!(
             fs::read(projection.join("debug/deps/a.rlib")).unwrap(),
@@ -1943,7 +1953,10 @@ mod tests {
                 .open(base.join(LOCK_FILE))
                 .unwrap();
             FileExt::lock_shared(&lock).unwrap();
-            scope.spawn(|| publish_cargo_cache(&private, &base).unwrap());
+            scope.spawn(|| {
+                publish_cargo_cache(&private, &base, Instant::now() + CARGO_TARGET_LEASE_WAIT)
+                    .unwrap()
+            });
             let (base, seed) = (&base, &seed);
             scope.spawn(move || {
                 seed_worktree_cargo_target(base, seed).unwrap();
@@ -2774,6 +2787,49 @@ mod tests {
             fs::read(base.join(CACHE_CURRENT).join("cold-artifact")).unwrap(),
             b"cold"
         );
+    }
+
+    #[test]
+    fn publication_lock_contention_skips_warmth_and_keeps_the_run_result() {
+        let root = TempDir::new().unwrap();
+        let source = root.path().join("source");
+        let compatibility = cargo_target_compatibility(&source, &[]);
+        let base = shared_store_dir(root.path(), &format!("gate:{}", compatibility.identity()));
+        fs::create_dir_all(base.join(CACHE_CURRENT)).unwrap();
+        fs::write(base.join(CACHE_CURRENT).join("warm-artifact"), b"warm").unwrap();
+        let mut target = acquire_managed_cargo_target_for_compatibility_in_until(
+            root.path(),
+            "gate",
+            &source,
+            &compatibility,
+            Instant::now() + Duration::from_secs(5),
+        )
+        .unwrap();
+        fs::write(target.target_dir().join("run-artifact"), b"run").unwrap();
+        let lock = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(base.join(LOCK_FILE))
+            .unwrap();
+        FileExt::lock_exclusive(&lock).unwrap();
+
+        // A held publication lock must not turn a finished run into a failure.
+        target
+            .publish_until(Instant::now() + Duration::from_millis(10))
+            .unwrap();
+
+        FileExt::unlock(&lock).unwrap();
+        assert!(!base.join(CACHE_CURRENT).join("run-artifact").exists());
+        assert_eq!(
+            fs::read(base.join(CACHE_CURRENT).join("warm-artifact")).unwrap(),
+            b"warm"
+        );
+        assert!(fs::read_dir(&base).unwrap().flatten().all(|entry| !entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with(CACHE_STAGING_PREFIX)));
     }
 
     #[test]
