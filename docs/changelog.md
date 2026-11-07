@@ -4,6 +4,19 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.446.18] - 2026-11-07
+
+### Changed
+- Converge Lab attempts on authoritative terminal state
+
+### Fixed
+- attach-path reports every attached component; no arbitrary singular id
+- record a failing cadence durably and surface it in status
+- Fix Cook classification for incomplete reviews without patches
+- give every stalled Cook state one recovery step that makes progress
+- retire recoverable candidates on Cook cancellation
+- show a cadence's last instance outcome in the list
+
 ## [0.446.17] - 2026-11-07
 
 ### Fixed
