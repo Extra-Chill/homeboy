@@ -1747,6 +1747,11 @@ fn run_promotion_gates_inner(
         return Ok(PromotionGateRun::without_gates(options.dry_run));
     }
 
+    emit_promotion_progress(
+        "gate_materialization",
+        None,
+        Some("materializing gate workspace".to_string()),
+    );
     let candidate_checkout = CandidateGateCheckout::materialize(
         worktree_path,
         options

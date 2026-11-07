@@ -1761,7 +1761,28 @@ pub(crate) fn observe_daemon_job_until_terminal(
         runner_job_id,
         budget,
         cancelled,
-        |endpoint| fetch_daemon_job(&client, endpoint, runner_job_id),
+        |endpoint| {
+            let job = fetch_daemon_job(&client, endpoint, runner_job_id)?;
+            if !job.status.is_terminal() {
+                if let Some(run_id) = job
+                    .runner_job_projection
+                    .as_ref()
+                    .and_then(|projection| projection.lifecycle.as_ref())
+                    .and_then(|lifecycle| lifecycle.durable_run_id.as_deref())
+                {
+                    if let Ok(events) = fetch_daemon_events(&client, endpoint, runner_job_id) {
+                        homeboy_agents::agent_task_lifecycle::relay_runner_progress(
+                            run_id,
+                            &homeboy_core::api_jobs::RunnerJobLogSnapshot {
+                                job: job.clone(),
+                                events,
+                            },
+                        )?;
+                    }
+                }
+            }
+            Ok(job)
+        },
         || refreshed_daemon_endpoint(runner_id),
     )?;
     let (events, _) = daemon_read_resilient_with_endpoint_reload(
