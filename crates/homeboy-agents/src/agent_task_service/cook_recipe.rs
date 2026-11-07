@@ -643,6 +643,55 @@ impl CookRecipeStore {
         self.enqueue_terminal_continuation_with_recovery(cook_id, run_id, false)
     }
 
+    /// Make the terminal continuation a recovery `Continue` step names
+    /// claimable before its handler runs (#17494).
+    ///
+    /// A terminal attempt whose provider work ended (`Succeeded` or
+    /// `CandidateRecoverable`) still owes its remaining phases. When no
+    /// continuation was ever scheduled for it (a provider liveness timeout can
+    /// stop the attempt before the terminal projection enqueues one), the
+    /// handler would find nothing to claim and report a no-op. A completed
+    /// continuation is reopened only for a verified candidate whose
+    /// publication waits on its review form: that verdict postdates the
+    /// completed continuation, which re-reads the persisted promotion and
+    /// dispatches only the bounded review-form follow-up. Every other state
+    /// is left to the handler unchanged.
+    pub(crate) fn schedule_recovery_continuation(&self, cook_id: &str, run_id: &str) -> Result<()> {
+        let lifecycle_store = self.lifecycle_store();
+        if !lifecycle_store.record_exists(run_id)? {
+            return Ok(());
+        }
+        let record = lifecycle_store.read_record(run_id)?;
+        if !matches!(
+            record.state(),
+            agent_task_lifecycle::AgentTaskRunState::Succeeded
+                | agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
+        ) {
+            return Ok(());
+        }
+        let reopen = match lifecycle_continuation_state(lifecycle_continuation(&record)) {
+            CookContinuationState::Absent => ContinuationReopen::Absent,
+            CookContinuationState::Completed
+                if super::cook_promotion::verified_candidate_awaits_review_form_in_store(
+                    &lifecycle_store,
+                    &record,
+                ) =>
+            {
+                ContinuationReopen::Completed
+            }
+            _ => return Ok(()),
+        };
+        let continuation = AgentTaskCookContinuation {
+            schema: CONTINUATION_SCHEMA.to_string(),
+            key: format!("{cook_id}:{run_id}"),
+            cook_id: cook_id.to_string(),
+            run_id: run_id.to_string(),
+            retries: 0,
+        };
+        enqueue_lifecycle_continuation_reopening(self, &continuation, reopen)?;
+        Ok(())
+    }
+
     /// Queue feedback remediation against the existing terminal Cook attempt.
     /// Failed continuation records may be rearmed, but no new attempt or budget
     /// is created here; normal continuation admission remains authoritative.
@@ -2152,12 +2201,40 @@ fn lifecycle_continuation_state(value: Option<&Value>) -> CookContinuationState 
     }
 }
 
+/// Which existing continuation state an enqueue may replace. `Absent` is the
+/// ordinary first scheduling; the others reopen a finished claim and start a
+/// new generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ContinuationReopen {
+    Absent,
+    Failed,
+    Completed,
+}
+
 fn enqueue_lifecycle_continuation(
     recipe_store: &CookRecipeStore,
     continuation: &AgentTaskCookContinuation,
     rearm_failed: bool,
 ) -> Result<bool> {
+    enqueue_lifecycle_continuation_reopening(
+        recipe_store,
+        continuation,
+        if rearm_failed {
+            ContinuationReopen::Failed
+        } else {
+            ContinuationReopen::Absent
+        },
+    )
+}
+
+fn enqueue_lifecycle_continuation_reopening(
+    recipe_store: &CookRecipeStore,
+    continuation: &AgentTaskCookContinuation,
+    reopen: ContinuationReopen,
+) -> Result<bool> {
     validate_continuation(continuation)?;
+    let rearm_failed = reopen == ContinuationReopen::Failed;
+    let reopening = reopen != ContinuationReopen::Absent;
     let lifecycle_store = recipe_store.lifecycle_store();
     let recipe = recipe_store.load_recipe(&continuation.cook_id)?;
     if !recipe
@@ -2176,9 +2253,12 @@ fn enqueue_lifecycle_continuation(
     let mut enqueued = false;
     lifecycle_store.mutate_record(&continuation.run_id, |record| {
         let state = lifecycle_continuation_state(lifecycle_continuation(record));
-        if state != CookContinuationState::Absent
-            && !(rearm_failed && state == CookContinuationState::Failed)
-        {
+        let reopenable = match reopen {
+            ContinuationReopen::Absent => false,
+            ContinuationReopen::Failed => state == CookContinuationState::Failed,
+            ContinuationReopen::Completed => state == CookContinuationState::Completed,
+        };
+        if state != CookContinuationState::Absent && !reopenable {
             return false;
         }
         let now = agent_task_lifecycle::now_timestamp();
@@ -2192,8 +2272,8 @@ fn enqueue_lifecycle_continuation(
             "cook_id": continuation.cook_id,
             "run_id": continuation.run_id,
             "state": "pending",
-            "retries": if rearm_failed { 0 } else { continuation.retries },
-            "generation": if rearm_failed { previous_generation.saturating_add(1) } else { previous_generation },
+            "retries": if reopening { 0 } else { continuation.retries },
+            "generation": if reopening { previous_generation.saturating_add(1) } else { previous_generation },
             "enqueued_at": now,
         });
         if rearm_failed {

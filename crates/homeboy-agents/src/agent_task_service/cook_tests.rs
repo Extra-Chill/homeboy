@@ -24269,25 +24269,14 @@ fn malformed_agent_review_form_recovers_by_publishing_a_supplied_form() {
             created: std::cell::Cell::new(false),
         };
 
-        let (preflight, _) = crate::agent_task_service::recover_cook(
-            cook_id,
-            crate::agent_task_service::CookRecoveryRequest {
-                preflight: true,
-                ..Default::default()
-            },
-            &performer,
-        )
-        .expect("recover --preflight plans the verified candidate");
+        // Without an operator form, publication would refuse; recovery
+        // continues the Cook, whose bounded review-form follow-up replaces the
+        // unusable form (#17494).
         assert_eq!(
-            preflight.step,
-            crate::agent_task_service::CookRecoveryStep::Publish
-        );
-        let failure = preflight.failure.expect("publication needs a usable form");
-        assert!(
-            failure["message"].as_str().unwrap().contains(&format!(
-                "agent-task recover {run_id} --review-form @FORM.json"
-            )),
-            "{failure}"
+            crate::agent_task_service::plan_cook_recovery(cook_id)
+                .expect("plan the verified candidate")
+                .step,
+            crate::agent_task_service::CookRecoveryStep::Continue
         );
 
         let (published, exit_code) = crate::agent_task_service::recover_cook(
