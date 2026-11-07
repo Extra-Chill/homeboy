@@ -160,6 +160,7 @@ pub enum ErrorCode {
 
     InternalIoError,
     ReleaseDeadlineExceeded,
+    GithubRateLimited,
     InternalJsonError,
     InternalUnexpected,
 }
@@ -242,6 +243,7 @@ impl ErrorCode {
 
             ErrorCode::InternalIoError => "internal.io_error",
             ErrorCode::ReleaseDeadlineExceeded => "release_deadline_exceeded",
+            ErrorCode::GithubRateLimited => "github.rate_limited",
             ErrorCode::InternalJsonError => "internal.json_error",
             ErrorCode::InternalUnexpected => "internal.unexpected",
         }
@@ -298,6 +300,7 @@ impl ErrorCode {
             "storage.exhausted" => Self::StorageExhausted,
             "internal.io_error" => Self::InternalIoError,
             "release_deadline_exceeded" => Self::ReleaseDeadlineExceeded,
+            "github.rate_limited" => Self::GithubRateLimited,
             "internal.json_error" => Self::InternalJsonError,
             "internal.unexpected" => Self::InternalUnexpected,
             _ => return None,

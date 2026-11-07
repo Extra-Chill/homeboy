@@ -470,10 +470,7 @@ mod tests {
             let count = with_catalog_server("503 Service Unavailable", "unavailable", |_| {
                 let error = upgrade::check_for_updates().unwrap_err();
                 assert!(
-                    error
-                        .details
-                        .to_string()
-                        .contains("parse GitHub release response"),
+                    error.message.contains("503 Service Unavailable"),
                     "{error:?}"
                 );
                 assert!(upgrade::check_for_updates_with_runners(&[], false).is_err());

@@ -505,7 +505,7 @@ fn exit_code_for_error(code: ErrorCode) -> i32 {
         | ErrorCode::DeployUploadFailed
         | ErrorCode::GitCommandFailed => 20,
 
-        ErrorCode::ObservationStoreBusy => 20,
+        ErrorCode::ObservationStoreBusy | ErrorCode::GithubRateLimited => 20,
 
         // Exhausted storage is an environment fault, not a bug in the command
         // that happened to be holding the pen when the filesystem gave out. It

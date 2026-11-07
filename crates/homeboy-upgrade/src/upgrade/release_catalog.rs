@@ -14,7 +14,7 @@ use semver::Version;
 use serde::Deserialize;
 
 use super::constants::{
-    GITHUB_RELEASES_LIST_API, RELEASE_ASSET_DOWNLOAD_BASE, RELEASE_CATALOG_TIMEOUT, VERSION,
+    GITHUB_RELEASES_LIST_API, RELEASE_ASSET_DOWNLOAD_BASE, RELEASE_CATALOG_TIMEOUT,
 };
 
 /// Release artifacts are named `homeboy-<target triple>.tar.xz`, and the
@@ -327,22 +327,7 @@ pub(crate) fn fetch_release_catalog() -> Result<Vec<ReleaseEntry>> {
     let url = GITHUB_RELEASES_LIST_API;
     #[cfg(test)]
     let url = test_release_url(url);
-    let client = reqwest::blocking::Client::builder()
-        .user_agent(format!("homeboy/{}", VERSION))
-        .timeout(RELEASE_CATALOG_TIMEOUT)
-        .build()
-        .map_err(|e| Error::internal_io(e.to_string(), Some("create HTTP client".to_string())))?;
-
-    client
-        .get(url)
-        .send()
-        .and_then(reqwest::blocking::Response::error_for_status)
-        .map_err(|e| {
-            let mut error =
-                Error::internal_io(e.to_string(), Some("list GitHub releases".to_string()));
-            error.message = format!("Failed to list GitHub releases: {e}");
-            error
-        })?
+    super::github_api::fetch(&url, RELEASE_CATALOG_TIMEOUT)?
         .json::<Vec<ReleaseEntry>>()
         .map_err(|e| {
             Error::internal_json(
