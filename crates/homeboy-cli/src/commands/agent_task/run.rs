@@ -571,12 +571,8 @@ fn apply_component_lint_gate(
     if !declares_lint || already_linted {
         return Ok(());
     }
-    let base = args.base.as_deref().ok_or_else(|| {
-        homeboy::core::Error::internal_unexpected(
-            "Cook base must be resolved before inferring the component lint gate",
-        )
-    })?;
-    let gate = changed_component_lint_gate(&siblings, base)?;
+    // Promotion binds this token to the harvested candidate's recorded base SHA.
+    let gate = changed_component_lint_gate(&siblings, "__HOMEBOY_COOK_BASE_SHA__")?;
     args.gates.push_controller_verify(gate);
     Ok(())
 }
@@ -624,7 +620,7 @@ fn changed_component_lint_gate(
         // failure, never evidence that a component has no changes.
         gates.push(format!(
             "if git diff --quiet --no-renames {} -- {}; then :; else changed=$?; if [ \"$changed\" -gt 1 ]; then exit \"$changed\"; fi; {} || exit $?; fi",
-            quote_args(&[format!("origin/{base}")]),
+            quote_args(&[base.to_string()]),
             quote_args(&[format!(":(literal){path}")]),
             component_lint_gate(&component.id, &path, base),
         ));
@@ -659,16 +655,17 @@ fn component_declares_lint(component: &homeboy::core::component::Component) -> b
 /// root with a repository-relative component path. It mirrors the component's CI
 /// `homeboy review lint`, including its declared baseline policy, and checks
 /// only what the candidate changed since its base, so pre-existing findings
-/// elsewhere cannot reject an unrelated change (#17226). Lab snapshots publish
-/// the base as `origin/<base>`, not necessarily a local branch. Cook already
+/// elsewhere cannot reject an unrelated change (#17226). Promotion binds the
+/// recorded base SHA before execution. Cook already
 /// placed this workspace, so the gate runs there instead of re-entering
 /// resource-policy placement from its sanitized gate home (#16517).
 fn component_lint_gate(component_id: &str, component_cwd: &str, base: &str) -> String {
     format!(
-        "homeboy --placement local review lint {} --path {} --changed-since {}",
+        "HOMEBOY_LINT_BASE={} homeboy --placement local review lint {} --path {} --changed-since {}",
+        quote_args(&[base.to_string()]),
         quote_args(&[component_id.to_string()]),
         quote_args(&[component_cwd.to_string()]),
-        quote_args(&[format!("origin/{base}")])
+        quote_args(&[base.to_string()])
     )
 }
 
@@ -11284,7 +11281,7 @@ mod tests {
         // #15888: data-machine#3608 declared only `homeboy review test` and
         // published a PR that failed the component's required CI lint.
         // #17226: the gate checks only what changed since the Cook's base.
-        let lint = "homeboy --placement local review lint data-machine --path . --changed-since origin/release";
+        let lint = "HOMEBOY_LINT_BASE=__HOMEBOY_COOK_BASE_SHA__ homeboy --placement local review lint data-machine --path . --changed-since __HOMEBOY_COOK_BASE_SHA__";
         assert_eq!(
             cook_gates(
                 &["--verify", "homeboy review test data-machine"],
@@ -11404,7 +11401,7 @@ mod tests {
             args.gates.verify,
             [
                 "(cd 'plugins/users plugin' && homeboy review test users --path .)",
-                "homeboy --placement local review lint users --path 'plugins/users plugin' --changed-since origin/main"
+                "HOMEBOY_LINT_BASE=__HOMEBOY_COOK_BASE_SHA__ homeboy --placement local review lint users --path 'plugins/users plugin' --changed-since __HOMEBOY_COOK_BASE_SHA__"
             ]
         );
         assert!(!args
@@ -11427,7 +11424,7 @@ mod tests {
             explicit.gates.verify,
             [
                 "echo repository gate",
-                "homeboy --placement local review lint users --path 'plugins/users plugin' --changed-since origin/main"
+                "HOMEBOY_LINT_BASE=__HOMEBOY_COOK_BASE_SHA__ homeboy --placement local review lint users --path 'plugins/users plugin' --changed-since __HOMEBOY_COOK_BASE_SHA__"
             ]
         );
     }
@@ -11468,10 +11465,21 @@ mod tests {
             "-qm",
             "base",
         ]);
-        git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        git(&["branch", "-m", "trunk"]);
+        let base = String::from_utf8(
+            std::process::Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(dir.path())
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
         let siblings = super::lint_components_in_checkout(&components[0], components.clone());
         assert_eq!(siblings.len(), 2);
-        let gate = super::changed_component_lint_gate(&siblings, "main").unwrap();
+        let gate = super::changed_component_lint_gate(&siblings, &base).unwrap();
         assert!(!gate.contains(dir.path().to_str().unwrap()));
         // A shell function stands in for homeboy and records exactly which
         // component/path was linted. Run with -e like a strict gate runner.
@@ -11497,7 +11505,7 @@ mod tests {
         let output = run();
         assert!(output.status.success());
         assert_eq!(String::from_utf8(output.stdout).unwrap(),
-            "--placement local review lint data-machine-events --path plugins/data-machine-events --changed-since origin/main\n");
+            format!("--placement local review lint data-machine-events --path plugins/data-machine-events --changed-since {base}\n"));
         let failed = std::process::Command::new("sh")
             .args(["-ec", &format!("homeboy() {{ return 23; }}; {gate}")])
             .current_dir(dir.path())
@@ -11511,15 +11519,14 @@ mod tests {
         )
         .unwrap();
         assert_eq!(String::from_utf8(run().stdout).unwrap().lines().count(), 2);
-        git(&["update-ref", "-d", "refs/remotes/origin/main"]);
-        assert!(!run().status.success(), "missing base must fail closed");
+        assert!(!gate.contains("origin/"));
     }
 
     #[test]
     fn component_lint_gate_quotes_component_id() {
         assert_eq!(
             component_lint_gate("odd id", ".", "odd base"),
-            "homeboy --placement local review lint 'odd id' --path . --changed-since 'origin/odd base'"
+            "HOMEBOY_LINT_BASE='odd base' homeboy --placement local review lint 'odd id' --path . --changed-since 'odd base'"
         );
     }
 
@@ -11544,7 +11551,7 @@ mod tests {
             args.gates.verify,
             [
                 "homeboy review test data-machine",
-                "homeboy --placement local review lint data-machine --path . --changed-since origin/main"
+                "HOMEBOY_LINT_BASE=main homeboy --placement local review lint data-machine --path . --changed-since main"
             ]
         );
         assert_eq!(args.gates.input_sources.len(), 2);

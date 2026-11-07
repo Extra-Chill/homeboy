@@ -1727,6 +1727,29 @@ fn run_promotion_gates_inner(
     gate_workspace: Option<&Path>,
     observation_store: &homeboy_core::observation::ObservationStore,
 ) -> Result<PromotionGateRun> {
+    // Generated gates are templates until the immutable candidate is harvested.
+    // Never resolve a moving remote branch in the executable gate.
+    let mut bound_options = options.clone();
+    if options
+        .gates
+        .verify
+        .iter()
+        .chain(&options.gates.private_verify)
+        .any(|command| command.contains("__HOMEBOY_COOK_BASE_SHA__"))
+    {
+        let base = committed_candidate
+            .map(|candidate| candidate.base_sha.clone())
+            .unwrap_or_else(|| "unresolved-cook-base".to_string());
+        for command in bound_options
+            .gates
+            .verify
+            .iter_mut()
+            .chain(&mut bound_options.gates.private_verify)
+        {
+            *command = command.replace("__HOMEBOY_COOK_BASE_SHA__", &base);
+        }
+    }
+    let options = &bound_options;
     emit_promotion_progress(
         "hydration",
         None,

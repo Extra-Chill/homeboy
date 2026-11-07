@@ -335,7 +335,11 @@ pub(super) fn sync_workspace_batch_in_roots(
         let Some(head) = head else { continue };
         let local_path = Path::new(&outputs[index].local_path);
         let options = &requests[index].0;
-        let refs = super::super::git::controller_bundle_refs("HEAD", None, &options.git_fetch_refs);
+        let refs = super::super::git::controller_bundle_refs(
+            "HEAD",
+            options.changed_since_base.as_deref(),
+            &options.git_fetch_refs,
+        );
         super::super::git::validate_controller_git_bundle_source(local_path, control)?;
         homeboy_core::observation::phase_timing::time(
             "stage.lab.source_materialization.bundle_object_closure",

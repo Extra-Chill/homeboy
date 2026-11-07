@@ -288,7 +288,7 @@ fn existing_pr_cook_resolution_uses_canonical_refs_for_preview_and_update() {
 
         assert_eq!(
             resolved.gates.verify,
-            ["homeboy --placement local review lint fixture --path . --changed-since origin/release"]
+            ["HOMEBOY_LINT_BASE=__HOMEBOY_COOK_BASE_SHA__ homeboy --placement local review lint fixture --path . --changed-since __HOMEBOY_COOK_BASE_SHA__"]
         );
         assert_eq!(resolved.base.as_deref(), Some("release"));
         assert_eq!(resolved.head.as_deref(), Some("feature"));
@@ -3780,7 +3780,7 @@ fn component_lint_gate_is_added_after_file_gates_are_snapshotted() {
         assert!(gates.contains("cargo test"), "file gate retained: {gates}");
         assert!(
             gates.contains(
-                "homeboy --placement local review lint linted --path . --changed-since origin/main"
+                "HOMEBOY_LINT_BASE=__HOMEBOY_COOK_BASE_SHA__ homeboy --placement local review lint linted --path . --changed-since __HOMEBOY_COOK_BASE_SHA__"
             ),
             "component lint gate added: {gates}"
         );

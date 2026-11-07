@@ -224,6 +224,7 @@ fn materialize_gate_workspace(
     path: &Path,
     mode: crate::RunnerWorkspaceSyncMode,
     run_id: &str,
+    base: Option<&str>,
 ) -> Result<GateWorkspace> {
     let (sync, _) = crate::sync_workspace(
         runner_id,
@@ -231,7 +232,7 @@ fn materialize_gate_workspace(
             path: path.display().to_string(),
             mode,
             controller_routed_git: false,
-            changed_since_base: None,
+            changed_since_base: base.map(str::to_string),
             git_fetch_refs: vec![],
             snapshot_includes: vec![],
             allow_dirty_lab_workspace: false,
@@ -313,6 +314,7 @@ fn execute_owned(
         &resource_root,
         crate::RunnerWorkspaceSyncMode::Snapshot,
         run_id,
+        None,
     )?;
     let snapshot = snapshot_workspace.sync.clone();
     for resource in &mut resources {
@@ -334,6 +336,7 @@ fn execute_owned(
         cwd,
         crate::RunnerWorkspaceSyncMode::SnapshotGit,
         run_id,
+        homeboy_agents::agent_tasks::gate::component_lint_base(&request.label),
     )?;
     let candidate = candidate_workspace.sync.clone();
     let binary = runner.settings.homeboy_path.as_deref().ok_or_else(|| {

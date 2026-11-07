@@ -49,6 +49,7 @@ fn completed_gate_releases_its_run_owned_workspace() {
             &resources,
             crate::RunnerWorkspaceSyncMode::Snapshot,
             RUN_ID,
+            None,
         )
         .expect("materialize gate workspace");
         let remote_path = workspace.sync.remote_path.clone();
@@ -87,6 +88,7 @@ fn gate_without_terminal_outcome_retains_workspace_for_job_reconciliation() {
             &resources,
             crate::RunnerWorkspaceSyncMode::Snapshot,
             RUN_ID,
+            None,
         )
         .expect("materialize gate workspace");
         let remote_path = workspace.sync.remote_path.clone();
@@ -119,6 +121,7 @@ fn gate_failing_before_job_admission_releases_its_workspace() {
             &resources,
             crate::RunnerWorkspaceSyncMode::Snapshot,
             RUN_ID,
+            None,
         )
         .expect("materialize gate workspace");
         let remote_path = workspace.sync.remote_path.clone();

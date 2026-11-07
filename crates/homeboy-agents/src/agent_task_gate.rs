@@ -2433,6 +2433,16 @@ fn run_gate_argv_with_supervision(
     )
 }
 
+/// Comparison base carried by generated component lint gates, also used by
+/// canonical Lab materialization to retain the commit object.
+pub fn component_lint_base(command: &str) -> Option<&str> {
+    command
+        .split("HOMEBOY_LINT_BASE=")
+        .nth(1)?
+        .split_whitespace()
+        .next()
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "shell and declared gates share one process executor"
@@ -2449,6 +2459,25 @@ fn run_gate_argv(
     package_artifacts: &[AgentTaskGatePackageArtifactRequirement],
     declared_plan: Option<&homeboy_engine_primitives::test_execution::TestExecutionPlan>,
 ) -> Result<AgentTaskGateReport> {
+    if let Some(base) = component_lint_base(command) {
+        if !Command::new("git")
+            .args(["cat-file", "-e", &format!("{base}^{{commit}}")])
+            .current_dir(cwd)
+            .output()
+            .is_ok_and(|output| output.status.success())
+        {
+            return Ok(placement::gate_non_execution_report(
+                index,
+                command_vec,
+                visibility,
+                reveal_policy,
+                &Error::invalid_argument(
+                    "gate.base",
+                    format!("recorded Cook base {base} is unavailable"),
+                ),
+            ));
+        }
+    }
     let runner_id = gate_environment
         .lab_runner
         .clone()
@@ -2522,6 +2551,25 @@ fn run_gate_argv_local(
     package_artifacts: &[AgentTaskGatePackageArtifactRequirement],
     declared_plan: Option<&homeboy_engine_primitives::test_execution::TestExecutionPlan>,
 ) -> Result<AgentTaskGateReport> {
+    if let Some(base) = component_lint_base(command) {
+        let resolved = Command::new("git")
+            .args(["cat-file", "-e", &format!("{base}^{{commit}}")])
+            .current_dir(cwd)
+            .output();
+        if !resolved.is_ok_and(|output| output.status.success()) {
+            let error = Error::invalid_argument(
+                "gate.base",
+                format!("recorded Cook base {base} is unavailable"),
+            );
+            return Ok(placement::gate_non_execution_report(
+                index,
+                command_vec,
+                visibility,
+                reveal_policy,
+                &error,
+            ));
+        }
+    }
     let mut process = Command::new(&command_vec[0]);
     process
         .args(&command_vec[1..])
@@ -6046,6 +6094,25 @@ mod rustup_location_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn unresolved_component_lint_base_is_unavailable_without_verdict() {
+        let workspace = tempfile::tempdir().unwrap();
+        let report = super::run_gate_command_with_timeout(
+            workspace.path(),
+            1,
+            "HOMEBOY_LINT_BASE=0000000000000000000000000000000000000000 false",
+            super::AgentTaskGateVisibility::Visible,
+            super::AgentTaskGateRevealPolicy::FullEvidence,
+            workspace.path(),
+            std::time::Duration::from_secs(10),
+            &super::AgentTaskGateEnvironmentPolicy::default(),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(report.status, super::AgentTaskGateStatus::Unavailable);
+        assert!(report.failure_evidence.is_none());
+        assert_eq!(report.exit_code, 0);
+    }
 
     /// A bash-only gate program under dash dies on line 1 with exit 2 on the
     /// candidate and the baseline alike. That is a broken gate declaration,
