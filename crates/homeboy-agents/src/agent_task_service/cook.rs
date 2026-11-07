@@ -1000,6 +1000,85 @@ pub(super) fn promote_with_gate_setup_retries(
     }
 }
 
+/// Repair only the historical, unverified fallback. Explicit bases and transport
+/// failures retain their original promotion contract and are never rewritten.
+fn recover_compatibility_cook_base(
+    store: &CookRecipeStore,
+    lifecycle_store: &AgentTaskLifecycleStore,
+    options: &mut CookRequest,
+) -> Result<()> {
+    if options.identity.initial_plan.metadata["cook_base_resolution"]["source"]
+        != "compatibility_fallback"
+    {
+        return Ok(());
+    }
+    let target_path = if Path::new(&options.workspace.to_worktree).is_dir() {
+        PathBuf::from(&options.workspace.to_worktree)
+    } else {
+        let Some(target) =
+            homeboy_core::worktree_provider::resolve_native_worktree_mutation_target(
+                &options.workspace.to_worktree,
+            )?
+        else {
+            return Ok(());
+        };
+        target.path
+    };
+    match crate::agent_task_promotion::capture_declared_base(
+        &target_path,
+        Some(&options.finalization.base),
+    ) {
+        Ok(_) => return Ok(()),
+        Err(error)
+            if error.details["field"] == "base_ref"
+                && error
+                    .message
+                    .contains("was not found on origin before promotion gates") => {}
+        Err(error) => return Err(error),
+    }
+    let Some(remote_ref) = homeboy_core::git::default_remote_branch_until(
+        &target_path,
+        "origin",
+        std::time::Instant::now() + std::time::Duration::from_secs(5),
+    )?
+    else {
+        return Err(Error::validation_invalid_argument(
+            "base",
+            "Cook requires a remote default branch; specify --base",
+            None,
+            None,
+        ));
+    };
+    let base = remote_ref.strip_prefix("origin/").unwrap_or(&remote_ref);
+    let verified = crate::agent_task_promotion::capture_declared_base(&target_path, Some(base))?;
+    let resolution = serde_json::json!({
+        "base": base,
+        "from": remote_ref,
+        "source": "remote_head",
+        "sha": verified.map(|base| base.sha),
+        "evidence_path": target_path,
+    });
+    let mut recipe = store.load_recipe(&options.identity.cook_id)?;
+    recipe.finalization["base"] = serde_json::json!(base);
+    for attempt in &mut recipe.attempts {
+        if attempt.plan.metadata["cook_base_resolution"]["source"] == "compatibility_fallback" {
+            attempt.plan.metadata["cook_base_resolution"] = resolution.clone();
+        }
+    }
+    // The recipe is reconstruction authority. Publish it before the derived
+    // controller plan so an interruption cannot restore the guessed base.
+    store.persist_recipe(&recipe)?;
+    options.finalization.base = base.to_string();
+    options.identity.initial_plan.metadata["cook_base_resolution"] = resolution;
+    if lifecycle_store.record_exists(&options.identity.initial_run_id)? {
+        lifecycle_store.write_controller_plan(
+            &options.identity.initial_run_id,
+            &options.identity.initial_plan,
+        )?;
+    }
+    Ok(())
+}
+
 fn gate_setup_retry_delay(retry: u32) -> std::time::Duration {
     #[cfg(test)]
     {
@@ -5802,6 +5881,20 @@ fn run_cook_spine(
                 let continuation_plan = lifecycle_store.read_controller_plan(&attempt.run_id)?;
                 rebind_baseline_continuation_workspace(&mut reconstructed, &continuation_plan)?;
                 reconstructed.identity.initial_plan = continuation_plan;
+                // Recipe-first correction can survive an interruption before
+                // the derived controller plan is rewritten.
+                if attempt.plan.metadata["cook_base_resolution"]["source"] == "remote_head"
+                    && reconstructed.identity.initial_plan.metadata["cook_base_resolution"]
+                        ["source"]
+                        == "compatibility_fallback"
+                {
+                    reconstructed.identity.initial_plan.metadata["cook_base_resolution"] =
+                        attempt.plan.metadata["cook_base_resolution"].clone();
+                    lifecycle_store.write_controller_plan(
+                        &attempt.run_id,
+                        &reconstructed.identity.initial_plan,
+                    )?;
+                }
             }
         }
         reconstructed
@@ -5812,6 +5905,9 @@ fn run_cook_spine(
         options.gates = super::cook_recipe::admitted_gate_policy(&options)?;
         options
     };
+    if existing_recipe {
+        recover_compatibility_cook_base(store, lifecycle_store, &mut options)?;
+    }
     // Candidate adoption records the concrete external model on the lifecycle
     // attempt. Reuse it only when the persisted promotion authenticates the
     // same candidate/model pair, including after a detached continuation.

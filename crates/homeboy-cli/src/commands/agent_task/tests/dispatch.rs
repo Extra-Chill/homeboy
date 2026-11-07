@@ -29,7 +29,16 @@ impl AgentTaskCookAttemptDispatcher for RecipeOnlyDispatcher {
     }
 }
 
-fn cook_args_from_cli(args: Vec<String>) -> AgentTaskCookArgs {
+fn cook_args_from_cli(mut args: Vec<String>) -> AgentTaskCookArgs {
+    // Most dispatch tests exercise identity rather than remote discovery.
+    // Supply their declared base explicitly; resolver tests parse raw argv.
+    if !args.iter().any(|arg| arg == "--base") {
+        args.extend(["--base".to_string(), "main".to_string()]);
+    }
+    cook_args_from_raw_cli(args)
+}
+
+fn cook_args_from_raw_cli(args: Vec<String>) -> AgentTaskCookArgs {
     let cli = Cli::parse_from(args);
     let Commands::AgentTask(agent_task) = cli.command else {
         panic!("agent-task command");
@@ -258,7 +267,7 @@ fn existing_pr_cook_resolution_uses_canonical_refs_for_preview_and_update() {
         );
 
         let resolved = {
-            let mut input = cook_args_from_cli(vec![
+            let mut input = cook_args_from_raw_cli(vec![
                 "homeboy".into(),
                 "agent-task".into(),
                 "cook".into(),
@@ -644,10 +653,7 @@ fn cook_infers_repo_from_an_explicit_linked_worktree_cwd_and_persists_its_proven
             plan.metadata["cook_repository_identity"],
             args.repository_identity.expect("identity")
         );
-        assert_eq!(
-            plan.metadata["cook_base_resolution"]["source"],
-            "compatibility_fallback"
-        );
+        assert_eq!(plan.metadata["cook_base_resolution"]["source"], "explicit");
 
         let inferred_from_worktree = {
             let mut input = cook_args_from_cli(vec![
@@ -1385,7 +1391,7 @@ fn cook_resolves_omitted_base_from_workspace_upstream_for_standard_and_custom_br
             register_component("fixture", source.path(), &component_remote);
 
             let args = {
-                let mut input = cook_args_from_cli(vec![
+                let mut input = cook_args_from_raw_cli(vec![
                     "homeboy".to_string(),
                     "agent-task".to_string(),
                     "cook".to_string(),
@@ -1580,7 +1586,7 @@ fn cook_exact_component_slug_disambiguates_shared_monorepo_remote() {
 }
 
 #[test]
-fn cook_resolves_omitted_base_from_repository_metadata_or_compatibility_fallback() {
+fn cook_resolves_omitted_base_from_repository_metadata_or_fails_closed() {
     with_isolated_home(|_| {
         let source = tempfile::tempdir().expect("source checkout");
         init_runtime_component_checkout(source.path());
@@ -1621,6 +1627,41 @@ fn cook_resolves_omitted_base_from_repository_metadata_or_compatibility_fallback
             .status()
             .expect("remove unavailable main")
             .success());
+        let destination = source.path().join("../destination");
+        homeboy_test_support::git::run(
+            source.path(),
+            &[
+                "worktree",
+                "add",
+                destination.to_str().unwrap(),
+                "-b",
+                "destination",
+            ],
+        );
+        homeboy::core::worktree::adopt(homeboy::core::worktree::WorktreeAdoptOptions {
+            handle: "fixture@destination".to_string(),
+            path: destination.display().to_string(),
+            kind: None,
+            provenance: None,
+        })
+        .expect("adopt destination handle");
+        let handle_args = cook_args_from_raw_cli(vec![
+            "homeboy".into(),
+            "agent-task".into(),
+            "cook".into(),
+            "--prompt".into(),
+            "resolve destination".into(),
+            "--to-worktree".into(),
+            "fixture@destination".into(),
+            "--no-finalize".into(),
+        ]);
+        let handle_args = super::super::run::resolve_cook_destination(handle_args, None)
+            .expect("resolve the handle before reading remote HEAD");
+        assert_eq!(handle_args.base.as_deref(), Some("trunk"));
+        assert_eq!(
+            handle_args.base_resolution.unwrap()["source"],
+            "remote_head"
+        );
         let component_remote = "https://github.com/example/fixture.git";
         assert!(Command::new("git")
             .args(["remote", "set-url", "origin", component_remote])
@@ -1631,7 +1672,7 @@ fn cook_resolves_omitted_base_from_repository_metadata_or_compatibility_fallback
         register_component("fixture", source.path(), component_remote);
 
         let metadata = {
-            let mut input = cook_args_from_cli(vec![
+            let mut input = cook_args_from_raw_cli(vec![
                 "homeboy".to_string(),
                 "agent-task".to_string(),
                 "cook".to_string(),
@@ -1696,8 +1737,8 @@ fn cook_resolves_omitted_base_from_repository_metadata_or_compatibility_fallback
             ])
         );
 
-        let fallback = {
-            let mut input = cook_args_from_cli(vec![
+        let missing = {
+            let mut input = cook_args_from_raw_cli(vec![
                 "homeboy".to_string(),
                 "agent-task".to_string(),
                 "cook".to_string(),
@@ -1716,12 +1757,8 @@ fn cook_resolves_omitted_base_from_repository_metadata_or_compatibility_fallback
                 Err(error) => Err(error),
             }
         }
-        .expect("fall back without metadata");
-        assert_eq!(fallback.base.as_deref(), Some("main"));
-        assert_eq!(
-            fallback.base_resolution.expect("base evidence")["source"],
-            "compatibility_fallback"
-        );
+        .expect_err("missing metadata must fail closed");
+        assert!(missing.to_string().contains("--base"));
     });
 }
 
@@ -2310,6 +2347,8 @@ fn cook_goal_frames_explicit_prompt_without_creating_another_provider_cell() {
             "homeboy",
             "agent-task",
             "cook",
+            "--base",
+            "main",
             "--goal",
             "Preserve the durable provider-cell contract",
             "--prompt",
@@ -2380,6 +2419,8 @@ fn cook_goal_without_explicit_work_remains_one_provider_cell() {
             "homeboy",
             "agent-task",
             "cook",
+            "--base",
+            "main",
             "--goal",
             "Implement the targeted repair",
             "--repo",
