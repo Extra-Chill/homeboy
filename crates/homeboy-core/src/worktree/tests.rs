@@ -2255,6 +2255,42 @@ fn cleanup_marks_missing_worktree_record_removed() {
 }
 
 #[test]
+fn identityless_manifest_is_a_diagnostic_and_does_not_stop_residue_retirement() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = git_repo();
+    let store = dir.path().join("store");
+
+    let mut tombstone = fixture_record(source.path(), &dir.path().join("gone"));
+    rebind_handle(&mut tombstone, "fixture@gone".to_string());
+    tombstone.state = TaskWorktreeState::Removed;
+    write_record(&store, &tombstone).unwrap();
+
+    // A legacy manifest written before identities were required.
+    let mut legacy = fixture_record(source.path(), &dir.path().join("legacy"));
+    rebind_handle(&mut legacy, "fixture@legacy".to_string());
+    legacy.workspace_identity = None;
+    let legacy_path = record_path(&store, &legacy.id);
+    fs::write(&legacy_path, serde_json::to_string(&legacy).unwrap()).unwrap();
+
+    assert_eq!(retire_residue_with_store(&store).unwrap(), ["fixture@gone"]);
+    let listed = list_with_store(&store).unwrap();
+    assert!(listed.worktrees.is_empty());
+    assert_eq!(listed.diagnostics.len(), 1);
+    assert_eq!(
+        listed.diagnostics[0].record_path.as_deref(),
+        Some(legacy_path.display().to_string().as_str())
+    );
+
+    let quarantined = reconcile_malformed_task_worktree_records_with_store(true, &store).unwrap();
+    assert_eq!(quarantined.len(), 1);
+    assert_eq!(
+        quarantined[0].record_path,
+        legacy_path.display().to_string()
+    );
+    assert!(!legacy_path.exists());
+}
+
+#[test]
 fn tombstoned_missing_worktree_is_retired_and_live_path_is_not() {
     let dir = tempfile::tempdir().unwrap();
     let source = git_repo();
