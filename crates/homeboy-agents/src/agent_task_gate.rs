@@ -1,5 +1,6 @@
 pub mod failure_excerpt;
 pub mod placement;
+pub mod verdict;
 
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
@@ -701,6 +702,9 @@ fn git_ignored_children(checkout: &Path, children: &[PathBuf]) -> Vec<PathBuf> {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AgentTaskGateReport {
+    /// Durable original verdict and exact execution identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verdict: Option<verdict::GateVerdictEvidence>,
     /// Verified native runner admission and candidate-bound terminal evidence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lab_receipt: Option<serde_json::Value>,
@@ -1533,6 +1537,7 @@ impl AgentTaskGateReport {
 
         Self {
             schema: AGENT_TASK_GATE_REPORT_SCHEMA.to_string(),
+            verdict: None,
             lab_receipt: None,
             step,
             id,
@@ -1598,6 +1603,7 @@ impl AgentTaskGateReport {
             visibility,
             reveal_policy,
             status: AgentTaskGateStatus::Skipped,
+            verdict: None,
             lab_receipt: None,
             command,
             invocation,
@@ -2610,6 +2616,21 @@ fn run_gate_argv_local(
             None,
         ));
     }
+    let verdict = verdict::GateVerdict::prepare(
+        cwd,
+        &process,
+        &gate_environment,
+        &selected_environment.report,
+        execution.runtime_tmpdir,
+        declared_plan,
+    );
+    if let Some(report) = verdict
+        .as_ref()
+        .and_then(|verdict| verdict.passed(index, visibility, reveal_policy))
+    {
+        return Ok(report);
+    }
+    let verdict_started = Instant::now();
     // Every deterministic gate is contained the same way regardless of
     // whether the caller supervises it: the gate spawns build/test tooling
     // (`cargo test -p ... --lib` and friends) that outlives a plain
@@ -2846,6 +2867,9 @@ fn run_gate_argv_local(
         stdout: output.capture.stdout,
         stderr: output.capture.stderr,
     };
+    if let Some(verdict) = verdict {
+        verdict.record(cwd, &mut report, verdict_started.elapsed());
+    }
     Ok(report)
 }
 
@@ -5833,7 +5857,10 @@ impl From<AgentTaskGateReport> for HomeboyGateResult {
         let command = report.command.join(" ");
         let summary = gate_result_summary(&report, &command);
         let agent_feedback = gate_result_agent_feedback(&report);
-        let evidence = gate_result_evidence(&report);
+        let mut evidence = gate_result_evidence(&report);
+        if let Some(verdict) = &report.verdict {
+            evidence["verdict"] = json!(verdict);
+        }
 
         HomeboyGateResult::new(
             report.id.clone(),

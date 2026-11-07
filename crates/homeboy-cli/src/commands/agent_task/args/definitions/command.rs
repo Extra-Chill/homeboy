@@ -166,6 +166,13 @@ pub enum AgentTaskCommand {
         #[arg(long)]
         outcome: std::path::PathBuf,
     },
+    /// Run a public gate from a Cook's recorded gate policy at the current tree.
+    Gate {
+        /// Cook recipe ID.
+        cook_id: String,
+        /// Public gate ID (gate-1, gate-2, ...).
+        id: String,
+    },
     /// Internal admitted runner gate execution boundary.
     #[command(hide = true)]
     GateExecute {
