@@ -3327,8 +3327,7 @@ fn delivery_of(run_id: &str) -> crate::agent_task_service::CookDelivery {
     .expect("cook delivery record")
 }
 
-/// #16049: a clean rebase that leaves the verified tree byte-identical keeps
-/// the candidate's gate proof and publishes without re-running the gates.
+/// Observation rows wait for verification and terminal disposition.
 #[test]
 fn agent_task_cook_rows_wait_for_verification_and_terminal_disposition() {
     homeboy_core::test_support::with_isolated_home(|_| {
@@ -3495,7 +3494,7 @@ fn terminal_cook_recovery_settles_rows_and_one_span_in_both_directions() {
 }
 
 #[test]
-fn moved_base_rebase_publishes_without_regating() {
+fn moved_base_rebase_publishes_through_delivery() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let run_id = "cook-16049-identical-attempt-1";
         let (options, _) = seed_moving_base_attempt("cook-16049-identical", run_id);
@@ -3532,10 +3531,9 @@ fn moved_base_rebase_publishes_without_regating() {
     });
 }
 
-/// #16603: finalization's moving-base refusal catches up again and publishes
-/// the rebased candidate on its existing gate proof.
+/// Finalization's moving-base refusal enters the same bounded catch-up path.
 #[test]
-fn moved_base_under_finalization_catches_up_then_publishes_without_regating() {
+fn moved_base_under_finalization_catches_up_then_publishes() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let run_id = "cook-16049-changed-attempt-1";
         let (options, _) = seed_moving_base_attempt("cook-16049-changed", run_id);
@@ -3655,7 +3653,7 @@ fn moved_base_budget_exhaustion_blocks_with_base_conflict() {
         assert_eq!(
             report.value.stop_reason.as_deref(),
             Some(
-                "base_conflict: moving-base recovery exhausted after 3 refreshed base observations"
+                "base_conflict: base continued moving after bounded rebase-and-regate attempts; start a fresh Cook"
             )
         );
         let delivery = delivery_of(run_id);
@@ -3913,6 +3911,25 @@ fn normal_cook_promotion_fixture(cancel_gate: bool) {
 
 #[test]
 fn moved_base_catch_up_rebases_real_owned_candidate_and_refuses_divergence() {
+    exercise_real_git_base_advance(false, false, false);
+}
+
+#[test]
+fn recover_rebases_and_regates_real_git_candidate_without_provider_execution() {
+    exercise_real_git_base_advance(false, true, false);
+}
+
+#[test]
+fn moved_base_conflict_stops_real_git_cook_without_publication() {
+    exercise_real_git_base_advance(true, false, false);
+}
+
+#[test]
+fn rewritten_base_stops_real_git_cook_without_publication() {
+    exercise_real_git_base_advance(false, false, true);
+}
+
+fn exercise_real_git_base_advance(conflicting: bool, recover: bool, rewritten: bool) {
     use crate::agent_task::{AgentTaskArtifact, AgentTaskOutcome, AgentTaskOutcomeStatus};
     use crate::agent_task_scheduler::{AgentTaskAggregate, AgentTaskAggregateTotals};
 
@@ -3996,7 +4013,21 @@ fn moved_base_catch_up_rebases_real_owned_candidate_and_refuses_divergence() {
                 &["commit", "-m", &format!("advance base {revision}")],
             );
         }
-        git(&advance, &["push", "origin", "main"]);
+        if conflicting {
+            std::fs::write(advance.join("src/lib.rs"), "conflicting upstream edit\n").unwrap();
+            git(&advance, &["add", "."]);
+            git(&advance, &["commit", "-m", "conflicting advance"]);
+        }
+        if rewritten {
+            // Replace the root while keeping identical content: this must be
+            // refused for ancestry, not mistaken for an apply conflict.
+            git(&advance, &["checkout", "--orphan", "rewritten-main"]);
+            git(&advance, &["add", "."]);
+            git(&advance, &["commit", "-m", "rewritten base"]);
+            git(&advance, &["push", "--force", "origin", "HEAD:main"]);
+        } else {
+            git(&advance, &["push", "origin", "main"]);
+        }
         let advanced_base = git_output(&advance, &["rev-parse", "HEAD"]).unwrap();
 
         let run_id = "moving-base-real-git";
@@ -4098,17 +4129,113 @@ fn moved_base_catch_up_rebases_real_owned_candidate_and_refuses_divergence() {
         let finalization_calls = Arc::new(AtomicUsize::new(0));
         let finalization_calls_for_finalizer = Arc::clone(&finalization_calls);
         let expected_base = advanced_base.clone();
-        let report = run_cook(CookContext {
-            side_effects: Some(CookSideEffects::new(move |_, _, _, caught_up| {
-                finalization_calls_for_finalizer.fetch_add(1, Ordering::SeqCst);
-                assert_eq!(caught_up.status, AgentTaskPromotionStatus::Applied);
-                assert_eq!(caught_up.verified_base.as_ref().unwrap().sha, expected_base);
-                Ok(serde_json::json!({"status": "review_ready"}))
-            })),
-            ..CookContext::new(options.clone(), Arc::new(UnusedExecutor))
-        })
-        .unwrap();
-        assert_eq!(report.value.status, "review_ready", "{:#?}", report.value);
+        if conflicting || rewritten {
+            let report = run_cook(CookContext {
+                side_effects: Some(CookSideEffects::new(|_, _, _, _| {
+                    panic!("conflicting candidate must never be published")
+                })),
+                ..CookContext::new(options.clone(), Arc::new(UnusedExecutor))
+            })
+            .unwrap();
+            assert_eq!(report.value.status, "blocked");
+            assert!(report
+                .value
+                .stop_reason
+                .as_deref()
+                .unwrap()
+                .contains("fresh Cook"));
+            assert_eq!(
+                git_output(&remote, &["rev-parse", "refs/heads/main"]).unwrap(),
+                advanced_base,
+                "a refused candidate must not change the advertised base"
+            );
+            assert_eq!(
+                git_output(&remote, &["for-each-ref", "--format=%(refname)"]).unwrap(),
+                "refs/heads/main",
+                "a refused candidate must not publish a branch"
+            );
+            assert_eq!(
+                git_output(&destination, &["rev-parse", "HEAD"]).unwrap(),
+                verified_base
+            );
+            assert_eq!(
+                std::fs::read_to_string(destination.join("src/lib.rs")).unwrap(),
+                "new\n"
+            );
+            return;
+        }
+        if recover {
+            // Delivery owns rebase-and-regate, so recovery simply continues.
+            let recovery = super::super::plan_cook_recovery(run_id).unwrap();
+            assert_eq!(recovery.step, super::super::CookRecoveryStep::Continue);
+        }
+        struct RecoverCandidate {
+            options: CookRequest,
+            calls: Arc<AtomicUsize>,
+            base: String,
+        }
+        impl super::super::CookRecoveryPerformer for RecoverCandidate {
+            fn continue_cook(
+                &self,
+                _: &str,
+                rearm: bool,
+                _: &super::super::CookRecoveryOverrides,
+            ) -> Result<(Value, i32)> {
+                assert!(!rearm);
+                let calls = Arc::clone(&self.calls);
+                let base = self.base.clone();
+                let report = run_cook(CookContext {
+                    side_effects: Some(CookSideEffects::new(move |_, _, _, caught_up| {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        assert_eq!(caught_up.status, AgentTaskPromotionStatus::Applied);
+                        assert_eq!(caught_up.verified_base.as_ref().unwrap().sha, base);
+                        Ok(serde_json::json!({"status": "review_ready"}))
+                    })),
+                    ..CookContext::new(self.options.clone(), Arc::new(UnusedExecutor))
+                })?;
+                assert_eq!(report.value.status, "review_ready");
+                Ok((
+                    serde_json::to_value(report.value).unwrap(),
+                    report.exit_code,
+                ))
+            }
+            fn preflight_continue_cook(&self, _: &str, _: bool) -> Result<(Value, i32)> {
+                unreachable!()
+            }
+            fn retry(&self, _: &str) -> Result<(Value, i32)> {
+                unreachable!("must not execute provider")
+            }
+            fn reconcile(&self, _: &str) -> Result<(Value, i32)> {
+                unreachable!()
+            }
+            fn adopt(&self, _: &str, _: &str) -> Result<(Value, i32)> {
+                unreachable!()
+            }
+        }
+        let performer = RecoverCandidate {
+            options: options.clone(),
+            calls: finalization_calls_for_finalizer,
+            base: expected_base,
+        };
+        let exit_code = if recover {
+            super::super::recover_cook(
+                run_id,
+                super::super::CookRecoveryRequest::default(),
+                &performer,
+            )
+            .unwrap()
+            .1
+        } else {
+            super::super::CookRecoveryPerformer::continue_cook(
+                &performer,
+                run_id,
+                false,
+                &super::super::CookRecoveryOverrides::default(),
+            )
+            .unwrap()
+            .1
+        };
+        assert_eq!(exit_code, 0);
         assert_eq!(finalization_calls.load(Ordering::SeqCst), 1);
         let caught_up = persisted_promotion_for_attempt(run_id).unwrap().unwrap();
         assert_eq!(caught_up.status, AgentTaskPromotionStatus::Applied);
@@ -4116,7 +4243,12 @@ fn moved_base_catch_up_rebases_real_owned_candidate_and_refuses_divergence() {
             caught_up.provenance["base_catch_up"]["gates_verified_base"], verified_base,
             "the rebased candidate keeps the gate proof from the base its gates ran on"
         );
-        assert!(caught_up.provenance.get("resume_contract").is_none());
+        assert_eq!(caught_up.provenance["resumed_post_apply_promotion"], true);
+        assert_eq!(caught_up.deterministic_gates.len(), 1);
+        assert_eq!(
+            caught_up.deterministic_gates[0].status,
+            crate::agent_task_gate::AgentTaskGateStatus::Succeeded
+        );
         assert_eq!(
             git_output(&destination, &["diff", "--name-only", &advanced_base]).unwrap(),
             "src/lib.rs",
@@ -4332,8 +4464,8 @@ fn moved_base_catch_up_preserves_history_below_the_verified_pr_head() {
         )
         .unwrap();
         assert!(
-            matches!(&catch_up, BaseCatchUp::NotOwned(reason) if reason.contains("builds on branch history")),
-            "expected branch publication, not a spurious conflict: {catch_up:?}"
+            matches!(&catch_up, BaseCatchUp::Conflict { .. }),
+            "non-ancestor base must stop publication: {catch_up:?}"
         );
         assert_eq!(git(&["rev-parse", "HEAD"]), prior_base);
         assert_eq!(
