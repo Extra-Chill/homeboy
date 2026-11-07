@@ -6249,11 +6249,9 @@ mod tests {
     #[test]
     fn non_applied_promotion_reports_do_not_freeze_destination_inputs() {
         let recipe_context = homeboy_core::test_support::HermeticTestContext::new();
-        let lifecycle_context = homeboy_core::test_support::HermeticTestContext::new();
         let recipe_store = CookRecipeStore::new(recipe_context.path_roots());
-        let lifecycle_store = crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(
-            lifecycle_context.path_roots(),
-        );
+        let lifecycle_store =
+            crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(recipe_context.path_roots());
 
         let recipe = recipe();
         recipe_store

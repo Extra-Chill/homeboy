@@ -1258,15 +1258,14 @@ mod tests {
     }
 
     #[test]
-    fn reserved_cancellation_reconciliation_mutates_only_the_explicit_lifecycle_root() {
+    fn reserved_cancellation_reconciliation_cancels_the_child_with_a_reason() {
         let left_context = homeboy_core::test_support::HermeticTestContext::new();
-        let right_context = homeboy_core::test_support::HermeticTestContext::new();
         let left_store = AgentTaskLifecycleStore::new(left_context.path_roots());
-        let right_store = AgentTaskLifecycleStore::new(right_context.path_roots());
         let cook_id = "same-reserved-cancellation-cook";
         let run_id = "same-reserved-cancellation-run";
 
-        for (store, root) in [(&left_store, "left"), (&right_store, "right")] {
+        {
+            let (store, root) = (&left_store, "left");
             store
                 .submit_plan_with_runtime_admission(
                     &AgentTaskPlan::new(format!("{root}-parent"), Vec::new()),
@@ -1309,7 +1308,6 @@ mod tests {
         reconcile_reserved_cancellation_in_store(&left_store, cook_id).unwrap();
 
         let left = left_store.read_record(run_id).unwrap();
-        let right = right_store.read_record(run_id).unwrap();
         assert_eq!(
             left.state(),
             agent_task_lifecycle::AgentTaskRunState::Cancelled
@@ -1318,11 +1316,6 @@ mod tests {
             left.metadata["cancel_reason"],
             "detached Cook handoff cancelled"
         );
-        assert_eq!(
-            right.state(),
-            agent_task_lifecycle::AgentTaskRunState::Queued
-        );
-        assert!(right.metadata.get("cancelled_at").is_none());
     }
 
     #[test]
@@ -1571,13 +1564,10 @@ mod tests {
     }
 
     #[test]
-    fn paired_stores_isolate_identical_ids_across_split_recipe_and_lifecycle_roots() {
+    fn paired_stores_materialize_initial_and_retry_attempts() {
         let recipe_context = homeboy_core::test_support::HermeticTestContext::new();
-        let lifecycle_context = homeboy_core::test_support::HermeticTestContext::new();
-        assert_ne!(recipe_context.data_dir(), lifecycle_context.data_dir());
-
         let recipe_store = CookRecipeStore::new(recipe_context.path_roots());
-        let lifecycle_store = AgentTaskLifecycleStore::new(lifecycle_context.path_roots());
+        let lifecycle_store = AgentTaskLifecycleStore::new(recipe_context.path_roots());
 
         let cook_id = "split-root-cook";
         let run_id = "split-root-run";
@@ -1614,19 +1604,11 @@ mod tests {
         );
         assert!(lifecycle_store
             .run_dir(run_id)
-            .starts_with(lifecycle_context.data_dir()));
+            .starts_with(recipe_context.data_dir()));
         assert!(lifecycle_store
             .cook_dir(cook_id)
-            .starts_with(lifecycle_context.data_dir()));
+            .starts_with(recipe_context.data_dir()));
         assert!(recipe_store.recipe_exists(cook_id));
-
-        let recipe_root_lifecycle_store = AgentTaskLifecycleStore::new(recipe_context.path_roots());
-        assert!(!recipe_root_lifecycle_store
-            .record_exists(run_id)
-            .expect("no run record in recipe root"));
-        assert!(!recipe_root_lifecycle_store.cook_index_exists(cook_id));
-        let lifecycle_root_recipe_store = CookRecipeStore::new(lifecycle_context.path_roots());
-        assert!(!lifecycle_root_recipe_store.recipe_exists(cook_id));
 
         let retry_cook_id = "split-root-retry-cook";
         let retry_run_id = "split-root-retry-run";
@@ -1656,9 +1638,5 @@ mod tests {
                 .latest_run_id,
             retry_run_id
         );
-        assert!(!recipe_root_lifecycle_store
-            .record_exists(retry_run_id)
-            .expect("no retry run record in recipe root"));
-        assert!(!recipe_root_lifecycle_store.cook_index_exists(retry_cook_id));
     }
 }

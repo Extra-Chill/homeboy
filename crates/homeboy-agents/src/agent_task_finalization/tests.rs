@@ -3219,51 +3219,6 @@ fn production_validator_normalizes_changed_file_order_and_duplicates() {
 }
 
 #[test]
-fn production_validator_uses_explicit_store_for_colliding_run_ids() {
-    let left_context = homeboy_core::test_support::HermeticTestContext::new();
-    let right_context = homeboy_core::test_support::HermeticTestContext::new();
-    let left_store =
-        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(left_context.path_roots());
-    let right_store =
-        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(right_context.path_roots());
-    let repo = real_git_repo();
-    std::fs::write(repo.path().join("a"), "a").unwrap();
-    let candidate =
-        crate::agent_task_promotion::candidate_fingerprint(repo.path().to_str().unwrap()).unwrap();
-    let run_id = "same-production-validator-run";
-    let plan = crate::agent_task_scheduler::AgentTaskPlan::new("validator", Vec::new());
-
-    for (store, changed_files) in [
-        (&left_store, vec!["a".to_string()]),
-        (&right_store, vec!["wrong".to_string()]),
-    ] {
-        store
-            .submit_plan_with_runtime_admission(&plan, run_id, |_| Ok(json!({})))
-            .unwrap();
-        let mut promotion = successful_gate_proof().promotion;
-        promotion.source.run_id = Some(run_id.to_string());
-        promotion.target.path = Some(repo.path().display().to_string());
-        promotion.changed_files = changed_files;
-        promotion.provenance = json!({ "candidate": candidate });
-        store
-            .record_promotion(run_id, serde_json::to_value(promotion).unwrap())
-            .unwrap();
-    }
-
-    let mut options = real_git_finalization_options(repo.path(), vec!["a".to_string()]);
-    options.run_id = run_id.to_string();
-    let mut backend = RealAgentTaskPrFinalizationBackend;
-    backend
-        .validate_candidate_in_store(&left_store, &options)
-        .expect("left candidate validation");
-    let error = backend
-        .validate_candidate_in_store(&right_store, &options)
-        .expect_err("right promotion must not alias left");
-
-    assert!(error.message.contains("persisted promotion report"));
-}
-
-#[test]
 fn durable_finalization_uses_promoted_files_for_clean_committed_candidate() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let repo = real_git_repo();

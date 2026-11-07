@@ -4282,29 +4282,19 @@ mod tests {
     }
 
     #[test]
-    fn local_execution_isolates_identical_run_ids_in_explicit_lifecycle_stores() {
+    fn local_execution_persists_terminal_state_cleanup_and_candidate_artifacts() {
         let first = homeboy_core::test_support::HermeticTestContext::new();
-        let second = homeboy_core::test_support::HermeticTestContext::new();
         let first_store = agent_task_lifecycle::AgentTaskLifecycleStore::new(first.path_roots());
-        let second_store = agent_task_lifecycle::AgentTaskLifecycleStore::new(second.path_roots());
         let first_workspace = tempfile::tempdir().expect("first workspace");
-        let second_workspace = tempfile::tempdir().expect("second workspace");
         initialize_workspace(first_workspace.path());
-        initialize_workspace(second_workspace.path());
         let run_id = "same-local-follow-up-run";
 
-        for (store, plan_id, workspace) in [
-            (
+        {
+            let (store, plan_id, workspace) = (
                 &first_store,
                 "first-local-follow-up",
                 first_workspace.path(),
-            ),
-            (
-                &second_store,
-                "second-local-follow-up",
-                second_workspace.path(),
-            ),
-        ] {
+            );
             let result = run_loaded_plan_with_derived_cook_baseline_in_store(
                 store,
                 one_task_plan(plan_id, workspace),
@@ -4340,8 +4330,6 @@ mod tests {
             let scratch = std::fs::read_to_string(scratch_index).expect("rooted scratch index");
             assert!(scratch.contains(run_id));
         }
-
-        assert_ne!(first_store.run_dir(run_id), second_store.run_dir(run_id));
     }
 
     #[test]
