@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.446.17] - 2026-11-07
+
+### Fixed
+- treat an identity-less task-worktree manifest as malformed
+
 ## [0.446.16] - 2026-11-07
 
 ### Changed
