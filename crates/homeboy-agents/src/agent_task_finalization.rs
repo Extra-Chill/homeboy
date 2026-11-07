@@ -1700,11 +1700,7 @@ fn validate_durable_publication_eligibility(
         ),
         Ok(crate::agent_task_promotion::AgentTaskPromotionCandidate::Git { .. })
     );
-    let green_gates = !promotion.gate_results.is_empty()
-        && promotion
-            .gate_results
-            .iter()
-            .all(|gate| gate.status == HomeboyGateStatus::Passed);
+    let green_gates = promotion.finalization_eligible();
     let green_fingerprinted_candidate = fingerprinted_candidate
         && promotion.status == crate::agent_task_promotion::AgentTaskPromotionStatus::Applied
         && green_gates;
@@ -1723,15 +1719,12 @@ fn validate_durable_publication_eligibility(
     let verified_candidate_recovery = matches!(
         lifecycle.execution.state,
         RunExecutionState::PartialFailure | RunExecutionState::CandidateRecoverable
-    ) && producing_runtime.is_some_and(|runtime| {
-        runtime.metadata["model"]
-            .as_str()
-            .is_some_and(is_concrete_model)
-    }) && match promotion.provenance.get("replacement_gate_proof")
-    {
-        None => green_fingerprinted_candidate,
-        Some(_) => fingerprinted_candidate && authorized_replacement_gate_proof(promotion),
-    };
+    ) && producing_runtime
+        .is_some_and(|runtime| recorded_runtime_model(&runtime.metadata).is_some())
+        && match promotion.provenance.get("replacement_gate_proof") {
+            None => green_fingerprinted_candidate,
+            Some(_) => fingerprinted_candidate && authorized_replacement_gate_proof(promotion),
+        };
     if (lifecycle.execution.state == RunExecutionState::Succeeded
         && (all_provider_runtimes_succeeded
             || (producing_runtime_succeeded && green_fingerprinted_candidate)))
@@ -1799,7 +1792,32 @@ fn validate_durable_publication_eligibility(
         return Ok(DurablePublicationEligibility::AuthenticatedExternalCandidateAdoption);
     }
 
-    Err(crate::agent_task_service::CookDeliveryBlockerCode::PublishRefused.mark(Error::validation_invalid_argument("run_id", "durable run must have succeeded execution and succeeded provider runtime, or be a partial or candidate-recoverable run whose applied, fingerprinted candidate has green gates bound to it and whose producing runtime records a concrete model, before publication; the only other exceptions are an applied, green, fingerprinted candidate-adoption recovery with durable zero-execution pre-provider transport provenance or an applied, green, committed-change-provenance-bound authenticated external candidate adoption", None, None)))
+    let reason = if !green_gates {
+        "publication refused: gates are not green; at least one gate is required and inherited failures must have baseline proof"
+    } else if !fingerprinted_candidate {
+        "publication refused: candidate is not fingerprinted"
+    } else if promotion.status != crate::agent_task_promotion::AgentTaskPromotionStatus::Applied {
+        "publication refused: candidate is not applied"
+    } else if !adoption_model.is_some_and(is_concrete_model)
+        && !producing_runtime
+            .is_some_and(|runtime| recorded_runtime_model(&runtime.metadata).is_some())
+    {
+        "publication refused: concrete model missing from producing runtime or authenticated adoption"
+    } else if !matches!(
+        lifecycle.execution.state,
+        RunExecutionState::Succeeded
+            | RunExecutionState::PartialFailure
+            | RunExecutionState::CandidateRecoverable
+    ) {
+        "publication refused: wrong execution state without authenticated candidate adoption"
+    } else {
+        "publication refused: producing runtime has not succeeded or candidate-bound recovery/adoption proof is invalid"
+    };
+    Err(
+        crate::agent_task_service::CookDeliveryBlockerCode::PublishRefused.mark(
+            Error::validation_invalid_argument("run_id", reason, None, None),
+        ),
+    )
 }
 
 fn no_real_provider_execution(lifecycle: &RunLifecycleRecord) -> bool {
@@ -1822,6 +1840,25 @@ fn is_full_git_commit_identity(value: &str) -> bool {
     matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
+// Read the runtime's served_models receipt, which also feeds status, before
+// falling back to the requested model recorded by older runtimes.
+fn recorded_runtime_model(metadata: &serde_json::Value) -> Option<&str> {
+    metadata["served_models"]
+        .as_array()
+        .and_then(|models| {
+            models
+                .iter()
+                .rev()
+                .filter_map(serde_json::Value::as_str)
+                .find(|model| is_concrete_model(model))
+        })
+        .or_else(|| {
+            metadata["model"]
+                .as_str()
+                .filter(|model| is_concrete_model(model))
+        })
+}
+
 fn durable_model(lifecycle: &RunLifecycleRecord, recovered_task: Option<&str>) -> Result<String> {
     let model = lifecycle
         .provider_runtime
@@ -1831,12 +1868,7 @@ fn durable_model(lifecycle: &RunLifecycleRecord, recovered_task: Option<&str>) -
             Some(task_id) => runtime.task_id == task_id,
             None => runtime.state == ProviderRuntimeState::Succeeded,
         })
-        .find_map(|runtime| {
-            runtime
-                .metadata
-                .get("model")
-                .and_then(serde_json::Value::as_str)
-        })
+        .find_map(|runtime| recorded_runtime_model(&runtime.metadata))
         .unwrap_or_default()
         .to_string();
     if model.trim().is_empty()
