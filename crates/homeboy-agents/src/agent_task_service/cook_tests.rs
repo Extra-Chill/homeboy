@@ -14594,6 +14594,69 @@ fn explicit_local_continuation_replaces_exhausted_auto_lab_transport_without_rep
 }
 
 #[test]
+fn terminal_report_classifies_real_incomplete_and_abnormal_provider_aggregates() {
+    for (name, fixture, expected) in [
+        (
+            "incomplete",
+            include_str!("cook_tests/fixtures/incomplete_no_patch.json"),
+            "no_candidate",
+        ),
+        (
+            "abnormal",
+            include_str!("cook_tests/fixtures/abnormal_provider_exit.json"),
+            "provider_failure",
+        ),
+    ] {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let cook_id = format!("cook-17446-{name}");
+            let run_id = format!("{cook_id}-attempt-1");
+            let mut options =
+                batch_cook_options(&cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+            options.identity.initial_run_id = run_id.clone();
+            options.retry_policy.max_attempts = 1;
+            persist_initial_recipe(&options).unwrap();
+            agent_task_lifecycle::submit_plan(&options.identity.initial_plan, Some(&run_id))
+                .unwrap();
+            agent_task_lifecycle::record_cook_attempt_in_store(
+                &test_lifecycle_store(),
+                &cook_id,
+                1,
+                &run_id,
+            )
+            .unwrap();
+            let mut aggregate: crate::agent_task_schedule::AgentTaskAggregate =
+                serde_json::from_str(fixture).unwrap();
+            // Rebind only identity; retain the real provider result and diagnostics.
+            aggregate.plan_id = options.identity.initial_plan.plan_id.clone();
+            aggregate.outcomes[0].task_id = options.identity.initial_plan.tasks[0].task_id.clone();
+            let reason = aggregate.outcomes[0].outputs["review_form"]["incomplete_reason"]
+                .as_str()
+                .map(str::to_string);
+            agent_task_lifecycle::record_run_aggregate(
+                &run_id,
+                &options.identity.initial_plan,
+                &aggregate,
+            )
+            .unwrap();
+            let report = run_cook(CookContext::new(options, Arc::new(UnusedExecutor))).unwrap();
+            assert_eq!(report.value.status, expected, "{name}");
+            assert_eq!(report.exit_code, 1, "{name}");
+            if expected == "no_candidate" {
+                assert_eq!(
+                    report.value.terminal_phase.as_deref(),
+                    Some("candidate_selection")
+                );
+                assert_eq!(
+                    report.value.terminal_failure_classification.as_deref(),
+                    Some("no_candidate")
+                );
+                assert_eq!(report.value.stop_reason, reason);
+            }
+        });
+    }
+}
+
+#[test]
 fn terminal_fallback_preserves_cancellation_and_provider_failure_classifications() {
     assert_eq!(
         terminal_fallback_status(agent_task_lifecycle::AgentTaskRunState::Cancelled),

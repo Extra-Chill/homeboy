@@ -1,0 +1,403 @@
+{
+  "schema": "homeboy/agent-task-aggregate/v1",
+  "plan_id": "agent-task-dispatch-80a1192a-e313-4d37-b6ad-95796ed2c7a6",
+  "status": "failed",
+  "totals": {
+    "queued": 0,
+    "running": 0,
+    "blocked": 0,
+    "skipped": 0,
+    "succeeded": 0,
+    "candidate_recoverable": 0,
+    "recoverable_candidates": 0,
+    "failed": 1,
+    "cancelled": 0,
+    "timed_out": 0
+  },
+  "outcomes": [
+    {
+      "schema": "homeboy/agent-task-outcome/v1",
+      "task_id": "cook-roadie",
+      "status": "failed",
+      "summary": "OpenCode execution failed.",
+      "failure_classification": "execution_failed",
+      "artifacts": [
+        {
+          "schema": "homeboy/agent-task-artifact/v1",
+          "id": "patch",
+          "kind": "patch",
+          "name": "patch",
+          "path": "/home/chubes/.local/share/homeboy/artifacts/executor-finalized/2f70f1f3-a92f-4712-8334-97a0a3f79145/artifact-dd26b89760ed93df9d75c3d4a597546a3bc9e67607aa4c403cf6e111512625e9",
+          "url": "file:///home/chubes/.local/share/homeboy/artifacts/agent-task/executor-artifacts/agent-task-8620ad92-6d75-4333-a9ab-baf34f22924f-attempt-1-c31237bc/cook-roadie/attempt-1/cook-roadie-opencode.patch",
+          "mime": "text/x-patch",
+          "size_bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "metadata": {
+            "executor_artifact_finalized": true,
+            "mime_inference": "extension_only",
+            "provider_kind": "git-diff",
+            "provider_model": "zai-coding-plan/glm-5.3-flash",
+            "role": "patch"
+          }
+        },
+        {
+          "schema": "homeboy/agent-task-artifact/v1",
+          "id": "transcript",
+          "kind": "transcript",
+          "name": "transcript",
+          "path": "/home/chubes/.local/share/homeboy/artifacts/executor-finalized/2f70f1f3-a92f-4712-8334-97a0a3f79145/artifact-09f89bb79ec0dcbea270ebeb20c0a10d8f31e08ec2e6fc682441720f4a82b3a6",
+          "url": "file:///home/chubes/.local/share/homeboy/artifacts/agent-task/executor-artifacts/agent-task-8620ad92-6d75-4333-a9ab-baf34f22924f-attempt-1-c31237bc/cook-roadie/attempt-1/cook-roadie-opencode-transcript.txt",
+          "mime": "text/plain",
+          "size_bytes": 358710,
+          "sha256": "7395866c57b400bbae89479308bc67f014268137ba10e3cc1c330343031c8a60",
+          "metadata": {
+            "executor_artifact_finalized": true,
+            "mime_inference": "extension_only",
+            "provider_kind": "agent-runtime-transcript",
+            "role": "transcript"
+          }
+        },
+        {
+          "schema": "homeboy/agent-task-artifact/v1",
+          "id": "agent_result",
+          "kind": "json",
+          "name": "agent_result",
+          "path": "/home/chubes/.local/share/homeboy/artifacts/executor-finalized/2f70f1f3-a92f-4712-8334-97a0a3f79145/artifact-60e0a41895c52a58dd7c2b8eb6aed83a9d0cb7ff9d50f814540adb804f167753",
+          "url": "file:///home/chubes/.local/share/homeboy/artifacts/agent-task/executor-artifacts/agent-task-8620ad92-6d75-4333-a9ab-baf34f22924f-attempt-1-c31237bc/cook-roadie/attempt-1/cook-roadie-opencode-result.json",
+          "mime": "application/json",
+          "size_bytes": 492,
+          "sha256": "822717318c975f2f37290747c4fb2706c49401ba92d47155ef44f11e24d0be46",
+          "metadata": {
+            "executor_artifact_finalized": true,
+            "mime_inference": "extension_only"
+          }
+        },
+        {
+          "schema": "homeboy/agent-task-artifact/v1",
+          "id": "progress_events",
+          "kind": "agent-task-progress",
+          "name": "progress_events",
+          "path": "/home/chubes/.local/share/homeboy/artifacts/executor-finalized/2f70f1f3-a92f-4712-8334-97a0a3f79145/artifact-a3b2eb5b4d64c741ce4a960eaa06fd71c93d9f31cfdcce1b9c0d903049abe25b",
+          "url": "file:///home/chubes/.local/share/homeboy/artifacts/agent-task/executor-artifacts/agent-task-8620ad92-6d75-4333-a9ab-baf34f22924f-attempt-1-c31237bc/cook-roadie/attempt-1/cook-roadie-opencode-progress.jsonl",
+          "size_bytes": 14666,
+          "sha256": "d85a47b233b0a046fcd6067f3e3b0183c269d76e9f7d45b645593694c37d6c21",
+          "metadata": {
+            "executor_artifact_finalized": true,
+            "mime_inference": "extension_only"
+          }
+        },
+        {
+          "schema": "homeboy/agent-task-artifact/v1",
+          "id": "opencode-runtime-stdout",
+          "kind": "runtime_log",
+          "name": "opencode-runtime-stdout",
+          "path": "/home/chubes/.local/share/homeboy/artifacts/executor-finalized/2f70f1f3-a92f-4712-8334-97a0a3f79145/artifact-9fec839828865309dcbc881ed1d830da2d4b6f20e496dde5e64b42a059ed6e7b",
+          "url": "file:///home/chubes/.local/share/homeboy/artifacts/agent-task/executor-artifacts/agent-task-8620ad92-6d75-4333-a9ab-baf34f22924f-attempt-1-c31237bc/cook-roadie/attempt-1/cook-roadie-opencode-runtime-stdout.log",
+          "mime": "text/plain",
+          "size_bytes": 358710,
+          "sha256": "7395866c57b400bbae89479308bc67f014268137ba10e3cc1c330343031c8a60",
+          "metadata": {
+            "executor_artifact_finalized": true,
+            "mime_inference": "extension_only",
+            "provider_kind": "opencode-runtime-log",
+            "role": "runtime_log"
+          }
+        },
+        {
+          "schema": "homeboy/agent-task-artifact/v1",
+          "id": "opencode-runtime-activity",
+          "kind": "runtime_log",
+          "name": "opencode-runtime-activity",
+          "path": "/home/chubes/.local/share/homeboy/artifacts/executor-finalized/2f70f1f3-a92f-4712-8334-97a0a3f79145/artifact-e447148ef38f9de39457acffa5a24a1078bbfa12180802adc07f3992912f51d1",
+          "url": "file:///home/chubes/.local/share/homeboy/artifacts/agent-task/executor-artifacts/agent-task-8620ad92-6d75-4333-a9ab-baf34f22924f-attempt-1-c31237bc/cook-roadie/attempt-1/cook-roadie-opencode-runtime-session-activity.jsonl",
+          "size_bytes": 54613,
+          "sha256": "f0a48ca5234973c9a9fca5057116028a196d9f699601922cf280902a2ae0b1aa",
+          "metadata": {
+            "executor_artifact_finalized": true,
+            "mime_inference": "extension_only",
+            "provider_kind": "opencode-runtime-log",
+            "role": "runtime_log"
+          }
+        }
+      ],
+      "typed_artifacts": [
+        {
+          "name": "patch",
+          "type": "file",
+          "payload": {
+            "artifact_id": "patch",
+            "kind": "patch",
+            "path": "/home/chubes/.local/share/homeboy/artifacts/executor-finalized/2f70f1f3-a92f-4712-8334-97a0a3f79145/artifact-dd26b89760ed93df9d75c3d4a597546a3bc9e67607aa4c403cf6e111512625e9",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "size_bytes": 0,
+            "url": "file:///home/chubes/.local/share/homeboy/artifacts/agent-task/executor-artifacts/agent-task-8620ad92-6d75-4333-a9ab-baf34f22924f-attempt-1-c31237bc/cook-roadie/attempt-1/cook-roadie-opencode.patch"
+          },
+          "artifact": {
+            "schema": "homeboy/agent-task-artifact/v1",
+            "id": "patch",
+            "kind": "patch",
+            "name": "patch",
+            "path": "/home/chubes/.local/share/homeboy/artifacts/executor-finalized/2f70f1f3-a92f-4712-8334-97a0a3f79145/artifact-dd26b89760ed93df9d75c3d4a597546a3bc9e67607aa4c403cf6e111512625e9",
+            "url": "file:///home/chubes/.local/share/homeboy/artifacts/agent-task/executor-artifacts/agent-task-8620ad92-6d75-4333-a9ab-baf34f22924f-attempt-1-c31237bc/cook-roadie/attempt-1/cook-roadie-opencode.patch",
+            "mime": "text/x-patch",
+            "size_bytes": 0,
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "metadata": {
+              "executor_artifact_finalized": true,
+              "mime_inference": "extension_only",
+              "provider_kind": "git-diff",
+              "provider_model": "zai-coding-plan/glm-5.3-flash",
+              "role": "patch"
+            }
+          },
+          "metadata": {
+            "normalized_from": "runtime_artifact"
+          }
+        },
+        {
+          "name": "agent_result",
+          "type": "file",
+          "payload": {
+            "artifact_id": "agent_result",
+            "kind": "json",
+            "path": "/home/chubes/.local/share/homeboy/artifacts/executor-finalized/2f70f1f3-a92f-4712-8334-97a0a3f79145/artifact-60e0a41895c52a58dd7c2b8eb6aed83a9d0cb7ff9d50f814540adb804f167753",
+            "sha256": "822717318c975f2f37290747c4fb2706c49401ba92d47155ef44f11e24d0be46",
+            "size_bytes": 492,
+            "url": "file:///home/chubes/.local/share/homeboy/artifacts/agent-task/executor-artifacts/agent-task-8620ad92-6d75-4333-a9ab-baf34f22924f-attempt-1-c31237bc/cook-roadie/attempt-1/cook-roadie-opencode-result.json"
+          },
+          "artifact": {
+            "schema": "homeboy/agent-task-artifact/v1",
+            "id": "agent_result",
+            "kind": "json",
+            "name": "agent_result",
+            "path": "/home/chubes/.local/share/homeboy/artifacts/executor-finalized/2f70f1f3-a92f-4712-8334-97a0a3f79145/artifact-60e0a41895c52a58dd7c2b8eb6aed83a9d0cb7ff9d50f814540adb804f167753",
+            "url": "file:///home/chubes/.local/share/homeboy/artifacts/agent-task/executor-artifacts/agent-task-8620ad92-6d75-4333-a9ab-baf34f22924f-attempt-1-c31237bc/cook-roadie/attempt-1/cook-roadie-opencode-result.json",
+            "mime": "application/json",
+            "size_bytes": 492,
+            "sha256": "822717318c975f2f37290747c4fb2706c49401ba92d47155ef44f11e24d0be46",
+            "metadata": {
+              "executor_artifact_finalized": true,
+              "mime_inference": "extension_only"
+            }
+          },
+          "metadata": {
+            "normalized_from": "runtime_artifact"
+          }
+        },
+        {
+          "name": "transcript",
+          "type": "file",
+          "payload": {
+            "artifact_id": "transcript",
+            "kind": "transcript",
+            "path": "/home/chubes/.local/share/homeboy/artifacts/executor-finalized/2f70f1f3-a92f-4712-8334-97a0a3f79145/artifact-09f89bb79ec0dcbea270ebeb20c0a10d8f31e08ec2e6fc682441720f4a82b3a6",
+            "sha256": "7395866c57b400bbae89479308bc67f014268137ba10e3cc1c330343031c8a60",
+            "size_bytes": 358710,
+            "url": "file:///home/chubes/.local/share/homeboy/artifacts/agent-task/executor-artifacts/agent-task-8620ad92-6d75-4333-a9ab-baf34f22924f-attempt-1-c31237bc/cook-roadie/attempt-1/cook-roadie-opencode-transcript.txt"
+          },
+          "artifact": {
+            "schema": "homeboy/agent-task-artifact/v1",
+            "id": "transcript",
+            "kind": "transcript",
+            "name": "transcript",
+            "path": "/home/chubes/.local/share/homeboy/artifacts/executor-finalized/2f70f1f3-a92f-4712-8334-97a0a3f79145/artifact-09f89bb79ec0dcbea270ebeb20c0a10d8f31e08ec2e6fc682441720f4a82b3a6",
+            "url": "file:///home/chubes/.local/share/homeboy/artifacts/agent-task/executor-artifacts/agent-task-8620ad92-6d75-4333-a9ab-baf34f22924f-attempt-1-c31237bc/cook-roadie/attempt-1/cook-roadie-opencode-transcript.txt",
+            "mime": "text/plain",
+            "size_bytes": 358710,
+            "sha256": "7395866c57b400bbae89479308bc67f014268137ba10e3cc1c330343031c8a60",
+            "metadata": {
+              "executor_artifact_finalized": true,
+              "mime_inference": "extension_only",
+              "provider_kind": "agent-runtime-transcript",
+              "role": "transcript"
+            }
+          },
+          "metadata": {
+            "normalized_from": "runtime_artifact"
+          }
+        }
+      ],
+      "evidence_refs": [
+        {
+          "kind": "git-diff",
+          "uri": "file:///home/chubes/.local/share/homeboy/artifacts/agent-task/executor-artifacts/agent-task-8620ad92-6d75-4333-a9ab-baf34f22924f-attempt-1-c31237bc/cook-roadie/attempt-1/cook-roadie-opencode.patch",
+          "label": "patch"
+        },
+        {
+          "kind": "agent-runtime-transcript",
+          "uri": "file:///home/chubes/.local/share/homeboy/artifacts/agent-task/executor-artifacts/agent-task-8620ad92-6d75-4333-a9ab-baf34f22924f-attempt-1-c31237bc/cook-roadie/attempt-1/cook-roadie-opencode-transcript.txt",
+          "label": "transcript"
+        },
+        {
+          "kind": "json",
+          "uri": "file:///home/chubes/.local/share/homeboy/artifacts/agent-task/executor-artifacts/agent-task-8620ad92-6d75-4333-a9ab-baf34f22924f-attempt-1-c31237bc/cook-roadie/attempt-1/cook-roadie-opencode-result.json",
+          "label": "agent_result"
+        },
+        {
+          "kind": "agent-task-progress",
+          "uri": "file:///home/chubes/.local/share/homeboy/artifacts/agent-task/executor-artifacts/agent-task-8620ad92-6d75-4333-a9ab-baf34f22924f-attempt-1-c31237bc/cook-roadie/attempt-1/cook-roadie-opencode-progress.jsonl",
+          "label": "progress_events"
+        },
+        {
+          "kind": "opencode-runtime-log",
+          "uri": "file:///home/chubes/.local/share/homeboy/artifacts/agent-task/executor-artifacts/agent-task-8620ad92-6d75-4333-a9ab-baf34f22924f-attempt-1-c31237bc/cook-roadie/attempt-1/cook-roadie-opencode-runtime-stdout.log",
+          "label": "OpenCode stdout"
+        },
+        {
+          "kind": "opencode-runtime-log",
+          "uri": "file:///home/chubes/.local/share/homeboy/artifacts/agent-task/executor-artifacts/agent-task-8620ad92-6d75-4333-a9ab-baf34f22924f-attempt-1-c31237bc/cook-roadie/attempt-1/cook-roadie-opencode-runtime-session-activity.jsonl",
+          "label": "OpenCode activity"
+        },
+        {
+          "kind": "executor-input",
+          "uri": "file:///home/chubes/.local/share/homeboy/artifacts/agent-task/executor-evidence/agent-task-8620ad92-6d75-4333-a9ab-baf34f22924f-attempt-1-c31237bc/cook-roadie/executor-input.json",
+          "label": "latest raw executor input"
+        },
+        {
+          "kind": "executor-result",
+          "uri": "file:///home/chubes/.local/share/homeboy/artifacts/agent-task/executor-evidence/agent-task-8620ad92-6d75-4333-a9ab-baf34f22924f-attempt-1-c31237bc/cook-roadie/executor-result.json",
+          "label": "latest raw executor result"
+        },
+        {
+          "kind": "executor-runtime-evidence",
+          "uri": "file:///home/chubes/.local/share/homeboy/artifacts/agent-task/executor-evidence/agent-task-8620ad92-6d75-4333-a9ab-baf34f22924f-attempt-1-c31237bc/cook-roadie/executor-runtime-evidence.json",
+          "label": "provider runtime evidence index"
+        },
+        {
+          "kind": "executor-artifact-root",
+          "uri": "file:///home/chubes/.local/share/homeboy/artifacts/agent-task/executor-artifacts/agent-task-8620ad92-6d75-4333-a9ab-baf34f22924f-attempt-1-c31237bc/cook-roadie/attempt-1",
+          "label": "executor artifact root"
+        },
+        {
+          "kind": "provider-session",
+          "uri": "file:///home/chubes/.local/share/homeboy/artifacts/agent-task/executor-evidence/agent-task-8620ad92-6d75-4333-a9ab-baf34f22924f-attempt-1-c31237bc/cook-roadie/executor-runtime-evidence.json",
+          "label": "provider-native session metadata"
+        },
+        {
+          "kind": "provider-runtime-progress",
+          "uri": "file:///home/chubes/.local/share/homeboy/artifacts/agent-task/executor-artifacts/agent-task-8620ad92-6d75-4333-a9ab-baf34f22924f-attempt-1-c31237bc/cook-roadie/attempt-1/cook-roadie-opencode-progress.jsonl",
+          "label": "runtime progress"
+        },
+        {
+          "kind": "provider-runtime-stderr",
+          "uri": "file:///home/chubes/.local/share/homeboy/artifacts/agent-task/executor-artifacts/agent-task-8620ad92-6d75-4333-a9ab-baf34f22924f-attempt-1-c31237bc/cook-roadie/attempt-1/provider-runtime-stderr-1.log",
+          "label": "runtime stderr"
+        },
+        {
+          "kind": "provider-runtime-stderr",
+          "uri": "file:///home/chubes/.local/share/homeboy/artifacts/agent-task/executor-artifacts/agent-task-8620ad92-6d75-4333-a9ab-baf34f22924f-attempt-1-c31237bc/cook-roadie/attempt-1/cook-roadie-opencode-runtime-stderr.log",
+          "label": "runtime stderr"
+        },
+        {
+          "kind": "provider-runtime-stdout",
+          "uri": "file:///home/chubes/.local/share/homeboy/artifacts/agent-task/executor-artifacts/agent-task-8620ad92-6d75-4333-a9ab-baf34f22924f-attempt-1-c31237bc/cook-roadie/attempt-1/provider-runtime-stdout-1.log",
+          "label": "runtime stdout"
+        },
+        {
+          "kind": "provider-runtime-stdout",
+          "uri": "file:///home/chubes/.local/share/homeboy/artifacts/agent-task/executor-artifacts/agent-task-8620ad92-6d75-4333-a9ab-baf34f22924f-attempt-1-c31237bc/cook-roadie/attempt-1/cook-roadie-opencode-runtime-stdout.log",
+          "label": "runtime stdout"
+        }
+      ],
+      "diagnostics": [
+        {
+          "class": "provider",
+          "message": "OpenCode CLI exited with status 1.",
+          "data": {}
+        }
+      ],
+      "outputs": {},
+      "metadata": {
+        "execution_budget": {
+          "executions_used": 1,
+          "exhausted": null,
+          "max_provider_executions": 5,
+          "max_provider_rotations": 2,
+          "max_same_provider_retries": 2,
+          "provider_rotations_used": 0,
+          "remaining_provider_executions": 4,
+          "same_provider_retries_used": 0,
+          "terminal_reason": "failed"
+        },
+        "exit_code": 1,
+        "managed_services": [],
+        "model": "zai-coding-plan/glm-5.3-flash",
+        "model_identity": {
+          "actual": "zai-coding-plan/glm-5.3-flash",
+          "attempted": "zai-coding-plan/glm-5.3-flash",
+          "candidate_producing": null,
+          "provider_reported": null,
+          "requested": null,
+          "resolved": "zai-coding-plan/glm-5.3-flash"
+        },
+        "opencode_progress": {
+          "coalesced_or_dropped": 0,
+          "emitted": 126,
+          "last_type": "step_finish"
+        },
+        "opencode_session": {
+          "id": "ses_ef27f289effe5PkTNY2AjCYip5",
+          "status": "discovered"
+        },
+        "provider": "opencode.agent-task-executor",
+        "provider_usage": {
+          "cache_read_tokens": 1368128,
+          "cache_read_tokens_status": "complete",
+          "cache_write_tokens": 0,
+          "cache_write_tokens_status": "complete",
+          "cost_usd": 0,
+          "cost_usd_status": "complete",
+          "duplicate_events": 0,
+          "events_seen": 41,
+          "events_with_usage": 41,
+          "execution_id": "ses_ef27f289effe5PkTNY2AjCYip5",
+          "input_tokens": 67309,
+          "input_tokens_status": "complete",
+          "malformed_events": 0,
+          "output_tokens": 4245,
+          "output_tokens_status": "complete",
+          "reasoning_tokens": 5035,
+          "reasoning_tokens_status": "complete",
+          "schema": "homeboy/agent-task-usage/v1",
+          "source": "opencode-jsonl",
+          "stream_truncated": false,
+          "total_tokens": 1444717,
+          "total_tokens_status": "complete"
+        },
+        "publication": {
+          "owner": "controller",
+          "status": "not_attempted"
+        }
+      }
+    }
+  ],
+  "events": [
+    {
+      "task_id": "cook-roadie",
+      "state": "queued",
+      "attempt": 1
+    },
+    {
+      "task_id": "cook-roadie",
+      "state": "running",
+      "attempt": 1
+    },
+    {
+      "task_id": "cook-roadie",
+      "state": "failed",
+      "attempt": 1,
+      "message": "OpenCode execution failed."
+    }
+  ],
+  "queue": {
+    "max_concurrency": 1,
+    "queued": 0,
+    "running": 0,
+    "blocked": 0,
+    "completed": 1,
+    "resource_budget": {
+      "default_task_units": 1,
+      "active_units": 0
+    }
+  }
+}
