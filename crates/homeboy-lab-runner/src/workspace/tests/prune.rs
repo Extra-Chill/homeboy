@@ -12,8 +12,9 @@ use crate::workspace::sync::{
     prune_workspaces, revalidated_candidate_is_deletable, runner_job_liveness_with,
     ssh_process_liveness_command, ssh_prune_delete_command_with_terminal_authority,
     ssh_prune_delete_materialized_workspace_command, ssh_prune_delete_orphan_artifact_dir_command,
-    sync_workspace, update_workspace_resource_lifecycle, workspace_liveness_with_size_observation,
-    workspace_metadata_file, ActiveResourceLifecycleLiveness, RunAuthority,
+    ssh_prune_delete_unowned_entry_command, sync_workspace, update_workspace_resource_lifecycle,
+    workspace_liveness_with_size_observation, workspace_metadata_file,
+    ActiveResourceLifecycleLiveness, RunAuthority,
 };
 use crate::workspace::types::{
     RunnerWorkspacePruneOptions, RunnerWorkspaceSyncMode, RunnerWorkspaceSyncOptions,
@@ -1245,6 +1246,64 @@ fn prune_convergence_resumes_durable_receipts_across_more_than_twenty_pages() {
     });
 }
 
+/// A Homeboy-named metadata-less checkout past the unowned age is reclaimed
+/// unless a process holds it (#17239).
+#[test]
+fn prune_reclaims_an_old_unowned_checkout_unless_a_process_holds_it() {
+    crate::test_support::with_isolated_home(|_| {
+        let roots = homeboy_core::paths::PathRoots::from_environment().expect("roots");
+        let runner_root = tempfile::tempdir().expect("runner root");
+        let root = runner_root.path().join("_lab_workspaces");
+        let free = root.join("free-checkout-1792000000000000000");
+        let held = root.join("held-checkout-1792000000000000001");
+        for path in [&free, &held] {
+            fs::create_dir_all(path.join(".git")).expect("metadata-less checkout");
+            age_entry(path);
+        }
+        rooted_local_runner(&roots, "lab-local-prune-unowned", runner_root.path());
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg("sleep 30")
+            .current_dir(&held)
+            .spawn()
+            .expect("hold checkout cwd");
+
+        let (output, exit_code) = crate::workspace::sync::prune_workspaces(
+            "lab-local-prune-unowned",
+            RunnerWorkspacePruneOptions {
+                apply: true,
+                min_age_hours: 1,
+                limit: 10,
+                passes: 1,
+                cursor: None,
+                ..RunnerWorkspacePruneOptions::default()
+            },
+        )
+        .expect("prune unowned checkouts");
+        child.kill().expect("stop held process");
+        child.wait().expect("reap held process");
+
+        assert_eq!(exit_code, 0);
+        let removed = output
+            .removed
+            .iter()
+            .map(|entry| (entry.remote_path.clone(), entry.reason.clone()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            removed,
+            vec![(
+                free.display().to_string(),
+                "workspace_metadata_missing_expired".to_string()
+            )],
+            "{}",
+            prune_diagnosis(&output)
+        );
+        assert_eq!(output.skipped_live_count, 1, "{}", prune_diagnosis(&output));
+        assert!(!free.exists());
+        assert!(held.exists());
+    });
+}
+
 /// Age a Lab workspace entry past the prune age gate.
 fn age_entry(path: &Path) {
     let status = Command::new("touch")
@@ -1294,8 +1353,9 @@ fn write_family_workspace(path: &Path, local_path: &Path, run_id: Option<&str>) 
 /// `<checkout>-homeboy-artifacts` siblings, manual checkouts) were counted but
 /// never planned nor reported. Every top-level entry must be inventoried:
 /// stale workspaces behind a retained prefix are planned, orphaned artifact
-/// siblings are planned on their checkout ownership proof, and entries with
-/// no ownership proof are reported as unknown with a reason.
+/// siblings are planned on their checkout ownership proof, a Homeboy-named
+/// entry with no ownership proof is planned past the unowned age (#17239), and
+/// any other entry without proof is reported as unknown with a reason.
 #[test]
 fn prune_page_inventories_every_lab_workspace_family_behind_a_retained_prefix() {
     crate::test_support::with_isolated_home(|_| {
@@ -1342,8 +1402,11 @@ fn prune_page_inventories_every_lab_workspace_family_behind_a_retained_prefix() 
         write_family_workspace(&kept, &live_source, None);
         let kept_artifacts = root.join("zz-kept-checkout-homeboy-artifacts");
         fs::create_dir_all(kept_artifacts.join("provenance")).expect("kept artifacts");
-        // No ownership proof at all.
-        let manual = root.join("manual-checkout");
+        // No ownership proof at all: a Homeboy-named checkout past the unowned
+        // age, and a resident checkout with no Homeboy name.
+        let unowned = root.join("studio-cli-split-create-c1405-1792000000000000000");
+        fs::create_dir_all(unowned.join(".git")).expect("unowned checkout");
+        let manual = root.join("woocommerce");
         fs::create_dir_all(manual.join(".git")).expect("manual checkout");
         let stray = root.join("stray-file");
         fs::write(&stray, "stray").expect("stray file");
@@ -1382,6 +1445,10 @@ fn prune_page_inventories_every_lab_workspace_family_behind_a_retained_prefix() 
                 (path(&agent), "source_path_missing".to_string()),
                 (path(&baseline), "source_path_missing".to_string()),
                 (path(&fix_issue), "source_path_missing".to_string()),
+                (
+                    path(&unowned),
+                    "workspace_metadata_missing_expired".to_string()
+                ),
                 (
                     path(&orphan_artifacts),
                     "artifact_dir_checkout_missing".to_string()
@@ -1446,7 +1513,7 @@ fn prune_page_inventories_every_lab_workspace_family_behind_a_retained_prefix() 
                 + retained.iter().map(|(_, count)| count).sum::<usize>(),
             entry_count
         );
-        assert!(young.exists() && orphan_artifacts.exists() && manual.exists());
+        assert!(young.exists() && orphan_artifacts.exists() && unowned.exists());
 
         let (applied, _) = crate::workspace::sync::prune_workspaces(
             "lab-local-prune-families",
@@ -1460,8 +1527,8 @@ fn prune_page_inventories_every_lab_workspace_family_behind_a_retained_prefix() 
             },
         )
         .expect("prune apply");
-        assert_eq!(applied.removed.len(), 4, "{}", prune_diagnosis(&applied));
-        for removed in [&agent, &baseline, &fix_issue, &orphan_artifacts] {
+        assert_eq!(applied.removed.len(), 5, "{}", prune_diagnosis(&applied));
+        for removed in [&agent, &baseline, &fix_issue, &unowned, &orphan_artifacts] {
             assert!(!removed.exists(), "{}", removed.display());
         }
         for removed in [&agent, &baseline, &fix_issue] {
@@ -1521,6 +1588,52 @@ fn ssh_orphan_artifact_dir_delete_revalidates_checkout_absence() {
         String::from_utf8_lossy(&foreign.stdout),
         "unknown:workspace_path"
     );
+}
+
+#[test]
+fn ssh_unowned_entry_delete_revalidates_metadata_absence() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path().join("_lab_workspaces");
+    let checkout = root.join("old-checkout");
+    fs::create_dir_all(checkout.join(".git")).expect("checkout");
+    fs::create_dir_all(workspace_metadata_file(&checkout).parent().unwrap())
+        .expect("state sibling");
+    fs::write(workspace_metadata_file(&checkout), "{}").expect("metadata");
+    let delete = |path: &Path| {
+        Command::new("sh")
+            .arg("-c")
+            .arg(ssh_prune_delete_unowned_entry_command(
+                &root.display().to_string(),
+                &path.display().to_string(),
+            ))
+            .output()
+            .expect("run unowned delete")
+    };
+
+    // Metadata written since the scan makes the entry owned again.
+    let output = delete(&checkout);
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "unknown:workspace_metadata_present"
+    );
+    assert!(checkout.exists());
+
+    fs::remove_file(workspace_metadata_file(&checkout)).expect("remove metadata");
+    let output = delete(&checkout);
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "removed");
+    assert!(!checkout.exists());
+    assert!(!workspace_metadata_file(&checkout)
+        .parent()
+        .unwrap()
+        .exists());
+
+    let outside = temp.path().join("outside");
+    fs::create_dir_all(&outside).expect("outside");
+    assert_eq!(
+        String::from_utf8_lossy(&delete(&outside).stdout),
+        "unknown:workspace_path"
+    );
+    assert!(outside.exists());
 }
 
 #[test]
