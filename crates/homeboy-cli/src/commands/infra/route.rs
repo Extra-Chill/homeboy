@@ -1132,9 +1132,25 @@ fn admit_unmaterialized_cook(
             &cook_id,
         )?
     };
-    if !cli.detach_after_handoff {
+    report_unmaterialized_cook_admission(cli, &record, readiness_state, output_file)
+}
+
+/// Report a recorded unmaterialized Cook admission. The local controller
+/// daemon schedules it, so the submitter starts that daemon first (#17506);
+/// only a daemon that cannot be started is reported as the blocker, with its
+/// start error and recovery (#16181). A `--wait` submission waits on the
+/// scheduled work only when the daemon is up.
+fn report_unmaterialized_cook_admission(
+    cli: &Cli,
+    record: &agent_task_lifecycle::AgentTaskRunRecord,
+    readiness_state: &str,
+    output_file: Option<&str>,
+) -> homeboy::core::Result<i32> {
+    let cook_id = &record.run_id;
+    let blocker = homeboy::agents::agent_task_service::ensure_scheduling_daemon();
+    if !cli.detach_after_handoff && blocker.is_none() {
         let (output, exit_code) =
-            crate::commands::agent_task::status::wait_for_terminal_status(&cook_id)?;
+            crate::commands::agent_task::status::wait_for_terminal_status(cook_id)?;
         let stdout = serde_json::to_string_pretty(&output).map_err(|error| {
             Error::internal_json(
                 error.to_string(),
@@ -1147,7 +1163,7 @@ fn admit_unmaterialized_cook(
         println!("{stdout}");
         return Ok(exit_code);
     }
-    let admission = record.metadata["unmaterialized_cook_admission"].clone();
+    let admission = &record.metadata["unmaterialized_cook_admission"];
     let mut output = serde_json::json!({
         "schema": "homeboy/unmaterialized-cook-admission-result/v1",
         "status": "pending_resource_admission",
@@ -1159,18 +1175,8 @@ fn admit_unmaterialized_cook(
         "commands": admission["commands"],
         "execution_scheduling": record.metadata["execution_scheduling"],
     });
-    // The queued admission is scheduled by the local controller daemon. When
-    // that daemon is down the wait cannot ever be scheduled, so the admission
-    // result names the dead daemon and its recovery instead of leaving the
-    // operator waiting on nothing (#16181). A live (or unobservable) daemon
-    // keeps today's output unchanged.
-    if let Some(daemon) = homeboy::agents::agent_task_service::scheduling_daemon_evidence()
-        .filter(|daemon| !daemon.admits_work)
-    {
-        output["blocker"] = serde_json::json!({
-            "daemon": daemon,
-            "next_action": "homeboy daemon recover",
-        });
+    if let Some(blocker) = blocker {
+        output["blocker"] = blocker;
     }
     let stdout = serde_json::to_string_pretty(&output).map_err(|error| {
         Error::internal_json(

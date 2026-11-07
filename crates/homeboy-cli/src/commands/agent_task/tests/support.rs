@@ -305,10 +305,12 @@ impl AgentTaskExecutorAdapter for ApplyArtifactExecutor {
     }
 }
 
+/// In-process commands that queue daemon-scheduled work never spawn this test
+/// binary as the scheduling daemon.
 pub(crate) fn with_temp_home(run: impl FnOnce()) {
     with_isolated_home(|_| {
         homeboy::agents::agent_task_lifecycle::clear_runner_continuation_provider_for_test();
-        run();
+        homeboy::agents::agent_task_service::with_scheduling_daemon_start(|| Ok(()), run);
     });
 }
 

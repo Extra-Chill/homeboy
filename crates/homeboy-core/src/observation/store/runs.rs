@@ -1560,6 +1560,25 @@ impl ObservationStore {
         }))
     }
 
+    /// True while this store holds an unmaterialized Cook admission that is
+    /// neither materialized nor terminal. The local controller daemon schedules
+    /// those admissions from this same store, so it must stay up while one is
+    /// pending (#17506). Materialization terminates the parent record, so the
+    /// live-state filter alone excludes it. Reads the active-scope partial
+    /// index's rows only.
+    pub fn has_pending_unmaterialized_cook_admission(&self) -> Result<bool> {
+        self.connection
+            .query_row(
+                "SELECT EXISTS (SELECT 1 FROM runs
+                 WHERE kind = 'agent-task'
+                   AND json_extract(metadata_json, '$.agent_task_run.state') IN ('queued', 'running')
+                   AND json_type(metadata_json, '$.agent_task_run.metadata.unmaterialized_cook_admission') = 'object')",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(sqlite_error("read pending unmaterialized Cook admissions"))
+    }
+
     pub fn list_runs(&self, filter: RunListFilter) -> Result<Vec<RunRecord>> {
         Ok(self.list_runs_page(filter)?.runs)
     }
