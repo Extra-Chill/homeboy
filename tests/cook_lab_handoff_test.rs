@@ -547,7 +547,14 @@ fn cook_accepts_local_detachment_after_materializing_an_executable_attempt() {
                 ]
                 .iter()
                 .filter_map(|pointer| status.pointer(pointer).and_then(serde_json::Value::as_str))
-                .any(|state| matches!(state, "succeeded" | "failed" | "cancelled"))
+                // Cancellation can retain an already-harvested candidate.
+                // That is terminal too; it must not keep this cleanup waiting.
+                .any(|state| {
+                    matches!(
+                        state,
+                        "succeeded" | "failed" | "cancelled" | "candidate_recoverable"
+                    )
+                })
             });
         if terminal {
             break;

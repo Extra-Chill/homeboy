@@ -27,6 +27,7 @@ enum TestRunnerReconciliation {
     Snapshots(Vec<homeboy_core::api_jobs::RunnerJobLogSnapshot>),
     ConfirmedAbsent(usize),
     Unconfirmed,
+    Retained(homeboy_core::observation::RunRecord),
 }
 
 struct ReconciliationProvider {
@@ -35,6 +36,17 @@ struct ReconciliationProvider {
 }
 
 impl RunnerContinuationProvider for ReconciliationProvider {
+    fn runner_run_record(
+        &self,
+        _runner_id: &str,
+        _run_id: &str,
+    ) -> Result<Option<homeboy_core::observation::RunRecord>> {
+        Ok(match self.result.lock().unwrap().as_ref() {
+            Some(TestRunnerReconciliation::Retained(run)) => Some(run.clone()),
+            _ => None,
+        })
+    }
+
     fn runner_job_log_snapshot(
         &self,
         _runner_id: &str,
@@ -61,7 +73,9 @@ impl RunnerContinuationProvider for ReconciliationProvider {
                 }
             }
             Some(
-                TestRunnerReconciliation::Unconfirmed | TestRunnerReconciliation::Snapshots(_),
+                TestRunnerReconciliation::Unconfirmed
+                | TestRunnerReconciliation::Snapshots(_)
+                | TestRunnerReconciliation::Retained(_),
             )
             | None => RunnerJobReconciliation::UnconfirmedAbsence,
         }
@@ -243,6 +257,39 @@ fn retained_terminal_run(record: &AgentTaskRunRecord) -> homeboy_core::observati
         metadata_json: json!({"agent_task_run": remote, "agent_task_aggregate": aggregate}),
         ..Default::default()
     }
+}
+
+#[test]
+fn reconcile_observes_terminal_lab_attempt_while_controller_is_running() {
+    with_isolated_home(|_| {
+        let record = accepted_detached_handoff("retained-reconcile");
+        let store = test_lifecycle_store();
+        assert_eq!(record.state(), AgentTaskRunState::Running);
+        let _provider = RunnerContinuationTestGuard::install(Box::new(ReconciliationProvider {
+            result: Mutex::new(Some(TestRunnerReconciliation::Retained(
+                retained_terminal_run(&record),
+            ))),
+            recovered_runner_job_id: Mutex::new(None),
+        }));
+        let preview = crate::agent_task_service::reconcile_run(&record.run_id, true).unwrap();
+        assert_eq!(
+            preview.runs[0].authoritative_state,
+            AgentTaskRunState::Failed
+        );
+        assert_eq!(
+            store.read_record(&record.run_id).unwrap().state(),
+            AgentTaskRunState::Running
+        );
+        let applied = crate::agent_task_service::reconcile_run(&record.run_id, false).unwrap();
+        assert_eq!(
+            applied.runs[0].authoritative_state,
+            AgentTaskRunState::Failed
+        );
+        assert_eq!(
+            status(&record.run_id).unwrap().state(),
+            AgentTaskRunState::Failed
+        );
+    });
 }
 
 #[test]

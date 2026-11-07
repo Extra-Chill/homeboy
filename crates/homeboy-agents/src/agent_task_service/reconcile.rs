@@ -123,16 +123,24 @@ fn rooted_exact_status(
 /// Apply refreshes through [`rooted_exact_status`], which persists the runner,
 /// candidate, and admission projections it observes. A preview must not write
 /// (#13697: reads never mutate; reconciliation is the explicit action), so it
-/// reads the durable record as stored. Apply still re-reads authoritatively
-/// immediately before acting, so a preview can only over-report candidates,
-/// never cancel one.
+/// projects retained runner authority in memory using the same validated reader.
+/// Apply still re-reads authoritatively immediately before acting; preview
+/// never commits the projection or cancels a run.
 fn decision_status(
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     run_id: &str,
     dry_run: bool,
 ) -> Result<agent_task_lifecycle::AgentTaskRunRecord> {
     if dry_run {
-        agent_task_lifecycle::exact_record_in_store(lifecycle_store, run_id)
+        let mut record = agent_task_lifecycle::exact_record_in_store(lifecycle_store, run_id)?;
+        if !record.state().is_terminal() {
+            agent_task_lifecycle::observe_terminal_runner_record_in_store(
+                lifecycle_store,
+                &mut record,
+                false,
+            )?;
+        }
+        Ok(record)
     } else {
         rooted_exact_status(lifecycle_store, run_id)
     }

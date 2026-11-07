@@ -3904,7 +3904,15 @@ pub fn record_provider_execution_terminal_with_model_in_store(
         if let Some(model) = model.map(str::trim).filter(|model| !model.is_empty()) {
             execution["model"] = json!(model);
         }
-        execution["finished_at"] = json!(now_timestamp());
+        let now = now_timestamp();
+        execution["finished_at"] = json!(now);
+        let metadata = record.ensure_metadata_object();
+        metadata.insert("phase".to_string(), json!("provider_done"));
+        metadata.insert(
+            "phase_activity".to_string(),
+            json!("provider exited; harvesting candidate"),
+        );
+        metadata.insert("phase_started_at".to_string(), json!(now));
         found = true;
         true
     })?;

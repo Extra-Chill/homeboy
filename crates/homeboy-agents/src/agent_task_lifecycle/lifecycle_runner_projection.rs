@@ -41,6 +41,15 @@ pub(crate) fn project_terminal_runner_record_in_store(
     record: &mut AgentTaskRunRecord,
     source: &homeboy_core::observation::RunRecord,
 ) -> Result<bool> {
+    project_terminal_runner_record(lifecycle_store, record, source, true)
+}
+
+pub(crate) fn project_terminal_runner_record(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    record: &mut AgentTaskRunRecord,
+    source: &homeboy_core::observation::RunRecord,
+    persist: bool,
+) -> Result<bool> {
     if record.state().is_terminal() {
         return Ok(false);
     }
@@ -121,15 +130,44 @@ pub(crate) fn project_terminal_runner_record_in_store(
         json!({"source": "durable_runner_run_record", "run_id": source.id, "runner_job_id": job_id, "state": remote.state(),
             "source_finished_at": source.finished_at, "execution_context": remote.metadata["runner_execution_context"]}),
     );
-    apply_aggregate_transition_in_store(
-        lifecycle_store,
-        AgentTaskAggregateTransition {
+    if persist {
+        apply_aggregate_transition_in_store(
+            lifecycle_store,
+            AgentTaskAggregateTransition {
+                record,
+                plan: &plan,
+                aggregate: &aggregate,
+            },
+        )?;
+    } else {
+        apply_aggregate_to_record(
             record,
-            plan: &plan,
-            aggregate: &aggregate,
-        },
-    )?;
+            &plan,
+            &aggregate,
+            lifecycle_store
+                .aggregate_path(&source.id)
+                .display()
+                .to_string(),
+        );
+    }
     Ok(true)
+}
+
+/// Relay live daemon progress through the canonical snapshot projection.
+/// Generic commands and already-terminal controller records have no live
+/// agent-task projection to update.
+pub fn relay_runner_progress(
+    run_id: &str,
+    snapshot: &homeboy_core::api_jobs::RunnerJobLogSnapshot,
+) -> Result<()> {
+    let store = AgentTaskLifecycleStore::from_environment()?;
+    let Ok(mut record) = store.read_record(run_id) else {
+        return Ok(());
+    };
+    if record.state().is_terminal() || snapshot.job.status.is_terminal() {
+        return Ok(());
+    }
+    reconcile_runner_job_snapshot_in_store(&store, &mut record, snapshot)
 }
 
 pub(crate) fn reconcile_runner_job_snapshot(
@@ -293,6 +331,14 @@ pub(crate) fn reconcile_runner_job_snapshot_in_store(
                     "provider/executor process is active"
                 }),
             );
+            if let Some(phase) = snapshot.events.iter().rev().find_map(|event| {
+                (event.kind == homeboy_core::api_jobs::JobEventKind::Progress)
+                    .then(|| event.data.as_ref()?.get("phase")?.as_str())
+                    .flatten()
+            }) {
+                metadata.insert("phase".to_string(), json!(phase));
+                metadata.insert("phase_activity".to_string(), json!(phase));
+            }
             metadata.insert(
                 "provider_state".to_string(),
                 json!(if queued { "queued" } else { "active" }),

@@ -227,16 +227,8 @@ pub(crate) fn reconcile_runner_job_state_in_store(
     ) else {
         return Ok(());
     };
-    if let Ok(Some(source)) = super::runner_continuation::with_runner_continuation(|p| {
-        p.runner_run_record(&runner_id, &record.run_id)
-    }) {
-        if super::lifecycle_runner_projection::project_terminal_runner_record_in_store(
-            lifecycle_store,
-            record,
-            &source,
-        )? {
-            return Ok(());
-        }
+    if observe_terminal_runner_record_in_store(lifecycle_store, record, true)? {
+        return Ok(());
     }
     match super::runner_continuation::with_runner_continuation(|p| {
         p.reconcile_runner_job(&runner_id, &job_id)
@@ -258,6 +250,37 @@ pub(crate) fn reconcile_runner_job_state_in_store(
             }
             Ok(())
         }
+    }
+}
+
+/// Observe retained runner authority without requiring a live transport job.
+/// Preview uses the same identity and aggregate validation as apply, but writes nothing.
+pub(crate) fn observe_terminal_runner_record_in_store(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    record: &mut AgentTaskRunRecord,
+    persist: bool,
+) -> Result<bool> {
+    let Some(runner_id) = record.runner_id() else {
+        return Ok(false);
+    };
+    let source = super::runner_continuation::with_runner_continuation(|p| {
+        p.runner_run_record(runner_id, &record.run_id)
+    });
+    match source {
+        Ok(Some(source)) if persist => {
+            super::lifecycle_runner_projection::project_terminal_runner_record_in_store(
+                lifecycle_store,
+                record,
+                &source,
+            )
+        }
+        Ok(Some(source)) => super::lifecycle_runner_projection::project_terminal_runner_record(
+            lifecycle_store,
+            record,
+            &source,
+            false,
+        ),
+        _ => Ok(false),
     }
 }
 

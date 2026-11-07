@@ -1226,6 +1226,18 @@ impl AgentTaskScheduler {
                             });
                         }
                     }
+                    if let (Some(run_id), Ok(store)) = (
+                        running_task.run_id.as_deref(),
+                        self.durable_lifecycle_store(),
+                    ) {
+                        let _ = crate::agent_task_lifecycle::record_cook_progress_in_store(
+                            store,
+                            run_id,
+                            "harvesting",
+                            result.attempt,
+                            Some("provider exited; harvesting candidate"),
+                        );
+                    }
                     if let Err(error) = harvest_candidate_commit_in_store(
                         &mut outcome,
                         &running_task,

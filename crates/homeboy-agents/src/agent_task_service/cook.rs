@@ -6747,11 +6747,9 @@ fn run_cook_spine(
                                     Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
                                     Err(mpsc::RecvTimeoutError::Timeout) => {}
                                 }
-                                // Scheduler terminalization precedes
-                                // controller-owned artifact harvesting. Once no
-                                // provider execution is active, this heartbeat
-                                // would otherwise sample only its own `ps`
-                                // subprocess while that cleanup completes.
+                                // The scheduler records harvesting at provider exit.
+                                // Stop provider supervision rather than overwriting
+                                // subsequent phases with synthetic harvest heartbeats.
                                 if !agent_task_lifecycle::has_active_provider_execution_in_store(heartbeat_lifecycle_store, &heartbeat_run_id,
                                 )
                                 .unwrap_or(true)
