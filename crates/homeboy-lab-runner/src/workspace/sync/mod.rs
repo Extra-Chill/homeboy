@@ -3373,6 +3373,18 @@ fn revalidate_candidate_liveness(
             RunnerKind::Ssh => liveness("inactive", Vec::new()),
         });
     }
+    if candidate.reason == UNOWNED_ENTRY_EXPIRED_REASON {
+        return Ok(match runner.kind {
+            RunnerKind::Local
+                if Path::new(&workspace_metadata_path(&candidate.remote_path)).exists() =>
+            {
+                liveness("unknown", vec!["workspace_metadata_present".to_string()])
+            }
+            RunnerKind::Local => local_process_liveness(Path::new(&candidate.remote_path)),
+            // Revalidated atomically with deletion on the runner.
+            RunnerKind::Ssh => liveness("inactive", Vec::new()),
+        });
+    }
     let metadata = match runner.kind {
         RunnerKind::Local => {
             let path = PathBuf::from(workspace_metadata_path(&candidate.remote_path));
@@ -3679,6 +3691,14 @@ pub(crate) fn ssh_process_liveness_command(path: &str) -> String {
 const PRUNE_SCAN_STATUS_PREFIX: &str = "__homeboy_prune_scan__\t";
 /// Candidate reason for a run artifact sibling whose checkout no longer exists.
 const ARTIFACT_DIR_CHECKOUT_MISSING_REASON: &str = "artifact_dir_checkout_missing";
+/// Candidate reason for a Homeboy-named entry (`<name>-<19-digit nanosecond
+/// stamp>`) with no ownership record past [`UNOWNED_ENTRY_MIN_AGE_SECONDS`].
+const UNOWNED_ENTRY_EXPIRED_REASON: &str = "workspace_metadata_missing_expired";
+/// Age past which a Homeboy-named entry with no ownership record is
+/// reclaimable once no process holds it: a checkout from before metadata, or
+/// one whose sync died before writing it (#17239). Entries without the stamp,
+/// such as a resident `woocommerce` checkout, are never reclaimed this way.
+const UNOWNED_ENTRY_MIN_AGE_SECONDS: u64 = 7 * 24 * 60 * 60;
 
 /// One inventoried top-level entry, as reported by [`prune_scan_command`].
 enum PruneScanRow {
@@ -3688,10 +3708,14 @@ enum PruneScanRow {
         remote_path: String,
         encoded_metadata: String,
     },
-    /// Old `<checkout>-homeboy-artifacts` sibling whose checkout is gone.
-    OrphanArtifactDir {
+    /// Old entry with no ownership record of its own: a `-homeboy-artifacts`
+    /// or `-homeboy-state` sibling whose checkout is gone, or a Homeboy-named
+    /// metadata-less checkout past [`UNOWNED_ENTRY_MIN_AGE_SECONDS`]. Only
+    /// liveness keeps it.
+    Unowned {
         age_seconds: u64,
         remote_path: String,
+        reason: &'static str,
     },
     Retained {
         reason: String,
@@ -3721,7 +3745,7 @@ enum PruneScanOutcome {
 
 struct PlannedPruneEntry {
     entry: RunnerWorkspacePruneEntry,
-    /// Runner-workspace metadata; `None` for orphaned artifact siblings.
+    /// Runner-workspace metadata; `None` for unowned entries.
     metadata: Option<serde_json::Value>,
 }
 
@@ -3756,9 +3780,15 @@ fn parse_prune_scan_output(stdout: &str) -> Result<PruneScanPage> {
                 remote_path: path.to_string(),
                 encoded_metadata: metadata.to_string(),
             },
-            ["artifact", age, path] => PruneScanRow::OrphanArtifactDir {
+            ["artifact", age, path] => PruneScanRow::Unowned {
                 age_seconds: number(age),
                 remote_path: path.to_string(),
+                reason: ARTIFACT_DIR_CHECKOUT_MISSING_REASON,
+            },
+            ["unowned", age, path] => PruneScanRow::Unowned {
+                age_seconds: number(age),
+                remote_path: path.to_string(),
+                reason: UNOWNED_ENTRY_EXPIRED_REASON,
             },
             ["retained", reason, _path] => PruneScanRow::Retained {
                 reason: reason.to_string(),
@@ -3785,8 +3815,10 @@ fn parse_prune_scan_output(stdout: &str) -> Result<PruneScanPage> {
 /// Runner workspaces (every `sync_workspace` checkout, whatever its name
 /// family) are proven by `<checkout>-homeboy-state/runner-workspace.json`;
 /// state and run artifact siblings are proven by their `<checkout>-homeboy-state`
-/// / `<checkout>-homeboy-artifacts` names and follow the checkout they belong to. Anything else has no ownership proof and is
-/// reported as unknown rather than silently skipped or deleted.
+/// / `<checkout>-homeboy-artifacts` names and follow the checkout they belong to.
+/// An entry with no ownership proof is reported as unknown, unless it carries
+/// a Homeboy name stamp and is older than [`UNOWNED_ENTRY_MIN_AGE_SECONDS`];
+/// then it is planned on liveness alone.
 fn classify_prune_scan_row(runner: &super::super::Runner, row: PruneScanRow) -> PruneScanOutcome {
     let planned = |remote_path: String, source_path: String, age_seconds: u64, reason: String| {
         RunnerWorkspacePruneEntry {
@@ -3811,20 +3843,16 @@ fn classify_prune_scan_row(runner: &super::super::Runner, row: PruneScanRow) -> 
             remote_path,
             reason,
         },
-        PruneScanRow::OrphanArtifactDir {
+        PruneScanRow::Unowned {
             age_seconds,
             remote_path,
+            reason,
         } => {
             let checkout = artifact_dir_checkout(&remote_path)
-                .unwrap_or_default()
+                .unwrap_or(&remote_path)
                 .to_string();
             PruneScanOutcome::Planned(PlannedPruneEntry {
-                entry: planned(
-                    remote_path,
-                    checkout,
-                    age_seconds,
-                    ARTIFACT_DIR_CHECKOUT_MISSING_REASON.to_string(),
-                ),
+                entry: planned(remote_path, checkout, age_seconds, reason.to_string()),
                 metadata: None,
             })
         }
@@ -3979,7 +4007,7 @@ fn prune_candidate_reason_from_decoded_metadata(
 ///
 /// Walks every top-level entry after `after` in byte order and prints one row
 /// per entry (see [`PruneScanRow`]). Only rows that need controller-side
-/// classification (`workspace`, `artifact`) count against `row_budget`; the
+/// classification (`workspace`, `artifact`, `unowned`) count against `row_budget`; the
 /// walk also stops once `scan_budget_seconds` is spent, but always inspects at
 /// least one entry so every page advances. Nothing is size-measured here:
 /// only planned entries are measured, by [`prune_size_command`].
@@ -3992,7 +4020,7 @@ pub(crate) fn prune_scan_command(
 ) -> String {
     format!(
         concat!(
-            "root={root}; after={after}; meta_name={meta}; suffix={suffix}; state_suffix={state_suffix}; min_age={min_age}; ",
+            "root={root}; after={after}; meta_name={meta}; suffix={suffix}; state_suffix={state_suffix}; min_age={min_age}; unowned_min_age={unowned_min_age}; ",
             "now=$(date +%s); deadline=$((now + {scan_budget})); ",
             "if [ -d \"$root\" ]; then LC_ALL=C find \"$root\" -mindepth 1 -maxdepth 1 -print | LC_ALL=C sort | {{ ",
             "scanned=0; rows=0; complete=complete; last=; ",
@@ -4009,7 +4037,7 @@ pub(crate) fn prune_scan_command(
             "else case \"$dir\" in ",
             "*\"$suffix\") checkout=${{dir%\"$suffix\"}}; if [ -e \"$checkout\" ] || [ -L \"$checkout\" ]; then printf \"retained\\tartifact_dir_owned_by_checkout\\t%s\\n\" \"$dir\"; continue; fi; kind=artifact ;; ",
             "*\"$state_suffix\") checkout=${{dir%\"$state_suffix\"}}; if [ -e \"$checkout\" ] || [ -L \"$checkout\" ]; then printf \"retained\\tstate_dir_owned_by_checkout\\t%s\\n\" \"$dir\"; continue; fi; kind=artifact ;; ",
-            "*) printf \"unknown\\tworkspace_metadata_missing\\t%s\\n\" \"$dir\"; continue ;; ",
+            "*) stamp=${{dir##*-}}; case \"$stamp\" in ''|*[!0-9]*) stamp= ;; esac; if [ \"${{#stamp}}\" -ne 19 ] || [ \"$age\" -lt \"$unowned_min_age\" ]; then printf \"unknown\\tworkspace_metadata_missing\\t%s\\n\" \"$dir\"; continue; fi; kind=unowned ;; ",
             "esac; fi; ",
             "rows=$((rows + 1)); printf \"%s\\t%s\\t%s\" \"$kind\" \"$age\" \"$dir\"; ",
             "if [ \"$kind\" = workspace ]; then printf \"\\t\"; base64 < \"$meta\" | tr -d \"\\n\"; fi; printf \"\\n\"; ",
@@ -4022,6 +4050,7 @@ pub(crate) fn prune_scan_command(
         state_suffix = shell::quote_arg(RUNNER_WORKSPACE_STATE_DIR_SUFFIX),
         suffix = shell::quote_arg(RUNNER_ARTIFACT_ROOT_DIR_SUFFIX),
         min_age = shell::quote_arg(&min_age.to_string()),
+        unowned_min_age = min_age.max(UNOWNED_ENTRY_MIN_AGE_SECONDS),
         row_budget = row_budget,
         scan_budget = scan_budget_seconds,
     )
@@ -4141,6 +4170,8 @@ fn remove_ssh_prune_candidate(
     client.env.extend(runner.env.clone());
     let command = if candidate.reason == ARTIFACT_DIR_CHECKOUT_MISSING_REASON {
         ssh_prune_delete_orphan_artifact_dir_command(root, &candidate.remote_path)
+    } else if candidate.reason == UNOWNED_ENTRY_EXPIRED_REASON {
+        ssh_prune_delete_unowned_entry_command(root, &candidate.remote_path)
     } else if candidate.reason == STALE_MATERIALIZED_WORKSPACE_REASON {
         let metadata_path = PathBuf::from(workspace_metadata_path(&candidate.remote_path));
         let metadata_command = format!(
@@ -4267,6 +4298,23 @@ pub(crate) fn ssh_prune_delete_orphan_artifact_dir_command(
         path = shell::quote_arg(remote_path),
         suffix = shell::quote_arg(RUNNER_ARTIFACT_ROOT_DIR_SUFFIX),
         state_suffix = shell::quote_arg(RUNNER_WORKSPACE_STATE_DIR_SUFFIX),
+        probe_and_delete = SSH_PRUNE_PROBE_AND_DELETE,
+    )
+}
+
+/// Delete an entry with no ownership record, revalidating at the destructive
+/// boundary that it still has none and no process owns it.
+pub(crate) fn ssh_prune_delete_unowned_entry_command(root: &str, remote_path: &str) -> String {
+    format!(
+        concat!(
+            "root={root}; p={path}; meta_rel={meta}; ",
+            "case \"$p\" in \"$root\"/*) ;; *) printf unknown:workspace_path; exit 0 ;; esac; ",
+            "[ -e \"$p$meta_rel\" ] && {{ printf unknown:workspace_metadata_present; exit 0; }}; ",
+            "{probe_and_delete}"
+        ),
+        root = shell::quote_arg(root),
+        path = shell::quote_arg(remote_path),
+        meta = shell::quote_arg(&workspace_metadata_relative_to_checkout()),
         probe_and_delete = SSH_PRUNE_PROBE_AND_DELETE,
     )
 }
