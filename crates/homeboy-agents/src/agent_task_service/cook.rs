@@ -2165,14 +2165,9 @@ fn canonical_finalization_recovery_run_id_with_stores(
 
 fn canonical_finalization_eligible(
     promotion: &AgentTaskPromotionReport,
-
     has_valid_review_form: bool,
 ) -> bool {
-    matches!(
-        promotion.status,
-        AgentTaskPromotionStatus::Applied | AgentTaskPromotionStatus::GateFailed
-    ) && promotion.finalization_eligible()
-        && has_valid_review_form
+    promotion.applied_with_passing_verdict() && has_valid_review_form
 }
 
 /// Read finalization from the canonical selected attempt or its authenticated

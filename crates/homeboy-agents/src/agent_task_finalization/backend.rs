@@ -1534,8 +1534,8 @@ mod remote_base_tests {
 
     use homeboy_core::test_support::run_git_command as git;
 
-    /// `GIT_SSH_COMMAND` and the `GIT_CONFIG_*` rewrite layers are
-    /// process-global, so tests that set them must not overlap.
+    /// `GIT_SSH_COMMAND` is process-global, so tests that set it must not
+    /// overlap. Rewrites go in repo-local config, never `GIT_CONFIG_*` env.
     static PUSH_TRANSPORT_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
     fn push_transport_env_lock() -> MutexGuard<'static, ()> {
@@ -1936,14 +1936,15 @@ mod remote_base_tests {
         // same env-configured rewrite the host policy would apply, then
         // retry finalization. The retry pushes the same commit exactly once.
         drop(_fixture_ssh);
-        let _count = homeboy_core::test_support::EnvVarGuard::set("GIT_CONFIG_COUNT", "1");
-        let _key = homeboy_core::test_support::EnvVarGuard::set(
-            "GIT_CONFIG_KEY_0",
-            format!("url.{}.pushInsteadOf", origin.path().display()),
-        );
-        let _value = homeboy_core::test_support::EnvVarGuard::set(
-            "GIT_CONFIG_VALUE_0",
-            "git@git.example.test:acme/repo.git",
+        // Repo-local, not process-global GIT_CONFIG_* env: a partially set
+        // env layer would break every git command concurrent tests spawn.
+        git(
+            repo.path(),
+            &[
+                "config",
+                &format!("url.{}.pushInsteadOf", origin.path().display()),
+                "git@git.example.test:acme/repo.git",
+            ],
         );
 
         let tracking = RealAgentTaskPrFinalizationBackend
@@ -2051,14 +2052,15 @@ mod remote_base_tests {
         // push destination, which is reachable, without Git ever contacting
         // the dead fetch URL.
         drop(_fixture_ssh);
-        let _count = homeboy_core::test_support::EnvVarGuard::set("GIT_CONFIG_COUNT", "1");
-        let _key = homeboy_core::test_support::EnvVarGuard::set(
-            "GIT_CONFIG_KEY_0",
-            format!("url.{}.pushInsteadOf", origin.path().display()),
-        );
-        let _value = homeboy_core::test_support::EnvVarGuard::set(
-            "GIT_CONFIG_VALUE_0",
-            "git@git.example.test:acme/repo.git",
+        // Repo-local, not process-global GIT_CONFIG_* env: a partially set
+        // env layer would break every git command concurrent tests spawn.
+        git(
+            repo.path(),
+            &[
+                "config",
+                &format!("url.{}.pushInsteadOf", origin.path().display()),
+                "git@git.example.test:acme/repo.git",
+            ],
         );
 
         assert_eq!(

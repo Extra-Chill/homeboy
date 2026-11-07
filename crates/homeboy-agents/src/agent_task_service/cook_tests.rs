@@ -7617,6 +7617,11 @@ fn reconstructed_cook_rejects_a_removed_managed_workspace_before_provider_execut
             ).expect("fixture workspace identity"),
             "branch": "fix/continuation",
             "base_ref": "main",
+            "workspace_identity": homeboy_core::worktree::task_worktree_workspace_identity(
+                "fixture",
+                &options.workspace.to_worktree,
+            )
+            .expect("task worktree identity"),
             "cleanup_policy": "remove_when_safe",
             "branch_cleanup_intent": "delete_when_merged",
             "created_at": "2026-01-01T00:00:00Z",

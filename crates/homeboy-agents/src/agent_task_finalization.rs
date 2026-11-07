@@ -1700,10 +1700,11 @@ fn validate_durable_publication_eligibility(
         ),
         Ok(crate::agent_task_promotion::AgentTaskPromotionCandidate::Git { .. })
     );
+    // The same passing verdict recovery step selection uses: a proven
+    // inherited failure passes and stays recorded as evidence (#17508).
     let green_gates = promotion.finalization_eligible();
-    let green_fingerprinted_candidate = fingerprinted_candidate
-        && promotion.status == crate::agent_task_promotion::AgentTaskPromotionStatus::Applied
-        && green_gates;
+    let green_fingerprinted_candidate =
+        fingerprinted_candidate && promotion.applied_with_passing_verdict();
     // Retry history is durable and intentionally retains failed attempts. It
     // must not veto publication when the canonical receipt for the task that
     // produced this promoted candidate records a successful attempt.
@@ -1780,14 +1781,12 @@ fn validate_durable_publication_eligibility(
                         || candidate_head.starts_with(candidate_ref))
             })
     });
-    let authenticated_external_adoption = promotion.status
-        == crate::agent_task_promotion::AgentTaskPromotionStatus::Applied
+    let authenticated_external_adoption = promotion.applied_with_passing_verdict()
         && promotion.provenance["adoption"]["source_run_id"]
             == promotion.source.run_id.clone().unwrap_or_default()
         && candidate_is_bound
         && adoption_model.is_some_and(is_concrete_model)
-        && committed_change_provenance
-        && green_gates;
+        && committed_change_provenance;
     if authenticated_external_adoption {
         return Ok(DurablePublicationEligibility::AuthenticatedExternalCandidateAdoption);
     }
