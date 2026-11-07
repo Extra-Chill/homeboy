@@ -24,6 +24,10 @@ pub struct ProjectComponentsOutput {
     pub status: ProjectComponentsStatus,
     pub component_ids: Vec<String>,
     pub component_count: usize,
+    /// Every component bound to the attached checkout, sorted by ID.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub attached_component_ids: Vec<String>,
+    /// Present only when exactly one component attached.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attached_component_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -38,6 +42,8 @@ pub struct ProjectComponentsOutput {
     pub batch: Option<BatchComponentAttachmentOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub monorepo: Option<MonorepoComponentAttachmentOutput>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub next_actions: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -55,6 +61,9 @@ pub struct MonorepoComponentAttachmentOutput {
     pub missing_count: usize,
     pub unrelated_count: usize,
     pub components: Vec<MonorepoComponentAttachmentItem>,
+    /// Human-readable lines separating deployable package components from
+    /// aggregate/repository components.
+    pub summary: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -62,6 +71,19 @@ pub struct MonorepoComponentAttachmentItem {
     pub id: String,
     pub path: String,
     pub status: String,
+    /// True when the component config declares a deploy artifact
+    /// (`build_artifact`) or package contract (`package_artifacts`).
+    pub deployable: bool,
+}
+
+/// Component selection derived from one monorepo attach-path plan. Dry-run and
+/// apply both build their result through [`plan_attach_path_selection`].
+#[derive(Debug, Clone)]
+struct AttachPathSelection {
+    attached_component_ids: Vec<String>,
+    attached_component_id: Option<String>,
+    next_actions: Vec<String>,
+    monorepo: MonorepoComponentAttachmentOutput,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -161,59 +183,119 @@ pub fn attach_component_path_report(
 ) -> Result<ProjectComponentsOutput> {
     let changes = rebase_monorepo_component_paths(project_id, local_path, dry_run)?;
     let project = load(project_id)?;
-    let attached_component_id = changes
-        .iter()
-        .find(|change| change.path == local_path.to_string_lossy())
-        .map(|change| change.id.clone());
+    let selection = plan_attach_path_selection(project_id, changes, dry_run, |path| {
+        crate::component::discover_from_portable(Path::new(path))
+            .is_some_and(|component| component_is_deployable(&component))
+    });
     let mut output = build_components_summary(
         project_id,
         "attach_path",
         &project,
-        attached_component_id,
         Some(local_path.to_string_lossy().to_string()),
     )?;
-    output.monorepo = Some(build_monorepo_attachment_output(changes, dry_run));
+    output.attached_component_ids = selection.attached_component_ids;
+    output.attached_component_id = selection.attached_component_id;
+    output.next_actions = selection.next_actions;
+    output.monorepo = Some(selection.monorepo);
     Ok(output)
 }
 
-fn build_monorepo_attachment_output(
+fn component_is_deployable(component: &Component) -> bool {
+    component.build_artifact.is_some() || !component.package_artifacts.is_empty()
+}
+
+fn plan_attach_path_selection(
+    project_id: &str,
     changes: Vec<MonorepoComponentPathChange>,
     dry_run: bool,
-) -> MonorepoComponentAttachmentOutput {
-    let mut output = MonorepoComponentAttachmentOutput {
+    is_deployable: impl Fn(&str) -> bool,
+) -> AttachPathSelection {
+    let mut monorepo = MonorepoComponentAttachmentOutput {
         dry_run,
         attached_count: 0,
         unchanged_count: 0,
         missing_count: 0,
         unrelated_count: 0,
         components: Vec::with_capacity(changes.len()),
+        summary: Vec::new(),
     };
+    let mut attached = Vec::new();
     for change in changes {
         let status = match change.status {
             MonorepoComponentPathStatus::Attached => {
-                output.attached_count += 1;
+                monorepo.attached_count += 1;
                 "attached"
             }
             MonorepoComponentPathStatus::Unchanged => {
-                output.unchanged_count += 1;
+                monorepo.unchanged_count += 1;
                 "unchanged"
             }
             MonorepoComponentPathStatus::Missing => {
-                output.missing_count += 1;
+                monorepo.missing_count += 1;
                 "missing"
             }
             MonorepoComponentPathStatus::Unrelated => {
-                output.unrelated_count += 1;
+                monorepo.unrelated_count += 1;
                 "unrelated"
             }
         };
-        output.components.push(MonorepoComponentAttachmentItem {
+        let bound = matches!(
+            change.status,
+            MonorepoComponentPathStatus::Attached | MonorepoComponentPathStatus::Unchanged
+        );
+        let deployable = bound && is_deployable(&change.path);
+        if bound {
+            attached.push((change.id.clone(), deployable));
+            monorepo.summary.push(if deployable {
+                format!("deployable {} ({})", change.id, change.path)
+            } else {
+                format!(
+                    "aggregate/repository {} ({}): not a deploy target",
+                    change.id, change.path
+                )
+            });
+        }
+        monorepo.components.push(MonorepoComponentAttachmentItem {
             id: change.id,
             path: change.path,
             status: status.to_string(),
+            deployable,
         });
     }
-    output
+    attached.sort();
+
+    let attached_component_ids: Vec<String> = attached.iter().map(|(id, _)| id.clone()).collect();
+    let deployable_ids: Vec<&str> = attached
+        .iter()
+        .filter(|(_, deployable)| *deployable)
+        .map(|(id, _)| id.as_str())
+        .collect();
+    let deploy_command = |component_id: &str| {
+        format!(
+            "homeboy deploy {} {}",
+            crate::engine::shell::quote_arg(project_id),
+            crate::engine::shell::quote_arg(component_id)
+        )
+    };
+    let next_actions = match deployable_ids.as_slice() {
+        [] => Vec::new(),
+        [only] => vec![format!("Deploy: {}", deploy_command(only))],
+        many => vec![format!(
+            "Choose one deployable component ({}): {}",
+            many.join(", "),
+            deploy_command("<component-id>")
+        )],
+    };
+
+    AttachPathSelection {
+        attached_component_id: match attached_component_ids.as_slice() {
+            [only] => Some(only.clone()),
+            _ => None,
+        },
+        attached_component_ids,
+        next_actions,
+        monorepo,
+    }
 }
 
 pub fn attach_component_paths_report(
@@ -358,6 +440,7 @@ pub fn attach_component_paths_report(
             .as_ref()
             .map(|project| project.components.len())
             .unwrap_or_default(),
+        attached_component_ids: Vec::new(),
         attached_component_id: None,
         attached_path: None,
         components: Vec::new(),
@@ -368,6 +451,7 @@ pub fn attach_component_paths_report(
         local_path_diagnostics: Vec::new(),
         batch: Some(batch),
         monorepo: None,
+        next_actions: Vec::new(),
     })
 }
 
@@ -426,13 +510,13 @@ pub fn remove_components_report(
 ) -> Result<ProjectComponentsOutput> {
     remove_components(project_id, component_ids)?;
     let project = load(project_id)?;
-    build_components_summary(project_id, "remove", &project, None, None)
+    build_components_summary(project_id, "remove", &project, None)
 }
 
 pub fn clear_components(project_id: &str) -> Result<ProjectComponentsOutput> {
     clear_component_attachments(project_id)?;
     let project = load(project_id)?;
-    build_components_summary(project_id, "clear", &project, None, None)
+    build_components_summary(project_id, "clear", &project, None)
 }
 
 fn build_components_output(
@@ -448,6 +532,7 @@ fn build_components_output(
         status: ProjectComponentsStatus::Complete,
         component_ids: project_component_ids(project),
         component_count: project.components.len(),
+        attached_component_ids: Vec::new(),
         attached_component_id: None,
         attached_path: None,
         components,
@@ -455,6 +540,7 @@ fn build_components_output(
         local_path_diagnostics: Vec::new(),
         batch: None,
         monorepo: None,
+        next_actions: Vec::new(),
     })
 }
 
@@ -488,6 +574,7 @@ fn build_components_list_output(
         },
         component_ids: project_component_ids(project),
         component_count: project.components.len(),
+        attached_component_ids: Vec::new(),
         attached_component_id: None,
         attached_path: None,
         components,
@@ -495,6 +582,7 @@ fn build_components_list_output(
         local_path_diagnostics,
         batch: None,
         monorepo: None,
+        next_actions: Vec::new(),
     })
 }
 
@@ -502,7 +590,6 @@ fn build_components_summary(
     project_id: &str,
     action: &str,
     project: &Project,
-    attached_component_id: Option<String>,
     attached_path: Option<String>,
 ) -> Result<ProjectComponentsOutput> {
     Ok(ProjectComponentsOutput {
@@ -511,21 +598,23 @@ fn build_components_summary(
         status: ProjectComponentsStatus::Complete,
         component_ids: project_component_ids(project),
         component_count: project.components.len(),
-        attached_component_id,
+        attached_component_ids: Vec::new(),
+        attached_component_id: None,
         attached_path,
         components: Vec::new(),
         warnings: component_local_path_blockers(project),
         local_path_diagnostics: Vec::new(),
         batch: None,
         monorepo: None,
+        next_actions: Vec::new(),
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        attach_component_paths_report, build_components_summary, list_components,
-        remove_components_report, BatchComponentAttachmentFailurePolicy,
+        attach_component_path_report, attach_component_paths_report, build_components_summary,
+        list_components, remove_components_report, BatchComponentAttachmentFailurePolicy,
         BatchComponentAttachmentInput, BatchComponentAttachmentItemStatus,
         BatchComponentAttachmentWorktreePolicy, ProjectComponentsStatus,
     };
@@ -580,16 +669,149 @@ mod tests {
             "site",
             "attach_path",
             &project,
-            Some("plugin".to_string()),
             Some("/repo/plugin".to_string()),
         )
         .expect("summary output");
 
         assert_eq!(output.component_ids, vec!["plugin"]);
         assert_eq!(output.component_count, 1);
-        assert_eq!(output.attached_component_id.as_deref(), Some("plugin"));
         assert!(output.components.is_empty());
         assert!(!output.warnings.is_empty());
+    }
+
+    /// Monorepo root `repo` (aggregate, no artifact) with leaf packages.
+    fn write_monorepo(root: &std::path::Path, leaves: &[(&str, bool)]) {
+        write_component(root, "repo");
+        for (id, deployable) in leaves {
+            let dir = root.join("packages").join(id);
+            fs::create_dir_all(&dir).expect("leaf directory");
+            let config = if *deployable {
+                format!(r#"{{"id":"{id}","build_artifact":"build/{id}.zip"}}"#)
+            } else {
+                format!(r#"{{"id":"{id}"}}"#)
+            };
+            fs::write(dir.join("homeboy.json"), config).expect("leaf config");
+        }
+    }
+
+    fn save_project_with(ids: &[&str]) {
+        save(&Project {
+            id: "site".to_string(),
+            components: ids
+                .iter()
+                .map(|id| ProjectComponentAttachment {
+                    id: id.to_string(),
+                    local_path: format!("/old/{id}"),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        })
+        .expect("save project");
+    }
+
+    #[test]
+    fn multi_component_attach_reports_plural_ids_without_singular() {
+        with_isolated_home(|home| {
+            let root = home.path().join("mono");
+            write_monorepo(&root, &[("leaf", true)]);
+            save_project_with(&["leaf"]);
+
+            let output = attach_component_path_report("site", &root, false).expect("attach output");
+
+            assert_eq!(output.attached_component_ids, vec!["leaf", "repo"]);
+            assert!(output.attached_component_id.is_none());
+            let json = serde_json::to_value(&output).expect("serialize");
+            assert!(json.get("attached_component_id").is_none());
+            let monorepo = output.monorepo.expect("monorepo output");
+            let repo = monorepo
+                .components
+                .iter()
+                .find(|item| item.id == "repo")
+                .expect("aggregate item");
+            assert!(!repo.deployable);
+            assert!(monorepo
+                .summary
+                .iter()
+                .any(|line| line.starts_with("aggregate/repository repo")));
+            assert!(monorepo
+                .summary
+                .iter()
+                .any(|line| line.starts_with("deployable leaf")));
+            assert_eq!(
+                output.next_actions,
+                vec!["Deploy: homeboy deploy site leaf"]
+            );
+        });
+    }
+
+    #[test]
+    fn single_component_attach_reports_plural_and_singular_ids() {
+        with_isolated_home(|home| {
+            let root = home.path().join("solo");
+            write_component(&root, "solo");
+            save_project_with(&[]);
+
+            let output = attach_component_path_report("site", &root, false).expect("attach output");
+
+            assert_eq!(output.attached_component_ids, vec!["solo"]);
+            assert_eq!(output.attached_component_id.as_deref(), Some("solo"));
+            assert!(
+                output.next_actions.is_empty(),
+                "non-deployable component must not be suggested as a deploy target"
+            );
+        });
+    }
+
+    #[test]
+    fn next_actions_require_selection_among_several_deployable_components() {
+        with_isolated_home(|home| {
+            let root = home.path().join("mono");
+            write_monorepo(&root, &[("alpha", true), ("beta", true), ("docs", false)]);
+            save_project_with(&["alpha", "beta", "docs"]);
+
+            let output = attach_component_path_report("site", &root, false).expect("attach output");
+
+            assert_eq!(
+                output.attached_component_ids,
+                vec!["alpha", "beta", "docs", "repo"]
+            );
+            assert_eq!(output.next_actions.len(), 1);
+            let action = &output.next_actions[0];
+            assert!(action.contains("alpha, beta"), "{action}");
+            assert!(!action.contains("docs"), "{action}");
+            assert!(!action.contains("repo"), "{action}");
+        });
+    }
+
+    #[test]
+    fn dry_run_and_apply_produce_identical_selection() {
+        with_isolated_home(|home| {
+            let root = home.path().join("mono");
+            write_monorepo(&root, &[("alpha", true), ("beta", false)]);
+            save_project_with(&["alpha", "beta"]);
+
+            let selection = |output: super::ProjectComponentsOutput| {
+                let mut json = serde_json::to_value(&output).expect("serialize");
+                let monorepo = json
+                    .get_mut("monorepo")
+                    .and_then(|value| value.as_object_mut())
+                    .expect("monorepo output");
+                monorepo.remove("dry_run");
+                serde_json::json!({
+                    "attached_component_ids": json["attached_component_ids"],
+                    "attached_component_id": json.get("attached_component_id"),
+                    "next_actions": json["next_actions"],
+                    "monorepo": json["monorepo"],
+                })
+            };
+
+            let dry_run =
+                attach_component_path_report("site", &root, true).expect("dry-run output");
+            let applied = attach_component_path_report("site", &root, false).expect("apply output");
+
+            assert_eq!(selection(dry_run), selection(applied));
+        });
     }
 
     #[test]

@@ -266,7 +266,18 @@ homeboy project components attach-path <project_id> <local_path>
 ```
 
 Attaches a repo path for a project component discovered via that repo's
-`homeboy.json`.
+`homeboy.json`. In a monorepo, every nested component already in the project
+(plus the root component) is rebound to the checkout. `--dry-run` and apply
+report the same selection:
+
+- `attached_component_ids`: every component bound to the checkout, sorted.
+- `attached_component_id`: present only when exactly one component attached.
+- `monorepo.components[].deployable`: `true` when the component declares a
+  deploy artifact (`build_artifact`) or package contract (`package_artifacts`).
+  Aggregate/repository components are `false` and are never suggested as deploy
+  targets; `monorepo.summary` lists both groups for humans.
+- `next_actions`: the deploy command when one component is deployable, or a
+  single entry asking you to choose among the deployable IDs when several are.
 
 #### `components remove`
 
