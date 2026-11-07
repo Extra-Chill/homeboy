@@ -7385,6 +7385,11 @@ fn reconstructed_cook_rejects_a_removed_managed_workspace_before_provider_execut
             "created_at": "2026-01-01T00:00:00Z",
             "state": "removed",
             "lifecycle_revision": 1,
+            "workspace_identity": homeboy_core::worktree::task_worktree_workspace_identity(
+                "fixture",
+                &options.workspace.to_worktree,
+            )
+            .expect("fixture workspace identity"),
         });
         std::fs::write(
             records.join(format!(
