@@ -385,12 +385,10 @@ impl AgentTaskPrFinalizationBackend for MockBackend {
 
     fn quarantine_capability(
         &mut self,
-        newly_created: bool,
+        _newly_created: bool,
         was_draft: bool,
     ) -> Result<AgentTaskPrQuarantineCapability> {
-        Ok(self.quarantine_capability.unwrap_or(if newly_created {
-            AgentTaskPrQuarantineCapability::CloseNewPr
-        } else if was_draft {
+        Ok(self.quarantine_capability.unwrap_or(if was_draft {
             AgentTaskPrQuarantineCapability::PreserveExistingDraft
         } else {
             AgentTaskPrQuarantineCapability::ConvertExistingReadyPrToDraft
@@ -506,7 +504,6 @@ impl AgentTaskPrFinalizationBackend for MockBackend {
             .quarantine_state
             .clone()
             .unwrap_or_else(|| match capability {
-                AgentTaskPrQuarantineCapability::CloseNewPr => "new_pr_closed".to_string(),
                 AgentTaskPrQuarantineCapability::PreserveExistingDraft => {
                     "existing_pr_already_draft".to_string()
                 }
@@ -694,7 +691,7 @@ fn binding_observation_failure_is_retried_and_recoverable_not_drift() {
                 .contains("publication candidate drift refused"));
             assert!(matches!(
                 backend.quarantine_capabilities.as_slice(),
-                [AgentTaskPrQuarantineCapability::CloseNewPr]
+                [AgentTaskPrQuarantineCapability::ConvertExistingReadyPrToDraft]
             ));
             assert_eq!(backend.publication_binding_calls, 1);
         } else {
@@ -713,13 +710,6 @@ fn binding_observation_failure_is_retried_and_recoverable_not_drift() {
                 .as_str()
                 .unwrap()
                 .contains("read temporarily unavailable"));
-            assert!(!backend
-                .quarantine_capabilities
-                .iter()
-                .any(|capability| matches!(
-                    capability,
-                    AgentTaskPrQuarantineCapability::CloseNewPr
-                )));
             assert!(
                 matches!(
                     backend.quarantine_capabilities[0],
@@ -860,36 +850,60 @@ fn finalization_refuses_remote_drift_immediately_before_pr_mutation() {
 }
 
 #[test]
-fn post_mutation_drift_closes_new_pr_and_refuses_a_receipt() {
-    let mut backend = MockBackend {
-        changed_files: vec!["src/lib.rs".to_string()],
-        publication_binding: Some(AgentTaskPublicationBinding {
-            candidate_sha: "candidate-sha".to_string(),
-            candidate_tree: "candidate-tree".to_string(),
-            remote_sha: "foreign-remote-sha".to_string(),
-            pr_head_sha: "foreign-pr-head".to_string(),
-            repository: "Extra-Chill/homeboy".to_string(),
-            head_repository: "Extra-Chill/homeboy".to_string(),
+fn post_mutation_drift_keeps_new_pr_open_as_draft_and_refuses_a_receipt() {
+    for (draft, conversion_fails) in [(false, false), (true, false), (false, true)] {
+        let mut backend = MockBackend {
             changed_files: vec!["src/lib.rs".to_string()],
-        }),
-        ..Default::default()
-    };
+            publication_binding: Some(AgentTaskPublicationBinding {
+                candidate_sha: "candidate-sha".to_string(),
+                candidate_tree: "candidate-tree".to_string(),
+                remote_sha: "foreign-remote-sha".to_string(),
+                pr_head_sha: "foreign-pr-head".to_string(),
+                repository: "Extra-Chill/homeboy".to_string(),
+                head_repository: "Extra-Chill/homeboy".to_string(),
+                changed_files: vec!["src/lib.rs".to_string()],
+            }),
+            ..Default::default()
+        };
 
-    let result = finalize_pr_with_backend(options(), &mut backend);
-    let error = result.expect_err("post-mutation drift refuses finalization receipt");
+        backend.quarantine_error = conversion_fails;
+        let mut request = options();
+        request.draft_pr = draft;
+        let result = finalize_pr_with_backend(request.clone(), &mut backend);
+        let error = result.expect_err("post-mutation drift refuses finalization receipt");
 
-    assert!(backend.created);
-    assert_eq!(backend.quarantine_calls, 1);
-    assert!(error
-        .message
-        .contains("expected_candidate_sha=candidate-sha"));
-    assert!(error
-        .message
-        .contains("observed_remote_sha=foreign-remote-sha"));
-    assert!(error
-        .message
-        .contains("observed_pr_head_sha=foreign-pr-head"));
-    assert!(error.message.contains("cleanup_state=new_pr_closed"));
+        assert!(backend.created);
+        assert_eq!(backend.quarantine_calls, 1);
+        assert!(error
+            .message
+            .contains("expected_candidate_sha=candidate-sha"));
+        assert!(error
+            .message
+            .contains("observed_remote_sha=foreign-remote-sha"));
+        assert!(error
+            .message
+            .contains("observed_pr_head_sha=foreign-pr-head"));
+        assert_eq!(
+            backend.quarantine_capabilities,
+            vec![if draft {
+                AgentTaskPrQuarantineCapability::PreserveExistingDraft
+            } else {
+                AgentTaskPrQuarantineCapability::ConvertExistingReadyPrToDraft
+            }]
+        );
+        assert!(error
+            .message
+            .contains(&format!("homeboy agent-task recover {}", request.run_id)));
+        if conversion_fails {
+            assert!(error
+                .message
+                .contains("PR #123 left open; draft conversion failed"));
+            assert!(error.message.contains("quarantine command failed"));
+            assert!(!error.message.contains("left open as draft"));
+        } else {
+            assert!(error.message.contains("PR #123 left open as draft"));
+        }
+    }
 }
 
 #[test]
@@ -1064,43 +1078,6 @@ fn unsupported_existing_ready_pr_quarantine_refuses_update_before_mutation() {
     assert!(error.message.contains("cleanup_capability=unsupported"));
     assert!(!backend.updated && !backend.created);
     assert_eq!(backend.quarantine_calls, 0);
-}
-
-#[test]
-fn failed_new_pr_close_preserves_drift_and_cleanup_evidence_without_receipt() {
-    let mut backend = MockBackend {
-        changed_files: vec!["src/lib.rs".to_string()],
-        publication_binding: Some(AgentTaskPublicationBinding {
-            candidate_sha: "candidate-sha".to_string(),
-            candidate_tree: "candidate-tree".to_string(),
-            remote_sha: "foreign-remote-sha".to_string(),
-            pr_head_sha: "foreign-pr-head".to_string(),
-            repository: "Extra-Chill/homeboy".to_string(),
-            head_repository: "Extra-Chill/homeboy".to_string(),
-            changed_files: vec!["src/lib.rs".to_string()],
-        }),
-        quarantine_error: true,
-        ..Default::default()
-    };
-
-    let error = finalize_pr_with_backend(options(), &mut backend)
-        .expect_err("failed close still refuses receipt");
-
-    assert!(backend.created);
-    assert_eq!(backend.quarantine_calls, 1);
-    for expected in [
-        "expected_candidate_sha=candidate-sha",
-        "observed_remote_sha=foreign-remote-sha",
-        "observed_pr_head_sha=foreign-pr-head",
-        "cleanup_state=failed",
-        "cleanup_capability=close_new_pr",
-        "cleanup_error=quarantine command failed",
-    ] {
-        assert!(
-            error.message.contains(expected),
-            "missing {expected}: {error}"
-        );
-    }
 }
 
 #[test]

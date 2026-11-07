@@ -17696,12 +17696,10 @@ impl AgentTaskPrFinalizationBackend for CaptureBackend {
     }
     fn quarantine_capability(
         &mut self,
-        newly_created: bool,
+        _newly_created: bool,
         was_draft: bool,
     ) -> Result<crate::agent_task_finalization::AgentTaskPrQuarantineCapability> {
-        Ok(if newly_created {
-            crate::agent_task_finalization::AgentTaskPrQuarantineCapability::CloseNewPr
-        } else if was_draft {
+        Ok(if was_draft {
             crate::agent_task_finalization::AgentTaskPrQuarantineCapability::PreserveExistingDraft
         } else {
             crate::agent_task_finalization::AgentTaskPrQuarantineCapability::ConvertExistingReadyPrToDraft
@@ -17775,9 +17773,6 @@ impl AgentTaskPrFinalizationBackend for CaptureBackend {
         capability: crate::agent_task_finalization::AgentTaskPrQuarantineCapability,
     ) -> Result<String> {
         Ok(match capability {
-            crate::agent_task_finalization::AgentTaskPrQuarantineCapability::CloseNewPr => {
-                "new_pr_closed".to_string()
-            }
             crate::agent_task_finalization::AgentTaskPrQuarantineCapability::PreserveExistingDraft => {
                 "existing_pr_already_draft".to_string()
             }

@@ -349,10 +349,10 @@ pub struct AgentTaskPrRef {
     pub is_draft: bool,
 }
 
-/// The safe state transition available if a PR binding drifts after mutation.
+/// The draft-only safe transition if a PR binding drifts after mutation.
+/// Existing draft/ready capabilities apply to newly created PRs too; PRs stay open.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentTaskPrQuarantineCapability {
-    CloseNewPr,
     PreserveExistingDraft,
     ConvertExistingReadyPrToDraft,
     Unsupported,
