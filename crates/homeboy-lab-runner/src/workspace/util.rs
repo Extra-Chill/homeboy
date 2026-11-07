@@ -278,6 +278,10 @@ pub(super) fn shell_output_failure(output: std::process::Output, action: &str) -
     }
     let stdout = bounded_command_output(&output.stdout);
     let stderr = bounded_command_output(&output.stderr);
+    let storage = Error::internal_io(format!("{stdout}\n{stderr}"), Some(action.to_string()));
+    if storage.is_storage_exhausted() {
+        return Err(storage.with_retryable(true));
+    }
     // The command is typically a local `tar ... | ssh <runner> <extract>`
     // pipe, so an SSH transport that drops mid-materialization surfaces here
     // as a signal death (`sh` returns no exit code, reported as -1) or an
@@ -460,6 +464,25 @@ fn bounded_command_output(output: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn staging_enospc_is_top_level_retryable_storage_with_runner_path() {
+        let path = "/runner/workspaces/.homeboy-tmp/.tmp123";
+        let output = std::process::Command::new("sh")
+            .args([
+                "-c",
+                &format!(
+                    "printf '%s' 'No space left on device (os error 28) at {path}' >&2; exit 20"
+                ),
+            ])
+            .output()
+            .unwrap();
+        let error = shell_output_failure(output, "runner materialization call").unwrap_err();
+        assert_eq!(error.code.as_str(), "storage.exhausted");
+        assert_eq!(error.retryable, Some(true));
+        assert!(error.details.to_string().contains(path));
+    }
 
     #[cfg(unix)]
     #[test]

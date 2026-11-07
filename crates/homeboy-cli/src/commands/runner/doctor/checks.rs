@@ -2,6 +2,13 @@ use super::*;
 use std::collections::BTreeSet;
 use types::{RunnerCheck, RunnerDoctorStatus, RunnerRepairAction, ToolProbe};
 
+pub(crate) fn staging_has_capacity(disk: &types::DiskProbe) -> bool {
+    use homeboy::runner::staging_temp::{MIN_STAGING_FREE_BYTES, MIN_STAGING_FREE_RATIO};
+    disk.available_mb.saturating_mul(1024 * 1024) >= MIN_STAGING_FREE_BYTES
+        && (disk.total_mb == 0
+            || disk.available_mb as f64 / disk.total_mb as f64 >= MIN_STAGING_FREE_RATIO)
+}
+
 pub(crate) fn tool_check(spec: RunnerToolSpec, probe: &ToolProbe) -> RunnerCheck {
     if probe.available {
         ok(

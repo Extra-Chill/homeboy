@@ -1113,7 +1113,7 @@ pub(crate) fn materialize_prepared_workspace_update(
         .chain(delta.changed_file_paths.iter())
         .cloned()
         .collect::<Vec<_>>();
-    let mut removal_list = tempfile::NamedTempFile::new().map_err(|err| {
+    let mut removal_list = crate::staging_temp::file().map_err(|err| {
         Error::internal_io(
             err.to_string(),
             Some("stage prepared workspace removals".to_string()),
@@ -1244,7 +1244,7 @@ pub(crate) fn materialize_prepared_workspace_update(
                         })
                     })
                     .and_then(|_| {
-                        let metadata = tempfile::NamedTempFile::new().map_err(|err| {
+                        let metadata = crate::staging_temp::file().map_err(|err| {
                             Error::internal_io(
                                 err.to_string(),
                                 Some("stage prepared workspace metadata".to_string()),
@@ -1387,7 +1387,7 @@ fn materialize_changed_paths_controlled(
     if changed_paths.is_empty() {
         return Ok(());
     }
-    let mut list = tempfile::NamedTempFile::new()
+    let mut list = crate::staging_temp::file()
         .map_err(|err| Error::internal_io(err.to_string(), Some(action.to_string())))?;
     for path in changed_paths {
         control.checkpoint()?;
@@ -1648,7 +1648,7 @@ pub(crate) fn immutable_replay_snapshot(
     source: &Path,
     excludes: &[String],
 ) -> Result<ImmutableReplaySnapshot> {
-    let stage = tempfile::tempdir().map_err(|error| {
+    let stage = crate::staging_temp::dir().map_err(|error| {
         Error::internal_io(
             error.to_string(),
             Some("create replay snapshot stage".to_string()),

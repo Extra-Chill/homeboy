@@ -89,6 +89,34 @@ pub fn report(
         ),
     });
 
+    let staging = workspace_root.join(".homeboy-tmp");
+    let staging_probe = std::fs::create_dir_all(&staging)
+        .ok()
+        .and_then(|()| probes::local_disk_probe(&staging));
+    checks.push(match staging_probe {
+        Some(disk) if checks::staging_has_capacity(&disk) => checks::ok(
+            "disk.staging",
+            format!(
+                "{} MB available at {}",
+                disk.available_mb,
+                staging.display()
+            ),
+            None,
+        ),
+        probe => checks::error(
+            "disk.staging",
+            format!(
+                "Staging {} has {} MB available (requires 1024 MB and 1% free)",
+                staging.display(),
+                probe
+                    .map(|disk| disk.available_mb.to_string())
+                    .unwrap_or_else(|| "unknown".into())
+            ),
+            Some("Free runner staging capacity before gate work".into()),
+            BTreeMap::new(),
+        ),
+    });
+
     let fallback_runner;
     let runner = match runner {
         Some(runner) => runner,

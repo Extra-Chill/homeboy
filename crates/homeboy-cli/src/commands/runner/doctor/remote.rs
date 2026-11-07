@@ -254,6 +254,33 @@ pub fn report(
 
     // A Lab repair must not report success for a runner that cannot accept a
     // workspace. Keep this lightweight check in the otherwise bounded scope.
+    let staging = format!("{}/.homeboy-tmp", workspace_root.trim_end_matches('/'));
+    let staging_writable = client
+        .execute(&format!(
+            "mkdir -p {} && test -w {}",
+            common::shell_word(&staging),
+            common::shell_word(&staging)
+        ))
+        .success;
+    let staging_probe = probes::remote_disk_probe(client, &staging);
+    checks.push(match staging_probe {
+        Some(disk) if staging_writable && checks::staging_has_capacity(&disk) => checks::ok(
+            "disk.staging",
+            format!("{} MB available at {}", disk.available_mb, staging),
+            None,
+        ),
+        probe => checks::error(
+            "disk.staging",
+            format!(
+                "Staging {staging} has {} MB available (requires writable storage, 1024 MB and 1% free)",
+                probe
+                    .map(|disk| disk.available_mb.to_string())
+                    .unwrap_or_else(|| "unknown".into())
+            ),
+            Some("Free runner staging capacity before gate work".into()),
+            BTreeMap::new(),
+        ),
+    });
     let workspace_writable = probes::remote_path_writable(client, &workspace_root);
     checks.push(checks::path_writable_check(
         "workspace.writable",

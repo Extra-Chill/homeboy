@@ -21,6 +21,7 @@ mod util;
 pub(crate) use util::ssh_client_for_runner;
 
 pub use pull::{plan_workspace_pull, pull_workspace};
+pub(crate) use sync::require_runner_workspace_disk_headroom;
 pub(crate) use sync::save_prepared_source_cache;
 pub(crate) use sync::update_workspace_resource_lifecycle;
 #[cfg(test)]

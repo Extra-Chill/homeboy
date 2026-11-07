@@ -54,6 +54,14 @@ pub(super) struct GitInstall {
     pub(super) retain: Vec<String>,
 }
 
+fn materialization_error(mut error: Error, input: &Path) -> Error {
+    if error.is_storage_exhausted() {
+        error.retryable = Some(true);
+        error.details["runner_path"] = serde_json::json!(input);
+    }
+    error
+}
+
 pub(super) fn io(error: impl std::fmt::Display) -> Error {
     Error::internal_io(
         error.to_string(),
@@ -73,6 +81,7 @@ pub(super) fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {
 /// object-cache evidence; it never creates a workspace.
 pub fn materialization_plan(input: &Path) -> Result<serde_json::Value> {
     materialization_plan_controlled(input, &WorkspaceControl::default())
+        .map_err(|error| materialization_error(error, input))
 }
 
 pub(super) fn materialization_plan_controlled(
@@ -91,11 +100,12 @@ pub(super) fn materialization_plan_controlled(
         .roots
         .first()
         .ok_or_else(|| io("empty materialization plan"))?;
-    let probe = local_snapshot_filesystem_probe(
-        Path::new(&first.remote_path),
-        "runner snapshot destination",
-    )?;
-    let disk = local_runner_workspace_disk_probe(Path::new(&first.remote_path))
+    let store_root = super::blobs::store(&first.remote_path);
+    let _scratch = crate::staging_temp::Scope::new(store_root.parent().unwrap());
+    let staging = store_root.parent().unwrap().join(".homeboy-tmp");
+    fs::create_dir_all(&staging).map_err(io)?;
+    let probe = local_snapshot_filesystem_probe(&staging, "runner snapshot destination")?;
+    let disk = local_runner_workspace_disk_probe(&staging)
         .ok_or_else(|| io("runner filesystem capacity unavailable"))?;
     let store = super::blobs::store(&first.remote_path);
     super::blobs::prune(&store)?;
@@ -171,6 +181,7 @@ pub(super) fn materialization_plan_controlled(
 /// transport directory. Verify every root before publishing any execution view.
 pub fn materialization_commit(input: &Path) -> Result<serde_json::Value> {
     materialization_commit_controlled(input, &WorkspaceControl::default())
+        .map_err(|error| materialization_error(error, input))
 }
 
 pub(super) fn materialization_commit_controlled(
@@ -187,6 +198,7 @@ pub(super) fn materialization_commit_controlled(
     }
     let first = request.roots.first().ok_or_else(|| io("empty commit"))?;
     let store = super::blobs::store(&first.summary.remote_path);
+    let _scratch = crate::staging_temp::Scope::new(store.parent().unwrap());
     fs::create_dir_all(&store).map_err(io)?;
     if let Ok(blobs) = fs::read_dir(input.join("blobs")) {
         for blob in blobs {

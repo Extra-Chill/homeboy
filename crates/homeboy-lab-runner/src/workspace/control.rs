@@ -104,14 +104,29 @@ impl WorkspaceControl {
         action: &str,
     ) -> Result<std::process::Output> {
         self.checkpoint()?;
-        let file = tempfile::NamedTempFile::new()
-            .map_err(|error| Error::internal_io(error.to_string(), Some(action.to_string())))?;
+        let file = crate::staging_temp::file().map_err(|error| {
+            let error = Error::internal_io(error.to_string(), Some(action.to_string()));
+            if error.is_storage_exhausted() {
+                error.with_retryable(true)
+            } else {
+                error
+            }
+        })?;
         let mut output = self.output_to_file(
             process,
             file.reopen()
                 .map_err(|error| Error::internal_io(error.to_string(), None))?,
             action,
         )?;
+        if !output.status.success() {
+            let storage = Error::internal_io(
+                String::from_utf8_lossy(&output.stderr).to_string(),
+                Some(file.path().display().to_string()),
+            );
+            if storage.is_storage_exhausted() {
+                return Err(storage.with_retryable(true));
+            }
+        }
         let mut reader = file
             .reopen()
             .map_err(|error| Error::internal_io(error.to_string(), None))?;
@@ -148,6 +163,11 @@ impl WorkspaceControl {
             "read workspace Git evidence",
         )?;
         if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let storage = Error::internal_io(stderr.to_string(), Some(path.display().to_string()));
+            if storage.is_storage_exhausted() {
+                return Err(storage.with_retryable(true));
+            }
             return Err(Error::internal_unexpected(
                 super::util::git_failure_evidence(path, args, &output),
             ));

@@ -453,7 +453,7 @@ fn upload_snapshot(
     plan: &RunnerExtensionMaterializationPlan,
     transfer: &RunnerFileTransfer,
 ) -> Result<()> {
-    let tempdir = tempfile::tempdir().map_err(|err| {
+    let tempdir = crate::staging_temp::dir().map_err(|err| {
         Error::internal_io(err.to_string(), Some("stage extension overlay".to_string()))
     })?;
     let staged = tempdir.path().join("source");

@@ -886,6 +886,15 @@ fn exec_with_status_snapshot_attempt(
         ));
     }
 
+    let local_runner = crate::load(runner_id)?;
+    let _scratch = if local_runner.kind == RunnerKind::Local {
+        local_runner
+            .workspace_root
+            .as_deref()
+            .map(|root| crate::staging_temp::Scope::new(std::path::Path::new(root)))
+    } else {
+        None
+    };
     let secret_env_plan = runner_exec_secret_env_plan(
         &options.command,
         options.capability_preflight.as_ref(),
