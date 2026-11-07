@@ -837,6 +837,182 @@ fn canonical_status_refs_hydrate_through_the_agent_task_resolver() {
     });
 }
 
+/// #13144: an intentional-no-change Cook that finalized an existing immutable
+/// candidate behind two green deterministic gates and opened a PR reports one
+/// coherent finalized status in the compact, full and machine-readable
+/// projections, whether read by attempt or by Cook.
+#[test]
+fn finalized_existing_candidate_status_reads_one_durable_scope() {
+    with_isolated_home(|_| {
+        let cook_id = "cook-13144-existing-candidate";
+        let run_id = "cook-13144-existing-candidate-attempt-1";
+        let pr_url = "https://github.com/Automattic/static-site-importer/pull/1227";
+        let plan = test_plan();
+        let store = test_lifecycle_store();
+        agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("Cook attempt");
+        agent_task_lifecycle::record_cook_attempt_in_store(&store, cook_id, 1, run_id)
+            .expect("Cook index attempt");
+        let aggregate = AgentTaskAggregate {
+            schema: "homeboy/agent-task-aggregate/v1".to_string(),
+            plan_id: plan.plan_id.clone(),
+            totals: Default::default(),
+            outcomes: vec![AgentTaskOutcome {
+                task_id: "task-a".to_string(),
+                status: AgentTaskOutcomeStatus::Succeeded,
+                summary: Some("existing candidate already satisfies the task".to_string()),
+                outputs: json!({
+                    "provider_run_result": { "intentional_no_change": {
+                        "schema": "homeboy/agent-task-intentional-no-change/v1",
+                        "verdict": "already_satisfied",
+                        "inspected_revision": "candidate",
+                        "source_evidence": ["fixture"]
+                    }}
+                }),
+                ..Default::default()
+            }],
+            events: Vec::new(),
+            artifact_lineage: Vec::new(),
+            child_runs: Vec::new(),
+            artifact_bindings: Vec::new(),
+            queue: Default::default(),
+        };
+        agent_task_lifecycle::record_run_aggregate(run_id, &plan, &aggregate)
+            .expect("provider aggregate");
+        // The existing candidate is verified without a new patch: the
+        // promotion proves it behind two green deterministic gates.
+        agent_task_lifecycle::record_promotion(
+            run_id,
+            json!({
+                "schema": "homeboy/agent-task-promotion-report/v1",
+                "status": "verified_no_changes",
+                "task_id": "task-a",
+                "changed_files": ["lib.rs"],
+                "deterministic_gates": [
+                    {"id": "cargo-test", "command": ["cargo", "test"], "status": "succeeded"},
+                    {"id": "cargo-clippy", "command": ["cargo", "clippy"], "status": "succeeded"}
+                ]
+            }),
+        )
+        .expect("verified existing candidate");
+        agent_task_lifecycle::record_cook_finalization_in_store(
+            &store,
+            run_id,
+            json!({"status": "review_ready", "pr_number": 1227, "pr_url": pr_url}),
+        )
+        .expect("finalized PR");
+
+        let read = |requested: &str, full: bool, exact: bool| {
+            let (value, exit) = status(StatusArgs {
+                run_id: requested.to_string(),
+                full,
+                exact,
+                strict_subject_exit: true,
+                interval: "5s".to_string(),
+                timeout: "30m".to_string(),
+                ..Default::default()
+            })
+            .expect("status");
+            assert_eq!(exit, 0, "{value}");
+            value
+        };
+        // Cook-wide selection resolves the Cook to the finalized attempt.
+        let selection = homeboy::agents::agent_task_lifecycle::resolve_cook_reader_target_in_store(
+            &store, cook_id,
+        )
+        .expect("Cook-wide selection")
+        .selection
+        .expect("Cook index selection");
+        assert_eq!(selection.run_id, run_id);
+        assert!(!selection.incomplete);
+
+        for (requested, exact) in [(run_id, true), (run_id, false), (cook_id, false)] {
+            for full in [false, true] {
+                // The machine-readable (`--output json`) projection.
+                let value = read(requested, full, exact);
+                assert_eq!(value["schema"], "homeboy/control-plane-run/v1");
+                assert_eq!(value["run"], run_id, "{value}");
+                assert_eq!(value["state"], "succeeded", "{value}");
+                assert!(value["blocker"].is_null(), "{value}");
+                assert!(value.get("reason").is_none(), "{value}");
+                assert!(value["recovery"].is_null(), "{value}");
+                assert_eq!(value["candidate"]["id"], "task-a", "{value}");
+                assert_eq!(value["candidate"]["state"], "verified_no_changes");
+                assert_eq!(
+                    value["gates"],
+                    json!([
+                        {"id": "cargo-test", "state": "succeeded"},
+                        {"id": "cargo-clippy", "state": "succeeded"}
+                    ]),
+                    "{value}"
+                );
+                assert_eq!(
+                    value["publication"],
+                    json!({"id": pr_url, "state": "review_ready"}),
+                    "{value}"
+                );
+                let next = format!("review the published PR: {pr_url}");
+                if full {
+                    let available = value["action_eligibility"]["actions"]
+                        .as_array()
+                        .expect("eligibility")
+                        .iter()
+                        .filter(|action| action["availability"] == "available")
+                        .count();
+                    assert_eq!(available, 0, "{value}");
+                } else {
+                    assert_eq!(value["next_action"]["command"], next.as_str());
+                    assert_eq!(value["action_eligibility"]["available_action_count"], 0);
+                }
+
+                // The compact human projection reads the same durable scope.
+                let summary = crate::commands::agent_task_summary::render_agent_task_summary(
+                    crate::commands::agent_task_summary::AgentTaskSummaryKind::Status,
+                    &value,
+                )
+                .expect("status renders");
+                for line in [
+                    "Status: succeeded\n".to_string(),
+                    "Candidate: verified_no_changes\n".to_string(),
+                    "Gates: succeeded, succeeded\n".to_string(),
+                    "Publication: review_ready\n".to_string(),
+                    format!("PR: {pr_url}\n"),
+                    format!("Next: {next}\n"),
+                ] {
+                    assert!(summary.contains(&line), "{summary}");
+                }
+                for contradiction in [
+                    "Blocker:",
+                    "Reason:",
+                    "Retry:",
+                    "not_run",
+                    "not_requested",
+                    "pending",
+                    "diagnose",
+                    "recover",
+                ] {
+                    assert!(!summary.contains(contradiction), "{summary}");
+                }
+            }
+        }
+
+        // The review read model agrees: gates passed, PR finalization completed.
+        let review = homeboy::agents::orchestration::review_from_current_environment(
+            run_id,
+            &Default::default(),
+        )
+        .expect("review");
+        let states = &review.evidence["execution_states"];
+        assert_eq!(states["gate"]["state"], "passed", "{states}");
+        assert_eq!(states["promotion"]["state"], "verified_no_changes");
+        assert_eq!(
+            states["finalization"],
+            json!({"state": "completed", "finalized": true})
+        );
+        assert_eq!(states["publication"]["id"], pr_url);
+        assert_eq!(review.evidence["canonical_candidate"]["state"], "finalized");
+    });
+}
+
 #[test]
 fn status_returns_control_plane_run_for_a_cancelled_retry() {
     with_isolated_home(|_| {

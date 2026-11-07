@@ -3287,20 +3287,25 @@ fn review_execution_states(
     let promotion_state = promotion.map_or("not_attempted".to_string(), promotion_label);
     let target_applied = candidate.is_some_and(|candidate| candidate.target_applied);
     let pending = promotion == Some(AgentTaskPromotionStatus::VerificationPending);
-    let gate_state = if delivery.is_some_and(|delivery| {
-        delivery
-            .gates
-            .iter()
-            .any(|gate| gate.state == AgentTaskGateStatus::AcceptedInheritedFailure)
-    }) {
+    let gates = delivery.map_or(&[][..], |delivery| delivery.gates.as_slice());
+    // An existing candidate verified in place (#13144) runs its gates without
+    // applying a new patch: its recorded gates are the gate truth.
+    let verified_in_place =
+        promotion == Some(AgentTaskPromotionStatus::VerifiedNoChanges) && !gates.is_empty();
+    let gate_state = if gates
+        .iter()
+        .any(|gate| gate.state == AgentTaskGateStatus::AcceptedInheritedFailure)
+    {
         "accepted_inherited_failure"
-    } else if !target_applied {
+    } else if !target_applied && !verified_in_place {
         "not_run"
     } else {
         match promotion {
             Some(status) if status.gate_failed() => "failed",
             Some(AgentTaskPromotionStatus::VerificationPending) => "pending",
-            Some(AgentTaskPromotionStatus::Applied) => "passed",
+            Some(
+                AgentTaskPromotionStatus::Applied | AgentTaskPromotionStatus::VerifiedNoChanges,
+            ) => "passed",
             _ => "not_run",
         }
     };
