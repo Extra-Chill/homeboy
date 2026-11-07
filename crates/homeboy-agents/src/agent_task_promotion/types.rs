@@ -268,6 +268,17 @@ impl AgentTaskPromotionStatus {
         matches!(self, Self::GateDeferred)
     }
 
+    /// Whether the patch reached its destination without a passing verdict:
+    /// its gates failed, deferred (never judged the candidate), or did not
+    /// complete. These are exactly the states replacement verification of the
+    /// already-applied candidate accepts (#17494).
+    pub fn applied_without_passing_verdict(self) -> bool {
+        matches!(
+            self,
+            Self::VerificationPending | Self::GateFailed | Self::GateDeferred
+        )
+    }
+
     /// Stable handoff boundary identifier for this promotion status.
     pub fn handoff_boundary(self) -> &'static str {
         match self {

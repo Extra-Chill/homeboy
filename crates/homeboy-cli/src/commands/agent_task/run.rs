@@ -4401,8 +4401,9 @@ where
             | agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
     ) {
         // Ordinary continuation consumes only the pending entry scheduled by
-        // authoritative reconciliation. Failed and completed claims require an
-        // explicit rearm and can never be silently replayed.
+        // authoritative reconciliation or by the recovery step that selected
+        // it (`schedule_recovery_continuation`). Failed and completed claims
+        // require an explicit rearm and can never be silently replayed.
         // The recipe membership check, the claim, and the state read are one
         // decision, so all three have to name the same home (#7505).
         let recipe_store = agent_task_service::CookRecipeStore::from_current_data_root()?;
@@ -4414,20 +4415,7 @@ where
                 &run_id,
             )?
         } else {
-            let claim = recipe_store.claim_continuation_for(&recipe.cook_id, &run_id)?;
-            if claim.is_none()
-                && agent_task_service_direct::recorded_promotion_report(&record.metadata)?
-                    .is_some_and(|promotion| promotion.is_object())
-            {
-                // A direct operator continuation must remain admissible even
-                // when status reconciliation has not materialized the queue
-                // entry yet. Finalization receipts are handled above and stay
-                // observation-only.
-                recipe_store.enqueue_terminal_continuation(&recipe.cook_id, &run_id)?;
-                recipe_store.claim_continuation_for(&recipe.cook_id, &run_id)?
-            } else {
-                claim
-            }
+            recipe_store.claim_continuation_for(&recipe.cook_id, &run_id)?
         };
         let Some(claim) = claim else {
             return Ok((
@@ -5211,11 +5199,13 @@ fn cook_terminal_continuation_status(
                 "command": format!("homeboy agent-task status {run_id}"),
             }),
         ),
+        // `agent-task recover` schedules the continuation its step names
+        // before calling this handler; reconcile has nothing to apply here.
         agent_task_service::CookContinuationState::Absent => (
             "continuation_not_scheduled",
             serde_json::json!({
-                "action": "reconcile_terminal_attempt",
-                "command": format!("homeboy agent-task reconcile {run_id} --dry-run"),
+                "action": "schedule_continuation",
+                "command": agent_task_service_direct::cook_recover_command(None, run_id),
             }),
         ),
     };

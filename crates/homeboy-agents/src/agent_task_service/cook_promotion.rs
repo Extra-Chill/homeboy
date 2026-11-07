@@ -1173,10 +1173,7 @@ pub(crate) fn persisted_promotion_for_attempt_in_store(
 pub(crate) fn applied_candidate_needs_replacement_gates(
     promotion: &AgentTaskPromotionReport,
 ) -> bool {
-    matches!(
-        promotion.status,
-        AgentTaskPromotionStatus::GateFailed | AgentTaskPromotionStatus::VerificationPending
-    ) && promotion.status.patch_promoted()
+    promotion.status.applied_without_passing_verdict()
         && promotion.provenance.get("replacement_gate_proof").is_none()
         && !promotion.finalization_eligible()
 }
@@ -1191,7 +1188,7 @@ pub(crate) fn ensure_replacement_gate_candidate(run_id: &str) -> Result<()> {
     }
     Err(Error::validation_invalid_argument(
         "replace-gates",
-        "replacement gates require an already-applied candidate whose verification failed or did not complete",
+        "replacement gates require an already-applied candidate whose verification failed, deferred or did not complete",
         Some(run_id.to_string()),
         Some(vec![format!("homeboy agent-task status {run_id}")]),
     ))
@@ -1252,14 +1249,10 @@ pub fn record_replacement_gate_proof(
             None,
         ));
     }
-    if !matches!(
-        original.status,
-        AgentTaskPromotionStatus::GateFailed | AgentTaskPromotionStatus::VerificationPending
-    ) || !original.status.patch_promoted()
-    {
+    if !original.status.applied_without_passing_verdict() {
         return Err(Error::validation_invalid_argument(
             "cook_delivery.artifacts.promotion.status",
-            "replacement gate proof is only valid for an already-applied candidate whose verification failed or did not complete",
+            "replacement gate proof is only valid for an already-applied candidate whose verification failed, deferred or did not complete",
             Some(run_id.to_string()),
             None,
         ));
@@ -1403,11 +1396,8 @@ pub(super) fn validate_replacement_promotion_in_store(
                 .is_ok_and(|bytes| reference["sha256"] == content_hash::sha256_hex(&bytes))
             && serde_json::from_value::<AgentTaskPromotionReport>(original.clone()).is_ok_and(
                 |original| {
-                    matches!(
-                        original.status,
-                        AgentTaskPromotionStatus::GateFailed
-                            | AgentTaskPromotionStatus::VerificationPending
-                    ) && original.source.run_id == promotion.source.run_id
+                    original.status.applied_without_passing_verdict()
+                        && original.source.run_id == promotion.source.run_id
                         && original.source.task_id == promotion.source.task_id
                         && original.target.worktree == promotion.target.worktree
                         && original.target.path == promotion.target.path
@@ -1827,14 +1817,10 @@ fn verify_replacement_gates_owned(
     if recovering_interrupted_execution && interrupted_rerun_authorization.is_none() {
         return Err(interrupted_replacement_gate_execution_error(run_id));
     }
-    if !matches!(
-        original.status,
-        AgentTaskPromotionStatus::GateFailed | AgentTaskPromotionStatus::VerificationPending
-    ) || !original.status.patch_promoted()
-    {
+    if !original.status.applied_without_passing_verdict() {
         return Err(Error::validation_invalid_argument(
             "cook_delivery.artifacts.promotion.status",
-            "replacement gates require an already-applied candidate whose verification failed or did not complete",
+            "replacement gates require an already-applied candidate whose verification failed, deferred or did not complete",
             Some(run_id.to_string()),
             None,
         ));
@@ -6599,12 +6585,20 @@ pub(crate) fn cook_failure_context_with_stores(
                     .as_ref()
                     .is_some_and(cancelled_without_operator_request);
             let retry_refusal = retry_refusal.flatten();
-            let delivered_candidate = delivered_candidate_facts(record.as_ref(), delivery.as_ref());
+            let delivered_candidate =
+                delivered_candidate_facts(lifecycle_store, record.as_ref(), delivery.as_ref());
             // The adopt observation only matters for a terminal `no_changes`
             // attempt; skip the worktree inspection for every other state.
             let adoptable_candidate_ref = (status == "no_changes")
                 .then(|| no_changes_adoption_candidate(&recipe))
                 .flatten();
+            // The kernel driver lock is the one liveness fact: a live driver
+            // owns every transition, so recovery has no step to take, which
+            // is what diagnose reports for the same Cook (#17494).
+            let live_driver =
+                super::cook_recipe::CookRecipeStore::for_lifecycle_store(lifecycle_store)
+                    .foreign_cook_driver(cook_id)
+                    .is_ok_and(|driver| driver.is_some());
             cook_recovery_actions_with_prefix(
                 status,
                 &chronological_latest_run_id,
@@ -6613,6 +6607,7 @@ pub(crate) fn cook_failure_context_with_stores(
                     .is_ok_and(|record| {
                         agent_task_lifecycle::disconnected_runner_recovery_available(&record)
                     }),
+                live_driver,
                 recovery_legal,
                 blocking_claim.is_some(),
                 continuation_admitted,
@@ -7057,6 +7052,9 @@ struct DeliveredCandidateFacts {
     applied_gate_failure: bool,
     /// Verified, unpublished candidate; its review form is publication input.
     verified_unpublished: bool,
+    /// The verified candidate has no publishable review form: neither the
+    /// agent's nor a recorded operator recovery form (#17494).
+    review_form_missing: bool,
 }
 
 /// HEAD of the Cook's destination worktree when the worktree's branch holds
@@ -7137,6 +7135,7 @@ fn git_stdout(dir: &std::path::Path, args: &[&str]) -> Option<String> {
 }
 
 fn delivered_candidate_facts(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     record: Option<&agent_task_lifecycle::AgentTaskRunRecord>,
     delivery: Option<&super::CookDelivery>,
 ) -> DeliveredCandidateFacts {
@@ -7159,10 +7158,49 @@ fn delivered_candidate_facts(
             .as_ref()
             .is_some_and(|candidate| !candidate.tree_sha.is_empty())
         && !delivery.is_some_and(super::CookDelivery::published);
+    let review_form_missing =
+        verified_unpublished && review_form_missing_in_store(lifecycle_store, record);
     DeliveredCandidateFacts {
         applied_gate_failure,
         verified_unpublished,
+        review_form_missing,
     }
+}
+
+/// Whether publication of `record` would refuse for want of a review form:
+/// neither a recorded operator recovery form nor a usable agent form exists.
+fn review_form_missing_in_store(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    record: &agent_task_lifecycle::AgentTaskRunRecord,
+) -> bool {
+    record.metadata.get("recovery_review_form").is_none()
+        && review_form_for_finalization_in_store(lifecycle_store, &record.run_id).is_err()
+}
+
+/// A verified, unpublished candidate whose publication waits only on its
+/// review form. Its completed terminal continuation predates that verdict
+/// (replacement gates made it green afterwards), so recovery reopens it to
+/// run the bounded review-form follow-up (#17494).
+pub(crate) fn verified_candidate_awaits_review_form_in_store(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    record: &agent_task_lifecycle::AgentTaskRunRecord,
+) -> bool {
+    let delivery = super::CookDelivery::from_run_metadata(&record.metadata);
+    let facts = delivered_candidate_facts(lifecycle_store, Some(record), delivery.as_ref());
+    facts.review_form_missing && agent_incomplete_reason(lifecycle_store, &record.run_id).is_none()
+}
+
+/// Whether the attempt's applied candidate still has no passing verdict: its
+/// gates failed, deferred or never completed and no replacement proof made
+/// them green. Publication refuses such a candidate, so nothing may select
+/// publication ahead of the verification that clears it (#17494).
+pub(crate) fn applied_candidate_awaits_verification(run_id: &str) -> bool {
+    persisted_promotion_for_attempt(run_id)
+        .ok()
+        .flatten()
+        .is_some_and(|promotion| {
+            promotion.status.applied_without_passing_verdict() && !promotion.finalization_eligible()
+        })
 }
 
 struct CookRecoveryActions {
@@ -7191,6 +7229,7 @@ fn cook_recovery_actions(
         agent_task_lifecycle::exact_record(run_id).is_ok_and(|record| {
             agent_task_lifecycle::disconnected_runner_recovery_available(&record)
         }),
+        false,
         recovery_legal,
         blocking_claim,
         retry_admitted,
@@ -7211,6 +7250,7 @@ fn cook_recovery_actions_with_prefix(
     status: &str,
     run_id: &str,
     disconnected_runner: bool,
+    live_driver: bool,
     recovery_legal: bool,
     blocking_claim: bool,
     retry_admitted: bool,
@@ -7232,6 +7272,7 @@ fn cook_recovery_actions_with_prefix(
             status,
             recovery_legal,
             disconnected_runner,
+            live_driver,
             blocking_claim,
             retry_admitted,
             retry_refusal,
@@ -7244,6 +7285,7 @@ fn cook_recovery_actions_with_prefix(
             adoptable_candidate_ref,
             applied_gate_failure: delivered_candidate.applied_gate_failure,
             verified_unpublished: delivered_candidate.verified_unpublished,
+            review_form_missing: delivered_candidate.review_form_missing,
         });
     if !recovery_legal {
         let reason = match &step {

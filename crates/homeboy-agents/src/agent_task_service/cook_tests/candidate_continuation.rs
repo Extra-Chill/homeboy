@@ -443,3 +443,214 @@ fn refused_publication_ends_the_terminal_continuation_without_regating() {
             .is_none());
     });
 }
+
+/// #17494: one stopped-Cook state per case, each read back through the public
+/// recovery entry points. Every state names exactly one step that makes
+/// progress, and performing it changes durable state rather than reporting a
+/// no-op.
+#[derive(Clone, Copy, Debug)]
+enum WedgedCook {
+    /// The candidate is applied but a Lab gate deferred, and an earlier
+    /// manual publication intent is recorded.
+    DeferredGateBeforePublish,
+    /// Green gates, applied candidate, no AI-authored review form.
+    MissingReviewForm,
+    /// A provider liveness timeout left the attempt candidate-recoverable
+    /// before any terminal continuation was scheduled.
+    ContinuationNotScheduled,
+    /// A terminal Cook whose driver exited still claims its destination.
+    WedgedTerminalDriver,
+}
+
+/// Continues by claiming the scheduled continuation, as the CLI handler
+/// does; every other step is refused.
+struct ClaimingContinuation;
+impl crate::agent_task_service::CookRecoveryPerformer for ClaimingContinuation {
+    fn continue_cook(
+        &self,
+        run: &str,
+        rearm: bool,
+        _: &crate::agent_task_service::CookRecoveryOverrides,
+    ) -> Result<(Value, i32)> {
+        assert!(!rearm);
+        let recipes = CookRecipeStore::from_current_data_root().unwrap();
+        let cook = recipes
+            .load_recipe_for_attempt(run)
+            .unwrap()
+            .unwrap()
+            .cook_id;
+        let claimed = recipes
+            .claim_continuation_for(&cook, run)
+            .unwrap()
+            .is_some();
+        Ok((
+            serde_json::json!({ "claimed": claimed }),
+            i32::from(!claimed),
+        ))
+    }
+    fn preflight_continue_cook(&self, _: &str, _: bool) -> Result<(Value, i32)> {
+        panic!("recovery performs, it does not preflight")
+    }
+    fn retry(&self, _: &str) -> Result<(Value, i32)> {
+        panic!("must not retry")
+    }
+    fn reconcile(&self, _: &str) -> Result<(Value, i32)> {
+        panic!("must not reconcile")
+    }
+    fn adopt(&self, _: &str, _: &str) -> Result<(Value, i32)> {
+        panic!("must not adopt")
+    }
+    fn publish(
+        &self,
+        run: &str,
+        _: &crate::agent_task_service::CookPublishRequest,
+        _: bool,
+    ) -> Result<(Value, i32)> {
+        panic!("publication of {run} is refused in this state; it is not a next step")
+    }
+}
+
+fn wedge(case: WedgedCook, options: &CookRequest) {
+    let run = &options.identity.initial_run_id;
+    let store = test_lifecycle_store();
+    match case {
+        WedgedCook::DeferredGateBeforePublish => {
+            let mut promotion = persisted_promotion_for_attempt(run).unwrap().unwrap();
+            promotion.status = AgentTaskPromotionStatus::GateDeferred;
+            promotion.deterministic_gates[0].status =
+                crate::agent_task_gate::AgentTaskGateStatus::Deferred;
+            promotion.deterministic_gates[0].exit_code = 0;
+            promotion.normalize_gate_outcome();
+            store
+                .record_promotion(run, serde_json::to_value(&promotion).unwrap())
+                .unwrap();
+            agent_task_lifecycle::record_manual_finalization_intent(
+                run,
+                serde_json::json!({ "run_id": run }),
+            )
+            .unwrap();
+        }
+        WedgedCook::MissingReviewForm => {
+            let mut aggregate = store.read_aggregate(run).unwrap();
+            aggregate.outcomes[0].outputs = Value::Null;
+            store
+                .record_run_aggregate(run, &options.identity.initial_plan, &aggregate)
+                .unwrap();
+        }
+        WedgedCook::ContinuationNotScheduled => {
+            agent_task_lifecycle::rewrite_record_for_test(run, |record| {
+                crate::agent_task_service::set_cook_delivery_artifact_for_test(
+                    &mut record.metadata,
+                    "/promotion",
+                    Value::Null,
+                );
+                crate::agent_task_service::set_cook_delivery_artifact_for_test(
+                    &mut record.metadata,
+                    "/promotions",
+                    serde_json::json!([]),
+                );
+                record.ensure_metadata_object().remove("cook_continuation");
+            })
+            .unwrap();
+        }
+        WedgedCook::WedgedTerminalDriver => {}
+    }
+}
+
+#[test]
+fn every_wedged_cook_state_has_one_progressing_recovery_step() {
+    use crate::agent_task_service::CookRecoveryStep;
+    for case in [
+        WedgedCook::DeferredGateBeforePublish,
+        WedgedCook::MissingReviewForm,
+        WedgedCook::ContinuationNotScheduled,
+        WedgedCook::WedgedTerminalDriver,
+    ] {
+        // A deferred gate never produced replacement proof; every other state
+        // starts from the candidate the corrected gates verified.
+        let fixture = |test: &dyn Fn(CookRequest)| match case {
+            WedgedCook::DeferredGateBeforePublish => {
+                with_corrected_gate_failure(false, |options, _| test(options))
+            }
+            _ => with_corrected_gate_candidate(|options, _, _| test(options)),
+        };
+        fixture(&|options| {
+            wedge(case, &options);
+            let cook = &options.identity.cook_id;
+            let run = &options.identity.initial_run_id;
+            let plan = crate::agent_task_service::plan_cook_recovery(cook).unwrap();
+            match case {
+                WedgedCook::DeferredGateBeforePublish => {
+                    // The recipe's own gates re-run before anything publishes.
+                    assert_eq!(plan.status, "gates_deferred", "{case:?}");
+                    assert_eq!(plan.step, CookRecoveryStep::Continue, "{case:?}");
+                    // The operator alternative is admitted for the same state.
+                    let (report, exit) = crate::agent_task_service::recover_cook(
+                        cook,
+                        crate::agent_task_service::CookRecoveryRequest {
+                            replace_gates: Some(
+                                crate::agent_task_service::CookReplaceGatesRequest {
+                                    proof: crate::agent_task_service::CookReplacementProof::Gates(
+                                        VerifyGateOptions {
+                                            verify: vec![
+                                                "test \"$(cat tracked.txt)\" = promoted".into()
+                                            ],
+                                            ..Default::default()
+                                        },
+                                    ),
+                                    authorize_external_proof: "operator re-runs deferred gates"
+                                        .into(),
+                                    authorize_interrupted_rerun: None,
+                                },
+                            ),
+                            ..Default::default()
+                        },
+                        &ReplacementOnlyRecoveryPerformer,
+                    )
+                    .unwrap();
+                    assert_eq!(exit, 0, "{case:?}: {report:#?}");
+                    let stored = persisted_promotion_for_attempt(run).unwrap().unwrap();
+                    assert!(stored.finalization_eligible(), "{case:?}");
+                }
+                WedgedCook::MissingReviewForm | WedgedCook::ContinuationNotScheduled => {
+                    assert_eq!(plan.step, CookRecoveryStep::Continue, "{case:?}: {plan:?}");
+                    let (report, exit) = crate::agent_task_service::recover_cook(
+                        cook,
+                        Default::default(),
+                        &ClaimingContinuation,
+                    )
+                    .unwrap();
+                    assert_eq!(exit, 0, "{case:?}: {report:#?}");
+                    assert_eq!(report.result.unwrap()["claimed"], true, "{case:?}");
+                }
+                WedgedCook::WedgedTerminalDriver => {
+                    // Liveness is the kernel driver lock, observed from another
+                    // controller. While a driver holds it, recovery names no
+                    // step (as diagnose reports a running Cook); once it exits,
+                    // the same Cook names its progressing step again.
+                    let recipes = CookRecipeStore::from_current_data_root().unwrap();
+                    let (held, release) = std::sync::mpsc::channel();
+                    let (done, wait) = std::sync::mpsc::channel::<()>();
+                    let driver = std::thread::spawn({
+                        let recipes = recipes.clone();
+                        let cook = cook.clone();
+                        move || {
+                            let _guard = recipes.try_acquire_cook_driver(&cook).unwrap().unwrap();
+                            held.send(()).unwrap();
+                            wait.recv().unwrap();
+                        }
+                    });
+                    release.recv().unwrap();
+                    let live = crate::agent_task_service::plan_cook_recovery(cook).unwrap();
+                    assert!(live.step.is_none(), "{case:?}: {live:?}");
+                    done.send(()).unwrap();
+                    driver.join().unwrap();
+                    assert!(recipes.foreign_cook_driver(cook).unwrap().is_none());
+                    let released = crate::agent_task_service::plan_cook_recovery(cook).unwrap();
+                    assert_eq!(released.step, plan.step, "{case:?}");
+                    assert!(!released.step.is_none(), "{case:?}: {released:?}");
+                }
+            }
+        });
+    }
+}

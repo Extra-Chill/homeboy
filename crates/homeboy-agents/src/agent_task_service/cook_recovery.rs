@@ -42,8 +42,8 @@ pub enum CookRecoveryStep {
     /// A promotion claim is still held; reconcile it before anything else
     /// (`reconcile --apply`).
     Reconcile,
-    /// The already-applied candidate failed (or never completed) its gates and
-    /// no continuation is admitted. Re-verify that exact candidate with
+    /// The already-applied candidate failed, deferred or never completed its
+    /// gates and no continuation is admitted. Re-verify that exact candidate with
     /// corrected gates, or record candidate-bound external proof, without
     /// re-applying the patch or replaying provider work. Both need explicit
     /// operator authorization (`recover --authorize-external-proof ...`).
@@ -121,6 +121,8 @@ pub(crate) struct CookRecoveryInputs<'a> {
     /// A durable lifecycle record exists for the attempt.
     pub recovery_legal: bool,
     pub disconnected_runner: bool,
+    /// Another controller holds the Cook's kernel driver lock right now.
+    pub live_driver: bool,
     /// A promotion operation claim is still `running`.
     pub blocking_claim: bool,
     /// Retry (or continuation) admission accepted this attempt.
@@ -147,11 +149,14 @@ pub(crate) struct CookRecoveryInputs<'a> {
     /// The attempt's applied candidate failed (or never completed) its
     /// deterministic gates and holds no replacement proof yet.
     pub applied_gate_failure: bool,
-    /// Applied, verified candidate with no publication receipt. Its review
-    /// form is publication's input, not a reason to replay provider work: a
-    /// missing, incomplete or malformed agent form is replaced with
-    /// `--review-form` on the publish step (#16441).
+    /// Applied, verified candidate with no publication receipt. Gates are
+    /// never replayed for it (#16441).
     pub verified_unpublished: bool,
+    /// The attempt's selected outcome records no usable AI-authored review
+    /// form. Publication refuses without one, so a verified candidate in this
+    /// state continues the Cook, whose bounded review-form follow-up records
+    /// it (#17494). An operator form (`--review-form`) still selects publish.
+    pub review_form_missing: bool,
     /// HEAD of the destination worktree when its branch holds commits ahead
     /// of the recorded base (#16181). A terminal `no_changes` attempt in that
     /// state is adoptable: the operator's committed work is the candidate the
@@ -164,6 +169,13 @@ pub(crate) fn cook_recovery_step(inputs: &CookRecoveryInputs<'_>) -> CookRecover
     if !inputs.recovery_legal {
         return CookRecoveryStep::none(
             "No recovery command is legal because the durable recipe has no lifecycle record. Start a fresh Cook after preserving the recipe reference for investigation.",
+        );
+    }
+    // A live driver owns every transition of its Cook; any step recovery
+    // took would race it, and `diagnose` reports the same Cook as running.
+    if inputs.live_driver {
+        return CookRecoveryStep::none(
+            "A live Cook driver is running this Cook; watch it with `agent-task status` instead.",
         );
     }
     if inputs.disconnected_runner {
@@ -192,6 +204,9 @@ pub(crate) fn cook_recovery_step(inputs: &CookRecoveryInputs<'_>) -> CookRecover
         }
     }
     if publishable {
+        if inputs.review_form_missing {
+            return continuation_step(inputs);
+        }
         return CookRecoveryStep::Publish;
     }
     // A stale destination checkpoint cannot authorize replacing a verified
@@ -252,6 +267,11 @@ pub(crate) fn cook_recovery_step(inputs: &CookRecoveryInputs<'_>) -> CookRecover
             inputs.status
         ));
     }
+    continuation_step(inputs)
+}
+
+/// Continue the Cook, rearming its failed terminal continuation first.
+fn continuation_step(inputs: &CookRecoveryInputs<'_>) -> CookRecoveryStep {
     if inputs.continuation_rearm_required {
         CookRecoveryStep::Rearm
     } else {
@@ -540,9 +560,13 @@ pub fn plan_cook_recovery(id: &str) -> Result<CookRecoveryPlan> {
         Err(error) => return manual_finalization_plan(id).ok_or(error),
     };
     // A validated manual-finalization intent is the operator's explicit
-    // publication decision for this attempt; only a held claim precedes it.
+    // publication decision for this attempt; a held claim precedes it, and so
+    // does verification of an applied candidate whose gates failed, deferred
+    // or never completed: publication refuses that candidate, so selecting
+    // it would deadlock recovery on a guaranteed refusal (#17494).
     if plan.step != CookRecoveryStep::Reconcile
         && super::manual_finalization_publication_pending(&plan.run_id)
+        && !super::applied_candidate_awaits_verification(&plan.run_id)
     {
         plan.step = CookRecoveryStep::Publish;
     }
@@ -771,7 +795,14 @@ pub fn recover_cook(
     let none = CookRecoveryOverrides::default();
     let result = (|| {
         Ok(match &report.step {
-            CookRecoveryStep::Continue => performer.continue_cook(run_id, false, &none)?,
+            CookRecoveryStep::Continue => {
+                // The step names remaining work, so its continuation must be
+                // claimable before the handler runs; otherwise the handler
+                // finds nothing to consume and reports a no-op (#17494).
+                super::CookRecipeStore::from_current_data_root()?
+                    .schedule_recovery_continuation(&report.cook_id, run_id)?;
+                performer.continue_cook(run_id, false, &none)?
+            }
             CookRecoveryStep::Rearm => performer.continue_cook(run_id, true, &none)?,
             CookRecoveryStep::Retry | CookRecoveryStep::ForkReplacement => {
                 performer.retry(run_id)?
