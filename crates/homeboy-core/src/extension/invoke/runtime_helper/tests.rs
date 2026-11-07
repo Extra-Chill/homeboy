@@ -281,43 +281,6 @@ homeboy_cleanup_step_capture "$captured_path"
     }
 
     #[test]
-    fn sidecar_writer_appends_and_merges_json_arrays() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let helper_path = dir.path().join("sidecar-writer.sh");
-        let target_path = dir.path().join("lint-findings.json");
-        let source_path = dir.path().join("extra-findings.json");
-        std::fs::write(&helper_path, assets::SIDECAR_WRITER_SH).expect("write helper");
-        std::fs::write(
-            &source_path,
-            r#"[{"tool":"lint","message":"three","fingerprint":"third"}]"#,
-        )
-        .expect("source");
-
-        let output = std::process::Command::new("bash")
-        .arg("-c")
-        .arg(format!(
-            "source {}; HOMEBOY_LINT_FINDINGS_FILE={}; homeboy_append_lint_finding '{{\"tool\":\"lint\",\"message\":\"one\",\"fingerprint\":\"first\"}}'; homeboy_append_lint_finding '{{\"tool\":\"lint\",\"message\":\"two\",\"fingerprint\":\"second\"}}'; homeboy_merge_lint_findings {}; cat {}",
-            helper_path.display(),
-            target_path.display(),
-            source_path.display(),
-            target_path.display()
-        ))
-        .output()
-        .expect("run bash");
-
-        assert!(
-            output.status.success(),
-            "stderr: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert_eq!(
-            String::from_utf8_lossy(&output.stdout),
-            r#"[{"tool":"lint","message":"one","fingerprint":"first"},{"tool":"lint","message":"two","fingerprint":"second"},{"tool":"lint","message":"three","fingerprint":"third"}]
-"#
-        );
-    }
-
-    #[test]
     fn disposable_local_db_helper_exports_requested_env_names_without_framework_terms() {
         let dir = tempfile::tempdir().expect("tempdir");
         let helper_path = dir.path().join("disposable-local-db.sh");
@@ -339,241 +302,6 @@ homeboy_cleanup_step_capture "$captured_path"
         assert!(content.contains("homeboy_disposable_local_db_start"));
         assert!(!content.to_lowercase().contains("wpcom"));
         assert!(!content.to_lowercase().contains("wordpress"));
-    }
-
-    fn shasum_hex(algo: &str, identity: &str) -> String {
-        use std::io::Write;
-        let mut child = std::process::Command::new("shasum")
-            .arg("-a")
-            .arg(algo)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .spawn()
-            .expect("spawn shasum");
-        child
-            .stdin
-            .take()
-            .expect("shasum stdin")
-            .write_all(identity.as_bytes())
-            .expect("write identity");
-        let output = child.wait_with_output().expect("shasum output");
-        assert!(output.status.success(), "shasum should succeed");
-        String::from_utf8_lossy(&output.stdout)
-            .split_whitespace()
-            .next()
-            .expect("hash field")
-            .to_string()
-    }
-
-    #[test]
-    fn emit_test_failure_shim_uses_identity_override_for_fingerprint() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let helper_path = dir.path().join("emit-test-failure.sh");
-        std::fs::write(&helper_path, assets::EMIT_TEST_FAILURE_SH).expect("write helper");
-
-        // Identity override reproduces the per-language fingerprint (e.g. rust's
-        // sha256("rust:test:<name>")) byte-for-byte.
-        let identity = "rust:test:mymod::tests::it_works";
-        let output = std::process::Command::new("bash")
-        .arg("-c")
-        .arg(format!(
-            "source {}; homeboy_emit_test_failure --test-id 'mymod::tests::it_works' --message 'Rust test failed: mymod::tests::it_works' --identity '{}' --stdout-excerpt 'tail'",
-            helper_path.display(),
-            identity
-        ))
-        .output()
-        .expect("run bash");
-
-        assert!(
-            output.status.success(),
-            "stderr: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let record: serde_json::Value =
-            serde_json::from_slice(&output.stdout).expect("record is valid json");
-        assert_eq!(record["test_id"], "mymod::tests::it_works");
-        assert!(record["suite"].is_null(), "suite should be null when empty");
-        assert!(record["file"].is_null(), "file should be null when empty");
-        assert!(record["line"].is_null(), "line should be null when absent");
-        assert_eq!(record["failure_type"], "test_failure");
-        assert_eq!(record["stdout_excerpt"], "tail");
-        assert_eq!(record["stderr_excerpt"], "");
-        assert_eq!(
-            record["fingerprint"].as_str().expect("fingerprint string"),
-            shasum_hex("256", identity)
-        );
-    }
-
-    #[test]
-    fn emit_test_failure_shim_derives_canonical_fingerprint_and_supports_infra_fallback() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let helper_path = dir.path().join("emit-test-failure.sh");
-        std::fs::write(&helper_path, assets::EMIT_TEST_FAILURE_SH).expect("write helper");
-
-        // No --identity: the shim derives the canonical NUL-joined identity
-        // [test_id, file, line, failure_type, first_message_line], matching the
-        // WordPress make_failure_fingerprint contract.
-        let output = std::process::Command::new("bash")
-        .arg("-c")
-        .arg(format!(
-            "source {}; homeboy_emit_test_failure --test-id 'Foo::testBar' --suite phpunit --file src/Foo.php --line 42 --failure-type AssertionError --message 'Failed asserting that false is true.' --stdout-excerpt 'out'",
-            helper_path.display()
-        ))
-        .output()
-        .expect("run bash");
-
-        assert!(
-            output.status.success(),
-            "stderr: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let record: serde_json::Value =
-            serde_json::from_slice(&output.stdout).expect("record is valid json");
-        assert_eq!(record["test_id"], "Foo::testBar");
-        assert_eq!(record["suite"], "phpunit");
-        assert_eq!(record["file"], "src/Foo.php");
-        assert_eq!(record["line"], 42);
-        assert_eq!(record["failure_type"], "AssertionError");
-
-        let identity = [
-            "Foo::testBar",
-            "src/Foo.php",
-            "42",
-            "AssertionError",
-            "Failed asserting that false is true.",
-        ]
-        .join("\0");
-        assert_eq!(
-            record["fingerprint"].as_str().expect("fingerprint string"),
-            shasum_hex("256", &identity)
-        );
-
-        // Infra-fallback record: failure_type is "infrastructure".
-        let infra = std::process::Command::new("bash")
-        .arg("-c")
-        .arg(format!(
-            "source {}; homeboy_emit_test_failure --test-id 'cargo test' --failure-type infrastructure --message 'cargo test failed before individual test failures could be parsed' --identity 'rust:cargo-test:failed'",
-            helper_path.display()
-        ))
-        .output()
-        .expect("run bash");
-
-        assert!(
-            infra.status.success(),
-            "stderr: {}",
-            String::from_utf8_lossy(&infra.stderr)
-        );
-        let infra_record: serde_json::Value =
-            serde_json::from_slice(&infra.stdout).expect("infra record is valid json");
-        assert_eq!(infra_record["failure_type"], "infrastructure");
-        assert_eq!(
-            infra_record["fingerprint"]
-                .as_str()
-                .expect("fingerprint string"),
-            shasum_hex("256", "rust:cargo-test:failed")
-        );
-    }
-
-    #[test]
-    fn emit_test_failure_bound_excerpt_matches_canonical_bound() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let helper_path = dir.path().join("emit-test-failure.sh");
-        std::fs::write(&helper_path, assets::EMIT_TEST_FAILURE_SH).expect("write helper");
-
-        // 50 lines of 200 chars each: first 40 lines kept, then capped at 4000 chars.
-        let raw: String = (0..50)
-            .map(|i| format!("{}-{}", i, "x".repeat(196)))
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        let output = std::process::Command::new("bash")
-            .arg("-c")
-            .arg(format!(
-                "source {}; homeboy_test_failure_bound_excerpt \"$RAW\"",
-                helper_path.display()
-            ))
-            .env("RAW", &raw)
-            .output()
-            .expect("run bash");
-
-        assert!(
-            output.status.success(),
-            "stderr: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let excerpt = String::from_utf8_lossy(&output.stdout);
-        assert_eq!(
-            excerpt.chars().count(),
-            4000,
-            "excerpt should cap at 4000 chars"
-        );
-        assert!(
-            excerpt.ends_with("..."),
-            "capped excerpt should end with ellipsis"
-        );
-    }
-
-    #[test]
-    fn sidecar_writer_supports_test_failure_and_fix_result_wrappers() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let helper_path = dir.path().join("sidecar-writer.sh");
-        let failures_path = dir.path().join("test-failures.json");
-        let fixes_path = dir.path().join("fix-results.json");
-        std::fs::write(&helper_path, assets::SIDECAR_WRITER_SH).expect("write helper");
-
-        let output = std::process::Command::new("bash")
-        .arg("-c")
-        .arg(format!(
-            "source {}; HOMEBOY_TEST_FAILURES_FILE={}; HOMEBOY_FIX_RESULTS_FILE={}; homeboy_write_test_failures '{{\"test_id\":\"suite::case\",\"message\":\"failed\"}}'; homeboy_write_fix_results '{{\"file\":\"src/lib.rs\",\"message\":\"formatted\"}}'; printf '%s\n%s' \"$(cat {})\" \"$(cat {})\"",
-            helper_path.display(),
-            failures_path.display(),
-            fixes_path.display(),
-            failures_path.display(),
-            fixes_path.display()
-        ))
-        .output()
-        .expect("run bash");
-
-        assert!(
-            output.status.success(),
-            "stderr: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert_eq!(
-            String::from_utf8_lossy(&output.stdout),
-            r#"[{"test_id":"suite::case","message":"failed"}]
-[{"file":"src/lib.rs","message":"formatted"}]"#
-        );
-    }
-
-    #[test]
-    fn sidecar_writer_supports_test_results_object() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let helper_path = dir.path().join("sidecar-writer.sh");
-        let results_path = dir.path().join("nested").join("test-results.json");
-        std::fs::write(&helper_path, assets::SIDECAR_WRITER_SH).expect("write helper");
-
-        let output = std::process::Command::new("bash")
-        .arg("-c")
-        .arg(format!(
-            "source {}; HOMEBOY_TEST_RESULTS_FILE={}; homeboy_write_test_results_json '{{\"total\":5,\"passed\":3,\"failed\":1,\"skipped\":1}}'; cat {}",
-            helper_path.display(),
-            results_path.display(),
-            results_path.display()
-        ))
-        .output()
-        .expect("run bash");
-
-        assert!(
-            output.status.success(),
-            "stderr: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert_eq!(
-            String::from_utf8_lossy(&output.stdout),
-            r#"{"total":5,"passed":3,"failed":1,"skipped":1}
-"#
-        );
     }
 
     #[test]
@@ -600,49 +328,6 @@ homeboy_cleanup_step_capture "$captured_path"
             String::from_utf8_lossy(&output.stderr)
         );
         assert!(String::from_utf8_lossy(&output.stdout).contains(r#""total": 5"#));
-    }
-
-    #[test]
-    fn sidecar_writer_supports_annotation_source_files() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let helper_path = dir.path().join("sidecar-writer.sh");
-        let annotations_dir = dir.path().join("annotations");
-        let source_path = dir.path().join("annotations-extra.json");
-        std::fs::write(&helper_path, assets::SIDECAR_WRITER_SH).expect("write helper");
-        let source_file = ["b.", "p", "hp"].concat();
-        let written_file = ["a.", "p", "hp"].concat();
-        std::fs::write(
-            &source_path,
-            format!(r#"[{{"file":"{source_file}","line":2}}]"#),
-        )
-        .expect("source");
-
-        let output = std::process::Command::new("bash")
-        .arg("-c")
-        .arg(format!(
-            "source {}; HOMEBOY_ANNOTATIONS_DIR={}; homeboy_write_annotations fixture-a '{{\"file\":\"{}\",\"line\":1}}'; homeboy_merge_annotations fixture-b {}; printf '%s\n%s' \"$(cat {}/fixture-a.json)\" \"$(cat {}/fixture-b.json)\"",
-            helper_path.display(),
-            annotations_dir.display(),
-            written_file,
-            source_path.display(),
-            annotations_dir.display(),
-            annotations_dir.display()
-        ))
-        .output()
-        .expect("run bash");
-
-        assert!(
-            output.status.success(),
-            "stderr: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert_eq!(
-            String::from_utf8_lossy(&output.stdout),
-            format!(
-                r#"[{{"file":"{written_file}","line":1}}]
-[{{"file":"{source_file}","line":2}}]"#
-            )
-        );
     }
 
     #[test]
@@ -770,133 +455,6 @@ mod bench {
             String::from_utf8_lossy(&output.stdout),
             "{\"component_id\":\"demo\",\"iterations\":7,\"scenarios\":[]}\n"
         );
-    }
-
-    #[test]
-    fn bench_shell_helper_writes_scenarios_from_payload_files() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let helper_path = dir.path().join("bench-helper.sh");
-        let results_path = dir.path().join("bench-results.json");
-        let payload_path = dir.path().join("payload.json");
-        let extras_path = dir.path().join("extras.json");
-        std::fs::write(&helper_path, assets::BENCH_HELPER_SH).expect("write helper");
-        std::fs::write(
-            &payload_path,
-            r#"{
-  "timings_ns": [1000000, 3000000, 5000000],
-  "peak_rss_bytes": 4096,
-  "source": "custom",
-  "metadata": {"fixture": true},
-  "artifacts": {"stdout": {"path": "bench.log", "kind": "text"}},
-  "metrics": {"custom_ms": 9.5}
-}"#,
-        )
-        .expect("write payload");
-        std::fs::write(
-            &extras_path,
-            r#"{
-  "metadata": {"runner": {"status": "ok"}},
-  "metric_groups": {"phases": {"setup_ms": 12}},
-  "timeline": [{"id": "setup", "duration_ms": 12}]
-}"#,
-        )
-        .expect("write extras");
-
-        let output = std::process::Command::new("bash")
-        .arg("-c")
-        .arg(format!(
-            "source {}; homeboy_write_bench_results_from_payload_files --results-file {} --component demo --iterations 3 --extras-file {} 'bench-fast={}'; cat {}",
-            helper_path.display(),
-            results_path.display(),
-            extras_path.display(),
-            payload_path.display(),
-            results_path.display()
-        ))
-        .output()
-        .expect("run bash");
-
-        assert!(
-            output.status.success(),
-            "stderr: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let value: serde_json::Value = serde_json::from_slice(&output.stdout).expect("json");
-        assert_eq!(value["component_id"], "demo");
-        assert_eq!(value["iterations"], 3);
-        assert_eq!(value["metadata"]["runner"]["status"], "ok");
-        assert_eq!(value["metric_groups"]["phases"]["setup_ms"], 12);
-        assert_eq!(value["timeline"][0]["id"], "setup");
-        assert_eq!(value["scenarios"][0]["id"], "bench-fast");
-        assert_eq!(value["scenarios"][0]["iterations"], 3);
-        assert_eq!(value["scenarios"][0]["metrics"]["mean_ms"], 3.0);
-        assert_eq!(value["scenarios"][0]["metrics"]["p50_ms"], 3.0);
-        assert_eq!(value["scenarios"][0]["metrics"]["custom_ms"], 9.5);
-        assert_eq!(value["scenarios"][0]["memory"]["peak_bytes"], 4096);
-        assert_eq!(value["scenarios"][0]["source"], "custom");
-        assert_eq!(value["scenarios"][0]["metadata"]["fixture"], true);
-        assert_eq!(
-            value["scenarios"][0]["artifacts"]["stdout"]["path"],
-            "bench.log"
-        );
-    }
-
-    #[test]
-    fn bench_shell_helper_writes_scenario_inventory() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let helper_path = dir.path().join("bench-helper.sh");
-        let results_path = dir.path().join("bench-results.json");
-        std::fs::write(&helper_path, assets::BENCH_HELPER_SH).expect("write helper");
-
-        let output = std::process::Command::new("bash")
-        .arg("-c")
-        .arg(format!(
-            "source {}; homeboy_write_bench_scenario_inventory --results-file {} --component demo --iterations 11 'bench-http=src/bin/bench-http.rs=native-bin'; cat {}",
-            helper_path.display(),
-            results_path.display(),
-            results_path.display()
-        ))
-        .output()
-        .expect("run bash");
-
-        assert!(
-            output.status.success(),
-            "stderr: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let value: serde_json::Value = serde_json::from_slice(&output.stdout).expect("json");
-        assert_eq!(value["component_id"], "demo");
-        assert_eq!(value["iterations"], 0);
-        assert_eq!(value["scenarios"][0]["id"], "bench-http");
-        assert_eq!(value["scenarios"][0]["iterations"], 0);
-        assert_eq!(value["scenarios"][0]["default_iterations"], 11);
-        assert_eq!(value["scenarios"][0]["file"], "src/bin/bench-http.rs");
-        assert_eq!(value["scenarios"][0]["source"], "native-bin");
-    }
-
-    #[test]
-    fn bench_shell_helper_checks_selected_scenarios_and_artifact_refs() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let helper_path = dir.path().join("bench-helper.sh");
-        std::fs::write(&helper_path, assets::BENCH_HELPER_SH).expect("write helper");
-
-        let output = std::process::Command::new("bash")
-        .arg("-c")
-        .arg(format!(
-            "source {}; HOMEBOY_BENCH_SCENARIOS=cold,warm; if homeboy_bench_scenario_selected cold && ! homeboy_bench_scenario_selected hot; then homeboy_bench_artifact_ref_json bench.log text 'Bench log'; fi",
-            helper_path.display()
-        ))
-        .output()
-        .expect("run bash");
-
-        assert!(
-            output.status.success(),
-            "stderr: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let value: serde_json::Value = serde_json::from_slice(&output.stdout).expect("json");
-        assert_eq!(value["path"], "bench.log");
-        assert_eq!(value["kind"], "text");
-        assert_eq!(value["label"], "Bench log");
     }
 
     #[test]
@@ -1074,16 +632,22 @@ homeboyBenchProgress({ scenario: 'studio-agent-site-build', phase: 'setup' });
                 "helper should document percentile method"
             );
             assert!(
-                content.contains("p * (n - 1)") || content.contains("$p * ($n - 1)"),
-                "helper should use R-7 rank formula"
-            );
-            assert!(
                 content.contains("scenario") && content.contains("slug"),
                 "helper should own scenario slugging"
             );
             assert!(
                 content.contains("component_id") && content.contains("scenarios"),
                 "helper should own BenchResults envelope shape"
+            );
+        }
+        // The shell helper delegates its percentile math to the native writer.
+        for content in [
+            assets::BENCH_HELPER_JS,
+            include_str!("../../runtime_json/bench.rs"),
+        ] {
+            assert!(
+                content.contains("p * (n - 1)"),
+                "helper should use R-7 rank formula"
             );
         }
     }

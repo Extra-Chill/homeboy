@@ -252,6 +252,7 @@ pub mod runner;
 pub mod runs;
 pub(crate) mod runs_proof_summary;
 pub(crate) mod runs_summary;
+pub mod runtime_json;
 pub mod scratch;
 pub mod self_cmd;
 pub mod server;

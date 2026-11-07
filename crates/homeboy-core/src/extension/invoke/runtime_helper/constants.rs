@@ -12,3 +12,6 @@ pub const BENCH_HELPER_SH_ENV: &str = "HOMEBOY_RUNTIME_BENCH_HELPER_SH";
 pub const BENCH_HELPER_JS_ENV: &str = "HOMEBOY_RUNTIME_BENCH_HELPER_JS";
 pub const RUNTIME_SETTINGS_HELPER_ID: &str = "runtime-settings";
 pub const RUNTIME_SETTINGS_HELPER_ENV: &str = "HOMEBOY_RUNTIME_SETTINGS_HELPER";
+/// The running Homeboy binary. Runtime shell helpers invoke it for their JSON
+/// work instead of depending on `homeboy` (or any interpreter) being on PATH.
+pub const RUNTIME_EXECUTABLE_ENV: &str = "HOMEBOY_RUNTIME_EXECUTABLE";
