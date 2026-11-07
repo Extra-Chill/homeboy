@@ -3695,13 +3695,17 @@ pub(crate) fn ssh_process_liveness_command(path: &str) -> String {
 const PRUNE_SCAN_STATUS_PREFIX: &str = "__homeboy_prune_scan__\t";
 /// Candidate reason for a run artifact sibling whose checkout no longer exists.
 const ARTIFACT_DIR_CHECKOUT_MISSING_REASON: &str = "artifact_dir_checkout_missing";
-/// Candidate reason for a Homeboy-named entry (`<name>-<19-digit nanosecond
-/// stamp>`) with no ownership record past [`UNOWNED_ENTRY_MIN_AGE_SECONDS`].
+/// Candidate reason for a Homeboy-named entry with no ownership record past
+/// [`UNOWNED_ENTRY_MIN_AGE_SECONDS`]. Homeboy names every checkout it creates:
+/// snapshot syncs `<name>-<12 hex>-<uuid>-<19-digit nanosecond stamp>`
+/// (`temp::unique_name`), git syncs `<name>-<12 hex>`
+/// (`deterministic_remote_path`). The name is the ownership proof that
+/// exists from creation, before any metadata is written.
 const UNOWNED_ENTRY_EXPIRED_REASON: &str = "workspace_metadata_missing_expired";
 /// Age past which a Homeboy-named entry with no ownership record is
 /// reclaimable once no process holds it: a checkout from before metadata, or
-/// one whose sync died before writing it (#17239). Entries without the stamp,
-/// such as a resident `woocommerce` checkout, are never reclaimed this way.
+/// one whose sync died before writing it (#17239). Entries without a Homeboy
+/// name, such as a resident `woocommerce` checkout, are never reclaimed this way.
 const UNOWNED_ENTRY_MIN_AGE_SECONDS: u64 = 7 * 24 * 60 * 60;
 
 /// One inventoried top-level entry, as reported by [`prune_scan_command`].
@@ -4041,7 +4045,7 @@ pub(crate) fn prune_scan_command(
             "else case \"$dir\" in ",
             "*\"$suffix\") checkout=${{dir%\"$suffix\"}}; if [ -e \"$checkout\" ] || [ -L \"$checkout\" ]; then printf \"retained\\tartifact_dir_owned_by_checkout\\t%s\\n\" \"$dir\"; continue; fi; kind=artifact ;; ",
             "*\"$state_suffix\") checkout=${{dir%\"$state_suffix\"}}; if [ -e \"$checkout\" ] || [ -L \"$checkout\" ]; then printf \"retained\\tstate_dir_owned_by_checkout\\t%s\\n\" \"$dir\"; continue; fi; kind=artifact ;; ",
-            "*) stamp=${{dir##*-}}; case \"$stamp\" in ''|*[!0-9]*) stamp= ;; esac; if [ \"${{#stamp}}\" -ne 19 ] || [ \"$age\" -lt \"$unowned_min_age\" ]; then printf \"unknown\\tworkspace_metadata_missing\\t%s\\n\" \"$dir\"; continue; fi; kind=unowned ;; ",
+            "*) stamp=${{dir##*-}}; named=; case \"$stamp\" in ''|*[!0-9]*) ;; *) [ \"${{#stamp}}\" -eq 19 ] && named=1 ;; esac; case \"$stamp\" in ''|*[!0-9a-f]*) ;; *) [ \"${{#stamp}}\" -eq 12 ] && named=1 ;; esac; if [ -z \"$named\" ] || [ \"$age\" -lt \"$unowned_min_age\" ]; then printf \"unknown\\tworkspace_metadata_missing\\t%s\\n\" \"$dir\"; continue; fi; kind=unowned ;; ",
             "esac; fi; ",
             "rows=$((rows + 1)); printf \"%s\\t%s\\t%s\" \"$kind\" \"$age\" \"$dir\"; ",
             "if [ \"$kind\" = workspace ]; then printf \"\\t\"; base64 < \"$meta\" | tr -d \"\\n\"; fi; printf \"\\n\"; ",

@@ -1256,7 +1256,12 @@ fn prune_reclaims_an_old_unowned_checkout_unless_a_process_holds_it() {
         let root = runner_root.path().join("_lab_workspaces");
         let free = root.join("free-checkout-1792000000000000000");
         let held = root.join("held-checkout-1792000000000000001");
-        for path in [&free, &held] {
+        // A git sync's `deterministic_remote_path` name.
+        let git = root.join("homeboy-fix-17392-capability-probe-1d7c84a64600");
+        // Not Homeboy names: wrong digest length, upper-case hex.
+        let short = root.join("tool-1d7c84a646");
+        let upper = root.join("tool-1D7C84A64600");
+        for path in [&free, &held, &git, &short, &upper] {
             fs::create_dir_all(path.join(".git")).expect("metadata-less checkout");
             age_entry(path);
         }
@@ -1284,23 +1289,31 @@ fn prune_reclaims_an_old_unowned_checkout_unless_a_process_holds_it() {
         child.wait().expect("reap held process");
 
         assert_eq!(exit_code, 0);
-        let removed = output
+        let mut removed = output
             .removed
             .iter()
             .map(|entry| (entry.remote_path.clone(), entry.reason.clone()))
             .collect::<Vec<_>>();
+        removed.sort();
+        let reason = "workspace_metadata_missing_expired".to_string();
         assert_eq!(
             removed,
-            vec![(
-                free.display().to_string(),
-                "workspace_metadata_missing_expired".to_string()
-            )],
+            vec![
+                (free.display().to_string(), reason.clone()),
+                (git.display().to_string(), reason),
+            ],
             "{}",
             prune_diagnosis(&output)
         );
         assert_eq!(output.skipped_live_count, 1, "{}", prune_diagnosis(&output));
-        assert!(!free.exists());
-        assert!(held.exists());
+        assert_eq!(
+            output.skipped_unknown_count,
+            2,
+            "{}",
+            prune_diagnosis(&output)
+        );
+        assert!(!free.exists() && !git.exists());
+        assert!(held.exists() && short.exists() && upper.exists());
     });
 }
 
