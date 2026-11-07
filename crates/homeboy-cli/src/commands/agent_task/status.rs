@@ -194,6 +194,9 @@ pub(crate) fn bounded_full_operation_report(value: Value, operation: &str) -> Va
             "truncated": true,
         },
     });
+    if operation == "recover" {
+        output["step"] = bounded_value(&value["step"]);
+    }
     if operation == "cook" {
         if let Some(candidate) = value.get("durable_candidate") {
             output["durable_candidate"] = candidate.clone();
@@ -298,7 +301,16 @@ fn status_once(args: StatusArgs) -> CmdResult<Value> {
     if let Some(recipe_only) = recipe_only_status(&args.run_id, args.exact)? {
         return Ok((recipe_only, 0));
     }
-    let target = resolve_cook_reader_target(&args.run_id, args.exact)?;
+    // Status follows continuation authority, not promotion's candidate selection.
+    // Exact attempts and non-Cook runs retain their existing read behavior.
+    let target = if !args.exact && agent_task_service_direct::recipe_exists(&args.run_id)? {
+        AgentTaskCookReaderTarget {
+            run_id: agent_task_service_direct::resolve_cook_continuation_run_id(&args.run_id)?,
+            selection: None,
+        }
+    } else {
+        resolve_cook_reader_target(&args.run_id, args.exact)?
+    };
     let run = if args.exact {
         homeboy::agents::orchestration::run_exact_from_current_environment(&target.run_id)?
     } else {
@@ -315,6 +327,14 @@ fn status_once(args: StatusArgs) -> CmdResult<Value> {
     let mut value = serde_json::to_value(run).unwrap_or(Value::Null);
     if let Some(reason) = verdict.reason {
         value["reason"] = json!(reason);
+    }
+    if !args.exact
+        && target.run_id != args.run_id
+        && matches!(value["state"].as_str(), Some("running" | "queued"))
+    {
+        value["recovery"] = json!({
+            "command": format!("homeboy agent-task status {} --watch", quote_arg(&target.run_id)),
+        });
     }
     // Status is a pure projection (#13697, #15718): every read below is
     // bounded and never initializes, migrates, or reconciles durable state.
