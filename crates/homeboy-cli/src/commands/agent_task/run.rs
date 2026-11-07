@@ -2112,6 +2112,8 @@ mod preview_tests {
             "homeboy",
             "agent-task",
             "cook",
+            "--base",
+            "main",
             "--preview",
             "--prompt",
             "implement the issue",
@@ -2530,6 +2532,8 @@ mod preview_tests {
                 "homeboy".to_string(),
                 "agent-task".to_string(),
                 "cook".to_string(),
+                "--base".to_string(),
+                "main".to_string(),
                 "--preview".to_string(),
                 "--backend".to_string(),
                 "fixture".to_string(),
@@ -2664,6 +2668,8 @@ mod preview_tests {
                 "homeboy".to_string(),
                 "agent-task".to_string(),
                 "cook".to_string(),
+                "--base".to_string(),
+                "main".to_string(),
                 "--preview".to_string(),
                 "--backend".to_string(),
                 "fixture".to_string(),
@@ -2795,6 +2801,8 @@ mod preview_tests {
             "homeboy".to_string(),
             "agent-task".to_string(),
             "cook".to_string(),
+            "--base".to_string(),
+            "main".to_string(),
             "--preview".to_string(),
             "--backend".to_string(),
             "fixture".to_string(),
@@ -2989,6 +2997,8 @@ mod preview_tests {
                     "homeboy",
                     "agent-task",
                     "cook",
+                    "--base",
+                    "main",
                     "--preview",
                     "--backend",
                     "fixture",
@@ -3120,6 +3130,8 @@ mod preview_tests {
                 "homeboy",
                 "agent-task",
                 "cook",
+                "--base",
+                "main",
                 "--preview",
                 "--backend",
                 "fixture",
@@ -3436,6 +3448,8 @@ process.stdout.write(JSON.stringify({type:'message_end',message:{role:'assistant
             "fixture-repository".to_string(),
             "--prompt".to_string(),
             "Inspect the task workspace.".to_string(),
+            "--base".to_string(),
+            "main".to_string(),
             "--to-worktree".to_string(),
             workspace,
             "--no-finalize".to_string(),
@@ -5720,24 +5734,42 @@ fn resolve_cook_base(
         .or(args.dispatch.cwd.as_deref())
         .map(Path::new);
     let component = repository.map(|repo| Path::new(&repo.component.local_path));
-    let destination = args.to_worktree.as_deref().map(Path::new);
-    let resolution = super::default_branch::resolve_default_branch(
-        DefaultBranchRequest {
-            explicit_base: args.base.as_deref(),
-            explicit_from: None,
-            workspace,
-            component,
-            destination,
-            compatibility_fallback: Some("main"),
-        },
-        repository.map(|repo| {
-            (
-                Path::new(&repo.component.local_path),
-                repo.root.as_path(),
-                repo.remote.as_str(),
-            )
-        }),
-    )?;
+    let destination = match args.to_worktree.as_deref() {
+        Some(path) if Path::new(path).is_dir() => Some(PathBuf::from(path)),
+        Some(handle) => {
+            homeboy::core::worktree_provider::resolve_native_worktree_mutation_target(handle)?
+                .map(|target| target.path)
+        }
+        None => None,
+    };
+    let destination = destination.as_deref();
+    let resolution = if let Some(base) = &args.base {
+        super::default_branch::DefaultBranchResolution {
+            base: base.clone(),
+            from: format!("origin/{base}"),
+            sha: None,
+            source: "explicit".to_string(),
+            evidence_path: None,
+            precedence: vec!["explicit_base"],
+        }
+    } else {
+        super::default_branch::resolve_default_branch(
+            DefaultBranchRequest {
+                explicit_base: None,
+                explicit_from: None,
+                workspace,
+                component,
+                destination,
+            },
+            repository.map(|repo| {
+                (
+                    Path::new(&repo.component.local_path),
+                    repo.root.as_path(),
+                    repo.remote.as_str(),
+                )
+            }),
+        )?
+    };
     args.base = Some(resolution.base.clone());
     args.base_resolution = Some(serde_json::to_value(resolution).map_err(|error| {
         homeboy::core::Error::internal_unexpected(format!(

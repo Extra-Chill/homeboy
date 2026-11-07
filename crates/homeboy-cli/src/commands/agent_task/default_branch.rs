@@ -24,9 +24,6 @@ pub(crate) struct DefaultBranchRequest<'a> {
     pub workspace: Option<&'a Path>,
     pub component: Option<&'a Path>,
     pub destination: Option<&'a Path>,
-    /// Preserve single-Cook's deferred provider behavior when repository
-    /// evidence is not available until after materialization.
-    pub compatibility_fallback: Option<&'a str>,
 }
 
 pub(crate) fn resolve_default_branch(
@@ -64,7 +61,7 @@ pub(crate) fn resolve_default_branch(
 
     let (path, base, inferred_from, source) = if let Some(base) = request.explicit_base {
         let path = existing.first().map(|(path, _)| path.clone());
-        if path.is_none() && request.compatibility_fallback.is_none() {
+        if path.is_none() {
             return Err(missing_default_branch_error());
         }
         let remote = path
@@ -116,18 +113,7 @@ pub(crate) fn resolve_default_branch(
                 break;
             }
         }
-        resolved.unwrap_or_else(|| {
-            let base = request
-                .compatibility_fallback
-                .unwrap_or_default()
-                .to_string();
-            (
-                None,
-                base.clone(),
-                format!("origin/{base}"),
-                "compatibility_fallback",
-            )
-        })
+        resolved.ok_or_else(missing_default_branch_error)?
     };
 
     if base.is_empty() {
@@ -147,13 +133,11 @@ pub(crate) fn resolve_default_branch(
             Some(sha) => Some(sha),
             None => resolve_commit(&path, &base, started)?,
         };
-        if request.compatibility_fallback.is_none() {
-            if sha.is_none() {
-                return Err(unavailable_ref_error("from", &from, &remote));
-            }
-            if base_sha.is_none() {
-                return Err(unavailable_ref_error("base", &base, &remote));
-            }
+        if sha.is_none() {
+            return Err(unavailable_ref_error("from", &from, &remote));
+        }
+        if base_sha.is_none() {
+            return Err(unavailable_ref_error("base", &base, &remote));
         }
         if sha.is_some() && base_sha.is_some() && sha != base_sha {
             return Err(Error::validation_invalid_argument(
@@ -279,7 +263,7 @@ fn default_branch_timeout_error(path: &Path, operation: &str, elapsed: Duration)
 fn missing_default_branch_error() -> Error {
     Error::validation_invalid_argument(
         "base",
-        "repository default branch could not be inferred from configured or remote evidence",
+        "repository default branch could not be inferred from configured or remote evidence; specify --base",
         None,
         Some(vec![
             "Set the remote default explicitly: git remote set-head origin --auto".to_string(),
@@ -319,7 +303,6 @@ mod tests {
                     workspace: None,
                     component: Some(&checkout),
                     destination: None,
-                    compatibility_fallback: None,
                 },
                 None,
             )
@@ -343,7 +326,6 @@ mod tests {
                 workspace: None,
                 component: Some(&checkout),
                 destination: None,
-                compatibility_fallback: None,
             },
             None,
         )
@@ -361,7 +343,6 @@ mod tests {
                 workspace: None,
                 component: Some(&checkout),
                 destination: None,
-                compatibility_fallback: None,
             },
             None,
         )
@@ -376,7 +357,6 @@ mod tests {
                 workspace: None,
                 component: Some(&checkout),
                 destination: None,
-                compatibility_fallback: None,
             },
             None,
         )
@@ -385,26 +365,20 @@ mod tests {
     }
 
     #[test]
-    fn compatibility_mode_preserves_deferred_cook_base_resolution() {
+    fn missing_repository_evidence_fails_closed() {
         let fixture = tempfile::tempdir().expect("fixture");
-        let resolution = resolve_default_branch(
+        let error = resolve_default_branch(
             DefaultBranchRequest {
                 explicit_base: None,
                 explicit_from: None,
                 workspace: None,
                 component: Some(fixture.path()),
                 destination: None,
-                compatibility_fallback: Some("main"),
             },
             None,
         )
-        .expect("defer Cook base validation until materialization");
-
-        assert_eq!(resolution.base, "main");
-        assert_eq!(resolution.from, "origin/main");
-        assert_eq!(resolution.source, "compatibility_fallback");
-        assert_eq!(resolution.sha, None);
-        assert_eq!(resolution.evidence_path, None);
+        .expect_err("missing evidence must not guess a base");
+        assert!(error.to_string().contains("--base"));
     }
 
     #[test]
@@ -420,7 +394,6 @@ mod tests {
                 workspace: None,
                 component: Some(&component),
                 destination: None,
-                compatibility_fallback: None,
             },
             None,
         )
@@ -483,7 +456,6 @@ mod tests {
                 workspace: None,
                 component: Some(&checkout),
                 destination: None,
-                compatibility_fallback: Some("main"),
             },
             None,
         )
@@ -554,7 +526,6 @@ mod tests {
                 workspace: None,
                 component: Some(&checkout),
                 destination: None,
-                compatibility_fallback: Some("main"),
             },
             None,
         )

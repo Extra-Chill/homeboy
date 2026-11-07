@@ -425,7 +425,7 @@ fn refused_publication_ends_the_terminal_continuation_without_regating() {
         let diagnostic = continuation["diagnostic"].as_str().unwrap();
         assert!(
             diagnostic.starts_with("publish_refused: ")
-                && diagnostic.contains("durable run must have succeeded"),
+                && diagnostic.contains("publication refused:"),
             "{diagnostic}"
         );
         let blocker = crate::agent_task_service::CookDelivery::from_run_metadata(&record.metadata)

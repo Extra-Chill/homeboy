@@ -2391,7 +2391,7 @@ fn durable_finalization_accepts_only_authenticated_pre_provider_candidate_adopti
         finalization_options.manual_finalization = false;
         let error = finalize_pr_with_backend(finalization_options, &mut backend)
             .expect_err("unsafe recovery is blocked");
-        assert!(error.message.contains("durable run must have succeeded"));
+        assert!(error.message.contains("publication refused:"));
         assert!(!backend.committed && !backend.pushed && !backend.created);
     };
 
@@ -2685,6 +2685,65 @@ fn durable_finalization_rejects_stale_success_when_latest_producer_failed_or_gat
 
         assert!(finalize_pr_with_backend(finalization_options, &mut backend).is_err());
         assert!(!backend.created && !backend.committed && !backend.pushed);
+    }
+}
+
+#[test]
+fn durable_finalization_recovers_served_model_with_proven_inherited_gate() {
+    for (proven, served_model, refusal) in [
+        (true, Some("gpt-6.1-sol"), None),
+        (false, Some("gpt-6.1-sol"), Some("gates are not green")),
+        (true, None, Some("concrete model missing")),
+    ] {
+        let mut gate_proof = successful_gate_proof();
+        gate_proof.promotion.changed_files = vec!["src/lib.rs".to_string()];
+        let mut inherited =
+            serde_json::to_value(&gate_proof.promotion.deterministic_gates[0]).unwrap();
+        inherited["id"] = json!("inherited");
+        inherited["status"] = json!("accepted_inherited_failure");
+        inherited["exit_code"] = json!(1);
+        if proven {
+            inherited["failure_evidence"] = json!({
+                "classification": "candidate_code", "summary": "baseline failure",
+                "command": "cargo test", "exit_code": 1, "agent_feedback": "inherited"
+            });
+            inherited["baseline_comparison"] = json!({
+                "base_ref": "main", "exit_code": 1, "failure_fingerprint": "same",
+                "matches_candidate_failure": true, "result": "baseline_red"
+            });
+        }
+        gate_proof
+            .promotion
+            .deterministic_gates
+            .push(serde_json::from_value(inherited).unwrap());
+        let mut normalized = gate_proof.promotion.gate_results[0].clone();
+        normalized.id = "inherited".to_string();
+        normalized.status = HomeboyGateStatus::AcceptedInheritedFailure;
+        gate_proof.promotion.gate_results.push(normalized);
+        let mut lifecycle = successful_lifecycle("");
+        lifecycle.execution.state = RunExecutionState::CandidateRecoverable;
+        lifecycle.provider_runtime[0].state = ProviderRuntimeState::Failed;
+        lifecycle.provider_runtime[0].metadata =
+            json!({ "served_models": served_model.into_iter().collect::<Vec<_>>() });
+        let mut backend = MockBackend {
+            changed_files: vec!["src/lib.rs".to_string()],
+            lifecycle: Some(lifecycle),
+            gate_proof: Some(gate_proof),
+            ..Default::default()
+        };
+        let mut finalization_options = options();
+        finalization_options.manual_finalization = false;
+        finalization_options.changed_files = vec!["src/lib.rs".to_string()];
+        let result = finalize_pr_with_backend(finalization_options, &mut backend);
+        if let Some(reason) = refusal {
+            let error = result.expect_err("unsafe recovery refused");
+            assert!(error.message.contains(reason), "{}", error.message);
+            assert!(!backend.committed && !backend.pushed && !backend.created);
+        } else {
+            let report = result.expect("proven inherited failure with served model publishes");
+            assert_eq!(report.review_dossier.ai_assistance.model, "gpt-6.1-sol");
+            assert!(backend.created);
+        }
     }
 }
 
@@ -3788,7 +3847,7 @@ fn successful_gate_proof() -> AgentTaskPrDurableGateProof {
                     }
                 }
             },
-            "deterministic_gates": [{ "id": "gate", "status": "succeeded", "command": ["sh", "-c", "cargo test"], "exit_code": 0 }],
+            "deterministic_gates": [{ "id": "gate", "command": ["cargo", "test"], "status": "succeeded", "exit_code": 0 }],
             "gate_results": [{ "id": "gate", "name": "cargo test", "kind": "command", "status": "passed" }]
         })).expect("promotion proof"),
     }

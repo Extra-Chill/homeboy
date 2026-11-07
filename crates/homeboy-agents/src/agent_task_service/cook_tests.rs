@@ -6335,6 +6335,129 @@ fn retryable_preview_base_resolution_is_deferred_not_admitted() {
 }
 
 #[test]
+fn cook_recovers_recorded_compatibility_base_from_destination_origin() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let fixture = tempfile::tempdir().unwrap();
+        let origin = fixture.path().join("origin.git");
+        let seed = fixture.path().join("seed");
+        let destination = fixture.path().join("destination");
+        let git = |path: &Path, args: &[&str]| {
+            homeboy_core::git::run_git(path, args, "recovery fixture").unwrap()
+        };
+        git(
+            fixture.path(),
+            &[
+                "init",
+                "--bare",
+                "--initial-branch=trunk",
+                origin.to_str().unwrap(),
+            ],
+        );
+        git(
+            fixture.path(),
+            &["clone", origin.to_str().unwrap(), seed.to_str().unwrap()],
+        );
+        git(&seed, &["config", "user.name", "Test"]);
+        git(&seed, &["config", "user.email", "test@example.com"]);
+        git(&seed, &["commit", "--allow-empty", "-m", "base"]);
+        git(&seed, &["push", "origin", "trunk"]);
+        git(&seed, &["remote", "set-head", "origin", "trunk"]);
+        git(
+            &seed,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "candidate",
+                destination.to_str().unwrap(),
+            ],
+        );
+        homeboy_core::worktree::adopt(homeboy_core::worktree::WorktreeAdoptOptions {
+            handle: "fixture@candidate".into(),
+            path: destination.display().to_string(),
+            kind: None,
+            provenance: None,
+        })
+        .unwrap();
+        let lifecycle = test_lifecycle_store();
+        let recipes = CookRecipeStore::for_lifecycle_store(&lifecycle);
+        let mut options = batch_cook_options(
+            "cook-compatibility-base",
+            Arc::new(AcceptedDetachedAttemptDispatcher),
+        );
+        options.workspace.to_worktree = "fixture@candidate".into();
+        options.finalization.base = "main".into();
+        options.identity.initial_plan.metadata["cook_base_resolution"] = serde_json::json!({
+            "base": "main", "from": "origin/main", "source": "compatibility_fallback",
+        });
+        recipes.persist_initial_recipe(&options).unwrap();
+        recover_compatibility_cook_base(&recipes, &lifecycle, &mut options).unwrap();
+        assert_eq!(options.finalization.base, "trunk");
+        let recorded = recipes.load_recipe(&options.identity.cook_id).unwrap();
+        assert_eq!(recorded.finalization["base"], "trunk");
+        assert_eq!(
+            recorded.attempts[0].plan.metadata["cook_base_resolution"]["source"],
+            "remote_head"
+        );
+        assert_eq!(
+            crate::agent_task_promotion::capture_declared_base(
+                &destination,
+                Some(&options.finalization.base),
+            )
+            .unwrap()
+            .unwrap()
+            .base,
+            "trunk"
+        );
+        // A second pass cannot reopen the historical fallback path.
+        recover_compatibility_cook_base(&recipes, &lifecycle, &mut options).unwrap();
+        let base = git(&destination, &["rev-parse", "HEAD"]).trim().to_string();
+        std::fs::write(destination.join("candidate.txt"), "recovered candidate\n").unwrap();
+        git(&destination, &["add", "candidate.txt"]);
+        git(&destination, &["commit", "-m", "candidate"]);
+        let candidate = git(&destination, &["rev-parse", "HEAD"]).trim().to_string();
+        let tree = git(&destination, &["rev-parse", "HEAD^{tree}"])
+            .trim()
+            .to_string();
+        git(&destination, &["reset", "--hard", &base]);
+        let source = serde_json::json!({
+            "schema": crate::agent_task::AGENT_TASK_OUTCOME_SCHEMA,
+            "task_id": "task-1",
+            "status": "succeeded",
+            "candidate": { "base_sha": base, "candidate_sha": candidate, "tree_sha": tree },
+            "artifacts": [],
+        })
+        .to_string();
+        let source_path = fixture.path().join("outcome.json");
+        std::fs::write(&source_path, &source).unwrap();
+        let report = crate::agent_task_promotion::promote(
+            crate::agent_task_promotion::AgentTaskPromotionRequest {
+                source,
+                source_path: Some(source_path),
+                source_run_id: None,
+                source_worktree_path: Some(destination.clone()),
+                base_ref: Some(options.finalization.base.clone()),
+                task_base_sha: Some(base),
+                candidate_ref: None,
+                to_worktree: options.workspace.to_worktree.clone(),
+                task_id: None,
+                artifact_id: None,
+                dry_run: false,
+                gates: Default::default(),
+                provider_invocation: None,
+                repository_integrity_evidence: None,
+            },
+        )
+        .expect("recovered candidate promotes against trunk");
+        assert_eq!(
+            report.status,
+            crate::agent_task_promotion::AgentTaskPromotionStatus::Applied
+        );
+        assert_eq!(report.verified_base.unwrap().base, "trunk");
+    });
+}
+
+#[test]
 fn cook_promotion_recovers_legacy_stale_base_from_attempt_snapshot() {
     let mut options = batch_cook_options(
         "cook-legacy-stale-base",
@@ -7489,6 +7612,9 @@ fn reconstructed_cook_rejects_a_removed_managed_workspace_before_provider_execut
             "component_id": "fixture",
             "source_checkout": primary.path(),
             "worktree_path": target,
+            "workspace_identity": homeboy_core::worktree::task_worktree_workspace_identity(
+                "fixture", &options.workspace.to_worktree,
+            ).expect("fixture workspace identity"),
             "branch": "fix/continuation",
             "base_ref": "main",
             "workspace_identity": homeboy_core::worktree::task_worktree_workspace_identity(

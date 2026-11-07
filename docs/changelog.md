@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.447.1] - 2026-11-07
+
+### Changed
+- give the unrecoverable-source fixture its own workspace identity
+
+### Fixed
+- Fix Cook base resolution and recover legacy main fallbacks
+
 ## [0.447.0] - 2026-11-07
 
 ### Added

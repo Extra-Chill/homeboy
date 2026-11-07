@@ -306,7 +306,6 @@ pub(super) fn batch_prepare(args: AgentTaskBatchPrepareArgs) -> CmdResult<Value>
             workspace: None,
             component: Some(&path),
             destination: None,
-            compatibility_fallback: None,
         },
         None,
     )?;
