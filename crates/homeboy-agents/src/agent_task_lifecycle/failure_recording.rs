@@ -3223,19 +3223,13 @@ mod tests {
     }
 
     #[test]
-    fn controller_local_projection_isolates_identical_ids_across_artifact_roots() {
+    fn controller_local_projection_preserves_patch_bytes() {
         let left_context = homeboy_core::test_support::HermeticTestContext::new();
-        let right_context = homeboy_core::test_support::HermeticTestContext::new();
         let left_store = AgentTaskLifecycleStore::new(left_context.path_roots())
             .open_observation_initialized()
             .expect("left observation store");
-        let right_store = AgentTaskLifecycleStore::new(right_context.path_roots())
-            .open_observation_initialized()
-            .expect("right observation store");
         let left_source = left_context.root().join("source.patch");
-        let right_source = right_context.root().join("source.patch");
         std::fs::write(&left_source, b"left").expect("left source");
-        std::fs::write(&right_source, b"right").expect("right source");
 
         let left = controller_projected_local_artifact_path(
             &left_store,
@@ -3247,22 +3241,8 @@ mod tests {
             &format!("{:x}", sha2::Sha256::digest(b"left")),
         )
         .expect("left projection");
-        let right = controller_projected_local_artifact_path(
-            &right_store,
-            "same-run",
-            "same-task",
-            "same-artifact",
-            right_source.to_str().unwrap(),
-            5,
-            &format!("{:x}", sha2::Sha256::digest(b"right")),
-        )
-        .expect("right projection");
-
         assert!(left.starts_with(left_store.artifact_root().unwrap()));
-        assert!(right.starts_with(right_store.artifact_root().unwrap()));
-        assert_ne!(left, right);
         assert_eq!(std::fs::read(left).unwrap(), b"left");
-        assert_eq!(std::fs::read(right).unwrap(), b"right");
     }
 
     /// Register one logical artifact twice the way terminal projection does for

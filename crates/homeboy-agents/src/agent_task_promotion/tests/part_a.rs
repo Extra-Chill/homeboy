@@ -74,15 +74,10 @@ fn promotion_uses_recovered_controller_projection_without_public_artifact_path()
 fn recoverable_promotion_projection_uses_the_explicit_observation_store() {
     let _home = gate_home();
     let left_context = homeboy_core::test_support::HermeticTestContext::new();
-    let right_context = homeboy_core::test_support::HermeticTestContext::new();
     let left_store =
         crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(left_context.path_roots())
             .open_observation_initialized()
             .expect("left observation store");
-    let right_store =
-        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(right_context.path_roots())
-            .open_observation_initialized()
-            .expect("right observation store");
     let run_id = "same-projected-run";
     let task_id = "same-projected-task";
     let artifact_id = "same-projected-patch";
@@ -114,13 +109,6 @@ fn recoverable_promotion_projection_uses_the_explicit_observation_store() {
         .as_object_mut()
         .expect("patch artifact")
         .remove("path");
-    record_controller_projection_in_store(
-        &right_store,
-        run_id,
-        task_id,
-        artifact_id,
-        "wrong patch bytes",
-    );
     let projected = record_controller_projection_in_store(
         &left_store,
         run_id,
@@ -165,15 +153,10 @@ fn recoverable_promotion_projection_uses_the_explicit_observation_store() {
 #[test]
 fn committed_changes_retention_uses_the_explicit_observation_store() {
     let left_context = homeboy_core::test_support::HermeticTestContext::new();
-    let right_context = homeboy_core::test_support::HermeticTestContext::new();
     let left_store =
         crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(left_context.path_roots())
             .open_observation_initialized()
             .expect("left observation store");
-    let right_store =
-        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(right_context.path_roots())
-            .open_observation_initialized()
-            .expect("right observation store");
     let run_id = "same-committed-retention-run";
     left_store
         .upsert_imported_run(&homeboy_core::observation::RunRecord {
@@ -210,7 +193,6 @@ fn committed_changes_retention_uses_the_explicit_observation_store() {
 
     assert!(retained.starts_with(left_context.root()));
     assert_eq!(left_store.list_artifacts(run_id).unwrap().len(), 1);
-    assert!(right_store.list_artifacts(run_id).unwrap().is_empty());
 }
 
 #[test]

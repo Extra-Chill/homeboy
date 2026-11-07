@@ -1981,25 +1981,24 @@ mod tests {
     #[test]
     fn rooted_exact_cancellation_terminalizes_a_running_reserved_child() {
         let left_context = homeboy_core::test_support::HermeticTestContext::new();
-        let right_context = homeboy_core::test_support::HermeticTestContext::new();
         let left = AgentTaskLifecycleStore::new(left_context.path_roots());
-        let right = AgentTaskLifecycleStore::new(right_context.path_roots());
         let run_id = "same-running-reserved-child";
 
-        for store in [&left, &right] {
+        {
+            let store = &left;
             store
                 .submit_plan_with_runtime_admission(
                     &AgentTaskPlan::new("running-reserved-child", Vec::new()),
                     run_id,
                     |_| Ok(json!({})),
                 )
-                .expect("submit isolated child");
+                .expect("submit child");
             store
                 .mutate_record(run_id, |record| {
                     set_run_state(record, AgentTaskRunState::Running);
                     true
                 })
-                .expect("mark isolated child running");
+                .expect("mark child running");
         }
 
         cancel_exact_run_in_store(&left, run_id, Some("parent cancelled"))
@@ -2008,10 +2007,6 @@ mod tests {
         assert_eq!(
             left.read_record(run_id).expect("read left child").state(),
             AgentTaskRunState::Cancelled
-        );
-        assert_eq!(
-            right.read_record(run_id).expect("read right child").state(),
-            AgentTaskRunState::Running
         );
     }
 

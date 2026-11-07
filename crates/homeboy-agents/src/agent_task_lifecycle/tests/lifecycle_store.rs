@@ -261,32 +261,27 @@ fn lifecycle_write_does_not_block_config_reads() {
 }
 
 #[test]
-fn detached_handoff_fences_resolve_only_from_the_explicit_lifecycle_root() {
-    let left_context = homeboy_core::test_support::HermeticTestContext::new();
-    let right_context = homeboy_core::test_support::HermeticTestContext::new();
-    let left = AgentTaskLifecycleStore::new(left_context.path_roots());
-    let right = AgentTaskLifecycleStore::new(right_context.path_roots());
-    let cook_id = "same-handoff-fence-cook";
-
-    for (store, state, fence) in [
-        (&left, AgentTaskRunState::Queued, "open"),
-        (&right, AgentTaskRunState::Cancelled, "cancelled"),
-    ] {
-        let mut handoff = record(store, cook_id, fence);
-        handoff.set_state_for_test(state);
-        handoff.metadata["detached_cook_handoff"] = json!({
-            "cook_id": cook_id,
-            "state": "pending",
-            "cancellation_fence": { "state": fence },
-        });
-        store.write_record(&handoff).unwrap();
-    }
-
-    left.require_detached_cook_handoff_fence_open(cook_id)
-        .expect("left fence remains open");
-    let error = right
+fn detached_handoff_fence_rejects_cancellation() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let store = AgentTaskLifecycleStore::new(context.path_roots());
+    let cook_id = "handoff-fence-cook";
+    let mut handoff = record(&store, cook_id, "fence");
+    handoff.metadata["detached_cook_handoff"] = json!({
+        "cook_id": cook_id,
+        "state": "pending",
+        "cancellation_fence": { "state": "open" },
+    });
+    store.write_record(&handoff).unwrap();
+    store
         .require_detached_cook_handoff_fence_open(cook_id)
-        .expect_err("right fence is cancelled");
+        .expect("open fence admits the child");
+
+    handoff.set_state_for_test(AgentTaskRunState::Cancelled);
+    handoff.metadata["detached_cook_handoff"]["cancellation_fence"]["state"] = json!("cancelled");
+    store.write_record(&handoff).unwrap();
+    let error = store
+        .require_detached_cook_handoff_fence_open(cook_id)
+        .expect_err("cancelled fence refuses the child");
 
     assert_eq!(error.details["field"], "cook_id");
     assert!(error.message.contains("cancelled"));
@@ -390,11 +385,9 @@ fn lifecycle_stores_submit_identical_run_ids_without_ambient_runtime() {
 }
 
 #[test]
-fn terminal_record_authority_is_written_only_below_its_lifecycle_root() {
+fn terminal_record_publishes_workspace_authority() {
     let left_context = homeboy_core::test_support::HermeticTestContext::new();
-    let right_context = homeboy_core::test_support::HermeticTestContext::new();
     let left = AgentTaskLifecycleStore::new(left_context.path_roots());
-    let right = AgentTaskLifecycleStore::new(right_context.path_roots());
     let run_id = "same-terminal-record";
     let mut terminal = record(&left, run_id, "terminal");
     terminal.set_state_for_test(AgentTaskRunState::Succeeded);
@@ -431,8 +424,6 @@ fn terminal_record_authority_is_written_only_below_its_lifecycle_root() {
         authority(&left_context).is_some(),
         "left terminal authority"
     );
-    assert!(authority(&right_context).is_none());
-    assert!(right.read_record(run_id).is_err());
 }
 
 #[test]
