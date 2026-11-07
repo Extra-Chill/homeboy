@@ -330,6 +330,9 @@ pub struct GlobalDaemonStatus {
     pub active_jobs: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub blocker: Option<String>,
+    /// Cadences whose last finished instance failed, e.g. retention (#17234).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub failing_cadences: Vec<serde_json::Value>,
     pub drill_down: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repair: Option<&'static str>,

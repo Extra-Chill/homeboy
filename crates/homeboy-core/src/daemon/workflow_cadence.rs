@@ -67,6 +67,22 @@ pub struct Cadence {
     pub last_skipped_at_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
+    /// Set when a finished instance failed and cleared by the next success,
+    /// so `status` can see a failing cadence in the local store (#17234).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failing: Option<CadenceFailure>,
+}
+
+/// The run of failed instances a cadence is currently in.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CadenceFailure {
+    /// Slot of the first failed instance in the run.
+    pub since_slot_ms: u64,
+    /// The most recent failed instance and its reason.
+    pub instance: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -209,7 +225,23 @@ fn write(connection: &Connection, cadence: &Cadence) -> Result<()> {
 
 /// Every registration, ordered by workflow id.
 pub fn list() -> Result<Vec<Cadence>> {
-    let connection = open()?;
+    list_in(&open()?)
+}
+
+/// Active registrations whose last finished instance failed, read without
+/// initializing or writing the ledger.
+pub fn failing() -> Result<Vec<Cadence>> {
+    let path = crate::paths::observation_db()?;
+    let Some(connection) = crate::api_jobs::persistence::open_ledger_readonly(&path)? else {
+        return Ok(Vec::new());
+    };
+    Ok(list_in(&connection)?
+        .into_iter()
+        .filter(|cadence| cadence.cancelled_at_ms.is_none() && cadence.failing.is_some())
+        .collect())
+}
+
+fn list_in(connection: &Connection) -> Result<Vec<Cadence>> {
     let mut statement = connection
         .prepare("SELECT body FROM workflow_cadences ORDER BY workflow")
         .map_err(|error| sql(error, "list"))?;
@@ -288,6 +320,7 @@ pub fn register(
                 skipped: 0,
                 last_skipped_at_ms: None,
                 last_error: None,
+                failing: None,
             },
             "registered",
         ),
@@ -351,9 +384,50 @@ pub fn admit_due(store: &JobStore, now_ms: u64) -> Vec<Value> {
     };
     cadences
         .into_iter()
-        .filter(|cadence| cadence.cancelled_at_ms.is_none() && now_ms >= cadence.next_due_ms)
+        .filter(|cadence| cadence.cancelled_at_ms.is_none())
+        .inspect(|cadence| record_outcome(store, cadence))
+        .filter(|cadence| now_ms >= cadence.next_due_ms)
         .filter_map(|cadence| admit_one(store, cadence, now_ms).ok())
         .collect()
+}
+
+/// Record the last instance's failure on the registration once it finishes,
+/// or clear it on success. Best effort: a lost race retries next tick.
+fn record_outcome(store: &JobStore, cadence: &Cadence) {
+    let Some(instance) = cadence.last_instance.as_deref() else {
+        return;
+    };
+    if cadence
+        .failing
+        .as_ref()
+        .is_some_and(|failure| failure.instance == instance)
+    {
+        return;
+    }
+    let Some(job) = store
+        .controller_job_for_key(instance)
+        .filter(|job| job.status.is_terminal())
+    else {
+        return;
+    };
+    let Ok(view) = super::workflow_job::workflow_status(store, instance) else {
+        return;
+    };
+    let failing = match view["status"].as_str() {
+        Some("succeeded") if cadence.failing.is_some() => None,
+        Some("failed" | "cancelled" | "budget_exhausted") => Some(CadenceFailure {
+            since_slot_ms: cadence.failing.as_ref().map_or(
+                cadence.last_fired_at_ms.unwrap_or(job.created_at_ms),
+                |failure| failure.since_slot_ms,
+            ),
+            instance: instance.to_string(),
+            reason: view["reason"].as_str().map(str::to_string),
+        }),
+        _ => return,
+    };
+    let _ = advance(&cadence.workflow, cadence.next_due_ms, |cadence| {
+        cadence.failing = failing
+    });
 }
 
 fn admit_one(store: &JobStore, cadence: Cadence, now_ms: u64) -> Result<Value> {
@@ -549,6 +623,11 @@ pub fn view(cadence: &Cadence) -> Value {
         "skipped": cadence.skipped,
         "last_skipped_slot": at(cadence.last_skipped_at_ms),
         "last_error": cadence.last_error,
+        "failing": cadence.failing.as_ref().map(|failure| json!({
+            "since_slot": at(Some(failure.since_slot_ms)),
+            "instance": failure.instance,
+            "reason": failure.reason,
+        })),
     })
 }
 
