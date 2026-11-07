@@ -51,7 +51,7 @@ pub enum ScratchOutput {
     },
     List {
         command: &'static str,
-        allocations: Vec<ScratchAllocation>,
+        entities: Vec<ScratchAllocation>,
         total_bytes: u64,
     },
 }
@@ -76,12 +76,12 @@ pub fn run(args: ScratchArgs) -> CmdResult<ScratchOutput> {
             temp::allocate_scratch(&owner, &purpose, ttl)?,
         ),
         ScratchCommand::List => {
-            let allocations = temp::list_scratch(true)?;
-            let total_bytes = allocations.iter().filter_map(|row| row.size_bytes).sum();
+            let entities = temp::list_scratch(true)?;
+            let total_bytes = entities.iter().filter_map(|row| row.size_bytes).sum();
             Ok((
                 ScratchOutput::List {
                     command: "scratch.list",
-                    allocations,
+                    entities,
                     total_bytes,
                 },
                 0,
@@ -90,5 +90,21 @@ pub fn run(args: ScratchArgs) -> CmdResult<ScratchOutput> {
         ScratchCommand::Pin { id, reason } => one("scratch.pin", temp::pin_scratch(&id, &reason)?),
         ScratchCommand::Unpin { id } => one("scratch.unpin", temp::unpin_scratch(&id)?),
         ScratchCommand::Release { id } => one("scratch.release", temp::release_scratch(&id)?),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn list_returns_rows_under_entities() {
+        let value = serde_json::to_value(ScratchOutput::List {
+            command: "scratch.list",
+            entities: Vec::new(),
+            total_bytes: 0,
+        })
+        .unwrap();
+        assert_eq!(value["entities"], serde_json::json!([]));
     }
 }
