@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.447.0] - 2026-11-07
+
+### Added
+- owned, TTL-leased scratch for agent verification work
+
+### Fixed
+- deferred Lab Cook attempts resume with their runner placement
+
 ## [0.446.22] - 2026-11-07
 
 ### Fixed
