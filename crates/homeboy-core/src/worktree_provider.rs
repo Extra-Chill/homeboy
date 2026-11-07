@@ -777,6 +777,12 @@ mod tests {
                     .expect("parse valid record");
             record["id"] = serde_json::json!("missing@source");
             record["component_id"] = serde_json::json!("unrecoverable-component");
+            record["workspace_identity"] =
+                serde_json::json!(worktree::task_worktree_workspace_identity(
+                    "unrecoverable-component",
+                    "missing@source"
+                )
+                .expect("workspace identity"));
             record["source_checkout"] = serde_json::json!(home.path().join("missing-source"));
             record["worktree_path"] = serde_json::json!(home.path().join("missing-worktree"));
             std::fs::write(
