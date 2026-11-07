@@ -505,6 +505,36 @@ const RECIPE_ONLY_STATUS: &str = "recipe_only_recovery_required";
 /// uses, so every step (including replacement gates and publication) acts on
 /// the attempt `agent-task status` reports.
 pub fn plan_cook_recovery(id: &str) -> Result<CookRecoveryPlan> {
+    let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
+    if let Ok(record) = store.read_record(id) {
+        if record.metadata.get("cancellation_fence").is_some()
+            || record.metadata.get("candidate_retirement").is_some()
+        {
+            return Ok(CookRecoveryPlan {
+                cook_id: record.metadata["cook_id"]
+                    .as_str()
+                    .unwrap_or(id)
+                    .to_string(),
+                run_id: record.run_id,
+                status: "cancelled".into(),
+                step: CookRecoveryStep::none(
+                    "The Cook mission was fenced; its candidate is retired.",
+                ),
+            });
+        }
+    }
+    if let Ok(index) = store.read_cook_index(id) {
+        if index.cancellation_fence.is_some() {
+            return Ok(CookRecoveryPlan {
+                cook_id: id.to_string(),
+                run_id: index.latest_run_id.clone(),
+                status: "cancelled".into(),
+                step: CookRecoveryStep::none(
+                    "The Cook mission was fenced; its candidate is retired.",
+                ),
+            });
+        }
+    }
     let mut plan = match plan_cook_recovery_for_cook(id) {
         Ok(plan) => plan,
         Err(error) => return manual_finalization_plan(id).ok_or(error),

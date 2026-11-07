@@ -3044,7 +3044,11 @@ pub fn claim_cook_terminal_notification_in_store(
     cook_id: &str,
     delivered_by: &str,
 ) -> Result<bool> {
-    if cook_id.trim().is_empty() {
+    if cook_id.trim().is_empty()
+        || lifecycle_store
+            .read_cook_index(cook_id)
+            .is_ok_and(|index| index.cancellation_fence.is_some())
+    {
         return Ok(false);
     }
     lifecycle_store.claim_cook_notification(
