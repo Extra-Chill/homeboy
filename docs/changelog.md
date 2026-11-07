@@ -4,6 +4,17 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.446.20] - 2026-11-07
+
+### Changed
+- Never close Cook PRs; quarantine publication drift as draft
+- Keep runner materialization staging on workspace storage
+- Pin Cook component lint gates to the recorded base commit
+- Give the removed-worktree Cook fixture its manifest identity
+
+### Fixed
+- warm-cache publication contention no longer discards a gate verdict
+
 ## [0.446.19] - 2026-11-07
 
 ### Fixed
