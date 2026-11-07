@@ -139,7 +139,7 @@ fn violation(file: &str, kind: &str) -> ReleaseOwnedMutationViolation {
     ReleaseOwnedMutationViolation {
         file: file.to_string(),
         message: format!(
-            "{file} changed a {kind}. Release-owned mutations require durable Homeboy release provenance from the `version` step; configure `release.manual_version_targets` only for intentional manual maintenance."
+            "{file} changed a {kind}. This file is release-owned: revert the manual bump or lockfile change and let Homeboy's release `version` step generate it. Release-owned mutations require durable Homeboy release provenance; configure `release.manual_version_targets` only for intentional manual maintenance."
         ),
     }
 }
