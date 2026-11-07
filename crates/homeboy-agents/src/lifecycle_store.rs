@@ -1883,6 +1883,10 @@ impl AgentTaskLifecycleStore {
         // Terminal projection reads back the row this same commit just wrote,
         // self-healing its own resource projection if missing.
         let record = self.read_record(run_id)?;
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if record.state().is_terminal() {
+            super::run_processes::release(&record.run_id);
+        }
         self.workspace_terminal_authority_store()
             .persist_terminal_from_record(&record)
             .and_then(|_| {
