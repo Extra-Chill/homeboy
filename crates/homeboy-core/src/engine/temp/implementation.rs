@@ -270,6 +270,10 @@ struct RuntimeRunOwner {
     /// entries whose name already carries the prefix.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     allocation_prefix: Option<String>,
+    /// Present on agent scratch allocations (`homeboy scratch`), which no
+    /// process holds: the lease alone decides how long they are kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    scratch: Option<scratch::ScratchLease>,
 }
 
 /// Where a socket-safe managed temp owner was allocated.
@@ -590,6 +594,7 @@ fn managed_run_temp_dir_in_root(
         producer: producer.map(str::to_string),
         placement: placement.owner_value(),
         allocation_prefix: (!name.starts_with(prefix)).then(|| prefix.to_string()),
+        scratch: None,
     };
     if let Err(error) = write_run_owner(&staging, &owner) {
         let _ = fs::remove_dir_all(&staging);
@@ -801,6 +806,13 @@ mod owner_support {
     }
 
     pub(super) fn inspection_owner_protection(owner: &RuntimeRunOwner) -> Option<String> {
+        if let Some(reason) = owner
+            .scratch
+            .as_ref()
+            .and_then(scratch::ScratchLease::protection)
+        {
+            return Some(reason);
+        }
         if let Some(invocation_id) = owner
             .invocation_ids
             .iter()
@@ -912,6 +924,7 @@ mod owner_support {
 }
 use owner_support::*;
 
+pub(super) mod scratch;
 mod storage;
 use storage::*;
 
@@ -1497,6 +1510,7 @@ fn cleanup_runtime_tmp_root(
                         producer: None,
                         placement: None,
                         allocation_prefix: None,
+                        scratch: None,
                     };
                     let warning = format!("owner metadata is corrupt: {}", error.message);
                     if age < CORRUPT_OWNER_GRACE {
@@ -1561,8 +1575,10 @@ fn cleanup_runtime_tmp_root(
                     .managed_older_than_days
                     .unwrap_or(options.older_than_days)
                     .saturating_mul(86_400);
-            let size_independent_candidate =
-                metadata_warning.is_some() || owner.state == "succeeded" || age_expired;
+            let size_independent_candidate = metadata_warning.is_some()
+                || owner.state == "succeeded"
+                || owner.scratch.is_some()
+                || age_expired;
             let storage = if protection_reason.is_some()
                 || (!size_independent_candidate && !options.budget_spent())
             {
@@ -1602,8 +1618,11 @@ fn cleanup_runtime_tmp_root(
             let exceeds_count = retained_count >= options.run_max_count;
             let exceeds_bytes =
                 retained_bytes.saturating_add(inspection.size_bytes) > options.run_max_bytes;
+            // An unprotected scratch lease has passed its TTL unpinned.
+            let scratch_expired = inspection.owner.scratch.is_some();
             let eligible = inspection.metadata_warning.is_some()
                 || inspection.owner.state == "succeeded"
+                || scratch_expired
                 || age_expired
                 || exceeds_count
                 || exceeds_bytes;
@@ -1613,6 +1632,8 @@ fn cleanup_runtime_tmp_root(
                 Some(format!("{warning}; quarantine grace expired"))
             } else if inspection.owner.state == "succeeded" {
                 Some("successful run teardown is complete".to_string())
+            } else if scratch_expired {
+                Some("scratch allocation passed its TTL unpinned".to_string())
             } else if age_expired {
                 Some("failed or interrupted run exceeded age retention".to_string())
             } else if exceeds_count {
@@ -2459,6 +2480,7 @@ mod tests {
             producer: Some("dead_producer".to_string()),
             placement: None,
             allocation_prefix: None,
+            scratch: None,
         };
         write_run_owner(&path, &owner).expect("dead owner record");
         fs::write(path.join("evidence.bin"), vec![b'x'; 64]).expect("dead-owner evidence");
