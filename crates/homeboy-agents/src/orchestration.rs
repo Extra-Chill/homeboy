@@ -2207,13 +2207,13 @@ impl OrchestrationService<LifecycleStoreLookup> {
                             project_record(&current, None)?,
                             ControlPlaneActionPayload {
                                 schema: CONTROL_PLANE_PLACEMENT_UPDATE_RESULT_SCHEMA.to_string(),
-                                data: serde_json::json!({
+                                data: with_scheduling_blocker(serde_json::json!({
                                     "schema": CONTROL_PLANE_PLACEMENT_UPDATE_RESULT_SCHEMA,
                                     "run_id": current.run_id,
                                     "placement": parameters.placement,
                                     "reconciliation": reconciliation,
                                     "preserved_identity": true,
-                                }),
+                                })),
                             },
                             None,
                         ),
@@ -2251,11 +2251,23 @@ impl OrchestrationService<LifecycleStoreLookup> {
                                 project_record(&retry.record, None)?,
                                 ControlPlaneActionPayload {
                                     schema: CONTROL_PLANE_RETRY_RESULT_SCHEMA.to_string(),
-                                    data: serde_json::json!({
-                                        "record": retry.record,
-                                        "runnable": retry.run,
-                                        "created": retry.created,
-                                    }),
+                                    data: {
+                                        let data = serde_json::json!({
+                                            "record": retry.record,
+                                            "runnable": retry.run,
+                                            "created": retry.created,
+                                        });
+                                        // A live retry with an execution fence
+                                        // is scheduled by the local daemon.
+                                        if !retry.record.state().is_terminal()
+                                            && retry.record.metadata["execution_scheduling"]
+                                                .is_object()
+                                        {
+                                            with_scheduling_blocker(data)
+                                        } else {
+                                            data
+                                        }
+                                    },
                                 },
                                 cook_retry.then(|| {
                                     if retry.record.state().is_terminal() {
@@ -2315,7 +2327,9 @@ impl OrchestrationService<LifecycleStoreLookup> {
                             project_record(&current, None)?,
                             ControlPlaneActionPayload {
                                 schema: CONTROL_PLANE_REARM_RESULT_SCHEMA.to_string(),
-                                data: serde_json::json!({ "record": current }),
+                                data: with_scheduling_blocker(
+                                    serde_json::json!({ "record": current }),
+                                ),
                             },
                             None,
                         ),
@@ -2438,28 +2452,15 @@ impl OrchestrationService<LifecycleStoreLookup> {
                         })();
                         match resumed {
                             Ok((current, reconciliation)) => {
-                                let mut data = serde_json::json!({
+                                // The re-armed admission waits on the local
+                                // controller daemon's scheduling.
+                                let data = with_scheduling_blocker(serde_json::json!({
                                     "schema": "homeboy/unmaterialized-cook-resume/v1",
                                     "status": current.metadata["unmaterialized_cook_admission"]["state"],
                                     "run_id": requested_id,
                                     "idempotent": true,
                                     "reconciliation": reconciliation,
-                                });
-                                // The re-armed admission waits on the local
-                                // controller daemon's scheduling. When that
-                                // daemon is down the resume cannot ever be
-                                // picked up, so name it and its recovery
-                                // instead of leaving the operator waiting
-                                // (#16181).
-                                if let Some(daemon) =
-                                    crate::agent_task_service::scheduling_daemon_evidence()
-                                        .filter(|daemon| !daemon.admits_work)
-                                {
-                                    data["blocker"] = serde_json::json!({
-                                        "daemon": daemon,
-                                        "next_action": "homeboy daemon recover",
-                                    });
-                                }
+                                }));
                                 (
                                     ControlPlaneActionOutcome::Succeeded,
                                     project_record(&current, None)?,
@@ -5123,6 +5124,15 @@ fn unmaterialized_admission_blocker(
         }),
         daemon,
     ))
+}
+
+/// Actions that queue daemon-scheduled work start the local controller daemon
+/// (#17506) and carry its blocker only when it cannot be started (#16181).
+fn with_scheduling_blocker(mut data: Value) -> Value {
+    if let Some(blocker) = crate::agent_task_service::ensure_scheduling_daemon() {
+        data["blocker"] = blocker;
+    }
+    data
 }
 
 fn owner(record: &AgentTaskRunRecord) -> ControlPlaneOwner {

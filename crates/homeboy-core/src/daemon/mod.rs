@@ -2035,7 +2035,14 @@ where
             resource_evidence:
                 "unavailable: foreground shutdown does not collect OS resource snapshots"
                     .to_string(),
-            os_evidence: "graceful shutdown requested by SIGINT or SIGTERM".to_string(),
+            os_evidence: self_stop_guards
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .as_ref()
+                .map_or_else(
+                    || "graceful shutdown requested by SIGINT or SIGTERM".to_string(),
+                    |stop| stop.reason.os_evidence(),
+                ),
             stop_requested: true,
         })?;
         if clean {
