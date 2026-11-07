@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.446.19] - 2026-11-07
+
+### Fixed
+- status and recover resolve a Cook to the same current attempt
+- reclaim old Homeboy-named Lab checkouts that have no workspace metadata
+
 ## [0.446.18] - 2026-11-07
 
 ### Changed
