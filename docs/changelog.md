@@ -4,6 +4,16 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.449.5] - 2026-11-08
+
+### Fixed
+- keep timed-out edits as a recoverable candidate and heartbeat on progress
+- enforce conventional titles on every Cook PR title source
+- compare operator gate failures against the verified base
+- publish the completed producer despite later review-form-only attempts
+- authenticate GitHub API checks via gh and show rate-limit reset as RFC 3339
+- classify unexecuted gates as gate_environment_unavailable with the first error line
+
 ## [0.449.4] - 2026-11-08
 
 ### Changed
