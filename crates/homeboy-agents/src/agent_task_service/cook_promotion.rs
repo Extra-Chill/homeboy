@@ -639,55 +639,8 @@ pub(crate) fn promote_attempt_in_store(
     let repository_integrity_evidence =
         admitted_repository_integrity_evidence(lifecycle_store, run_id)?;
     let observation_store = lifecycle_store.open_observation_initialized()?;
-    let run_id = run_id.to_string();
-    let gate_store = lifecycle_store.clone();
-    let cook_id = options.identity.cook_id.clone();
     crate::agent_task_promotion::with_gate_supervision(
-        crate::agent_task_gate::GateSupervision {
-            timeout: options.gates.gate_timeout(),
-            no_progress_timeout: options.gates.gate_no_progress_timeout(),
-            heartbeat_interval: options.gates.gate_heartbeat_interval(),
-            on_spawn: Arc::new({
-                let run_id = run_id.clone();
-                let gate_store = gate_store.clone();
-                move |_, command| {
-                    agent_task_lifecycle::record_promotion_progress_in_store(
-                        &gate_store,
-                        &run_id,
-                        "gate",
-                        Some(command),
-                        Some("gate process started"),
-                        None,
-                    )
-                }
-            }),
-            on_heartbeat: Arc::new({
-                let run_id = run_id.clone();
-                let gate_store = gate_store.clone();
-                move |status| {
-                    agent_task_lifecycle::record_promotion_progress_in_store(
-                        &gate_store,
-                        &run_id,
-                        "gate",
-                        None,
-                        Some(&format!(
-                            "gate elapsed={}ms last-progress={}ms",
-                            status.elapsed_ms,
-                            status.last_progress_ms_ago.unwrap_or(status.elapsed_ms),
-                        )),
-                        Some(&status.output_tail),
-                    )
-                }
-            }),
-            is_cancelled: Arc::new({
-                let gate_store = gate_store.clone();
-                move || {
-                    gate_store
-                        .read_cook_index(&cook_id)
-                        .is_ok_and(|index| index.cancellation_fence.is_some())
-                }
-            }),
-        },
+        cook_gate_supervision(lifecycle_store, options, run_id),
         || {
             promote_with_checkpoint_in_observation_store(
                 AgentTaskPromotionRequest {
@@ -710,7 +663,7 @@ pub(crate) fn promote_attempt_in_store(
                 &observation_store,
                 |checkpoint| {
                     lifecycle_store.record_promotion(
-                        &run_id,
+                        run_id,
                         serde_json::to_value(checkpoint).map_err(|error| {
                             Error::internal_json(
                                 error.to_string(),
@@ -723,6 +676,62 @@ pub(crate) fn promote_attempt_in_store(
             )
         },
     )
+}
+
+/// Fresh and resumed gates share budgets and durable progress reporting.
+fn cook_gate_supervision(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    options: &CookRequest,
+    run_id: &str,
+) -> crate::agent_task_gate::GateSupervision {
+    let run_id = run_id.to_string();
+    let gate_store = lifecycle_store.clone();
+    let cook_id = options.identity.cook_id.clone();
+    crate::agent_task_gate::GateSupervision {
+        timeout: options.gates.gate_timeout(),
+        no_progress_timeout: options.gates.gate_no_progress_timeout(),
+        heartbeat_interval: options.gates.gate_heartbeat_interval(),
+        on_spawn: Arc::new({
+            let run_id = run_id.clone();
+            let gate_store = gate_store.clone();
+            move |_, command| {
+                agent_task_lifecycle::record_promotion_progress_in_store(
+                    &gate_store,
+                    &run_id,
+                    "gate",
+                    Some(command),
+                    Some("gate process started"),
+                    None,
+                )
+            }
+        }),
+        on_heartbeat: Arc::new({
+            let run_id = run_id.clone();
+            let gate_store = gate_store.clone();
+            move |status| {
+                agent_task_lifecycle::record_promotion_progress_in_store(
+                    &gate_store,
+                    &run_id,
+                    "gate",
+                    None,
+                    Some(&format!(
+                        "gate elapsed={}ms last-progress={}ms",
+                        status.elapsed_ms,
+                        status.last_progress_ms_ago.unwrap_or(status.elapsed_ms),
+                    )),
+                    Some(&status.output_tail),
+                )
+            }
+        }),
+        is_cancelled: Arc::new({
+            let gate_store = gate_store.clone();
+            move || {
+                gate_store
+                    .read_cook_index(&cook_id)
+                    .is_ok_and(|index| index.cancellation_fence.is_some())
+            }
+        }),
+    }
 }
 
 fn admitted_repository_integrity_evidence(
@@ -1057,32 +1066,42 @@ pub(crate) fn promote_or_load_attempt_in_store(
             let (source, source_path) = promotion_source_in_store(lifecycle_store, run_id)?;
             let source = bind_persisted_promotion_artifact(source, &promotion)?;
             let observation_store = lifecycle_store.open_observation_initialized()?;
-            let resumed = resume_promoted_patch_in_observation_store(
-                AgentTaskPromotionRequest {
-                    source,
-                    source_run_id: Some(run_id.to_string()),
-                    source_path,
-                    source_worktree_path: component_workspace_path(options)?
-                        .or_else(|| options.workspace.source_worktree_path.clone()),
-                    base_ref: Some(options.finalization.base.clone()),
-                    task_base_sha: cook_candidate_base_sha(options),
-                    candidate_ref: None,
-                    to_worktree: options.workspace.to_worktree.clone(),
-                    // A resumed verification must retain the scheduler-selected
-                    // candidate rather than falling back to aggregate outcome order.
-                    task_id: selected_candidate_task_id_in_store(lifecycle_store, run_id)?,
-                    // The checkpoint already authenticated this exact artifact;
-                    // retain its identity rather than selecting an equivalent alias.
-                    artifact_id: None,
-                    dry_run: false,
-                    gates: options.gates.clone(),
-                    provider_invocation: options.provider_transport.provider_invocation.clone(),
-                    repository_integrity_evidence: promotion.repository_integrity_evidence.clone(),
+            let resumed = crate::agent_task_promotion::with_gate_supervision(
+                cook_gate_supervision(lifecycle_store, options, run_id),
+                || {
+                    resume_promoted_patch_in_observation_store(
+                        AgentTaskPromotionRequest {
+                            source,
+                            source_run_id: Some(run_id.to_string()),
+                            source_path,
+                            source_worktree_path: component_workspace_path(options)?
+                                .or_else(|| options.workspace.source_worktree_path.clone()),
+                            base_ref: Some(options.finalization.base.clone()),
+                            task_base_sha: cook_candidate_base_sha(options),
+                            candidate_ref: None,
+                            to_worktree: options.workspace.to_worktree.clone(),
+                            // A resumed verification must retain the scheduler-selected
+                            // candidate rather than falling back to aggregate outcome order.
+                            task_id: selected_candidate_task_id_in_store(lifecycle_store, run_id)?,
+                            // The checkpoint already authenticated this exact artifact;
+                            // retain its identity rather than selecting an equivalent alias.
+                            artifact_id: None,
+                            dry_run: false,
+                            gates: options.gates.clone(),
+                            provider_invocation: options
+                                .provider_transport
+                                .provider_invocation
+                                .clone(),
+                            repository_integrity_evidence: promotion
+                                .repository_integrity_evidence
+                                .clone(),
+                        },
+                        &target_path,
+                        &serde_json::to_value(&promotion)
+                            .map_err(|error| Error::internal_json(error.to_string(), None))?,
+                        &observation_store,
+                    )
                 },
-                &target_path,
-                &serde_json::to_value(&promotion)
-                    .map_err(|error| Error::internal_json(error.to_string(), None))?,
-                &observation_store,
             )?;
             lifecycle_store.record_promotion(
                 run_id,
@@ -7195,9 +7214,7 @@ pub(crate) fn applied_candidate_awaits_verification(run_id: &str) -> bool {
     persisted_promotion_for_attempt(run_id)
         .ok()
         .flatten()
-        .is_some_and(|promotion| {
-            promotion.status.applied_without_passing_verdict() && !promotion.finalization_eligible()
-        })
+        .is_some_and(|promotion| applied_candidate_needs_replacement_gates(&promotion))
 }
 
 struct CookRecoveryActions {

@@ -1716,12 +1716,17 @@ fn validate_durable_publication_eligibility(
     // A partial or candidate-recoverable run publishes the candidate its gates
     // verified (#16441). Homeboy's own promotion binds its gates to the
     // fingerprint it records with them; an operator replacement binds them
-    // through its authorized proof.
-    let verified_candidate_recovery = matches!(
+    // through its authorized proof. Recording green delivery can already have
+    // advanced execution to Succeeded even when the producing runtime failed;
+    // retain the same fingerprint/model/proof checks after that transition.
+    let verified_candidate_recovery = (matches!(
         lifecycle.execution.state,
         RunExecutionState::PartialFailure | RunExecutionState::CandidateRecoverable
-    ) && producing_runtime
-        .is_some_and(|runtime| recorded_runtime_model(&runtime.metadata).is_some())
+    ) || (lifecycle.execution.state
+        == RunExecutionState::Succeeded
+        && authorized_replacement_gate_proof(promotion)))
+        && producing_runtime
+            .is_some_and(|runtime| recorded_runtime_model(&runtime.metadata).is_some())
         && match promotion.provenance.get("replacement_gate_proof") {
             None => green_fingerprinted_candidate,
             Some(_) => fingerprinted_candidate && authorized_replacement_gate_proof(promotion),

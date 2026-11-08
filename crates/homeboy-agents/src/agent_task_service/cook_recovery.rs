@@ -672,8 +672,8 @@ pub fn recover_cook(
     let CookRecoveryRequest {
         preflight,
         overrides,
-        replace_gates,
-        corrected_gates,
+        mut replace_gates,
+        mut corrected_gates,
         publish,
     } = request;
     if let Some(ci) = super::cook_ci::cook_ci_status(id)? {
@@ -745,6 +745,16 @@ pub fn recover_cook(
             0,
         ));
     }
+    // Executing corrected commands on the authenticated candidate is not an
+    // import of external proof. Keep recipe corrections for pre-provider runs,
+    // but route applied candidates through the single replacement predicate.
+    if corrected_gates.is_some() && super::applied_candidate_awaits_verification(&plan.run_id) {
+        replace_gates = Some(CookReplaceGatesRequest {
+            proof: CookReplacementProof::Gates(corrected_gates.take().unwrap()),
+            authorize_external_proof: "operator supplied replacement gates via recover".into(),
+            authorize_interrupted_rerun: None,
+        });
+    }
     validate_step_inputs(&mut plan, &overrides, replace_gates.is_some(), &publish)?;
     if !overrides.is_empty() {
         validate_overrides(&plan, preflight)?;
@@ -765,7 +775,7 @@ pub fn recover_cook(
                 "verify",
                 "recipe gate correction requires a pre-provider failure and cannot be combined with other recovery inputs",
                 Some(plan.run_id.clone()),
-                None,
+                Some(vec![format!("homeboy agent-task status {}", plan.run_id)]),
             ));
         }
         let store = super::CookRecipeStore::from_current_data_root()?;
@@ -876,7 +886,13 @@ fn finish_performed_step(
     match result {
         Ok((value, exit_code)) => {
             if exit_code != 0 {
-                report.failure = performed_step_failure(&value);
+                report.failure = performed_step_failure(&value).or_else(|| {
+                    Some(serde_json::json!({
+                        "code": "agent_task.recover_incomplete",
+                        "message": format!("Recovery did not complete (status: {}). Inspect the persisted run before recovering again.", report.status),
+                        "next_command": format!("homeboy agent-task status {}", report.run_id),
+                    }))
+                });
             }
             if report.preflight {
                 report.admission = Some(value);
@@ -1001,7 +1017,7 @@ fn validate_step_inputs(
             field,
             message,
             Some(plan.run_id.clone()),
-            None,
+            Some(vec![format!("homeboy agent-task recover {}", plan.run_id)]),
         ))
     };
     if replace_gates && publish {

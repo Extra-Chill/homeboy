@@ -20254,6 +20254,112 @@ fn corrected_replacement_gates(run_id: &str, verify: &str) -> Result<AgentTaskPr
     )
 }
 
+fn persist_deferred_fixture(run_id: &str) {
+    let mut promotion = persisted_promotion_for_attempt(run_id).unwrap().unwrap();
+    promotion.status = AgentTaskPromotionStatus::GateDeferred;
+    for gate in &mut promotion.deterministic_gates {
+        gate.status = crate::agent_task_gate::AgentTaskGateStatus::Unavailable;
+        gate.failure_evidence = None;
+        gate.exit_code = 1;
+    }
+    promotion.normalize_gate_outcome();
+    test_lifecycle_store()
+        .record_promotion(run_id, serde_json::to_value(promotion).unwrap())
+        .unwrap();
+}
+
+#[test]
+fn deferred_candidate_recovers_with_verify_file_and_publishes() {
+    with_corrected_gate_failure(false, |options, target| {
+        let run_id = &options.identity.initial_run_id;
+        persist_deferred_fixture(run_id);
+        let gate_file = target.parent().unwrap().join("replacement.sh");
+        std::fs::write(&gate_file, "test \"$(cat tracked.txt)\" = promoted").unwrap();
+        // The CLI snapshots --verify-file before handing this exact request to
+        // the service; no external-proof authorization is needed to execute it.
+        let (report, exit) = crate::agent_task_service::recover_cook(
+            run_id,
+            crate::agent_task_service::CookRecoveryRequest {
+                corrected_gates: Some(VerifyGateOptions {
+                    verify: vec![std::fs::read_to_string(gate_file).unwrap()],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            &ReplacementOnlyRecoveryPerformer,
+        )
+        .unwrap();
+        assert_eq!(exit, 0, "{report:?}");
+        let recipe_store = CookRecipeStore::from_current_data_root().unwrap();
+        let store = test_lifecycle_store();
+        let mut backend = CaptureBackend {
+            hydrate_run_id: Some(run_id.clone()),
+            ..Default::default()
+        };
+        let runtime = CookRuntime::with_finalizer(
+            Arc::new(UnusedExecutor),
+            &recipe_store,
+            &store,
+            |store, options, run_id, promotion| {
+                finalize_or_load_cook_pr_with_backend_with_stores(
+                    &recipe_store,
+                    store,
+                    options,
+                    run_id,
+                    promotion,
+                    &mut backend,
+                )
+            },
+            &noop_cook_progress_observer,
+        );
+        let result = CookService::run(options, runtime, CookMode::ContinueTerminal).unwrap();
+        assert_eq!(result.value.status, "review_ready", "{:#?}", result.value);
+        assert_eq!(backend.create_count, 1);
+    });
+}
+
+#[test]
+fn deferred_recovery_supervises_declared_gate_and_persists_unavailability() {
+    with_corrected_gate_failure(false, |mut options, _| {
+        let run_id = options.identity.initial_run_id.clone();
+        persist_deferred_fixture(&run_id);
+        // An unavailable Lab transport cannot judge the candidate.
+        options.gates.verify = vec!["test -f tracked.txt".into()];
+        options.gates.gate_environment.lab_runner = Some("unavailable-deferred-runner".into());
+        options.gates.gate_timeout_seconds = 2;
+        options.gates.gate_no_progress_timeout_seconds = 1;
+        let recipes = CookRecipeStore::from_current_data_root().unwrap();
+        let mut recipe = recipes.load_recipe(&options.identity.cook_id).unwrap();
+        recipe.gate_policy = serde_json::to_value(&options.gates).unwrap();
+        recipes.persist_recipe(&recipe).unwrap();
+        let store = test_lifecycle_store();
+        let recipe_store = CookRecipeStore::from_current_data_root().unwrap();
+        let runtime = CookRuntime::with_finalizer(
+            Arc::new(UnusedExecutor),
+            &recipe_store,
+            &store,
+            |_, _, _, _| panic!("unavailable gate must not publish"),
+            &noop_cook_progress_observer,
+        );
+        let result = CookService::run(options, runtime, CookMode::ContinueTerminal).unwrap();
+        assert_eq!(result.value.status, "gates_deferred", "{:#?}", result.value);
+        assert_ne!(result.exit_code, 0);
+        let record = store.read_record(&run_id).unwrap();
+        assert!(record.state().is_terminal());
+        let persisted = serde_json::to_string(&record).unwrap();
+        let promotion = persisted_promotion_for_attempt_in_store(&store, &run_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(promotion.status, AgentTaskPromotionStatus::GateDeferred);
+        assert!(result
+            .value
+            .stop_reason
+            .as_deref()
+            .is_some_and(|reason| !reason.is_empty()));
+        assert!(persisted.contains("homeboy agent-task recover"));
+    });
+}
+
 #[test]
 fn a_finished_failing_replacement_run_is_replaced_without_interrupted_rerun_authority() {
     with_corrected_gate_failure(false, |options, _target| {
