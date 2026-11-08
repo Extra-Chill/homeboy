@@ -4,6 +4,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.447.3] - 2026-11-08
+
+### Fixed
+- re-admit recipe-owned Cook retries on their recorded Lab runner
+- Fix Cook validation ordering before destination and base resolution
+- dirty remote-git extensions materialize from the controller snapshot
+
 ## [0.447.2] - 2026-11-08
 
 ### Changed
