@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.448.1] - 2026-11-08
+
+### Fixed
+- render pr-comment failures as mention-safe markdown
+
 ## [0.448.0] - 2026-11-08
 
 ### Added
