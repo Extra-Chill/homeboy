@@ -5,6 +5,32 @@ use std::sync::{
     Arc,
 };
 
+#[test]
+fn removed_materialization_paths_name_operation_and_owning_side() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("removed");
+    fs::write(&path, b"candidate").unwrap();
+    fs::remove_file(&path).unwrap();
+    let controller = match super::blobs::Source::new(path.clone(), "sha256:unused".into()) {
+        Ok(_) => panic!("removed source must fail"),
+        Err(error) => error,
+    };
+    let runner = materialization_plan(&path).unwrap_err();
+    for (error, side, operation) in [
+        (controller, "controller", "metadata"),
+        (runner, "runner", "read"),
+    ] {
+        assert!(error.message.contains(&path.display().to_string()));
+        assert!(error.message.contains(side));
+        assert!(error.message.contains(operation));
+        assert_eq!(error.details["path"], serde_json::json!(path));
+        assert_eq!(error.details["side"], side);
+        assert_eq!(error.details["operation"], operation);
+        assert_eq!(error.details["gate_disposition"], "unavailable");
+        assert_eq!(error.retryable, Some(true));
+    }
+}
+
 fn fixture(transport: &Path, destination: &Path) -> CommitRequest {
     fs::create_dir_all(transport.join("0/source")).unwrap();
     fs::write(transport.join("0/source/file"), b"exact\0bytes\xff").unwrap();

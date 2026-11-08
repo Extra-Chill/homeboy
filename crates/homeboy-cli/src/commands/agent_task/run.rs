@@ -940,8 +940,14 @@ pub(crate) fn preview_cook(
 fn preflight_cook_gates(args: &AgentTaskCookArgs) -> homeboy::core::Result<()> {
     let mut gates: homeboy::agents::agent_tasks::gate::VerifyGateOptions =
         args.gates.clone().into();
-    let current_dir = std::env::current_dir()
-        .map_err(|error| homeboy::core::Error::internal_io(error.to_string(), None))?;
+    let workspace = cook_gate_preflight_workspace(args)?;
+    preflight_resolved_cook_gates(&mut gates, &workspace)
+}
+
+fn cook_gate_preflight_workspace(args: &AgentTaskCookArgs) -> homeboy::core::Result<PathBuf> {
+    // Configured components deliberately omit repository_path from their
+    // durable identity. Resolve their checkout instead of snapshotting the
+    // controller's unrelated invocation directory during Lab preflight.
     let workspace = args
         .dispatch
         .cwd
@@ -953,8 +959,19 @@ fn preflight_cook_gates(args: &AgentTaskCookArgs) -> homeboy::core::Result<()> {
                 .and_then(|identity| identity["repository_path"].as_str())
                 .map(Path::new)
         })
-        .unwrap_or(&current_dir);
-    preflight_resolved_cook_gates(&mut gates, workspace)
+        .map(Path::to_path_buf);
+    let workspace = match workspace {
+        Some(workspace) => Some(workspace),
+        None => cook_component_id(args)
+            .map(cook_component_path_for_repository_name)
+            .transpose()?
+            .flatten(),
+    };
+    match workspace {
+        Some(workspace) => Ok(workspace),
+        None => std::env::current_dir()
+            .map_err(|error| homeboy::core::Error::internal_io(error.to_string(), None)),
+    }
 }
 
 pub(super) fn preflight_resolved_cook_gates(
@@ -1904,6 +1921,61 @@ mod preview_tests {
             &name,
         );
         assert!(output.status.success(), "git spawn regression: {output:?}");
+    }
+
+    #[test]
+    fn agent_task_component_preflight_materializes_repository_not_invocation_cwd() {
+        crate::test_support::with_isolated_home(|_| {
+            let (_fixture, checkout) =
+                crate::test_support::shared_committed_git_repo_fixture("fixture");
+            homeboy::core::component::write_standalone_component_config(
+                &homeboy::core::component::Component {
+                    id: "fixture".into(),
+                    local_path: checkout.display().to_string(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let mut args = cook(&[
+                "homeboy",
+                "agent-task",
+                "cook",
+                "--repo",
+                "fixture",
+                "--task-url",
+                "https://github.com/example/fixture/issues/17481",
+                "--prompt",
+                "x",
+                "--verify",
+                "homeboy review test fixture",
+            ]);
+            args.repository_identity = Some(serde_json::json!({
+                "component_id": "fixture", "component_registered": true
+            }));
+            let workspace = cook_gate_preflight_workspace(&args).unwrap();
+            assert_eq!(workspace, checkout);
+            assert!(workspace.join(".git").exists());
+            // Exercise the filesystem handoff, not just a serialized identity.
+            crate::test_support::run_git_command(&workspace, &["rev-parse", "HEAD"]);
+            let transfer = tempfile::NamedTempFile::new().unwrap();
+            crate::test_support::run_git_command(
+                &workspace,
+                &["archive", "HEAD", "-o", transfer.path().to_str().unwrap()],
+            );
+            let materialized = tempfile::tempdir().unwrap();
+            assert!(Command::new("tar")
+                .arg("-xf")
+                .arg(transfer.path())
+                .arg("-C")
+                .arg(materialized.path())
+                .status()
+                .unwrap()
+                .success());
+            assert!(std::fs::read_dir(materialized.path())
+                .unwrap()
+                .next()
+                .is_some());
+        });
     }
 
     #[cfg(unix)]
