@@ -2283,6 +2283,10 @@ pub(crate) fn catch_up_cook_candidate_to_base_in_store(
             "destination branch carries changes beyond this Cook's candidate; it is published on the branch as it stands",
         );
     }
+    crate::agent_task_promotion::destination::before_reset(
+        Path::new(path),
+        &options.identity.cook_id,
+    )?;
     let tree = match apply_immutable_candidate_to_base(
         path,
         &expected,

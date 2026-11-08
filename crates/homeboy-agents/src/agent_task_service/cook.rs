@@ -9023,6 +9023,7 @@ fn preflight_cook_workspace_base_ancestry_with_provider(
     adopted_dirty_candidate: bool,
     tracked_candidate: bool,
 ) -> Result<Option<CookWorkspaceBaseValidation>> {
+    crate::agent_task_promotion::destination::check(target, Some(&options.identity.cook_id))?;
     // Explicit CWDs are caller-owned and must remain untouched. Resolve their
     // declared ref into an isolated scheduler snapshot instead of treating the
     // persisted pin as authority to converge the caller's checkout.
@@ -9069,8 +9070,23 @@ fn preflight_cook_workspace_base_ancestry_with_provider(
         // scheduler snapshot may replace the gate-verified candidate's HEAD.
         return Ok(None);
     }
+    let destination_record = native_cook_destination_record(options)?;
+    if let Some(record) = destination_record.as_ref() {
+        if let Some(run) = record.run_id.as_deref() {
+            if run != options.identity.initial_run_id && run != options.identity.cook_id {
+                let owner = agent_task_lifecycle::exact_record(run)?;
+                if owner.metadata.get("cook_id").and_then(Value::as_str)
+                    != Some(options.identity.cook_id.as_str())
+                {
+                    return Err(crate::agent_task_promotion::destination::owner_mismatch(
+                        format!("destination is owned by another Cook run: {run}"),
+                    ));
+                }
+            }
+        }
+    }
     let native_owned = matches!(
-        native_cook_destination_record(options)?,
+        destination_record,
         Some(record)
             if record.state == homeboy_core::worktree::TaskWorktreeState::Active
                 && std::fs::canonicalize(&record.worktree_path).ok().as_deref()
@@ -9090,6 +9106,7 @@ fn preflight_cook_workspace_base_ancestry_with_provider(
             // the immutable base, not in the earlier read-only preflight.
             return Ok(None);
         };
+        crate::agent_task_promotion::destination::before_reset(target, &options.identity.cook_id)?;
         let resolved = materialize_prepared_cook_base(target, &options.finalization.base, pin)?;
         let issue_owned = options
             .identity
@@ -9950,14 +9967,19 @@ fn provision_pending_cook_workspace(
         &options.identity.initial_run_id,
         &options.identity.initial_plan,
     )?;
-    homeboy_core::worktree_provider::ensure_worktree_provision(
+    let provision = homeboy_core::worktree_provider::ensure_worktree_provision(
         &create_intent,
         &homeboy_core::worktree_provider::WorktreeProvisionLifecycle {
             purpose,
             owner_run_ref: options.identity.initial_run_id.clone(),
             cleanup_policy,
         },
-    )
+    )?;
+    crate::agent_task_promotion::destination::record(
+        Path::new(&provision.destination.ownership.path),
+        &options.identity.cook_id,
+    )?;
+    Ok(provision)
 }
 
 fn validate_pending_cook_repository_identity(_plan: &AgentTaskPlan, _target: &Path) -> Result<()> {
