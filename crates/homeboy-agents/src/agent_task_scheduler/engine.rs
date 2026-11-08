@@ -1279,16 +1279,27 @@ impl AgentTaskScheduler {
                     // tasks still follow the plan's candidate-completion policy;
                     // this only prevents sequential rotation of the same task.
                     //
-                    // A stalled provider is the one exception (#14965). Unlike a
-                    // genuine timeout or provider failure, a liveness stall says
-                    // nothing about the task itself — the provider simply went
-                    // silent — so holding its patch for human review would strand
-                    // the run exactly where an operator previously had to notice
-                    // the stall and move the work to the next provider by hand.
-                    // Falling through to the ordinary rotation path instead lets
-                    // a configured rotation entry's explicit `adoption` (never
-                    // applied implicitly — see `select_candidate_adoption`) carry
-                    // that patch into the next provider.
+                    // A supervisor-confirmed liveness timeout retains the same
+                    // immutable candidate contract as a wall-clock timeout.
+                    // Other provider-reported stalls still use explicit rotation
+                    // adoption; generic error text is not timeout authority.
+                    let provider_timed_out = outcome.diagnostics.iter().any(|diagnostic| {
+                        matches!(
+                            diagnostic.class.as_str(),
+                            "agent_task.provider_timeout" | "agent_task.provider_liveness_timeout"
+                        )
+                    }) && matches!(
+                        outcome.failure_classification,
+                        Some(
+                            AgentTaskFailureClassification::Timeout
+                                | AgentTaskFailureClassification::Stalled
+                        )
+                    );
+                    if provider_timed_out && outcome.outcome_candidate().is_some() {
+                        outcome.status = AgentTaskOutcomeStatus::Timeout;
+                        outcome.failure_classification =
+                            Some(AgentTaskFailureClassification::Timeout);
+                    }
                     let candidate_ready_for_convergence = outcome.failure_classification
                         != Some(AgentTaskFailureClassification::Stalled)
                         && outcome.outcome_candidate().is_some();

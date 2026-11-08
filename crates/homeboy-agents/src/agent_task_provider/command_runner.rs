@@ -1028,6 +1028,8 @@ pub(super) fn run_materialized_provider_command_once(
     let last_progress_ms: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
     let mut runtime_progress = runtime_progress_snapshot(&request.artifacts_path);
     let mut runtime_progress_events = 0_u64;
+    let mut last_heartbeat_ms = None::<u64>;
+    let mut observed_output_progress_ms = 0_u64;
     // Only sampled when the workspace root is known; a provider running
     // without a declared workspace (e.g. a preflight or repo-less task) keeps
     // relying on process output and artifacts-path progress alone.
@@ -1132,8 +1134,10 @@ pub(super) fn run_materialized_provider_command_once(
                 }
                 let elapsed = started.elapsed();
                 let elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
-                let mut progressed = false;
-                let mut workspace_progressed = false;
+                let output_progress_ms = last_progress_ms.load(Ordering::SeqCst);
+                let mut progressed = output_progress_ms > observed_output_progress_ms;
+                observed_output_progress_ms = output_progress_ms;
+                let mut progress_source = "runtime_output";
                 // Liveness is judged at this pass's observation instant, never
                 // after the samples below: on macOS each one forks `ps` and the
                 // workspace sample forks `git` twice, and charging that monitor
@@ -1152,17 +1156,15 @@ pub(super) fn run_materialized_provider_command_once(
                     runtime_progress_events = runtime_progress_events.saturating_add(1);
                 }
                 runtime_progress = current_runtime_progress;
-                // Liveness is the only consumer of the workspace signal, so it
-                // is only worth the `git` fork when a liveness deadline is
-                // actually in force and due for a fresh sample.
-                if liveness_timeout.is_some()
-                    && (liveness_expiring || elapsed_ms >= next_workspace_progress_check_ms)
-                {
+                // Sample even without a liveness deadline: status heartbeats
+                // also consume workspace and descendant activity evidence.
+                if liveness_expiring || elapsed_ms >= next_workspace_progress_check_ms {
                     next_workspace_progress_check_ms =
                         elapsed_ms.saturating_add(workspace_progress_check_interval_ms);
                     let current_activity = child.descendant_activity();
                     if current_activity.advanced_since(&descendant_activity) {
                         progressed = true;
+                        progress_source = "descendant_activity";
                         descendant_activity_events = descendant_activity_events.saturating_add(1);
                     }
                     descendant_activity = current_activity;
@@ -1173,7 +1175,7 @@ pub(super) fn run_materialized_provider_command_once(
                             &current_workspace_progress,
                         ) {
                             progressed = true;
-                            workspace_progressed = true;
+                            progress_source = "workspace_activity";
                             workspace_progress_events = workspace_progress_events.saturating_add(1);
                         }
                         workspace_progress = current_workspace_progress;
@@ -1181,15 +1183,18 @@ pub(super) fn run_materialized_provider_command_once(
                 }
                 if progressed {
                     last_progress_ms.store(elapsed_ms, Ordering::SeqCst);
+                    observed_output_progress_ms = elapsed_ms;
                 }
-                if workspace_progressed {
+                if progressed && last_heartbeat_ms.is_none_or(|last| elapsed_ms.saturating_sub(last) >= 30_000) {
                     if let Some(run_id) = run_id {
-                        let _ = crate::agent_task_lifecycle::record_provider_execution_workspace_activity(
+                        let _ = crate::agent_task_lifecycle::record_provider_execution_progress(
                             run_id,
                             &request.request.task_id,
                             attempt,
+                            progress_source,
                         );
                     }
+                    last_heartbeat_ms = Some(elapsed_ms);
                 }
                 if elapsed >= kill_at(current_deadline_ms) {
                     // A starved loop can first observe both deadlines on the

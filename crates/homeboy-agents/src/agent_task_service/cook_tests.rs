@@ -8159,11 +8159,10 @@ fn provider_prompt_without_declared_gates_preserves_existing_contract() {
     assert_eq!(options.identity.initial_plan.tasks[0], original);
 }
 
-/// End-to-end (#15818): with no operator template declared, every Cook
-/// projection together leaves the model-visible prompt exactly the operator's
-/// prompt; the facts travel as structured request data.
+/// Cook preserves the operator prompt and adds only targeted-test guidance;
+/// gate facts still travel as structured request data.
 #[test]
-fn dispatched_prompt_is_the_operator_prompt_without_a_template() {
+fn dispatched_prompt_preserves_operator_prompt_and_targets_tests() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let mut options = batch_cook_options(
             "dispatched-prompt-operator-owned",
@@ -8178,7 +8177,7 @@ fn dispatched_prompt_is_the_operator_prompt_without_a_template() {
         project_attempt_prompt_template(&mut options);
 
         let request = &options.identity.initial_plan.tasks[0];
-        assert_eq!(request.instructions, original_instructions);
+        assert_eq!(request.instructions, format!("{original_instructions}\n\nRun targeted tests for the code you change (named filters or single test files); the deterministic gates and CI run the broad suites after handback."));
         assert_eq!(
             request.inputs["homeboy"]["gates"]["verify"],
             serde_json::json!(["homeboy review test sample-plugin"])

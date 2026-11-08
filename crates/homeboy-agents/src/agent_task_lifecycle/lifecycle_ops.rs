@@ -3987,12 +3987,12 @@ pub(crate) fn record_provider_execution_runtime_evidence(
     })
 }
 
-/// Persist the timestamp of a workspace change observed by provider supervision.
-/// The status projection uses this finite lifecycle fact and never inspects a workspace.
-pub(crate) fn record_provider_execution_workspace_activity(
+/// Called only for observed progress, throttled by the provider supervisor.
+pub(crate) fn record_provider_execution_progress(
     run_id: &str,
     task_id: &str,
     attempt: u32,
+    source: &str,
 ) -> Result<AgentTaskRunRecord> {
     let lifecycle_store = AgentTaskLifecycleStore::from_environment()?;
     let run_id = sanitize_run_id(run_id);
@@ -4011,7 +4011,13 @@ pub(crate) fn record_provider_execution_workspace_activity(
         if execution["state"] != json!("running") {
             return false;
         }
-        execution["workspace_activity_observed_at"] = json!(now_timestamp());
+        let now = now_timestamp();
+        if source == "workspace_activity" {
+            execution["workspace_activity_observed_at"] = json!(now);
+        }
+        execution["heartbeat_at"] = json!(now);
+        execution["heartbeat_source"] = json!(source);
+        update_lifecycle_heartbeat(record);
         true
     })?;
     record.ok_or_else(|| {

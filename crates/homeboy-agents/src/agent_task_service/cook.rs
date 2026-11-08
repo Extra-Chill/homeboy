@@ -1551,6 +1551,11 @@ fn project_attempt_prompt_template(options: &mut CookRequest) {
             request,
             crate::agent_task_prompt_template::PromptPurpose::Attempt,
         );
+        const TARGETED_TESTS: &str = "Run targeted tests for the code you change (named filters or single test files); the deterministic gates and CI run the broad suites after handback.";
+        if !request.instructions.contains(TARGETED_TESTS) {
+            request.instructions.push_str("\n\n");
+            request.instructions.push_str(TARGETED_TESTS);
+        }
     }
 }
 
