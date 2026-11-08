@@ -147,6 +147,9 @@ fn repository_cleanliness_fixture_cook_leaves_only_the_provider_edit() {
         "repository-cleanliness-cook",
         "--repo",
         COMPONENT_ID,
+        // The fixture has no remote, so Cook cannot infer its base.
+        "--base",
+        "main",
         "--backend",
         "fixture",
         "--model",
