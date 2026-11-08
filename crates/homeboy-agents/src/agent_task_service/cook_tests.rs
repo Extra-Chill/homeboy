@@ -24693,6 +24693,127 @@ fn recovery_publishes_historical_inherited_failure_without_running_gates() {
 }
 
 #[test]
+fn publication_uses_completed_producer_despite_later_review_form_attempts() {
+    use crate::agent_task::AgentTaskOutcomeStatus;
+
+    for (later_status, gates_passed) in [
+        (AgentTaskOutcomeStatus::Timeout, true),
+        (AgentTaskOutcomeStatus::Succeeded, true),
+        (AgentTaskOutcomeStatus::Failed, true),
+        (AgentTaskOutcomeStatus::Timeout, false),
+    ] {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let cook_id = "cook-producer-publication";
+            let producer = "cook-producer-publication-attempt-1";
+            let continuation = "cook-producer-publication-attempt-2";
+            let target = tempfile::tempdir().unwrap();
+            let mut options =
+                batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+            options.identity.initial_run_id = producer.to_string();
+            options.identity.initial_plan.tasks[0].executor.model = Some("producer-model".into());
+            persist_initial_recipe(&options).unwrap();
+            agent_task_lifecycle::submit_plan(&options.identity.initial_plan, Some(producer))
+                .unwrap();
+            agent_task_lifecycle::record_cook_attempt_in_store(
+                &test_lifecycle_store(),
+                cook_id,
+                1,
+                producer,
+            )
+            .unwrap();
+            seed_substantive_candidate_aggregate(
+                producer, &options.identity.initial_plan, &target.path().join("candidate.patch"),
+                "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n",
+            );
+            let mut aggregate = agent_task_lifecycle::read_attempt_aggregate(producer).unwrap();
+            aggregate.outcomes[0].outputs = test_review_form_outputs();
+            agent_task_lifecycle::record_run_aggregate(
+                producer,
+                &options.identity.initial_plan,
+                &aggregate,
+            )
+            .unwrap();
+            let mut promotion = promotion_with_existing_path(producer, target.path());
+            if !gates_passed {
+                promotion.status = AgentTaskPromotionStatus::GateFailed;
+                promotion.deterministic_gates[0].status =
+                    crate::agent_task_gate::AgentTaskGateStatus::Failed;
+            }
+            agent_task_lifecycle::record_promotion(
+                producer,
+                serde_json::to_value(&promotion).unwrap(),
+            )
+            .unwrap();
+
+            let mut plan = options.identity.initial_plan.clone();
+            plan.tasks[0].executor.model = None;
+            plan.tasks[0].inputs["cook_loop"]["review_form_required"] = serde_json::json!(true);
+            plan.tasks[0].inputs["cook_loop"]["execution_budget_authority"] =
+                serde_json::json!({ "kind": "fresh_cook_review" });
+            super::super::record_recipe_attempt(cook_id, 2, continuation, &plan).unwrap();
+            agent_task_lifecycle::submit_plan(&plan, Some(continuation)).unwrap();
+            agent_task_lifecycle::record_cook_attempt_in_store(
+                &test_lifecycle_store(),
+                cook_id,
+                2,
+                continuation,
+            )
+            .unwrap();
+            let mut later = review_form_aggregate(&plan);
+            later.outcomes[0].status = later_status;
+            later.outcomes[0].outputs = Value::Null;
+            agent_task_lifecycle::record_run_aggregate(continuation, &plan, &later).unwrap();
+            let mut carried = promotion.clone();
+            carried.source.run_id = Some(continuation.to_string());
+            carried.provenance["cook_follow_up"] = serde_json::json!({
+                "kind": "review_form_only", "source_run_id": producer,
+            });
+            agent_task_lifecycle::record_promotion(
+                continuation,
+                serde_json::to_value(carried).unwrap(),
+            )
+            .unwrap();
+
+            for (recovery_id, supplied) in [
+                (cook_id, None),
+                (continuation, None),
+                (cook_id, Some(supplied_test_review_form())),
+                (continuation, Some(supplied_test_review_form())),
+            ] {
+                let result = recover_cook_pr_with_backend_and_review_form(
+                    recovery_id,
+                    supplied,
+                    None,
+                    Vec::new(),
+                    true,
+                    &mut CaptureBackend {
+                        synthetic_gate_proof: Some(promotion.clone()),
+                        ..Default::default()
+                    },
+                );
+                if gates_passed {
+                    let report = result.expect("later form execution cannot veto the producer");
+                    assert_eq!(report["status"], "validated");
+                    assert_eq!(
+                        report["review_dossier"]["ai_assistance"]["model"],
+                        "tier producer-model; served model not recorded"
+                    );
+                    assert_eq!(
+                        report["review_dossier"]["ai_assistance"]["tool"],
+                        "Homeboy (fixture)"
+                    );
+                } else {
+                    assert!(
+                        result.is_err(),
+                        "producer gate failure must still block publication"
+                    );
+                }
+            }
+        });
+    }
+}
+
+#[test]
 fn recovery_supplies_missing_historical_review_form_without_provider_dispatch() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let cook_id = "cook-9866";
