@@ -1527,7 +1527,18 @@ pub(super) fn run_detail(
         summary.status_note = cook.reason.clone();
         std::mem::replace(&mut summary.status, cook.state.clone())
     });
+    let promotion = run
+        .metadata_json
+        .pointer("/agent_task_run/metadata/cook_delivery/artifacts/promotion");
     Ok(RunDetail {
+        candidate_ref: promotion
+            .and_then(|p| p.get("candidate_ref"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        candidate_sha: promotion
+            .and_then(|p| p.pointer("/candidate/candidate_sha"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
         summary,
         observation_status,
         cook,

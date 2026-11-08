@@ -2314,12 +2314,13 @@ pub(crate) fn catch_up_cook_candidate_to_base_in_store(
             &candidate_sha,
         ],
     )?;
-    caught_up["provenance"]["candidate_commit"] =
+    caught_up["candidate"] =
         json!({"base_sha":fresh_base,"candidate_sha":candidate_sha,"tree_sha":tree});
-    caught_up["candidate"] = caught_up["provenance"]["candidate_commit"].clone();
+    caught_up["provenance"]["candidate_commit"] = caught_up["candidate"].clone();
     caught_up["status"] = json!("verification_pending");
     caught_up["deterministic_gates"] = json!([]);
     caught_up["gate_results"] = json!([]);
+    crate::agent_task_promotion::pin_applied_candidate(&options.identity.cook_id, &mut caught_up)?;
     caught_up["verified_base"] = json!({ "base": options.finalization.base, "sha": fresh_base });
     caught_up["provenance"]["candidate"] =
         serde_json::to_value(candidate_fingerprint(path)?).map_err(json_error)?;

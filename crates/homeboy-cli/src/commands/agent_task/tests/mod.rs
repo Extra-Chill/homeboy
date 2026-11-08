@@ -6,6 +6,7 @@
 
 mod support;
 
+mod candidate_ref;
 mod contract;
 mod dispatch;
 mod lifecycle;

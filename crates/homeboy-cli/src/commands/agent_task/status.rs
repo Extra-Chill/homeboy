@@ -339,6 +339,19 @@ fn status_once(args: StatusArgs) -> CmdResult<Value> {
     // Status is a pure projection (#13697, #15718): every read below is
     // bounded and never initializes, migrates, or reconciles durable state.
     if let Ok(record) = bounded_exact_record(&target.run_id) {
+        if let Some(promotion) = record
+            .metadata
+            .pointer("/cook_delivery/artifacts/promotion")
+        {
+            value["candidate_ref"] = promotion
+                .get("candidate_ref")
+                .cloned()
+                .unwrap_or(Value::Null);
+            value["candidate_sha"] = promotion
+                .pointer("/candidate/candidate_sha")
+                .cloned()
+                .unwrap_or(Value::Null);
+        }
         // The typed immutable candidate commit harvest recorded (#16303).
         if let Some(candidate) = &record.candidate {
             value["candidate_commit"] = json!(candidate);
@@ -505,6 +518,8 @@ fn compact_control_plane_status(value: Value) -> Value {
     }
     for key in [
         "candidate_commit",
+        "candidate_ref",
+        "candidate_sha",
         "lab_snapshot_failure",
         "lab_staging_diagnostic",
     ] {

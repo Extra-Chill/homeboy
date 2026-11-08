@@ -3015,6 +3015,7 @@ mod tests {
         changed_files: Vec<String>,
     ) -> AgentTaskPromotionReport {
         AgentTaskPromotionReport {
+            candidate_ref: None,
             schema: AGENT_TASK_PROMOTION_REPORT_SCHEMA.to_string(),
             status,
             source: AgentTaskPromotionSource {

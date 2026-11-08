@@ -108,6 +108,45 @@ fn runtime_retry_inherits_uncommitted_work_promotes_and_pushes_candidate_sha() {
         report.candidate.as_ref().unwrap().candidate_sha,
         candidate.candidate_sha
     );
+    let mut status_json = serde_json::to_value(&report).unwrap();
+    super::super::pin_applied_candidate("retry-cook", &mut status_json).unwrap();
+    let reference = status_json["candidate_ref"].as_str().unwrap();
+    assert_eq!(reference, "refs/homeboy/candidates/retry-cook");
+    assert_eq!(git_head(&root, reference), candidate.candidate_sha);
+    assert_eq!(
+        git_head(&root, &format!("{reference}^{{tree}}")),
+        candidate.tree_sha
+    );
+    assert_eq!(git_head(&root, "HEAD"), candidate.base_sha);
+    // The destination remains staged, while a ref checkout is clean.
+    let staged = Command::new("git")
+        .arg("-C")
+        .arg(&root)
+        .arg("write-tree")
+        .output()
+        .unwrap();
+    assert!(staged.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&staged.stdout).trim(),
+        candidate.tree_sha
+    );
+    let checkout = temp.path().join("candidate-checkout");
+    git(
+        &root,
+        &["worktree", "add", checkout.to_str().unwrap(), reference],
+    );
+    assert_eq!(
+        std::fs::read(checkout.join("retry.txt")).unwrap(),
+        b"remediation\n"
+    );
+    let clean = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&checkout)
+        .args(["status", "--porcelain"])
+        .output()
+        .unwrap();
+    assert!(clean.status.success());
+    assert!(clean.stdout.is_empty());
     let remote = temp.path().join("published.git");
     git(temp.path(), &["init", "--bare", remote.to_str().unwrap()]);
     git(

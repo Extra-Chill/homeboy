@@ -640,6 +640,12 @@ fn render_status_summary(payload: &Value) -> Option<String> {
     if let Some(mission) = string_value(payload, &["mission"]) {
         lines.push(format!("Mission: {mission}"));
     }
+    if let Some(reference) = string_value(payload, &["candidate_ref"]) {
+        lines.push(format!("Candidate ref: {reference}"));
+    }
+    if let Some(sha) = string_value(payload, &["candidate_sha"]) {
+        lines.push(format!("Candidate SHA: {sha}"));
+    }
     if let Some(candidate) = string_value(payload, &["candidate", "state"]) {
         lines.push(format!("Candidate: {candidate}"));
     }
