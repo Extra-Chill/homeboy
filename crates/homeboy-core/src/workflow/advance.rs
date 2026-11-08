@@ -172,6 +172,8 @@ impl StepState {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InstanceState {
     pub schema: String,
+    #[serde(default)]
+    pub timing: super::timing::WorkflowTiming,
     pub instance: String,
     pub inputs: BTreeMap<String, Value>,
     pub status: InstanceStatus,
@@ -208,6 +210,7 @@ impl InstanceState {
         };
         Self {
             schema: WORKFLOW_STATE_SCHEMA.to_string(),
+            timing: Default::default(),
             instance: instance.into(),
             inputs,
             status: InstanceStatus::Running,
@@ -404,6 +407,7 @@ pub fn advance(
         machine.enforce_timeouts();
         machine.progress();
     }
+    super::timing::capture(&mut machine.state, now_ms);
     (machine.state, machine.commands)
 }
 

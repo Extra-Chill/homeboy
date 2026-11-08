@@ -9,6 +9,7 @@ pub mod advance;
 pub mod definition;
 pub mod gate;
 pub mod template;
+pub mod timing;
 
 pub use advance::{
     advance, Command, Event, FinishedStatus, InstanceState, InstanceStatus, StepPhase, StepResult,

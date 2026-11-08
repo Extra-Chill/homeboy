@@ -671,3 +671,58 @@ fn terminal_instances_ignore_every_event() {
         assert!(commands.is_empty());
     }
 }
+
+#[test]
+fn recorded_transcripts_reach_workflow_hotspots_idempotently() {
+    use crate::observation::{ObservationStore, RunStatus};
+    use crate::performance_hotspots::{phase_hotspots, PhaseHotspotQuery};
+    for fixture in [
+        include_str!("golden/04-retry-backoff-then-success.json"),
+        include_str!("golden/07-approval.json"),
+        include_str!("golden/15-foreach-fan-out-max-parallel.json"),
+        include_str!("golden/19-foreach-item-retry-timeout-join-any.json"),
+        include_str!("golden/10-max-step-runs-cancels-in-flight.json"),
+    ] {
+        let fixture: Value = serde_json::from_str(fixture).unwrap();
+        let (_, state) = run_script(&fixture);
+        let dir = tempfile::tempdir().unwrap();
+        let store = ObservationStore::open_initialized_at(dir.path().join("runs.db")).unwrap();
+        let report = &state.timing.completed;
+        assert!(!report.spans.is_empty());
+        for _ in 0..2 {
+            store.record_workflow_timing(&state).unwrap();
+        }
+        let run = store.get_run(&state.instance).unwrap().unwrap();
+        assert_eq!(
+            run.status,
+            if state.status == InstanceStatus::Succeeded {
+                RunStatus::Pass
+            } else {
+                RunStatus::Fail
+            }
+            .as_str()
+        );
+        assert_eq!(store.phase_spans(&run.id).unwrap(), *report);
+        let hotspots = phase_hotspots(
+            &store,
+            &PhaseHotspotQuery {
+                kind: Some("workflow".into()),
+                last: 10,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(hotspots.runs_with_spans, 1);
+        for span in &report.spans {
+            let row = hotspots
+                .phases
+                .iter()
+                .find(|row| row.phase == span.id)
+                .unwrap();
+            assert_eq!(
+                row.timing.samples,
+                report.spans.iter().filter(|s| s.id == span.id).count()
+            );
+        }
+    }
+}
