@@ -41,8 +41,8 @@ use crate::commands::utils::response::{
     CommandNextActionKind, CommandResultRefs, CommandRunRef, ACTIONABLE_METADATA_KEY,
 };
 use crate::commands::utils::watch::{
-    parse_duration, watch_loop, WatchConclusion, WatchConfig, WatchPoller, WatchResult,
-    TIMEOUT_EXIT_CODE,
+    parse_duration, watch_loop, watch_loop_with_interval, WatchConclusion, WatchConfig,
+    WatchPoller, WatchResult, TIMEOUT_EXIT_CODE,
 };
 
 /// Cap the number of detail refs rendered in the compact summary so a noisy
@@ -996,15 +996,64 @@ fn watch_status_until(
     };
     let started = Instant::now();
     let mut progress = StatusWatchProgress::default();
-    let result = watch_loop(
+    let mut backoff = StatusWaitInterval::default();
+    let result = watch_loop_with_interval(
         &poller,
         &args.run_id,
         &WatchConfig { interval, timeout },
         std::thread::sleep,
         || started.elapsed(),
         |(snapshot, _), poll| progress.observe(snapshot, poll, |line| eprintln!("{line}")),
+        |(snapshot, _)| {
+            if await_materialization {
+                backoff.observe(status_change_projection(snapshot))
+            } else {
+                interval
+            }
+        },
     )?;
     Ok(watch_status_output(&args, result, progress))
+}
+
+/// Unchanged durable status projections need progressively fewer reads.
+#[derive(Default)]
+struct StatusWaitInterval {
+    previous: Option<Value>,
+    seconds: u64,
+}
+
+impl StatusWaitInterval {
+    fn observe(&mut self, projection: Value) -> Duration {
+        self.seconds = if self.previous.as_ref() == Some(&projection) {
+            (self.seconds * 2).min(15)
+        } else {
+            1
+        };
+        self.previous = Some(projection);
+        Duration::from_secs(self.seconds)
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn status_wait_interval_tracks_projection_changes() {
+    let mut policy = StatusWaitInterval::default();
+    for (projection, seconds) in [
+        ("queued", 1),
+        ("queued", 2),
+        ("queued", 4),
+        ("queued", 8),
+        ("queued", 15),
+        ("queued", 15),
+        ("running", 1),
+        ("running", 2),
+        ("new progress", 1),
+    ] {
+        assert_eq!(
+            policy.observe(json!(projection)),
+            Duration::from_secs(seconds)
+        );
+    }
 }
 
 #[derive(Default)]

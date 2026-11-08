@@ -89,9 +89,29 @@ pub fn watch_loop<P, S, C>(
     poller: &P,
     id: &str,
     config: &WatchConfig,
+    sleep: S,
+    elapsed: C,
+    progress: impl FnMut(&P::Item, u64),
+) -> homeboy::core::Result<WatchResult<P::Item>>
+where
+    P: WatchPoller,
+    S: FnMut(Duration),
+    C: Fn() -> Duration,
+{
+    watch_loop_with_interval(poller, id, config, sleep, elapsed, progress, |_| {
+        config.interval
+    })
+}
+
+/// Watch with a snapshot-dependent interval policy, retaining the same timeout bounds.
+pub fn watch_loop_with_interval<P, S, C>(
+    poller: &P,
+    id: &str,
+    config: &WatchConfig,
     mut sleep: S,
     elapsed: C,
     mut progress: impl FnMut(&P::Item, u64),
+    mut interval: impl FnMut(&P::Item) -> Duration,
 ) -> homeboy::core::Result<WatchResult<P::Item>>
 where
     P: WatchPoller,
@@ -113,6 +133,7 @@ where
             });
         }
 
+        let interval = interval(&item);
         let sleep_for = if let Some(timeout) = config.timeout {
             let waited = elapsed();
             if waited >= timeout {
@@ -123,9 +144,9 @@ where
                     waited,
                 });
             }
-            config.interval.min(timeout - waited)
+            interval.min(timeout - waited)
         } else {
-            config.interval
+            interval
         };
 
         sleep(sleep_for);

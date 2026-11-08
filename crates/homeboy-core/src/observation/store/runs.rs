@@ -325,6 +325,7 @@ impl ObservationStore {
             })?;
         }
 
+        let was_missing = !path.exists();
         let connection = schema::open_initialized_connection(&path)?;
         let store = Self {
             connection,
@@ -333,9 +334,22 @@ impl ObservationStore {
             roots,
         };
         if maintain_artifacts {
-            // Failure is returned to the caller and the next normal open
-            // deterministically retries; no detached work can be lost.
-            store.reconcile_unfinished_artifact_publications_with_retry(|| {})?;
+            static RECONCILED_PATHS: std::sync::OnceLock<
+                std::sync::Mutex<std::collections::HashSet<PathBuf>>,
+            > = std::sync::OnceLock::new();
+            let mut reconciled = RECONCILED_PATHS
+                .get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let canonical = schema::canonical_database_path(&store.path)?;
+            if was_missing {
+                reconciled.remove(&canonical);
+            }
+            if !reconciled.contains(&canonical) {
+                // Record only successful maintenance so the next normal open retries failures.
+                store.reconcile_unfinished_artifact_publications_with_retry(|| {})?;
+                reconciled.insert(canonical);
+            }
         }
         Ok(store)
     }
