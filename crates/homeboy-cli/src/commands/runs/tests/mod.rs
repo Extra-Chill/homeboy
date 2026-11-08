@@ -1603,6 +1603,96 @@ fn artifact_get_status_pointer_retrieves_retained_patch_after_producer_removal()
 }
 
 #[test]
+fn artifact_get_accepts_listed_logical_id_and_name() {
+    artifact_destination_fixture(false);
+}
+
+#[test]
+fn artifact_get_default_destination_is_named_and_absolute() {
+    artifact_destination_fixture(true);
+}
+
+#[test]
+fn artifact_get_to_flag_parses_as_output() {
+    #[derive(clap::Parser)]
+    struct Cli {
+        #[command(flatten)]
+        args: RunsArtifactGetArgs,
+    }
+    use clap::Parser;
+    let parsed = Cli::try_parse_from(["get", "run", "artifact", "--to", "chosen.patch"]).unwrap();
+    assert_eq!(
+        parsed.args.output,
+        Some(std::path::PathBuf::from("chosen.patch"))
+    );
+}
+
+fn artifact_destination_fixture(default_output: bool) {
+    with_isolated_home(|home| {
+        let store = test_store();
+        let run = store
+            .start_run(sample_run("bench", "homeboy", "studio", Value::Null))
+            .unwrap();
+        let source = home.path().join(".tmp1234");
+        std::fs::write(&source, b"candidate").unwrap();
+        let artifact = store
+            .record_artifact(&run.id, "git_bundle", &source)
+            .unwrap();
+        store.update_artifact_metadata(&artifact.id, serde_json::json!({"name": "candidate.bundle", "agent_task": {"logical_artifact_id": "cook-homeboy-attempt-1-patch"}})).unwrap();
+        for token in if default_output {
+            vec![]
+        } else {
+            vec![
+                artifact.id.as_str(),
+                "cook-homeboy-attempt-1-patch",
+                "git_bundle",
+            ]
+        } {
+            let destination = home.path().join("retrieved.bundle");
+            let (output, _) = artifact_get(
+                &store,
+                RunsArtifactGetArgs {
+                    run_id: run.id.clone(),
+                    artifact_id: token.to_string(),
+                    runner: None,
+                    output: Some(destination.clone()),
+                    field: vec![],
+                },
+            )
+            .unwrap();
+            let RunsOutput::ArtifactGet(output) = output else {
+                panic!("get")
+            };
+            assert_eq!(std::path::Path::new(&output.output_path), destination);
+            assert!(std::path::Path::new(&output.output_path).is_absolute());
+            assert_eq!(std::fs::read(destination).unwrap(), b"candidate");
+        }
+        if !default_output {
+            return;
+        }
+        let (output, _) = artifact_get(
+            &store,
+            RunsArtifactGetArgs {
+                run_id: run.id,
+                artifact_id: artifact.id,
+                runner: None,
+                output: None,
+                field: vec![],
+            },
+        )
+        .unwrap();
+        let RunsOutput::ArtifactGet(output) = output else {
+            panic!("get")
+        };
+        let path = std::path::Path::new(&output.output_path);
+        assert!(path.is_absolute());
+        assert_eq!(path.file_name().unwrap(), "candidate.bundle");
+        assert_eq!(std::fs::read(path).unwrap(), b"candidate");
+        std::fs::remove_file(path).unwrap();
+    });
+}
+
+#[test]
 fn artifact_get_canonical_pin_outranks_older_friendly_alias() {
     with_isolated_home(|home| {
         let store = test_store();

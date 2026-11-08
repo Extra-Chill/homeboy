@@ -347,6 +347,7 @@ pub(crate) fn run_with_cook_progress_and_provenance(
         AgentTaskCommand::Run(status_args) => run::run_submitted(status_args),
         AgentTaskCommand::ValidatePlan(args) => run::validate_plan(args),
         AgentTaskCommand::Status(status_args) => status::status(status_args),
+        AgentTaskCommand::Candidate { command } => candidate::run(command),
         AgentTaskCommand::ActiveScope(scope) => {
             let path = homeboy::core::paths::observation_db()?;
             let exists = path.try_exists().map_err(|error| {

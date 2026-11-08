@@ -1,4 +1,158 @@
+use homeboy::core::{Error, Result};
 use serde_json::Value;
+use std::path::Path;
+
+#[derive(clap::Subcommand, Debug)]
+pub enum CandidateCommand {
+    /// Fetch the selected candidate and check out the Cook's head branch.
+    Checkout {
+        cook_or_attempt: String,
+        #[arg(long)]
+        into: std::path::PathBuf,
+    },
+}
+
+fn git(path: &Path, args: &[&str]) -> Result<String> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .args(args)
+        .output()
+        .map_err(|e| Error::internal_io(e.to_string(), None))?;
+    if !output.status.success() {
+        return Err(Error::validation_invalid_argument(
+            "candidate",
+            String::from_utf8_lossy(&output.stderr).trim(),
+            None,
+            None,
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+pub(super) fn run(command: CandidateCommand) -> crate::commands::CmdResult<Value> {
+    let CandidateCommand::Checkout {
+        cook_or_attempt,
+        into,
+    } = command;
+    ensure_clean(&into)?;
+    let target = super::status::resolve_cook_reader_target(&cook_or_attempt, false)?;
+    let store = homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
+    let record = homeboy::agents::agent_task_lifecycle::exact_record_bounded_in_store(
+        &store,
+        &target.run_id,
+    )?;
+    let recipe = homeboy::agents::agent_task_service::load_recipe_for_attempt(&target.run_id)?;
+    let promotion = &record.metadata["cook_delivery"]["artifacts"]["promotion"];
+    let branch = recipe
+        .as_ref()
+        .and_then(|r| r.finalization["head"].as_str())
+        .or_else(|| promotion.pointer("/target/branch").and_then(Value::as_str))
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "candidate",
+                "Cook has no declared head branch",
+                None,
+                None,
+            )
+        })?;
+    let cook = recipe
+        .as_ref()
+        .map(|r| r.cook_id.as_str())
+        .or_else(|| record.metadata["cook_id"].as_str())
+        .unwrap_or(&cook_or_attempt);
+    let reference = format!("refs/homeboy/candidates/{cook}");
+    if let Some(source) = promotion.pointer("/target/path").and_then(Value::as_str) {
+        if git(Path::new(source), &["show-ref", "--verify", &reference]).is_ok() {
+            return checkout_from(&into, source, &reference, branch);
+        }
+    }
+    let observation = homeboy::core::observation::ObservationStore::open_initialized()?;
+    let artifact = homeboy::core::observation::runs_service::resolve_artifact_for_run(
+        &observation,
+        &target.run_id,
+        "git_bundle",
+    )?;
+    let sha = artifact
+        .metadata_json
+        .pointer("/candidate/candidate_sha")
+        .or_else(|| artifact.metadata_json.get("candidate_sha"))
+        .or_else(|| {
+            artifact
+                .metadata_json
+                .pointer("/agent_task/runner_provenance/candidate_sha")
+        })
+        .or_else(|| {
+            artifact
+                .metadata_json
+                .pointer("/agent_task/candidate/candidate_sha")
+        })
+        .and_then(Value::as_str)
+        .or_else(|| record.candidate.as_ref().map(|c| c.candidate_sha.as_str()))
+        .or_else(|| {
+            promotion
+                .pointer("/candidate/candidate_sha")
+                .and_then(Value::as_str)
+        })
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "candidate",
+                "candidate bundle has no candidate_sha metadata",
+                None,
+                None,
+            )
+        })?
+        .to_string();
+    let temp = tempfile::tempdir().map_err(|e| Error::internal_io(e.to_string(), None))?;
+    let output = Some(temp.path().join("candidate.bundle"));
+    use homeboy::core::observation::runs_service as service;
+    let fetched = match service::classify_artifact_storage(&artifact) {
+        service::ArtifactStorage::LocalFile => service::copy_local_file_artifact(artifact, output)?,
+        service::ArtifactStorage::Remote => service::download_remote_artifact(artifact, output)?,
+        service::ArtifactStorage::PublicUrl => service::download_public_artifact(artifact, output)?,
+        _ => {
+            return Err(Error::validation_invalid_argument(
+                "candidate",
+                "candidate bundle bytes are unavailable",
+                None,
+                None,
+            ))
+        }
+    };
+    checkout_from(&into, &fetched.output_path.to_string_lossy(), &sha, branch)
+}
+
+fn ensure_clean(into: &Path) -> Result<()> {
+    if !git(into, &["status", "--porcelain", "--untracked-files=all"])?.is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "into",
+            "worktree has uncommitted changes",
+            None,
+            None,
+        ));
+    }
+    Ok(())
+}
+
+fn checkout_from(
+    into: &Path,
+    source: &str,
+    revision: &str,
+    branch: &str,
+) -> crate::commands::CmdResult<Value> {
+    ensure_clean(into)?;
+    git(into, &["check-ref-format", "--branch", branch])?;
+    git(into, &["fetch", "--no-tags", "--", source, revision])?;
+    let sha = git(into, &["rev-parse", "FETCH_HEAD^{commit}"])?;
+    git(into, &["checkout", "-B", branch, &sha, "--"])?;
+    let path = into
+        .canonicalize()
+        .map_err(|e| Error::internal_io(e.to_string(), None))?;
+    Ok((
+        serde_json::json!({"command": "agent-task.candidate.checkout", "candidate_sha": sha, "branch": branch, "worktree": path}),
+        0,
+    ))
+}
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) enum CandidateState {
@@ -184,6 +338,109 @@ fn candidate_result_from_projection(value: &Value) -> Option<CandidateResult> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn checkout_fetches_canonical_ref_and_refuses_dirty_worktree() {
+        checkout_fixture(false);
+    }
+
+    #[test]
+    fn checkout_fetches_bundle_using_candidate_metadata() {
+        checkout_fixture(true);
+    }
+
+    fn checkout_fixture(bundle: bool) {
+        use crate::commands::agent_task::tests::support::{test_plan, with_isolated_home};
+        with_isolated_home(|home| {
+            let source = home.path().join("source");
+            let destination = home.path().join("destination");
+            std::fs::create_dir(&source).unwrap();
+            git(&source, &["init", "-b", "main"]).unwrap();
+            git(&source, &["config", "user.name", "Test"]).unwrap();
+            git(&source, &["config", "user.email", "test@example.test"]).unwrap();
+            std::fs::write(source.join("file"), "base").unwrap();
+            git(&source, &["add", "."]).unwrap();
+            git(&source, &["commit", "-m", "base"]).unwrap();
+            git(
+                home.path(),
+                &[
+                    "clone",
+                    source.to_str().unwrap(),
+                    destination.to_str().unwrap(),
+                ],
+            )
+            .unwrap();
+            std::fs::write(source.join("file"), "candidate").unwrap();
+            git(&source, &["commit", "-am", "candidate"]).unwrap();
+            let sha = git(&source, &["rev-parse", "HEAD"]).unwrap();
+            let run_id = "checkout-attempt";
+            let lifecycle =
+                homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
+                    .unwrap();
+            let mut plan = test_plan();
+            plan.metadata["cook_id"] = json!("checkout-cook");
+            plan.metadata["cook_attempt"] = json!(1);
+            homeboy::agents::agent_task_lifecycle::submit_plan(&plan, Some(run_id)).unwrap();
+            homeboy::agents::agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+                record.metadata = json!({"cook_id": "checkout-cook", "cook_delivery": {"artifacts": {"promotion": {
+                    "target": {"path": source, "branch": "cook/head"}
+                }}}});
+            }).unwrap();
+            homeboy::agents::agent_task_lifecycle::record_cook_attempt_in_store(
+                &lifecycle,
+                "checkout-cook",
+                1,
+                run_id,
+            )
+            .unwrap();
+            if bundle {
+                let path = home.path().join("candidate.bundle");
+                git(
+                    &source,
+                    &["bundle", "create", path.to_str().unwrap(), "HEAD"],
+                )
+                .unwrap();
+                let store =
+                    homeboy::core::observation::ObservationStore::open_initialized().unwrap();
+                let artifact = store.record_artifact(run_id, "git_bundle", &path).unwrap();
+                store
+                    .update_artifact_metadata(&artifact.id, json!({"candidate_sha": sha}))
+                    .unwrap();
+            } else {
+                git(
+                    &source,
+                    &["update-ref", "refs/homeboy/candidates/checkout-cook", &sha],
+                )
+                .unwrap();
+            }
+            let (value, _) = run(CandidateCommand::Checkout {
+                cook_or_attempt: if bundle { run_id } else { "checkout-cook" }.into(),
+                into: destination.clone(),
+            })
+            .unwrap();
+            assert_eq!(value["candidate_sha"], sha);
+            assert_eq!(
+                git(&destination, &["branch", "--show-current"]).unwrap(),
+                "cook/head"
+            );
+            assert_eq!(
+                std::fs::read_to_string(destination.join("file")).unwrap(),
+                "candidate"
+            );
+            assert!(git(&destination, &["status", "--porcelain"])
+                .unwrap()
+                .is_empty());
+            std::fs::write(destination.join("untracked"), "dirty").unwrap();
+            assert!(run(CandidateCommand::Checkout {
+                cook_or_attempt: run_id.into(),
+                into: destination.clone()
+            })
+            .unwrap_err()
+            .to_string()
+            .contains("uncommitted changes"));
+            assert_eq!(git(&destination, &["rev-parse", "HEAD"]).unwrap(), sha);
+        });
+    }
 
     #[test]
     fn canonical_projection_is_the_only_candidate_source() {

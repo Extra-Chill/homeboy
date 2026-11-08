@@ -43,6 +43,11 @@ pub struct ActiveScopeArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum AgentTaskCommand {
+    /// Retrieve the canonical candidate into a clean git worktree.
+    Candidate {
+        #[command(subcommand)]
+        command: crate::commands::agent_task::candidate::CandidateCommand,
+    },
     #[command(hide = true)]
     ExecutionStep {
         #[arg(long)]

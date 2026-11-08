@@ -86,6 +86,16 @@ credential-bearing fragments or arbitrary URLs.
 
 `agent-task status <run-id> --watch` polls the same canonical resource. Every material resource change is emitted immediately as one bounded `homeboy/agent-task-status-watch-event/v2` JSONL event on stderr. Stdout is the bounded `homeboy/agent-task-status-watch/v2` final envelope. Polls default to every `5s` and stop after `30m`; `--interval <duration>` and `--timeout <duration>` require `--watch`. A terminal failure exits nonzero; a timeout returns the latest partial status and exits `124`.
 
+### Candidate checkout
+
+`homeboy agent-task candidate checkout <cook|attempt> --into <worktree>` fetches
+and checks out the canonical candidate on the Cook's declared head branch. Cook
+aliases use the durable candidate selection, not simply the newest attempt.
+The command prefers `refs/homeboy/candidates/<cook>` in the promotion target;
+otherwise it downloads the candidate git bundle and fetches its recorded
+`candidate_sha`. The destination must already be a git worktree with no staged,
+unstaged, or untracked changes. Git also refuses a branch held by another worktree.
+
 ### Resource Behavior
 
 Resource admission follows command capability rather than command names. Bounded

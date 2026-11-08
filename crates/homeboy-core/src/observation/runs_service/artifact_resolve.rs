@@ -203,6 +203,11 @@ fn authoritative_equivalent_projection<'a>(
 
 fn artifact_matches_friendly_token(record: &ArtifactRecord, token: &str) -> bool {
     record.kind == token
+        || record
+            .metadata_json
+            .pointer("/agent_task/logical_artifact_id")
+            .and_then(serde_json::Value::as_str)
+            == Some(token)
         || record.metadata_json["name"].as_str() == Some(token)
         || record.metadata_json["original_manifest_id"].as_str() == Some(token)
 }
@@ -528,12 +533,21 @@ fn unknown_artifact_error(store: &ObservationStore, run_id: &str, artifact_id: &
     )
 }
 
-/// Copy a recorded file artifact's bytes to `output`.
-///
-/// Returns a stable `ArtifactFetchOutcome` so callers can present the
-/// summary in their preferred format. Validates that the artifact is a
-/// local file (callers should detect remote/metadata-only artifacts and
-/// dispatch separately).
+/// Choose a named, absolute destination independently of storage filenames.
+fn artifact_output_path(artifact: &ArtifactRecord, output: Option<PathBuf>) -> Result<PathBuf> {
+    let name = artifact.metadata_json["name"]
+        .as_str()
+        .unwrap_or(&artifact.id);
+    // A recorded name is a label, never a directory or traversal instruction.
+    let name = Path::new(name)
+        .file_name()
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| std::ffi::OsStr::new("artifact"));
+    let output = output.unwrap_or_else(|| PathBuf::from(name));
+    std::path::absolute(output).map_err(|error| Error::internal_io(error.to_string(), None))
+}
+
+/// Copy a recorded local file, returning its absolute destination.
 pub fn copy_local_file_artifact(
     artifact: ArtifactRecord,
     output: Option<PathBuf>,
@@ -563,12 +577,13 @@ pub fn copy_local_file_artifact(
             None,
         ));
     }
-    let file_name = source
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or(&artifact.id)
-        .to_string();
-    let output = output.unwrap_or_else(|| PathBuf::from(file_name));
+    let output = artifact_output_path(&artifact, output)?;
+    if source.canonicalize().ok().as_ref() == Some(&output) {
+        return Err(selection_error(
+            &artifact.id,
+            "artifact output would overwrite its source",
+        ));
+    }
     if let Some(parent) = output
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -635,8 +650,9 @@ pub fn download_remote_artifact(
     artifact: ArtifactRecord,
     output: Option<PathBuf>,
 ) -> Result<ArtifactFetchOutcome> {
+    let output = artifact_output_path(&artifact, output)?;
     let download = runner_evidence::with_runner_evidence(|p| {
-        p.download_remote_artifact(&artifact.path, output)
+        p.download_remote_artifact(&artifact.path, Some(output))
     })?;
     Ok(ArtifactFetchOutcome {
         run_id: artifact.run_id,
@@ -717,13 +733,7 @@ pub fn download_public_artifact(
             None,
         ));
     }
-    let filename = parsed
-        .path_segments()
-        .and_then(Iterator::last)
-        .filter(|name| !name.is_empty())
-        .unwrap_or(&artifact.id)
-        .to_string();
-    let output = output.unwrap_or_else(|| PathBuf::from(filename));
+    let output = artifact_output_path(&artifact, output)?;
     if let Some(parent) = output
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
