@@ -12,6 +12,20 @@ Upgrades Homeboy to the latest version. The command auto-detects the installatio
 
 By default, after a successful local upgrade, Homeboy also converges configured SSH runners on the installed controller release. This keeps lab runners from drifting behind the local CLI.
 
+### GitHub authentication
+
+Upgrade resolves credentials once per process: nonempty `GH_TOKEN`, then
+`GITHUB_TOKEN`, then `gh auth token --hostname github.com` (up to five seconds).
+If the CLI is missing, logged out, or fails, requests remain anonymous. Tokens
+are sent only to `https://api.github.com`. Check and upgrade JSON report
+`token_source` as `env`, `gh_cli`, or `none`. Rate-limit errors name the reset
+time in RFC 3339 and recommend `gh auth login` or setting `GH_TOKEN`.
+
+For binaries older than v0.448.2 affected by authenticated release selection,
+use `GH_TOKEN= homeboy upgrade` (also unset `GITHUB_TOKEN` if set), or reinstall
+with the install script. This historical escape hatch does not disable the
+`gh` fallback in current binaries.
+
 ### Runner convergence
 
 Each selected SSH runner goes through the same runner-binary convergence as `homeboy runner connect` (see [runner connection](../architecture/runner-connection.md#binary-convergence)). The target is the controller identity the upgrade just installed, not the build of the process running the upgrade. Convergence compares the runner's configured `homeboy_path` (its `self identity`) with that target and installs the target's exact release tag through `refresh-homeboy`'s verified release path only when the runner is older. It never downgrades, and it never replaces a daemon that has active jobs.
