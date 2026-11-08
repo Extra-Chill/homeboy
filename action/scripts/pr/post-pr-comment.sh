@@ -92,7 +92,7 @@ POST_RESULT="$(
   homeboy git pr comment "${COMP_ID}" \
     --path "${WORKSPACE}" \
     --number "${PR_NUMBER}" \
-    "${HEAD_GUARD_ARGS[@]}" \
+    ${HEAD_GUARD_ARGS[@]+"${HEAD_GUARD_ARGS[@]}"} \
     --comment-key "${COMMENT_KEY}" \
     --section-key "${SECTION_KEY}" \
     --body-file "${SECTION_FILE}" \
