@@ -56,6 +56,9 @@ COMMENT_KEY="$(derive_comment_key)"
 SECTION_KEY="$(derive_section_key)"
 SECTION_TITLE="$(derive_section_title)"
 HEADER="## Homeboy Results — \`${COMP_ID}\`"
+if is_component_matrix; then
+  HEADER="## Homeboy Results"
+fi
 # Preserve the current rendered section order (lint, build, test, bench).
 # Tooling versions are passed as the core-managed footer instead of an action-
 # rendered pseudo-section.
