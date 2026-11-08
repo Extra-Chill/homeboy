@@ -79,6 +79,8 @@ A step with `foreach` expands, once its `needs` and `when` pass, into one step j
 - **The step's output** is `{"total", "succeeded", "join", "items": [{"item", "outcome", "run_id", "output", "error"}]}`.
 - **Cancelling the instance** cancels every running item, the Cook a `cook` item runs included, and starts no further one.
 
+Use `{"min_succeeded": 0}` when item failures are expected outcomes, such as Cooks or `git pr merge-when-green` holds in a `next_pass` loop: the step succeeds once every item settles, preserving each item's `outcome` and `error`.
+
 `agent-task fanout cook-batch` compiles to exactly this shape (Example C).
 
 ### Step kinds

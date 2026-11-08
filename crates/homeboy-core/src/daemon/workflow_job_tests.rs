@@ -1113,7 +1113,12 @@ fn native_next_pass_forwards_inputs_and_stops_a_stable_chain() {
                     "next_pass": {"max_iterations": cap,
                         "inputs": {"changed": "{{steps.sample.output/value}}"},
                         "stop_unchanged": {"step": "sample", "output": "/value", "passes": stable}},
-                    "steps": [{"id": "sample", "exec": sh("printf '{\"value\":42}' > \"$HOMEBOY_STEP_OUTPUT\"")}]
+                    "steps": [
+                        {"id": "work", "foreach": ["a", "b"], "max_parallel": 1,
+                         "join": {"min_succeeded": 0}, "exec": sh("exit 1")},
+                        {"id": "sample", "needs": ["work"],
+                         "exec": sh("printf '{\"value\":42}' > \"$HOMEBOY_STEP_OUTPUT\"")}
+                    ]
                 }),
                 home.path(),
             );
@@ -1132,6 +1137,22 @@ fn native_next_pass_forwards_inputs_and_stops_a_stable_chain() {
                     .checkpoint
                     .unwrap();
                 assert_eq!(checkpoint["iteration"], iteration);
+                let status = workflow_status(&store, &current.instance).unwrap();
+                assert_eq!(status["status"], "succeeded");
+                assert_eq!(status["steps"]["sample"]["outcome"], "succeeded");
+                let work = &status["steps"]["work"];
+                assert_eq!(work["outcome"], "succeeded");
+                assert_eq!(work["output"]["total"], 2);
+                assert_eq!(work["output"]["succeeded"], 0);
+                let items = work["items"].as_array().unwrap();
+                let output_items = work["output"]["items"].as_array().unwrap();
+                assert_eq!(items.len(), 2);
+                assert_eq!(output_items.len(), 2);
+                for (item, output) in items.iter().zip(output_items) {
+                    assert_eq!(item["outcome"], "failed");
+                    assert_eq!(output["outcome"], item["outcome"]);
+                    assert_eq!(output["error"], item["error"]);
+                }
                 assert_eq!(current.inputs["carried"], "keep");
                 let children = child_instances(&store, &current.instance);
                 if iteration == expected {
