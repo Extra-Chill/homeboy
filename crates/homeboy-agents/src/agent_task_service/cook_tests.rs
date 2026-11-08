@@ -20499,6 +20499,182 @@ fn persist_deferred_fixture(run_id: &str) {
 }
 
 #[test]
+fn recover_selects_regate_only_for_unjudged_complete_candidates() {
+    use crate::agent_task_gate::AgentTaskGateStatus as Gate;
+    use crate::agent_task_service::{CookRecoveryRequest, CookRecoveryStep};
+    for (status, missing_form, expected) in [
+        (Gate::Unavailable, false, CookRecoveryStep::Regate),
+        (Gate::Deferred, false, CookRecoveryStep::Regate),
+        (Gate::Skipped, false, CookRecoveryStep::Regate),
+        (Gate::Failed, false, CookRecoveryStep::Continue),
+        (Gate::Unavailable, true, CookRecoveryStep::Continue),
+    ] {
+        with_corrected_gate_failure(false, |options, _| {
+            let run = &options.identity.initial_run_id;
+            let store = test_lifecycle_store();
+            let mut promotion = persisted_promotion_for_attempt(run).unwrap().unwrap();
+            promotion.deterministic_gates[0].status = status;
+            promotion.normalize_gate_outcome();
+            store
+                .record_promotion(run, serde_json::to_value(promotion).unwrap())
+                .unwrap();
+            if missing_form {
+                let mut aggregate = store.read_aggregate(run).unwrap();
+                aggregate.outcomes[0].outputs = Value::Null;
+                store
+                    .record_run_aggregate(run, &options.identity.initial_plan, &aggregate)
+                    .unwrap();
+            }
+            let plan = crate::agent_task_service::plan_cook_recovery(run).unwrap();
+            assert_eq!(plan.step, expected, "{status:?}, missing={missing_form}");
+            let context = crate::agent_task_service::cook_failure_context(
+                &options.identity.cook_id,
+                Some(run),
+                &plan.status,
+            )
+            .unwrap();
+            assert_eq!(context.recovery_step, Some(expected.clone()));
+            if expected == CookRecoveryStep::Regate {
+                assert!(context
+                    .next_actions
+                    .iter()
+                    .any(|action| action.action == "regate"));
+            }
+            if expected == CookRecoveryStep::Regate {
+                let (report, exit) = crate::agent_task_service::recover_cook(
+                    run,
+                    CookRecoveryRequest {
+                        preflight: true,
+                        ..Default::default()
+                    },
+                    &ReplacementOnlyRecoveryPerformer,
+                )
+                .unwrap();
+                assert_eq!(exit, 0);
+                assert_eq!(report.step, CookRecoveryStep::Regate);
+            }
+        });
+    }
+}
+
+#[test]
+fn recover_regate_explicitly_selects_an_earlier_candidate_after_attempt_cancellation() {
+    with_corrected_gate_failure(false, |options, _| {
+        let cook = &options.identity.cook_id;
+        let run = &options.identity.initial_run_id;
+        let store = test_lifecycle_store();
+        let recipes = CookRecipeStore::from_current_data_root().unwrap();
+        let mut recipe = recipes.load_recipe(cook).unwrap();
+        let mut later = recipe.attempts[0].clone();
+        later.attempt = 2;
+        later.run_id = "cancelled-later-attempt".into();
+        let mut record = store.read_record(run).unwrap();
+        record.run_id = later.run_id.clone();
+        record.set_state_for_test(agent_task_lifecycle::AgentTaskRunState::Running);
+        store.write_record(&record).unwrap();
+        agent_task_lifecycle::cancel_exact_run_in_store_with_provenance(
+            &store,
+            &later.run_id,
+            Some("cancelled"),
+            Some(serde_json::json!({"actor": "runner", "cause": "runner_job_cancelled"})),
+        )
+        .unwrap();
+        recipe.attempts.push(later.clone());
+        recipes.persist_recipe(&recipe).unwrap();
+        let index = store
+            .write_cook_index_attempt(cook, 2, &later.run_id, "2026-01-01T00:00:00Z".into(), None)
+            .unwrap();
+        // The later cancelled record has no candidate of its own.
+        agent_task_lifecycle::rewrite_record_for_test(&index.latest_run_id, |record| {
+            record
+                .metadata
+                .as_object_mut()
+                .unwrap()
+                .remove("cook_delivery");
+        })
+        .unwrap();
+        let (report, exit) = crate::agent_task_service::recover_cook(
+            cook,
+            crate::agent_task_service::CookRecoveryRequest {
+                regate: true,
+                preflight: true,
+                ..Default::default()
+            },
+            &ReplacementOnlyRecoveryPerformer,
+        )
+        .unwrap();
+        assert_eq!(exit, 0, "{report:#?}");
+        assert_eq!(report.run_id, *run);
+        assert_eq!(
+            report.step,
+            crate::agent_task_service::CookRecoveryStep::Regate
+        );
+    });
+}
+
+#[test]
+fn recover_regate_executes_recorded_gates_and_hands_green_candidate_to_publication() {
+    struct RegatePerformer;
+    impl crate::agent_task_service::CookRecoveryPerformer for RegatePerformer {
+        fn continue_cook(
+            &self,
+            _: &str,
+            _: bool,
+            _: &crate::agent_task_service::CookRecoveryOverrides,
+        ) -> Result<(Value, i32)> {
+            panic!("no provider")
+        }
+        fn preflight_continue_cook(&self, _: &str, _: bool) -> Result<(Value, i32)> {
+            panic!("no continuation")
+        }
+        fn retry(&self, _: &str) -> Result<(Value, i32)> {
+            panic!("no retry")
+        }
+        fn reconcile(&self, _: &str) -> Result<(Value, i32)> {
+            panic!("no reconcile")
+        }
+        fn adopt(&self, _: &str, _: &str) -> Result<(Value, i32)> {
+            panic!("no adopt")
+        }
+        fn publish(
+            &self,
+            run: &str,
+            _: &crate::agent_task_service::CookPublishRequest,
+            _: bool,
+        ) -> Result<(Value, i32)> {
+            assert!(persisted_promotion_for_attempt(run)?
+                .unwrap()
+                .finalization_eligible());
+            Ok((serde_json::json!({"status": "review_ready"}), 0))
+        }
+    }
+    with_corrected_gate_failure(false, |options, target| {
+        persist_deferred_fixture(&options.identity.initial_run_id);
+        let store = CookRecipeStore::from_current_data_root().unwrap();
+        let mut recipe = store.load_recipe(&options.identity.cook_id).unwrap();
+        let marker = target.join("target/regate-ran");
+        let gates = VerifyGateOptions {
+            verify: vec!["test \"$(cat tracked.txt)\" = promoted && mkdir -p target && touch target/regate-ran".into()],
+            ..Default::default()
+        };
+        recipe.gate_policy = serde_json::to_value(gates).unwrap();
+        store.persist_recipe(&recipe).unwrap();
+        let (report, exit) = crate::agent_task_service::recover_cook(
+            &options.identity.cook_id,
+            Default::default(),
+            &RegatePerformer,
+        )
+        .unwrap();
+        assert_eq!(exit, 0, "{report:#?}");
+        assert_eq!(
+            report.step,
+            crate::agent_task_service::CookRecoveryStep::Regate
+        );
+        assert!(marker.exists());
+    });
+}
+
+#[test]
 fn deferred_candidate_recovers_with_verify_file_and_publishes() {
     with_corrected_gate_failure(false, |options, target| {
         let run_id = &options.identity.initial_run_id;
