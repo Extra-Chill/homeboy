@@ -160,7 +160,13 @@ pub fn promote_with_checkpoint(
     // resolves once here and is passed down. The interior used to receive
     // `None` and re-resolve the environment partway through (#7505).
     let observation_store = homeboy_core::observation::ObservationStore::open_initialized()?;
-    promote_with_checkpoint_in_observation_store(options, &observation_store, &mut checkpoint)
+    let mut report = promote_with_checkpoint_in_observation_store(
+        options.clone(),
+        &observation_store,
+        &mut checkpoint,
+    )?;
+    compare_operator_gate_failures(&options, &mut report, None, &observation_store)?;
+    Ok(report)
 }
 
 pub(crate) fn promote_with_checkpoint_in_observation_store(
@@ -208,7 +214,14 @@ pub fn resume_promoted_patch(
     // resolves once here and is passed down. The interior used to receive
     // `None` and re-resolve the environment partway through (#7505).
     let observation_store = homeboy_core::observation::ObservationStore::open_initialized()?;
-    resume_promoted_patch_in_observation_store(options, target_path, previous, &observation_store)
+    let mut report = resume_promoted_patch_in_observation_store(
+        options.clone(),
+        target_path,
+        previous,
+        &observation_store,
+    )?;
+    compare_operator_gate_failures(&options, &mut report, None, &observation_store)?;
+    Ok(report)
 }
 
 pub(crate) fn resume_promoted_patch_in_observation_store(
@@ -336,7 +349,7 @@ fn resume_promoted_patch_internal<'a>(
         schema: AGENT_TASK_PROMOTION_REPORT_SCHEMA.to_string(),
         status: gates.status,
         source: promotion_source(&source_kind, &outcome, &options),
-        to_worktree: options.to_worktree,
+        to_worktree: options.to_worktree.clone(),
         target: target.clone(),
         candidate: Some(commit.clone()),
         changed_files,
@@ -360,6 +373,39 @@ fn resume_promoted_patch_internal<'a>(
         operator_notification,
     };
     Ok(report)
+}
+
+/// Operator scripts use the same immutable-base replay and recorded baseline
+/// facts as Cook's differential gates, including on direct promotion and resume.
+fn compare_operator_gate_failures(
+    options: &AgentTaskPromotionRequest,
+    report: &mut AgentTaskPromotionReport,
+    gate_workspace: Option<&Path>,
+    store: &homeboy_core::observation::ObservationStore,
+) -> Result<()> {
+    if !report.status.gate_failed() {
+        return Ok(());
+    }
+    let (Some(base), Some(root)) = (&report.verified_base, &report.target.path) else {
+        return Ok(());
+    };
+    let root = PathBuf::from(root);
+    let base_sha = base.sha.clone();
+    let workspace = promotion_gate_workspace(options, &root, gate_workspace);
+    crate::agent_task_service::compare_gate_failures_to_verified_base(
+        store,
+        report,
+        &root,
+        &workspace,
+        &base_sha,
+        options.gates.gate_timeout(),
+        options
+            .gates
+            .gate_environment
+            .admitted_component_id
+            .as_deref(),
+        |_, _| Ok(()),
+    )
 }
 
 struct ResumePromotedPatchAdmission {
