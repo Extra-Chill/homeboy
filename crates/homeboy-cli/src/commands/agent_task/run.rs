@@ -6732,16 +6732,14 @@ fn durable_component_cwd(
 pub(crate) fn cook_repository_names_for_selection(
     repo: &str,
 ) -> homeboy::core::Result<(String, String)> {
-    let component = cook_components_for_repository_name(repo)?
+    let Some(component) = cook_components_for_repository_name(repo)?
         .into_iter()
-        .next();
-    let component_id = component
-        .as_ref()
-        .map(|component| component.id.clone())
-        .unwrap_or_else(|| normalize_repository_name(repo));
-    let repository_name = component
-        .as_ref()
-        .and_then(cook_component_repository_remote)
+        .next()
+    else {
+        return Err(cook_repository_not_registered_error(repo)?);
+    };
+    let component_id = component.id.clone();
+    let repository_name = cook_component_repository_remote(&component)
         .as_deref()
         .map(normalize_repository_name)
         .unwrap_or_else(|| normalize_repository_name(repo));
@@ -6829,6 +6827,18 @@ fn cook_component_id(args: &AgentTaskCookArgs) -> Option<&str> {
 fn cook_components_for_repository_name(
     repository_name: &str,
 ) -> homeboy::core::Result<Vec<homeboy::core::component::Component>> {
+    let path_id;
+    let repository_name = if Path::new(repository_name).is_absolute() {
+        match homeboy::core::component::resolve_registered_primary_identity(repository_name)? {
+            homeboy::core::component::RegisteredPrimaryPathResolution::Primary(id) => {
+                path_id = id;
+                path_id.as_str()
+            }
+            _ => return Ok(Vec::new()),
+        }
+    } else {
+        repository_name
+    };
     let repository_name = normalize_repository_name(repository_name);
     // An exact component ID is the common Cook path. Do not hydrate every
     // registered primary checkout before selecting it: portable enrichment of
@@ -6895,6 +6905,34 @@ fn cook_components_for_repository_name(
         ));
     }
     Ok(matches)
+}
+
+fn cook_repository_not_registered_error(
+    repository: &str,
+) -> homeboy::core::Result<homeboy::core::Error> {
+    let components = homeboy::core::component::inventory::registered_primary()?;
+    let listing = if components.is_empty() {
+        "  (none)".to_string()
+    } else {
+        components
+            .iter()
+            .map(|component| {
+                format!(
+                    "  {} — remote: {}; primary path: {}",
+                    component.id,
+                    component.remote_url.as_deref().unwrap_or("(none)"),
+                    component.local_path,
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    Ok(homeboy::core::Error::validation_invalid_argument(
+        "repo",
+        format!("--repo `{repository}` does not match a registered component. Registered components:\n{listing}"),
+        Some(repository.to_string()),
+        None,
+    ))
 }
 
 fn cook_components_matching_repository_name(
