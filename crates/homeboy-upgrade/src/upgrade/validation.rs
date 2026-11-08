@@ -32,6 +32,7 @@ pub fn check_for_updates() -> Result<VersionCheck> {
 
     Ok(VersionCheck {
         command: "upgrade.check".to_string(),
+        token_source: crate::upgrade::github_api::token_source(),
         current_version: current,
         latest_version: Some(latest.clone()),
         update_available,
@@ -126,6 +127,7 @@ pub(crate) fn version_check_from_selection(
 
     VersionCheck {
         command: "upgrade.check".to_string(),
+        token_source: crate::upgrade::github_api::token_source(),
         current_version: current.to_string(),
         latest_version: installable,
         update_available,
@@ -272,6 +274,7 @@ mod tests {
     fn check(current: &str, latest: Option<&str>, update_available: bool) -> VersionCheck {
         VersionCheck {
             command: "upgrade.check".to_string(),
+            token_source: crate::upgrade::github_api::token_source(),
             current_version: current.to_string(),
             latest_version: latest.map(str::to_string),
             update_available,
