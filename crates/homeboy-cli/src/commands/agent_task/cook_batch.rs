@@ -49,8 +49,33 @@ pub(crate) fn fanout_with_placement(
     }
 }
 
-fn cook_batch(args: AgentTaskFanoutCookBatchArgs, placement: Placement) -> CmdResult<Value> {
+fn cook_batch(mut args: AgentTaskFanoutCookBatchArgs, placement: Placement) -> CmdResult<Value> {
     let children = parse_issues(&args.issues)?;
+    let selection = match args.repo.as_deref() {
+        Some(repo) => repo.to_string(),
+        None => {
+            let repositories = children
+                .iter()
+                .map(|issue| {
+                    issue
+                        .key
+                        .split('#')
+                        .next()
+                        .expect("issue key")
+                        .to_ascii_lowercase()
+                })
+                .collect::<BTreeSet<_>>();
+            if repositories.len() != 1 {
+                return Err(Error::validation_invalid_argument(
+                    "repo",
+                    "cannot infer --repo: every issue URL must belong to one GitHub repository; pass --repo explicitly",
+                    None,
+                    None,
+                ));
+            }
+            repositories.into_iter().next().expect("one repository")
+        }
+    };
     if !args.cook.gates.has_deterministic_gate() {
         return Err(Error::validation_invalid_argument(
             "verify",
@@ -78,18 +103,18 @@ fn cook_batch(args: AgentTaskFanoutCookBatchArgs, placement: Placement) -> CmdRe
             ));
         }
     }
+    let (_, component) = super::run::cook_repository_names_for_selection(&selection)?;
+    args.repo = Some(component.clone());
     let bundle_runner = match placement {
         Placement::Lab | Placement::LabOrLocal => lab_runner()?,
         Placement::Auto | Placement::Local => None,
     };
-    let repo = registered_repo(&args.repo)?;
-    let (_, component) = super::run::cook_repository_names_for_selection(&repo)?;
     let workspace =
         super::run::cook_component_path_for_repository_name(&component)?.ok_or_else(|| {
             Error::validation_invalid_argument(
                 "repo",
                 "Cook gate preflight requires a repository checkout",
-                Some(repo),
+                Some(selection),
                 None,
             )
         })?;
@@ -148,7 +173,11 @@ pub(super) fn compile(
         "agent-task".to_string(),
         "batch-prepare".to_string(),
         "--repo".to_string(),
-        args.repo.clone(),
+        args.repo.clone().ok_or_else(|| {
+            Error::validation_missing_argument(vec![
+                "--repo must be resolved before compiling a cook-batch".to_string(),
+            ])
+        })?,
         "--branch-prefix".to_string(),
         args.branch_prefix.clone(),
     ];
@@ -251,10 +280,13 @@ impl IssueRef {
                 "GitHub issue URL is missing a numeric issue number",
             ));
         }
-        let mut segments = prefix.trim_end_matches('/').rsplit('/');
-        let repo = segments.next().unwrap_or_default();
+        let repository = prefix
+            .strip_prefix("https://github.com/")
+            .ok_or_else(|| invalid("cook-batch issue inputs must be GitHub issue URLs"))?;
+        let mut segments = repository.split('/');
         let owner = segments.next().unwrap_or_default();
-        if owner.is_empty() || repo.is_empty() {
+        let repo = segments.next().unwrap_or_default();
+        if owner.is_empty() || repo.is_empty() || segments.next().is_some() {
             return Err(invalid("GitHub issue URL is missing its owner/repo"));
         }
         Ok(Self {
@@ -288,8 +320,7 @@ fn parse_issues(issues: &[String]) -> Result<Vec<IssueRef>> {
 /// `agent-task batch-prepare`: plan every child of a batch once.
 pub(super) fn batch_prepare(args: AgentTaskBatchPrepareArgs) -> CmdResult<Value> {
     let issues = parse_issues(&args.issues)?;
-    let repo = registered_repo(&args.repo)?;
-    let (repository, component) = super::run::cook_repository_names_for_selection(&repo)?;
+    let (repository, component) = super::run::cook_repository_names_for_selection(&args.repo)?;
     let path =
         super::run::cook_component_path_for_repository_name(&component)?.ok_or_else(|| {
             Error::validation_invalid_argument(
@@ -365,24 +396,6 @@ pub(super) fn batch_prepare(args: AgentTaskBatchPrepareArgs) -> CmdResult<Value>
         }),
         0,
     ))
-}
-
-/// A registered repository slug, from an exact registered primary checkout
-/// path. Any other value (`slug`, `owner/repo`, a remote URL) is a repository
-/// name, resolved exactly as a single Cook resolves `--repo` (#16273).
-fn registered_repo(repo: &str) -> Result<String> {
-    if !Path::new(repo).is_absolute() {
-        return Ok(repo.to_string());
-    }
-    match homeboy::core::component::resolve_registered_primary_identity(repo)? {
-        homeboy::core::component::RegisteredPrimaryPathResolution::Primary(id) => Ok(id),
-        _ => Err(Error::validation_invalid_argument(
-            "repo",
-            "--repo must be a registered repo slug or an exact registered primary path",
-            Some(repo.to_string()),
-            None,
-        )),
-    }
 }
 
 /// Transfer the batch's base commit to the Lab runner once. Every child at
@@ -561,6 +574,67 @@ mod tests {
             assert_eq!(value["component"], "extrachill-events");
             assert_eq!(value["base"], "main");
             assert_eq!(value["children"].as_array().map(Vec::len), Some(1));
+
+            let (preview, _) = cook_batch(
+                parse(&[
+                    "https://github.com/Extra-Chill/extrachill-events/issues/12",
+                    "--verify",
+                    "true",
+                    "--preview",
+                ]),
+                Placement::Local,
+            )
+            .expect("infer registered component from issue URL");
+            assert_eq!(
+                preview["workflow"]["steps"][1]["cook"]["repo"],
+                "extrachill-events"
+            );
+
+            let error = cook_batch(
+                parse(&[
+                    "https://github.com/Extra-Chill/extrachill-events/issues/12",
+                    "--repo",
+                    "nope/nope",
+                    "--verify",
+                    "true",
+                ]),
+                Placement::Local,
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(error.contains("Registered components"), "{error}");
+            assert!(error.contains("extrachill-events"), "{error}");
+            assert!(
+                error.contains("https://github.com/Extra-Chill/extrachill-events.git"),
+                "{error}"
+            );
+            assert!(error.contains(checkout.to_str().unwrap()), "{error}");
+        });
+    }
+
+    #[test]
+    fn cook_batch_inference_rejects_mixed_or_unregistered_repositories() {
+        crate::test_support::with_isolated_home(|_| {
+            let mixed = cook_batch(
+                parse(&[
+                    ISSUES[0],
+                    "https://github.com/other/repo/issues/1",
+                    "--verify",
+                    "true",
+                ]),
+                Placement::Local,
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(
+                mixed.contains("every issue URL must belong to one GitHub repository"),
+                "{mixed}"
+            );
+            let missing = cook_batch(parse(&[ISSUES[0], "--verify", "true"]), Placement::Local)
+                .unwrap_err()
+                .to_string();
+            assert!(missing.contains("Registered components"), "{missing}");
+            assert!(IssueRef::parse("https://example.com/owner/repo/issues/1").is_err());
         });
     }
 
