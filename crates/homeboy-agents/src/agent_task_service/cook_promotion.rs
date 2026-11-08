@@ -2944,13 +2944,14 @@ pub(crate) fn finalize_or_load_cook_pr_with_backend_with_stores<
         .get("review_form_unavailable")
         .is_some()
     {
-        let value = super::cook::publish_incomplete_draft_with_backend(
+        let value = super::cook::publish_incomplete_draft(
             options,
             &promotion,
             None,
             0,
             successful_run_id,
             &[],
+            true,
             backend,
         )?;
         lifecycle_store.record_cook_finalization(successful_run_id, value.clone())?;

@@ -7531,6 +7531,11 @@ fn run_cook_spine(
             adopted_attempt_is_ready_for_cook_continuation(lifecycle_store, &record)?
         };
         let review_form_unavailable = plan_is_review_form_only(&plan)
+            && retryable_review_form_terminal_failure_in_store(
+                lifecycle_store,
+                &record,
+                &aggregate,
+            )
             && matches!(
                 record.state(),
                 agent_task_lifecycle::AgentTaskRunState::Failed
@@ -8252,7 +8257,10 @@ fn publish_latest_incomplete_draft(
                     attempt.attempt,
                     &attempt.run_id,
                     &later,
-                );
+                    record.metadata.get("review_form_unavailable").is_some(),
+                    &mut crate::agent_task_finalization::RealAgentTaskPrFinalizationBackend,
+                )
+                .map(|_| ());
             }
         }
         later.push(format!(
@@ -8265,27 +8273,7 @@ fn publish_latest_incomplete_draft(
     Ok(())
 }
 
-fn publish_incomplete_draft(
-    options: &CookRequest,
-    promotion: &AgentTaskPromotionReport,
-    form: Option<&crate::agent_task_review_dossier::AiFilledReviewForm>,
-    attempt: u32,
-    run_id: &str,
-    later: &[String],
-) -> Result<()> {
-    publish_incomplete_draft_with_backend(
-        options,
-        promotion,
-        form,
-        attempt,
-        run_id,
-        later,
-        &mut crate::agent_task_finalization::RealAgentTaskPrFinalizationBackend,
-    )?;
-    Ok(())
-}
-
-pub(super) fn publish_incomplete_draft_with_backend<
+pub(super) fn publish_incomplete_draft<
     B: crate::agent_task_finalization::AgentTaskPrFinalizationBackend,
 >(
     options: &CookRequest,
@@ -8294,6 +8282,7 @@ pub(super) fn publish_incomplete_draft_with_backend<
     attempt: u32,
     run_id: &str,
     later: &[String],
+    review_form_unavailable: bool,
     backend: &mut B,
 ) -> Result<Value> {
     use homeboy_core::git;
@@ -8314,30 +8303,11 @@ pub(super) fn publish_incomplete_draft_with_backend<
         .to_string(),
     };
     let title = if options.finalization.title.is_empty() {
-        let source = options.workspace.source_refs.first().ok_or_else(|| {
-            Error::git_command_failed("draft publication requires a task title or issue/PR source")
-        })?;
-        let kind = if source.contains("/pull/") {
-            "pr"
-        } else {
-            "issue"
-        };
-        let output = std::process::Command::new("gh")
-            .args([kind, "view", source, "--json", "title", "--jq", ".title"])
-            .current_dir(root)
-            .output()
-            .map_err(|error| Error::git_command_failed(format!("read task title: {error}")))?;
-        if !output.status.success() {
-            return Err(Error::git_command_failed(
-                "could not read issue/PR task title",
-            ));
-        }
-        String::from_utf8_lossy(&output.stdout).trim().to_string()
+        format!("Incomplete: {}", options.identity.cook_id)
     } else {
         options.finalization.title.clone()
     };
-    let review_unavailable = promotion.applied_with_passing_verdict();
-    let note = if review_unavailable {
+    let note = if review_form_unavailable {
         "Review form unavailable: completion not assessed; deterministic gates passed"
     } else {
         "Incomplete candidate; deterministic verification failed."
@@ -8380,7 +8350,20 @@ pub(super) fn publish_incomplete_draft_with_backend<
                 let capability = backend.quarantine_capability(false, false)?;
                 backend.quarantine_pr(path, &pr, capability)?;
             }
-            backend.update_pr(None, path, pr.number, &title, &body)?
+            if review_form_unavailable {
+                backend.update_pr(None, path, pr.number, &title, &body)?
+            } else {
+                git::pr_comment(
+                    None,
+                    git::PrCommentOptions {
+                        number: pr.number,
+                        body,
+                        path: Some(path.to_string()),
+                        ..Default::default()
+                    },
+                )?;
+                pr
+            }
         }
         None => backend.create_pr(
             None,
