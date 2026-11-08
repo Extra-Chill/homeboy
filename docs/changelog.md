@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.449.6] - 2026-11-08
+
+### Changed
+- verify workflow Cooks survive daemon stop and restart
+
 ## [0.449.5] - 2026-11-08
 
 ### Fixed
