@@ -8338,7 +8338,7 @@ pub(super) fn publish_incomplete_draft<
         .to_string(),
     };
     let title = if options.finalization.title.is_empty() {
-        format!("Incomplete: {}", options.identity.cook_id)
+        format!("fix(cook): incomplete {}", options.identity.cook_id)
     } else {
         options.finalization.title.clone()
     };
