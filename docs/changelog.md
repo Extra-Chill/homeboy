@@ -4,6 +4,17 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.449.1] - 2026-11-08
+
+### Changed
+- git pr merge-when-green: merge an exact reviewed head once checks are green
+- re-measure supersession when the dry run fails
+- Add native bounded workflow next passes
+
+### Fixed
+- keep a stale busy daemon serving, report it, and make drain opt-in
+- publish gated Cook candidates when review forms are unavailable
+
 ## [0.449.0] - 2026-11-08
 
 ### Added
