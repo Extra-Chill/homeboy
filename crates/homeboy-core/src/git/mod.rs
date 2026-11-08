@@ -1,4 +1,6 @@
 mod changes;
+mod shallow;
+pub use shallow::{deepen_shallow_source, is_shallow_repository, shallow_source_remote};
 mod commits;
 mod gh_client;
 mod github;

@@ -2074,8 +2074,8 @@ mod preview_tests {
             let count = calls.lines().count();
             eprintln!("Cook preview git spawns: {count}\n{calls}");
             assert!(
-                count <= 9,
-                "expected at most nine git spawns, got {count}:\n{calls}"
+                count <= 10,
+                "expected at most ten git spawns including source history preflight, got {count}:\n{calls}"
             );
             assert_eq!(
                 calls
@@ -3775,6 +3775,100 @@ process.stdout.write(JSON.stringify({type:'message_end',message:{role:'assistant
     }
 
     #[test]
+    fn shallow_source_preview_plans_fetch_without_mutation() {
+        crate::test_support::with_isolated_home(|_| {
+            let root = tempfile::tempdir().unwrap();
+            let _capacity = declare_preview_fixture_capacity(root.path());
+            let seed = root.path().join("seed");
+            std::fs::create_dir(&seed).unwrap();
+            let git = |path: &Path, args: &[&str]| {
+                let output = Command::new("git")
+                    .arg("-C")
+                    .arg(path)
+                    .args(args)
+                    .output()
+                    .unwrap();
+                assert!(
+                    output.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                String::from_utf8(output.stdout).unwrap().trim().to_string()
+            };
+            git(&seed, &["init", "-b", "main"]);
+            git(&seed, &["config", "user.email", "fixture@example.test"]);
+            git(&seed, &["config", "user.name", "Fixture"]);
+            for content in ["base", "tip"] {
+                std::fs::write(seed.join("file"), content).unwrap();
+                git(&seed, &["add", "."]);
+                git(&seed, &["commit", "-m", content]);
+            }
+            let remote = root.path().join("remote.git");
+            git(
+                root.path(),
+                &[
+                    "clone",
+                    "--bare",
+                    seed.to_str().unwrap(),
+                    remote.to_str().unwrap(),
+                ],
+            );
+            let source = root.path().join("source");
+            git(
+                root.path(),
+                &[
+                    "clone",
+                    "--depth",
+                    "1",
+                    "--branch",
+                    "main",
+                    &format!("file://{}", remote.display()),
+                    source.to_str().unwrap(),
+                ],
+            );
+            let mut args = cook(&[
+                "homeboy",
+                "agent-task",
+                "cook",
+                "--preview",
+                "--backend",
+                "fixture",
+                "--prompt",
+                "implement",
+                "--repo",
+                source.to_str().unwrap(),
+                "--base",
+                "main",
+                "--head",
+                "fix/shallow",
+                "--to-worktree",
+                "source@fix-shallow",
+                "--no-finalize",
+            ]);
+            let (preview, _) = preview_cook(args.clone(), None).expect("read-only Cook preview");
+            assert_eq!(
+                preview["resolved"]["workspace"]["action"],
+                "planned_unshallow"
+            );
+            let repository = prepare_cook_request(&mut args, None).unwrap();
+            let args = resolve_cook_destination(args, repository.as_ref()).unwrap();
+            assert_eq!(
+                git(&source, &["rev-parse", "--is-shallow-repository"]),
+                "true"
+            );
+            git(&source, &["remote", "remove", "origin"]);
+            let error = provision_cook_destination(&args, repository.as_ref(), true).unwrap_err();
+            assert!(error
+                .message
+                .contains("source checkout is shallow and has no fetchable remote"));
+            assert_eq!(
+                git(&source, &["rev-parse", "--is-shallow-repository"]),
+                "true"
+            );
+        });
+    }
+
+    #[test]
     fn unmaterialized_preview_admits_replay_and_cook_materializes_origin_base() {
         crate::test_support::with_isolated_home(|_| {
             let root = tempfile::tempdir().expect("repository root");
@@ -5420,11 +5514,53 @@ fn cook_report_with_continuation(mut value: Value) -> Value {
 
 /// Converge a Cook promotion destination before compiling a task plan. This is
 /// controller-owned so local and Lab dispatch use the same managed checkout.
+/// Check source history before any durable admission or capacity wait. Preview
+/// only plans the fetch; admission performs it once against the source remote.
+pub(crate) fn preflight_cook_source_history(
+    args: &AgentTaskCookArgs,
+    repository: Option<&ResolvedCookRepository>,
+    preview: bool,
+) -> homeboy::core::Result<bool> {
+    if homeboy::core::parsed_command_preflight::captured_result().is_some_and(|result| {
+        result.placement.selected == homeboy_lab_contract::EffectiveExecutionPlacement::Local
+    }) {
+        return Ok(false);
+    }
+    let source = if let Some(repository) = repository {
+        PathBuf::from(&repository.source_checkout)
+    } else if let Some(path) = args.dispatch.cwd.as_deref().or_else(|| {
+        args.to_worktree
+            .as_deref()
+            .filter(|path| Path::new(path).is_dir())
+    }) {
+        PathBuf::from(path)
+    } else {
+        let Some(repo) = cook_provision_repository(args) else {
+            return Ok(false);
+        };
+        let target =
+            homeboy::core::component::resolve_target(homeboy::core::component::TargetSpec {
+                component_id: Some(&repo),
+                allow_synthetic: true,
+                accept_bare_directory: true,
+                ..Default::default()
+            })?;
+        PathBuf::from(target.git_root.as_deref().unwrap_or(&target.source_path))
+    };
+    if preview {
+        Ok(homeboy::core::git::shallow_source_remote(&source)?.is_some())
+    } else {
+        homeboy::core::git::deepen_shallow_source(&source)?;
+        Ok(false)
+    }
+}
+
 pub(crate) fn provision_cook_destination(
     args: &AgentTaskCookArgs,
     repository: Option<&ResolvedCookRepository>,
     preview: bool,
 ) -> homeboy::core::Result<Value> {
+    let planned_unshallow = preflight_cook_source_history(args, repository, preview)?;
     let handle = args.to_worktree.as_deref().ok_or_else(|| {
         homeboy::core::Error::validation_missing_argument(vec![
             "--to-worktree is required before provisioning a Cook destination".to_string(),
@@ -5461,7 +5597,7 @@ pub(crate) fn provision_cook_destination(
             validate_cook_base_before_provisioning(args, repository)?;
         }
         return Ok(serde_json::json!({
-            "action": if preview { "planned_reuse" } else { "existing" },
+            "action": if preview && planned_unshallow { "planned_unshallow" } else if preview { "planned_reuse" } else { "existing" },
             "kind": if preview { Some("preview_local") } else { kind.as_deref() },
             "handle": handle,
             "path": path,
@@ -5476,7 +5612,7 @@ pub(crate) fn provision_cook_destination(
         let (homeboy::core::worktree_provider::WorktreeProvisionPlan::Admitted(destination)
         | homeboy::core::worktree_provider::WorktreeProvisionPlan::Planned(destination)) = plan;
         return Ok(serde_json::json!({
-            "action": "planned_create", "kind": "native",
+            "action": if planned_unshallow { "planned_unshallow" } else { "planned_create" }, "kind": "native",
             "handle": destination.ownership.handle, "path": destination.ownership.path,
             "branch": destination.ownership.branch,
             "intent": { "handle": intent.handle, "repo": intent.repo, "base": intent.base,
@@ -8539,7 +8675,7 @@ pub(crate) fn compile_cook_plan(
 ) -> homeboy::core::Result<AgentTaskPlan> {
     let pending_lookup = matches!(
         provision.get("action").and_then(Value::as_str),
-        Some("lookup_pending" | "attestation_pending" | "planned_create")
+        Some("lookup_pending" | "attestation_pending" | "planned_create" | "planned_unshallow")
     );
     let requested_workspace = (!pending_lookup)
         .then(|| {

@@ -1003,6 +1003,11 @@ fn admit_unmaterialized_cook(
     // time — not admitted only to fail the same deterministic check on every
     // bounded replay attempt for the next hour.
     crate::commands::agent_task::run::require_model_override_acknowledgement_for_cook(&resolved)?;
+    crate::commands::agent_task::run::preflight_cook_source_history(
+        &resolved,
+        repository.as_ref(),
+        false,
+    )?;
     let mut replay_args = normalized_args.to_vec();
     crate::commands::agent_task::run::rewrite_cook_identity_replay_argv(
         &mut replay_args,
