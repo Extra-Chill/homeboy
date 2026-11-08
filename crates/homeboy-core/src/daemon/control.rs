@@ -682,7 +682,7 @@ where
 }
 
 struct StartupAttempt {
-    child: std::process::Child,
+    child: crate::child_reaper::ReapingChild,
     token: String,
     state_path: PathBuf,
     armed: bool,
@@ -691,7 +691,7 @@ struct StartupAttempt {
 impl StartupAttempt {
     fn new(child: std::process::Child, token: &str, state_path: &Path) -> Self {
         Self {
-            child,
+            child: child.into(),
             token: token.to_string(),
             state_path: state_path.to_path_buf(),
             armed: true,

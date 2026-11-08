@@ -180,6 +180,11 @@ pub(crate) fn capacity_with_catalog(
             "generated_at": chrono::Utc::now().to_rfc3339(),
             "routes": route_values,
             "lab_routes": lab_routes,
+            "lab_capacity": homeboy::runner::list().unwrap_or_default().iter().map(|runner| {
+                homeboy::runner::lab_capacity::report(&runner.id).unwrap_or_else(|error| json!({
+                    "runner_id": runner.id, "unavailable": error.to_string(),
+                }))
+            }).collect::<Vec<_>>(),
             "next_reset": next_reset,
         }),
         0,

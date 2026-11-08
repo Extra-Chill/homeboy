@@ -692,6 +692,34 @@ fn run_step(mut checkpoint: StepJobCheckpoint, job: &ControllerJobHandle) -> Res
         return Ok(checkpoint.result());
     }
 
+    // Launcher/continuation steps can submit execution steps themselves. They
+    // must not hold heavy-work slots while waiting on their own children.
+    let _capacity_permit = if checkpoint.request.terminal_consumer == "agent-task.execution-step" {
+        let limit = checkpoint
+            .request
+            .env
+            .public_env
+            .get("HOMEBOY_LAB_CONCURRENCY_LIMIT")
+            .and_then(|limit| limit.parse().ok());
+        let Some(permit) = crate::lab_capacity::acquire_step(limit, |position, capacity| {
+            if job.is_cancelled() {
+                return Ok(false);
+            }
+            job.progress(json!({
+                "waiting_for": "lab_capacity", "queue_position": position,
+                "load_average_1m": capacity.load_average_1m,
+                "effective_budget": capacity.effective_budget,
+                "eta_seconds": null,
+            }))?;
+            Ok(true)
+        })?
+        else {
+            return Ok(checkpoint.result());
+        };
+        Some(permit)
+    } else {
+        None
+    };
     let request = checkpoint.request.clone();
     let secrets = resolve_secrets(&request.env.secret_refs)?;
     let dir = step_job_dir(&job_id)?;
@@ -733,7 +761,7 @@ fn run_step(mut checkpoint: StepJobCheckpoint, job: &ControllerJobHandle) -> Res
     // The child leads its own session: a daemon restart must not take the
     // step down, and cancellation addresses the child's whole tree.
     crate::process::detach_from_caller_session(&mut command);
-    let mut process = command.spawn().map_err(|error| {
+    let process = command.spawn().map_err(|error| {
         let mut error = Error::internal_io(
             error.to_string(),
             Some(format!("spawn step program {}", request.program)),
@@ -742,6 +770,7 @@ fn run_step(mut checkpoint: StepJobCheckpoint, job: &ControllerJobHandle) -> Res
         write_launch_error(&log_path, &error);
         error
     })?;
+    let mut process = crate::child_reaper::ReapingChild::from(process);
     // Capture the start identity while the child is still unreaped.
     let start_identity = match crate::process::process_start_identity(process.id()) {
         Ok(Some(identity)) => identity,

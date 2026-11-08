@@ -2763,6 +2763,15 @@ where
             }),
             artifact: None,
         },
+        ("GET", "/capacity") => daemon_endpoint_response(
+            "daemon.capacity",
+            json!({
+                "capacity": crate::lab_capacity::observe(None),
+                "queued_steps": crate::lab_capacity::queued_steps(),
+                "queued_work": job_store.active_runner_jobs().into_iter()
+                    .filter(|job| job.status == JobStatus::Queued).collect::<Vec<_>>(),
+            }),
+        ),
         ("GET", "/capabilities") => daemon_endpoint_response(
             "daemon.capabilities",
             json!({
@@ -4482,6 +4491,9 @@ fn enqueue_exec_request(
             existing_job,
             move |job| {
                 let mut plan = plan;
+                if let Some(limit) = plan.concurrency_limit {
+                    plan.env.insert("HOMEBOY_LAB_CONCURRENCY_LIMIT".to_string(), limit.to_string());
+                }
                 if let (Some(lease), Some(claim_store)) = (
                     workspace_owner_lease.as_ref(),
                     workspace_owner_claim_store.as_ref(),

@@ -209,6 +209,8 @@ fn start_or_reconcile_worker_with_retry(
         .spawn()
         .map_err(|error| error.to_string())?;
     #[cfg(not(test))]
+    let child = homeboy_core::child_reaper::ReapingChild::from(child);
+    #[cfg(not(test))]
     let spawned = PostprocessWorkerSpawn {
         schema: WORKER_SPAWN_SCHEMA.to_string(),
         worker_id: uuid::Uuid::new_v4().to_string(),
