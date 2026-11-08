@@ -727,6 +727,16 @@ mod tests {
                 assert!(helper.is_some(), "expected env to include {env_var}");
                 assert!(helper.unwrap().ends_with(filename));
             }
+
+            let executable = env
+                .iter()
+                .find(|(k, _)| k == runtime_helper::RUNTIME_EXECUTABLE_ENV)
+                .map(|(_, v)| v.clone())
+                .expect("env should export the running homeboy binary");
+            assert_eq!(
+                std::path::PathBuf::from(executable),
+                std::env::current_exe().expect("current exe")
+            );
         });
     }
 

@@ -375,6 +375,14 @@ pub(crate) fn build_exec_env(
     if let Ok(helper_pairs) = runtime_helper::ensure_all_helpers() {
         env.extend(helper_pairs);
     }
+    // The startup-recorded `current_exe()`: it still names the installed binary
+    // after an upgrade replaces the running image.
+    if let Ok(executable) = homeboy_core::daemon::daemon_launchable_executable() {
+        env.push((
+            runtime_helper::RUNTIME_EXECUTABLE_ENV.to_string(),
+            executable.to_string_lossy().to_string(),
+        ));
+    }
 
     if let Some(path) = homeboy_engine_primitives::command_path::command_step_path() {
         env.push(("PATH".to_string(), path.to_string_lossy().to_string()));

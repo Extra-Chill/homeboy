@@ -4,8 +4,10 @@
 #
 # The helper owns the common "sidecar is a JSON array" file mechanics used by
 # lint findings, test failures, fix results, and annotation files. Callers still build the
-# domain-specific JSON object; this helper validates it and writes atomically.
-# Typed writes require a target declared in structured_sidecars.
+# domain-specific JSON object; Homeboy validates it and writes atomically
+# (compact UTF-8, trailing newline) through the running binary exported as
+# HOMEBOY_RUNTIME_EXECUTABLE. Typed writes require a target declared in
+# structured_sidecars.
 #
 # Usage:
 #   source "${HOMEBOY_RUNTIME_SIDECAR_WRITER}"
@@ -13,185 +15,32 @@
 #   homeboy_sidecar_write test.failures "$failure_json"
 #   homeboy_sidecar_merge annotation.phpcs "$tmp_annotations"
 
-homeboy_sidecar_python() {
-    if command -v python3 >/dev/null 2>&1; then
-        command -v python3
-        return 0
+homeboy_sidecar_runtime_json() {
+    if [ -z "${HOMEBOY_RUNTIME_EXECUTABLE:-}" ]; then
+        echo "[sidecar-writer] HOMEBOY_RUNTIME_EXECUTABLE is required" >&2
+        return 1
     fi
-    if command -v python >/dev/null 2>&1; then
-        command -v python
-        return 0
-    fi
-    echo "[sidecar-writer] python3 or python is required" >&2
-    return 1
+    "$HOMEBOY_RUNTIME_EXECUTABLE" __homeboy_runtime_json "$@"
 }
 
 homeboy_sidecar_write_json_array() {
-    local target="${1:-}"
-    shift || true
-
-    if [ -z "$target" ]; then
-        return 0
-    fi
-
-    local python_bin
-    python_bin="$(homeboy_sidecar_python)" || return 1
-
-    "$python_bin" - "$target" "$@" <<'PYEOF'
-import json
-import os
-import sys
-import tempfile
-
-target = sys.argv[1]
-items = [json.loads(raw) for raw in sys.argv[2:]]
-directory = os.path.dirname(target) or "."
-os.makedirs(directory, exist_ok=True)
-fd, tmp = tempfile.mkstemp(prefix=".homeboy-sidecar-", suffix=".json", dir=directory)
-try:
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        json.dump(items, handle, separators=(",", ":"), ensure_ascii=False)
-        handle.write("\n")
-    os.replace(tmp, target)
-except Exception:
-    try:
-        os.unlink(tmp)
-    except OSError:
-        pass
-    raise
-PYEOF
+    [ -n "${1:-}" ] || return 0
+    homeboy_sidecar_runtime_json sidecar-write-array "$@"
 }
 
 homeboy_sidecar_write_json_object() {
-    local target="${1:-}"
-    local item="${2:-}"
-
-    if [ -z "$target" ]; then
-        return 0
-    fi
-
-    local python_bin
-    python_bin="$(homeboy_sidecar_python)" || return 1
-
-    "$python_bin" - "$target" "$item" <<'PYEOF'
-import json
-import os
-import sys
-import tempfile
-
-target = sys.argv[1]
-item = json.loads(sys.argv[2])
-if not isinstance(item, dict):
-    raise ValueError("sidecar must contain a JSON object")
-directory = os.path.dirname(target) or "."
-os.makedirs(directory, exist_ok=True)
-fd, tmp = tempfile.mkstemp(prefix=".homeboy-sidecar-", suffix=".json", dir=directory)
-try:
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        json.dump(item, handle, separators=(",", ":"), ensure_ascii=False)
-        handle.write("\n")
-    os.replace(tmp, target)
-except Exception:
-    try:
-        os.unlink(tmp)
-    except OSError:
-        pass
-    raise
-PYEOF
+    [ -n "${1:-}" ] || return 0
+    homeboy_sidecar_runtime_json sidecar-write-object "$1" "${2:-}"
 }
 
 homeboy_sidecar_append_json() {
-    local target="${1:-}"
-    local item="${2:-}"
-
-    if [ -z "$target" ]; then
-        return 0
-    fi
-
-    local python_bin
-    python_bin="$(homeboy_sidecar_python)" || return 1
-
-    "$python_bin" - "$target" "$item" <<'PYEOF'
-import json
-import os
-import sys
-import tempfile
-
-target = sys.argv[1]
-item = json.loads(sys.argv[2])
-items = []
-if os.path.exists(target) and os.path.getsize(target) > 0:
-    with open(target, "r", encoding="utf-8") as handle:
-        loaded = json.load(handle)
-    if isinstance(loaded, list):
-        items = loaded
-    else:
-        raise ValueError(f"sidecar must contain a JSON array: {target}")
-items.append(item)
-directory = os.path.dirname(target) or "."
-os.makedirs(directory, exist_ok=True)
-fd, tmp = tempfile.mkstemp(prefix=".homeboy-sidecar-", suffix=".json", dir=directory)
-try:
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        json.dump(items, handle, separators=(",", ":"), ensure_ascii=False)
-        handle.write("\n")
-    os.replace(tmp, target)
-except Exception:
-    try:
-        os.unlink(tmp)
-    except OSError:
-        pass
-    raise
-PYEOF
+    [ -n "${1:-}" ] || return 0
+    homeboy_sidecar_runtime_json sidecar-append "$1" "${2:-}"
 }
 
 homeboy_sidecar_merge_json_array() {
-    local target="${1:-}"
-    local source="${2:-}"
-
-    if [ -z "$target" ] || [ -z "$source" ] || [ ! -s "$source" ]; then
-        return 0
-    fi
-
-    local python_bin
-    python_bin="$(homeboy_sidecar_python)" || return 1
-
-    "$python_bin" - "$target" "$source" <<'PYEOF'
-import json
-import os
-import sys
-import tempfile
-
-target = sys.argv[1]
-source = sys.argv[2]
-items = []
-if os.path.exists(target) and os.path.getsize(target) > 0:
-    with open(target, "r", encoding="utf-8") as handle:
-        loaded = json.load(handle)
-    if isinstance(loaded, list):
-        items = loaded
-    else:
-        raise ValueError(f"sidecar must contain a JSON array: {target}")
-with open(source, "r", encoding="utf-8") as handle:
-    incoming = json.load(handle)
-if not isinstance(incoming, list):
-    raise ValueError(f"source sidecar must contain a JSON array: {source}")
-items.extend(incoming)
-directory = os.path.dirname(target) or "."
-os.makedirs(directory, exist_ok=True)
-fd, tmp = tempfile.mkstemp(prefix=".homeboy-sidecar-", suffix=".json", dir=directory)
-try:
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        json.dump(items, handle, separators=(",", ":"), ensure_ascii=False)
-        handle.write("\n")
-    os.replace(tmp, target)
-except Exception:
-    try:
-        os.unlink(tmp)
-    except OSError:
-        pass
-    raise
-PYEOF
+    [ -n "${1:-}" ] && [ -n "${2:-}" ] && [ -s "${2:-}" ] || return 0
+    homeboy_sidecar_runtime_json sidecar-merge "$1" "$2"
 }
 
 homeboy_sidecar_target_for_type() {
