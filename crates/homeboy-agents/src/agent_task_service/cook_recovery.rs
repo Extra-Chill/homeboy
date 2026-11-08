@@ -226,6 +226,12 @@ pub(crate) fn cook_recovery_step(inputs: &CookRecoveryInputs<'_>) -> CookRecover
             };
         }
     }
+    if status == CookStatus::PreExecutionFailure && inputs.applied_gate_failure {
+        // Gate infrastructure can fail before a gate executes, after the
+        // provider candidate was applied. Continue that candidate, not provider
+        // execution; the recipe retains its admitted gate runner.
+        return continuation_step(inputs);
+    }
     if status == CookStatus::PreExecutionFailure {
         if inputs.retry_admitted {
             return CookRecoveryStep::Retry;
@@ -1321,6 +1327,14 @@ mod tests {
             step("pre_execution_failure", |inputs| inputs.retry_admitted =
                 true),
             CookRecoveryStep::Retry
+        );
+        assert_eq!(
+            step("pre_execution_failure", |inputs| {
+                inputs.retry_admitted = true;
+                inputs.applied_gate_failure = true;
+                inputs.continuation_rearm_required = true;
+            }),
+            CookRecoveryStep::Rearm
         );
         assert_eq!(
             step("verification_pending", |inputs| {
