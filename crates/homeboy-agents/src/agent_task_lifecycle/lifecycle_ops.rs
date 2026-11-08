@@ -7377,7 +7377,22 @@ pub(crate) fn attempt_preserves_candidate_or_gate(
     let Ok(record) = lifecycle_store.read_record_bounded(run_id) else {
         return false;
     };
-    if record.latest_executor_evidence.is_some() {
+    if let Some(evidence) = &record.latest_executor_evidence {
+        let setup_failure = record
+            .aggregate_path
+            .as_ref()
+            .and_then(|path| std::fs::read(path).ok())
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+            .and_then(|aggregate| aggregate.get("outcomes").and_then(Value::as_array).cloned())
+            .is_some_and(|outcomes| {
+                outcomes.iter().any(|outcome| {
+                    outcome["task_id"] == evidence.task_id
+                        && outcome["metadata"]["environment_setup_failure"] == true
+                })
+            });
+        if setup_failure && record.candidate.is_none() {
+            return false;
+        }
         return true;
     }
     use crate::agent_task_promotion::AgentTaskPromotionStatus as Status;

@@ -18,6 +18,12 @@ fn agent_dir_fixture(root: &Path) -> std::path::PathBuf {
     std::fs::write(agent.join("auth.json"), "{}").expect("auth");
     std::fs::write(agent.join("prompts/review.md"), "# review").expect("prompt");
     std::fs::write(agent.join("bin/rg"), MACH_O_ARM64).expect("mach-o rg");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(agent.join("bin/rg"), std::fs::Permissions::from_mode(0o755))
+            .expect("executable controller tool");
+    }
     agent
 }
 
@@ -67,6 +73,12 @@ fn provider_agent_dir_staging_plan_keeps_portable_executable_scripts() {
 #[cfg(unix)]
 #[test]
 fn provider_agent_dir_staging_copies_portable_config_and_omits_mach_o_bin() {
+    assert_portable_agent_dir_staging(false);
+    assert_portable_agent_dir_staging(true);
+}
+
+#[cfg(unix)]
+fn assert_portable_agent_dir_staging(symlink_bin: bool) {
     crate::test_support::with_isolated_home(|_| {
         let controller = tempfile::tempdir().expect("controller");
         let runner_root = tempfile::tempdir().expect("runner root");
@@ -80,6 +92,12 @@ fn provider_agent_dir_staging_copies_portable_config_and_omits_mach_o_bin() {
             false,
         )
         .expect("local runner");
+        // A cached tool directory may be a symlink on the controller too.
+        if symlink_bin {
+            let linked_bin = controller.path().join("native-tools");
+            std::fs::rename(agent.join("bin"), &linked_bin).expect("move bin");
+            std::os::unix::fs::symlink(&linked_bin, agent.join("bin")).expect("linked bin");
+        }
         let mut mapping = Vec::new();
         let synced = sync_extra_lab_workspaces(
             "agent-dir-staging",
@@ -115,12 +133,15 @@ fn provider_agent_dir_staging_copies_portable_config_and_omits_mach_o_bin() {
             !staged.join("bin/rg").exists(),
             "controller-platform bin/rg must not be staged"
         );
-        assert!(!staged.join("bin").exists(), "bin/ must not be staged");
+        assert!(
+            std::fs::symlink_metadata(staged.join("bin")).is_err(),
+            "bin/ must not be staged, even as a dangling symlink"
+        );
 
         let receipt = serde_json::to_value(&mapping[0]).expect("mapping entry json");
         assert_eq!(
             receipt["staging_receipt"]["omitted"],
-            serde_json::json!(["bin/"])
+            serde_json::json!([if symlink_bin { "bin" } else { "bin/" }])
         );
         assert_eq!(receipt["staging_receipt"]["omitted_count"], 1);
         assert_eq!(

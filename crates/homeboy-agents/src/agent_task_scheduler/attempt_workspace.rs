@@ -496,6 +496,24 @@ fn pinned_cook_workspace_base_snapshot(
         root,
         &["rev-parse", "--verify", &format!("{base}^{{commit}}")],
     )?;
+    // Snapshot transports retain commits, but do not necessarily retain the
+    // controller's remote-tracking names. Recreate the declared Cook base at
+    // its admission SHA, never at today's (possibly advanced) origin tip.
+    if let Some(declared) = snapshot.get("base").and_then(serde_json::Value::as_str) {
+        let branch = declared
+            .strip_prefix("refs/remotes/origin/")
+            .or_else(|| declared.strip_prefix("origin/"))
+            .or_else(|| declared.strip_prefix("refs/heads/"))
+            .unwrap_or(declared);
+        if branch != "HEAD"
+            && !((branch.len() == 40 || branch.len() == 64)
+                && branch.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        {
+            let reference = format!("refs/remotes/origin/{branch}");
+            git_output(root, &["check-ref-format", &reference])?;
+            git_output(root, &["update-ref", &reference, base])?;
+        }
+    }
     Ok(Some(base.to_string()))
 }
 

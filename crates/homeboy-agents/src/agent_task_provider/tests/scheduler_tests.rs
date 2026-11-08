@@ -80,13 +80,28 @@ fn remapped_lab_cook_spawns_and_harvests_from_runner_snapshot_identity() {
     let temp = tempfile::tempdir().expect("tempdir");
     let (controller, source) = remapped_cook_source(&temp);
     let marker = temp.path().join("provider-started");
-    let fake = node_pi(&format!("let cp=require('child_process');fs.writeFileSync('provider-change.txt','changed\\n');cp.execFileSync('git',['add','provider-change.txt']);cp.execFileSync('git',['-c','user.name=Homeboy','-c','user.email=homeboy@example.test','commit','-m','provider change'],{{stdio:'ignore'}});fs.writeFileSync({:?},JSON.stringify({{cwd:process.cwd(),workspace:launch.execution_cwd}}));answer('provider spawned');",marker));
+    let base = String::from_utf8(
+        std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&source)
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap()
+    .trim()
+    .to_string();
+    let fake = node_pi(&format!("let cp=require('child_process');if(cp.execFileSync('git',['rev-parse','origin/trunk']).toString().trim()!=={base:?})throw Error('wrong base');cp.execFileSync('git',['diff','origin/trunk','--stat']);fs.writeFileSync('provider-change.txt','changed\\n');cp.execFileSync('git',['add','provider-change.txt']);cp.execFileSync('git',['-c','user.name=Homeboy','-c','user.email=homeboy@example.test','commit','-m','provider change'],{{stdio:'ignore'}});fs.writeFileSync({:?},JSON.stringify({{cwd:process.cwd(),workspace:launch.execution_cwd}}));answer('provider spawned');",marker));
     let mut request = fake.request("cook-provider");
     let provider = fake.provider();
     request.workspace.root = Some(source.display().to_string());
     request.metadata = serde_json::json!({
         "cook_workspace_identity": crate::agent_task_workspace_identity::attest_workspace(&controller)
             .expect("attest source"),
+    });
+    request.metadata["cook_workspace_base_snapshot"] = json!({
+        "schema": "homeboy/cook-workspace-base-snapshot/v1",
+        "base": "trunk", "resolved_base": base, "destination_head": base
     });
     let mut plan = AgentTaskPlan::new("remapped-lab-cook-provider", vec![request]);
     crate::agent_task_service::bind_runner_snapshot_workspace_attestations(&mut plan)
@@ -123,6 +138,29 @@ fn remapped_lab_cook_spawns_and_harvests_from_runner_snapshot_identity() {
         .artifacts
         .iter()
         .any(|artifact| artifact.kind == "patch"));
+}
+
+#[test]
+fn environment_stopped_provider_is_a_setup_failure() {
+    let _home = super::common::artifact_home();
+    for reason in [
+        "rg: cannot execute binary file: Exec format error (exit 126)",
+        "fatal: ambiguous argument 'origin/trunk': unknown revision",
+    ] {
+        let fake = node_pi(&format!("answer({reason:?});"));
+        let outcome =
+            run_provider_command(&fake.request("environment-stop"), &fake.provider(), None);
+        assert_eq!(
+            outcome.failure_classification,
+            Some(AgentTaskFailureClassification::CapabilityMissing),
+            "{outcome:?}"
+        );
+        assert_eq!(outcome.status, AgentTaskOutcomeStatus::Failed);
+        assert!(outcome.candidate.is_none());
+        assert!(outcome.diagnostics.iter().any(|d| d.data["next_action"]
+            .as_str()
+            .is_some_and(|a| a.starts_with("homeboy runner doctor "))));
+    }
 }
 
 #[test]
