@@ -1187,15 +1187,19 @@ fn promote_with_operation_claim_in_store(
 pub(crate) fn bounded_error_diagnostic(error: &Error) -> Value {
     let mut details = homeboy_core::redaction::redact_json(&error.details);
     bound_diagnostic_value(&mut details, 0);
-    let deepest_cause = deepest_typed_error(&details).unwrap_or_else(|| {
-        serde_json::json!({
-            "code": error.code.as_str(),
-            "field": details.get("field"),
-            "message": truncate_diagnostic_text(&homeboy_core::redaction::redact_string(
-                &error.attributed_message(),
-            )),
-        })
-    });
+    // Select the cause before bounding nested details, which may replace the
+    // path with a depth-limit marker in transport-wrapped failures.
+    let deepest_cause = deepest_typed_error(&homeboy_core::redaction::redact_json(&error.details))
+        .unwrap_or_else(|| {
+            serde_json::json!({
+                "code": error.code.as_str(),
+                "field": details.get("field"),
+                "entry_path": details.get("entry_path"),
+                "message": truncate_diagnostic_text(&homeboy_core::redaction::redact_string(
+                    &error.attributed_message(),
+                )),
+            })
+        });
     serde_json::json!({
         "status": "failed",
         "code": format!("{:?}", error.code),
@@ -1222,11 +1226,18 @@ fn typed_error_at(value: &Value) -> Option<Value> {
     let error = fields.get("error")?.as_object()?;
     let code = error.get("code")?.as_str()?;
     let message = error.get("message")?.as_str()?;
-    Some(serde_json::json!({
+    let mut diagnostic = serde_json::json!({
         "code": code,
         "field": error.get("details").and_then(|details| details.get("field")),
         "message": truncate_diagnostic_text(message),
-    }))
+    });
+    if let Some(path) = error
+        .get("details")
+        .and_then(|details| details.get("entry_path"))
+    {
+        diagnostic["entry_path"] = path.clone();
+    }
+    Some(diagnostic)
 }
 
 /// Only an explicitly named `cause` is causal. Provider transcripts and sibling
@@ -1253,11 +1264,18 @@ fn plain_cause_error(value: &Value) -> Option<Value> {
     let fields = value.as_object()?;
     let code = fields.get("code")?.as_str()?;
     let message = fields.get("message")?.as_str()?;
-    Some(serde_json::json!({
+    let mut diagnostic = serde_json::json!({
         "code": code,
         "field": fields.get("details").and_then(|details| details.get("field")),
         "message": truncate_diagnostic_text(&homeboy_core::redaction::redact_string(message)),
-    }))
+    });
+    if let Some(path) = fields
+        .get("details")
+        .and_then(|details| details.get("entry_path"))
+    {
+        diagnostic["entry_path"] = path.clone();
+    }
+    Some(diagnostic)
 }
 
 fn bound_diagnostic_value(value: &mut Value, depth: usize) {
@@ -10814,6 +10832,25 @@ mod io_error_attribution_tests {
             diagnostic["message"],
             "IO error: write promotion checkpoint: Permission denied (os error 13)"
         );
+    }
+
+    #[test]
+    fn bounded_error_diagnostic_preserves_refused_path_through_gate_wrappers() {
+        let error = Error::new(
+            homeboy_core::ErrorCode::ValidationInvalidArgument,
+            "Cook gate failed",
+            serde_json::json!({"cause": {
+                "code": "validation.invalid_argument",
+                "message": "workspace content hash refused a symlink cycle at 'tracked/cycle'",
+                "details": {"entry_path": "tracked/cycle"}
+            }}),
+        );
+        let diagnostic = bounded_error_diagnostic(&error);
+        assert_eq!(diagnostic["deepest_cause"]["entry_path"], "tracked/cycle");
+        assert!(diagnostic["deepest_cause"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("tracked/cycle"));
     }
 
     #[test]

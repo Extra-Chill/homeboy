@@ -456,12 +456,14 @@ impl ContentHashTraversal<'_> {
                     Err(err) => return Err(Error::internal_io(err.to_string(), None)),
                 };
                 if ancestors.contains(&canonical) {
-                    return Err(Error::validation_invalid_argument(
+                    let mut error = Error::validation_invalid_argument(
                         "workspace",
-                        "workspace content hash refused a symlink cycle",
-                        Some(entry_path.display().to_string()),
+                        format!("workspace content hash refused a symlink cycle at '{relative}'"),
+                        Some(relative.clone()),
                         None,
-                    ));
+                    );
+                    error.details["entry_path"] = serde_json::json!(relative);
+                    return Err(error);
                 }
                 hash_directory_entry(self.hasher, &relative);
                 record_workspace_content_manifest_entry(
@@ -648,6 +650,7 @@ struct SnapshotMembership<'a> {
     excludes: &'a [String],
     includes: &'a [String],
     tracked: Option<BTreeSet<PathBuf>>,
+    ignored: BTreeSet<PathBuf>,
 }
 
 impl<'a> SnapshotMembership<'a> {
@@ -678,10 +681,43 @@ impl<'a> SnapshotMembership<'a> {
             }
             paths
         });
+        // The manifest drives transport too: ignored dependency content is
+        // neither shipped nor hashed. Tracked paths still override ignores.
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args([
+                "ls-files",
+                "-z",
+                "--others",
+                "--ignored",
+                "--exclude-standard",
+                "--directory",
+            ])
+            .output()
+            .map_err(|error| Error::internal_io(error.to_string(), None))?;
+        let mut ignored = BTreeSet::new();
+        if output.status.success() {
+            for bytes in output
+                .stdout
+                .split(|byte| *byte == 0)
+                .filter(|p| !p.is_empty())
+            {
+                #[cfg(unix)]
+                let path = {
+                    use std::os::unix::ffi::OsStrExt;
+                    PathBuf::from(std::ffi::OsStr::from_bytes(bytes))
+                };
+                #[cfg(not(unix))]
+                let path = PathBuf::from(String::from_utf8_lossy(bytes).into_owned());
+                ignored.insert(path);
+            }
+        }
         Ok(Self {
             excludes,
             includes,
             tracked,
+            ignored,
         })
     }
 
@@ -695,6 +731,9 @@ impl<'a> SnapshotMembership<'a> {
             .is_some_and(|paths| paths.contains(relative))
         {
             return true;
+        }
+        if relative.ancestors().any(|path| self.ignored.contains(path)) {
+            return false;
         }
         // Opening an excluded directory for tracked content must not admit its
         // untracked descendants.
@@ -832,6 +871,48 @@ mod tests {
         );
         assert!(!destination.path().join(".env").exists());
         assert!(!destination.path().join("vendor/x.php").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ignored_dependency_cycle_is_not_snapshot_content() {
+        use std::os::unix::fs::symlink;
+        let source = tempfile::tempdir().unwrap();
+        let destination = tempfile::tempdir().unwrap();
+        git(source.path(), &["init", "--quiet"]);
+        fs::write(source.path().join(".gitignore"), "node_modules/\n").unwrap();
+        fs::write(source.path().join("source.txt"), "source").unwrap();
+        git(source.path(), &["add", "."]);
+        fs::create_dir(source.path().join("node_modules")).unwrap();
+        let baseline = workspace_content_hash(source.path(), &[]).unwrap();
+        let cycle = source.path().join("node_modules/node_modules");
+        symlink("../node_modules", &cycle).unwrap();
+        assert_eq!(
+            workspace_content_hash(source.path(), &[]).unwrap(),
+            baseline
+        );
+        copy_snapshot_to_directory(source.path(), destination.path(), &[]).unwrap();
+        assert!(!destination.path().join("node_modules").exists());
+        fs::remove_file(cycle).unwrap();
+        assert_eq!(
+            workspace_content_hash(source.path(), &[]).unwrap(),
+            baseline
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tracked_cycle_refusal_names_workspace_relative_path() {
+        use std::os::unix::fs::symlink;
+        let source = tempfile::tempdir().unwrap();
+        git(source.path(), &["init", "--quiet"]);
+        fs::create_dir(source.path().join("tracked")).unwrap();
+        symlink("../tracked", source.path().join("tracked/cycle")).unwrap();
+        git(source.path(), &["add", "."]);
+        let error = workspace_content_hash(source.path(), &[]).unwrap_err();
+        assert!(error.message.contains("tracked/cycle"));
+        assert!(!error.message.contains(&source.path().display().to_string()));
+        assert_eq!(error.details["entry_path"], "tracked/cycle");
     }
 
     use homeboy_core::test_support::run_git_command as git;

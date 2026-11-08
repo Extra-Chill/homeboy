@@ -1049,7 +1049,12 @@ fn resolve_cook_key(id: &str) -> Result<String> {
     if super::load_recipe(id).is_ok() || super::load_recipe_for_attempt(id)?.is_some() {
         return Ok(id.to_string());
     }
-    agent_task_lifecycle::exact_record(id)
+    let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
+    let resolved = agent_task_lifecycle::resolve_cook_reader_run_id_in_store(&store, id)?;
+    if let Some(recipe) = super::load_recipe_for_attempt(&resolved)? {
+        return Ok(recipe.cook_id);
+    }
+    agent_task_lifecycle::exact_record(&resolved)
         .ok()
         .and_then(|record| {
             record

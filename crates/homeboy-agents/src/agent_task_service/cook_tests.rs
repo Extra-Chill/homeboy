@@ -1676,6 +1676,29 @@ fn no_change_side_effects(
     )
 }
 
+#[test]
+fn recovery_resolves_batch_child_alias_through_canonical_reader() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let cook_id = "cook-batch-child-recovery";
+        let child_id = "wf-cook-batch-recovery-cook-i1-n1-a1";
+        let options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        let run_id = options.identity.initial_run_id.clone();
+        persist_initial_recipe(&options).expect("persist child Cook");
+        agent_task_lifecycle::submit_plan(&options.identity.initial_plan, Some(&run_id))
+            .expect("submit child attempt");
+        agent_task_lifecycle::record_cook_attempt_in_store(
+            &test_lifecycle_store(),
+            child_id,
+            1,
+            &run_id,
+        )
+        .expect("index printed child identity");
+        let plan = crate::agent_task_service::plan_cook_recovery(child_id).expect("resolve child");
+        assert_eq!(plan.cook_id, cook_id);
+        assert_eq!(plan.run_id, run_id);
+    });
+}
+
 /// #15294: an attempt Homeboy proved changed nothing ends, once the attempt
 /// budget is spent, as a `no_changes` Cook that quotes the provider's final
 /// message. It never finalizes, and the run does not read as a recoverable
