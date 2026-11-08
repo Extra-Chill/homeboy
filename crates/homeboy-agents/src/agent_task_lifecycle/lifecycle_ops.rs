@@ -7499,9 +7499,13 @@ pub fn record_promotion_progress_frames(
 pub fn record_promotion_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
-    promotion: Value,
+    mut promotion: Value,
 ) -> Result<AgentTaskRunRecord> {
     let run_id = sanitize_run_id(run_id);
+    let owner = lifecycle_store.read_record(&run_id)?;
+    if let Some(cook_id) = owner.metadata.get("cook_id").and_then(Value::as_str) {
+        crate::agent_task_promotion::pin_applied_candidate(cook_id, &mut promotion)?;
+    }
     // The run state follows the delivery this promotion produces (see
     // `CookDelivery::lifecycle`): a candidate that has not completed
     // controller-owned verification is recoverable evidence, not a successful

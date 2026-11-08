@@ -3988,6 +3988,20 @@ fn exercise_real_git_base_advance(conflicting: bool, rewritten: bool) {
             crate::agent_task_promotion::candidate_fingerprint(destination.to_str().unwrap())
                 .unwrap();
         let verified_base = git_output(&destination, &["rev-parse", "HEAD"]).unwrap();
+        git(&destination, &["add", "."]);
+        let candidate_tree = git_output(&destination, &["write-tree"]).unwrap();
+        let candidate_sha = git_output(
+            &destination,
+            &[
+                "commit-tree",
+                &candidate_tree,
+                "-p",
+                &verified_base,
+                "-m",
+                "candidate",
+            ],
+        )
+        .unwrap();
 
         std::fs::create_dir(&advance).unwrap();
         git(
@@ -4096,7 +4110,7 @@ fn exercise_real_git_base_advance(conflicting: bool, rewritten: bool) {
                 "source": {"kind": "aggregate", "task_id": "provider", "run_id": run_id},
                 "to_worktree": options.workspace.to_worktree,
                 "target": {"worktree": options.workspace.to_worktree, "path": destination},
-                "candidate": {"base_sha": "base", "candidate_sha": "candidate", "tree_sha": "tree"},
+                "candidate": {"base_sha": verified_base, "candidate_sha": candidate_sha, "tree_sha": candidate_tree},
                 "changed_files": ["src/lib.rs"],
                 "deterministic_gates": [{"id": "gate", "visibility": "visible", "reveal_policy": "full_evidence", "status": "succeeded", "command": ["sh", "-c", "true"], "exit_code": 0}],
                 "gate_results": [{"id": "gate", "name": "true", "kind": "command", "status": "passed"}],

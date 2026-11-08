@@ -1013,6 +1013,10 @@ pub type RunsArtifactCleanupPersistedRow = runs_service::PersistedArtifactCleanu
 
 #[derive(Serialize)]
 pub struct RunDetail {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub candidate_ref: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub candidate_sha: Option<String>,
     #[serde(flatten)]
     pub summary: RunSummary,
     /// The observation row's own status when the run is a durable agent-task

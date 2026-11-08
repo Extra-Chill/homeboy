@@ -55,6 +55,8 @@ pub struct AgentTaskPromotionReport {
     pub source: AgentTaskPromotionSource,
     pub to_worktree: String,
     pub target: AgentTaskPromotionTarget,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_ref: Option<String>,
     pub candidate: Option<crate::agent_task::AgentTaskCandidate>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub changed_files: Vec<String>,

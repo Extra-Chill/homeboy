@@ -332,6 +332,7 @@ fn resume_promoted_patch_internal<'a>(
         options.source_run_id.as_deref(),
     );
     let report = AgentTaskPromotionReport {
+        candidate_ref: None,
         schema: AGENT_TASK_PROMOTION_REPORT_SCHEMA.to_string(),
         status: gates.status,
         source: promotion_source(&source_kind, &outcome, &options),
@@ -794,6 +795,7 @@ fn promote_candidate(
             AgentTaskPromotionTarget::from_worktree(options.to_worktree.clone(), path.as_deref());
         let status = AgentTaskPromotionStatus::NoChanges;
         return Ok(AgentTaskPromotionReport {
+            candidate_ref: None,
             schema: AGENT_TASK_PROMOTION_REPORT_SCHEMA.to_string(),
             status,
             source: promotion_source(source_kind, outcome, options),
@@ -921,6 +923,7 @@ fn promote_candidate(
         .as_ref()
         .and_then(|report| report.provenance.get("gate_feedback_baseline").cloned());
     Ok(AgentTaskPromotionReport {
+        candidate_ref: None,
         schema: AGENT_TASK_PROMOTION_REPORT_SCHEMA.to_string(),
         status: gates.status,
         source: promotion_source(source_kind, outcome, options),
@@ -1578,6 +1581,7 @@ fn promote_committed_changes(
     });
 
     Ok(AgentTaskPromotionReport {
+        candidate_ref: None,
         schema: AGENT_TASK_PROMOTION_REPORT_SCHEMA.to_string(),
         status: gates.status,
         source: promotion_source(source_kind, &outcome, options),
@@ -4140,6 +4144,7 @@ fn post_apply_report(
             .flatten()
     });
     Ok(AgentTaskPromotionReport {
+        candidate_ref: None,
         schema: AGENT_TASK_PROMOTION_REPORT_SCHEMA.to_string(),
         status,
         source: promotion_source(source_kind, outcome, options),
