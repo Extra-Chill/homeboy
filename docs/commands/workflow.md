@@ -83,6 +83,11 @@ A step with `foreach` expands, once its `needs` and `when` pass, into one step j
 
 ### Step kinds
 
+For a reviewed-head merge, use a `homeboy` step invoking
+[`git pr merge-when-green`](git.md#exact-head-green-merge). It owns bounded check
+and mergeability polling, typed holds, repository method selection, and the
+atomic head guard; workflows do not need an `exec` polling/merge wrapper.
+
 - **`exec`** runs a program directly, never through a shell. The program is resolved to an absolute path when the workflow is admitted. Its output is the JSON it writes to the file named by `$HOMEBOY_STEP_OUTPUT`.
 - **`homeboy`** runs `homeboy <argv>` with this Homeboy build. Its output is the `data` of the command's JSON envelope.
 - **`cook`** runs `homeboy agent-task cook <flags> --wait --cook-id <id>`. Every key must be a real `agent-task cook` flag; this is checked against the live command tree, so there is no second Cook contract. A string becomes `--key value`, `true` becomes `--key`, and an array repeats the flag. `wait`, `cook-id`, `run-id`, `output`, and `preview` belong to the workflow. The step's outcome is the Cook's terminal run state, read from its run record; `{{steps.<id>.run_id}}` is the Cook id.

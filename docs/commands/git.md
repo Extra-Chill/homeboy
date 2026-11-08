@@ -12,6 +12,43 @@ Most commands emit Homeboy's structured JSON envelope when appropriate. See the 
 
 Follow-up: git has many subcommand-specific payload shapes inside those wrappers; the current public contract tags the wrapper variants, and per-subcommand golden fixtures can be added incrementally where consumers need stricter fixtures.
 
+## Exact-head green merge
+
+```sh
+homeboy git pr merge-when-green --repo owner/repo --number 123 --sha <full-reviewed-sha> --wait-seconds 3600
+```
+
+Waits for checks and GitHub mergeability within one bounded budget (1–3600 seconds,
+including GitHub calls). Requires a nonempty check rollup, no failed checks, an
+open non-draft PR, and the exact reviewed head. Successful, neutral and skipped
+checks are accepted; both check runs and legacy commit statuses are supported.
+GitHub atomically compares the SHA when merging, so a head change cannot land
+unreviewed code. No branch update, check rerun, bypass or auto-merge is requested.
+
+The repository's enabled merge methods determine the method: squash, then merge
+commit, then rebase. Repository protections remain enforced by GitHub.
+
+The `merge_when_green` output has `merged`, `number`, `expected_head_sha`, and
+`hold` (null on success). A hold exits 1 with a typed `hold.reason`:
+`head_moved`, `checks_failed` (plus `names`), `checks_missing`, `conflicting`, or
+`timeout`. Missing checks and terminal failures hold immediately; pending checks
+and unknown mergeability wait. Authentication, API and repository-policy errors
+remain command errors rather than falsely reporting a successful merge.
+
+Use the matching existing **`homeboy` workflow step kind**, not a polling script:
+
+```json
+{
+  "id": "merge",
+  "needs": ["approve"],
+  "homeboy": ["git", "pr", "merge-when-green", "--repo", "{{inputs.repo}}", "--number", "{{inputs.pr}}", "--sha", "{{inputs.sha}}", "--wait-seconds", "600"],
+  "timeout": "11m"
+}
+```
+
+The step's output is this command's data; a hold fails the step. Keep its timeout
+longer than the command's wait budget. See [workflow step kinds](workflow.md#step-kinds).
+
 ## Component Resolution
 
 Most core git verbs can run without a positional component ID:

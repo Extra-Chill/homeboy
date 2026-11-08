@@ -15,6 +15,7 @@ pub enum GitCommandOutput {
     Pr(GithubPrOutput),
     PrRefresh(PrRefreshOutput),
     PrReadiness(GithubPrReadinessOutput),
+    MergeWhenGreen(homeboy::core::git::MergeWhenGreenOutput),
     Find(GithubFindOutput),
     ReconcileMergeability(PrMergeabilityReconcileOutput),
     Policy(PrPolicyDecision),
@@ -36,6 +37,9 @@ impl Serialize for GitCommandOutput {
             GitCommandOutput::Pr(output) => ("pr", serde_json::to_value(output)),
             GitCommandOutput::PrRefresh(output) => ("pr_refresh", serde_json::to_value(output)),
             GitCommandOutput::PrReadiness(output) => ("pr_readiness", serde_json::to_value(output)),
+            GitCommandOutput::MergeWhenGreen(output) => {
+                ("merge_when_green", serde_json::to_value(output))
+            }
             GitCommandOutput::Find(output) => ("find", serde_json::to_value(output)),
             GitCommandOutput::ReconcileMergeability(output) => {
                 ("reconcile_mergeability", serde_json::to_value(output))

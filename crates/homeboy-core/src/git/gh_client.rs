@@ -196,7 +196,7 @@ impl GhClient {
         Ok(output.stdout)
     }
 
-    fn output_until(&self, args: &[&str], deadline: Instant) -> Result<Output> {
+    pub(crate) fn output_until(&self, args: &[&str], deadline: Instant) -> Result<Output> {
         if Instant::now() >= deadline {
             return Err(Error::internal_io(
                 "GitHub API deadline exhausted before invocation",
