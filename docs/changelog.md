@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.450.0] - 2026-11-08
+
+### Added
+- resolve cook --repo from owner/repo, a checkout path, or issue URLs
+- record workflow step spans and split provider time into model, tool and gate phases
+
+### Changed
+- keep Cook preview CLI tests offline with a stub gh
+
 ## [0.449.6] - 2026-11-08
 
 ### Changed
