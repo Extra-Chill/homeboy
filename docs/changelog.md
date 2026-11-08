@@ -4,6 +4,17 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.447.2] - 2026-11-08
+
+### Changed
+- runtime sidecar and bench helpers emit JSON through homeboy instead of python
+
+### Fixed
+- enforce version-target release-owned guard in review lint
+- one passing verdict for recovery step selection and the publication guard
+- release a terminal run's orphaned env-inheriting processes
+- publish green candidates with proven inherited gate failures
+
 ## [0.447.1] - 2026-11-07
 
 ### Changed
