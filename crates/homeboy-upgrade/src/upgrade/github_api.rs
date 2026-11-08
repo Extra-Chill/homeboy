@@ -55,10 +55,12 @@ pub(super) fn fetch(url: &str, timeout: Duration) -> Result<Response> {
             serde_json::json!({"url": url, "status": status.as_u16(), "reset": reset}),
         ));
     }
-    Err(Error::internal_io(
-        format!("GitHub API returned {status} for {url}"),
-        Some("query GitHub releases".into()),
-    ))
+    let message = format!("GitHub API returned {status} for {url}");
+    let mut error = Error::internal_io(message.clone(), Some("query GitHub releases".into()));
+    // `internal_io` keeps the cause in details and a generic "IO error" message;
+    // the operator-facing message must name the HTTP status and URL.
+    error.message = message;
+    Err(error)
 }
 
 #[cfg(test)]
