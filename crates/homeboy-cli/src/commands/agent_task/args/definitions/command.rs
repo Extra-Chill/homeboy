@@ -111,6 +111,7 @@ pub enum AgentTaskCommand {
     /// `--task <task-id>` for multi-task runs.
     ReplayProviderBoundary(ReplayProviderBoundaryArgs),
     /// Mark a queued or stale-running durable run as cancelled.
+    /// The durable run metadata retains cancellation_actor (PID and redacted argv).
     Cancel(CancelArgs),
     /// Exclude one exact queued record while preserving its lifecycle and evidence.
     Quarantine(QuarantineArgs),
