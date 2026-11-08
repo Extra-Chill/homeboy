@@ -1484,6 +1484,7 @@ jobs:
           COMPONENT_NAME: ${{ steps.reconcile.outputs.component }}
           RESULTS: ${{ steps.reconcile.outputs.results }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           COMMENT_KEY_INPUT: ${{ inputs.comment-key }}
           COMMENT_SECTION_KEY_INPUT: ${{ inputs.comment-section-key || matrix.section_key }}
           COMMENT_SECTION_TITLE_INPUT: ${{ inputs.comment-section-title || matrix.section_title }}

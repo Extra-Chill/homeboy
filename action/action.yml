@@ -938,6 +938,7 @@ runs:
         COMPONENT_NAME: ${{ steps.read-config.outputs.portable-id }}
         RESULTS: ${{ steps.select-results.outputs.results }}
         PR_NUMBER: ${{ github.event.pull_request.number }}
+        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         BINARY_SOURCE: ${{ steps.resolve-binary.outputs.binary-source || steps.provisioning.outputs.binary-source }}
         COMMENT_KEY_INPUT: ${{ inputs.comment-key }}
         COMMENT_SECTION_KEY_INPUT: ${{ inputs.comment-section-key }}
