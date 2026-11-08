@@ -306,6 +306,12 @@ pub(super) enum PrCommand {
         #[arg(long, value_name = "PATH")]
         body_file: Option<String>,
 
+        /// Only publish if the PR is open and its head matches this SHA.
+        /// Closed/merged PRs or stale heads return a successful skip (exit 0).
+        /// Omit to preserve unguarded publication.
+        #[arg(long, value_name = "SHA")]
+        expected_head_sha: Option<String>,
+
         /// Sticky whole-body key (mode 2, PR #1334).
         /// Mutually exclusive with --comment-key / --section-key.
         #[arg(short, long, conflicts_with_all = ["comment_key", "section_key"])]

@@ -11,6 +11,31 @@ struct TestCli {
 }
 
 #[test]
+fn pr_comment_expected_head_sha_parses() {
+    let cli = TestCli::try_parse_from([
+        "git",
+        "pr",
+        "comment",
+        "homeboy",
+        "--number",
+        "42",
+        "--body",
+        "results",
+        "--expected-head-sha",
+        "abc123",
+    ])
+    .expect("guard flag parses");
+    match cli.command {
+        GitCommand::Pr(PrArgs {
+            command: PrCommand::Comment {
+                expected_head_sha, ..
+            },
+        }) => assert_eq!(expected_head_sha.as_deref(), Some("abc123")),
+        _ => panic!("expected PR comment command"),
+    }
+}
+
+#[test]
 fn push_override_flags_parse() {
     let cli = TestCli::try_parse_from([
         "git",
