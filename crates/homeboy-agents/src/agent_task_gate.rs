@@ -2419,7 +2419,7 @@ fn run_gate_argv_with_supervision(
     declared_plan: Option<&homeboy_engine_primitives::test_execution::TestExecutionPlan>,
 ) -> Result<AgentTaskGateReport> {
     homeboy_core::observation::phase_timing::time_with_outcome(
-        "gate.command",
+        &format!("gate.gate-{index}"),
         || {
             run_gate_argv(
                 cwd,
@@ -7425,10 +7425,14 @@ mod tests {
             assert_ne!(first.identity, second.identity);
             assert_ne!(first.path, second.path);
             let spans = store.phase_spans(&run_id).unwrap();
-            for phase in ["gate.command", "publish.gate_cargo_target"] {
+            for (phase, count) in [
+                ("gate.gate-1", 1),
+                ("gate.gate-2", 1),
+                ("publish.gate_cargo_target", 2),
+            ] {
                 assert_eq!(
                     spans.spans.iter().filter(|span| span.id == phase).count(),
-                    2
+                    count
                 );
             }
         });

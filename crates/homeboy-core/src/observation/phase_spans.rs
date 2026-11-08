@@ -277,13 +277,115 @@ impl ObservationStore {
                 }
             }
         }
+        if let Some(run) = self.get_run(run_id)? {
+            project_provider(&mut report, &run.metadata_json);
+        }
         Ok(report)
+    }
+}
+
+// Only unambiguous command/outcome pairs can share an aggregate clock. Promotion
+// gates already carry their own timestamps and must not be moved inside it.
+fn project_provider(report: &mut PhaseTimingReport, metadata: &serde_json::Value) {
+    let commands: Vec<_> = report
+        .spans
+        .iter()
+        .filter(|s| s.id == "provider.command")
+        .cloned()
+        .collect();
+    let Some(outcomes) = metadata
+        .pointer("/agent_task_aggregate/outcomes")
+        .and_then(|v| v.as_array())
+    else {
+        return;
+    };
+    if commands.len() != 1 || outcomes.len() != 1 {
+        return;
+    }
+    let Some(measured) = outcomes[0].get("metadata") else {
+        return;
+    };
+    let mut parts = Vec::new();
+    if let Some(ms) = measured["model_ms"].as_f64() {
+        parts.push(("provider.model".to_string(), ms));
+    }
+    if let Some(tools) = measured["tool_ms_by_name"].as_object() {
+        for (name, ms) in tools {
+            if let Some(ms) = ms.as_f64() {
+                parts.push((format!("provider.tool.{name}"), ms));
+            }
+        }
+    } else if let Some(ms) = measured["tool_ms"].as_f64() {
+        parts.push(("provider.tool.unknown".into(), ms));
+    }
+    let total: f64 = parts.iter().map(|(_, ms)| ms).sum();
+    if parts.iter().any(|(_, ms)| !ms.is_finite() || *ms < 0.0)
+        || total > commands[0].duration_ms.unwrap_or_default()
+    {
+        return;
+    }
+    let Ok(start) = chrono::DateTime::parse_from_rfc3339(&commands[0].started_at) else {
+        return;
+    };
+    let mut offset = 0.0;
+    for (id, ms) in parts {
+        if !report.spans.iter().any(|s| s.id == id) {
+            let mut span = commands[0].clone();
+            span.id = id;
+            span.duration_ms = Some(ms);
+            span.started_at = (start + chrono::Duration::microseconds((offset * 1000.0) as i64))
+                .to_rfc3339_opts(chrono::SecondsFormat::Micros, true);
+            report.spans.push(span);
+        }
+        offset += ms;
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recorded_cook_aggregate_splits_provider_through_public_hotspots() {
+        use crate::performance_hotspots::{phase_hotspots, PhaseHotspotQuery};
+        use homeboy_engine_primitives::phase_timing::PhaseTimer;
+        let aggregate: serde_json::Value = serde_json::from_str(include_str!("../../../homeboy-agents/src/agent_task_service/cook_tests/fixtures/incomplete_no_patch.json")).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let store = ObservationStore::open_initialized_at(dir.path().join("timing.db")).unwrap();
+        let run = store
+            .start_run(
+                super::super::NewRunRecord::builder("agent-task")
+                    .metadata(serde_json::json!({"agent_task_aggregate":aggregate}))
+                    .build(),
+            )
+            .unwrap();
+        let mut timer = PhaseTimer::new();
+        timer.record_ok("provider.command", std::time::Duration::from_secs(900));
+        store
+            .record_phase_spans(&run.id, "provider", &timer.into_report())
+            .unwrap();
+        let first = store.phase_spans(&run.id).unwrap();
+        assert_eq!(first, store.phase_spans(&run.id).unwrap());
+        let hotspots = phase_hotspots(
+            &store,
+            &PhaseHotspotQuery {
+                kind: Some("agent-task".into()),
+                last: 10,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(hotspots
+            .phases
+            .iter()
+            .any(|row| row.phase == "provider.model" && row.timing.p50_ms == 392072.0));
+        assert!(hotspots
+            .phases
+            .iter()
+            .any(|row| row.phase.starts_with("provider.tool.") && row.self_ms_total > 0.0));
+        let total: f64 = hotspots.phases.iter().map(|row| row.self_ms_total).sum();
+        assert!((total - 900000.0).abs() < 1.0);
+    }
 
     #[test]
     fn whole_run_phase_tracks_latest_outcome_without_changing_matching_spans() {
