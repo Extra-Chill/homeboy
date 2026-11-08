@@ -4550,6 +4550,55 @@ impl AgentTaskExecutorAdapter for MovingMainPinnedBaseExecutor {
 }
 
 #[derive(Clone)]
+struct TimeoutReviewFormExecutor;
+
+impl AgentTaskExecutorAdapter for TimeoutReviewFormExecutor {
+    fn execute(
+        &self,
+        request: crate::agent_task::AgentTaskRequest,
+        _context: crate::agent_task_scheduler::AgentTaskExecutionContext,
+    ) -> crate::agent_task::AgentTaskOutcome {
+        assert_eq!(request.policy.write, "none");
+        crate::agent_task::AgentTaskOutcome {
+            task_id: request.task_id,
+            status: crate::agent_task::AgentTaskOutcomeStatus::Timeout,
+            summary: Some("review provider exceeded timeout".to_string()),
+            ..Default::default()
+        }
+    }
+}
+
+#[test]
+fn cook_publishes_gated_candidate_when_review_form_provider_times_out() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let temp = tempfile::tempdir().unwrap();
+        let fixture = adopt_green_candidate_missing_review_form(
+            temp.path(),
+            "cook-review-unavailable",
+            Arc::new(TimeoutReviewFormExecutor),
+        );
+        let result = fixture
+            .result
+            .expect("optional review failure must not block Cook");
+        assert_eq!(result.exit_code, 0, "{:?}", result.value);
+        assert_eq!(result.value.status, "review_ready");
+        assert_eq!(result.value.terminal_phase.as_deref(), Some("review_form"));
+        let latest = result.value.latest_run_id.as_deref().unwrap();
+        let record = agent_task_lifecycle::exact_record(latest).unwrap();
+        assert_eq!(
+            record.metadata["review_form_unavailable"]["phase"],
+            "review_form"
+        );
+        assert!(
+            fixture.backend.body.contains("Review form unavailable"),
+            "{}",
+            fixture.backend.body
+        );
+        assert!(fixture.backend.committed && fixture.backend.pushed && fixture.backend.created);
+    });
+}
+
+#[derive(Clone)]
 struct ReviewFormOnlyExecutor;
 
 impl AgentTaskExecutorAdapter for ReviewFormOnlyExecutor {

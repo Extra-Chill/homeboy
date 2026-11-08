@@ -7530,17 +7530,47 @@ fn run_cook_spine(
         } else {
             adopted_attempt_is_ready_for_cook_continuation(lifecycle_store, &record)?
         };
-        let review_form_continuation = mode.allows_historical_terminal()
+        // A form-only execution cannot invalidate its authenticated, gated
+        // candidate. Preserve its failure as publication evidence instead.
+        let review_form_unavailable = plan_is_review_form_only(&plan)
+            && !matches!(
+                record.state(),
+                agent_task_lifecycle::AgentTaskRunState::Cancelled
+            )
             && review_form_attempt_is_ready_for_cook_continuation_in_store(
                 lifecycle_store,
                 &plan,
                 &record,
             )?
-            && retryable_review_form_terminal_failure_in_store(
-                lifecycle_store,
-                &record,
-                &aggregate,
-            );
+            && (!matches!(
+                record.state(),
+                agent_task_lifecycle::AgentTaskRunState::Succeeded
+            ) || review_form_from_aggregate(&aggregate)
+                .map(|form| form.is_none_or(|form| form.validate().is_err()))
+                .unwrap_or(true));
+        if review_form_unavailable {
+            lifecycle_store.record_metadata_value(
+                &run_id,
+                "review_form_unavailable",
+                serde_json::json!({
+                    "phase": "review_form",
+                    "message": "review form unavailable",
+                    "run_state": format!("{:?}", record.state()),
+                }),
+            )?;
+        }
+        let review_form_continuation = review_form_unavailable
+            || mode.allows_historical_terminal()
+                && review_form_attempt_is_ready_for_cook_continuation_in_store(
+                    lifecycle_store,
+                    &plan,
+                    &record,
+                )?
+                && retryable_review_form_terminal_failure_in_store(
+                    lifecycle_store,
+                    &record,
+                    &aggregate,
+                );
         let persisted_terminal_status = record.metadata["cook_progress"]["terminal_status"]
             .as_str()
             .map(str::to_string);
@@ -7822,7 +7852,11 @@ fn run_cook_spine(
         let _terminal_phase = terminal_timing
             .as_ref()
             .map(|store| store.run_phase_guard(&run_id, "terminal.decision"));
-        let review_form = review_form_from_aggregate(&aggregate)?;
+        let review_form = if review_form_unavailable {
+            None
+        } else {
+            review_form_from_aggregate(&aggregate)?
+        };
         let intentional_no_change = intentional_no_change_from_aggregate(&aggregate);
         let previous_failure_set = delivery
             .attempts
@@ -7858,7 +7892,7 @@ fn run_cook_spine(
             current_diff: gate_feedback_current_diff(&promotion),
             // The form is publication evidence. A no-finalize Cook preserves
             // the verified patch for review without entering finalization.
-            require_review_form: !options.finalization.no_finalize,
+            require_review_form: !options.finalization.no_finalize && !review_form_unavailable,
             review_form: review_form.clone(),
             metadata: serde_json::json!({
                 "previous_failure_set": previous_failure_set,
@@ -7921,7 +7955,13 @@ fn run_cook_spine(
                 return Ok(report);
             }
             AgentTaskCookLoopStatus::GreenCompleted => {
-                return super::cook_delivery::ensure_published(&mut delivery, promotion);
+                let mut report = super::cook_delivery::ensure_published(&mut delivery, promotion)?;
+                if review_form_unavailable {
+                    report.value.terminal_phase = Some("review_form".to_string());
+                    report.value.stop_reason =
+                        Some("review form unavailable; published the gated candidate".to_string());
+                }
+                return Ok(report);
             }
             AgentTaskCookLoopStatus::BaselineRed => {
                 if promotion.finalization_eligible() {

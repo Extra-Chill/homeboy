@@ -5776,10 +5776,18 @@ fn cook_ai_lineage_with_stores(
         .iter()
         .map(|path| format!("Updated `{path}` in the delivered candidate."))
         .collect::<Vec<_>>();
-    let (summary, what_changed) = implementation
+    let (mut summary, what_changed) = implementation
         .form
         .map(|form| (form.summary, form.what_changed))
         .unwrap_or_else(|| (implementation.task_summary.clone(), changed));
+    if lifecycle_store
+        .read_record(successful_run_id)?
+        .metadata
+        .get("review_form_unavailable")
+        .is_some()
+    {
+        summary.push_str(" Review form unavailable. Publication is based on the authenticated candidate and passed deterministic gates.");
+    }
     let (tool, model) = implementation.model.map_or_else(
         || {
             (
@@ -5857,18 +5865,35 @@ fn retry_descends_from_recipe(
 /// Load and validate the AI-authored review form for a finalizing run.
 ///
 /// The cook loop's review-form gate guarantees a valid form before finalization
-/// is reached; this re-reads it from the terminal outcome as the single source
-/// of the reviewer-facing prose. Its absence/invalidity here is an invariant
-/// violation (the gate would have looped), surfaced as a hard error rather than
-/// silently falling back to machine-templated prose.
-///
-/// This is the one decision whether the agent's form is usable. A missing,
-/// malformed, invalid or incomplete form is refused with the publish step's
-/// remedy: an operator-supplied `--review-form`, which replaces it.
+/// is reached. An authenticated form-only failure is explicitly recorded on
+/// the candidate; in that case publish factual controller prose, not an
+/// invented agent review. Other missing or incomplete forms remain errors.
 fn review_form_for_finalization_in_store(
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     run_id: &str,
 ) -> Result<crate::agent_task_review_dossier::AiFilledReviewForm> {
+    let record = lifecycle_store.read_record(run_id)?;
+    if record.metadata.get("review_form_unavailable").is_some() {
+        let promotion = persisted_promotion_for_attempt_in_store(lifecycle_store, run_id)?
+            .ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "review_form",
+                    "review form unavailable without candidate proof",
+                    None,
+                    None,
+                )
+            })?;
+        if promotion.applied_with_passing_verdict() {
+            return Ok(crate::agent_task_review_dossier::AiFilledReviewForm {
+                pr_title: format!("fix: update {}", promotion.changed_files.first().map(String::as_str).unwrap_or("candidate").chars().take(200).collect::<String>()),
+                summary: "Review form unavailable. This candidate passed its deterministic gates; no AI review-form assessment is available.".to_string(),
+                what_changed: promotion.changed_files.iter().map(|path| format!("Updated {path}")).collect(),
+                verification: Vec::new(),
+                completion: Some(crate::agent_task_review_dossier::AiReviewCompletion::Complete),
+                incomplete_reason: String::new(),
+            });
+        }
+    }
     let outcome = selected_outcome_for_attempt_in_store(lifecycle_store, run_id)?;
     crate::agent_task_review_dossier::AiFilledReviewForm::from_outcome_outputs(&outcome.outputs)
         .and_then(|form| {
