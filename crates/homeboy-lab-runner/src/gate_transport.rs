@@ -99,6 +99,7 @@ fn is_pre_handoff_configuration_error(error: &Error) -> bool {
 /// report does not replace actionable diagnostics with a generic message.
 fn lab_gate_public_error(error: &Error, artifact_ref: String) -> Error {
     let mut details = serde_json::json!({
+        "entry_path": error.details.get("entry_path"),
         "stage": error.details.get("stage"),
         "gate_disposition": error.details.get("gate_disposition"),
         "job_id": error.details.get("job_id"),
@@ -949,6 +950,20 @@ mod public_error_tests {
         assert_eq!(public.details["diagnostic"]["code"], error.code.as_str());
         assert_eq!(public.details["diagnostic"]["details"]["job_id"], "job-1");
         assert_eq!(public.retryable, None);
+    }
+
+    #[test]
+    fn content_refusal_preserves_workspace_relative_entry_path() {
+        let mut error = Error::validation_invalid_argument(
+            "workspace",
+            "workspace content hash refused a symlink cycle at 'tracked/cycle'",
+            Some("tracked/cycle".into()),
+            None,
+        );
+        error.details["entry_path"] = serde_json::json!("tracked/cycle");
+        let public = lab_gate_public_error(&error, "homeboy://run/x/artifact/y".into());
+        assert!(public.message.contains("tracked/cycle"));
+        assert_eq!(public.details["entry_path"], "tracked/cycle");
     }
 
     #[test]
