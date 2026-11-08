@@ -199,6 +199,7 @@ pub(crate) mod structured_sidecar;
 pub mod tag_gap;
 pub mod trace_secrets;
 pub(crate) mod transient_workspace_policy;
+pub mod transport_json;
 
 /// Test-only fixtures and hermetic process contexts, shared across the workspace
 /// (core, cli, and feature crates all rely on the same isolation contract).
