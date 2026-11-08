@@ -487,6 +487,9 @@ pub struct ReplayProviderBoundaryArgs {
 }
 #[derive(Args, Debug, Default)]
 pub struct RecoverArgs {
+    /// Re-run recorded gates on the newest candidate, without a provider attempt.
+    #[arg(long)]
+    pub regate: bool,
     /// Durable Cook ID, Cook attempt ID or batch-child run ID.
     pub id: String,
     /// Report the step recovery would perform without performing it. A

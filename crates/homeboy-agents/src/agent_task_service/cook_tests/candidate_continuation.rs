@@ -633,7 +633,7 @@ fn every_wedged_cook_state_has_one_progressing_recovery_step() {
                 WedgedCook::DeferredGateBeforePublish => {
                     // The recipe's own gates re-run before anything publishes.
                     assert_eq!(plan.status, "gate_environment_unavailable", "{case:?}");
-                    assert_eq!(plan.step, CookRecoveryStep::Continue, "{case:?}");
+                    assert_eq!(plan.step, CookRecoveryStep::Regate, "{case:?}");
                     // The operator alternative is admitted for the same state.
                     let (report, exit) = crate::agent_task_service::recover_cook(
                         cook,

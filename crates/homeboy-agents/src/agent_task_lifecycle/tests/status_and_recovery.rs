@@ -913,32 +913,29 @@ fn candidate_adoption_reconciles_and_cancels_an_orphaned_gate_group() {
     command.args(["-lc", "sleep 30"]);
     homeboy_core::engine::command::isolate_process_tree(&mut command);
     let mut child = command.spawn().expect("spawn isolated fake gate");
+    let gate_pid = child.id();
+    // Reap concurrently: an unreaped child remains a group member on macOS.
+    let reaper = std::thread::spawn(move || child.wait());
     start_candidate_adoption_gate_in_store(
         &lifecycle_store,
         &record.run_id,
         "sleep 30",
-        child.id(),
+        gate_pid,
         1800,
     )
     .expect("persist gate identity");
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let _config = homeboy_core::test_support::EnvVarGuard::set(
-            homeboy_core::paths::HOMEBOY_CONFIG_ROOT_ENV,
-            lifecycle_store.roots().config(),
-        );
-        let _data = homeboy_core::test_support::EnvVarGuard::set(
-            homeboy_core::paths::HOMEBOY_DATA_DIR_ENV,
-            lifecycle_store.roots().data(),
-        );
-        rewrite_record_for_test(&record.run_id, |record| {
+    // Keep the fixture rooted in its own store. Waiting for the global
+    // environment lock can outlive the fake gate under parallel test load.
+    lifecycle_store
+        .mutate_record(&record.run_id, |record| {
             record
                 .candidate_adoption
                 .as_mut()
                 .expect("adoption")
                 .owner_pid = u32::MAX;
+            true
         })
-    })
-    .expect("simulate controller interruption");
+        .expect("simulate controller interruption");
 
     let interrupted = reconcile_status_in_store(
         &lifecycle_store,
@@ -973,10 +970,10 @@ fn candidate_adoption_reconciles_and_cancels_an_orphaned_gate_group() {
         "cancelled"
     );
     assert!(
-        !homeboy_core::process::isolated_process_group_is_running(child.id())
+        !homeboy_core::process::isolated_process_group_is_running(gate_pid)
             .expect("inspect terminated gate group")
     );
-    let _ = child.wait();
+    reaper.join().expect("join gate reaper").expect("reap gate");
 }
 
 /// Rooted in an explicit store rather than a mutated process environment

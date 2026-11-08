@@ -7107,6 +7107,7 @@ struct DeliveredCandidateFacts {
     /// Applied candidate whose gates failed or never completed, without
     /// replacement proof.
     applied_gate_failure: bool,
+    regate_ready: bool,
     /// Verified, unpublished candidate; its review form is publication input.
     verified_unpublished: bool,
     /// The verified candidate has no publishable review form: neither the
@@ -7212,12 +7213,23 @@ fn delivered_candidate_facts(
             .as_ref()
             .is_some_and(|candidate| !candidate.tree_sha.is_empty())
         && !delivery.is_some_and(super::CookDelivery::published);
-    let review_form_missing =
-        verified_unpublished && review_form_missing_in_store(lifecycle_store, record);
+    let review_form_missing = review_form_missing_in_store(lifecycle_store, record);
+    let regate_ready = applied_gate_failure
+        && !review_form_missing
+        && agent_incomplete_reason(lifecycle_store, &record.run_id).is_none()
+        && promotion.finalization_blocking_gates().all(|gate| {
+            matches!(
+                gate.status,
+                crate::agent_task_gate::AgentTaskGateStatus::Deferred
+                    | crate::agent_task_gate::AgentTaskGateStatus::Unavailable
+                    | crate::agent_task_gate::AgentTaskGateStatus::Skipped
+            )
+        });
     DeliveredCandidateFacts {
         applied_gate_failure,
+        regate_ready,
         verified_unpublished,
-        review_form_missing,
+        review_form_missing: verified_unpublished && review_form_missing,
     }
 }
 
@@ -7336,6 +7348,7 @@ fn cook_recovery_actions_with_prefix(
             agent_incomplete_reason,
             adoptable_candidate_ref,
             applied_gate_failure: delivered_candidate.applied_gate_failure,
+            regate_ready: delivered_candidate.regate_ready,
             verified_unpublished: delivered_candidate.verified_unpublished,
             review_form_missing: delivered_candidate.review_form_missing,
         });
