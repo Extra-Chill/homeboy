@@ -2142,6 +2142,19 @@ enum LifecycleContinuationTransition<'a> {
     Fail(&'a str),
 }
 
+/// The existing claimed continuation is live only while its recorded owner lives.
+/// Readers use the same ownership evidence as continuation admission.
+pub(crate) fn live_cook_continuation(
+    record: &agent_task_lifecycle::AgentTaskRunRecord,
+) -> Option<&Value> {
+    let value = lifecycle_continuation(record)?;
+    (lifecycle_continuation_state(Some(value)) == CookContinuationState::Claimed
+        && value["owner_pid"]
+            .as_u64()
+            .is_some_and(|pid| u32::try_from(pid).is_ok_and(homeboy_core::process::pid_is_running)))
+    .then_some(value)
+}
+
 fn lifecycle_continuation(record: &agent_task_lifecycle::AgentTaskRunRecord) -> Option<&Value> {
     record.metadata.get(LIFECYCLE_CONTINUATION_KEY)
 }
