@@ -11,6 +11,7 @@ pub use cook_ci::{cook_ci_status, repoll_cook_ci};
 mod cook_activity;
 mod cook_adoption;
 mod cook_baseline;
+pub(crate) use cook_baseline::compare_gate_failures_to_verified_base;
 mod cook_budget;
 mod cook_delivery;
 /// The named readers of the artifacts the `cook_delivery` record holds.

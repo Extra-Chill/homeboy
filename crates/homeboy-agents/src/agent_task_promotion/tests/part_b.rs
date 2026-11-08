@@ -1096,6 +1096,92 @@ fn legacy_post_apply_checkpoint_recovers_only_with_corrected_non_main_base() {
 }
 
 #[test]
+fn operator_gates_compare_candidate_failures_to_the_immutable_base() {
+    let _home = gate_home();
+    for (command, expected_gate, expected_promotion) in [
+        (
+            "echo inherited >&2; exit 1",
+            "accepted_inherited_failure",
+            AgentTaskPromotionStatus::Applied,
+        ),
+        (
+            "test \"$(cat src/lib.rs)\" = old",
+            "failed",
+            AgentTaskPromotionStatus::GateFailed,
+        ),
+        ("true", "succeeded", AgentTaskPromotionStatus::Applied),
+    ] {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let target = temp.path().join("target");
+        std::fs::create_dir(&target).unwrap();
+        git(&target, &["init"]);
+        git(&target, &["config", "user.email", "test@example.com"]);
+        git(&target, &["config", "user.name", "Test"]);
+        std::fs::create_dir_all(target.join("src")).unwrap();
+        std::fs::write(target.join("src/lib.rs"), "old\n").unwrap();
+        git(&target, &["add", "."]);
+        git(&target, &["commit", "-m", "base"]);
+        std::fs::write(target.join("src/lib.rs"), "new\n").unwrap();
+        let candidate =
+            crate::agent_task_promotion::candidate_fingerprint(target.to_string_lossy().as_ref())
+                .unwrap();
+        let (source_path, source) = write_patch_source(&temp);
+        let options = super::resume_candidate::bind_candidate(
+            AgentTaskPromotionRequest {
+                source,
+                source_run_id: Some("operator-gate-run".to_string()),
+                source_path: Some(source_path),
+                source_worktree_path: None,
+                base_ref: None,
+                task_base_sha: None,
+                candidate_ref: None,
+                to_worktree: "repo@operator-gate".to_string(),
+                task_id: None,
+                artifact_id: None,
+                dry_run: false,
+                gates: VerifyGateOptions {
+                    verify: vec![command.to_string()],
+                    rerun_completed_gates: true,
+                    ..Default::default()
+                },
+                provider_invocation: None,
+                repository_integrity_evidence: None,
+            },
+            &target,
+        );
+        let previous = serde_json::json!({
+            "schema": "homeboy/agent-task-promotion-report/v1",
+            "status": "applied",
+            "source_run_id": "operator-gate-run",
+            "source": { "task_id": "task-1" },
+            "to_worktree": "repo@operator-gate",
+            "verified_base": {"base": "HEAD", "sha": serde_json::from_str::<Value>(&options.source).unwrap()["candidate"]["base_sha"]},
+            "target": { "worktree": "repo@operator-gate", "path": target },
+            "candidate": serde_json::from_str::<Value>(&options.source).unwrap()["candidate"],
+            "provenance": { "candidate": candidate },
+        });
+        let report = resume_promoted_patch(options, &target, &previous).unwrap();
+        assert_eq!(report.status, expected_promotion, "{command}");
+        assert_eq!(
+            serde_json::to_value(report.deterministic_gates[0].status).unwrap(),
+            expected_gate,
+            "{command}"
+        );
+        assert_eq!(report.finalization_eligible(), expected_gate != "failed");
+        assert_eq!(
+            report.deterministic_gates[0].baseline_comparison.is_some(),
+            expected_gate != "succeeded"
+        );
+        if expected_gate == "accepted_inherited_failure" {
+            assert!(report
+                .operator_notification
+                .message
+                .contains("baseline-red"));
+        }
+    }
+}
+
+#[test]
 fn resume_applied_promotion_reruns_gates_for_exact_dirty_candidate() {
     let _home = gate_home();
     let temp = tempfile::tempdir().expect("tempdir");
