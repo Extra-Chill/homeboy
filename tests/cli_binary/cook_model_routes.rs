@@ -495,6 +495,7 @@ fn run_preview(home: &TempDir, model: &str, acknowledged: bool) -> Output {
         command.arg("--acknowledge-model-override");
     }
     command
+        .env("PATH", super::fake_pi::offline_github(home.path()))
         .env("HOME", home.path())
         .env("XDG_CONFIG_HOME", home.path().join(".config"))
         .env("XDG_DATA_HOME", home.path().join(".local/share"))
