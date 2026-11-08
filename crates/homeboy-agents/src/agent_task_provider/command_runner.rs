@@ -291,6 +291,11 @@ fn outcome_is_transient(outcome: &AgentTaskOutcome) -> bool {
 /// substantive no-change candidate. Do not classify recovered tool errors from
 /// earlier turns: only the surfaced terminal report is authoritative here.
 fn classify_environment_stop(outcome: &mut AgentTaskOutcome) {
+    // A produced patch is never discarded on the strength of provider prose;
+    // only a stop without a candidate can be an environment failure.
+    if outcome.candidate.is_some() {
+        return;
+    }
     // A provider that explicitly completed despite a recovered tool error is
     // not an environment-caused stop.
     if outcome
@@ -325,7 +330,6 @@ fn classify_environment_stop(outcome: &mut AgentTaskOutcome) {
     }
     outcome.status = AgentTaskOutcomeStatus::Failed;
     outcome.failure_classification = Some(AgentTaskFailureClassification::CapabilityMissing);
-    outcome.candidate = None;
     if !outcome.metadata.is_object() {
         outcome.metadata = json!({});
     }
