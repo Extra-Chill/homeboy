@@ -63,6 +63,25 @@ fn prepare_empty_admission(id: &str) {
     .unwrap();
 }
 
+#[test]
+fn admitted_missing_argument_blocker_retains_details() {
+    with_isolated_home(|_| {
+        prepare_empty_admission("missing-args");
+        let mut record = test_lifecycle_store().read_record("missing-args").unwrap();
+        record.metadata["pre_execution_failure"] = serde_json::json!({
+            "error_code": "validation.missing_argument",
+            "message": "Missing required argument",
+            "details": {"args": ["prompt", "component"]}
+        });
+        let run = crate::orchestration::project_record(&record, None).unwrap();
+        let blocker = serde_json::to_value(run.blocker.unwrap()).unwrap();
+        assert_eq!(
+            blocker["details"]["args"],
+            serde_json::json!(["prompt", "component"])
+        );
+    });
+}
+
 fn work_intent_absent(store: &agent_task_lifecycle::AgentTaskLifecycleStore, id: &str) -> bool {
     store
         .open_observation_readonly()

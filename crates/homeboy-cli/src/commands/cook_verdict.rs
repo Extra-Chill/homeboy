@@ -342,6 +342,7 @@ mod tests {
     fn blocked_finalization_names_the_step_and_its_continuation() {
         let mut run = resource(ControlPlaneRunState::CandidateRecoverable);
         run.blocker = Some(homeboy_control_plane_contract::ControlPlaneBlocker {
+            details: None,
             code: Some("finalization".to_string()),
             message: "HEAD is behind or diverged from resolved base `main`".to_string(),
             state: None,

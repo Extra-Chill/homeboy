@@ -4276,6 +4276,7 @@ fn project_summary_fields(
         resource.recovery = None;
         resource.phase = Some("cancelled".into());
         resource.blocker = Some(ControlPlaneBlocker {
+            details: None,
             code: Some("mission_cancelled".into()),
             message: redacted_bounded(
                 &format!(
@@ -4890,6 +4891,14 @@ fn newest_timestamp(existing: Option<&str>, observed: Option<&str>) -> Option<St
     }
 }
 
+fn missing_argument_details(details: &Value) -> Option<Value> {
+    details.get("args").map(|args| {
+        serde_json::json!({
+            "args": homeboy_core::redaction::redact_json(args)
+        })
+    })
+}
+
 fn blocker(
     record: &AgentTaskRunRecord,
     delivery: Option<&CookDelivery>,
@@ -4901,8 +4910,9 @@ fn blocker(
             .or_else(|| quarantine.get("summary").and_then(|value| value.as_str()))
             .unwrap_or("run is quarantined");
         return Some(ControlPlaneBlocker {
+            details: None,
             code: Some("quarantine".to_string()),
-            message: redacted_bounded(message, MESSAGE_BOUND),
+            message: homeboy_core::redaction::redact_string(message),
             state: None,
             reason: Some(redacted_bounded(message, MESSAGE_BOUND)),
             retry: None,
@@ -4912,6 +4922,7 @@ fn blocker(
     }
     if let Some(reason) = record.stale_running_reason() {
         return Some(ControlPlaneBlocker {
+            details: None,
             code: Some("stale".to_string()),
             message: redacted_bounded(reason, MESSAGE_BOUND),
             state: None,
@@ -4925,8 +4936,9 @@ fn blocker(
         if let Some(failure) = record.metadata.get("execution_step_failure") {
             if let Some(message) = failure["message"].as_str() {
                 return Some(ControlPlaneBlocker {
+                    details: missing_argument_details(&failure["diagnostic"]["details"]),
                     code: failure["diagnostic"]["code"].as_str().map(str::to_string),
-                    message: redacted_bounded(message, MESSAGE_BOUND),
+                    message: homeboy_core::redaction::redact_string(message),
                     state: failure["classification"].as_str().map(str::to_string),
                     reason: Some(redacted_bounded(message, MESSAGE_BOUND)),
                     retry: None,
@@ -4941,6 +4953,7 @@ fn blocker(
             unmaterialized_admission_blocker(record, admission)
         {
             return Some(ControlPlaneBlocker {
+                details: None,
                 code: Some(state.clone()),
                 message: reason.clone(),
                 state: Some(state),
@@ -4964,8 +4977,9 @@ fn blocker(
         .filter(|value| !value.trim().is_empty())
     {
         return Some(ControlPlaneBlocker {
+            details: None,
             code: Some("controller_failure".to_string()),
-            message: redacted_bounded(message, MESSAGE_BOUND),
+            message: homeboy_core::redaction::redact_string(message),
             state: None,
             reason: None,
             retry: None,
@@ -4979,6 +4993,7 @@ fn blocker(
     ) {
         if let Some(stop) = homeboy_runner_contract::find_resource_guard_stop(&record.metadata) {
             return Some(ControlPlaneBlocker {
+                details: None,
                 code: Some(stop.violation.blocker_code()),
                 message: redacted_bounded(&stop.violation.observed_summary(), MESSAGE_BOUND),
                 state: None,
@@ -4996,12 +5011,13 @@ fn blocker(
             .filter(|value| !value.trim().is_empty())
         {
             return Some(ControlPlaneBlocker {
+                details: missing_argument_details(&failure["details"]),
                 code: failure
                     .get("error_code")
                     .and_then(|value| value.as_str())
                     .filter(|value| !value.trim().is_empty())
                     .map(|value| bounded(value, STATE_BOUND)),
-                message: redacted_bounded(message, MESSAGE_BOUND),
+                message: homeboy_core::redaction::redact_string(message),
                 state: None,
                 reason: None,
                 retry: None,
@@ -5016,8 +5032,9 @@ fn blocker(
         .and_then(|adoption| adoption.terminal_error.as_deref())
         .filter(|value| !value.trim().is_empty())
         .map(|message| ControlPlaneBlocker {
+            details: None,
             code: Some("adoption".to_string()),
-            message: redacted_bounded(message, MESSAGE_BOUND),
+            message: homeboy_core::redaction::redact_string(message),
             state: None,
             reason: None,
             retry: None,
@@ -5076,6 +5093,7 @@ fn recorded_failure_blocker(
         }
     };
     Some(ControlPlaneBlocker {
+        details: None,
         code: Some(bounded(&format!("outcome.{class}"), STATE_BOUND)),
         message: redacted_bounded(&message, MESSAGE_BOUND),
         state: Some(outcome.status.as_str().to_string()),
@@ -5299,8 +5317,9 @@ fn heartbeat_at(record: &AgentTaskRunRecord) -> Option<String> {
 /// carries the next legal action, as it does for resource-guard stops.
 fn delivery_blocker(blocker: &CookDeliveryBlocker) -> ControlPlaneBlocker {
     ControlPlaneBlocker {
+        details: None,
         code: Some(blocker.code.as_str().to_string()),
-        message: redacted_bounded(&blocker.message, MESSAGE_BOUND),
+        message: homeboy_core::redaction::redact_string(&blocker.message),
         state: None,
         reason: blocker
             .next_action
@@ -5579,8 +5598,9 @@ fn generic_observation_run_summary(
         .pointer("/control_plane/blocker")
         .and_then(Value::as_str)
         .map(|message| ControlPlaneBlocker {
+            details: None,
             code: None,
-            message: redacted_bounded(message, MESSAGE_BOUND),
+            message: homeboy_core::redaction::redact_string(message),
             state: None,
             reason: None,
             retry: None,

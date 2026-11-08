@@ -186,10 +186,33 @@ fn render_capacity_summary(payload: &Value) -> Option<String> {
         return None;
     }
     let routes = payload.get("routes").and_then(Value::as_array)?;
-    if routes.is_empty() {
-        return Some("Agent task capacity: no configured provider routes".to_string());
-    }
     let mut lines = Vec::new();
+    for route in payload
+        .get("lab_routes")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let runner = route
+            .get("runner_id")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let slots = |key| {
+            route
+                .get(key)
+                .and_then(Value::as_u64)
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "unknown".to_string())
+        };
+        lines.push(format!(
+            "Lab/{runner}: {} active slots, {} free slots",
+            slots("active_slots"),
+            slots("free_slots")
+        ));
+    }
+    if routes.is_empty() {
+        lines.push("Agent task capacity: no configured provider routes".to_string());
+    }
     for route in routes {
         let backend = capacity_route_label(route);
         let capacity = route.get("capacity").unwrap_or(&Value::Null);
@@ -626,6 +649,53 @@ fn render_cook_preview_summary(payload: &Value) -> Option<String> {
     Some(finish(lines))
 }
 
+#[test]
+fn agent_task_status_truncates_only_at_word_boundaries() {
+    for (text, limit, expected) in [
+        ("records a concrete remedy", 18, "records a…"),
+        ("短い 言葉 長い説明", 7, "短い 言葉…"),
+        ("unbrokenword", 5, "…"),
+        ("short text", 10, "short text"),
+    ] {
+        assert_eq!(compact_status_text(text, limit), expected);
+    }
+    let message = "records a concrete remedy ".repeat(20);
+    let payload = serde_json::json!({"schema": "homeboy/control-plane-run/v1", "run": "run", "state": "failed", "blocker": {"message": message}});
+    let summary = render_status_summary(&payload).unwrap();
+    assert!(summary.contains('…'));
+    assert_eq!(payload["blocker"]["message"], message);
+}
+
+#[test]
+fn agent_task_capacity_names_lab_runner_and_slots() {
+    let payload = serde_json::json!({
+        "schema": "homeboy/agent-task-capacity/v1",
+        "routes": [{"backend": "roadie", "model": "subagent"}],
+        "lab_routes": [{"runner_id": "lab-a", "active_slots": 2, "free_slots": 3}]
+    });
+    let summary = render_capacity_summary(&payload).unwrap();
+    assert!(summary.contains("Lab/lab-a: 2 active slots, 3 free slots"));
+    assert!(summary.contains("capacity not published"));
+}
+
+#[test]
+fn agent_task_status_names_missing_arguments() {
+    let payload = serde_json::json!({"schema": "homeboy/control-plane-run/v1", "run": "run", "state": "failed",
+        "blocker": {"message": "Missing required argument", "code": "validation.missing_argument", "details": {"args": ["prompt", "component"]}}});
+    assert!(render_status_summary(&payload)
+        .unwrap()
+        .contains("Missing required argument: prompt, component"));
+}
+
+fn compact_status_text(text: &str, limit: usize) -> String {
+    if text.chars().count() <= limit {
+        return text.to_string();
+    }
+    let prefix: String = text.chars().take(limit.saturating_sub(1)).collect();
+    let boundary = prefix.rfind(char::is_whitespace).unwrap_or(0);
+    format!("{}…", prefix[..boundary].trim_end())
+}
+
 fn render_status_summary(payload: &Value) -> Option<String> {
     if string_value(payload, &["schema"])? != "homeboy/control-plane-run/v1" {
         return None;
@@ -660,6 +730,20 @@ fn render_status_summary(payload: &Value) -> Option<String> {
         }
     }
     if let Some(blocker) = string_value(payload, &["blocker", "message"]) {
+        let args = payload
+            .pointer("/blocker/details/args")
+            .and_then(Value::as_array)
+            .map(|args| {
+                args.iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            });
+        let full = match args.filter(|args| !args.is_empty()) {
+            Some(args) => format!("{blocker}: {args}"),
+            None => blocker.to_string(),
+        };
+        let blocker = compact_status_text(&full, 240);
         if let Some(code) = string_value(payload, &["blocker", "code"])
             .filter(|code| code.starts_with("resource_guard."))
         {
