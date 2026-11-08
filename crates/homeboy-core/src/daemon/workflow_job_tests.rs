@@ -30,6 +30,7 @@ fn request(definition: Value, cwd: &Path) -> WorkflowJobRequest {
         instance: definition.instance_id(&inputs, None),
         instance_name: None,
         resumed_from: None,
+        definition_source: None,
         definition_digest: definition.digest(),
         definition,
         inputs,
@@ -1093,5 +1094,56 @@ fn a_step_that_readmits_the_definition_chains_child_instances() {
         }
         assert_eq!(watched["instance"], json!(grandchild.instance));
         assert_eq!(watched["status"], "succeeded");
+    });
+}
+
+#[test]
+fn native_next_pass_forwards_inputs_and_stops_a_stable_chain() {
+    with_isolated_home(|home| {
+        let store = JobStore::open_without_reconciliation(
+            home.path().join(crate::paths::OBSERVATION_DB_FILENAME),
+        )
+        .unwrap()
+        .with_daemon_lease("workflow-next-pass-test".into());
+        for (id, cap, stable, expected) in [("stable", 8, 3, 3), ("capped", 2, 8, 2)] {
+            let original = request(
+                json!({
+                    "schema": "homeboy/workflow/v1", "id": id,
+                    "inputs": {"carried": {"default": "keep"}, "changed": {"default": "first"}},
+                    "next_pass": {"max_iterations": cap,
+                        "inputs": {"changed": "{{steps.sample.output/value}}"},
+                        "stop_unchanged": {"step": "sample", "output": "/value", "passes": stable}},
+                    "steps": [{"id": "sample", "exec": sh("printf '{\"value\":42}' > \"$HOMEBOY_STEP_OUTPUT\"")}]
+                }),
+                home.path(),
+            );
+            let mut current = original.clone();
+            let job = admit(&store, &current);
+            crate::daemon::start_controller_job(job, &store).unwrap();
+            for iteration in 1..=expected {
+                let job = store.controller_job_for_key(&current.instance).unwrap();
+                assert_eq!(
+                    wait_terminal(&store, job.id, 30).status,
+                    JobStatus::Succeeded
+                );
+                let checkpoint = store
+                    .controller_job_state(job.id)
+                    .unwrap()
+                    .checkpoint
+                    .unwrap();
+                assert_eq!(checkpoint["iteration"], iteration);
+                assert_eq!(current.inputs["carried"], "keep");
+                let children = child_instances(&store, &current.instance);
+                if iteration == expected {
+                    assert!(children.is_empty());
+                } else {
+                    assert_eq!(children.len(), 1);
+                    let (_, child) = instance_job(&store, &children[0]).unwrap();
+                    current = WorkflowJobRequest::parse(&child.request).unwrap();
+                    assert_eq!(current.inputs["changed"], 42);
+                    assert_eq!(current.inputs["previous"]["outputs"]["sample"]["value"], 42);
+                }
+            }
+        }
     });
 }
