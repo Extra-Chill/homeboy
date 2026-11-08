@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.25.9] - 2026-11-08
+
+### Fixed
+- skip PR comments from superseded runs via --expected-head-sha
+
 ## [2.25.8] - 2026-11-08
 
 ### Fixed
