@@ -109,6 +109,7 @@ pub(super) fn run_pr(args: PrArgs) -> CmdResult<GitCommandOutput> {
             number,
             body,
             body_file,
+            expected_head_sha,
             key,
             comment_key,
             section_key,
@@ -160,6 +161,7 @@ pub(super) fn run_pr(args: PrArgs) -> CmdResult<GitCommandOutput> {
                     number,
                     body,
                     mode,
+                    expected_head_sha,
                     path,
                 },
             )?;
