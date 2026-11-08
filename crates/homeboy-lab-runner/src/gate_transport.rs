@@ -550,22 +550,8 @@ fn execute_owned(
         .ok_or_else(|| {
             Error::invalid_argument("gate.receipt", "terminal runner gate has no receipt stream")
         })?;
-    let value: serde_json::Value = serde_json::from_str(stdout).map_err(|error| {
-        Error::invalid_argument(
-            "gate.receipt",
-            format!(
-                "Lab gate stdout truncated/unparseable ({} bytes): {error}; {}",
-                stdout.len(),
-                if request.visibility
-                    == homeboy_agents::agent_tasks::gate::AgentTaskGateVisibility::Private
-                {
-                    "private terminal stderr withheld"
-                } else {
-                    "terminal stderr retained in diagnostic artifact"
-                }
-            ),
-        )
-    })?;
+    let value: serde_json::Value =
+        homeboy_core::transport_json::decode("gate_stdout", stdout.as_bytes())?;
     let location = value.get("data").unwrap_or(&value);
     if location.get("schema").and_then(serde_json::Value::as_str)
         != Some("homeboy/lab-gate-receipt-location/v1")
@@ -607,12 +593,7 @@ fn execute_owned(
             "terminal gate artifact content identity changed during transport",
         ));
     }
-    let mut receipt: LabGateReceipt = serde_json::from_slice(&bytes).map_err(|error| {
-        Error::invalid_argument(
-            "gate.receipt",
-            format!("invalid terminal Lab gate receipt: {error}"),
-        )
-    })?;
+    let mut receipt: LabGateReceipt = homeboy_core::transport_json::decode("gate_receipt", &bytes)?;
     request.verify_receipt(&receipt)?;
     if (receipt.report.status == homeboy_agents::agent_tasks::gate::AgentTaskGateStatus::Succeeded
         || receipt

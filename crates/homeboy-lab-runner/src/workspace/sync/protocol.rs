@@ -96,7 +96,7 @@ pub(super) fn io(error: impl std::fmt::Display) -> Error {
 }
 
 pub(super) fn json<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T> {
-    serde_json::from_slice(bytes).map_err(|error| Error::internal_json(error.to_string(), None))
+    homeboy_core::transport_json::decode("workspace_materialization_protocol", bytes)
 }
 
 pub(super) fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {
