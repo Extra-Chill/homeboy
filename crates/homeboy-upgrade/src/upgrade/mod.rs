@@ -2,6 +2,7 @@ mod admission;
 mod constants;
 mod execution;
 pub mod extension_update_check;
+mod github_api;
 mod helpers;
 mod operation;
 mod planning;

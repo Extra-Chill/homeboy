@@ -36,16 +36,7 @@ pub fn current_build_version() -> String {
 }
 
 fn fetch_latest_github_version_at(url: &str) -> Result<String> {
-    let client = reqwest::blocking::Client::builder()
-        .user_agent(format!("homeboy/{}", VERSION))
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .map_err(|e| Error::internal_io(e.to_string(), Some("create HTTP client".to_string())))?;
-
-    let response: GitHubRelease = client
-        .get(url)
-        .send()
-        .map_err(|e| Error::internal_io(e.to_string(), Some("query GitHub releases".to_string())))?
+    let response: GitHubRelease = super::github_api::fetch(url, Duration::from_secs(10))?
         .json()
         .map_err(|e| {
             Error::internal_json(
@@ -75,15 +66,10 @@ pub fn fetch_latest_version() -> Result<String> {
 pub fn fetch_latest_runtime_compatibility(
     expected_version: &str,
 ) -> Result<Option<RuntimeCompatibility>> {
-    let client = reqwest::blocking::Client::builder()
-        .user_agent(format!("homeboy/{}", VERSION))
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .map_err(|e| Error::internal_io(e.to_string(), Some("create HTTP client".to_string())))?;
-    let release: GitHubRelease = client
-        .get(GITHUB_RELEASES_API)
-        .send()
-        .map_err(|e| Error::internal_io(e.to_string(), Some("query GitHub releases".to_string())))?
+    let url = GITHUB_RELEASES_API;
+    #[cfg(test)]
+    let url = &release_catalog::test_release_url(url);
+    let release: GitHubRelease = super::github_api::fetch(url, Duration::from_secs(10))?
         .json()
         .map_err(|e| {
             Error::internal_json(
