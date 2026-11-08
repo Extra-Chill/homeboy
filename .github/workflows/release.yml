@@ -179,6 +179,10 @@ jobs:
       - name: Dry-run release check
         id: release-check
         if: inputs.release_tag == '' && steps.attach.outputs.superseded != 'true' && steps.failed-release.outputs.blocked != 'true'
+        # A concurrent release can push its tag between checkout and this dry
+        # run, which then fails on a tag unreachable from HEAD (#17601). The
+        # decide step re-measures the branch tip and fails on anything else.
+        continue-on-error: true
         uses: Extra-Chill/homeboy-action@v2
         with:
           source: '.'
@@ -224,6 +228,21 @@ jobs:
           SKIPPED_REASON="${{ steps.release-check.outputs['skipped-reason'] }}"
           SUPERSEDED="${{ steps.attach.outputs.superseded }}"
           BRANCH_TIP="${{ steps.attach.outputs['branch-tip'] }}"
+
+          # A failed dry run is superseded only when the branch tip has moved
+          # past HEAD since checkout: the newer tip's run owns the release
+          # (#17601). Otherwise the failure stands.
+          if [ "${DRY_RUN_OUTCOME}" = "failure" ]; then
+            git fetch -q origin "${RELEASE_BRANCH}"
+            BRANCH_TIP="$(git rev-parse "origin/${RELEASE_BRANCH}")"
+            if [ "${BRANCH_TIP}" != "${HEAD_SHA}" ]; then
+              echo "should-release=false" >> "$GITHUB_OUTPUT"
+              echo "::notice::Superseded during the dry run: ${HEAD_SHA:0:8} is behind the ${RELEASE_BRANCH} tip ${BRANCH_TIP:0:8}, whose own run owns this release."
+              exit 0
+            fi
+            echo "::error::Release dry run failed at the ${RELEASE_BRANCH} tip ${HEAD_SHA:0:8}; see the 'Dry-run release check' step."
+            exit 1
+          fi
 
           # A superseded push is a MEASURED negative, and the only one this job
           # measures itself rather than reading back from the dry run.
