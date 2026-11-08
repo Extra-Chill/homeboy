@@ -15,7 +15,7 @@
 //! | 7 | Restart in place over a dead admission owner (#15456) | `restart_in_place_takes_admission_from_a_dead_generation` |
 //! | 8 | Dead remote generation with a stale job reconciles (#15556, #17429) | in-process: `connection_dead_lease_attestation` tests (`runner reconcile --attest-absent`) |
 //! | 9 | Host-service teardown (whole process group SIGKILL) recovers | `whole_daemon_process_group_killed_recovers_without_edits` |
-//! | 10 | Stop and restart in place mid-workflow, twice, resumes in one store (#15936) | `stop_and_restart_in_place_resumes_in_flight_work_every_time` |
+//! | 10 | Stop and restart in place mid-workflow, twice; exec and Cook children resume (#15936, #17440) | `stop_and_restart_in_place_resumes_in_flight_work_every_time` and `stop_and_restart_in_place_readopts_in_flight_workflow_cook` |
 //! | 11 | Cook intent committed, daemon SIGKILL before delivery (#15804) | `execution_step_chaos::committed_execution_intent_survives_daemon_sigkill_before_delivery` (fixture binary target) |
 //! | 12 | Cook execution-step child SIGKILL before publication; one recovery | `execution_step_chaos::killed_execution_step_child_recovers_once` |
 //! | 13 | Daemon process-group SIGKILL with Cook step held; adopt once | `execution_step_chaos::execution_step_survives_daemon_process_group_sigkill` |
@@ -418,4 +418,169 @@ fn stop_and_restart_in_place_resumes_in_flight_work_every_time() {
     let _ = homeboy_at(&bin, home.path())
         .args(["daemon", "stop"])
         .status();
+}
+
+/// Case 10, Cook variant (#17440): the workflow's `cook --wait` observer
+/// and its provider must both survive requested stops in place.
+#[cfg(unix)]
+#[test]
+fn stop_and_restart_in_place_readopts_in_flight_workflow_cook() {
+    use homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore;
+    use homeboy_core::test_support::{HermeticTestContext, TestBinary};
+    use serde_json::{json, Value};
+
+    let context = HermeticTestContext::new();
+    let (_repo_guard, checkout) =
+        homeboy_core::test_support::shared_committed_git_repo_fixture("workflow-chaos");
+    std::fs::create_dir_all(checkout.join("docs")).unwrap();
+    std::fs::write(checkout.join("docs/agent-task-smoke.md"), "before\n").unwrap();
+    homeboy_core::test_support::run_git_fixture_command(&checkout, &["add", "."]);
+    homeboy_core::test_support::run_git_fixture_command(&checkout, &["commit", "-m", "seed patch"]);
+    homeboy_core::test_support::run_git_fixture_command(
+        &checkout,
+        &["remote", "add", "origin", checkout.to_str().unwrap()],
+    );
+    let gate = context.root().join("provider.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&gate).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let ledger = context.root().join("provider-executions");
+    let command = || {
+        let mut cmd = context.command(TestBinary::HomeboyFixture);
+        cmd.env("HOMEBOY_FIXTURE_PROVIDER_RELEASE_SOCKET", &gate)
+            .env("HOMEBOY_FIXTURE_PROVIDER_EXECUTIONS_FILE", &ledger);
+        cmd
+    };
+    let run = |args: &[&str]| -> Value {
+        let output = command().args(args).output().unwrap();
+        assert!(
+            output.status.success(),
+            "{args:?}: {} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).unwrap()
+    };
+    // Stop the daemon on assertion failure too; dropping the socket releases
+    // the held provider if the test cannot send its normal release token.
+    struct Cleanup<'a>(&'a HermeticTestContext);
+    impl Drop for Cleanup<'_> {
+        fn drop(&mut self) {
+            let _ = self
+                .0
+                .command(TestBinary::HomeboyFixture)
+                .args(["daemon", "stop"])
+                .output();
+        }
+    }
+    let _cleanup = Cleanup(&context);
+    run(&[
+        "component",
+        "create",
+        "--local-path",
+        checkout.to_str().unwrap(),
+    ]);
+    run(&[
+        "worktree",
+        "create",
+        "workflow-chaos",
+        "--branch",
+        "task",
+        "--from",
+        "HEAD",
+    ]);
+    let worktree = checkout.parent().unwrap().join("workflow-chaos@task");
+    std::fs::write(
+        context.config_dir().join("homeboy.json"),
+        r#"{"retention":{"reconstructable_artifact_reserve_bytes":0}}"#,
+    )
+    .unwrap();
+    run(&["daemon", "ensure-running"]);
+    let definition = context.root().join("cook-workflow.json");
+    std::fs::write(&definition, serde_json::to_vec(&json!({
+        "schema": "homeboy/workflow/v1", "id": "cook-restart-proof",
+        "env": {"public": ["HOMEBOY_FIXTURE_PROVIDER_RELEASE_SOCKET", "HOMEBOY_FIXTURE_PROVIDER_EXECUTIONS_FILE"]},
+        "steps": [{"id": "cook", "cook": {
+            "repo": "workflow-chaos", "base": "main", "backend": "fixture", "placement": "local",
+            "model": "fixture-model", "prompt": "make the deterministic fixture patch",
+            "cwd": worktree, "to-worktree": worktree, "verify": "true",
+            "max-attempts": 1, "no-finalize": true
+        }}]
+    })).unwrap()).unwrap();
+    let admitted = run(&["workflow", "run", definition.to_str().unwrap()]);
+    let instance = admitted["data"]["instance"].as_str().unwrap();
+    let wait = |what: &str, predicate: &mut dyn FnMut() -> bool| {
+        let deadline = Instant::now() + Duration::from_secs(65);
+        while !predicate() {
+            assert!(
+                Instant::now() < deadline,
+                "{what}: {}",
+                run(&["runs", "show", instance])
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    };
+    let mut provider = None;
+    wait("Cook provider held", &mut || {
+        provider = listener.accept().ok().map(|(stream, _)| stream);
+        provider.is_some()
+    });
+    let before = run(&["runs", "show", instance]);
+    let step = before["data"]["steps"]["cook"].clone();
+    let cook_id = step["run_id"].as_str().unwrap();
+    let store = AgentTaskLifecycleStore::new(context.path_roots());
+    let run_id = store.read_cook_index(cook_id).unwrap().latest_run_id;
+    assert!(!store.read_record(&run_id).unwrap().state().is_terminal());
+    for _ in 0..2 {
+        run(&["daemon", "stop"]);
+        run(&["daemon", "ensure-running"]);
+        let after = run(&["runs", "show", instance]);
+        assert_eq!(after["data"]["steps"]["cook"]["run_id"], step["run_id"]);
+        assert_eq!(
+            after["data"]["steps"]["cook"]["job"]["job_id"],
+            step["job"]["job_id"]
+        );
+        assert_eq!(after["data"]["steps"]["cook"]["attempt"], 1);
+        assert_eq!(
+            store.read_cook_index(cook_id).unwrap().latest_run_id,
+            run_id
+        );
+        assert!(!store.read_record(&run_id).unwrap().state().is_terminal());
+        assert_eq!(std::fs::read_to_string(&ledger).unwrap().lines().count(), 1);
+    }
+    use std::io::Write;
+    provider.unwrap().write_all(&[1]).unwrap();
+    wait("workflow records Cook's real terminal outcome", &mut || {
+        run(&["runs", "show", instance])["data"]["status"] == "succeeded"
+    });
+    let finished = run(&["runs", "show", instance]);
+    assert_eq!(finished["data"]["steps"]["cook"]["attempt"], 1);
+    assert_eq!(finished["data"]["steps"]["cook"]["outcome"], "succeeded");
+    assert_eq!(finished["data"]["steps"]["cook"]["run_id"], cook_id);
+    assert_eq!(
+        store.read_cook_index(cook_id).unwrap().latest_run_id,
+        run_id
+    );
+    assert_eq!(
+        serde_json::to_value(store.read_record(&run_id).unwrap().state()).unwrap(),
+        "succeeded"
+    );
+    assert_eq!(std::fs::read_to_string(ledger).unwrap().lines().count(), 1);
+    // Do not mistake `runs show`'s own successful exit for the workload's.
+    let key = step["key"].as_str().unwrap().replace('/', "__");
+    let output: Value = serde_json::from_slice(
+        &std::fs::read(
+            context
+                .artifact_dir()
+                .join("workflows")
+                .join(instance)
+                .join(key)
+                .join("output.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        output["exit_code"], 0,
+        "Cook's actual command result: {output}"
+    );
 }
