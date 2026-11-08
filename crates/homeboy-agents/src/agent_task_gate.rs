@@ -233,6 +233,19 @@ pub struct AgentTaskGateEnvironmentPolicy {
     /// never receive a writable path to the controller-owned source.
     #[serde(default)]
     pub extension_inputs: Vec<AgentTaskGateExtensionInput>,
+    #[serde(default)]
+    pub requirements: AgentTaskGateRequirements,
+}
+
+/// Explicit host inputs. Tool mappings belong to installed extensions.
+/// Secret values are resolved at execution, never stored in policy.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AgentTaskGateRequirements {
+    #[serde(default)]
+    pub host_tools: Vec<String>,
+    #[serde(default)]
+    pub secrets: Vec<String>,
 }
 
 /// A required executable and its non-mutating initialization probe.
@@ -303,6 +316,7 @@ impl Default for AgentTaskGateEnvironmentPolicy {
             shared_cargo_target: None,
             admitted_component_id: None,
             extension_inputs: Vec::new(),
+            requirements: AgentTaskGateRequirements::default(),
         }
     }
 }
@@ -1006,6 +1020,10 @@ impl AgentTaskGateEnvironment {
             .collect();
         AgentTaskGateEnvironmentPolicy {
             lab_runner: self.lab_runner.clone(),
+            requirements: AgentTaskGateRequirements {
+                host_tools: Vec::new(),
+                secrets: self.declared_secret_env.clone(),
+            },
             mode: self.mode,
             variables,
             preserve: self.preserved.clone(),
@@ -4191,6 +4209,66 @@ impl GateHydrationEnvironment {
     }
 }
 
+fn resolve_gate_requirements(
+    requirements: &AgentTaskGateRequirements,
+    values: &mut BTreeMap<String, String>,
+    report: &mut AgentTaskGateEnvironment,
+) -> Result<()> {
+    if !requirements.host_tools.is_empty() {
+        let extensions = homeboy_core::extension::catalog::load_all_extensions()?;
+        for tool in &requirements.host_tools {
+            let mappings: Vec<_> = extensions
+                .iter()
+                .filter_map(|extension| extension.gate_host_tools.get(tool))
+                .collect();
+            if mappings.len() != 1 || mappings[0].is_empty() {
+                return Err(Error::validation_invalid_argument(
+                    "gate_requirements.host_tools",
+                    format!("host tool '{tool}' needs exactly one extension declaration"),
+                    None,
+                    None,
+                ));
+            }
+            for (name, source) in mappings[0] {
+                let value = preserved_environment_value(source).map_err(|_| {
+                    Error::validation_invalid_argument(
+                        "gate_requirements.host_tools",
+                        format!("missing host tool '{tool}' input '{name}'"),
+                        None,
+                        None,
+                    )
+                })?;
+                if source.contains('/') && !Path::new(&value).exists() {
+                    return Err(Error::validation_invalid_argument(
+                        "gate_requirements.host_tools",
+                        format!("missing host tool '{tool}' input '{name}'"),
+                        None,
+                        None,
+                    ));
+                }
+                values.insert(name.clone(), value);
+                report.preserved.insert(name.clone(), source.clone());
+            }
+        }
+    }
+    for name in &requirements.secrets {
+        let value = std::env::var(name)
+            .ok()
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "gate_requirements.secrets",
+                    format!("missing secret '{name}'"),
+                    None,
+                    None,
+                )
+            })?;
+        values.insert(name.clone(), value);
+        report.declared_secret_env.push(name.clone());
+    }
+    Ok(())
+}
+
 fn selected_gate_environment(
     policy: &AgentTaskGateEnvironmentPolicy,
     runtime_tmpdir: Option<&Path>,
@@ -4213,6 +4291,7 @@ fn selected_gate_environment(
         values.insert(name.clone(), value);
         report.preserved.insert(name.clone(), source.clone());
     }
+    resolve_gate_requirements(&policy.requirements, &mut values, &mut report)?;
     let host_home = std::env::var_os("HOME").map(PathBuf::from);
     let declared_playwright_cache = std::env::var_os("PLAYWRIGHT_BROWSERS_PATH").map(PathBuf::from);
     preserve_playwright_cache(
@@ -4803,6 +4882,7 @@ pub(crate) fn preflight_verify_gate_options(cwd: &Path, gates: &VerifyGateOption
         && gates.gate_target_probes().is_empty()
         && gates.gate_package_artifacts.is_empty()
         && gates.gate_environment.extension_inputs.is_empty()
+        && gates.gate_environment.requirements == AgentTaskGateRequirements::default()
     {
         return Ok(());
     }
@@ -10209,6 +10289,7 @@ mod tests {
             shared_cargo_target: Some(false),
             admitted_component_id: None,
             extension_inputs: Vec::new(),
+            requirements: AgentTaskGateRequirements::default(),
         };
         let report = run_gate_command_with_policy_and_runtime_tmpdir_and_environment(
             temp.path(),

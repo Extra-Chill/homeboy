@@ -118,6 +118,13 @@ pub struct ExtensionManifest {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub isolated_home_paths: Vec<String>,
 
+    /// Named host resources exposed only when a gate requests them. Each
+    /// environment mapping resolves a host variable with an optional relative
+    /// suffix (for example `HOME/.cache/tool`). Resolution belongs here, not
+    /// in the generic gate executor.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub gate_host_tools: BTreeMap<String, BTreeMap<String, String>>,
+
     // Standalone capabilities (already self-contained structs)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cli: Option<CliConfig>,

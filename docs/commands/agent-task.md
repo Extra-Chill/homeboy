@@ -6,6 +6,19 @@ Homeboy owns durable orchestration and provider-neutral outcomes. Runtime
 providers own backend-specific execution. For the provider fanout ownership seam,
 see [`docs/architecture/provider-fanout-boundary.md`](../architecture/provider-fanout-boundary.md).
 
+## Declared gate host inputs
+
+`agent-task cook --gate-requirements '{"host_tools":["asset-cache"],"secrets":["ACCESS_TOKEN"]}'`
+requests named host inputs. The matching workflow `cook` key is
+`"gate-requirements"`, with the same JSON string value.
+
+Installed extensions own `gate_host_tools` mappings, for example
+`{"asset-cache":{"ASSET_CACHE":"HOME/.cache/assets"}}`. Exactly one
+extension must declare each requested tool. Missing mappings, relative resource
+paths that do not exist, and missing or empty secrets fail gate preflight.
+Secret values are read from the executing host environment; policy and gate
+evidence record only their names. This does not resolve external secret stores.
+
 ## Incomplete Cook drafts
 
 `agent-task cook --publish-incomplete-draft` opts into preserving a non-empty
