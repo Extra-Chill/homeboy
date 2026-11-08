@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.447.5] - 2026-11-08
+
+### Changed
+- pass an explicit Cook base for the remote-less cleanliness fixture
+
+### Fixed
+- keep a Cook pass reclaimable until it reports a terminal outcome
+
 ## [0.447.4] - 2026-11-08
 
 ### Fixed
