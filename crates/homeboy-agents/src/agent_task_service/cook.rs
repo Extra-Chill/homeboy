@@ -7530,24 +7530,14 @@ fn run_cook_spine(
         } else {
             adopted_attempt_is_ready_for_cook_continuation(lifecycle_store, &record)?
         };
-        // A form-only execution cannot invalidate its authenticated, gated
-        // candidate. Preserve its failure as publication evidence instead.
         let review_form_unavailable = plan_is_review_form_only(&plan)
-            && !matches!(
+            && matches!(
                 record.state(),
-                agent_task_lifecycle::AgentTaskRunState::Cancelled
+                agent_task_lifecycle::AgentTaskRunState::Failed
+                    | agent_task_lifecycle::AgentTaskRunState::PartialFailure
             )
-            && review_form_attempt_is_ready_for_cook_continuation_in_store(
-                lifecycle_store,
-                &plan,
-                &record,
-            )?
-            && (!matches!(
-                record.state(),
-                agent_task_lifecycle::AgentTaskRunState::Succeeded
-            ) || review_form_from_aggregate(&aggregate)
-                .map(|form| form.is_none_or(|form| form.validate().is_err()))
-                .unwrap_or(true));
+            && persisted_promotion_for_attempt_in_store(lifecycle_store, &run_id)?
+                .is_some_and(|promotion| promotion.applied_with_passing_verdict());
         if review_form_unavailable {
             lifecycle_store.record_metadata_value(
                 &run_id,
@@ -7958,8 +7948,10 @@ fn run_cook_spine(
                 let mut report = super::cook_delivery::ensure_published(&mut delivery, promotion)?;
                 if review_form_unavailable {
                     report.value.terminal_phase = Some("review_form".to_string());
-                    report.value.stop_reason =
-                        Some("review form unavailable; published the gated candidate".to_string());
+                    report.value.stop_reason = Some(
+                        "review form unavailable; published the gated candidate as a draft"
+                            .to_string(),
+                    );
                 }
                 return Ok(report);
             }
@@ -8281,6 +8273,29 @@ fn publish_incomplete_draft(
     run_id: &str,
     later: &[String],
 ) -> Result<()> {
+    publish_incomplete_draft_with_backend(
+        options,
+        promotion,
+        form,
+        attempt,
+        run_id,
+        later,
+        &mut crate::agent_task_finalization::RealAgentTaskPrFinalizationBackend,
+    )?;
+    Ok(())
+}
+
+pub(super) fn publish_incomplete_draft_with_backend<
+    B: crate::agent_task_finalization::AgentTaskPrFinalizationBackend,
+>(
+    options: &CookRequest,
+    promotion: &AgentTaskPromotionReport,
+    form: Option<&crate::agent_task_review_dossier::AiFilledReviewForm>,
+    attempt: u32,
+    run_id: &str,
+    later: &[String],
+    backend: &mut B,
+) -> Result<Value> {
     use homeboy_core::git;
     let path = promotion
         .provenance
@@ -8299,24 +8314,48 @@ fn publish_incomplete_draft(
         .to_string(),
     };
     let title = if options.finalization.title.is_empty() {
-        format!("Incomplete: {}", options.identity.cook_id)
+        let source = options.workspace.source_refs.first().ok_or_else(|| {
+            Error::git_command_failed("draft publication requires a task title or issue/PR source")
+        })?;
+        let kind = if source.contains("/pull/") {
+            "pr"
+        } else {
+            "issue"
+        };
+        let output = std::process::Command::new("gh")
+            .args([kind, "view", source, "--json", "title", "--jq", ".title"])
+            .current_dir(root)
+            .output()
+            .map_err(|error| Error::git_command_failed(format!("read task title: {error}")))?;
+        if !output.status.success() {
+            return Err(Error::git_command_failed(
+                "could not read issue/PR task title",
+            ));
+        }
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
     } else {
         options.finalization.title.clone()
     };
-    let mut body = format!("Incomplete candidate; deterministic verification failed.\n\nTask: {}\n\nincomplete_reason: {}\n",
+    let review_unavailable = promotion.applied_with_passing_verdict();
+    let note = if review_unavailable {
+        "Review form unavailable: completion not assessed; deterministic gates passed"
+    } else {
+        "Incomplete candidate; deterministic verification failed."
+    };
+    let mut body = format!(
+        "{note}\n\nTask: {}\n\nincomplete_reason: {}\n",
         options.workspace.source_refs.join("\n"),
-        form.map(|form| form.incomplete_reason.as_str()).unwrap_or("not recorded"));
+        form.map(|form| form.incomplete_reason.as_str())
+            .unwrap_or("completion not assessed")
+    );
     body.push_str(&format!(
         "\nCandidate from attempt {attempt} (`{run_id}`).\n"
     ));
     if !later.is_empty() {
         body.push_str(&format!("\nLater attempts:\n{}\n", later.join("\n")));
     }
-    for gate in promotion
-        .deterministic_gates
-        .iter()
-        .filter(|gate| gate.status == crate::agent_task_gate::AgentTaskGateStatus::Failed)
-    {
+    for gate in &promotion.deterministic_gates {
+        body.push_str(&format!("\nGate: {} — {:?}\n", gate.id, gate.status));
         let output = format!("{}\n{}", gate.stdout, gate.stderr);
         let tail = output
             .lines()
@@ -8328,61 +8367,32 @@ fn publish_incomplete_draft(
             .collect::<Vec<_>>()
             .join("\n");
         body.push_str(&format!(
-            "\nFailed gate: {}\n\n```text\n{}\n```\n",
+            "\nGate output: {}\n\n```text\n{}\n```\n",
             gate.id, tail
         ));
     }
-    git::stage_all(root)?;
-    if git::has_staged_changes(root)? {
-        git::run_git(
-            root,
-            &["commit", "-m", &title],
-            "commit incomplete candidate",
-        )?;
-    }
-    git::push_at(
-        None,
-        git::PushOptions {
-            refspec: Some(format!("HEAD:refs/heads/{head}")),
-            non_interactive: true,
-            ..Default::default()
-        },
-        Some(path),
-    )?;
-    let existing = git::pr_find(
-        None,
-        git::PrFindOptions {
-            head: Some(head.clone()),
-            state: git::PrState::Open,
-            limit: 1,
-            path: Some(path.to_string()),
-            ..Default::default()
-        },
-    )?;
-    if let Some(pr) = existing.items.first() {
-        git::pr_comment(
+    backend.commit_all(path, &title)?;
+    let sha = git::run_git(root, &["rev-parse", "HEAD"], "resolve draft candidate")?;
+    backend.push_branch(path, sha.trim(), &head)?;
+    let pr = match backend.find_open_pr(None, path, &options.finalization.base, &head)? {
+        Some(pr) => {
+            if !pr.is_draft {
+                let capability = backend.quarantine_capability(false, false)?;
+                backend.quarantine_pr(path, &pr, capability)?;
+            }
+            backend.update_pr(None, path, pr.number, &title, &body)?
+        }
+        None => backend.create_pr(
             None,
-            git::PrCommentOptions {
-                number: pr.number,
-                body,
-                path: Some(path.to_string()),
-                ..Default::default()
-            },
-        )?;
-    } else {
-        git::pr_create(
-            None,
-            git::PrCreateOptions {
-                path: Some(path.to_string()),
-                base: options.finalization.base.clone(),
-                head,
-                title,
-                body,
-                draft: true,
-            },
-        )?;
-    }
-    Ok(())
+            path,
+            &options.finalization.base,
+            &head,
+            &title,
+            &body,
+            true,
+        )?,
+    };
+    Ok(serde_json::json!({"status": "draft_published", "pr_number": pr.number, "pr_url": pr.url}))
 }
 
 /// A deferred gate never executed, so the stop reason names each typed cause

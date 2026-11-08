@@ -2938,6 +2938,24 @@ pub(crate) fn finalize_or_load_cook_pr_with_backend_with_stores<
             None,
         ));
     }
+    if lifecycle_store
+        .read_record(successful_run_id)?
+        .metadata
+        .get("review_form_unavailable")
+        .is_some()
+    {
+        let value = super::cook::publish_incomplete_draft_with_backend(
+            options,
+            &promotion,
+            None,
+            0,
+            successful_run_id,
+            &[],
+            backend,
+        )?;
+        lifecycle_store.record_cook_finalization(successful_run_id, value.clone())?;
+        return Ok(value);
+    }
     let finalization = cook_finalization_options_with_stores(
         store,
         lifecycle_store,
@@ -5776,18 +5794,10 @@ fn cook_ai_lineage_with_stores(
         .iter()
         .map(|path| format!("Updated `{path}` in the delivered candidate."))
         .collect::<Vec<_>>();
-    let (mut summary, what_changed) = implementation
+    let (summary, what_changed) = implementation
         .form
         .map(|form| (form.summary, form.what_changed))
         .unwrap_or_else(|| (implementation.task_summary.clone(), changed));
-    if lifecycle_store
-        .read_record(successful_run_id)?
-        .metadata
-        .get("review_form_unavailable")
-        .is_some()
-    {
-        summary.push_str(" Review form unavailable. Publication is based on the authenticated candidate and passed deterministic gates.");
-    }
     let (tool, model) = implementation.model.map_or_else(
         || {
             (
@@ -5865,35 +5875,12 @@ fn retry_descends_from_recipe(
 /// Load and validate the AI-authored review form for a finalizing run.
 ///
 /// The cook loop's review-form gate guarantees a valid form before finalization
-/// is reached. An authenticated form-only failure is explicitly recorded on
-/// the candidate; in that case publish factual controller prose, not an
-/// invented agent review. Other missing or incomplete forms remain errors.
+/// is reached. Unavailable forms take the incomplete-draft publication path
+/// instead. Missing or incomplete forms remain errors here.
 fn review_form_for_finalization_in_store(
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     run_id: &str,
 ) -> Result<crate::agent_task_review_dossier::AiFilledReviewForm> {
-    let record = lifecycle_store.read_record(run_id)?;
-    if record.metadata.get("review_form_unavailable").is_some() {
-        let promotion = persisted_promotion_for_attempt_in_store(lifecycle_store, run_id)?
-            .ok_or_else(|| {
-                Error::validation_invalid_argument(
-                    "review_form",
-                    "review form unavailable without candidate proof",
-                    None,
-                    None,
-                )
-            })?;
-        if promotion.applied_with_passing_verdict() {
-            return Ok(crate::agent_task_review_dossier::AiFilledReviewForm {
-                pr_title: format!("fix: update {}", promotion.changed_files.first().map(String::as_str).unwrap_or("candidate").chars().take(200).collect::<String>()),
-                summary: "Review form unavailable. This candidate passed its deterministic gates; no AI review-form assessment is available.".to_string(),
-                what_changed: promotion.changed_files.iter().map(|path| format!("Updated {path}")).collect(),
-                verification: Vec::new(),
-                completion: Some(crate::agent_task_review_dossier::AiReviewCompletion::Complete),
-                incomplete_reason: String::new(),
-            });
-        }
-    }
     let outcome = selected_outcome_for_attempt_in_store(lifecycle_store, run_id)?;
     crate::agent_task_review_dossier::AiFilledReviewForm::from_outcome_outputs(&outcome.outputs)
         .and_then(|form| {

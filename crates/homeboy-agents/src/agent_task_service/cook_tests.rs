@@ -4569,7 +4569,7 @@ impl AgentTaskExecutorAdapter for TimeoutReviewFormExecutor {
 }
 
 #[test]
-fn cook_publishes_gated_candidate_when_review_form_provider_times_out() {
+fn cook_publishes_draft_when_review_form_provider_times_out() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let temp = tempfile::tempdir().unwrap();
         let fixture = adopt_green_candidate_missing_review_form(
@@ -4581,8 +4581,13 @@ fn cook_publishes_gated_candidate_when_review_form_provider_times_out() {
             .result
             .expect("optional review failure must not block Cook");
         assert_eq!(result.exit_code, 0, "{:?}", result.value);
-        assert_eq!(result.value.status, "review_ready");
+        assert_eq!(result.value.status, "draft_published");
         assert_eq!(result.value.terminal_phase.as_deref(), Some("review_form"));
+        assert!(result.value.finalization.as_ref().unwrap()["pr_number"].is_number());
+        assert!(fixture.backend.draft);
+        assert_eq!(fixture.backend.title, "Batch cook");
+        assert!(fixture.backend.body.contains("Gate:"));
+        assert!(!fixture.backend.body.contains("fix: update"));
         let latest = result.value.latest_run_id.as_deref().unwrap();
         let record = agent_task_lifecycle::exact_record(latest).unwrap();
         assert_eq!(
@@ -4590,7 +4595,9 @@ fn cook_publishes_gated_candidate_when_review_form_provider_times_out() {
             "review_form"
         );
         assert!(
-            fixture.backend.body.contains("Review form unavailable"),
+            fixture.backend.body.contains(
+                "Review form unavailable: completion not assessed; deterministic gates passed"
+            ),
             "{}",
             fixture.backend.body
         );
@@ -17771,6 +17778,8 @@ fn adoption_rejects_unknown_run_or_cook_ids() {
 #[derive(Default)]
 struct CaptureBackend {
     body: String,
+    draft: bool,
+    title: String,
     committed: bool,
     pushed: bool,
     created: bool,
@@ -18007,6 +18016,8 @@ impl AgentTaskPrFinalizationBackend for CaptureBackend {
         draft: bool,
     ) -> Result<AgentTaskPrRef> {
         self.created = true;
+        self.draft = draft;
+        self.title = _title.to_string();
         self.create_count += 1;
         self.body = body.to_string();
         Ok(AgentTaskPrRef {
