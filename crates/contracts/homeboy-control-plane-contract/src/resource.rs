@@ -695,6 +695,9 @@ pub struct ControlPlaneLiveness {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ControlPlaneBlocker {
+    /// Redacted diagnostic details retained for actionable validation failures.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub code: Option<String>,
     pub message: String,
@@ -949,6 +952,7 @@ mod tests {
         });
         resource.phase = Some("terminal".to_string());
         resource.blocker = Some(ControlPlaneBlocker {
+            details: None,
             code: Some("stale".to_string()),
             message: "runner_disconnected".to_string(),
             state: None,

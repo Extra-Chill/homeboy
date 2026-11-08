@@ -1578,6 +1578,16 @@ fn replacement_green_gate_status_error(
         })
         .collect::<Vec<_>>();
     let suffix = match failing.first() {
+        Some(gate) if failing_gates[0]["executed"] == false => format!(
+            " (gate `{}` {}: {})",
+            gate.id,
+            failing_gates[0]["status"].as_str().unwrap_or("unavailable"),
+            gate.skip_reason
+                .as_ref()
+                .map(|skip| skip.reason.as_str())
+                .filter(|reason| !reason.is_empty())
+                .unwrap_or_else(|| failing_gates[0]["stderr_tail"].as_str().unwrap_or_default()),
+        ),
         Some(gate) => format!(" (gate `{}` exited {})", gate.id, gate.exit_code),
         None => String::new(),
     };
@@ -4950,8 +4960,16 @@ fn cook_review_dossier_with_stores_and_review_form(
     Ok((
         AgentTaskReviewDossier {
             schema: "homeboy/agent-task-review-dossier/v1".to_string(),
-            summary: lineage.summary,
-            what_changed: lineage.what_changed,
+            summary: if review_form.is_some() {
+                terminal_form.summary.clone()
+            } else {
+                lineage.summary
+            },
+            what_changed: if review_form.is_some() {
+                terminal_form.what_changed.clone()
+            } else {
+                lineage.what_changed
+            },
             how_to_test: Vec::new(),
             // Deterministic evidence: orchestrator-owned. Each candidate-bound
             // gate renders once from `verified_commands`; `evidence` carries only
@@ -7918,6 +7936,19 @@ mod replacement_green_gate_status_tests {
             .as_str()
             .unwrap()
             .contains("marker-16236"));
+    }
+
+    #[test]
+    fn unexecuted_replacement_names_status_and_transport_cause() {
+        let report = replacement(serde_json::json!([
+            {"id": "gate-1", "status": "unavailable", "command": ["true"],
+             "exit_code": 0, "stderr": "[runner.lab_transport_failure] Lab gate runner admission is stale or unavailable"}
+        ]));
+        let error = replacement_green_gate_status_error("run", &report);
+        assert!(error.message.contains("unavailable"));
+        assert!(error.message.contains("runner.lab_transport_failure"));
+        assert!(!error.message.contains("exited 0"));
+        assert_eq!(error.details["failing_gates"][0]["executed"], false);
     }
 
     #[test]

@@ -24762,6 +24762,21 @@ fn recovery_supplies_missing_historical_review_form_without_provider_dispatch() 
         .expect("supplied form finalizes without manual reconstruction");
         assert_eq!(published["status"], "review_ready");
         assert!(publish_backend.created);
+        let form = supplied_test_review_form().form;
+        assert!(
+            publish_backend
+                .body
+                .contains(&format!("## Summary\n{}", form.summary)),
+            "{}",
+            publish_backend.body
+        );
+        for change in form.what_changed {
+            assert!(
+                publish_backend.body.contains(&change),
+                "{}",
+                publish_backend.body
+            );
+        }
         let record = agent_task_lifecycle::reconcile_status(run_id).expect("recovery receipt");
         assert_eq!(
             record.metadata["recovery_review_form"]["provenance"]["source"],
