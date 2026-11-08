@@ -479,6 +479,16 @@ migration mode for a manually prepared candidate with no durable run.
 
 #### Single-Issue Cook
 
+With `agent-task cook --task-url <GitHub issue URL>`, Cook reworks the issue's
+single open linked PR on that PR's head branch. With no open linked PR, it
+chooses a fresh issue-derived branch (adding `-2`, `-3`, … when an earlier
+attempt occupied the default name), rather than adopting closed or merged work.
+Several open linked PRs are refused; select one with `--task-url <PR URL>`.
+Output plan metadata `cook_issue_resolution` reports `pr_rework` or
+`fresh_branch` and the issue/PR URLs or chosen head. GitHub lookup failures
+stop resolution rather than guessing. Callers need not invent per-pass branch
+names or route issue URLs to PR URLs themselves.
+
 Use `agent-task cook` for one issue or one workspace task. It is the non-fanout
 path: create or reuse one task worktree, dispatch one provider run, promote the
 patch artifact into `--to-worktree`, run deterministic gates, retry red gates up

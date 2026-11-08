@@ -1596,8 +1596,10 @@ pub struct AgentTaskCookArgs {
         value_parser = parse_prepared_base_sha
     )]
     pub prepared_base_sha: Option<String>,
-    /// Head branch to push and open the PR from. Defaults to the branch the
-    /// destination worktree is already on.
+    /// Head branch to push and open the PR from. With an issue task URL, Cook
+    /// reworks its single open linked PR, otherwise derives a fresh branch;
+    /// several open linked PRs require an explicit PR URL. The chosen route is
+    /// reported as cook_issue_resolution. An explicit head must match PR rework.
     #[arg(long, value_name = "BRANCH")]
     pub head: Option<String>,
     /// Title for the finalized pull request. Defaults to a title derived from
@@ -1628,6 +1630,9 @@ pub struct AgentTaskCookArgs {
     /// Controller-resolved base provenance persisted with the Cook plan.
     #[arg(skip)]
     pub base_resolution: Option<serde_json::Value>,
+    /// Issue routing decision persisted in output as cook_issue_resolution.
+    #[arg(skip)]
+    pub issue_resolution: Option<serde_json::Value>,
     /// Captured at CLI ingress when `--prompt -` is used. This survives route
     /// handoff and plan compilation without asking a later phase to reread stdin.
     #[arg(skip)]
