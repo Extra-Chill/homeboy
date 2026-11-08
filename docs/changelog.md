@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.449.3] - 2026-11-08
+
+### Changed
+- resolve an issue URL to its open PR or a fresh branch
+
+### Fixed
+- accept zero-success foreach joins
+
 ## [0.449.2] - 2026-11-08
 
 ### Changed
