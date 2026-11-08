@@ -278,7 +278,7 @@ fn only_lease_mismatch_is_treated_as_authoritative() {
     ));
 }
 
-fn unconverged_refresh_fixture() -> (HomeboyBinaryRefreshPlan, RunnerExecOutput) {
+pub(super) fn unconverged_refresh_fixture() -> (HomeboyBinaryRefreshPlan, RunnerExecOutput) {
     let plan = HomeboyBinaryRefreshPlan {
         runner_id: "homeboy-lab".to_string(),
         mode: "select".to_string(),
@@ -414,7 +414,10 @@ fn deferred_reconnect_names_the_jobs_that_deferred_it() {
 
     assert_eq!(failure.exit_code, 1);
     let message = failure.verification.expect("deferred cause is named");
-    assert!(message.contains("reconnect deferred"), "{message}");
+    assert!(
+        message.contains("staged; selects on reconnect when"),
+        "{message}"
+    );
     assert!(message.contains("job-raced-after-precheck"), "{message}");
     assert!(message.contains("selector moved"), "{message}");
 }

@@ -687,68 +687,75 @@ fn reconnect_rollback_restores_its_own_selected_binary() {
 }
 
 #[test]
-fn post_promotion_active_job_race_restores_prior_selection_without_stopping_daemon() {
-    crate::test_support::with_isolated_home(|_| {
-        crate::create(
-            r#"{"id":"lab-local","kind":"local","homeboy_path":"/selected/homeboy"}"#,
-            false,
-        )
-        .expect("runner");
-
-        let deferred = defer_reconnect_after_promotion_race_in_roots(
-            &ambient_roots(),
-            "lab-local",
-            "/selected/homeboy",
-            Some("/stable/homeboy"),
-            &[active_admission("job-raced-after-precheck")],
-        )
-        .expect("defer raced reconnect");
-
-        assert_eq!(deferred.reason, "active_daemon_jobs");
-        assert_eq!(deferred.active_job_ids, ["job-raced-after-precheck"]);
-        assert!(deferred.ownership_contention.is_none());
-        assert_eq!(
-            crate::load("lab-local")
-                .expect("reload")
-                .settings
-                .homeboy_path
-                .as_deref(),
-            Some("/stable/homeboy")
-        );
-    });
-}
-
-#[test]
-fn post_promotion_active_job_race_preserves_newer_selector_as_contention() {
-    crate::test_support::with_isolated_home(|_| {
-        crate::create(
-            r#"{"id":"lab-local","kind":"local","homeboy_path":"/newer/homeboy"}"#,
-            false,
-        )
-        .expect("runner");
-
-        let deferred = defer_reconnect_after_promotion_race_in_roots(
-            &ambient_roots(),
-            "lab-local",
-            "/selected/homeboy",
-            Some("/stable/homeboy"),
-            &[active_admission("job-raced-after-precheck")],
-        )
-        .expect("defer raced reconnect");
-
-        assert!(deferred
-            .ownership_contention
-            .as_deref()
-            .is_some_and(|message| message.contains("preserving the newer owner")));
-        assert_eq!(
-            crate::load("lab-local")
-                .expect("reload")
-                .settings
-                .homeboy_path
-                .as_deref(),
-            Some("/newer/homeboy")
-        );
-    });
+fn homeboy_refresh_selection_restartability_matrix() {
+    for (restartable, reconnect, expected) in [
+        (false, false, "/stable/homeboy"),
+        (false, true, "/stable/homeboy"),
+        (true, false, "/stable/homeboy"),
+        (true, true, "/new/homeboy"),
+    ] {
+        crate::test_support::with_isolated_home(|_| {
+            crate::create(
+                r#"{"id":"lab-local","kind":"local","homeboy_path":"/stable/homeboy"}"#,
+                false,
+            )
+            .unwrap();
+            let roots = ambient_roots();
+            let lease =
+                acquire_runner_binary_promotion_in_roots(&roots, "lab-local", "new", |_| {})
+                    .unwrap();
+            let stage = should_stage_refresh(true, restartable, reconnect);
+            persist_refresh_candidate_in_roots(&roots, &lease, "lab-local", "/new/homeboy", stage)
+                .unwrap();
+            let runner = crate::load("lab-local").unwrap();
+            assert_eq!(runner.settings.homeboy_path.as_deref(), Some(expected));
+            assert_eq!(
+                runner.settings.staged_homeboy_path.as_deref(),
+                stage.then_some("/new/homeboy")
+            );
+            if stage {
+                let deferred = HomeboyReconnectDeferred {
+                    reason: "active_daemon_jobs",
+                    active_job_ids: vec!["blocking-job".into()],
+                    selected_binary_path: "/new/homeboy".into(),
+                    followup_commands: vec![],
+                    ownership_contention: None,
+                };
+                let (plan, execution) = super::part_c::unconverged_refresh_fixture();
+                let failure = deferred_reconnect_failure(
+                    &plan,
+                    execution,
+                    &active_job_reconnect_error("lab-local", &deferred.active_job_ids),
+                    &deferred,
+                );
+                assert!(failure
+                    .verification
+                    .unwrap()
+                    .contains("staged; selects on reconnect when blocking-job finish"));
+                // The same verified slot is consumed at the next replacement
+                // boundary, with no intermediate child selection.
+                persist_refresh_candidate_in_roots(
+                    &roots,
+                    &lease,
+                    "lab-local",
+                    "/new/homeboy",
+                    false,
+                )
+                .unwrap();
+                let selected = crate::load("lab-local").unwrap();
+                assert_eq!(
+                    selected.settings.homeboy_path.as_deref(),
+                    Some("/new/homeboy")
+                );
+                assert!(selected.settings.staged_homeboy_path.is_none());
+            } else {
+                assert!(
+                    !stage,
+                    "successful reconnect reports promotion, not staging"
+                );
+            }
+        });
+    }
 }
 
 #[test]
