@@ -10,6 +10,8 @@ mod github_comment_sections;
 mod mention_safety;
 pub use mention_safety::neutralize_mentions;
 mod github_pr_comments;
+mod pr_merge_when_green;
+pub use pr_merge_when_green::{pr_merge_when_green, MergeHold, MergeWhenGreenOutput};
 mod github_types;
 mod operation_output;
 mod operations;
