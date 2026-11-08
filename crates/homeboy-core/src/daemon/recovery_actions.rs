@@ -25,6 +25,7 @@ use super::{DaemonRepairStep, DaemonStaleReasonCode, DaemonStatus};
 use crate::error::{ActionSafety, ExecutableAction};
 
 /// Stop the daemon recorded in the local state file.
+pub const DRAIN_THEN_REPLACE: &str = "drain_then_replace";
 pub const DAEMON_STOP: &str = "daemon_stop";
 /// Replace or reuse the daemon that owns the local store. Starting a daemon
 /// runs its startup recovery of every dead generation in its scope.
@@ -212,6 +213,50 @@ pub fn plan_recovery(status: &DaemonStatus) -> DaemonRecoveryPlan {
         };
     }
     plan
+}
+
+/// Opt-in draining leaves the default recovery planner unchanged.
+pub fn plan_recovery_with_drain(status: &DaemonStatus, drain: bool) -> DaemonRecoveryPlan {
+    let freshness = &status.freshness;
+    if drain
+        && status.running
+        && status.reachable
+        && freshness.active_jobs > 0
+        && matches!(
+            freshness.stale_reason_code,
+            Some(
+                DaemonStaleReasonCode::VersionMismatch
+                    | DaemonStaleReasonCode::BuildIdentityMismatch
+                    | DaemonStaleReasonCode::ExecutableReplaced
+            )
+        )
+    {
+        return DaemonRecoveryPlan {
+            steps: vec![DaemonRepairStep::executable(
+                DRAIN_THEN_REPLACE,
+                drain_action(),
+            )],
+            reason: format!(
+                "drain {} protected job(s), then replace the stale daemon",
+                freshness.active_jobs
+            ),
+            required_confirmations: Vec::new(),
+            executable: true,
+            lifecycle: Plan::Transition {
+                step: Step::Repair {
+                    lease_id: freshness.lease_id.clone(),
+                    codes: vec![DRAIN_THEN_REPLACE.to_string()],
+                },
+            },
+        };
+    }
+    plan_recovery(status)
+}
+
+fn drain_action() -> ExecutableAction {
+    let mut action = recover();
+    action.args.push("--drain".to_string());
+    action
 }
 
 /// Dead-generation jobs startup recovery left untouched: no recorded child
@@ -705,6 +750,50 @@ mod tests {
 
         assert_eq!(plan.steps[0].code, DAEMON_ENSURE_RUNNING);
         assert!(plan.required_confirmations.is_empty());
+    }
+
+    #[test]
+    fn admission_reporting_and_opt_in_drain_table() {
+        for (reason, jobs, state) in [
+            (None, 2, "serving"),
+            (
+                Some(DaemonStaleReasonCode::VersionMismatch),
+                2,
+                "stale_serving",
+            ),
+            (
+                Some(DaemonStaleReasonCode::BuildIdentityMismatch),
+                2,
+                "stale_serving",
+            ),
+            (
+                Some(DaemonStaleReasonCode::ExecutableReplaced),
+                2,
+                "stale_serving",
+            ),
+            (
+                Some(DaemonStaleReasonCode::VersionMismatch),
+                0,
+                "unavailable",
+            ),
+        ] {
+            let report = status(reason, Vec::new(), jobs);
+            let admission = report.admission_report();
+            assert_eq!(admission["state"], state);
+            assert_eq!(admission["active_jobs"], jobs);
+            assert_eq!(admission["daemon_version"], "0.326.1");
+            if state == "stale_serving" {
+                assert!(report.admits_work());
+                assert!(report.render_summary().contains("replaces when idle"));
+                assert!(matches!(
+                    plan_recovery(&report).lifecycle,
+                    Plan::Wait { .. }
+                ));
+                let drain = plan_recovery_with_drain(&report, true);
+                assert_eq!(drain.steps[0].code, DRAIN_THEN_REPLACE);
+                assert!(drain.executable);
+            }
+        }
     }
 
     #[test]

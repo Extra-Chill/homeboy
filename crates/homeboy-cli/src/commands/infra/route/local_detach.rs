@@ -323,7 +323,7 @@ pub(super) fn intercept_local_detached_cook(
             );
             crate::commands::agent_task::run::announce_resolved_execution_placement();
         }
-        let envelope = handoff_envelope(
+        let mut envelope = handoff_envelope(
             &cook_id,
             bound_child_pid(&cook_id),
             &step_log_path(&job_id),
@@ -333,6 +333,12 @@ pub(super) fn intercept_local_detached_cook(
             provider_placement.unwrap_or("local"),
             provider_runner_id,
         );
+        if let Ok(status) = homeboy::core::daemon::read_status() {
+            envelope["daemon_admission"] = status.admission_report();
+            if status.stale_serving() {
+                eprintln!("{}", status.render_summary());
+            }
+        }
         let stdout = finalize_handoff_envelope(&envelope, output_file)?;
         // `--output` owns the serialized acknowledgement until this point. Emit
         // those exact bytes so both requested destinations carry one contract.

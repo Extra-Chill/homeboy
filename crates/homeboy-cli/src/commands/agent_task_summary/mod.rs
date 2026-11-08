@@ -515,6 +515,14 @@ fn render_cook_preview_summary(payload: &Value) -> Option<String> {
             "Placement: {selected_placement}{admission_suffix}  (requested: {requested_placement}{reason})"
         )
     };
+    let placement_line = if let Some(summary) = resolved
+        .pointer("/placement/admission/daemon/summary")
+        .and_then(Value::as_str)
+    {
+        format!("{placement_line}\nDaemon: {summary}")
+    } else {
+        placement_line
+    };
     let provider = resolved
         .get("provider")
         .and_then(Value::as_object)

@@ -284,11 +284,8 @@ fn controller_job_response(value: &serde_json::Value) -> Option<&serde_json::Val
 }
 
 impl LocalControllerJobClient {
-    /// Connect only when the resident daemon runs this exact Homeboy build.
-    ///
-    /// Controller-job drivers are in-process code, so a reachable older daemon
-    /// can deserialize a request while applying stale ownership semantics. Fail
-    /// before submission instead of handing new lifecycle records to it.
+    /// Connect to the installed build, or a stale busy daemon that continues
+    /// serving until idle. An explicitly draining daemon refuses new work.
     pub fn connect_current_build() -> Result<Self> {
         // Dead-lease cleanup needs exclusive admission. Recover before taking
         // our shared guard, then retain the guarded validation below.
@@ -297,6 +294,9 @@ impl LocalControllerJobClient {
         }
         let admission_guard = acquire_daemon_admission_lock()?;
         let prior = read_status()?;
+        if daemon_draining() {
+            return Err(daemon_draining_error());
+        }
         match Self::connect() {
             Ok(mut client) => {
                 client.admission_guard = Mutex::new(Some(admission_guard));
@@ -746,7 +746,7 @@ impl LocalControllerJobClient {
 /// it to converge an existing daemon before reporting success.
 pub fn converge_current_build_idle_daemon() -> Result<bool> {
     let status = read_status()?;
-    if !status.running || status.fresh {
+    if !status.running || status.fresh || status.stale_serving() {
         return Ok(false);
     }
 
@@ -944,7 +944,43 @@ impl DaemonStatus {
     /// and freshness fields rather than an overloaded `running` field: build
     /// incompatibility must not masquerade as process death (#13621).
     pub fn admits_work(&self) -> bool {
-        self.running && self.fresh && self.reachable
+        self.running && self.reachable && !self.draining() && (self.fresh || self.stale_serving())
+    }
+
+    fn draining(&self) -> bool {
+        self.freshness.lease_id.as_deref().is_some_and(|lease| {
+            drain_path()
+                .ok()
+                .and_then(|path| std::fs::read_to_string(path).ok())
+                .is_some_and(|marker| marker == lease)
+        })
+    }
+
+    /// A busy old build remains a serving execution plane until idle.
+    pub fn stale_serving(&self) -> bool {
+        self.running
+            && self.reachable
+            && !self.draining()
+            && !self.fresh
+            && self.freshness.active_jobs > 0
+            && matches!(
+                self.freshness.stale_reason_code,
+                Some(
+                    DaemonStaleReasonCode::VersionMismatch
+                        | DaemonStaleReasonCode::BuildIdentityMismatch
+                        | DaemonStaleReasonCode::ExecutableReplaced
+                )
+            )
+    }
+
+    /// Structured admission evidence shared by status and Cook.
+    pub fn admission_report(&self) -> serde_json::Value {
+        json!({
+            "state": if self.draining() { "draining" } else if self.stale_serving() { "stale_serving" } else if self.admits_work() { "serving" } else { "unavailable" },
+            "daemon_version": self.freshness.daemon_version,
+            "active_jobs": self.freshness.active_jobs,
+            "summary": self.render_summary(),
+        })
     }
 
     /// The service manager that owns the live daemon, if one does. Only that
@@ -958,7 +994,21 @@ impl DaemonStatus {
 
     /// Render [`DaemonStatus::summary`] from the status's own evidence.
     pub fn render_summary(&self) -> String {
-        let mut summary = if self.running && self.reachable {
+        let mut summary = if self.draining() {
+            format!(
+                "daemon draining: {} active jobs, replaces when idle",
+                self.freshness.active_jobs
+            )
+        } else if self.stale_serving() {
+            format!(
+                "stale_serving: daemon v{}, {} active jobs, replaces when idle",
+                self.freshness
+                    .daemon_version
+                    .as_deref()
+                    .unwrap_or("unknown"),
+                self.freshness.active_jobs
+            )
+        } else if self.running && self.reachable {
             if self.freshness.stale_reason_code == Some(DaemonStaleReasonCode::VersionMismatch) {
                 format!(
                     "daemon process is live and its API is reachable; live daemon from an older build ({}), with {} active job(s); replacement planned when idle",
@@ -1906,6 +1956,11 @@ where
     let mut accepted = 0;
     let mut serve_result = Ok(());
     loop {
+        if daemon_draining()
+            && daemon_freshness_report(&job_store).is_ok_and(|report| report.active_jobs == 0)
+        {
+            break;
+        }
         if shutdown
             .as_ref()
             .is_some_and(|flag| flag.load(Ordering::Acquire))
@@ -1960,9 +2015,10 @@ where
     }
 
     drop(connection_tx);
-    let shutdown_requested = shutdown
-        .as_ref()
-        .is_some_and(|flag| flag.load(Ordering::Acquire));
+    let shutdown_requested = daemon_draining()
+        || shutdown
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::Acquire));
     // One budget covers the connection workers and the helpers, so a stop
     // never waits on back-to-back drains.
     let drain_deadline = Instant::now() + HELPER_DRAIN_DEADLINE;
@@ -2626,6 +2682,20 @@ fn route_with_job_store_and_body_and_runner_and_auth<R>(
 where
     R: AnalysisJobRunner,
 {
+    if method == "POST"
+        && daemon_draining()
+        && matches!(
+            path.split('?').next().unwrap_or(path),
+            "/jobs"
+                | "/exec"
+                | "/controller/jobs"
+                | "/runner/jobs"
+                | "/admissions"
+                | "/v1/control-plane/runs"
+        )
+    {
+        return error_response(503, daemon_draining_error());
+    }
     if let Err(error) = job_store.reconcile_expired_local_child_reservations() {
         return error_response(500, error);
     }
@@ -6327,6 +6397,32 @@ mod tests {
         });
     }
 
+    #[test]
+    fn daemon_recover_drain_preserves_protected_jobs_and_refuses_admission() {
+        with_isolated_home(|_| {
+            write_test_lease("drain-test-lease");
+            let store = JobStore::open_without_reconciliation(paths::observation_db().unwrap())
+                .unwrap()
+                .with_daemon_lease("drain-test-lease".to_string());
+            let protected = store.create("runner.exec");
+            store.start(protected.id).unwrap();
+            drain_then_replace("drain-test-lease").unwrap();
+            assert!(daemon_draining());
+            let response = route_with_job_store("POST", "/controller/jobs", &store);
+            assert_eq!(response.status_code, 503);
+            assert!(response.body.to_string().contains("daemon_draining"));
+            assert!(with_daemon_job_admission(|| Ok(())).is_err());
+            assert_eq!(store.active_runner_jobs().len(), 1);
+            assert_eq!(
+                store.active_runner_jobs()[0].job_id,
+                protected.id.to_string()
+            );
+            // A replacement lease cannot inherit a previous generation's drain.
+            write_test_lease("replacement-lease");
+            assert!(!daemon_draining());
+        });
+    }
+
     /// Offline `daemon status` (the CLI path `runner connect` reads when this
     /// controller's daemon is dead) must scope the shared ledger the same way
     /// as the live daemon (#16089). Another controller's stamped live work on a
@@ -8585,8 +8681,58 @@ fn daemon_admission_fence_timeout_error_at(path: &Path, wait: Duration) -> Error
     error
 }
 
+fn daemon_draining_error() -> Error {
+    let mut error = Error::validation_invalid_argument(
+        "daemon_draining",
+        "daemon is draining; run homeboy daemon ensure-running after it becomes idle",
+        None,
+        None,
+    );
+    error.details["classification"] = json!("daemon_draining");
+    error
+}
+
+fn drain_path() -> Result<std::path::PathBuf> {
+    Ok(state_path()?.with_extension("drain"))
+}
+
+fn daemon_draining() -> bool {
+    let Ok(path) = drain_path() else { return false };
+    let Ok(lease) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    validate_lease_file(&match state_path() {
+        Ok(path) => path,
+        Err(_) => return false,
+    })
+    .ok()
+    .and_then(|validation| validation.state)
+    .is_some_and(|state| state.lease_id == lease)
+}
+
+/// Lease-bound drain: no signals are sent and protected jobs remain owned.
+pub fn drain_then_replace(lease_id: &str) -> Result<()> {
+    let _fence = try_acquire_daemon_job_admission_fence()?.ok_or_else(|| {
+        Error::internal_unexpected("daemon admission busy; retry homeboy daemon recover")
+    })?;
+    let state = validate_lease_file(&state_path()?)?
+        .state
+        .ok_or_else(|| Error::internal_unexpected("no daemon lease"))?;
+    if state.lease_id != lease_id {
+        return Err(Error::internal_unexpected(
+            "daemon lease changed before drain",
+        ));
+    }
+    std::fs::write(drain_path()?, lease_id).map_err(|error| {
+        Error::internal_io(error.to_string(), Some("request daemon drain".to_string()))
+    })
+}
+
 pub(super) fn with_daemon_job_admission<T>(operation: impl FnOnce() -> Result<T>) -> Result<T> {
     let _guard = acquire_daemon_admission_lock()?;
+    if daemon_draining() {
+        return Err(daemon_draining_error());
+    }
     operation()
 }
 

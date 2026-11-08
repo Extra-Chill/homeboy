@@ -1752,6 +1752,14 @@ fn render_cook_admission(decision: crate::commands::infra::route::CookAdmissionD
             admission["next_action"] = serde_json::json!(next_action);
         }
     }
+    // Report only an existing daemon: reading status opens the observation
+    // store, and preview admission must not create state.
+    let daemon_exists = homeboy::core::paths::daemon_state_file().is_ok_and(|path| path.exists());
+    if daemon_exists {
+        if let Ok(status) = homeboy::core::daemon::read_status() {
+            admission["daemon"] = status.admission_report();
+        }
+    }
     admission
 }
 
