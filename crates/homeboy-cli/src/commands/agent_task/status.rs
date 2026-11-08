@@ -293,6 +293,17 @@ pub(super) fn status(args: StatusArgs) -> CmdResult<Value> {
 }
 
 fn status_once(args: StatusArgs) -> CmdResult<Value> {
+    let (mut value, code) = status_without_feedback(args.clone())?;
+    let cook_id = bounded_exact_record(&args.run_id)
+        .ok()
+        .and_then(|record| record.metadata["cook_id"].as_str().map(str::to_string))
+        .unwrap_or(args.run_id);
+    let store = homeboy::agents::agent_task_feedback::CookFeedbackStore::from_current_data_root()?;
+    value["cook_feedback"] = store.status_value(&cook_id)?;
+    Ok((value, code))
+}
+
+fn status_without_feedback(args: StatusArgs) -> CmdResult<Value> {
     if !args.exact {
         if let Some(ci) = agent_task_service_direct::cook_ci_status(&args.run_id)? {
             return Ok((ci, 0));
