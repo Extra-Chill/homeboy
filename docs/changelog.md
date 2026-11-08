@@ -4,6 +4,17 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.449.0] - 2026-11-08
+
+### Added
+- skip PR comment publication for stale heads and closed PRs
+
+### Changed
+- Serialize the strict observation-store test against HomeGuard's home lock
+
+### Fixed
+- link sibling component extensions into isolated gate HOME
+
 ## [0.448.2] - 2026-11-08
 
 ### Fixed
