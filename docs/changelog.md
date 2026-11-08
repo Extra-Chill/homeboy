@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.447.8] - 2026-11-08
+
+### Fixed
+- rebase a gated candidate onto an advanced base and re-run its gates before publishing
+- keep transport context in Lab JSON decode errors and bound mismatch paths
+
 ## [0.447.7] - 2026-11-08
 
 ### Fixed
