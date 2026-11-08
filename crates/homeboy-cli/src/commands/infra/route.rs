@@ -2026,11 +2026,26 @@ impl crate::agents::agent_task_service::WorkJobHandler for TerminalCookWorkHandl
                     "phase": "terminal_continuation",
                 }),
             );
-            crate::agents::agent_task_lifecycle::record_cook_controller_failure_in_store(
-                &agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?,
-                &request.run_id,
-                &diagnostic,
-            )?;
+            // Recording is diagnostic evidence; it must never replace the
+            // worker's own failure as the step outcome.
+            if let Err(record_error) =
+                agent_task_lifecycle::AgentTaskLifecycleStore::from_environment().and_then(
+                    |store| {
+                        crate::agents::agent_task_lifecycle::record_cook_controller_failure_in_store(
+                            &store,
+                            &request.run_id,
+                            &diagnostic,
+                        )
+                    },
+                )
+            {
+                homeboy::log_status!(
+                    "agent-task",
+                    "could not record terminal continuation failure for {}: {}",
+                    request.run_id,
+                    record_error.message
+                );
+            }
         }
         outcome
     }
