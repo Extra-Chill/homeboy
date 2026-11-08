@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.448.0] - 2026-11-08
+
+### Added
+- expose the applied Cook candidate as refs/homeboy/candidates/<cook>
+
+### Fixed
+- operator projection papercuts in status, capacity, gate refusals and review-form PR bodies
+
 ## [0.447.9] - 2026-11-08
 
 ### Fixed
