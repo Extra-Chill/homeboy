@@ -1,4 +1,3 @@
-use homeboy_engine_primitives::content_hash;
 use std::collections::HashMap;
 use std::fs;
 use std::io::Read;
@@ -10,6 +9,7 @@ use sha2::{Digest, Sha256};
 
 use homeboy_core::engine::shell;
 use homeboy_core::error::{Error, Result};
+use homeboy_core::extension::lifecycle::is_generated_extension_metadata_path;
 use homeboy_core::resource_lifecycle_index::{
     ResourceCleanupPolicy, ResourceEvidenceRetention, ResourceLifecycleRecord,
     ResourceLifecycleResourceStatus,
@@ -439,7 +439,7 @@ fn sync_controller_snapshot(
         RunnerKind::Local => {
             let destination = Path::new(synced_source_path);
             copy_snapshot_to_directory(Path::new(&plan.source_path), destination, &excludes)?;
-            remove_appledouble_files(destination)
+            scrub_extension_snapshot(destination)
         }
         RunnerKind::Ssh => {
             let transfer = RunnerFileTransfer::for_runner(runner)?;
@@ -459,7 +459,7 @@ fn upload_snapshot(
     let staged = tempdir.path().join("source");
     let excludes = extension_snapshot_excludes();
     copy_snapshot_to_directory(Path::new(&plan.source_path), &staged, &excludes)?;
-    remove_appledouble_files(&staged)?;
+    scrub_extension_snapshot(&staged)?;
     let archive = tempdir.path().join("source.tar");
     let status = Command::new("tar")
         .env("COPYFILE_DISABLE", "1")
@@ -612,15 +612,22 @@ fn controller_snapshot_provenance(
     plan: &RunnerExtensionMaterializationPlan,
 ) -> RunnerExtensionMaterializationProvenance {
     let source = Path::new(&plan.source_path);
-    let dirty = git_dirty(source);
+    let dirty_fingerprint =
+        match homeboy_core::extension::lifecycle::read_source_cleanliness_at(source) {
+            homeboy_core::extension::lifecycle::ExtensionSourceCleanliness::Dirty {
+                fingerprint,
+                ..
+            } => Some(fingerprint),
+            _ => None,
+        };
     RunnerExtensionMaterializationProvenance {
         id: plan.id.clone(),
         source_path: plan.source_path.clone(),
         synced_source_path: plan.synced_source_path.clone(),
         content_hash: plan.content_hash.clone(),
         source_revision: git_revision(source),
-        dirty,
-        dirty_fingerprint: dirty.then(|| git_dirty_fingerprint(source)).flatten(),
+        dirty: dirty_fingerprint.is_some(),
+        dirty_fingerprint,
         synced_at: chrono::Utc::now().to_rfc3339(),
         dev_overlay: true,
         lifecycle: dev_extension_lifecycle(runner_id, &plan.synced_source_path, &plan.id),
@@ -752,7 +759,34 @@ fn collect_hash_entries(
                 .unwrap_or(&path)
                 .to_string_lossy()
                 .replace('\\', "/");
-            entries.push((relative, path));
+            // The hash identifies the snapshot bytes, which never carry
+            // generated install metadata.
+            if !is_generated_extension_metadata_path(&relative, None) {
+                entries.push((relative, path));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Strip what is not extension source from a staged snapshot: AppleDouble
+/// sidecars and the install-local provenance Homeboy generates. A controller
+/// snapshot may come from an *installed* directory, whose `.source-*` files
+/// describe the controller install, not the runner's.
+fn scrub_extension_snapshot(path: &Path) -> Result<()> {
+    remove_appledouble_files(path)?;
+    for entry in fs::read_dir(path)
+        .map_err(|err| Error::internal_io(err.to_string(), Some(path.display().to_string())))?
+    {
+        let entry = entry
+            .map_err(|err| Error::internal_io(err.to_string(), Some(path.display().to_string())))?;
+        let name = entry.file_name();
+        if is_generated_extension_metadata_path(&name.to_string_lossy(), None)
+            && entry.file_type().is_ok_and(|kind| kind.is_file())
+        {
+            fs::remove_file(entry.path()).map_err(|err| {
+                Error::internal_io(err.to_string(), Some(entry.path().display().to_string()))
+            })?;
         }
     }
     Ok(())
@@ -838,30 +872,6 @@ pub(crate) fn git_revision(path: &Path) -> Option<String> {
         .status
         .success()
         .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
-}
-
-pub(crate) fn git_dirty(path: &Path) -> bool {
-    Command::new("git")
-        .args(["-C", &path.display().to_string(), "status", "--porcelain"])
-        .output()
-        .ok()
-        .is_some_and(|output| !output.stdout.is_empty())
-}
-
-pub(crate) fn git_dirty_fingerprint(path: &Path) -> Option<String> {
-    let output = Command::new("git")
-        .args([
-            "-C",
-            &path.display().to_string(),
-            "status",
-            "--porcelain=v1",
-        ])
-        .output()
-        .ok()?;
-    output
-        .status
-        .success()
-        .then(|| content_hash::sha256_hex(&output.stdout))
 }
 
 fn sanitize_ref(value: &str) -> String {
@@ -1134,6 +1144,50 @@ mod tests {
 
         assert!(synced_rules.join("consistent-test-it.js").exists());
         assert!(!synced_rules.join("._consistent-test-it.js").exists());
+    }
+
+    #[test]
+    fn controller_snapshot_of_installed_directory_excludes_generated_metadata() {
+        let workspace = tempfile::tempdir().expect("runner workspace");
+        let mut runner = runner();
+        runner.workspace_root = Some(workspace.path().to_string_lossy().to_string());
+        let source = tempfile::tempdir().expect("installed extension");
+        fs::write(source.path().join("rust.json"), r#"{"id":"rust"}"#).expect("manifest");
+        fs::create_dir_all(source.path().join("fixtures")).expect("fixtures");
+        fs::write(source.path().join("fixtures/.source-url"), "fixture").expect("nested source");
+        let hash_without_metadata =
+            extension_source_content_hash(source.path()).expect("source hash");
+        for generated in [".source-url", ".source-revision", ".source-requested-ref"] {
+            fs::write(source.path().join(generated), "generated").expect("generated metadata");
+        }
+
+        assert_eq!(
+            extension_source_content_hash(source.path()).expect("source hash"),
+            hash_without_metadata
+        );
+
+        let request = RunnerExtensionMaterializationRequest {
+            id: "rust".to_string(),
+            revision: "abc123".to_string(),
+            source: RunnerExtensionMaterializationSource::ControllerSnapshot {
+                local_path: source.path().to_path_buf(),
+            },
+        };
+        let provenance = materialize_runner_extension_with_exec(
+            &runner,
+            "homeboy",
+            None,
+            &request,
+            &mut |_runner_id, _options| Ok((output(), 0)),
+        )
+        .expect("materializes");
+        let synced = Path::new(&provenance.synced_source_path);
+
+        assert!(synced.join("rust.json").exists());
+        assert!(synced.join("fixtures/.source-url").exists());
+        for generated in [".source-url", ".source-revision", ".source-requested-ref"] {
+            assert!(!synced.join(generated).exists(), "{generated} was synced");
+        }
     }
 
     #[test]
