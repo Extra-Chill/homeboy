@@ -41,7 +41,7 @@ publication.
 | `reconcile <run-id>\|--all [--dry-run\|--apply]` | Preview one durable run/group or the active fleet; mutate only with `--apply`. |
 | `artifacts <run-id>` | List artifacts and evidence refs recorded for a completed run. |
 | `replay-provider-boundary <run-id> [--task <task-id>]` | Hydrate the latest raw executor input and print provider-boundary fields without relaunching a provider. |
-| `cancel <run-id>` | Mark a queued or stale-running durable run as cancelled. |
+| `cancel <run-id>` | Mark a queued or stale-running durable run as cancelled. Retains the writing process's PID and redacted argv in `metadata.cancellation_actor`, visible through status and independent of daemon job retention. |
 | `quarantine <run-id> --reason <text>` | Exclude one exact queued run while retaining its nonterminal lifecycle evidence. |
 | `rearm <run-id>` | Return one exact quarantined queued run to eligibility after repair. |
 | `resume <run-id>` | Resume a queued or stale-running durable run. Given a Cook ID whose durable state names a recovery step, it performs that step through `recover <cook-id>`. |

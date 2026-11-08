@@ -3199,6 +3199,17 @@ fn cancel_run_marks_queued_record_cancelled() {
 
     let cancelled = cancel_run_in_store(&lifecycle_store, "run-cancel-queued", Some("loser cell"))
         .expect("queued run cancelled");
+    let persisted = lifecycle_store
+        .read_record("run-cancel-queued")
+        .expect("durable record");
+    assert_eq!(
+        persisted.metadata["cancellation_actor"]["pid"],
+        std::process::id()
+    );
+    assert_eq!(
+        persisted.metadata["cancellation_actor"]["argv"],
+        homeboy_core::process::current_actor()["argv"]
+    );
     let loaded = reconcile_status_in_store(
         &lifecycle_store,
         "run-cancel-queued",

@@ -559,7 +559,6 @@ pub(crate) fn cancel_exact_run_in_store_with_provenance(
             metadata.remove("runner_cancellation_pending");
             terminalize_running_provider_executions(metadata, &cancelled_at);
             metadata.insert("cancelled_at".to_string(), json!(cancelled_at));
-            metadata.insert("cancelled_by_pid".to_string(), json!(std::process::id()));
             metadata.insert(
                 "cancel_reason".to_string(),
                 json!(reason.unwrap_or("cancel requested")),
@@ -1170,7 +1169,6 @@ fn cancel_resolved_run_in_store(
         let metadata = record.ensure_metadata_object();
         terminalize_running_provider_executions(metadata, &cancelled_at);
         metadata.insert("cancelled_at".to_string(), json!(cancelled_at));
-        metadata.insert("cancelled_by_pid".to_string(), json!(std::process::id()));
         metadata.insert(
             "cancel_reason".to_string(),
             json!(reason.unwrap_or("cancel requested")),
