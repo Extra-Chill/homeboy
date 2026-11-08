@@ -228,8 +228,17 @@ pub(crate) fn prepare_execution_intent(
                 }),
         }
     };
-    let local = admission["binding"]["placement"]["requested"] == "local";
-    let runner = if local {
+    let retry_placement = &record.metadata["cook_retry_placement"];
+    let local = admission["binding"]["placement"]["requested"] == "local"
+        || retry_placement["kind"] == "local";
+    let retry_runner = retry_placement["runner_id"]
+        .as_str()
+        .filter(|runner| !runner.is_empty() && *runner != "local");
+    // Historical recipes recorded only `kind: lab`, without an admitted
+    // runner. Keep their existing runtime-generation recovery behavior.
+    let runner = if retry_placement["kind"] == "lab" && retry_runner.is_some() {
+        retry_runner.map(str::to_string)
+    } else if local {
         None
     } else {
         admission["binding"]["placement"]["runner_ref"]

@@ -10923,6 +10923,56 @@ fn zero_execution_pre_execution_failure_recovers_by_retrying_its_recipe() {
 }
 
 #[test]
+fn lab_pre_execution_retry_preserves_admitted_placement_and_accepts_projected_step() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let options = retryable_pre_provider_cook("cook-lab-retry-placement", 1);
+        let recipes = CookRecipeStore::from_current_data_root().unwrap();
+        let mut recipe = recipes.load_recipe(&options.identity.cook_id).unwrap();
+        recipe.promotion_transport["attempt_dispatch"] = serde_json::json!({
+            "kind": "lab", "runner_id": "homeboy-lab"
+        });
+        recipes.persist_recipe(&recipe).unwrap();
+        agent_task_lifecycle::rewrite_record_for_test(&options.identity.initial_run_id, |record| {
+            record.metadata["execution_placement_decision"] = serde_json::json!({
+                "decision_id": "original-lab-placement",
+                "policy_id": "lab-route-contract", "policy_revision": "v1",
+                "identity": {"repository": "repo", "workspace": "/ws/repo", "task": "cook-repo"},
+                "requested": "Auto", "required": "lab", "selected": "lab",
+                "runner": {"runner_id": "homeboy-lab", "source": "explicit"},
+                "fallback": {"local_allowed": false},
+                "override_authorization": {"authorized": false}
+            });
+        })
+        .unwrap();
+
+        assert_eq!(
+            recover_preflight_step(&options.identity.cook_id),
+            super::super::CookRecoveryStep::Retry
+        );
+        crate::agent_task_service::retry_admission(&options.identity.initial_run_id).unwrap();
+        let retry =
+            crate::agent_task_service::retry(&options.identity.initial_run_id, None, false, false)
+                .expect("the projected retry is accepted on the controller");
+        // Read back the durable reservation, as a restarted controller would;
+        // placement must not depend on the retry caller's process-local route.
+        let store = test_lifecycle_store();
+        let reserved = store.read_record(&retry.record.run_id).unwrap();
+        let intent = crate::agent_task_service::current_execution_intent(&store, &reserved)
+            .unwrap()
+            .unwrap();
+        assert_eq!(intent.runner.as_deref(), Some("homeboy-lab"));
+        assert_eq!(
+            intent.step.wait.runner_eligible.as_deref(),
+            Some("homeboy-lab")
+        );
+        assert_eq!(
+            retry.record.metadata["cook_retry_placement"],
+            recipe.promotion_transport["attempt_dispatch"]
+        );
+    });
+}
+
+#[test]
 fn refused_pre_execution_retry_names_the_admission_refusal() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let options = retryable_pre_provider_cook("cook-refused-pre-execution-retry", 1);

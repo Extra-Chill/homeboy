@@ -1115,9 +1115,14 @@ fn retry_reservation_metadata(
     };
     let value = serde_json::to_value(&preparation)
         .map_err(|error| Error::internal_json(error.to_string(), None))?;
+    let recipe = recipes.load_recipe(&retry.cook_id)?;
     let metadata = serde_json::Map::from_iter([
         ("cook_id".into(), json!(retry.cook_id)),
         ("execution_retry_preparation".into(), value),
+        (
+            "cook_retry_placement".into(),
+            recipe.promotion_transport["attempt_dispatch"].clone(),
+        ),
     ]);
     Ok((preparation, metadata))
 }
@@ -1670,7 +1675,10 @@ where
     preflight(&source_plan)?;
     let unmaterialized_admission = source.state().is_terminal()
         && agent_task_lifecycle::is_unmaterialized_cook_admission(&source);
-    if !unmaterialized_admission {
+    // Recipe-owned retries freeze their admitted dispatch in the execution
+    // intent. Only generic retries still risk silently executing locally.
+    let recipe_owned_retry = retry_admission_in_store(&lifecycle_store, &source, false)?.is_some();
+    if !unmaterialized_admission && !recipe_owned_retry {
         if let Some(error) = lab_placed_retry_refusal(
             &source,
             &source_plan,
@@ -3041,6 +3049,15 @@ fn retry_admission_in_store(
             Some(source.run_id.clone()),
             None,
         ));
+    }
+    // Projection and execution share this acceptance check: never advertise
+    // a generic retry that would lose a required Lab placement.
+    if retry.is_none() && !agent_task_lifecycle::is_unmaterialized_cook_admission(source) {
+        let plan =
+            agent_task_lifecycle::load_controller_plan_in_store(lifecycle_store, &source.run_id)?;
+        if let Some(error) = lab_placed_retry_refusal(source, &plan, false) {
+            return Err(error);
+        }
     }
     Ok(retry)
 }
