@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.25.8] - 2026-11-08
+
+### Fixed
+- consolidate matrix PR comments and render differential verdicts
+
 ## [2.25.7] - 2026-11-06
 
 ### Fixed
