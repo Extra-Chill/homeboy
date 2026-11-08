@@ -1818,7 +1818,7 @@ struct TerminalCookWorkHandler;
 const TERMINAL_COOK_WORK_TYPE: &str = "agent-task-cook-terminal-continuation";
 const TERMINAL_COOK_JOB_VERSION: u32 = 1;
 
-#[derive(Debug, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 struct TerminalCookJobRequest {
     schema: String,
@@ -2009,7 +2009,45 @@ impl crate::agents::agent_task_service::WorkJobHandler for TerminalCookWorkHandl
         _invocation: crate::agents::agent_task_service::WorkJobInvocation,
     ) -> homeboy::core::Result<crate::agents::agent_task_service::WorkJobStep> {
         let progress = self.initial_progress(&checkpoint)?;
-        supervise_terminal_cook_worker(parse_terminal_cook_job(&checkpoint)?, progress)
+        let request = parse_terminal_cook_job(&checkpoint)?;
+        let outcome = supervise_terminal_cook_worker(request.clone(), progress);
+        if let Err(error) = &outcome {
+            let worker_log_tail = error.details.get("worker_log_tail").cloned().or_else(|| {
+                request.worker.as_ref().and_then(|worker| worker.outcome_path.parent())
+                    .and_then(|dir| crate::agents::agent_task_provider::structured_error::read_runtime_stream_tail(&dir.join("worker.log")))
+                    .map(|tail| serde_json::Value::String(tail.redacted))
+            });
+            let diagnostic = homeboy::core::redaction::RedactionPolicy::default().redact_json(
+                &serde_json::json!({
+                    "code": error.code.as_str(),
+                    "message": error.message,
+                    "details": error.details,
+                    "worker_log_tail": worker_log_tail,
+                    "phase": "terminal_continuation",
+                }),
+            );
+            // Recording is diagnostic evidence; it must never replace the
+            // worker's own failure as the step outcome.
+            if let Err(record_error) =
+                agent_task_lifecycle::AgentTaskLifecycleStore::from_environment().and_then(
+                    |store| {
+                        crate::agents::agent_task_lifecycle::record_cook_controller_failure_in_store(
+                            &store,
+                            &request.run_id,
+                            &diagnostic,
+                        )
+                    },
+                )
+            {
+                homeboy::log_status!(
+                    "agent-task",
+                    "could not record terminal continuation failure for {}: {}",
+                    request.run_id,
+                    record_error.message
+                );
+            }
+        }
+        outcome
     }
 
     fn cancelled(
@@ -2338,6 +2376,18 @@ fn run_terminal_cook_continuation(
     );
     let failure = match outcome {
         Ok(0) => {
+            if crate::agents::agent_task_service::continuation_state_in_store(
+                &store,
+                &request.cook_id,
+                &request.run_id,
+            )? != CookContinuationState::Completed
+            {
+                return Ok(WorkJobStep::Continue {
+                    checkpoint,
+                    progress,
+                    wait: TERMINAL_COOK_WORKER_POLL,
+                });
+            }
             return Ok(WorkJobStep::Complete(serde_json::json!({
                 "claimed": true,
                 "cook_id": request.cook_id,

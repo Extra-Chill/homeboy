@@ -167,6 +167,78 @@ fn terminal_continuation_failure_step_hands_off_retries_and_announces_failure() 
     assert!(!announced);
 }
 
+#[test]
+fn agent_task_failed_terminal_job_persists_diagnosable_cause_even_after_completion() {
+    use crate::agents::agent_task_service::{WorkJobHandler, WorkJobInvocation};
+    homeboy::core::test_support::with_isolated_home(|_| {
+        let run_id = "failed-terminal-worker";
+        let plan = crate::agents::agent_tasks::scheduler::AgentTaskPlan::new("plan", Vec::new());
+        agent_task_lifecycle::submit_plan(&plan, Some(run_id)).unwrap();
+        agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+            record.metadata["cook_continuation"] = serde_json::json!({"state": "completed"});
+        })
+        .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let outcome_path = dir.path().join("outcome.json");
+        std::fs::write(&outcome_path, serde_json::to_vec(&serde_json::json!({
+            "schema": TERMINAL_COOK_WORKER_SCHEMA,
+            "outcome": {"outcome": "failed", "code": "internal.unexpected", "message": "publication transport unavailable", "details": {}}
+        })).unwrap()).unwrap();
+        std::fs::write(
+            dir.path().join("worker.log"),
+            "publication transport failed\n",
+        )
+        .unwrap();
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let start_identity = homeboy::core::process::process_start_identity(pid)
+            .unwrap()
+            .unwrap();
+        child.kill().unwrap();
+        child.wait().unwrap();
+        let request = TerminalCookJobRequest {
+            schema: "homeboy/terminal-cook-continuation-request/v1".into(),
+            cook_id: run_id.into(),
+            run_id: run_id.into(),
+            generation: 0,
+            worker: Some(TerminalCookWorker {
+                pid,
+                start_identity,
+                outcome_path,
+            }),
+            interrupted_workers: 0,
+        };
+        assert!(TerminalCookWorkHandler
+            .advance(
+                serde_json::to_value(request).unwrap(),
+                WorkJobInvocation::Resume
+            )
+            .is_err());
+        let (diagnosis, _) =
+            crate::commands::agent_task::run(crate::commands::agent_task::AgentTaskArgs {
+                command: crate::commands::agent_task::AgentTaskCommand::Diagnose(
+                    crate::commands::agent_task::DiagnoseArgs {
+                        run_id: run_id.into(),
+                        full: true,
+                    },
+                ),
+            })
+            .unwrap();
+        assert!(!diagnosis["root_cause"].is_null());
+        let record = crate::agents::agent_task_lifecycle::exact_record(run_id).unwrap();
+        assert_eq!(
+            record.metadata["cook_controller_failure"]["message"],
+            "publication transport unavailable"
+        );
+        assert!(
+            !record.metadata["cook_controller_failure"]["details"]["worker_log_tail"].is_null()
+        );
+    });
+}
+
 use super::*;
 use homeboy::core::test_support::bounded_output;
 use std::fs;

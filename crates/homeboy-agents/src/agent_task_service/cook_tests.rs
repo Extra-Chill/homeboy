@@ -16151,6 +16151,10 @@ fn detached_adoption_follow_up_records_before_dispatch_then_finalizes_once_witho
                 .metadata["cook_continuation"]["state"],
             "claimed"
         );
+        let child_claim =
+            crate::agent_task_service::claim_continuation_for(&fixture.cook_id, follow_up)
+                .unwrap()
+                .expect("review-form continuation is independently claimable");
         let mut resumed_backend = CaptureBackend {
             hydrate_run_id: Some(fixture.run_id.clone()),
             ..Default::default()
@@ -16174,6 +16178,9 @@ fn detached_adoption_follow_up_records_before_dispatch_then_finalizes_once_witho
             },
         )
         .expect("continuation consumes terminal follow-up");
+        child_claim
+            .complete()
+            .expect("absorbed child unwinds successfully while parent owns Cook");
 
         assert_eq!(exit_code, 0);
         assert!(resumed_backend.created);

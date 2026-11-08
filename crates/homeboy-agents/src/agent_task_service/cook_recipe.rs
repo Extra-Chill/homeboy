@@ -2597,6 +2597,16 @@ fn transition_lifecycle_continuation(
         let Some(mut value) = lifecycle_continuation(record).cloned() else {
             return false;
         };
+        // Finalization can absorb a child while its consumer is still unwinding.
+        // That is a successful ownership transfer, not a lost-claim failure.
+        if value
+            .get("absorbed_by_run_id")
+            .and_then(Value::as_str)
+            .is_some()
+        {
+            transitioned = true;
+            return false;
+        }
         if lifecycle_continuation_state(Some(&value)) != CookContinuationState::Claimed
             || value.get("claim_identity").and_then(Value::as_str) != Some(claim_identity)
         {
@@ -3400,6 +3410,11 @@ fn consume_claimed_with_dispatcher_policy(
         .get("provider_executions_consumed")
         .and_then(Value::as_u64)
         .unwrap_or(0);
+    lifecycle_store.mutate_record(&claim.continuation().run_id, |record| {
+        let metadata = record.ensure_metadata_object();
+        let outcome = metadata.remove("cook_pass_outcome").is_some();
+        metadata.remove("cook_progress").is_some() || outcome
+    })?;
     let execution = execute(options);
     if let Some(feedback) = prepared_feedback {
         let current_recipe = store.load_recipe(&recipe.cook_id)?;
@@ -3415,7 +3430,24 @@ fn consume_claimed_with_dispatcher_policy(
     }
     match execution {
         Ok(0) => {
-            claim.complete()?;
+            let current = lifecycle_store.read_record(&claim.continuation().run_id)?;
+            let terminal = current
+                .metadata
+                .pointer("/cook_pass_outcome/terminal")
+                .and_then(Value::as_bool)
+                == Some(true)
+                || current
+                    .metadata
+                    .pointer("/cook_progress/phase")
+                    .and_then(Value::as_str)
+                    == Some("terminal")
+                || super::CookDelivery::from_run_metadata(&current.metadata)
+                    .is_some_and(|delivery| delivery.blocker.is_some());
+            if terminal {
+                claim.complete()?;
+            } else {
+                claim.retry()?;
+            }
             Ok(0)
         }
         Ok(exit_code) => {
@@ -4800,6 +4832,10 @@ mod tests {
             |_| Ok(None),
             |options| {
                 observed = Some(options);
+                store.lifecycle_store().mutate_record("run", |record| {
+                    record.metadata["cook_progress"] = serde_json::json!({"phase": "terminal"});
+                    true
+                })?;
                 Ok(0)
             },
             CookMode::ContinueTerminal,
@@ -5800,10 +5836,39 @@ mod tests {
             .expect("the recorded runtime generation no longer pins continuation");
 
         assert_eq!(exit_code, 0);
+        assert!(
+            store
+                .claim_continuation_for("cook", "run")
+                .unwrap()
+                .is_some(),
+            "a pass without a terminal report must remain reclaimable"
+        );
+    }
+
+    #[test]
+    fn successful_pass_without_gates_or_publication_is_reclaimable() {
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let (store, _) = rooted_stores(&context);
+        store.persist_recipe(&recipe()).unwrap();
+        store.enqueue_terminal_continuation("cook", "run").unwrap();
+        let claim = store
+            .claim_continuation_for("cook", "run")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            store
+                .consume_claimed_with_dispatcher(claim, |_| Ok(None), |_| Ok(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            continuation_state_in_store(&store, "cook", "run").unwrap(),
+            CookContinuationState::Pending
+        );
         assert!(store
             .claim_continuation_for("cook", "run")
             .unwrap()
-            .is_none());
+            .is_some());
     }
 
     /// A record carrying an undecodable continuation is inert: it is neither
