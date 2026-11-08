@@ -20468,7 +20468,11 @@ fn deferred_recovery_supervises_declared_gate_and_persists_unavailability() {
             &noop_cook_progress_observer,
         );
         let result = CookService::run(options, runtime, CookMode::ContinueTerminal).unwrap();
-        assert_eq!(result.value.status, "gates_deferred", "{:#?}", result.value);
+        assert_eq!(
+            result.value.status, "gate_environment_unavailable",
+            "{:#?}",
+            result.value
+        );
         assert_ne!(result.exit_code, 0);
         let record = store.read_record(&run_id).unwrap();
         assert!(record.state().is_terminal());

@@ -8052,7 +8052,7 @@ fn run_cook_spine(
                 let stop_reason = gates_deferred_stop_reason(&promotion, &cook_id);
                 return Ok(stores.report(CookReportInput {
                     cook_id,
-                    status: "gates_deferred",
+                    status: "gate_environment_unavailable",
                     disposition: CookDisposition::Terminal,
                     attempts,
                     finalization: None,

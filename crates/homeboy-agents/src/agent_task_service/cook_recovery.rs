@@ -1353,7 +1353,7 @@ mod tests {
     #[test]
     fn step_decision_covers_every_variant() {
         assert_eq!(
-            step("gates_deferred", |inputs| {
+            step("gate_environment_unavailable", |inputs| {
                 inputs.retry_admitted = false;
                 inputs.continuation_rearm_required = true;
             }),

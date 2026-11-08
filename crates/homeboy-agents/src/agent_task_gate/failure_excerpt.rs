@@ -35,7 +35,8 @@ pub fn gate_failure_excerpt(report: &AgentTaskGateReport) -> Option<String> {
 /// promotion report's `deterministic_gates`).
 pub fn gate_failure_excerpt_from_value(gate: &Value) -> Option<String> {
     let status = str_at(gate, "/status").or_else(|| str_at(gate, "/state"))?;
-    if !matches!(status, "failed" | "failure" | "accepted_inherited_failure") {
+    let unavailable = matches!(status, "unavailable" | "deferred");
+    if !unavailable && !matches!(status, "failed" | "failure" | "accepted_inherited_failure") {
         return None;
     }
     let private = str_at(gate, "/visibility") == Some("private");
@@ -71,6 +72,41 @@ pub fn gate_failure_excerpt_from_value(gate: &Value) -> Option<String> {
     }
     if let Some(command) = command {
         lines.push(format!("command: {command}"));
+    }
+    if unavailable {
+        let receipt = gate.get("lab_receipt").unwrap_or(&Value::Null);
+        let diagnostic = receipt.get("diagnostic").unwrap_or(&Value::Null);
+        // Transport errors wrap the original runner diagnostic. Read that
+        // existing evidence rather than trying to infer setup from gate output.
+        let diagnostic = diagnostic
+            .pointer("/details/diagnostic")
+            .unwrap_or(diagnostic);
+        let setup = gate
+            .get("setup")
+            .and_then(Value::as_array)
+            .and_then(|steps| {
+                steps
+                    .iter()
+                    .find(|step| str_at(step, "/status") == Some("failed"))
+            });
+        let step = str_at(diagnostic, "/details/step_id")
+            .or_else(|| setup.map(|_| "promotion.gate_setup"))
+            .or_else(|| str_at(receipt, "/stage"))
+            .unwrap_or("gate environment");
+        lines.push(format!("failed step: {step}"));
+        let stderr = setup
+            .and_then(|step| str_at(step, "/stderr"))
+            .or_else(|| str_at(diagnostic, "/details/stderr"))
+            .or_else(|| str_at(diagnostic, "/message"));
+        if let Some(first) =
+            stderr.and_then(|text| text.lines().find(|line| !line.trim().is_empty()))
+        {
+            lines.push(format!("error: {first}"));
+        }
+        if let Some(reference) = str_at(receipt, "/artifact_ref") {
+            lines.push(format!("artifact: {reference}"));
+        }
+        return Some(homeboy_core::redaction::redact_string(&lines.join("\n")));
     }
     if let Some(exit_code) = exit_code {
         lines.push(format!("exit code: {exit_code}"));

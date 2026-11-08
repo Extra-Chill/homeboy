@@ -203,6 +203,7 @@ pub enum CookDeliveryState {
 #[serde(rename_all = "snake_case")]
 pub enum CookDeliveryBlockerCode {
     GateFailed,
+    #[serde(rename = "gate_environment_unavailable", alias = "gates_deferred")]
     GatesDeferred,
     BaseConflict,
     ForeignCommits,
@@ -215,7 +216,7 @@ impl CookDeliveryBlockerCode {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::GateFailed => "gate_failed",
-            Self::GatesDeferred => "gates_deferred",
+            Self::GatesDeferred => "gate_environment_unavailable",
             Self::BaseConflict => "base_conflict",
             Self::ForeignCommits => "foreign_commits",
             Self::PublishRefused => "publish_refused",
