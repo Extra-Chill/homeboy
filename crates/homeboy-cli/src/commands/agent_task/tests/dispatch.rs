@@ -480,6 +480,10 @@ fn cook_derives_issue_destination_and_preserves_explicit_override() {
                 "implement the issue".to_string(),
                 "--to-worktree".to_string(),
                 "homeboy@caller-selected".to_string(),
+                "--repo".to_string(),
+                "homeboy".to_string(),
+                "--head".to_string(),
+                "caller-selected".to_string(),
                 "--no-finalize".to_string(),
             ]);
             match crate::commands::agent_task::run::resolve_cook_repository(&mut input) {
@@ -494,7 +498,7 @@ fn cook_derives_issue_destination_and_preserves_explicit_override() {
             explicit.to_worktree.as_deref(),
             Some("homeboy@caller-selected")
         );
-        assert_eq!(explicit.head, None);
+        assert_eq!(explicit.head.as_deref(), Some("caller-selected"));
     });
 }
 
@@ -736,6 +740,8 @@ fn repo_only_cook_persists_configured_repository_identity_for_deferred_lookup() 
                 "expected".to_string(),
                 "--to-worktree".to_string(),
                 "fixture@expected".to_string(),
+                "--head".to_string(),
+                "expected".to_string(),
                 "--no-finalize".to_string(),
             ]);
             match crate::commands::agent_task::run::resolve_cook_repository(&mut input) {
@@ -771,6 +777,8 @@ fn repo_only_cook_without_registered_component_persists_requested_repository_exp
                 "unidentified".to_string(),
                 "--to-worktree".to_string(),
                 "fixture@unidentified".to_string(),
+                "--head".to_string(),
+                "unidentified".to_string(),
                 "--no-finalize".to_string(),
             ]);
             match crate::commands::agent_task::run::resolve_cook_repository(&mut input) {
@@ -1031,6 +1039,8 @@ fn cook_preserves_repository_and_component_identity_for_every_destination_form()
                 "php-transformer".to_string(),
                 "--to-worktree".to_string(),
                 "php-transformer@component-id".to_string(),
+                "--head".to_string(),
+                "component-id".to_string(),
                 "--no-finalize".to_string(),
             ]);
             match crate::commands::agent_task::run::resolve_cook_repository(&mut input) {
@@ -1586,6 +1596,43 @@ fn cook_exact_component_slug_disambiguates_shared_monorepo_remote() {
 }
 
 #[test]
+fn cook_missing_destination_reports_creation_inputs_before_base_inference() {
+    with_isolated_home(|_| {
+        for (extra, expected) in [
+            (vec![], vec!["--repo <repo>", "--head <branch>"]),
+            (vec!["--repo", "fixture"], vec!["--head <branch>"]),
+            (vec!["--head", "feature"], vec!["--repo <repo>"]),
+            (
+                vec!["--task-url", "https://github.com/example/fixture/issues/1"],
+                vec!["--repo <repo>"],
+            ),
+        ] {
+            let mut argv = vec![
+                "homeboy",
+                "agent-task",
+                "cook",
+                "--prompt",
+                "fix",
+                "--to-worktree",
+                "fixture@missing",
+                "--no-finalize",
+            ];
+            argv.extend(extra);
+            let args = cook_args_from_raw_cli(argv.into_iter().map(str::to_string).collect());
+            let error = super::super::run::resolve_cook_destination(args, None)
+                .expect_err("creation requirements precede base inference");
+            let missing = error.details["args"]
+                .as_array()
+                .expect("one missing-argument diagnostic");
+            assert_eq!(missing.len(), expected.len());
+            for (message, prefix) in missing.iter().zip(expected) {
+                assert!(message.as_str().unwrap().starts_with(prefix));
+            }
+        }
+    });
+}
+
+#[test]
 fn cook_resolves_omitted_base_from_repository_metadata_or_fails_closed() {
     with_isolated_home(|_| {
         let source = tempfile::tempdir().expect("source checkout");
@@ -1682,6 +1729,8 @@ fn cook_resolves_omitted_base_from_repository_metadata_or_fails_closed() {
                 "fixture".to_string(),
                 "--to-worktree".to_string(),
                 "fixture@missing".to_string(),
+                "--head".to_string(),
+                "missing".to_string(),
                 "--no-finalize".to_string(),
             ]);
             match crate::commands::agent_task::run::resolve_cook_repository(&mut input) {
@@ -1733,6 +1782,8 @@ fn cook_resolves_omitted_base_from_repository_metadata_or_fails_closed() {
                 "fixture@missing",
                 "--base",
                 "trunk",
+                "--head",
+                "missing",
                 "--no-finalize",
             ])
         );
@@ -1748,6 +1799,8 @@ fn cook_resolves_omitted_base_from_repository_metadata_or_fails_closed() {
                 "unavailable".to_string(),
                 "--to-worktree".to_string(),
                 "unavailable@missing".to_string(),
+                "--head".to_string(),
+                "missing".to_string(),
                 "--no-finalize".to_string(),
             ]);
             match crate::commands::agent_task::run::resolve_cook_repository(&mut input) {

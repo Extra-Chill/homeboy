@@ -721,20 +721,10 @@ pub(crate) fn preview_cook(
     // validation, so preserve its precedence over backend guidance.
     validate_cook_source_authority(&args, provenance)?;
     bind_cook_preview_lifecycle(&mut args);
-    let repository_result = resolve_cook_repository(&mut args);
-    let component = repository_result
-        .as_ref()
-        .ok()
-        .and_then(|repo| repo.as_ref())
-        .map(|repo| &repo.component);
-    apply_component_default_verify_gates(&mut args, component)?;
-    // Source policy is a static validation and must apply to preview exactly as
-    // it applies before an execution route can inspect the destination.
-    validate_cook_request_with_provenance(&args, provenance)?;
+    let repository = prepare_cook_request(&mut args, provenance)?;
     let preview_request =
         dispatch_service::resolve_dispatch_request(resolved_dispatch_args_for_cook(&args)?.into())?;
     dispatch_service::require_model_override_acknowledgement(&preview_request)?;
-    let repository = repository_result?;
     record_preview_phase(&mut progress, "destination_resolution");
     let (mut args, mut provision) =
         with_preview_heartbeat(&mut progress, "destination_resolution", || {
@@ -5463,26 +5453,49 @@ fn cook_provider_provision_intent(
     args: &AgentTaskCookArgs,
     handle: &str,
 ) -> homeboy::core::Result<homeboy::core::worktree_provider::WorktreeProvisionIntent> {
+    let (repo, head) = cook_missing_destination_requirements(args)?;
     Ok(homeboy::core::worktree_provider::WorktreeProvisionIntent {
         handle: handle.to_string(),
-        repo: cook_provision_repository(args).ok_or_else(|| {
-            homeboy::core::Error::validation_missing_argument(vec![
-                "--repo <repo> is required to create a missing --to-worktree destination"
-                    .to_string(),
-            ])
-        })?,
+        repo,
         base: args
             .base
             .clone()
             .expect("Cook base is resolved before provider preflight"),
-        head: args.head.clone().ok_or_else(|| {
-            homeboy::core::Error::validation_missing_argument(vec![
-                "--head <branch> is required to create a missing --to-worktree destination"
-                    .to_string(),
-            ])
-        })?,
+        head,
         task_url: args.dispatch.task_url.clone(),
     })
+}
+
+/// Report all creation inputs together, independently of base inference. A task
+/// issue can supply the branch; PR refs have already been resolved by the caller.
+fn cook_missing_destination_requirements(
+    args: &AgentTaskCookArgs,
+) -> homeboy::core::Result<(String, String)> {
+    let repo = cook_provision_repository(args);
+    let head = args.head.clone().or_else(|| {
+        args.dispatch
+            .task_url
+            .as_deref()
+            .and_then(|url| derived_cook_branch(url).ok())
+    });
+    let mut missing = Vec::new();
+    if repo.is_none() {
+        missing.push(
+            "--repo <repo> is required to create a missing --to-worktree destination".to_string(),
+        );
+    }
+    if head.is_none() {
+        missing.push(
+            "--head <branch> is required to create a missing --to-worktree destination".to_string(),
+        );
+    }
+    if !missing.is_empty() {
+        return Err(homeboy::core::Error::validation_missing_argument(missing));
+    }
+    Ok((
+        repo.expect("repository checked"),
+        head.expect("branch checked"),
+    ))
 }
 
 /// Provider worktrees are rooted at a canonical repository primary, while Cook
@@ -5638,7 +5651,14 @@ pub(crate) fn resolve_cook_destination(
         }
     }
     resolve_cook_pull_request(&mut args)?;
-    if args.to_worktree.is_some() {
+    if let Some(handle) = args.to_worktree.as_deref() {
+        if !Path::new(handle).is_dir()
+            && homeboy::core::worktree_provider::resolve_native_worktree_mutation_target(handle)?
+                .is_none()
+        {
+            let (_, head) = cook_missing_destination_requirements(&args)?;
+            args.head = Some(head);
+        }
         resolve_cook_base(&mut args, repository)?;
         return Ok(args);
     }
@@ -7182,6 +7202,24 @@ fn validate_cook_source_authority(
     Ok(())
 }
 
+/// Shared ordering boundary for preview, execution, handoff and admission.
+/// Repository metadata supplies default gates, but destination/base resolution
+/// must not start until the request (including queue-only refusal) is valid.
+pub(crate) fn prepare_cook_request(
+    args: &mut AgentTaskCookArgs,
+    provenance: Option<&crate::cli_surface::CommandArgumentProvenance>,
+) -> homeboy::core::Result<Option<ResolvedCookRepository>> {
+    let repository = resolve_cook_repository(args);
+    let component = repository
+        .as_ref()
+        .ok()
+        .and_then(|repo| repo.as_ref())
+        .map(|repo| &repo.component);
+    apply_component_default_verify_gates(args, component)?;
+    validate_cook_request_with_provenance(args, provenance)?;
+    repository
+}
+
 pub(crate) fn validate_cook_request_with_provenance(
     args: &AgentTaskCookArgs,
     provenance: Option<&crate::cli_surface::CommandArgumentProvenance>,
@@ -7354,19 +7392,11 @@ pub(crate) fn run_cook_with_executor_and_dispatcher_with_progress(
     progress: super::CookProgress<'_>,
     provenance: Option<&crate::cli_surface::CommandArgumentProvenance>,
 ) -> CmdResult<Value> {
-    let repository_result = resolve_cook_repository(&mut args);
-    let component = repository_result
-        .as_ref()
-        .ok()
-        .and_then(|repo| repo.as_ref())
-        .map(|repo| &repo.component);
     let retained_gate_contract = args.gates.has_retained_contract();
     snapshot_cook_prompt(&mut args)?;
     args.gates.snapshot_file_inputs()?;
-    apply_component_default_verify_gates(&mut args, component)?;
-    validate_cook_request_with_provenance(&args, provenance)?;
+    let repository = prepare_cook_request(&mut args, provenance)?;
     confirm_model_override(&mut args)?;
-    let repository = repository_result?;
     if !args.no_progress {
         if let Some(progress) = progress {
             progress(

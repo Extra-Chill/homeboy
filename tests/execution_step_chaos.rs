@@ -276,6 +276,9 @@ fn crash_case(fault: Fault) {
             COOK,
             "--repo",
             "execution-chaos",
+            // The fixture checkout has no remote, so Cook cannot infer a base.
+            "--base",
+            "main",
             "--backend",
             "fixture",
             "--model",

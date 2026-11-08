@@ -3737,6 +3737,58 @@ fn auto_cook_stale_lab_does_not_persist_blocked_runner_stale_retries() {
 }
 
 #[test]
+fn cook_admission_and_handoff_validate_before_destination_io() {
+    crate::test_support::with_isolated_home(|_| {
+        for queue_only in [false, true] {
+            let mut argv = vec![
+                "homeboy",
+                "agent-task",
+                "cook",
+                "--backend",
+                "fixture",
+                "--prompt",
+                "fix",
+                "--to-worktree",
+                "fixture@missing",
+                "--no-finalize",
+            ];
+            if queue_only {
+                argv.push("--queue-only");
+            }
+            let cli = Cli::parse_from(&argv);
+            let normalized: Vec<String> = argv.into_iter().map(str::to_string).collect();
+            let preflight = homeboy::core::parsed_command_preflight::ParsedCommandPreflightResult::new(
+                normalized.clone(),
+                resource_policy::parsed_command_preflight_input(&cli, &normalized),
+                None, None,
+                homeboy::core::parsed_command_preflight::DeferredWorkloadDecision::NotApplicable,
+                homeboy::core::parsed_command_preflight::FallbackDirective::None,
+                crate::cli_runtime::placement_directive(&cli, None, false),
+                None,
+            );
+            let admission = admit_unmaterialized_cook(&cli, &normalized, &preflight, None, None)
+                .expect_err("invalid request cannot be queued");
+            let handoff = materialize_agent_task_cook_plan(&cli, None)
+                .expect_err("invalid request cannot be handed off");
+            for error in [admission, handoff] {
+                if queue_only {
+                    assert!(error
+                        .message
+                        .contains("cannot queue its controller-owned lifecycle"));
+                } else {
+                    let missing = error.details["args"]
+                        .as_array()
+                        .expect("creation requirements");
+                    assert_eq!(missing.len(), 2);
+                    assert!(missing[0].as_str().unwrap().starts_with("--repo <repo>"));
+                    assert!(missing[1].as_str().unwrap().starts_with("--head <branch>"));
+                }
+            }
+        }
+    });
+}
+
+#[test]
 fn unmaterialized_cook_admission_maps_runner_readiness_to_honest_states() {
     let readiness = |state: &str, reasons: &[&str]| {
         homeboy::core::parsed_command_preflight::LabReadinessSnapshot {

@@ -993,10 +993,9 @@ fn admit_unmaterialized_cook(
         ));
     };
     let mut args = *cook.clone();
-    let repository = crate::commands::agent_task::run::resolve_cook_repository(&mut args)?;
+    let repository = crate::commands::agent_task::run::prepare_cook_request(&mut args, provenance)?;
     let resolved =
         crate::commands::agent_task::run::resolve_cook_destination(args, repository.as_ref())?;
-    crate::commands::agent_task::run::validate_cook_request_with_provenance(&resolved, provenance)?;
     // Run every check the replay worker will run, including model-override
     // confirmation, before any admission record is persisted (#15009). A
     // queued Lab admission has no TTY to prompt against, so a submission that
@@ -3689,10 +3688,9 @@ fn materialize_agent_task_cook_plan(
         return Ok(None);
     };
     let mut args = *cook.clone();
-    let repository = crate::commands::agent_task::run::resolve_cook_repository(&mut args)?;
+    let repository = crate::commands::agent_task::run::prepare_cook_request(&mut args, provenance)?;
     let cook =
         crate::commands::agent_task::run::resolve_cook_destination(args, repository.as_ref())?;
-    crate::commands::agent_task::run::validate_cook_request_with_provenance(&cook, provenance)?;
     let provision = crate::commands::agent_task::run::provision_cook_destination(
         &cook,
         repository.as_ref(),
