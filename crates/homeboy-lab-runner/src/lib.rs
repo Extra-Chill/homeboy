@@ -943,10 +943,10 @@ pub fn refresh_lab_runner_readiness_for_admission() -> Result<LabRunnerReadiness
             runner_id.clone(),
         )
     });
-    let deadline = std::time::Instant::now() + readonly_probe::readonly_probe_timeout();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
     let mut observations = Vec::new();
     for runner_id in runner_ids.into_iter().take(DETACHED_QUEUE_REFRESH_LIMIT) {
-        observations.push(observe_lab_runner_admission_candidate(&runner_id, deadline));
+        observations.push(retry_admission_candidate(&runner_id, deadline));
     }
     lab_runner_readiness_from_refresh_observations(preferred.as_deref(), observations)
 }
@@ -954,24 +954,62 @@ pub fn refresh_lab_runner_readiness_for_admission() -> Result<LabRunnerReadiness
 /// Read one explicitly selected runner for immediate workload admission. Unlike
 /// the bounded inventory refresh, this never substitutes another runner.
 pub fn lab_runner_readiness_for_admission(runner_id: &str) -> Result<LabRunnerReadiness> {
-    let runner = load(runner_id)?;
-    runner_probe_gate::invalidate_runner_probes(runner_id);
-    let status = runner_admission_snapshot(runner_id)?.status;
-    let capabilities_ready = status.configured_job_binary_build_identity.is_some()
-        || !runner_capability_inventory(runner_id)?
-            .runtime_ids
-            .is_empty();
-    let candidate = lab_runner_admission_candidate(
+    let candidate = retry_admission_candidate(
         runner_id,
-        runner.settings.concurrency_limit,
-        &status,
-        capabilities_ready,
-        lab::offload::metadata::require_exact_runner_version(&runner.settings),
-    );
+        std::time::Instant::now() + std::time::Duration::from_secs(20),
+    )?;
     Ok(lab_runner_readiness_from_candidates(
         Some(runner_id),
         vec![candidate],
     ))
+}
+
+fn retry_admission_candidate(
+    runner_id: &str,
+    deadline: std::time::Instant,
+) -> Result<DefaultLabRunnerCandidate> {
+    let mut result = Err(Error::internal_unexpected("runner probe not attempted"));
+    for attempt in 0..3 {
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            break;
+        }
+        result = observe_lab_runner_admission_candidate(
+            runner_id,
+            deadline.min(now + std::time::Duration::from_secs(5)),
+        );
+        if result
+            .as_ref()
+            .is_ok_and(|candidate| candidate.connected && !candidate.unverified_daemon)
+        {
+            return result;
+        }
+        if attempt < 2 {
+            std::thread::sleep(
+                std::time::Duration::from_millis(250 << attempt)
+                    .min(deadline.saturating_duration_since(std::time::Instant::now())),
+            );
+        }
+    }
+    result
+        .map(|mut candidate| {
+            if !candidate.connected || candidate.unverified_daemon {
+                candidate.admission_remediation =
+                    Some(format!("homeboy runner connect {runner_id}"));
+            }
+            candidate
+        })
+        .map_err(|error| {
+            let mut blocker = Error::internal_unexpected(format!(
+                "blocked_runner_unavailable: {error}; run homeboy runner connect {runner_id}"
+            ));
+            blocker.details = serde_json::json!({
+                "classification": "blocked_runner_unavailable",
+                "runner": runner_id,
+                "recovery_command": format!("homeboy runner connect {runner_id}"),
+            });
+            blocker
+        })
 }
 
 fn observe_lab_runner_admission_candidate(

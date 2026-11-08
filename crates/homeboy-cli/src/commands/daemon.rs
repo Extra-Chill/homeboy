@@ -875,8 +875,21 @@ where
     output.lease_id = postcondition.freshness.lease_id;
     output.store_path = postcondition.state_path;
     output.active_jobs = postcondition.freshness.active_jobs;
-    output.next_command = "homeboy daemon status".to_string();
-    if !fresh {
+    output.next_command = if output
+        .applied_steps
+        .iter()
+        .any(|step| step == daemon::recovery_actions::DRAIN_THEN_REPLACE)
+    {
+        "homeboy daemon ensure-running".to_string()
+    } else {
+        "homeboy daemon status".to_string()
+    };
+    if !fresh
+        && !output
+            .applied_steps
+            .iter()
+            .any(|step| step == daemon::recovery_actions::DRAIN_THEN_REPLACE)
+    {
         output.blocked_on = Some(format!(
             "recovery executed but the authoritative status remains stale{}",
             postcondition
@@ -911,6 +924,12 @@ fn execute_recovery_plan(
                     )
                 })?;
                 daemon::stop_for_lease(lease_id)?;
+            }
+            code if code == actions::DRAIN_THEN_REPLACE => {
+                daemon::drain_then_replace(
+                    lease_id
+                        .ok_or_else(|| Error::internal_unexpected("drain requires a lease id"))?,
+                )?;
             }
             code if code == actions::DAEMON_ENSURE_RUNNING => {
                 daemon::ensure_running(addr)?;

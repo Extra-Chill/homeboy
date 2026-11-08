@@ -297,6 +297,17 @@ impl LocalControllerJobClient {
         }
         let admission_guard = acquire_daemon_admission_lock()?;
         let prior = read_status()?;
+        if let Some(error) = prior.admission_blocker() {
+            return Err(error);
+        }
+        if daemon_draining() {
+            return Err(Error::validation_invalid_argument(
+                "daemon_stale_draining",
+                "daemon is draining; run homeboy daemon recover",
+                None,
+                None,
+            ));
+        }
         match Self::connect() {
             Ok(mut client) => {
                 client.admission_guard = Mutex::new(Some(admission_guard));
@@ -750,6 +761,9 @@ pub fn converge_current_build_idle_daemon() -> Result<bool> {
         return Ok(false);
     }
 
+    if let Some(error) = status.admission_blocker() {
+        return Err(error);
+    }
     if !recovery_actions::authorizes_automatic_idle_restart(&status) {
         let plan = recovery_actions::plan_recovery(&status);
         let recovery_command = if plan.executable && plan.required_confirmations.is_empty() {
@@ -944,7 +958,30 @@ impl DaemonStatus {
     /// and freshness fields rather than an overloaded `running` field: build
     /// incompatibility must not masquerade as process death (#13621).
     pub fn admits_work(&self) -> bool {
-        self.running && self.fresh && self.reachable
+        self.running && self.fresh && self.reachable && !daemon_draining()
+    }
+
+    /// Refuse stale protected work before any durable admission.
+    pub fn admission_blocker(&self) -> Option<Error> {
+        if self.running && self.reachable && !self.fresh && self.freshness.active_jobs > 0 {
+            let mut error = Error::validation_invalid_argument(
+                "daemon_stale_draining",
+                format!(
+                    "daemon {} has {} active protected job(s); run homeboy daemon recover",
+                    self.freshness
+                        .daemon_version
+                        .as_deref()
+                        .unwrap_or("unknown"),
+                    self.freshness.active_jobs
+                ),
+                None,
+                None,
+            );
+            error.details = json!({"classification": "daemon_stale_draining", "daemon_version": self.freshness.daemon_version, "active_jobs": self.freshness.active_jobs, "recovery_command": "homeboy daemon recover"});
+            Some(error)
+        } else {
+            None
+        }
     }
 
     /// The service manager that owns the live daemon, if one does. Only that
@@ -958,7 +995,12 @@ impl DaemonStatus {
 
     /// Render [`DaemonStatus::summary`] from the status's own evidence.
     pub fn render_summary(&self) -> String {
-        let mut summary = if self.running && self.reachable {
+        let mut summary = if self.running && daemon_draining() {
+            format!(
+                "daemon draining with {} active job(s)",
+                self.freshness.active_jobs
+            )
+        } else if self.running && self.reachable {
             if self.freshness.stale_reason_code == Some(DaemonStaleReasonCode::VersionMismatch) {
                 format!(
                     "daemon process is live and its API is reachable; live daemon from an older build ({}), with {} active job(s); replacement planned when idle",
@@ -1906,6 +1948,11 @@ where
     let mut accepted = 0;
     let mut serve_result = Ok(());
     loop {
+        if daemon_draining()
+            && daemon_freshness_report(&job_store).is_ok_and(|report| report.active_jobs == 0)
+        {
+            break;
+        }
         if shutdown
             .as_ref()
             .is_some_and(|flag| flag.load(Ordering::Acquire))
@@ -1960,9 +2007,10 @@ where
     }
 
     drop(connection_tx);
-    let shutdown_requested = shutdown
-        .as_ref()
-        .is_some_and(|flag| flag.load(Ordering::Acquire));
+    let shutdown_requested = daemon_draining()
+        || shutdown
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::Acquire));
     // One budget covers the connection workers and the helpers, so a stop
     // never waits on back-to-back drains.
     let drain_deadline = Instant::now() + HELPER_DRAIN_DEADLINE;
@@ -2626,6 +2674,28 @@ fn route_with_job_store_and_body_and_runner_and_auth<R>(
 where
     R: AnalysisJobRunner,
 {
+    if method == "POST"
+        && daemon_draining()
+        && matches!(
+            path.split('?').next().unwrap_or(path),
+            "/jobs"
+                | "/exec"
+                | "/controller/jobs"
+                | "/runner/jobs"
+                | "/admissions"
+                | "/v1/control-plane/runs"
+        )
+    {
+        return error_response(
+            503,
+            Error::validation_invalid_argument(
+                "daemon_stale_draining",
+                "daemon is draining; run homeboy daemon recover",
+                None,
+                None,
+            ),
+        );
+    }
     if let Err(error) = job_store.reconcile_expired_local_child_reservations() {
         return error_response(500, error);
     }
@@ -6327,6 +6397,32 @@ mod tests {
         });
     }
 
+    #[test]
+    fn daemon_recover_drain_preserves_protected_jobs_and_refuses_admission() {
+        with_isolated_home(|_| {
+            write_test_lease("drain-test-lease");
+            let store = JobStore::open_without_reconciliation(paths::observation_db().unwrap())
+                .unwrap()
+                .with_daemon_lease("drain-test-lease".to_string());
+            let protected = store.create("runner.exec");
+            store.start(protected.id).unwrap();
+            drain_then_replace("drain-test-lease").unwrap();
+            assert!(daemon_draining());
+            let response = route_with_job_store("POST", "/controller/jobs", &store);
+            assert_eq!(response.status_code, 503);
+            assert!(response.body.to_string().contains("daemon_stale_draining"));
+            assert!(with_daemon_job_admission(|| Ok(())).is_err());
+            assert_eq!(store.active_runner_jobs().len(), 1);
+            assert_eq!(
+                store.active_runner_jobs()[0].job_id,
+                protected.id.to_string()
+            );
+            // A replacement lease cannot inherit a previous generation's drain.
+            write_test_lease("replacement-lease");
+            assert!(!daemon_draining());
+        });
+    }
+
     /// Offline `daemon status` (the CLI path `runner connect` reads when this
     /// controller's daemon is dead) must scope the shared ledger the same way
     /// as the live daemon (#16089). Another controller's stamped live work on a
@@ -7342,6 +7438,27 @@ mod tests {
             let identity = persisted_identity();
             assert!(remove_lease_if_identity_matches(&path, &identity).expect("remove lease"));
             assert!(!path.exists());
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn daemon_admission_retries_transient_file_lock_contention() {
+        with_isolated_home(|_| {
+            // Model a different process holding the file fence, without the
+            // in-process exclusive flag. Admission must tolerate a brief
+            // lifecycle transition, but never use a blocking flock.
+            let (_, file) = open_daemon_admission_lock().unwrap();
+            assert!(try_lock_file_exclusive(&file, "test admission fence").unwrap());
+            let release = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(50));
+                drop(file);
+            });
+            let guard = acquire_daemon_admission_lock().unwrap();
+            release.join().unwrap();
+            assert!(try_acquire_daemon_job_admission_fence().unwrap().is_none());
+            drop(guard);
+            assert!(try_acquire_daemon_job_admission_fence().unwrap().is_some());
         });
     }
 
@@ -8585,8 +8702,52 @@ fn daemon_admission_fence_timeout_error_at(path: &Path, wait: Duration) -> Error
     error
 }
 
+fn drain_path() -> Result<std::path::PathBuf> {
+    Ok(state_path()?.with_extension("drain"))
+}
+
+fn daemon_draining() -> bool {
+    let Ok(path) = drain_path() else { return false };
+    let Ok(lease) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    validate_lease_file(&match state_path() {
+        Ok(path) => path,
+        Err(_) => return false,
+    })
+    .ok()
+    .and_then(|validation| validation.state)
+    .is_some_and(|state| state.lease_id == lease)
+}
+
+/// Lease-bound drain: no signals are sent and protected jobs remain owned.
+pub fn drain_then_replace(lease_id: &str) -> Result<()> {
+    let _fence = try_acquire_daemon_job_admission_fence()?.ok_or_else(|| {
+        Error::internal_unexpected("daemon admission busy; retry homeboy daemon recover")
+    })?;
+    let state = validate_lease_file(&state_path()?)?
+        .state
+        .ok_or_else(|| Error::internal_unexpected("no daemon lease"))?;
+    if state.lease_id != lease_id {
+        return Err(Error::internal_unexpected(
+            "daemon lease changed before drain",
+        ));
+    }
+    std::fs::write(drain_path()?, lease_id).map_err(|error| {
+        Error::internal_io(error.to_string(), Some("request daemon drain".to_string()))
+    })
+}
+
 pub(super) fn with_daemon_job_admission<T>(operation: impl FnOnce() -> Result<T>) -> Result<T> {
     let _guard = acquire_daemon_admission_lock()?;
+    if daemon_draining() {
+        return Err(Error::validation_invalid_argument(
+            "daemon_stale_draining",
+            "daemon is draining; run homeboy daemon recover",
+            None,
+            None,
+        ));
+    }
     operation()
 }
 
@@ -8595,10 +8756,18 @@ fn acquire_daemon_admission_lock() -> Result<DaemonAdmissionGuard> {
     let mut state = state_lock
         .lock()
         .map_err(|_| Error::internal_unexpected("daemon admission process state is poisoned"))?;
+    let deadline = Instant::now() + std::time::Duration::from_secs(5);
     while state.exclusive_held {
-        state = state_changed.wait(state).map_err(|_| {
-            Error::internal_unexpected("daemon admission process state is poisoned")
-        })?;
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(Error::internal_unexpected(
+                "daemon admission deadline exceeded",
+            ));
+        }
+        state = state_changed
+            .wait_timeout(state, remaining)
+            .map_err(|_| Error::internal_unexpected("daemon admission process state is poisoned"))?
+            .0;
     }
     state.shared_holders += 1;
     drop(state);
@@ -8611,12 +8780,32 @@ fn acquire_daemon_admission_lock() -> Result<DaemonAdmissionGuard> {
         }
     };
     #[cfg(unix)]
-    if unsafe { libc::flock(std::os::fd::AsRawFd::as_raw_fd(&file), libc::LOCK_SH) } != 0 {
-        release_daemon_admission_shared();
-        return Err(Error::internal_io(
-            std::io::Error::last_os_error().to_string(),
-            Some("lock daemon admission".to_string()),
-        ));
+    loop {
+        if unsafe {
+            libc::flock(
+                std::os::fd::AsRawFd::as_raw_fd(&file),
+                libc::LOCK_SH | libc::LOCK_NB,
+            )
+        } == 0
+        {
+            break;
+        }
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::WouldBlock
+            && error.kind() != std::io::ErrorKind::Interrupted
+        {
+            release_daemon_admission_shared();
+            return Err(Error::internal_io(
+                error.to_string(),
+                Some("lock daemon admission".to_string()),
+            ));
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            release_daemon_admission_shared();
+            return Err(daemon_admission_fence_timeout_error(Duration::from_secs(5)));
+        }
+        std::thread::sleep(remaining.min(Duration::from_millis(10)));
     }
     #[cfg(windows)]
     {
@@ -8628,7 +8817,7 @@ fn acquire_daemon_admission_lock() -> Result<DaemonAdmissionGuard> {
         if unsafe {
             LockFileEx(
                 file.as_raw_handle(),
-                0,
+                windows_sys::Win32::Storage::FileSystem::LOCKFILE_FAIL_IMMEDIATELY,
                 0,
                 u32::MAX,
                 u32::MAX,

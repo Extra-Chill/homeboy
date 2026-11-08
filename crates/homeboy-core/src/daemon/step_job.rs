@@ -646,6 +646,22 @@ impl ControllerJobDriver for StepJobDriver {
     }
 }
 
+fn write_launch_error(path: &std::path::Path, error: &Error) {
+    use std::io::Write;
+    let text = serde_json::json!({"message": error.message, "details": error.details}).to_string();
+    if let Ok(mut log) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        if writeln!(log, "{text}").is_ok() {
+            let _ = log.flush();
+            return;
+        }
+    }
+    println!("{text}");
+}
+
 fn run_step(mut checkpoint: StepJobCheckpoint, job: &ControllerJobHandle) -> Result<Value> {
     let job_id = job.job_id();
     match checkpoint.phase {
@@ -718,10 +734,13 @@ fn run_step(mut checkpoint: StepJobCheckpoint, job: &ControllerJobHandle) -> Res
     // step down, and cancellation addresses the child's whole tree.
     crate::process::detach_from_caller_session(&mut command);
     let mut process = command.spawn().map_err(|error| {
-        Error::internal_io(
+        let mut error = Error::internal_io(
             error.to_string(),
             Some(format!("spawn step program {}", request.program)),
-        )
+        );
+        error.details["classification"] = serde_json::json!("detached_launch_failed");
+        write_launch_error(&log_path, &error);
+        error
     })?;
     // Capture the start identity while the child is still unreaped.
     let start_identity = match crate::process::process_start_identity(process.id()) {
@@ -1349,6 +1368,23 @@ mod tests {
         let job_id = harness.job().unwrap().id.to_string();
         std::fs::read_to_string(step_job_dir(&job_id).unwrap().join(STEP_LOG_FILE))
             .unwrap_or_default()
+    }
+
+    #[test]
+    fn detached_launch_failure_writes_typed_error() {
+        with_isolated_home(|home| {
+            let mut request = request("true", Default::default());
+            request.program = "/nonexistent/homeboy-detached".to_string();
+            let harness = step_harness(&request, home.path());
+            harness.start_via_controller_boundary().unwrap();
+            assert_eq!(
+                harness.wait_until_terminal().unwrap().status,
+                crate::api_jobs::JobStatus::Failed
+            );
+            let log = job_log(&harness);
+            assert!(log.contains("detached_launch_failed"), "{log}");
+            assert!(log.contains("spawn step program"), "{log}");
+        });
     }
 
     /// #16273: a failed step names the child's own cause, not only its status.

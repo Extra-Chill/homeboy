@@ -26,6 +26,7 @@ use crate::error::{ActionSafety, ExecutableAction};
 
 /// Stop the daemon recorded in the local state file.
 pub const DAEMON_STOP: &str = "daemon_stop";
+pub const DRAIN_THEN_REPLACE: &str = "drain_then_replace";
 /// Replace or reuse the daemon that owns the local store. Starting a daemon
 /// runs its startup recovery of every dead generation in its scope.
 pub const DAEMON_ENSURE_RUNNING: &str = "daemon_ensure_running";
@@ -295,6 +296,34 @@ fn plan_recovery_steps(status: &DaemonStatus) -> DaemonRecoveryPlan {
         );
     }
 
+    if status.running
+        && status.reachable
+        && freshness.active_jobs > 0
+        && matches!(
+            freshness.stale_reason_code,
+            Some(
+                DaemonStaleReasonCode::VersionMismatch
+                    | DaemonStaleReasonCode::BuildIdentityMismatch
+                    | DaemonStaleReasonCode::ExecutableReplaced
+            )
+        )
+    {
+        return DaemonRecoveryPlan {
+            steps: vec![DaemonRepairStep::executable(DRAIN_THEN_REPLACE, recover())],
+            reason: format!(
+                "drain {} protected job(s), then replace the stale daemon",
+                freshness.active_jobs
+            ),
+            required_confirmations: Vec::new(),
+            executable: true,
+            lifecycle: Plan::Transition {
+                step: Step::Repair {
+                    lease_id: freshness.lease_id.clone(),
+                    codes: vec![DRAIN_THEN_REPLACE.to_string()],
+                },
+            },
+        };
+    }
     let attestation = needs_attestation(status);
     if freshness.fresh && freshness.stale_reason_code.is_none() {
         if !attestation.is_empty() {
@@ -708,6 +737,30 @@ mod tests {
     }
 
     #[test]
+    fn admission_fresh_stale_busy_and_stale_idle() {
+        for (reason, jobs, blocked) in [
+            (None, 2, false),
+            (Some(DaemonStaleReasonCode::VersionMismatch), 2, true),
+            (Some(DaemonStaleReasonCode::VersionMismatch), 0, false),
+            (Some(DaemonStaleReasonCode::BuildIdentityMismatch), 2, true),
+            (Some(DaemonStaleReasonCode::ExecutableReplaced), 2, true),
+            (Some(DaemonStaleReasonCode::ExecutableReplaced), 0, false),
+        ] {
+            let report = status(reason, Vec::new(), jobs);
+            assert_eq!(report.admission_blocker().is_some(), blocked);
+            if let Some(error) = report.admission_blocker() {
+                assert_eq!(error.details["classification"], "daemon_stale_draining");
+                assert!(error.message.contains("0.326.1"));
+                assert!(error.message.contains(&format!("{jobs} active protected")));
+                assert!(error.message.contains("homeboy daemon recover"));
+                let plan = plan_recovery(&report);
+                assert!(plan.executable);
+                assert_eq!(plan.steps[0].code, DRAIN_THEN_REPLACE);
+            }
+        }
+    }
+
+    #[test]
     fn reachable_version_mismatch_with_active_jobs_never_offers_attestation() {
         let mut status = status(
             Some(super::super::DaemonStaleReasonCode::VersionMismatch),
@@ -729,16 +782,10 @@ mod tests {
         let plan = plan_recovery(&status);
 
         assert_eq!(plan.steps.len(), 1);
-        assert_eq!(plan.steps[0].code, DAEMON_DIAGNOSE);
-        assert!(!plan.executable);
+        assert_eq!(plan.steps[0].code, DRAIN_THEN_REPLACE);
+        assert!(plan.executable);
         assert!(plan.required_confirmations.is_empty());
-        assert!(matches!(
-            plan.lifecycle,
-            Plan::Wait {
-                cause: WaitCause::BusyStaleDaemon,
-                ..
-            }
-        ));
+        assert!(matches!(plan.lifecycle, Plan::Transition { .. }));
     }
 
     /// Replacement may proceed without any attestation when every active job

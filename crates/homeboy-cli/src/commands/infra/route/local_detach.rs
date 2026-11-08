@@ -222,6 +222,21 @@ pub(super) fn intercept_local_detached_cook(
         };
     }
 
+    // Prove execution-plane admission before creating a durable Cook handle.
+    let controller_client = if cli.detach_after_handoff {
+        homeboy::core::daemon::LocalControllerJobClient::connect_current_build_recovering_idle()?
+    } else {
+        match homeboy::core::daemon::LocalControllerJobClient::connect_current_build() {
+            Ok(client) => client,
+            Err(error) if controller_job_daemon_build_mismatch(&error) => {
+                if durable_local_ownership {
+                    return Err(error);
+                }
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        }
+    };
     let requested_cook_id = cook.dispatch.run_id.clone();
     let cook_id = requested_cook_id
         .clone()
@@ -244,23 +259,6 @@ pub(super) fn intercept_local_detached_cook(
         None => materialize_stdin_prompt(&mut child_args, &cook_id)?,
     };
 
-    // When authoritative daemon status authorizes a confirmation-free idle
-    // restart, recover under the exact lease and continue this same request
-    // instead of making the operator reconstruct it (#13513).
-    let controller_client = if cli.detach_after_handoff {
-        homeboy::core::daemon::LocalControllerJobClient::connect_current_build_recovering_idle()?
-    } else {
-        match homeboy::core::daemon::LocalControllerJobClient::connect_current_build() {
-            Ok(client) => client,
-            Err(error) if controller_job_daemon_build_mismatch(&error) => {
-                if durable_local_ownership {
-                    return Err(error);
-                }
-                return Ok(None);
-            }
-            Err(error) => return Err(error),
-        }
-    };
     let mut overrides = vec![(
         crate::cli_runtime::COOK_STARTUP_LAUNCHER_ID_ENV.to_string(),
         admission.launcher_id.clone(),
