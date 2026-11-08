@@ -218,9 +218,8 @@ impl TryFrom<Value> for Join {
                 .get("min_succeeded")
                 .and_then(Value::as_u64)
                 .and_then(|min| u32::try_from(min).ok())
-                .filter(|min| *min >= 1)
                 .map(Join::MinSucceeded)
-                .ok_or_else(|| "`join.min_succeeded` must be a positive integer".to_string()),
+                .ok_or_else(|| "`join.min_succeeded` must be a non-negative integer".to_string()),
             _ => Err(r#"`join` is "all", "any", or {"min_succeeded": N}"#.to_string()),
         }
     }
@@ -950,13 +949,6 @@ mod tests {
             (
                 |v| {
                     v["steps"][1]["foreach"] = json!(["a"]);
-                    v["steps"][1]["join"] = json!({"min_succeeded": 0});
-                },
-                "positive integer",
-            ),
-            (
-                |v| {
-                    v["steps"][1]["foreach"] = json!(["a"]);
                     v["steps"][1]["max_parallel"] = json!(0);
                 },
                 "at least 1",
@@ -989,12 +981,17 @@ mod tests {
         let mut value = base();
         value["steps"][1]["foreach"] = json!("{{steps.evaluate.output/children}}");
         value["steps"][1]["max_parallel"] = json!(2);
-        value["steps"][1]["join"] = json!({"min_succeeded": 2});
         value["steps"][1]["cook"]["prompt"] = json!("fix {{item.issue_url}} on {{item}}");
-        let parsed = definition(value.clone()).unwrap();
-        assert_eq!(parsed.steps[1].join, Some(Join::MinSucceeded(2)));
-        let serialized = serde_json::to_value(&parsed).unwrap();
-        assert_eq!(serialized["steps"][1]["join"], json!({"min_succeeded": 2}));
+        for min in [0, 2] {
+            value["steps"][1]["join"] = json!({"min_succeeded": min});
+            let parsed = definition(value.clone()).unwrap();
+            assert_eq!(parsed.steps[1].join, Some(Join::MinSucceeded(min)));
+            let serialized = serde_json::to_value(&parsed).unwrap();
+            assert_eq!(
+                serialized["steps"][1]["join"],
+                json!({"min_succeeded": min})
+            );
+        }
         for join in ["all", "any"] {
             value["steps"][1]["join"] = json!(join);
             assert_eq!(
