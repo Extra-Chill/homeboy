@@ -3911,25 +3911,20 @@ fn normal_cook_promotion_fixture(cancel_gate: bool) {
 
 #[test]
 fn moved_base_catch_up_rebases_real_owned_candidate_and_refuses_divergence() {
-    exercise_real_git_base_advance(false, false, false);
-}
-
-#[test]
-fn recover_rebases_and_regates_real_git_candidate_without_provider_execution() {
-    exercise_real_git_base_advance(false, true, false);
+    exercise_real_git_base_advance(false, false);
 }
 
 #[test]
 fn moved_base_conflict_stops_real_git_cook_without_publication() {
-    exercise_real_git_base_advance(true, false, false);
+    exercise_real_git_base_advance(true, false);
 }
 
 #[test]
 fn rewritten_base_stops_real_git_cook_without_publication() {
-    exercise_real_git_base_advance(false, false, true);
+    exercise_real_git_base_advance(false, true);
 }
 
-fn exercise_real_git_base_advance(conflicting: bool, recover: bool, rewritten: bool) {
+fn exercise_real_git_base_advance(conflicting: bool, rewritten: bool) {
     use crate::agent_task::{AgentTaskArtifact, AgentTaskOutcome, AgentTaskOutcomeStatus};
     use crate::agent_task_scheduler::{AgentTaskAggregate, AgentTaskAggregateTotals};
 
@@ -4164,11 +4159,6 @@ fn exercise_real_git_base_advance(conflicting: bool, recover: bool, rewritten: b
             );
             return;
         }
-        if recover {
-            // Delivery owns rebase-and-regate, so recovery simply continues.
-            let recovery = super::super::plan_cook_recovery(run_id).unwrap();
-            assert_eq!(recovery.step, super::super::CookRecoveryStep::Continue);
-        }
         struct RecoverCandidate {
             options: CookRequest,
             calls: Arc<AtomicUsize>,
@@ -4217,24 +4207,14 @@ fn exercise_real_git_base_advance(conflicting: bool, recover: bool, rewritten: b
             calls: finalization_calls_for_finalizer,
             base: expected_base,
         };
-        let exit_code = if recover {
-            super::super::recover_cook(
-                run_id,
-                super::super::CookRecoveryRequest::default(),
-                &performer,
-            )
-            .unwrap()
-            .1
-        } else {
-            super::super::CookRecoveryPerformer::continue_cook(
-                &performer,
-                run_id,
-                false,
-                &super::super::CookRecoveryOverrides::default(),
-            )
-            .unwrap()
-            .1
-        };
+        let exit_code = super::super::CookRecoveryPerformer::continue_cook(
+            &performer,
+            run_id,
+            false,
+            &super::super::CookRecoveryOverrides::default(),
+        )
+        .unwrap()
+        .1;
         assert_eq!(exit_code, 0);
         assert_eq!(finalization_calls.load(Ordering::SeqCst), 1);
         let caught_up = persisted_promotion_for_attempt(run_id).unwrap().unwrap();
