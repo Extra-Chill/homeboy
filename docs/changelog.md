@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.447.6] - 2026-11-08
+
+### Fixed
+- project an in-flight Cook continuation instead of 'publication not attempted'
+- resolve component checkouts before gate preflight and give materialization IO errors context
+- skip ignored dependency dirs in gate snapshots and name refused paths
+- authenticate and status-check upgrade GitHub API requests
+
 ## [0.447.5] - 2026-11-08
 
 ### Changed
