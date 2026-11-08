@@ -1908,6 +1908,26 @@ where
     }
     let _ = daemon_runtime_snapshot();
     let loopback_bind = local_addr.ip().is_loopback();
+    refresh_daemon_freshness_snapshot(&job_store);
+    let (health_shutdown_tx, health_shutdown_rx) = mpsc::channel();
+    let health_store = job_store.clone();
+    let health_updater = std::thread::spawn(move || {
+        let mut revision = health_store.health_revision.load(Ordering::Acquire);
+        let mut refreshed = Instant::now();
+        loop {
+            if health_shutdown_rx.recv_timeout(Duration::from_millis(100))
+                != Err(mpsc::RecvTimeoutError::Timeout)
+            {
+                return;
+            }
+            let current = health_store.health_revision.load(Ordering::Acquire);
+            if current != revision || refreshed.elapsed() >= Duration::from_secs(5) {
+                refresh_daemon_freshness_snapshot(&health_store);
+                revision = current;
+                refreshed = Instant::now();
+            }
+        }
+    });
 
     let (local_shutdown_tx, local_shutdown_rx) = mpsc::channel();
     let (completion_shutdown_tx, completion_shutdown_rx) = mpsc::channel();
@@ -2054,12 +2074,14 @@ where
         }
     }
 
+    let _ = health_shutdown_tx.send(());
     let _ = local_shutdown_tx.send(());
     let _ = completion_shutdown_tx.send(());
     let _ = orchestration_shutdown_tx.send(());
     let _ = work_intent_shutdown_tx.send(());
     let _ = lifetime_shutdown_tx.send(());
     let mut helpers = vec![
+        ("health-snapshot-updater", health_updater),
         ("local-child-reservation-reconciler", local_child_reconciler),
         ("completion-notifier", completion_notifier),
         ("orchestration-reconciler", orchestration_reconciler),
@@ -2696,6 +2718,22 @@ where
     {
         return error_response(503, daemon_draining_error());
     }
+    // Health must never reconcile or inspect the job ledger on a request worker.
+    if method == "GET" && path.split('?').next() == Some("/health") {
+        return HttpResponse {
+            status_code: 200,
+            body: json!({
+                "status": "ok",
+                "pid": std::process::id(),
+                "version": VERSION,
+                "build_identity": build_identity::current(),
+                "lease": heartbeat_lease().ok(),
+                "freshness": job_store.daemon_freshness_snapshot.lock()
+                    .expect("health snapshot lock").clone(),
+            }),
+            artifact: None,
+        };
+    }
     if let Err(error) = job_store.reconcile_expired_local_child_reservations() {
         return error_response(500, error);
     }
@@ -2711,18 +2749,6 @@ where
                 artifact: None,
             },
             Err(err) => error_response(503, err),
-        },
-        ("GET", "/health") => HttpResponse {
-            status_code: 200,
-            body: json!({
-                "status": "ok",
-                "pid": std::process::id(),
-                "version": VERSION,
-                "build_identity": build_identity::current(),
-                "lease": heartbeat_lease().ok(),
-                "freshness": daemon_freshness_report(job_store).ok(),
-            }),
-            artifact: None,
         },
         ("GET", "/version") => HttpResponse {
             status_code: 200,
@@ -3820,6 +3846,16 @@ fn validate_lifecycle_stop_request(request: &LifecycleStopRequest) -> Result<()>
         ));
     }
     Ok(())
+}
+
+fn refresh_daemon_freshness_snapshot(job_store: &JobStore) {
+    // Do the expensive recovery scan without holding the reader's lock. An
+    // unavailable validation must clear old evidence rather than serve it fresh.
+    let report = daemon_freshness_report(job_store).ok();
+    *job_store
+        .daemon_freshness_snapshot
+        .lock()
+        .expect("health snapshot lock") = report;
 }
 
 fn daemon_freshness_report(job_store: &JobStore) -> Result<DaemonFreshnessReport> {
@@ -6275,6 +6311,40 @@ mod tests {
     /// 400 (`runner subsystem is unavailable`).
     pub(super) fn register_enqueue_test_driver() {
         runner_exec_driver::register_runner_exec_driver(Arc::new(EnqueueTestDriver));
+    }
+
+    #[test]
+    fn health_serves_snapshot_without_recovery_or_reconciliation() {
+        with_isolated_home(|_| {
+            write_test_lease("lease-health");
+            let store = JobStore::default();
+            for _ in 0..64 {
+                reserve_admission(
+                    Some(json!({
+                        "runner_id": "lab",
+                        "command": "homeboy generic-workload",
+                        "expected_daemon_lease_id": "lease-health",
+                        "admission_lease_protocol": 1,
+                    })),
+                    &store,
+                )
+                .expect("reservation");
+            }
+            let computed = serde_json::to_value(daemon_freshness_report(&store).unwrap()).unwrap();
+            refresh_daemon_freshness_snapshot(&store);
+            assert_eq!(computed["active_jobs"], 64);
+            let response = route_with_job_store("GET", "/health", &store);
+            assert_eq!(response.body["freshness"], computed);
+            // Clearing the cached evidence must not trigger an on-demand scan.
+            *store.daemon_freshness_snapshot.lock().unwrap() = None;
+            let response = route_with_job_store("GET", "/health", &store);
+            assert!(response.body["freshness"].is_null());
+            refresh_daemon_freshness_snapshot(&store);
+            assert_eq!(
+                route_with_job_store("GET", "/health", &store).body["freshness"],
+                computed
+            );
+        });
     }
 
     #[test]

@@ -1751,7 +1751,12 @@ fn runner_daemon_freshness_until(
     let Some(timeout) = remaining_observation_budget(deadline) else {
         return Ok(None);
     };
-    Ok(daemon_http_freshness_with_timeout(&runner.id, local_url, timeout).ok())
+    Ok(daemon_http_freshness_with_timeout(
+        &runner.id,
+        local_url,
+        timeout.min(connection_daemon::HEALTH_PROBE_TIMEOUT),
+    )
+    .ok())
 }
 
 /// Preserve remote lease evidence when the controller-side daemon HTTP tunnel is unavailable.
@@ -2062,7 +2067,7 @@ pub(crate) fn probe_verified_direct_daemon_health(
 ) -> std::result::Result<connection_daemon::DaemonHealthReport, String> {
     connection_daemon::daemon_health_report_with_timeout(
         local_url,
-        crate::readonly_probe::readonly_probe_timeout(),
+        connection_daemon::HEALTH_PROBE_TIMEOUT,
     )
 }
 
