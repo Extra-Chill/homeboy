@@ -198,7 +198,8 @@ pub(super) fn ensure_transport_with(
 /// therefore not dead. A dead tunnel still fails fast: an absent tunnel
 /// process, a closed channel, or a lease/PID mismatch ends the probe
 /// immediately. Only a slow answer uses this budget.
-pub(super) const PERSISTED_TRANSPORT_LIVENESS_TIMEOUT: Duration = Duration::from_secs(10);
+pub(super) const PERSISTED_TRANSPORT_LIVENESS_TIMEOUT: Duration =
+    crate::connection::connection_daemon::HEALTH_PROBE_TIMEOUT;
 
 struct LiveTransport;
 

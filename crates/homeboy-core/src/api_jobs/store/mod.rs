@@ -65,6 +65,9 @@ pub struct JobStore {
     pub(super) next_event_sequence: Arc<AtomicU64>,
     pub(super) persistence: Option<Arc<JobStorePersistence>>,
     pub(super) daemon_lease_id: Option<String>,
+    /// Health evidence refreshed outside request workers.
+    pub(crate) daemon_freshness_snapshot: Arc<Mutex<Option<crate::daemon::DaemonFreshnessReport>>>,
+    pub(crate) health_revision: Arc<AtomicU64>,
     /// The daemon scope this store acts for; see [`JobStore::owns`].
     pub(super) daemon_scope: Option<DaemonScope>,
     #[cfg(test)]
@@ -595,6 +598,7 @@ impl JobStore {
         }
         drop(inner);
         drop(transaction);
+        self.health_revision.fetch_add(1, Ordering::Release);
         Ok(output)
     }
 
@@ -690,6 +694,9 @@ impl JobStore {
         inner.controller_submissions = durable.controller_submissions;
         inner.expired_controller_submissions = durable.expired_controller_submissions;
         inner.compaction = durable.compaction;
+        if committed.is_ok() {
+            self.health_revision.fetch_add(1, Ordering::Release);
+        }
         committed
     }
 
@@ -895,6 +902,8 @@ impl JobStore {
             durable_write_failures: Arc::new(AtomicU64::new(0)),
             #[cfg(test)]
             durable_write_skips: Arc::new(AtomicU64::new(0)),
+            daemon_freshness_snapshot: Arc::default(),
+            health_revision: Arc::default(),
         };
 
         store.durable_transaction(|inner| {
@@ -977,6 +986,8 @@ impl JobStore {
             durable_write_failures: Arc::new(AtomicU64::new(0)),
             #[cfg(test)]
             durable_write_skips: Arc::new(AtomicU64::new(0)),
+            daemon_freshness_snapshot: Arc::default(),
+            health_revision: Arc::default(),
         };
         store.durable_transaction(|_| Ok(()))?;
         Ok(store)
