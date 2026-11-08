@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.447.9] - 2026-11-08
+
+### Fixed
+- deepen shallow Lab sources at admission, plan it read-only in preview
+
 ## [0.447.8] - 2026-11-08
 
 ### Fixed
