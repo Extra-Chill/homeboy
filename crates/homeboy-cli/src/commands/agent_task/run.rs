@@ -1752,6 +1752,9 @@ fn render_cook_admission(decision: crate::commands::infra::route::CookAdmissionD
             admission["next_action"] = serde_json::json!(next_action);
         }
     }
+    if let Ok(status) = homeboy::core::daemon::read_status() {
+        admission["daemon"] = status.admission_report();
+    }
     admission
 }
 

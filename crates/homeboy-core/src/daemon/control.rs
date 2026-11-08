@@ -209,7 +209,9 @@ fn stale_daemon_action(status: &super::DaemonStatus) -> Option<StaleDaemonAction
         && matches!(
             status.freshness.stale_reason_code,
             Some(
-                DaemonStaleReasonCode::VersionMismatch | DaemonStaleReasonCode::ExecutableReplaced
+                DaemonStaleReasonCode::VersionMismatch
+                    | DaemonStaleReasonCode::BuildIdentityMismatch
+                    | DaemonStaleReasonCode::ExecutableReplaced
             )
         )
     {
