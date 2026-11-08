@@ -67,7 +67,7 @@ Reused steps retain their recorded outputs, run ids, item records, and original 
 }
 ```
 
-`iterate` and `command` gates are not part of this version. Admission refuses them with a message that names the replacement: an `iterate` is replaced by a final `homeboy` step that runs `workflow run <this definition>` with the next pass's inputs, gated by `when`; a `{"command": [...]}` gate is replaced by an `exec` step plus an `outcome` gate. Unknown top-level fields are refused like any unknown field.
+Use `next_pass` for a bounded chain of passes. Unknown fields (including the removed `iterate`) are refused. Replace command gates with an `exec` step plus an `outcome` gate.
 
 ### Fan-out and join
 
@@ -146,14 +146,30 @@ A step runs with `env_clear()` plus its admitted environment:
 - `homeboy` and `cook` steps also get the runtime environment a detached Cook gets (provider process variables and Homeboy's `HOMEBOY_*` configuration).
 - Every step also gets `HOMEBOY_WORKFLOW_INSTANCE`, the id of the instance whose step is running. `workflow run` reads it and records the admitting instance as the new instance's `parent`.
 
-### Self-admitting chains
+### Native next passes (`next_pass`)
 
-The replacement for `iterate` is a chain of instances: the definition's final step is a `homeboy` step that runs `workflow run <this definition>` with the next pass's inputs, gated by `when`. Each pass is one instance, so every pass has its own status, step jobs, and budget.
+`next_pass` starts another instance only after the current pass succeeds and its optional `when` gate passes. It forwards every input, replacing only `next_pass.inputs` (typed JSON values and templates). No self-admitting `again`/`retry` commands or caller-maintained stall counters are needed.
 
-- **The parent link.** An instance admitted by a step of another instance records that instance as its `parent`. `runs show <instance>` shows `parent` and `children`, so the chain is readable from either end.
-- **Replays converge.** The instance id hashes the definition and inputs, so a step re-running `workflow run` with the same inputs (a crash, a replayed decision) returns the existing child instead of admitting a second one.
-- **Watching follows the chain.** `workflow run --wait` and `runs watch <instance>` observe their instance to its terminal status, then follow `children` to the last instance of the chain and report that instance's terminal status.
-- **Termination is the author's job.** The re-admitting step's `when` gate decides whether the chain continues; with a false gate the chain ends and the last instance is the report. `workflow cancel` stops a chain by cancelling the instance that would re-admit.
+```json
+{
+"schema": "homeboy/workflow/v1",
+"id": "bounded-loop",
+"inputs": {"cursor": {"default": null}},
+"steps": [{"id": "evaluate", "exec": {"program": "evaluate"}}],
+"next_pass": {
+  "max_iterations": 10,
+  "when": {"step": "evaluate", "output": "/continue", "equals": true},
+  "inputs": {"cursor": "{{steps.evaluate.output/cursor}}"},
+  "stop_unchanged": {"step": "evaluate", "output": "/remaining", "passes": 3}
+}
+}
+```
+
+- `inputs.iteration` is a reserved positive JSON integer, starting at 1. `max_iterations` includes the first pass.
+- `inputs.previous` is null on the first pass; thereafter it contains `outputs` (a map keyed by step id) and `unchanged_passes`. A step can read the whole object with `{{inputs.previous}}`.
+- `stop_unchanged` counts consecutive passes with equal JSON values at the chosen output pointer, including the first observation. A changed value resets the count to 1; a missing output is an error.
+- Each pass has its own status, step jobs and budget. Parent/children links and `--wait` follow the chain. Child admission is idempotent across recovery.
+- Definitions and admitted environments/programs are pinned. For file-based admission, a modified or missing definition is refused with a clear error before the next pass; restart to adopt edits. Registry files are checked too; stdin/inline/built-in definitions remain pinned snapshots. `next_pass` cannot be combined with `every`.
 
 ### Cadence (`every`)
 
@@ -186,55 +202,6 @@ When the daemon that owns an instance dies or is stopped, the instance resumes o
 - **`workflow list`** lists the definitions in `~/.config/homeboy/workflows/`, the built-ins, and every registered cadence. `runs list --kind workflow` lists instances in the daemon without discovery filters.
 
 ## Examples
-
-### Example A: a self-admitting proof loop
-
-One definition, one instance per pass. `capture` and `evaluate` decide, `fix` is a Cook that only runs on findings, and `again` re-admits the same definition with the next iteration number when `evaluate` says to continue. Three iterations are three instances; each pass has its own status and budget.
-
-```json
-{
-  "schema": "homeboy/workflow/v1",
-  "id": "ssi-url-proof",
-  "inputs": {
-    "url": {"required": true},
-    "candidate_sha": {"required": true},
-    "workspace": {"required": true},
-    "iteration": {"default": 1}
-  },
-  "env": { "public": ["SSI_BLOCKS_ENGINE_PATH", "HOMEBOY_WP_CODEBOX_BIN"] },
-  "budget": { "max_step_runs": 6, "deadline": "4h" },
-  "steps": [
-    { "id": "capture", "timeout": "15m",
-      "homeboy": ["runner", "exec", "lab", "--cwd", "{{inputs.workspace}}", "--",
-                  "node", "tools/url-loop-controller.mjs", "capture", "--url", "{{inputs.url}}"] },
-    { "id": "evaluate", "needs": ["capture"], "timeout": "90m",
-      "homeboy": ["runner", "exec", "lab", "--", "node", "tools/url-loop-controller.mjs", "evaluate",
-                  "--fixture", "{{steps.capture.output/fixture_root}}", "--candidate-sha", "{{inputs.candidate_sha}}",
-                  "--iteration", "{{inputs.iteration}}"] },
-    { "id": "fix", "needs": ["evaluate"],
-      "when": { "step": "evaluate", "output": "/verdict", "equals": "findings" },
-      "retry": { "max": 1, "on": ["failed"] },
-      "cook": { "repo": "static-site-importer", "placement": "lab",
-                "prompt": "Fix the import findings in {{steps.evaluate.output/report_path}} for {{inputs.url}}.",
-                "verify": ["composer test", "node tools/url-loop-controller.mjs evaluate --fixture {{steps.capture.output/fixture_root}}"] } },
-    { "id": "again", "needs": ["evaluate"],
-      "when": { "step": "evaluate", "output": "/continue", "exists": true },
-      "homeboy": ["workflow", "run", "ssi-url-proof",
-                  "--input", "url={{inputs.url}}",
-                  "--input", "candidate_sha={{inputs.candidate_sha}}",
-                  "--input", "workspace={{inputs.workspace}}",
-                  "--input", "iteration={{steps.evaluate.output/next_iteration}}"] }
-  ]
-}
-```
-
-The contract between passes is in the inputs and the evaluate output:
-
-- **`evaluate` emits `{"verdict": …, "continue": …, "next_iteration": …}`** — a `continue` member means another pass is needed, and `next_iteration` is the number the next pass runs with. The `again` step re-admits the definition with it; the admission happens inside this pass's step, so this pass's status view lists the next pass under `children`.
-- **Each pass is one instance** with its own `wf-…` id (the definition and inputs decide it). `capture` runs in every pass; the controller reuses the fixture it already captured for the URL, so a later pass returns quickly and passes its `fixture_root` on to `evaluate`.
-- **A new candidate SHA is just new inputs:** `homeboy workflow run ssi-url-proof --input url=… --input candidate_sha=<new> --input workspace=…`. The same inputs are a no-op that returns the existing instance.
-- **`--wait` follows the chain:** `homeboy workflow run ssi-url-proof … --wait` exits when the last pass of the chain is terminal, non-zero unless it succeeded.
-- **A `capture` failure** (for example missing Chromium) fails that pass's instance with its output in the step job's log under `artifacts/jobs/<job_id>/`. It cannot park; the chain stops with it.
 
 ### Example B: nightly repeating task (cadence + gate → Cook → review)
 

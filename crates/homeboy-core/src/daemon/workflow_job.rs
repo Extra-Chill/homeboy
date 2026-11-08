@@ -72,6 +72,8 @@ pub struct WorkflowJobRequest {
     /// The definition, pinned at admission.
     pub definition: WorkflowDefinition,
     pub definition_digest: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub definition_source: Option<String>,
     pub inputs: BTreeMap<String, Value>,
     /// Absolute path of the Homeboy executable `homeboy` and `cook` steps run.
     pub homeboy_program: String,
@@ -506,6 +508,15 @@ fn cancelled(request: &WorkflowJobRequest, state: &InstanceState, store: &JobSto
 }
 
 fn finish(request: &WorkflowJobRequest, state: &InstanceState, store: &JobStore) -> Result<Value> {
+    if state.status == InstanceStatus::Succeeded {
+        if let Some(child) = next_pass(request, state)? {
+            let envelope = serde_json::from_value(child.submission()?)
+                .map_err(|error| invalid(format!("invalid next pass: {error}")))?;
+            let admission =
+                super::with_daemon_job_admission(|| super::admit_controller_job(envelope, store))?;
+            super::start_controller_job(admission.job.id, store)?;
+        }
+    }
     let result = projection(state, Some(store));
     match state.status {
         InstanceStatus::Succeeded => Ok(result),
@@ -521,6 +532,100 @@ fn finish(request: &WorkflowJobRequest, state: &InstanceState, store: &JobStore)
             Err(error)
         }
     }
+}
+
+/// Build a replay-stable child from the admitted (pinned) definition.
+fn next_pass(
+    request: &WorkflowJobRequest,
+    state: &InstanceState,
+) -> Result<Option<WorkflowJobRequest>> {
+    let Some(next) = &request.definition.next_pass else {
+        return Ok(None);
+    };
+    if let Some(path) = &request.definition_source {
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| invalid(format!("cannot read next-pass definition {path}: {e}")))?;
+        if WorkflowDefinition::parse(&text)?.digest() != request.definition_digest {
+            return Err(invalid(format!("definition changed between passes: {path}; restart the workflow to use the new definition")));
+        }
+    }
+    let iteration = request
+        .inputs
+        .get("iteration")
+        .and_then(Value::as_u64)
+        .filter(|n| *n >= 1 && *n <= u64::from(u32::MAX))
+        .ok_or_else(|| invalid("next_pass requires a positive integer iteration"))?;
+    if iteration >= u64::from(next.max_iterations)
+        || next.when.as_ref().is_some_and(|gate| !gate.evaluate(state))
+    {
+        return Ok(None);
+    }
+    let mut streak = 1;
+    if let Some(stop) = &next.stop_unchanged {
+        let current = state
+            .steps
+            .get(&stop.step)
+            .and_then(|s| s.output.as_ref())
+            .and_then(|v| v.pointer(&stop.output))
+            .ok_or_else(|| invalid("next_pass.stop_unchanged output is missing"))?;
+        let previous = &request.inputs["previous"];
+        let old = previous
+            .get("outputs")
+            .and_then(|v| v.get(&stop.step))
+            .and_then(|v| v.pointer(&stop.output));
+        if old == Some(current) {
+            streak = previous
+                .get("unchanged_passes")
+                .and_then(Value::as_u64)
+                .unwrap_or(1)
+                + 1;
+        }
+        if streak >= u64::from(stop.passes) {
+            return Ok(None);
+        }
+    }
+    fn render(value: &Value, state: &InstanceState) -> Result<Value> {
+        Ok(match value {
+            Value::String(text) => {
+                crate::workflow::template::resolve_value(text, state).map_err(invalid)?
+            }
+            Value::Array(items) => Value::Array(
+                items
+                    .iter()
+                    .map(|v| render(v, state))
+                    .collect::<Result<_>>()?,
+            ),
+            Value::Object(items) => Value::Object(
+                items
+                    .iter()
+                    .map(|(k, v)| Ok((k.clone(), render(v, state)?)))
+                    .collect::<Result<_>>()?,
+            ),
+            other => other.clone(),
+        })
+    }
+    let mut child = request.clone();
+    for (name, value) in &next.inputs {
+        child.inputs.insert(name.clone(), render(value, state)?);
+    }
+    child
+        .inputs
+        .insert("iteration".into(), json!(iteration + 1));
+    let outputs: BTreeMap<_, _> = state
+        .steps
+        .iter()
+        .filter_map(|(id, step)| step.output.as_ref().map(|v| (id, v)))
+        .collect();
+    child.inputs.insert(
+        "previous".into(),
+        json!({"outputs": outputs, "unchanged_passes": streak}),
+    );
+    child.parent = Some(request.instance.clone());
+    child.resumed_from = None;
+    child.instance = child
+        .definition
+        .instance_id(&child.inputs, child.instance_name.as_deref());
+    Ok(Some(child))
 }
 
 /// Every event the ledger holds for this state, in a deterministic order.
