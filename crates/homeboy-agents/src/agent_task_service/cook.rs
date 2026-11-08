@@ -5257,6 +5257,23 @@ fn run_cook_with_runtime(
             lifecycle_store,
             result.exit_code != 0,
         );
+        // Persist the pass outcome on its source, even when the report's latest
+        // attempt is a detached review-form child. Exit zero can mean handoff.
+        if lifecycle_store.record_exists(&notification_options.identity.initial_run_id)? {
+            lifecycle_store.mutate_record(
+                &notification_options.identity.initial_run_id,
+                |record| {
+                    record.ensure_metadata_object().insert(
+                        "cook_pass_outcome".into(),
+                        serde_json::json!({
+                            "status": result.value.status,
+                            "terminal": result.value.disposition.is_terminal(),
+                        }),
+                    );
+                    true
+                },
+            )?;
+        }
         if result.value.disposition.is_terminal() {
             let finalized = lifecycle_store
                 .open_observation_initialized()
