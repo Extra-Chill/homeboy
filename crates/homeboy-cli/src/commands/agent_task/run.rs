@@ -3893,6 +3893,73 @@ process.stdout.write(JSON.stringify({type:'message_end',message:{role:'assistant
     }
 
     #[test]
+    fn cook_validation_rejects_mismatched_native_handles() {
+        crate::test_support::with_isolated_home(|_| {
+            for preview in [false, true] {
+                for handle in ["other@fix-17598", "homeboy@wrong-head"] {
+                    let mut args = cook(&[
+                        "homeboy",
+                        "agent-task",
+                        "cook",
+                        "--repo",
+                        "homeboy",
+                        "--head",
+                        "fix/17598",
+                        "--to-worktree",
+                        handle,
+                        "--prompt",
+                        "fix the issue",
+                        "--no-finalize",
+                    ]);
+                    args.preview = preview;
+                    let error = validate_cook_request_with_provenance(&args, None)
+                        .expect_err("mismatched handle must fail before admission");
+                    assert!(
+                        error.message.contains("expected `homeboy@fix-17598`"),
+                        "{error:?}"
+                    );
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn cook_derives_native_handle_from_repository_and_head() {
+        crate::test_support::with_isolated_home(|_| {
+            let root = tempfile::tempdir().unwrap();
+            let checkout = root.path().join("repository");
+            std::fs::create_dir(&checkout).unwrap();
+            for repository in ["repository".to_string(), checkout.display().to_string()] {
+                for (head, expected) in [
+                    ("fix/17598", "repository@fix-17598"),
+                    ("Fix/Mixed__Case", "repository@Fix-Mixed__Case"),
+                ] {
+                    let mut args = cook(&[
+                        "homeboy",
+                        "agent-task",
+                        "cook",
+                        "--repo",
+                        &repository,
+                        "--head",
+                        head,
+                        "--base",
+                        "main",
+                        "--prompt",
+                        "fix the issue",
+                        "--no-finalize",
+                    ]);
+                    // Component identity must not replace repository identity.
+                    args.repository_identity = Some(
+                        json!({"component_id": "renamed-component", "repository_path": repository}),
+                    );
+                    let resolved = resolve_cook_destination(args, None).unwrap();
+                    assert_eq!(resolved.to_worktree.as_deref(), Some(expected));
+                }
+            }
+        });
+    }
+
+    #[test]
     fn unmaterialized_preview_admits_replay_and_cook_materializes_origin_base() {
         let _lookup = issue_lookup_fixture();
         crate::test_support::with_isolated_home(|_| {
@@ -5945,7 +6012,10 @@ pub(crate) fn resolve_cook_destination(
     if args.issue_resolution.is_some() {
         args.issue_resolution.as_mut().unwrap()["head"] = json!(head);
     }
-    let handle = format!("{handle_repository}@{}", slugify_cook_branch(&head));
+    let handle = homeboy::core::worktree_provider::native_handle_for_branch(
+        requested.as_deref().unwrap_or(repo),
+        &head,
+    );
     args.to_worktree = Some(handle.clone());
     let derived = args.head.is_none();
     if derived {
@@ -6129,8 +6199,8 @@ fn resolve_cook_pull_request(args: &mut AgentTaskCookArgs) -> homeboy::core::Res
     }
     // Without a supplied checkout, the PR head determines the provider handle.
     if args.dispatch.workspace.is_none() && args.dispatch.cwd.is_none() {
-        if let Some(repo) = cook_component_id(args).or(args.dispatch.repo.as_deref()) {
-            let handle = format!("{repo}@{}", slugify_cook_branch(&head));
+        if let Some(repo) = cook_provision_repository(args) {
+            let handle = homeboy::core::worktree_provider::native_handle_for_branch(&repo, &head);
             if args
                 .to_worktree
                 .as_deref()
@@ -7347,7 +7417,8 @@ pub(super) fn fresh_derived_cook_branch(
         } else {
             format!("{base}-{generation}")
         };
-        let handle = format!("{repository}@{}", slugify_cook_branch(&branch));
+        let handle =
+            homeboy::core::worktree_provider::native_handle_for_branch(repository, &branch);
         let record = homeboy::core::worktree::resolve_workspace_ref_if_present(&handle)?;
         if record.is_some() {
             continue;
@@ -7532,6 +7603,21 @@ pub(crate) fn validate_cook_request_with_provenance(
 ) -> homeboy::core::Result<()> {
     validate_cook_source_authority(args, provenance)?;
     validate_cook_subjects(args.title.as_deref(), args.commit_message.as_deref())?;
+    if args.dispatch.cwd.is_none() {
+        if let (Some(handle), Some(repository), Some(head)) = (
+            args.to_worktree.as_deref(),
+            cook_provision_repository(args),
+            args.head.as_deref(),
+        ) {
+            if !Path::new(handle).is_dir() {
+                homeboy::core::worktree_provider::validate_native_handle(
+                    handle,
+                    &repository,
+                    head,
+                )?;
+            }
+        }
+    }
     if args.dispatch.core.queue_only {
         return Err(homeboy::core::Error::validation_invalid_argument(
             "queue-only",

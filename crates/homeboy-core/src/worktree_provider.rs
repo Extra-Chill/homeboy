@@ -471,27 +471,38 @@ fn handle_mismatch_error(record_handle: &str, requested_handle: &str) -> Error {
     )
 }
 
-fn native_provision_intent(intent: &WorktreeProvisionIntent) -> Result<WorktreeProvisionIntent> {
-    let repo = Path::new(&intent.repo);
+/// Canonical native handle for a repository name or local repository path.
+pub fn native_handle_for_branch(repository: &str, head: &str) -> String {
+    let repo = Path::new(repository);
     let repository = repo
         .is_dir()
         .then(|| repo.file_name())
         .flatten()
         .and_then(|name| name.to_str())
         .filter(|name| !name.is_empty())
-        .unwrap_or(&intent.repo);
-    let expected = worktree::handle_for_branch(repository, &intent.head);
-    if intent.handle != expected {
+        .unwrap_or(repository);
+    worktree::handle_for_branch(repository, head)
+}
+
+/// Validate destination identity without looking up or provisioning a worktree.
+pub fn validate_native_handle(handle: &str, repository: &str, head: &str) -> Result<()> {
+    let expected = native_handle_for_branch(repository, head);
+    if handle != expected {
         return Err(Error::validation_invalid_argument(
             "to_worktree",
             format!(
                 "native worktree handle `{}` does not match repository `{}` and branch `{}`; expected `{expected}`",
-                intent.handle, intent.repo, intent.head
+                handle, repository, head
             ),
-            Some(intent.handle.clone()),
+            Some(handle.to_string()),
             None,
         ));
     }
+    Ok(())
+}
+
+fn native_provision_intent(intent: &WorktreeProvisionIntent) -> Result<WorktreeProvisionIntent> {
+    validate_native_handle(&intent.handle, &intent.repo, &intent.head)?;
     Ok(intent.clone())
 }
 
