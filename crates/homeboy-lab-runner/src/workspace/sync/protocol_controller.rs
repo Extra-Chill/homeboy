@@ -31,10 +31,22 @@ pub(super) fn sync_workspace_batch_in_roots(
         || super::super::util::ssh_client_for_runner(runner)
             .is_ok_and(|(_, client)| client.is_local);
     let transfer = if local_transport {
-        fs::create_dir_all(workspace_root).map_err(io)?;
-        tempfile::tempdir_in(workspace_root).map_err(io)?
+        fs::create_dir_all(workspace_root).materialization(
+            "create_dir_all",
+            Path::new(workspace_root),
+            "controller",
+        )?;
+        tempfile::tempdir_in(workspace_root).materialization(
+            "create tempdir",
+            Path::new(workspace_root),
+            "controller",
+        )?
     } else {
-        tempfile::tempdir().map_err(io)?
+        tempfile::tempdir().materialization(
+            "create tempdir",
+            &std::env::temp_dir(),
+            "controller",
+        )?
     };
     let mut requests = requests;
     let original_count = requests.len();
@@ -124,7 +136,7 @@ pub(super) fn sync_workspace_batch_in_roots(
             }
         }
         let directory = transfer.path().join(index.to_string());
-        fs::create_dir(&directory).map_err(io)?;
+        fs::create_dir(&directory).materialization("create_dir", &directory, "controller")?;
         let head = if options.mode == RunnerWorkspaceSyncMode::SnapshotGit {
             control.git(&local_path, &["rev-parse", "HEAD"]).ok()
         } else {
@@ -482,7 +494,11 @@ pub(super) fn invoke(
         return Ok(response);
     }
     let incoming = if local {
-        Some(crate::staging_temp::dir().map_err(io)?)
+        Some(crate::staging_temp::dir().materialization(
+            "create tempdir",
+            Path::new(root),
+            "runner",
+        )?)
     } else {
         None
     };
@@ -501,12 +517,18 @@ pub(super) fn invoke(
                             control,
                         )?;
                 }
-                for entry in fs::read_dir(directory).map_err(io)? {
-                    let entry = entry.map_err(io)?;
-                    if entry.file_type().map_err(io)?.is_dir() {
+                for entry in
+                    fs::read_dir(directory).materialization("read_dir", directory, "controller")?
+                {
+                    let entry = entry.materialization("read_dir entry", directory, "controller")?;
+                    if entry
+                        .file_type()
+                        .materialization("file_type", &entry.path(), "controller")?
+                        .is_dir()
+                    {
                         archive
                             .append_dir_all(entry.file_name(), entry.path())
-                            .map_err(io)?;
+                            .materialization("archive directory", &entry.path(), "controller")?;
                     }
                 }
             }
@@ -519,14 +541,16 @@ pub(super) fn invoke(
             };
             archive
                 .append_path_with_name(directory.join(name), name)
-                .map_err(io)?;
-            archive.finish().map_err(io)
+                .materialization("archive", &directory.join(name), "controller")?;
+            archive
+                .finish()
+                .materialization("finish archive", directory, "controller")
         },
         |reader| {
             if let Some(incoming) = &incoming {
                 tar::Archive::new(reader)
                     .unpack(incoming.path())
-                    .map_err(io)?;
+                    .materialization("unpack", incoming.path(), "runner")?;
                 materialization_commit_controlled(incoming.path(), control)
             } else {
                 let binary = crate::remote_runner_homeboy_path(runner, "materialize Lab sources")?;
