@@ -48,6 +48,7 @@ pub use commits::{
     get_previous_tag_before_any_with_prefix, get_previous_tag_before_with_prefix,
     is_conventional_subject, recommended_bump_from_commits, strip_conventional_prefix,
     CommitCategory, CommitCounts, CommitInfo, MonorepoContext, RemoteReleaseCoordinate, SemverBump,
+    CONVENTIONAL_COMMIT_TYPES,
 };
 pub use commits::{
     extract_version_from_tag, find_version_commit_with_prefix,

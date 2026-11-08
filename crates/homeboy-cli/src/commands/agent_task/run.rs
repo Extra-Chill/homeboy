@@ -7459,11 +7459,41 @@ pub(crate) fn prepare_cook_request(
     repository
 }
 
+/// Validate operator-supplied publication subjects before Cook has side effects.
+fn validate_cook_subjects(
+    title: Option<&str>,
+    commit_message: Option<&str>,
+) -> homeboy::core::Result<()> {
+    for (argument, subject) in [
+        ("title", title),
+        (
+            "commit-message",
+            commit_message.map(|message| message.lines().next().unwrap_or("")),
+        ),
+    ] {
+        if let Some(subject) = subject {
+            if !homeboy::core::git::is_conventional_subject(subject) {
+                return Err(homeboy::core::Error::validation_invalid_argument(
+                    argument,
+                    format!(
+                        "Cook requires a conventional subject: type(scope)?!?: subject; types: {}. Bumps: feat = minor, fix and other types = patch, ! = major",
+                        homeboy::core::git::CONVENTIONAL_COMMIT_TYPES.join(", ")
+                    ),
+                    Some(subject.to_string()),
+                    None,
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_cook_request_with_provenance(
     args: &AgentTaskCookArgs,
     provenance: Option<&crate::cli_surface::CommandArgumentProvenance>,
 ) -> homeboy::core::Result<()> {
     validate_cook_source_authority(args, provenance)?;
+    validate_cook_subjects(args.title.as_deref(), args.commit_message.as_deref())?;
     if args.dispatch.core.queue_only {
         return Err(homeboy::core::Error::validation_invalid_argument(
             "queue-only",
@@ -12196,6 +12226,35 @@ mod tests {
         assert!(summary.contains("test inventory unavailable without building test binaries"));
         assert!(summary.contains("Private gate selections deferred: 1 (details withheld)"));
         assert!(!summary.contains("private-command-secret"));
+    }
+
+    #[test]
+    fn cook_admission_requires_conventional_subjects() {
+        for (title, message, accepted) in [
+            (None, None, true),
+            (Some("feat(x): add thing"), None, true),
+            (Some("fix!: change contract"), None, true),
+            (Some("Add thing"), None, false),
+            (Some(""), None, false),
+            (None, Some("fix(cook): repair thing\n\nDetails"), true),
+            (
+                None,
+                Some("Add thing\n\nfix: body is not the subject"),
+                false,
+            ),
+            (None, Some("\nfix: later line"), false),
+            (None, Some(""), false),
+            (Some("feat: add thing"), Some("Invalid subject"), false),
+        ] {
+            let result = super::validate_cook_subjects(title, message);
+            assert_eq!(result.is_ok(), accepted, "{title:?} / {message:?}");
+            if let Err(error) = result {
+                let error = error.to_string();
+                assert!(error.contains("type(scope)?!?: subject"), "{error}");
+                assert!(error.contains("minor"), "{error}");
+                assert!(error.contains("major"), "{error}");
+            }
+        }
     }
 
     fn title_cook_args(extra: &[&str]) -> super::AgentTaskCookArgs {

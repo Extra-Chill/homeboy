@@ -3119,6 +3119,14 @@ pub(crate) fn cook_finalization_options_with_stores(
     let pr_title = form_title
         .clone()
         .unwrap_or_else(|| options.finalization.title.clone());
+    if !homeboy_core::git::is_conventional_subject(&pr_title) {
+        return Err(Error::validation_invalid_argument(
+            "title",
+            "Cook PR title must be a conventional subject: type(scope)?!?: subject",
+            Some(pr_title),
+            None,
+        ));
+    }
     let commit_message = cook_commit_message(
         &options.finalization.commit_message,
         &pr_title,

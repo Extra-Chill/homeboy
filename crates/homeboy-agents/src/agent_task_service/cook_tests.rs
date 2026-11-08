@@ -4734,7 +4734,7 @@ fn cook_publishes_draft_when_review_form_provider_times_out() {
         assert_eq!(result.value.terminal_phase.as_deref(), Some("review_form"));
         assert!(result.value.finalization.as_ref().unwrap()["pr_number"].is_number());
         assert!(fixture.backend.draft);
-        assert_eq!(fixture.backend.title, "Batch cook");
+        assert_eq!(fixture.backend.title, "fix(cook): batch cook");
         assert!(fixture.backend.body.contains("Gate:"));
         assert!(!fixture.backend.body.contains("fix: update"));
         let latest = result.value.latest_run_id.as_deref().unwrap();
@@ -4771,8 +4771,11 @@ fn cook_review_unavailable_draft_uses_default_title_without_source_lookup() {
         assert_eq!(result.value.status, "draft_published");
         assert_eq!(
             fixture.backend.title,
-            "Incomplete: cook-review-default-title"
+            "fix(cook): incomplete cook-review-default-title"
         );
+        assert!(homeboy_core::git::is_conventional_subject(
+            &fixture.backend.title
+        ));
         assert!(fixture.backend.draft);
         assert!(fixture.backend.body.contains(
             "Review form unavailable: completion not assessed; deterministic gates passed"
@@ -5809,7 +5812,7 @@ fn batch_cook_options(
             draft_pr: false,
             base: "main".to_string(),
             head: None,
-            title: "Batch cook".to_string(),
+            title: "fix(cook): batch cook".to_string(),
             commit_message: "test".to_string(),
             protected_branches: Vec::new(),
         },
@@ -15261,7 +15264,7 @@ fn cook_returns_after_accepted_detached_attempt_without_waiting_for_daemon_compl
                     draft_pr: false,
                     base: "main".to_string(),
                     head: None,
-                    title: "Detached cook".to_string(),
+                    title: "fix(cook): detached cook".to_string(),
                     commit_message: "test".to_string(),
                     protected_branches: Vec::new(),
                 },
@@ -15539,7 +15542,7 @@ fn adopt_green_candidate_missing_review_form(
         temp,
         cook_id,
         review_executor,
-        "Batch cook",
+        "fix(cook): batch cook",
     )
 }
 
@@ -21275,7 +21278,7 @@ fn promotion_claim_options(cook_id: &str, run_id: &str) -> CookRequest {
             draft_pr: false,
             base: "main".to_string(),
             head: None,
-            title: "Cook".to_string(),
+            title: "fix(cook): cook".to_string(),
             commit_message: "test".to_string(),
             protected_branches: Vec::new(),
         },
@@ -22093,7 +22096,7 @@ fn cook_real_pi_response_persists_served_model_through_published_body() {
                 draft_pr: false,
                 base: "main".to_string(),
                 head: Some("fix/8058".to_string()),
-                title: "Close #8058".to_string(),
+                title: "fix(cook): close #8058".to_string(),
                 commit_message: "test".to_string(),
                 protected_branches: vec!["main".to_string()],
             },
@@ -25413,7 +25416,7 @@ fn cook_rejects_test_claim_without_matching_durable_gate() {
             draft_pr: false,
             base: "main".to_string(),
             head: Some("fix/8058".to_string()),
-            title: "Close #8058".to_string(),
+            title: "fix(cook): close #8058".to_string(),
             commit_message: "test".to_string(),
             protected_branches: vec!["main".to_string()],
         },
