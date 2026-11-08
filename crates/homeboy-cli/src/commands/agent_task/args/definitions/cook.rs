@@ -803,6 +803,7 @@ mod tests {
             ("gate-execution-policy", "continue-all"), ("gate-timeout-seconds", "42"),
             ("gate-heartbeat-interval-seconds", "7"), ("gate-no-progress-timeout-seconds", "11"),
             ("gate-environment-mode", "replace"), ("gate-runner", "lab"),
+            ("gate-requirements", r#"{"host_tools":["tool"],"secrets":["TOKEN"]}"#),
             ("gate-env", "NAME=with=equals"), ("gate-env-from", "CACHE=HOME/cache"),
             ("gate-toolchain", "rustc"),
             ("gate-toolchain-spec", r#"{"command":"custom","probe_arguments":["probe"]}"#),
