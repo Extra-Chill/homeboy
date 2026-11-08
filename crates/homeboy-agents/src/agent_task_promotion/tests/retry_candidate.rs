@@ -55,6 +55,9 @@ fn runtime_retry_inherits_uncommitted_work_promotes_and_pushes_candidate_sha() {
     }))
     .unwrap();
     let mut plan = AgentTaskPlan::new("retry-candidate", vec![request]);
+    // This exercises candidate inheritance, not timeout handling. Allow Git
+    // materialization to complete even when the full suite saturates the host.
+    plan.options.timeout_ms = Some(30_000);
     plan.options.retry.max_attempts = 2;
     plan.options.retry.retryable_failure_classifications =
         vec![AgentTaskFailureClassification::Transient];

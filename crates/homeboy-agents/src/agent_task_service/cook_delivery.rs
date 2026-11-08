@@ -1097,8 +1097,8 @@ fn compare_failed_gates_to_verified_base(
 
 /// Bring a Cook-owned candidate onto its current resolved base (#16049).
 ///
-/// A candidate whose base moved is replayed onto the new base and keeps its
-/// gate proof; the forge's CI verifies the merged result (#16603). `moving_base_error` carries
+/// A candidate whose base moved is replayed onto the new base and reverified
+/// with its declared gates. `moving_base_error` carries
 /// finalization's refusal when the base moved under it, and makes a candidate
 /// that cannot be caught up a blocker instead of a finalization attempt.
 fn ensure_base_current(
@@ -1109,6 +1109,15 @@ fn ensure_base_current(
 ) -> Result<CookDeliveryStep<AgentTaskPromotionReport>> {
     let (lifecycle_store, options, run_id) = (ctx.lifecycle_store, ctx.options, ctx.run_id);
     let finalize_message = || moving_base_error.map(|error| error.message.clone());
+    if *base_movements >= BASE_MOVEMENT_BUDGET && moving_base_error.is_some() {
+        return ctx.blocked(
+            CookDeliveryBlockerCode::BaseConflict,
+            "base continued moving after bounded rebase-and-regate attempts; start a fresh Cook"
+                .to_string(),
+            Vec::new(),
+            *base_movements,
+        );
+    }
     match (ctx.side_effects).catch_up_base(lifecycle_store, options, run_id, &promotion)? {
         BaseCatchUp::Current | BaseCatchUp::NotOwned(_) if moving_base_error.is_none() => {
             Ok(ControlFlow::Continue(promotion))
@@ -1132,7 +1141,7 @@ fn ensure_base_current(
         }
         BaseCatchUp::Conflict { base, paths } => {
             let message = format!(
-                "candidate conflicts with resolved base `{}` at {base}; rebase it onto the moved base before publishing",
+                "candidate cannot converge onto resolved base `{}` at {base} (conflict or non-ancestor recorded base); start a fresh Cook",
                 options.finalization.base
             );
             let code = CookDeliveryBlockerCode::BaseConflict;
@@ -1149,6 +1158,14 @@ fn ensure_base_current(
         BaseCatchUp::Rebased { promotion } => {
             *base_movements += 1;
             ctx.update_attempt_promotion(&promotion);
+            if promotion.status != AgentTaskPromotionStatus::Applied {
+                return ctx.blocked(
+                    CookDeliveryBlockerCode::GateFailed,
+                    "rebased candidate did not pass the declared gates; inspect gate evidence before starting a fresh Cook".to_string(),
+                    Vec::new(),
+                    *base_movements,
+                );
+            }
             Ok(ControlFlow::Continue(promotion))
         }
     }

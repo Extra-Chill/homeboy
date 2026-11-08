@@ -3633,9 +3633,43 @@ fn fetch_declared_base_sha(
         })
         .unwrap_or("<not advertised>");
     if advertised_sha != sha {
+        // Preserve the immutable prepared boundary when origin fast-forwards.
+        // Delivery owns rebasing and re-verifying the candidate; never write
+        // the old SHA into the remote-tracking ref here.
+        if advertised_sha != "<not advertised>" {
+            let fetched = run_declared_base_git(
+                worktree_path,
+                git,
+                &[
+                    "fetch",
+                    "--no-tags",
+                    "--no-write-fetch-head",
+                    "origin",
+                    advertised_sha,
+                ],
+                environment,
+                base_ref,
+                "fetch",
+                timeout,
+            )?;
+            if fetched.status.success() {
+                let ancestor = run_declared_base_git(
+                    worktree_path,
+                    git,
+                    &["merge-base", "--is-ancestor", sha, advertised_sha],
+                    environment,
+                    base_ref,
+                    "verify",
+                    timeout,
+                )?;
+                if ancestor.status.success() {
+                    return Ok(());
+                }
+            }
+        }
         return Err(Error::validation_invalid_argument(
             "base_ref",
-            format!("refusing to write declared base `{base_ref}` SHA {sha}: origin advertises {advertised_sha} for {remote_ref}"),
+            format!("refusing to write declared base `{base_ref}` SHA {sha}: origin advertises {advertised_sha} for {remote_ref}; recorded base is not an ancestor of the advertised tip; start a fresh Cook"),
             None,
             None,
         ));

@@ -1066,7 +1066,7 @@ pub(crate) fn promote_or_load_attempt_in_store(
             let (source, source_path) = promotion_source_in_store(lifecycle_store, run_id)?;
             let source = bind_persisted_promotion_artifact(source, &promotion)?;
             let observation_store = lifecycle_store.open_observation_initialized()?;
-            let resumed = crate::agent_task_promotion::with_gate_supervision(
+            let mut resumed = crate::agent_task_promotion::with_gate_supervision(
                 cook_gate_supervision(lifecycle_store, options, run_id),
                 || {
                     resume_promoted_patch_in_observation_store(
@@ -1103,6 +1103,9 @@ pub(crate) fn promote_or_load_attempt_in_store(
                     )
                 },
             )?;
+            if let Some(catch_up) = promotion.provenance.get("base_catch_up") {
+                resumed.provenance["base_catch_up"] = catch_up.clone();
+            }
             lifecycle_store.record_promotion(
                 run_id,
                 serde_json::to_value(&resumed)
@@ -2166,9 +2169,10 @@ pub(crate) fn retryable_provider_discovery_failure_with_store(
 
 pub(crate) fn is_moving_base_finalization_error(error: &Error) -> bool {
     error.code == homeboy_core::ErrorCode::ValidationInvalidArgument
-        && error
+        && (error
             .message
             .contains("HEAD is behind or diverged from resolved base")
+            || error.message.contains("refusing to write declared base"))
 }
 
 /// What catching a Cook-owned candidate up to its resolved base did (#16049).
@@ -2181,9 +2185,8 @@ pub(crate) enum BaseCatchUp {
     /// does not own it and never rewrites it.
     NotOwned(String),
     /// The candidate was replayed onto the moved base without conflicts and
-    /// recorded as the latest promotion. It keeps its gate proof; the forge's
-    /// CI verifies the merged result (#16603). `provenance.base_catch_up`
-    /// names the base its gates actually ran on.
+    /// recorded as the latest promotion after rerunning the declared gates.
+    /// `provenance.base_catch_up` records its previous verification boundary.
     Rebased { promotion: AgentTaskPromotionReport },
     /// The candidate does not apply to the moved base. `paths` are the
     /// candidate files the base also changed; the destination is untouched.
@@ -2236,6 +2239,15 @@ pub(crate) fn catch_up_cook_candidate_to_base_in_store(
     if fresh_base == prior_base {
         return Ok(BaseCatchUp::Current);
     }
+    if !git_status(
+        path,
+        &["merge-base", "--is-ancestor", &prior_base, &fresh_base],
+    )? {
+        return Ok(BaseCatchUp::Conflict {
+            base: fresh_base,
+            paths: Vec::new(),
+        });
+    }
     let current = candidate_fingerprint(path)?;
     if current != expected
         && !is_exact_rebased_candidate(path, &expected, &current, &prior_base, &fresh_base)?
@@ -2259,17 +2271,6 @@ pub(crate) fn catch_up_cook_candidate_to_base_in_store(
     {
         return not_owned(
             "destination branch carries changes beyond this Cook's candidate; it is published on the branch as it stands",
-        );
-    }
-    // The verified base can itself be the PR head. Its branch-only commits
-    // are invisible to the delta check above, but the candidate depends on
-    // them: projecting just that delta onto the base would discard history.
-    if !git_status(
-        path,
-        &["merge-base", "--is-ancestor", &prior_base, &fresh_base],
-    )? {
-        return not_owned(
-            "candidate builds on branch history that is not on the resolved base; it is published on the branch as it stands",
         );
     }
     let tree = match apply_immutable_candidate_to_base(
@@ -2315,6 +2316,10 @@ pub(crate) fn catch_up_cook_candidate_to_base_in_store(
     )?;
     caught_up["provenance"]["candidate_commit"] =
         json!({"base_sha":fresh_base,"candidate_sha":candidate_sha,"tree_sha":tree});
+    caught_up["candidate"] = caught_up["provenance"]["candidate_commit"].clone();
+    caught_up["status"] = json!("verification_pending");
+    caught_up["deterministic_gates"] = json!([]);
+    caught_up["gate_results"] = json!([]);
     caught_up["verified_base"] = json!({ "base": options.finalization.base, "sha": fresh_base });
     caught_up["provenance"]["candidate"] =
         serde_json::to_value(candidate_fingerprint(path)?).map_err(json_error)?;
@@ -2330,9 +2335,8 @@ pub(crate) fn catch_up_cook_candidate_to_base_in_store(
         "resolved_base": fresh_base,
     });
     lifecycle_store.record_promotion(run_id, caught_up.clone())?;
-    Ok(BaseCatchUp::Rebased {
-        promotion: serde_json::from_value(caught_up).map_err(json_error)?,
-    })
+    let promotion = promote_or_load_attempt_in_store(lifecycle_store, options, run_id)?;
+    Ok(BaseCatchUp::Rebased { promotion })
 }
 
 /// Accept an operator-rebased candidate only when its single commit is based on
@@ -2688,56 +2692,12 @@ fn git_with_index(path: &str, args: &[&str], index: &std::path::Path) -> Result<
     ))
 }
 
-/// The resolved base's current SHA, materialized locally. `None` when origin
-/// does not report the base.
+/// Resolve and materialize the advertised base using promotion's snapshot contract.
 fn observe_and_fetch_base(path: &str, base: &str) -> Result<Option<String>> {
-    let observed = std::process::Command::new("git")
-        .args([
-            "ls-remote",
-            "--heads",
-            "origin",
-            &format!("refs/heads/{base}"),
-        ])
-        .current_dir(path)
-        .output()
-        .map_err(|error| Error::git_command_failed(error.to_string()))?;
-    let Some(sha) = String::from_utf8_lossy(&observed.stdout)
-        .split_whitespace()
-        .next()
-        .filter(|sha| !sha.is_empty())
-        .map(str::to_string)
-    else {
-        return Ok(None);
-    };
-    let fetched = homeboy_core::git::with_remote_tracking_authority_until(
-        Path::new(path),
-        "materialize refreshed destination base",
-        std::time::Instant::now() + std::time::Duration::from_secs(30),
-        |remaining| {
-            homeboy_core::git::run_git_output_with_env_timeout(
-                Path::new(path),
-                &[
-                    "fetch",
-                    "--no-tags",
-                    "--no-write-fetch-head",
-                    "origin",
-                    &sha,
-                ],
-                "materialize refreshed destination base",
-                &[],
-                remaining,
-            )
-        },
-    )?;
-    if !fetched.status.success() {
-        return Err(Error::validation_invalid_argument(
-            "base",
-            format!("could not materialize refreshed destination base `{base}` at {sha}"),
-            None,
-            None,
-        ));
-    }
-    Ok(Some(sha))
+    Ok(
+        crate::agent_task_promotion::capture_declared_base(Path::new(path), Some(base))?
+            .map(|snapshot| snapshot.sha),
+    )
 }
 
 #[cfg(test)]
