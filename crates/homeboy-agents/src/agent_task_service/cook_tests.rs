@@ -4699,6 +4699,88 @@ impl AgentTaskExecutorAdapter for MovingMainPinnedBaseExecutor {
 }
 
 #[derive(Clone)]
+struct TimeoutReviewFormExecutor;
+
+impl AgentTaskExecutorAdapter for TimeoutReviewFormExecutor {
+    fn execute(
+        &self,
+        request: crate::agent_task::AgentTaskRequest,
+        _context: crate::agent_task_scheduler::AgentTaskExecutionContext,
+    ) -> crate::agent_task::AgentTaskOutcome {
+        assert_eq!(request.policy.write, "none");
+        crate::agent_task::AgentTaskOutcome {
+            task_id: request.task_id,
+            status: crate::agent_task::AgentTaskOutcomeStatus::Timeout,
+            summary: Some("review provider exceeded timeout".to_string()),
+            ..Default::default()
+        }
+    }
+}
+
+#[test]
+fn cook_publishes_draft_when_review_form_provider_times_out() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let temp = tempfile::tempdir().unwrap();
+        let fixture = adopt_green_candidate_missing_review_form(
+            temp.path(),
+            "cook-review-unavailable",
+            Arc::new(TimeoutReviewFormExecutor),
+        );
+        let result = fixture
+            .result
+            .expect("optional review failure must not block Cook");
+        assert_eq!(result.exit_code, 0, "{:?}", result.value);
+        assert_eq!(result.value.status, "draft_published");
+        assert_eq!(result.value.terminal_phase.as_deref(), Some("review_form"));
+        assert!(result.value.finalization.as_ref().unwrap()["pr_number"].is_number());
+        assert!(fixture.backend.draft);
+        assert_eq!(fixture.backend.title, "Batch cook");
+        assert!(fixture.backend.body.contains("Gate:"));
+        assert!(!fixture.backend.body.contains("fix: update"));
+        let latest = result.value.latest_run_id.as_deref().unwrap();
+        let record = agent_task_lifecycle::exact_record(latest).unwrap();
+        assert_eq!(
+            record.metadata["review_form_unavailable"]["phase"],
+            "review_form"
+        );
+        assert!(
+            fixture.backend.body.contains(
+                "Review form unavailable: completion not assessed; deterministic gates passed"
+            ),
+            "{}",
+            fixture.backend.body
+        );
+        assert!(fixture.backend.committed && fixture.backend.pushed && fixture.backend.created);
+    });
+}
+
+#[test]
+fn cook_review_unavailable_draft_uses_default_title_without_source_lookup() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let temp = tempfile::tempdir().unwrap();
+        let fixture = adopt_green_candidate_missing_review_form_with_title(
+            temp.path(),
+            "cook-review-default-title",
+            Arc::new(TimeoutReviewFormExecutor),
+            "",
+        );
+        let result = fixture
+            .result
+            .expect("draft publication needs no title lookup");
+        assert_eq!(result.exit_code, 0, "{:?}", result.value);
+        assert_eq!(result.value.status, "draft_published");
+        assert_eq!(
+            fixture.backend.title,
+            "Incomplete: cook-review-default-title"
+        );
+        assert!(fixture.backend.draft);
+        assert!(fixture.backend.body.contains(
+            "Review form unavailable: completion not assessed; deterministic gates passed"
+        ));
+    });
+}
+
+#[derive(Clone)]
 struct ReviewFormOnlyExecutor;
 
 impl AgentTaskExecutorAdapter for ReviewFormOnlyExecutor {
@@ -15453,6 +15535,20 @@ fn adopt_green_candidate_missing_review_form(
     cook_id: &str,
     review_executor: SharedAgentTaskExecutor,
 ) -> AdoptedMissingFormFixture {
+    adopt_green_candidate_missing_review_form_with_title(
+        temp,
+        cook_id,
+        review_executor,
+        "Batch cook",
+    )
+}
+
+fn adopt_green_candidate_missing_review_form_with_title(
+    temp: &std::path::Path,
+    cook_id: &str,
+    review_executor: SharedAgentTaskExecutor,
+    title: &str,
+) -> AdoptedMissingFormFixture {
     let source = temp.join("source");
     let target = temp.join("target");
     std::fs::create_dir(&source).expect("create source repository");
@@ -15514,6 +15610,7 @@ fn adopt_green_candidate_missing_review_form(
     let run_id = format!("{cook_id}-attempt-1");
     let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
     options.identity.initial_run_id = run_id.to_string();
+    options.finalization.title = title.to_string();
     options.workspace.source_worktree_path = None;
     options.workspace.task_base_sha = Some(base.clone());
     options.provider_transport.provider_invocation =
@@ -17928,6 +18025,8 @@ fn adoption_rejects_unknown_run_or_cook_ids() {
 #[derive(Default)]
 struct CaptureBackend {
     body: String,
+    draft: bool,
+    title: String,
     committed: bool,
     pushed: bool,
     created: bool,
@@ -18164,6 +18263,8 @@ impl AgentTaskPrFinalizationBackend for CaptureBackend {
         draft: bool,
     ) -> Result<AgentTaskPrRef> {
         self.created = true;
+        self.draft = draft;
+        self.title = _title.to_string();
         self.create_count += 1;
         self.body = body.to_string();
         Ok(AgentTaskPrRef {

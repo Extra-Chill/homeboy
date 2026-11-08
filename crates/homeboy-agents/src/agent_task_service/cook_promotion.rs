@@ -2928,6 +2928,25 @@ pub(crate) fn finalize_or_load_cook_pr_with_backend_with_stores<
             None,
         ));
     }
+    if lifecycle_store
+        .read_record(successful_run_id)?
+        .metadata
+        .get("review_form_unavailable")
+        .is_some()
+    {
+        let value = super::cook::publish_incomplete_draft(
+            options,
+            &promotion,
+            None,
+            0,
+            successful_run_id,
+            &[],
+            true,
+            backend,
+        )?;
+        lifecycle_store.record_cook_finalization(successful_run_id, value.clone())?;
+        return Ok(value);
+    }
     let finalization = cook_finalization_options_with_stores(
         store,
         lifecycle_store,
@@ -5855,14 +5874,8 @@ fn retry_descends_from_recipe(
 /// Load and validate the AI-authored review form for a finalizing run.
 ///
 /// The cook loop's review-form gate guarantees a valid form before finalization
-/// is reached; this re-reads it from the terminal outcome as the single source
-/// of the reviewer-facing prose. Its absence/invalidity here is an invariant
-/// violation (the gate would have looped), surfaced as a hard error rather than
-/// silently falling back to machine-templated prose.
-///
-/// This is the one decision whether the agent's form is usable. A missing,
-/// malformed, invalid or incomplete form is refused with the publish step's
-/// remedy: an operator-supplied `--review-form`, which replaces it.
+/// is reached. Unavailable forms take the incomplete-draft publication path
+/// instead. Missing or incomplete forms remain errors here.
 fn review_form_for_finalization_in_store(
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     run_id: &str,
