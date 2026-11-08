@@ -351,6 +351,7 @@ def main() -> int:
         return 0
 
     adjusted = dict(results)
+    comment_verdicts: dict[str, Any] = {}
     for command, status in list(adjusted.items()):
         base_command = quality_base_command(command)
         if base_command not in {"lint", "test"}:
@@ -360,7 +361,22 @@ def main() -> int:
         # clock too. Before this, `timeout` skipped the gate entirely and stayed
         # a hard red even when main was equally unable to finish, which is the
         # one thing differential gating exists to rule out.
-        if status not in {"fail", "timeout"}:
+        if status not in {"pass", "fail", "timeout"}:
+            continue
+
+        current_count, current_kind = metric_for(command, current_dir)
+        baseline_count, _ = metric_for(command, base_dir)
+        introduced_count = None
+        if status == "pass":
+            introduced_count = 0
+        elif current_count is not None and baseline_count is not None:
+            introduced_count = (current_count if current_kind == SCOPED
+                                else max(0, current_count - baseline_count))
+        comment_verdicts[command] = {
+            "new_findings": introduced_count,
+            "baseline_findings": baseline_count,
+        }
+        if status == "pass":
             continue
 
         timed_out = status == "timeout"
@@ -443,6 +459,7 @@ def main() -> int:
                         file=sys.stderr,
                     )
 
+            comment_verdicts[command]["new_findings"] = len(introduced)
             if introduced:
                 infrastructure = set(retry.get("infrastructure_errors", [])) & introduced if retry else set()
                 if infrastructure:
@@ -547,6 +564,7 @@ def main() -> int:
                 )
                 continue
             if drift is False:
+                comment_verdicts[command]["new_findings"] = 0
                 adjusted[command] = "baseline_red"
                 print(
                     f"::warning::Differential gate marked {command} baseline_red: the command's own "
@@ -617,6 +635,13 @@ def main() -> int:
             f"::notice::Differential gate accepted {command}: current={current} base={base}",
             file=sys.stderr,
         )
+
+    for command, verdict in comment_verdicts.items():
+        verdict["status"] = adjusted[command]
+    # Retain the gate's verdict for downstream presentation. Consumers must not
+    # infer success from raw candidate totals or run the gate a second time.
+    with open(os.path.join(current_dir, "differential-comment.json"), "w", encoding="utf-8") as handle:
+        json.dump({"schema": "homeboy/differential-comment/v1", "commands": comment_verdicts}, handle)
 
     print(json.dumps(adjusted, separators=(",", ":")))
     return 0

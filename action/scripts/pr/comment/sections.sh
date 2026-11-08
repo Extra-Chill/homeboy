@@ -11,7 +11,7 @@ commands_use_review_report() {
   normalized="$(canonicalize_commands "${COMMANDS}")"
 
   local setup_file="${HOMEBOY_SETUP_RESULT_FILE:-${OUTPUT_DIR:+${OUTPUT_DIR}/setup.json}}"
-  [ "${normalized}" = "review lint,review test" ] && [ -z "${EXTRA_ARGS:-}" ] && { [ -z "${setup_file}" ] || [ ! -f "${setup_file}" ]; }
+  [ ! -f "${OUTPUT_DIR:-}/differential-comment.json" ] && [ "${normalized}" = "review lint,review test" ] && [ -z "${EXTRA_ARGS:-}" ] && { [ -z "${setup_file}" ] || [ ! -f "${setup_file}" ]; }
 }
 
 add_review_banner() {
@@ -181,7 +181,26 @@ append_command_details() {
 
 append_split_command_section() {
   local command="$1"
-  local status json_file scope_suffix icon label
+  local status json_file scope_suffix icon label verdict count baseline
+
+  verdict="$(differential_verdict "${command}" 2>/dev/null || true)"
+  if [ -n "${verdict}" ]; then
+    status="$(printf '%s' "${verdict}" | jq -r '.status')"
+    count="$(printf '%s' "${verdict}" | jq -r '.new_findings // "unknown"')"
+    baseline="$(printf '%s' "${verdict}" | jq -r '.baseline_findings // "unknown"')"
+    icon="$(status_icon "${status}")"
+    if { [ "${status}" = pass ] || [ "${status}" = baseline_red ]; } && [ "${count}" = 0 ]; then
+      SECTION_BODY+=":white_check_mark: **${command}** — no new findings"$'\n\n'
+      return 0
+    else
+      SECTION_BODY+="${icon} **${command}** — $(status_label "${status}") (differential); ${count} new finding(s)"$'\n\n'
+    fi
+    if [ "${baseline}" != unknown ] && [ "${baseline}" != 0 ]; then
+      SECTION_BODY+="<details><summary>Baseline: ${baseline} pre-existing finding(s)</summary>"$'\n\n'
+      SECTION_BODY+="Baseline debt is not attributed to this PR."$'\n\n</details>\n\n'
+    fi
+    return 0
+  fi
 
   status="$(command_status "${command}")"
   icon="$(status_icon "${status}")"
