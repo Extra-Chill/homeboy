@@ -3701,14 +3701,35 @@ pub(crate) fn recover_cook_pr_with_backend_and_review_form<B: AgentTaskPrFinaliz
     {
         run_or_cook_id.to_string()
     } else {
-        canonical_cook_recovery_run_id(&recipe.cook_id).ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "run_or_cook_id",
-                "durable Cook has no canonical promotable candidate",
-                Some(run_or_cook_id.to_string()),
-                None,
-            )
-        })?
+        review_form
+            .as_ref()
+            .and_then(|_| canonical_cook_candidate(&recipe.cook_id))
+            .and_then(|candidate| candidate["run_id"].as_str().map(str::to_string))
+            .or_else(|| canonical_cook_recovery_run_id(&recipe.cook_id))
+            .ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "run_or_cook_id",
+                    "durable Cook has no canonical promotable candidate",
+                    Some(run_or_cook_id.to_string()),
+                    None,
+                )
+            })?
+    };
+    // An exact form-only attempt is not a new publication authority when
+    // the selected producer already has a form (or the operator supplies it).
+    let run_id = if persisted_promotion_for_attempt(&run_id)?.is_some_and(|promotion| {
+        promotion.provenance["cook_follow_up"]["kind"] == "review_form_only"
+    }) {
+        let selected = canonical_cook_candidate(&recipe.cook_id)
+            .and_then(|candidate| candidate["run_id"].as_str().map(str::to_string));
+        selected
+            .filter(|producer| {
+                review_form.is_some()
+                    || canonical_cook_recovery_run_id(&recipe.cook_id).as_ref() == Some(producer)
+            })
+            .unwrap_or(run_id)
+    } else {
+        run_id
     };
     // A verified empty remediation is evidence about the already-applied
     // candidate, not a replacement candidate. Recover the source promotion so
@@ -4095,6 +4116,23 @@ pub(crate) fn canonical_cook_recovery_run_id_with_stores(
     let source_run_id = candidate["run_id"].as_str()?.to_string();
     if source_run_id.is_empty() {
         return None;
+    }
+    // Publication belongs to the selected producer once its form is complete.
+    // A later form-only execution cannot invalidate that candidate or replace
+    // the runtime identity used to disclose its implementation.
+    let aggregate = stores
+        .map(|(_, lifecycle)| lifecycle.read_aggregate(&source_run_id))
+        .unwrap_or_else(|| agent_task_lifecycle::read_attempt_aggregate(&source_run_id));
+    if aggregate
+        .ok()
+        .and_then(|aggregate| {
+            super::cook::review_form_from_aggregate(&aggregate)
+                .ok()
+                .flatten()
+        })
+        .is_some_and(|form| form.validate().is_ok())
+    {
+        return Some(source_run_id);
     }
     let recipe = stores
         .map(|(store, _)| store.load_recipe(cook_id))
