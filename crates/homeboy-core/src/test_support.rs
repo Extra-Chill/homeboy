@@ -668,6 +668,10 @@ impl HermeticTestContext {
 
 #[test]
 fn hermetic_default_observation_store_fails_closed() {
+    // Use the same lock as HomeGuard::new, but do not install a home override:
+    // a sibling's process-wide override would legitimately allow ambient roots
+    // and invalidate the fail-closed assertions below. Hold it through both probes.
+    let _home_lock = home_env_guard();
     let context = HermeticTestContext::new();
     assert_eq!(
         crate::paths::observation_db_in_root(context.path_roots().data()),
