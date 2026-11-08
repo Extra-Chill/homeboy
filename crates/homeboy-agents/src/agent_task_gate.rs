@@ -2947,8 +2947,8 @@ struct SelectedGateEnvironment {
 }
 
 impl SelectedGateEnvironment {
-    /// Expose the admitted component's linked extensions inside an isolated
-    /// gate HOME (#15383).
+    /// Expose the admitted and checkout sibling components' linked extensions
+    /// inside an isolated gate HOME (#15383, #17569).
     ///
     /// HOME isolation keeps host config and credentials out of gates, but it
     /// also hid every installed extension, so the canonical gate for an
@@ -3013,20 +3013,50 @@ impl SelectedGateEnvironment {
         let Some(home) = self.isolated_home.clone() else {
             return Ok(());
         };
-        let Ok(component) = homeboy_core::component::resolve_effective(
+        let mut components = Vec::new();
+        if let Ok(component) = homeboy_core::component::resolve_effective(
             self.admitted_component_id.as_deref(),
             Some(&cwd.to_string_lossy()),
             None,
-        ) else {
-            return Ok(());
-        };
-        let Some(linked) = component.extensions.as_ref() else {
-            return Ok(());
-        };
+        ) {
+            components.push(component);
+        }
+        // Resolve portable sibling contracts from the executing checkout, not
+        // controller registry paths. Git excludes ignored dependency trees.
+        if let Some((root, files)) = homeboy_core::git::repo_root(cwd).and_then(|root| {
+            homeboy_core::git::output_optional(
+                &root,
+                &[
+                    "ls-files",
+                    "--cached",
+                    "--others",
+                    "--exclude-standard",
+                    "-z",
+                ],
+            )
+            .map(|files| (root, files))
+        }) {
+            for file in files.split('\0') {
+                let path = Path::new(file);
+                if !path.file_name().is_some_and(|name| name == "homeboy.json") {
+                    continue;
+                }
+                let manifest = root.join(path);
+                if let Some(component) = homeboy_core::component::discover_from_portable(
+                    manifest.parent().unwrap_or(&root),
+                ) {
+                    components.push(component);
+                }
+            }
+        }
+        let ids = components
+            .into_iter()
+            .filter_map(|component| component.extensions)
+            .flat_map(|linked| linked.into_keys())
+            .collect();
         let Ok(host_extensions) = homeboy_core::paths::extensions() else {
             return Ok(());
         };
-        let ids: std::collections::BTreeSet<String> = linked.keys().cloned().collect();
         let explicit: std::collections::BTreeSet<String> = self
             .report
             .extension_inputs
@@ -11167,8 +11197,9 @@ exit 2
         );
     }
 
-    /// #16268: a nested `homeboy review test` gate probe runs with the same
-    /// component inputs as the gate itself. Under HOME isolation the probe must
+    /// #16268, #17569: a nested gate probe runs with the same component inputs
+    /// as the gate itself, including a sub-component's extensions when the
+    /// admitted root has none. Under HOME isolation the probe must
     /// see the component's host-installed extensions, or it rejects a gate the
     /// operator's own shell passes; and a failed probe reports what Homeboy
     /// said on stdout rather than an empty stderr.
@@ -11198,8 +11229,21 @@ exit 2
         .expect("extension manifest");
 
         let workspace = tempfile::tempdir().expect("workspace");
+        assert!(Command::new("git")
+            .arg("init")
+            .current_dir(workspace.path())
+            .status()
+            .expect("git init")
+            .success());
         fs::write(
             workspace.path().join("homeboy.json"),
+            r#"{"id":"probe-root"}"#,
+        )
+        .expect("admitted component without extensions");
+        let sibling = workspace.path().join("sub-component");
+        fs::create_dir(&sibling).expect("sub-component");
+        fs::write(
+            sibling.join("homeboy.json"),
             r#"{"id":"probe-component","extensions":{"probe-ext":{}}}"#,
         )
         .expect("portable component");
@@ -11223,15 +11267,33 @@ exit 2
         std::env::set_var("PATH", format!("{}:/usr/bin:/bin", bin.path().display()));
 
         let gates = VerifyGateOptions {
-            verify: vec!["homeboy review test probe-component".to_string()],
+            verify: vec!["homeboy review test probe-component --path sub-component".to_string()],
             gate_environment: AgentTaskGateEnvironmentPolicy {
                 isolate_home: true,
+                admitted_component_id: Some("probe-root".to_string()),
                 ..AgentTaskGateEnvironmentPolicy::default()
             },
             ..VerifyGateOptions::default()
         };
         preflight_verify_gate_options(workspace.path(), &gates)
             .expect("the probe sees the extension the gate will see");
+        let mut selected = selected_gate_environment(&gates.gate_environment, None)
+            .expect("isolated gate environment");
+        selected
+            .configure_linked_extensions(workspace.path())
+            .unwrap();
+        assert_eq!(selected.report.linked_extensions.len(), 1);
+        assert_eq!(selected.report.linked_extensions[0].id, "probe-ext");
+        let installed = selected
+            .isolated_home
+            .as_ref()
+            .unwrap()
+            .join(".config/homeboy/extensions/probe-ext");
+        assert!(installed.is_symlink());
+        assert_eq!(
+            installed.canonicalize().unwrap(),
+            extension.canonicalize().unwrap()
+        );
 
         fs::remove_dir_all(&extension).expect("uninstall host extension");
         let error = preflight_verify_gate_options(workspace.path(), &gates)
