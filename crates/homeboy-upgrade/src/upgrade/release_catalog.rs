@@ -395,7 +395,7 @@ pub(super) mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let url = format!(
-            "http://{}/releases?per_page=100",
+            "http://{}/releases?per_page=30",
             listener.local_addr().unwrap()
         );
         let stopped = Arc::new(AtomicBool::new(false));
@@ -444,7 +444,7 @@ pub(super) mod tests {
         let target = running_target_triple().expect("test host has a published target");
         let count = with_catalog_responder(
             |request| {
-                assert!(request.contains("per_page=100"));
+                assert!(request.contains("per_page=30"));
                 let host = request
                     .lines()
                     .find_map(|line| {
@@ -453,7 +453,7 @@ pub(super) mod tests {
                     })
                     .unwrap();
                 let headers = format!(
-                    "Link: <http://{host}/releases?per_page=100&page=3>; rel=\"last\", <http://{host}/releases?per_page=100&page=2>; rel=\"next\"\r\n"
+                    "Link: <http://{host}/releases?per_page=30&page=3>; rel=\"last\", <http://{host}/releases?per_page=30&page=2>; rel=\"next\"\r\n"
                 );
                 let entry = serde_json::json!({
                     "tag_name": "v0.447.9",
@@ -492,7 +492,7 @@ pub(super) mod tests {
                     .unwrap();
                 (
                     "200 OK".into(),
-                    format!("Link: <http://{host}/releases?per_page=100>; rel=\"next\"\r\n"),
+                    format!("Link: <http://{host}/releases?per_page=30>; rel=\"next\"\r\n"),
                     "[]".into(),
                 )
             },
