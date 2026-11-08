@@ -4164,7 +4164,12 @@ pub fn project_record(
     // interruption; the reconcile action remains the mutating path.
     let record = &project_dead_candidate_adoption(record);
     let mut resource = project_summary_fields(record, plan)?;
-    resource.action_eligibility = Some(lifecycle_action_eligibility(record, plan));
+    resource.action_eligibility =
+        if crate::agent_task_service::live_cook_continuation(record).is_some() {
+            None
+        } else {
+            Some(lifecycle_action_eligibility(record, plan))
+        };
     if record.metadata.get("cancellation_fence").is_some()
         || record.metadata.get("candidate_retirement").is_some()
     {
@@ -4252,6 +4257,16 @@ fn project_summary_fields(
     resource.publication = delivery.as_ref().and_then(publication);
     resource.recovery = projected_cook_recovery(record);
     project_live_gate_verification(&mut resource, record);
+    if let Some(continuation) = crate::agent_task_service::live_cook_continuation(record) {
+        resource.state = ControlPlaneRunState::Running;
+        resource.phase = Some("publishing".to_string());
+        resource.owner = Some(ControlPlaneOwner {
+            kind: "cook_continuation".to_string(),
+            id: continuation["owner_pid"].to_string(),
+        });
+        resource.blocker = None;
+        resource.recovery = None;
+    }
     if let Some(fence) = record
         .metadata
         .get("cancellation_fence")

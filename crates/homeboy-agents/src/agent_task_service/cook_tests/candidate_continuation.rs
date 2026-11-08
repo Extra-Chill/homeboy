@@ -367,15 +367,65 @@ fn continue_terminal(
 #[test]
 fn candidate_recoverable_with_own_green_bound_gates_publishes() {
     with_own_green_gates(|options, _| {
-        let mut backend = CaptureBackend {
-            hydrate_run_id: Some(options.identity.initial_run_id.clone()),
+        let run = &options.identity.initial_run_id;
+        let before = persisted_promotion_for_attempt(run).unwrap().unwrap();
+        let performer = PublishCandidate(std::sync::Mutex::new(CaptureBackend {
+            hydrate_run_id: Some(run.clone()),
             ..Default::default()
-        };
-        let result = continue_terminal(&options, &mut backend).unwrap();
-        assert_eq!(result.value.status, "review_ready", "{:#?}", result.value);
-        assert_eq!(result.exit_code, 0);
-        assert_eq!(backend.create_count, 1);
-        assert!(backend.body.contains("gpt-6.1-sol"));
+        }));
+        let (report, exit) = crate::agent_task_service::recover_cook(
+            &options.identity.cook_id,
+            Default::default(),
+            &performer,
+        )
+        .unwrap();
+        assert_eq!(exit, 0, "{report:#?}");
+        assert_eq!(
+            report.step,
+            crate::agent_task_service::CookRecoveryStep::Publish
+        );
+        assert_eq!(report.result.unwrap()["status"], "review_ready");
+        let after = persisted_promotion_for_attempt(run).unwrap().unwrap();
+        assert_eq!(before.deterministic_gates, after.deterministic_gates);
+        assert_eq!(performer.0.lock().unwrap().create_count, 1);
+    });
+}
+
+#[test]
+fn live_continuation_is_visible_and_recovery_leaves_its_claim_untouched() {
+    with_own_green_gates(|options, _| {
+        let (cook, run) = (&options.identity.cook_id, &options.identity.initial_run_id);
+        let recipes = CookRecipeStore::from_current_data_root().unwrap();
+        recipes.enqueue_terminal_continuation(cook, run).unwrap();
+        let _claim = recipes.claim_continuation_for(cook, run).unwrap().unwrap();
+        let store = test_lifecycle_store();
+        let before = store.read_record(run).unwrap();
+        let status = crate::orchestration::run_from_current_environment(cook).unwrap();
+        assert_eq!(
+            status.state,
+            homeboy_control_plane_contract::ControlPlaneRunState::Running
+        );
+        assert_eq!(status.phase.as_deref(), Some("publishing"));
+        assert_eq!(status.owner.unwrap().id, std::process::id().to_string());
+        let performer = PublishCandidate(std::sync::Mutex::new(CaptureBackend::default()));
+        let (report, exit) =
+            crate::agent_task_service::recover_cook(cook, Default::default(), &performer).unwrap();
+        assert_eq!(exit, 0);
+        assert!(report.step.is_none());
+        assert_eq!(
+            report.result.unwrap()["next_action"],
+            format!("homeboy agent-task status {cook} --watch")
+        );
+        let after = store.read_record(run).unwrap();
+        assert_eq!(
+            before.metadata["cook_continuation"],
+            after.metadata["cook_continuation"]
+        );
+        assert_eq!(
+            before.metadata["cook_delivery"],
+            after.metadata["cook_delivery"]
+        );
+        assert!(!performer.0.lock().unwrap().created);
     });
 }
 

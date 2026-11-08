@@ -570,7 +570,8 @@ pub fn plan_cook_recovery(id: &str) -> Result<CookRecoveryPlan> {
     // does verification of an applied candidate whose gates failed, deferred
     // or never completed: publication refuses that candidate, so selecting
     // it would deadlock recovery on a guaranteed refusal (#17494).
-    if plan.step != CookRecoveryStep::Reconcile
+    if !CookStatus::from_status(&plan.status).is_in_flight()
+        && plan.step != CookRecoveryStep::Reconcile
         && super::manual_finalization_publication_pending(&plan.run_id)
         && !super::applied_candidate_awaits_verification(&plan.run_id)
     {
@@ -714,6 +715,36 @@ pub fn recover_cook(
         ));
     }
     let mut plan = plan_cook_recovery(id)?;
+    // Ownership wins over every operator override and manual publication intent.
+    // Report the durable claim and progress without touching admission or gates.
+    let live_record = agent_task_lifecycle::exact_record(&plan.run_id).ok();
+    if let Some((record, owner)) = live_record
+        .as_ref()
+        .and_then(|record| super::live_cook_continuation(record).map(|owner| (record, owner)))
+    {
+        return Ok((
+            CookRecoveryReport {
+                schema: COOK_RECOVERY_SCHEMA,
+                cook_id: plan.cook_id.clone(),
+                run_id: plan.run_id,
+                status: "in_flight".into(),
+                step: CookRecoveryStep::none(format!(
+                    "Continuation owner pid {} is in flight; homeboy agent-task status {} --watch",
+                    owner["owner_pid"], plan.cook_id
+                )),
+                preflight,
+                overrides: None,
+                admission: None,
+                result: Some(serde_json::json!({
+                    "continuation": owner,
+                    "progress": record.metadata.get("cook_progress"),
+                    "next_action": format!("homeboy agent-task status {} --watch", plan.cook_id),
+                })),
+                failure: None,
+            },
+            0,
+        ));
+    }
     validate_step_inputs(&mut plan, &overrides, replace_gates.is_some(), &publish)?;
     if !overrides.is_empty() {
         validate_overrides(&plan, preflight)?;
@@ -1076,6 +1107,9 @@ pub(crate) fn cook_recovery_status(record: &agent_task_lifecycle::AgentTaskRunRe
         State::Queued => return "queued".to_string(),
         State::Running => return "running".to_string(),
         _ => {}
+    }
+    if super::live_cook_continuation(record).is_some() {
+        return "in_flight".to_string();
     }
     if let Some(status) = super::CookDelivery::from_run_metadata(&record.metadata)
         .and_then(|delivery| delivery.lifecycle().cook_status)
