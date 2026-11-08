@@ -131,7 +131,8 @@ fn pr_comment_fresh(
         repo_flag,
     ];
     let mut body_files = Vec::new();
-    push_markdown_body_file_arg(&mut args, &mut body_files, "--body-file", &options.body)?;
+    let body = super::neutralize_mentions(&options.body);
+    push_markdown_body_file_arg(&mut args, &mut body_files, "--body-file", &body)?;
     let output = gh.run(&args)?;
     Ok(GithubPrOutput {
         component_id: id,
@@ -154,7 +155,7 @@ fn pr_comment_sticky_whole(
     body: String,
     key: String,
 ) -> Result<GithubPrOutput> {
-    let full_body = format!("{}\n{}", marker_for_key(&key), body);
+    let full_body = super::neutralize_mentions(&format!("{}\n{}", marker_for_key(&key), body));
 
     if let Some(existing_id) = find_sticky_comment_id(gh, &repo, pr_number, &key)? {
         let args: Vec<String> = vec![

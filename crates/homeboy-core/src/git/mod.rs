@@ -7,6 +7,8 @@ mod github;
 pub use github::cook_ci;
 pub mod github_app;
 mod github_comment_sections;
+mod mention_safety;
+pub use mention_safety::neutralize_mentions;
 mod github_pr_comments;
 mod github_types;
 mod operation_output;
