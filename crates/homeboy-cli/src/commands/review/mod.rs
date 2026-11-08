@@ -558,7 +558,7 @@ pub fn run(mut args: ReviewArgs) -> CmdResult<Value> {
             let deadline = ReviewPreflightDeadline::start();
             let requested_source = lint_args.release_readiness_source.clone();
             let component = load_component_with_deadline(&lint_args.comp, deadline)?;
-            reject_manual_changelog_edit_for_lint(&component, &lint_args)?;
+            reject_manual_release_owned_edits_for_lint(&component, &lint_args)?;
             prepare_local_review_dependencies(&component, &None, deadline)?;
             to_value_with_readiness_provenance(
                 lint::run(review_lint_args(lint_args)),
@@ -1517,7 +1517,7 @@ fn manual_changelog_edit(
     )
 }
 
-fn reject_manual_changelog_edit_for_lint(
+fn reject_manual_release_owned_edits_for_lint(
     component: &homeboy::core::component::Component,
     args: &lint::LintArgs,
 ) -> homeboy::core::Result<()> {
@@ -1537,20 +1537,38 @@ fn reject_manual_changelog_edit_for_lint(
     let Some(changed_files) = changed_files else {
         return Ok(());
     };
-    let Some(violation) = changelog::detect_manual_changelog_edit(
+    if let Some(violation) = changelog::detect_manual_changelog_edit(
         component.changelog_target.as_deref(),
         &changed_files,
         component.release.allow_manual_changelog_edits,
         None,
-    ) else {
-        return Ok(());
-    };
-    Err(homeboy::core::Error::validation_invalid_argument(
-        "changed-files",
-        violation.message,
-        Some(violation.path),
-        None,
-    ))
+    ) {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "changed-files",
+            violation.message,
+            Some(violation.path),
+            None,
+        ));
+    }
+    let violations = release_owned_mutations_for_scope(
+        component,
+        &component.local_path,
+        &args.changed,
+        &changed_files,
+    );
+    if !violations.is_empty() {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "changed-files",
+            violations
+                .iter()
+                .map(|v| v.message.as_str())
+                .collect::<Vec<_>>()
+                .join("\n"),
+            None,
+            None,
+        ));
+    }
+    Ok(())
 }
 
 fn manual_release_owned_mutations(
@@ -1562,19 +1580,25 @@ fn manual_release_owned_mutations(
     let Some(changed_files) = review_context.precomputed_changed_files() else {
         return Vec::new();
     };
-    let baseline = args
-        .changed
+    release_owned_mutations_for_scope(component, source_path, &args.changed, changed_files)
+}
+
+fn release_owned_mutations_for_scope(
+    component: &homeboy::core::component::Component,
+    source_path: &str,
+    changed: &ChangedScopeArgs,
+    changed_files: &[String],
+) -> Vec<version::ReleaseOwnedMutationViolation> {
+    let baseline = changed
         .changed_since()
-        .or(args.changed.changed_only.then_some("HEAD"));
+        .or(changed.changed_only.then_some("HEAD"));
     let Some(baseline) = baseline else {
         return Vec::new();
     };
 
     let mutations = changed_files
         .iter()
-        .filter_map(|file| {
-            version_mutation_at(source_path, baseline, file, args.changed.changed_only)
-        })
+        .filter_map(|file| version_mutation_at(source_path, baseline, file, changed.changed_only))
         .collect::<Vec<_>>();
     version::detect_manual_release_owned_mutations(component, &mutations, None)
 }
@@ -2654,7 +2678,7 @@ mod tests {
             ..Default::default()
         };
 
-        let error = reject_manual_changelog_edit_for_lint(&component, &args)
+        let error = reject_manual_release_owned_edits_for_lint(&component, &args)
             .expect_err("CI lint must reject release-owned changelog edits");
 
         assert_eq!(
@@ -2666,6 +2690,154 @@ mod tests {
             .contains("Homeboy generates changelog entries"));
         assert_eq!(error.details["field"], "changed-files");
         assert_eq!(error.details["id"], "docs/changelog.md");
+    }
+
+    #[test]
+    fn direct_review_lint_guards_version_targets_and_derived_lockfiles() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(root)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+        };
+        git(&["init"]);
+        git(&["config", "user.email", "test@example.com"]);
+        git(&["config", "user.name", "Test"]);
+        std::fs::write(root.join("package.json"), r#"{"version":"1.0.0"}"#).unwrap();
+        std::fs::write(root.join("package-lock.json"), "original lockfile").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-m", "fixture"]);
+        let mut component = homeboy::core::component::Component {
+            local_path: root.to_str().unwrap().to_string(),
+            version_targets: Some(vec![homeboy::core::component::VersionTarget {
+                file: "package.json".to_string(),
+                pattern: Some(r#""version"\s*:\s*"([0-9.]+)""#.to_string()),
+                artifact_path: None,
+            }]),
+            ..Default::default()
+        };
+        let mut args = lint::LintArgs::for_test("fixture", root.to_str().unwrap());
+        args.changed.changed_only = true;
+
+        // Editing a manifest is allowed when its release-owned version is unchanged.
+        std::fs::write(
+            root.join("package.json"),
+            r#"{"version":"1.0.0","description":"new metadata"}"#,
+        )
+        .unwrap();
+        assert!(reject_manual_release_owned_edits_for_lint(&component, &args).is_ok());
+
+        // The changelog exemption must not exempt version targets as well.
+        component.release.allow_manual_changelog_edits = true;
+        std::fs::write(root.join("package.json"), r#"{"version":"1.0.1"}"#).unwrap();
+
+        let error = reject_manual_release_owned_edits_for_lint(&component, &args).unwrap_err();
+        assert_eq!(
+            error.code,
+            homeboy::core::ErrorCode::ValidationInvalidArgument
+        );
+        assert!(error.message.contains("package.json"));
+        assert!(error.message.contains("revert the manual bump"));
+
+        // The same guard protects committed Cook candidates relative to their base.
+        git(&["add", "."]);
+        git(&["commit", "-m", "candidate"]);
+        args.changed.changed_only = false;
+        args.changed.lab.since.changed_since = Some("HEAD~1".to_string());
+        assert!(reject_manual_release_owned_edits_for_lint(&component, &args).is_err());
+        component.release.manual_version_targets = vec!["package.json".to_string()];
+        assert!(reject_manual_release_owned_edits_for_lint(&component, &args).is_ok());
+
+        component.release.manual_version_targets.clear();
+        // Compare the lockfile-only candidate with the original fixture, not the
+        // version-bumped commit (which would also report a manifest rollback).
+        let baseline = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD~1"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert!(baseline.status.success());
+        args.changed.lab.since.changed_since = Some(
+            String::from_utf8(baseline.stdout)
+                .unwrap()
+                .trim()
+                .to_string(),
+        );
+        std::fs::write(root.join("package.json"), r#"{"version":"1.0.0"}"#).unwrap();
+        std::fs::write(root.join("package-lock.json"), "changed lockfile").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-m", "lockfile candidate"]);
+        let error = reject_manual_release_owned_edits_for_lint(&component, &args).unwrap_err();
+        assert!(error.message.contains("package-lock.json"));
+        assert!(error.message.contains("release-derived lockfile"));
+        assert!(!error.message.contains("configured version field"));
+        component.release.manual_version_targets = vec!["package.json".to_string()];
+        assert!(reject_manual_release_owned_edits_for_lint(&component, &args).is_ok());
+    }
+
+    #[test]
+    fn direct_review_lint_guards_configured_plugin_and_composer_versions() {
+        for (file, pattern, before, after) in [
+            (
+                "plugin.php",
+                r"Version:\s*([0-9.]+)",
+                "<?php /* Version: 1.0.0 */",
+                "<?php /* Version: 1.0.1 */",
+            ),
+            (
+                "composer.json",
+                r#""version"\s*:\s*"([0-9.]+)""#,
+                r#"{"version":"1.0.0"}"#,
+                r#"{"version":"1.0.1"}"#,
+            ),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path();
+            for args in [
+                vec!["init"],
+                vec!["config", "user.email", "test@example.com"],
+                vec!["config", "user.name", "Test"],
+            ] {
+                assert!(std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(root)
+                    .output()
+                    .unwrap()
+                    .status
+                    .success());
+            }
+            std::fs::write(root.join(file), before).unwrap();
+            for args in [vec!["add", "."], vec!["commit", "-m", "fixture"]] {
+                assert!(std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(root)
+                    .output()
+                    .unwrap()
+                    .status
+                    .success());
+            }
+            std::fs::write(root.join(file), after).unwrap();
+            let mut component = homeboy::core::component::Component {
+                local_path: root.to_str().unwrap().to_string(),
+                version_targets: Some(vec![homeboy::core::component::VersionTarget {
+                    file: file.to_string(),
+                    pattern: Some(pattern.to_string()),
+                    artifact_path: None,
+                }]),
+                ..Default::default()
+            };
+            let mut args = lint::LintArgs::for_test("fixture", root.to_str().unwrap());
+            args.changed.changed_only = true;
+            let error = reject_manual_release_owned_edits_for_lint(&component, &args).unwrap_err();
+            assert!(error.message.contains(file));
+            assert!(error.message.contains("revert the manual bump"));
+            component.release.manual_version_targets = vec![file.to_string()];
+            assert!(reject_manual_release_owned_edits_for_lint(&component, &args).is_ok());
+        }
     }
 
     fn review_args_fixture() -> ReviewArgs {
