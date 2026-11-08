@@ -1238,13 +1238,16 @@ pub(super) fn run_materialized_provider_command_once(
                     let remaining_liveness = liveness_timeout.saturating_sub(progress_age);
                     let sleep_for = remaining_liveness
                         .min(kill_at(current_deadline_ms).saturating_sub(elapsed))
-                        .min(Duration::from_millis(50));
+                        .min(Duration::from_millis(250));
                     if sleep_for > Duration::ZERO {
                         std::thread::sleep(sleep_for);
                     }
                     continue;
                 }
-                std::thread::sleep(Duration::from_millis(10));
+                std::thread::sleep(
+                    Duration::from_millis(250)
+                        .min(kill_at(current_deadline_ms).saturating_sub(elapsed)),
+                );
             }
             Err(_) => break (None, false, false, false),
         }
