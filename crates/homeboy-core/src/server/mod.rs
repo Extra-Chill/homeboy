@@ -74,6 +74,9 @@ pub struct RunnerSettings {
     pub service_managed: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub concurrency_limit: Option<usize>,
+    /// Sustained PSI avg300 percentage limits (CPU some, IO/memory full).
+    #[serde(default)]
+    pub pressure_thresholds: crate::runner_pressure::PressureThresholds,
     /// Maximum seconds the controller waits for an accepted runner job. Unset
     /// retains the twenty-minute default; zero detaches immediately. The
     /// `HOMEBOY_RUNNER_EXEC_WAIT_TIMEOUT_SECS` env var overrides this for one run.

@@ -540,6 +540,7 @@ fn rooted_controller_staging_cancel_retains_blocker_until_job_is_terminal() {
         )
         .expect("test executable identity"),
         runtime_paths: homeboy_core::daemon::DaemonRuntimeSnapshot {
+            pressure: None,
             loaded_at: "now".to_string(),
             paths: Vec::new(),
         },

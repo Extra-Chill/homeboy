@@ -289,7 +289,12 @@ pub(crate) fn freshness_report_from_validation(
         ownership_evidence,
         daemon_version: state.map(|state| state.build_identity.version.clone()),
         daemon_build_identity: state.map(|state| state.build_identity.display.clone()),
-        runtime_paths: state.map(|state| state.runtime_paths.clone()),
+        runtime_paths: state.map(|state| {
+            let mut paths = state.runtime_paths.clone();
+            // The controller reapplies the configured runner thresholds.
+            paths.pressure = Some(crate::runner_pressure::sample(&Default::default()));
+            paths
+        }),
         active_jobs,
         termination_evidence: (!validation.running)
             .then(read_termination_evidence)
@@ -342,6 +347,7 @@ mod tests {
                 ino: 0,
             },
             runtime_paths: DaemonRuntimeSnapshot {
+                pressure: None,
                 loaded_at: String::new(),
                 paths: Vec::new(),
             },

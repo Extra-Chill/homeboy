@@ -751,6 +751,7 @@ mod tests {
         stale_reason_code: Option<DaemonStaleReasonCode>,
     ) -> remote_daemon::RemoteDaemonStatus {
         remote_daemon::RemoteDaemonStatus {
+            runtime_paths: None,
             daemon: Some(remote_daemon::RemoteDaemon {
                 address: "127.0.0.1:49152".to_string(),
                 pid: Some(pid),
@@ -1084,6 +1085,7 @@ mod tests {
     fn transport_drop_after_successful_stop_accepts_matching_clean_stop_evidence() {
         let session = direct_ssh_session("lease-stopped");
         let status = remote_daemon::RemoteDaemonStatus {
+            runtime_paths: None,
             daemon: None,
             stale_reason: None,
             stale_reason_code: Some(DaemonStaleReasonCode::LeaseMissing),
@@ -1128,6 +1130,7 @@ mod tests {
     fn transport_drop_reconciles_missing_lease_after_idempotent_stop() {
         let session = direct_ssh_session("lease-removed");
         let status = remote_daemon::RemoteDaemonStatus {
+            runtime_paths: None,
             daemon: None,
             stale_reason: None,
             stale_reason_code: Some(DaemonStaleReasonCode::LeaseMissing),

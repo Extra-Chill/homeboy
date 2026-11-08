@@ -10,6 +10,7 @@ use super::*;
 #[test]
 fn first_connect_routes_to_idempotent_ensure_start_when_no_daemon_exists() {
     let status = RemoteDaemonStatus {
+        runtime_paths: None,
         daemon: None,
         stale_reason: None,
         stale_reason_code: None,
@@ -149,6 +150,7 @@ fn active_job_fence_allows_reattach_but_rejects_new_admission() {
 #[test]
 fn missing_daemon_state_with_active_jobs_starts_the_recovering_successor() {
     let status = RemoteDaemonStatus {
+        runtime_paths: None,
         daemon: None,
         stale_reason: Some("daemon state is unavailable".to_string()),
         stale_reason_code: Some(DaemonStaleReasonCode::LeaseMissing),

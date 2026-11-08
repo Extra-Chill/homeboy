@@ -541,6 +541,7 @@ mod tests {
                 ino: 0,
             },
             runtime_paths: DaemonRuntimeSnapshot {
+                pressure: None,
                 loaded_at: "now".to_string(),
                 paths: Vec::new(),
             },

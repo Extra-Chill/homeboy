@@ -268,6 +268,8 @@ pub(super) enum RunnerCommand {
         #[arg(long)]
         expected_live_pid: Option<u32>,
     },
+    /// Bounded disk usage inventory of Homeboy-owned roots (two-second scan).
+    Inventory { id: String },
     /// Show persisted runner tunnel status
     Status {
         /// Runner ID. Omit to show all runner session states.
