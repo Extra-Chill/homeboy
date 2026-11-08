@@ -3478,7 +3478,7 @@ fn agent_task_timeout_ms_flags_parse_for_cook_run_and_run_plan() {
 /// any provider work, and the branch is left intact. Naming the same branch
 /// explicitly with `--head` stays authoritative.
 #[test]
-fn derived_destination_refuses_a_stale_leftover_branch_but_explicit_head_is_authoritative() {
+fn derived_destination_skips_a_stale_leftover_branch_but_explicit_head_is_authoritative() {
     with_isolated_home(|_| {
         let primary = tempfile::tempdir().expect("primary checkout");
         init_runtime_component_checkout(primary.path());
@@ -3533,12 +3533,8 @@ fn derived_destination_refuses_a_stale_leftover_branch_but_explicit_head_is_auth
             }
         };
 
-        let error = resolve(&[]).expect_err("a stale derived destination is refused");
-        assert!(
-            error.message.contains("existing PR work"),
-            "names the existing PR work: {}",
-            error.message
-        );
+        let fresh = resolve(&[]).expect("a stale branch is skipped");
+        assert_eq!(fresh.head.as_deref(), Some("fix/issue-78-fixture-2"));
         assert_eq!(
             git(&["rev-parse", "fix/issue-78-fixture"]),
             stale_head,
@@ -3612,10 +3608,10 @@ fn derived_destination_advances_past_a_retired_issue_worktree() {
             .expect("create the first derived destination");
         assert_eq!(created.record.id, "fixture@fix-issue-77-fixture");
 
-        // An active destination is reused unchanged.
+        // A fresh attempt does not adopt an active destination either.
         assert_eq!(
             derive().to_worktree.as_deref(),
-            Some("fixture@fix-issue-77-fixture")
+            Some("fixture@fix-issue-77-fixture-2")
         );
 
         homeboy::core::worktree::remove(homeboy::core::worktree::WorktreeRemoveOptions {
@@ -3638,7 +3634,7 @@ fn derived_destination_advances_past_a_retired_issue_worktree() {
 }
 
 #[test]
-fn derived_generations_follow_pr_state() {
+fn issue_resolution_routes() {
     with_isolated_home(|_| {
         let primary = tempfile::tempdir().unwrap();
         init_runtime_component_checkout(primary.path());
@@ -3664,32 +3660,61 @@ fn derived_generations_follow_pr_state() {
             "PATH",
             format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
         );
-        for state in ["MERGED", "CLOSED", "OPEN"] {
+        register_component(
+            "fixture",
+            primary.path(),
+            "https://github.com/example/fixture.git",
+        );
+        for (states, expected_route, expected_head) in [
+            (vec!["open"], Some("pr_rework"), "custom/pr-head"),
+            (
+                vec!["closed", "closed"],
+                Some("fresh_branch"),
+                "fix/issue-1-fixture-2",
+            ),
+            (vec!["open", "open"], None, ""),
+        ] {
+            let events: Vec<Value> = states.iter().enumerate().map(|(n, state)| json!({
+                "event": "cross-referenced", "source": {"issue": {
+                    "state": state, "html_url": format!("https://github.com/example/fixture/pull/{}", n + 2),
+                    "pull_request": {}
+                }}
+            })).collect();
             homeboy_test_support::write_executable(&bin.join("gh"), &format!(
-                "#!/bin/sh\ncase \"$*\" in *--state\\ all*--head\\ fix/issue-1-fixture\\ *) printf '[{{\"state\":\"{state}\",\"url\":\"https://github.com/example/fixture/pull/2\"}}]' ;; *) printf '[]' ;; esac\n"
+                "#!/bin/sh\ncase \"$*\" in api*) printf '%s' '{}' ;; 'pr view'*) printf '%s' '{{\"baseRefName\":\"main\",\"headRefName\":\"custom/pr-head\"}}' ;; *) printf '[]' ;; esac\n",
+                json!([events])
             ), 0o755).unwrap();
-            let result = super::super::run::next_live_derived_cook_branch(
-                "fixture",
-                "fix/issue-1-fixture",
-                Some(primary.path()),
-                None,
-            )
-            .unwrap();
-            if state == "OPEN" {
-                // The open PR owns the generation: Cook adopts it as rework.
+            let mut input = cook_args_from_cli(
+                [
+                    "homeboy",
+                    "agent-task",
+                    "cook",
+                    "--prompt",
+                    "fix",
+                    "--repo",
+                    "fixture",
+                    "--task-url",
+                    "https://github.com/example/fixture/issues/1",
+                    "--no-finalize",
+                ]
+                .map(str::to_string)
+                .to_vec(),
+            );
+            let repository = super::super::run::resolve_cook_repository(&mut input).unwrap();
+            let result = super::super::run::resolve_cook_destination(input, repository.as_ref());
+            if let Some(route) = expected_route {
+                let resolved = result.unwrap();
+                assert_eq!(resolved.issue_resolution.as_ref().unwrap()["route"], route);
+                assert_eq!(resolved.head.as_deref(), Some(expected_head));
                 assert_eq!(
-                    result,
-                    (
-                        "fix/issue-1-fixture".to_string(),
-                        Some("https://github.com/example/fixture/pull/2".to_string())
-                    )
+                    resolved.to_worktree.as_deref(),
+                    Some(format!("fixture@{}", expected_head.replace('/', "-")).as_str())
                 );
             } else {
-                assert_eq!(
-                    result,
-                    ("fix/issue-1-fixture-2".to_string(), None),
-                    "{state}"
-                );
+                assert!(result
+                    .unwrap_err()
+                    .message
+                    .contains("several open linked PRs"));
             }
         }
     });
@@ -3746,17 +3771,16 @@ fn derived_generation_skips_another_source_checkout_but_reuses_same_source() {
         }
         for (source, expected) in [
             (secondary.path(), "fix/issue-1-fixture-3"),
-            (primary.path(), "fix/issue-1-fixture-2"),
+            (primary.path(), "fix/issue-1-fixture-3"),
         ] {
             assert_eq!(
-                super::super::run::next_live_derived_cook_branch(
+                super::super::run::fresh_derived_cook_branch(
                     "fixture",
                     "fix/issue-1-fixture",
                     Some(source),
-                    None,
                 )
                 .unwrap(),
-                (expected.to_string(), None)
+                expected.to_string()
             );
         }
     });
@@ -3785,19 +3809,18 @@ fn derived_generation_separates_live_owners_but_reuses_same_run() {
             source_path: None,
         })
         .unwrap();
-        for (owner, expected) in [
+        for (_owner, expected) in [
             ("other-run", "fix/issue-1-fixture-2"),
-            ("live-owner", "fix/issue-1-fixture"),
+            ("live-owner", "fix/issue-1-fixture-2"),
         ] {
             assert_eq!(
-                super::super::run::next_live_derived_cook_branch(
+                super::super::run::fresh_derived_cook_branch(
                     "fixture",
                     "fix/issue-1-fixture",
                     Some(primary.path()),
-                    Some(owner)
                 )
                 .unwrap(),
-                (expected.to_string(), None)
+                expected.to_string()
             );
         }
     });
