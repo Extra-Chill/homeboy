@@ -1519,6 +1519,55 @@ fn fixture_backend_produces_deterministic_smoke_artifacts() {
 }
 
 #[test]
+fn fixture_provider_timeout_retains_edits_but_not_a_clean_worktree() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        for mode in ["timeout", "liveness_timeout", "clean_timeout"] {
+            let temp = tempfile::tempdir().unwrap();
+            let source = linked_cook_source(&temp);
+            let (mut request, _) = request("timeout-fixture", "unused".to_string());
+            request.executor.backend = "fixture".to_string();
+            request.executor.config = json!({"mode": mode});
+            request.workspace.root = Some(source.display().to_string());
+            let run_id = format!("fixture-{mode}");
+            let plan = AgentTaskPlan::new(&run_id, vec![request]);
+            crate::agent_task_lifecycle::submit_plan(&plan, Some(&run_id)).unwrap();
+            crate::agent_task_service::run_submitted(
+                run_id.clone(),
+                Arc::new(ExtensionProviderAgentTaskExecutor::default()),
+            )
+            .unwrap();
+            let aggregate = crate::agent_task_lifecycle::read_aggregate(&run_id).unwrap();
+            let outcome = &aggregate.outcomes[0];
+            if mode == "clean_timeout" {
+                assert_eq!(aggregate.status(), AgentTaskRunState::Failed);
+                assert!(outcome.candidate.is_none());
+            } else {
+                assert_eq!(
+                    aggregate.status(),
+                    AgentTaskRunState::CandidateRecoverable,
+                    "{outcome:?}"
+                );
+                assert_eq!(
+                    outcome.failure_classification,
+                    Some(AgentTaskFailureClassification::Timeout)
+                );
+                assert_eq!(outcome.metadata["timeout_recovery"]["incomplete"], true);
+                let candidate = outcome.candidate.as_ref().expect("captured candidate");
+                let output = std::process::Command::new("git")
+                    .current_dir(&source)
+                    .args(["rev-parse", &format!("refs/homeboy/candidates/{run_id}")])
+                    .output()
+                    .unwrap();
+                assert_eq!(
+                    String::from_utf8(output.stdout).unwrap().trim(),
+                    candidate.candidate_sha
+                );
+            }
+        }
+    });
+}
+
+#[test]
 fn fixture_backend_classifies_empty_runtime_bundle() {
     let artifact_root = tempfile::tempdir().expect("artifact root");
     let (mut request, _provider) = request("task-empty-runtime", "unused".to_string());

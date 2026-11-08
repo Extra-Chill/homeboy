@@ -4838,6 +4838,16 @@ fn live_provider_liveness(
     {
         observations.push(("workspace_activity", observed_at));
     }
+    if let Some(observed_at) = execution
+        .get("heartbeat_at")
+        .and_then(Value::as_str)
+        .and_then(parse_timestamp)
+    {
+        let source = execution["heartbeat_source"]
+            .as_str()
+            .unwrap_or("runtime_output");
+        observations.push((source, observed_at));
+    }
     let started_at = execution
         .get("started_at")
         .and_then(Value::as_str)
@@ -7118,6 +7128,22 @@ mod tests {
         assert_eq!(
             liveness.last_observed_progress_at.as_deref(),
             Some("2020-01-01T00:00:05+00:00")
+        );
+        record.metadata["provider_executions"][0]["heartbeat_at"] = json!("2020-01-01T00:00:08Z");
+        record.metadata["provider_executions"][0]["heartbeat_source"] =
+            json!("descendant_activity");
+        let liveness = live_provider_liveness(
+            &record,
+            None,
+            chrono::DateTime::parse_from_rfc3339("2020-01-01T00:00:10Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+        )
+        .unwrap();
+        assert_eq!(liveness.source.as_deref(), Some("descendant_activity"));
+        assert_eq!(
+            liveness.last_observed_progress_at.as_deref(),
+            Some("2020-01-01T00:00:08+00:00")
         );
     }
 

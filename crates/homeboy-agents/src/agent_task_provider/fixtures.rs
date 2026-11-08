@@ -43,6 +43,36 @@ pub(super) fn run_fixture_provider(
         .and_then(Value::as_str)
         .unwrap_or("success");
     match mode {
+        "timeout" | "liveness_timeout" | "clean_timeout" => {
+            if mode != "clean_timeout" {
+                if let Some(root) = request.workspace.root.as_deref() {
+                    std::fs::write(Path::new(root).join("partial.txt"), "partial work\n")
+                        .expect("write timeout fixture change");
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+            let liveness = mode == "liveness_timeout";
+            failure_outcome(
+                request,
+                if liveness {
+                    AgentTaskOutcomeStatus::Failed
+                } else {
+                    AgentTaskOutcomeStatus::Timeout
+                },
+                if liveness {
+                    AgentTaskFailureClassification::Stalled
+                } else {
+                    AgentTaskFailureClassification::Timeout
+                },
+                if liveness {
+                    "agent_task.provider_liveness_timeout"
+                } else {
+                    "agent_task.provider_timeout"
+                },
+                "fixture exceeded provider timeout".to_string(),
+                json!({}),
+            )
+        }
         "empty_patch" => fixture_empty_patch_outcome(request, artifact_root),
         "empty_runtime_bundle" => fixture_empty_runtime_bundle_outcome(request, artifact_root),
         _ => fixture_success_outcome(request, artifact_root),
