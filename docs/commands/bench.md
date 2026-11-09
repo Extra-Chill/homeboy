@@ -57,6 +57,11 @@ It reports discovered, exercised, skipped-unsafe, and failed surface counts plus
 top uncovered groups when those fields are available; missing fields are simply
 omitted.
 
+Extension bench runners inherit the caller's `PATH` in its original order;
+Homeboy only appends its discovered tool directories as fallbacks. The `node`
+the runner child resolves from that `PATH` is recorded under
+`run_metadata.runner.node` as `{ "path", "version" }`.
+
 Bench runners that mutate runtime state can report fuzz-safe lifecycle evidence
 under `run_metadata.lifecycle`. The lifecycle result uses
 `homeboy/lifecycle-result/v1` and includes phase statuses plus `snapshot_refs`

@@ -109,6 +109,20 @@ pub struct BenchRunnerMetadata {
     pub path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_revision: Option<String>,
+    /// The `node` the runner child resolved from its own `PATH`, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node: Option<BenchNodeRuntime>,
+}
+
+/// The `node` executable a bench runner child resolves, and its version.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct BenchNodeRuntime {
+    /// Absolute path of the first `node` on the child's `PATH`.
+    pub path: String,
+    /// `node --version` output from that executable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

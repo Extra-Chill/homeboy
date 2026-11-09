@@ -1,12 +1,15 @@
 //! The `PATH` Homeboy hands to commands it runs.
 //!
 //! One builder discovers a host's installed tools: home-relative bin
-//! directories first, then Node version bins, then a caller-selected list of
-//! absolute bin directories, then the inherited `PATH`, deduplicated. Missing
-//! directories are skipped so the result stays portable across hosts.
+//! directories, then Node version bins, then a caller-selected list of
+//! absolute bin directories, deduplicated against the inherited `PATH`.
+//! Missing directories are skipped so the result stays portable across hosts.
 //!
 //! - [`command_step_path`] serves rig `command` steps, lifecycle phases, and
-//!   extension executions on the local host.
+//!   extension executions on the local host. The caller's `PATH` keeps its
+//!   order and wins; discovered directories are only appended as fallbacks,
+//!   so the toolchain the operator selected (e.g. `actions/setup-node`) is the
+//!   one a child resolves.
 //! - [`runner_tool_path`] serves Lab runner commands and gates, which must
 //!   resolve the runner user's installed tools (npm, node, composer, ...)
 //!   even when the command's `HOME` is isolated.
@@ -31,8 +34,8 @@ const HOME_PREPEND_DIRS: &[&str] = &[".local/bin", ".cargo/bin", ".kimaki/bin"];
 /// version (descending name order) first within each root.
 const NODE_VERSION_ROOTS: &[(&str, &str)] = &[(".local/opt", "node-"), (".nvm/versions/node", "")];
 
-/// Absolute bin directories for local command steps, after Node discovery and
-/// still ahead of the inherited `PATH`.
+/// Absolute bin directories for local command steps, appended after the
+/// inherited `PATH` and Node discovery.
 const COMMAND_STEP_DIRS: &[&str] = &["/opt/homebrew/bin", "/usr/local/bin"];
 
 /// Absolute bin directories for runner commands. A runner's inherited `PATH`
@@ -47,11 +50,36 @@ const RUNNER_SYSTEM_DIRS: &[&str] = &[
     "/sbin",
 ];
 
-/// Builds the PATH for rig `command` steps.
+/// Builds the PATH for local command steps and extension executions.
+///
+/// The caller's inherited `PATH` comes first, verbatim and in order; discovered
+/// tool directories are appended only as fallbacks for a minimal caller PATH.
 pub fn command_step_path() -> Option<OsString> {
     let home = homeboy_paths::home_root().ok();
     let existing_path = std::env::var_os("PATH");
-    build_tool_path(home.as_deref(), COMMAND_STEP_DIRS, existing_path.as_deref())
+    build_caller_first_path(home.as_deref(), COMMAND_STEP_DIRS, existing_path.as_deref())
+}
+
+/// Resolve `command` the way a child process given `path` would: the first
+/// executable file named `command` in `path` order.
+pub fn resolve_command_on_path(command: &str, path: &OsStr) -> Option<PathBuf> {
+    std::env::split_paths(path)
+        .filter(|directory| !directory.as_os_str().is_empty())
+        .map(|directory| directory.join(command))
+        .find(|candidate| is_executable_file(candidate))
+}
+
+#[cfg(unix)]
+fn is_executable_file(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    fs::metadata(path)
+        .map(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn is_executable_file(path: &Path) -> bool {
+    path.is_file()
 }
 
 /// Builds the PATH for commands a Lab runner executes on its own host.
@@ -60,6 +88,20 @@ pub fn command_step_path() -> Option<OsString> {
 /// whose `HOME` is isolated still resolves the runner's installed tools.
 pub fn runner_tool_path(home: Option<&Path>, existing_path: Option<&OsStr>) -> Option<OsString> {
     build_tool_path(home, RUNNER_SYSTEM_DIRS, existing_path)
+}
+
+/// Assembles a PATH that keeps the inherited PATH first and in order, then
+/// appends discovered tool directories it does not already contain.
+fn build_caller_first_path(
+    home: Option<&Path>,
+    absolute_dirs: &[&str],
+    existing_path: Option<&OsStr>,
+) -> Option<OsString> {
+    let mut seen = HashSet::new();
+    let mut paths = Vec::new();
+    push_inherited_path(&mut paths, &mut seen, existing_path);
+    push_discovered_dirs(&mut paths, &mut seen, home, absolute_dirs);
+    join_tool_paths(paths)
 }
 
 /// Assembles a tool PATH against an explicit home, absolute dir list, and
@@ -71,26 +113,44 @@ fn build_tool_path(
 ) -> Option<OsString> {
     let mut seen = HashSet::new();
     let mut paths = Vec::new();
+    push_discovered_dirs(&mut paths, &mut seen, home, absolute_dirs);
+    push_inherited_path(&mut paths, &mut seen, existing_path);
+    join_tool_paths(paths)
+}
 
+fn push_discovered_dirs(
+    paths: &mut Vec<PathBuf>,
+    seen: &mut HashSet<PathBuf>,
+    home: Option<&Path>,
+    absolute_dirs: &[&str],
+) {
     if let Some(home) = home {
         for dir in HOME_PREPEND_DIRS {
-            push_existing_path(&mut paths, &mut seen, home.join(dir));
+            push_existing_path(paths, seen, home.join(dir));
         }
         for (root, prefix) in NODE_VERSION_ROOTS {
-            push_node_version_bins(&mut paths, &mut seen, &home.join(root), prefix);
+            push_node_version_bins(paths, seen, &home.join(root), prefix);
         }
     }
 
     for dir in absolute_dirs {
-        push_existing_path(&mut paths, &mut seen, PathBuf::from(dir));
+        push_existing_path(paths, seen, PathBuf::from(dir));
     }
+}
 
+fn push_inherited_path(
+    paths: &mut Vec<PathBuf>,
+    seen: &mut HashSet<PathBuf>,
+    existing_path: Option<&OsStr>,
+) {
     if let Some(existing_path) = existing_path {
         for path in std::env::split_paths(existing_path) {
-            push_path(&mut paths, &mut seen, path);
+            push_path(paths, seen, path);
         }
     }
+}
 
+fn join_tool_paths(paths: Vec<PathBuf>) -> Option<OsString> {
     if paths.is_empty() {
         None
     } else {
@@ -144,7 +204,58 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
 
-    use super::{build_tool_path, runner_tool_path};
+    use super::{
+        build_caller_first_path, build_tool_path, resolve_command_on_path, runner_tool_path,
+    };
+
+    #[test]
+    fn caller_first_path_keeps_inherited_order_ahead_of_discovered_dirs() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let home = tmp.path().join("home");
+        let local = home.join(".local/bin");
+        let nvm_node = home.join(".nvm/versions/node/v20.0.0/bin");
+        let system = tmp.path().join("usr-local-bin");
+        let caller_node = tmp.path().join("setup-node/bin");
+        for dir in [&local, &nvm_node, &system, &caller_node] {
+            fs::create_dir_all(dir).expect("bin");
+        }
+        let system_dir = system.to_string_lossy().into_owned();
+        let inherited =
+            std::env::join_paths([caller_node.clone(), system.clone(), PathBuf::from("/bin")])
+                .expect("inherited");
+
+        let path = build_caller_first_path(Some(&home), &[system_dir.as_str()], Some(&inherited))
+            .expect("path");
+        let parts = std::env::split_paths(&path).collect::<Vec<_>>();
+
+        assert_eq!(
+            parts,
+            vec![caller_node, system, PathBuf::from("/bin"), local, nvm_node]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_command_on_path_returns_first_executable_in_order() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let non_exec = tmp.path().join("a");
+        let first = tmp.path().join("b");
+        let second = tmp.path().join("c");
+        for (dir, mode) in [(&non_exec, 0o644), (&first, 0o755), (&second, 0o755)] {
+            fs::create_dir_all(dir).expect("dir");
+            let tool = dir.join("tool");
+            fs::write(&tool, "#!/bin/sh\n").expect("tool");
+            fs::set_permissions(&tool, fs::Permissions::from_mode(mode)).expect("chmod");
+        }
+        let path = std::env::join_paths([&non_exec, &first, &second]).expect("path");
+
+        assert_eq!(
+            resolve_command_on_path("tool", &path),
+            Some(first.join("tool"))
+        );
+        assert_eq!(resolve_command_on_path("missing", &path), None);
+    }
 
     #[test]
     fn test_build_tool_path_prepends_existing_toolchain_dirs() {
