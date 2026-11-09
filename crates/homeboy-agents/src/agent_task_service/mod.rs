@@ -49,6 +49,7 @@ mod work_job;
 /// The promotion request is defined once in `agent_task_promotion`; the service
 /// layer re-exports it so existing importers keep one canonical type.
 pub use crate::agent_task_promotion::AgentTaskPromotionRequest;
+pub(crate) use cook::review_form_from_aggregate;
 pub use cook::*;
 pub use cook_activity::{worktree_files_changed, CookActivityProbe, CookProviderActivity};
 pub use cook_adoption::*;
@@ -70,7 +71,6 @@ pub(crate) use cook_pre_execution::*;
 pub use cook_pre_execution::{recover_recipe_attempt, retryable_pre_execution_failure};
 pub use cook_promotion::*;
 pub use cook_recipe::*;
-pub(crate) use cook_recovery::cook_recovery_status;
 pub use cook_recovery::{
     cook_recovery_delegation, is_store_contention, plan_cook_recovery, recover_cook,
     with_store_contention_backoff, CookPublishRequest, CookRecoveryOverrides,
@@ -78,6 +78,7 @@ pub use cook_recovery::{
     CookRecoveryStep, CookReplaceGatesRequest, CookReplacementProof, COOK_RECOVERY_SCHEMA,
     STORE_BUSY_CODE,
 };
+pub(crate) use cook_recovery::{cook_recovery_status, incomplete_review_recovery_command};
 
 /// Observe the local controller daemon with the one freshness report
 /// `homeboy daemon status` renders (#16181). Queued work is scheduled by that

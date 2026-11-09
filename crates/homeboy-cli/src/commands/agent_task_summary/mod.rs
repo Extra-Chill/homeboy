@@ -844,9 +844,11 @@ pub(crate) fn control_plane_next_action(payload: &Value, run_id: &str) -> String
             .map(|identity| format!("review the published PR: {identity}"))
             .unwrap_or_else(|| format!("homeboy runs evidence {run_id}"));
     }
-    if string_value(payload, &["blocker", "code"])
-        .is_some_and(|code| code.starts_with("resource_guard.") || code.starts_with("outcome."))
-    {
+    if string_value(payload, &["blocker", "code"]).is_some_and(|code| {
+        code.starts_with("resource_guard.")
+            || code.starts_with("outcome.")
+            || code == "review_form.incomplete"
+    }) {
         if let Some(remedy) = string_value(payload, &["blocker", "reason"]) {
             return remedy.to_string();
         }

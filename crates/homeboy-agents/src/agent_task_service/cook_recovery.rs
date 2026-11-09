@@ -180,6 +180,14 @@ pub(crate) struct CookRecoveryInputs<'a> {
     pub no_progress: Option<&'a CookRecoveryNoProgress>,
 }
 
+/// The complete operator override for an agent-declared incomplete candidate.
+pub(crate) fn incomplete_review_recovery_command(id: &str) -> String {
+    format!(
+        "homeboy agent-task recover {} --review-form @FILE --review-form-tool <tool> --review-form-model <model> --review-form-author <author>",
+        homeboy_core::engine::shell::quote_arg(id)
+    )
+}
+
 /// Decide the single next recovery step from durable Cook evidence. This is
 /// the one planner: `status` "Next:", `diagnose`, `recover --preflight` and
 /// `recover` all read their step from it, so none can name a step another
@@ -233,9 +241,9 @@ fn decide_cook_recovery_step(inputs: &CookRecoveryInputs<'_>) -> CookRecoverySte
     if status == CookStatus::CandidateRecoverable || publishable {
         if let Some(reason) = inputs.agent_incomplete_reason {
             return CookRecoveryStep::none(format!(
-                "The agent's review form declares the task incomplete: {reason}. Continuing would re-read the same verdict, so `recover` cannot publish this candidate on its own. Inspect it with `agent-task diagnose {run}`; if the task is in fact done, publish it with a complete review form via `agent-task recover {run} --review-form @FORM.json --review-form-tool <TOOL> --review-form-model <MODEL> --review-form-author <IDENTITY>`, otherwise start a fresh Cook.",
+                "The agent's review form declares the task incomplete: {reason}. Continuing would re-read the same verdict, so `recover` cannot publish this candidate on its own. If the task is in fact done, publish it with a complete review form via `{command}`, otherwise start a fresh Cook.",
                 reason = reason.trim_end_matches('.'),
-                run = inputs.run_id
+                command = incomplete_review_recovery_command(inputs.run_id)
             ));
         }
     }
@@ -1559,6 +1567,24 @@ mod tests {
             inputs.run_id = "cook-attempt-1";
             inputs.agent_incomplete_reason = Some(reason);
         });
+        let (report, exit) = finish_without_step(CookRecoveryReport {
+            schema: COOK_RECOVERY_SCHEMA,
+            cook_id: "cook".into(),
+            run_id: "cook-attempt-1".into(),
+            status: "candidate_recoverable".into(),
+            step: decided.clone(),
+            preflight: false,
+            overrides: None,
+            admission: None,
+            result: None,
+            failure: None,
+        });
+        assert_eq!(exit, 1);
+        let failure = report.failure.unwrap();
+        assert!(failure["message"]
+            .as_str()
+            .unwrap()
+            .contains(&incomplete_review_recovery_command("cook-attempt-1")));
         let CookRecoveryStep::None { reason: message } = decided else {
             panic!(
                 "an agent-declared incomplete candidate must not advertise continuation: {decided:?}"
@@ -1566,7 +1592,7 @@ mod tests {
         };
         assert!(message.contains(reason), "{message}");
         assert!(
-            message.contains("agent-task recover cook-attempt-1 --review-form @FORM.json"),
+            message.contains(&incomplete_review_recovery_command("cook-attempt-1")),
             "{message}"
         );
         assert_eq!(

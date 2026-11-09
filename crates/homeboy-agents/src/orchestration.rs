@@ -4199,6 +4199,34 @@ fn project_snapshot(
             .as_ref()
             .and_then(recorded_failure_blocker);
     }
+    if resource.state == ControlPlaneRunState::CandidateRecoverable {
+        if let Some(reason) = snapshot.aggregate.as_ref().and_then(|aggregate| {
+            crate::agent_task_service::review_form_from_aggregate(aggregate)
+                .ok()
+                .flatten()?
+                .incomplete_reason()
+                .map(str::to_string)
+        }) {
+            let id = resource
+                .mission
+                .as_ref()
+                .map(|id| id.as_str())
+                .unwrap_or(&snapshot.record.run_id);
+            resource.blocker = Some(ControlPlaneBlocker {
+                code: Some("review_form.incomplete".into()),
+                message: redacted_bounded(
+                    &format!("The agent's review form declares the task incomplete: {reason}"),
+                    MESSAGE_BOUND,
+                ),
+                reason: Some(crate::agent_task_service::incomplete_review_recovery_command(id)),
+                details: None,
+                state: None,
+                retry: None,
+                daemon: None,
+                output: None,
+            });
+        }
+    }
     Ok(resource)
 }
 
@@ -7293,6 +7321,41 @@ mod tests {
             record: record(run_id),
             plan,
             aggregate: None,
+        }
+    }
+
+    #[test]
+    fn incomplete_review_snapshot_exposes_reason_and_override_command() {
+        let mut snapshot = snapshot("incomplete-attempt", None);
+        snapshot.record = serde_json::from_value({
+            let mut value = serde_json::to_value(&snapshot.record).unwrap();
+            value["state"] = json!("candidate_recoverable");
+            value
+        })
+        .unwrap();
+        snapshot.aggregate = Some(
+            serde_json::from_value(json!({
+                "plan_id": "incomplete-attempt",
+                "totals": {"total": 1, "succeeded": 1, "failed": 0, "cancelled": 0, "skipped": 0},
+                "outcomes": [{
+                    "task_id": "task", "status": "succeeded",
+                    "outputs": {"review_form": {
+                        "pr_title": "Candidate", "summary": "Partial", "what_changed": ["Change"],
+                        "completion": "incomplete", "incomplete_reason": "Regression still missing"
+                    }}
+                }]
+            }))
+            .unwrap(),
+        );
+        for summary in [false, true] {
+            let resource = project_snapshot(&snapshot, summary).unwrap();
+            let blocker = resource.blocker.unwrap();
+            assert_eq!(blocker.code.as_deref(), Some("review_form.incomplete"));
+            assert!(blocker.message.contains("Regression still missing"));
+            assert_eq!(
+                blocker.reason.unwrap(),
+                crate::agent_task_service::incomplete_review_recovery_command("incomplete-attempt")
+            );
         }
     }
 
