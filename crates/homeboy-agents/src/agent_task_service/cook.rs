@@ -9070,23 +9070,8 @@ fn preflight_cook_workspace_base_ancestry_with_provider(
         // scheduler snapshot may replace the gate-verified candidate's HEAD.
         return Ok(None);
     }
-    let destination_record = native_cook_destination_record(options)?;
-    if let Some(record) = destination_record.as_ref() {
-        if let Some(run) = record.run_id.as_deref() {
-            if run != options.identity.initial_run_id && run != options.identity.cook_id {
-                let owner = agent_task_lifecycle::exact_record(run)?;
-                if owner.metadata.get("cook_id").and_then(Value::as_str)
-                    != Some(options.identity.cook_id.as_str())
-                {
-                    return Err(crate::agent_task_promotion::destination::owner_mismatch(
-                        format!("destination is owned by another Cook run: {run}"),
-                    ));
-                }
-            }
-        }
-    }
     let native_owned = matches!(
-        destination_record,
+        native_cook_destination_record(options)?,
         Some(record)
             if record.state == homeboy_core::worktree::TaskWorktreeState::Active
                 && std::fs::canonicalize(&record.worktree_path).ok().as_deref()
