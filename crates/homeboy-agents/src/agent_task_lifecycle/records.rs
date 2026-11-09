@@ -1134,6 +1134,7 @@ impl AgentTaskRunRecord {
                             | "worktree_provider_ensure"
                             | "provider_ready"
                             | "provider_start"
+                            | "retry"
                             | "in_flight"
                     )
                 ))
