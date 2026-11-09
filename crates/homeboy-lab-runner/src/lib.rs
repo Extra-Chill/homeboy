@@ -139,6 +139,7 @@ mod lab;
 mod lab_apply;
 mod lab_args;
 mod lab_capabilities;
+pub mod lab_capacity;
 mod lab_command;
 mod lab_env;
 mod lab_offload_provider;

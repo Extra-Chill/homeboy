@@ -510,7 +510,7 @@ impl ManagedServices {
         let worker = std::env::var_os("HOMEBOY_SERVICE_SUPERVISOR_WORKER")
             .map(PathBuf::from)
             .unwrap_or_else(|| std::env::current_exe().expect("current Homeboy executable"));
-        Command::new(worker)
+        let child = Command::new(worker)
             .args(["self", "service-supervisor-worker", "--request"])
             .arg(&request_path)
             .stdin(Stdio::null())
@@ -518,6 +518,7 @@ impl ManagedServices {
             .stderr(Stdio::null())
             .spawn()
             .map_err(|error| format!("start managed service worker: {error}"))?;
+        let _child = homeboy_core::child_reaper::ReapingChild::from(child);
         wait_for_service_worker_start(specs, run_id)
     }
 

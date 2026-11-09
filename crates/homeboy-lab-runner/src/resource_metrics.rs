@@ -221,8 +221,9 @@ fn durable_command_output_until_cancelled(
         )
     };
     let started = Instant::now();
-    let (mut child, identity) = runner_exec_job::spawn(command)
+    let (child, identity) = runner_exec_job::spawn(command)
         .map_err(|error| runner_command_spawn_error(command, &error))?;
+    let mut child = homeboy_core::child_reaper::ReapingChild::from(child);
     let pid = identity.pid;
     if let Err(error) = acknowledge_child(
         identity,
