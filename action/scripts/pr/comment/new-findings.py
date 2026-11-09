@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render only attributed failures and workflow annotations (never raw totals)."""
+"""Render attributed findings and confirmed introduced execution failures."""
 import json
 import os
 from pathlib import Path
@@ -57,8 +57,9 @@ def main():
                        if isinstance(f, dict) and f.get('file') in changed]
         findings.extend(details or [])
         tests.extend(verdict.get('new_failed_tests', []))
-        if not details and not verdict.get('new_failed_tests') and (verdict.get('new_findings') or 0) > 0:
-            failures.append(command)
+        if not details and not verdict.get('new_failed_tests') and (
+                verdict.get('introduced_failure') is True or (verdict.get('new_findings') or 0) > 0):
+            failures.append((command, verdict))
 
     ranks = {'critical': 0, 'error': 1, 'high': 1, 'warning': 2, 'medium': 2, 'info': 3, 'low': 3}
     findings.sort(key=lambda f: ranks.get(str(f.get('severity', 'error')).lower(), 1))
@@ -72,7 +73,13 @@ def main():
     if len(findings) > 10:
         lines.append('- Additional new findings are in the run summary.')
     lines.extend('- Failing test: ' + code(t) for t in sorted(set(tests)))
-    lines.extend('- New failures: ' + code(c) for c in failures)
+    for command, verdict in failures:
+        lines.append('- New failure: ' + code(command))
+        diagnostic = verdict.get('diagnostic')
+        if diagnostic:
+            diagnostic = '\n'.join(str(diagnostic).splitlines()[-10:])
+            lines.append('\n```text\n' + safe(diagnostic).replace('`', "'") + '\n```')
+        print(f"::error title={escape(command, True)}::New failure introduced by this PR")
     if lines:
         url = f"{os.environ.get('GITHUB_SERVER_URL', 'https://github.com')}/{os.environ.get('GITHUB_REPOSITORY', '')}/actions/runs/{os.environ.get('GITHUB_RUN_ID', '')}"
         lines.append(f'\n[Full report and artifacts]({url})')

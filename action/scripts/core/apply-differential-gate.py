@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from collections import deque
 from hashlib import sha256
 from typing import Any
 
@@ -354,8 +355,6 @@ def main() -> int:
     comment_verdicts: dict[str, Any] = {}
     for command, status in list(adjusted.items()):
         base_command = quality_base_command(command)
-        if base_command not in {"lint", "test"}:
-            continue
         # A timeout is admitted here so that a candidate which ran out of clock
         # can still be recognised as pre-existing when the baseline ran out of
         # clock too. Before this, `timeout` skipped the gate entirely and stayed
@@ -386,6 +385,25 @@ def main() -> int:
         base_metadata = base_command_status(command, base_dir)
         base_failed = command_failed(base_metadata)
         base_structured = base_metadata.get("structured_output") is True
+
+        # Explicit execution success is stronger than absent/zero metrics.
+        # Do not infer a healthy baseline merely from missing failure evidence.
+        baseline_passed = base_metadata.get("status") == "pass" and base_metadata.get("exit_code") == 0
+        unattributed = current is None or (current == 0 and current_kind != SCOPED)
+        if base_command == "test":
+            unattributed = test_outcomes(command, current_dir)[0] == "missing"
+        if status == "fail" and baseline_passed and unattributed:
+            comment_verdicts[command]["introduced_failure"] = True
+            try:
+                with open(os.path.join(current_dir, f"{output_stem(command)}.log"),
+                          encoding="utf-8", errors="replace") as handle:
+                    comment_verdicts[command]["diagnostic"] = "".join(deque(handle, maxlen=10)).rstrip()
+            except OSError:
+                pass
+            continue
+
+        if base_command not in {"lint", "test"}:
+            continue
 
         if base_command == "test":
             current_evidence, current_inventory, current_failed = test_outcomes(command, current_dir)
