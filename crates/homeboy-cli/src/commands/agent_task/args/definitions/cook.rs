@@ -1204,7 +1204,7 @@ mod tests {
             "--preview",
             "--run-plan",
             "--placement <PLACEMENT>",
-            "One repository per batch",
+            "Omit --repo to infer a registered component",
             "homeboy runs watch <instance>",
             "Two phases:",
             "Verification is required:",
