@@ -350,6 +350,20 @@ fn status_without_feedback(args: StatusArgs) -> CmdResult<Value> {
     // Status is a pure projection (#13697, #15718): every read below is
     // bounded and never initializes, migrates, or reconciles durable state.
     if let Ok(record) = bounded_exact_record(&target.run_id) {
+        if record
+            .metadata
+            .get("unmaterialized_cook_admission")
+            .is_some()
+            && matches!(value["state"].as_str(), Some("running" | "queued"))
+        {
+            if let Ok(status) = homeboy::core::daemon::read_status() {
+                let admission = status.admission_report();
+                if admission["waiting_for"] == "daemon_replacement" {
+                    value["waiting_for"] = admission["waiting_for"].clone();
+                    value["daemon_admission"] = admission;
+                }
+            }
+        }
         if let Some(promotion) = record
             .metadata
             .pointer("/cook_delivery/artifacts/promotion")

@@ -1029,6 +1029,7 @@ pub fn step_request(
         super::step_job::STEP_RECEIPT_CONSUMER.to_string()
     };
     let mut step = StepJobRequest::new(submission.key.clone(), program, args, cwd, env, consumer);
+    step.root_durable_run_id = Some(request.instance.clone());
     if let Some(run_id) = linked_run {
         step = step.with_linked_durable_run_id(run_id);
     }

@@ -1141,6 +1141,7 @@ fn report_unmaterialized_cook_admission(
         "execution_scheduling": record.metadata["execution_scheduling"],
     });
     if let Some(blocker) = blocker {
+        output["waiting_for"] = blocker["waiting_for"].clone();
         output["blocker"] = blocker;
     }
     let stdout = serde_json::to_string_pretty(&output).map_err(|error| {

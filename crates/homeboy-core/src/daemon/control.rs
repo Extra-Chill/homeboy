@@ -175,6 +175,18 @@ pub struct ArtifactFetchOutcome {
 /// replacement resumes that work from the same store (#15936).
 pub fn ensure_running(addr: &str) -> Result<DaemonStartResult> {
     let status = read_status()?;
+    // A drain fences roots, not access to the lease: owned continuations and
+    // read/cancel clients must still reach its per-request admission gate.
+    if status.running && status.reachable && status.draining() {
+        if let Some(state) = status.state {
+            return Ok(DaemonStartResult {
+                pid: state.pid,
+                address: state.address,
+                state_path: state.state_path,
+                lease_id: state.lease_id,
+            });
+        }
+    }
     match stale_daemon_action(&status) {
         Some(StaleDaemonAction::KeepRouting(daemon)) => return Ok(daemon),
         // A service manager starts the replacement itself; spawning one here

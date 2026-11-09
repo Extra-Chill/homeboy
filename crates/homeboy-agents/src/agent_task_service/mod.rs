@@ -97,10 +97,17 @@ pub fn scheduling_daemon_evidence(
 /// Start the local controller daemon that schedules queued work, as the
 /// submitter of daemon-scheduled work must under the on-demand model
 /// (#17506). `ensure_running` defers to a service manager and keeps routing to
-/// a busy older build. Returns the admission blocker only when the daemon
-/// cannot be started, naming the start error. Status readers never call this.
+/// a busy older build. Reports replacement waiting without rejecting the
+/// durable submission, or the start error when unavailable. Status is read-only.
 pub fn ensure_scheduling_daemon() -> Option<serde_json::Value> {
-    let error = start_scheduling_daemon().err()?;
+    let result = start_scheduling_daemon();
+    if let Ok(status) = homeboy_core::daemon::read_status() {
+        let report = status.admission_report();
+        if report["waiting_for"] == "daemon_replacement" {
+            return Some(report);
+        }
+    }
+    let error = result.err()?;
     Some(serde_json::json!({
         "daemon": scheduling_daemon_evidence(),
         "error": error.message_with_cause(),

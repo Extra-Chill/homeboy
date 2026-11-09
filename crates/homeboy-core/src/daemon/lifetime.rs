@@ -189,20 +189,22 @@ pub(super) fn owns_lifetime(
     service_manager.is_none() && !startup_token.is_empty()
 }
 
-/// The idle policy this `serve` enforces on itself, or `None` when it does not
-/// own its lifetime. Read before the lease is published, so an invalid idle
-/// window fails startup instead of leaving a lease behind.
+/// The lifetime policy this `serve` enforces. Resident and service-managed
+/// launches stop only for executable replacement, not ordinary idleness.
+/// Read before publishing the lease so an invalid idle window fails startup.
 pub(super) fn owned_idle_lifetime(
     service_manager: Option<super::DaemonServiceManager>,
-) -> Result<Option<IdleLifetime>> {
+) -> Result<IdleLifetime> {
     let startup_token = std::env::var(super::DAEMON_STARTUP_TOKEN_ENV).unwrap_or_default();
     if !owns_lifetime(&startup_token, service_manager) {
-        return Ok(None);
+        // Resident and service-managed daemons have no ordinary idle timeout,
+        // but must still yield a replaced executable after owned work ends.
+        return Ok(IdleLifetime::new(None, Instant::now()));
     }
-    Ok(Some(IdleLifetime::new(
+    Ok(IdleLifetime::new(
         configured_idle_timeout()?,
         Instant::now(),
-    )))
+    ))
 }
 
 /// One poll's view of this daemon's lifetime inputs.
@@ -213,9 +215,8 @@ pub(super) struct LifetimeObservation {
     pub(super) state_dir_removed: bool,
     /// The published lease is this process's own.
     pub(super) own_lease: bool,
-    /// Active jobs in this daemon's scope, a pending unmaterialized Cook
-    /// admission this daemon schedules (#17506), an unreadable count of either,
-    /// or a live launcher still returning the startup handoff.
+    /// Active jobs in this daemon's scope, pending admissions when this build
+    /// can schedule roots, unreadable counts, or a live startup launcher.
     pub(super) busy: bool,
     /// The executable this daemon started from was replaced (#15403).
     pub(super) binary_replaced: bool,
@@ -359,12 +360,30 @@ fn observe_lifetime(
             .and_then(|store| store.has_pending_unmaterialized_cook_admission())
             .unwrap_or(true)
     };
+    let binary_replaced = running_executable_replaced();
     LifetimeObservation {
         state_dir_removed: state_dir_removed(state_path),
         own_lease,
-        busy: active_jobs || pending_admission() || launcher.is_some_and(LauncherIdentity::is_live),
-        binary_replaced: running_executable_replaced(),
+        // Queued roots belong to the replacement, not the stale lease.
+        busy: active_jobs
+            || (!binary_replaced && pending_admission())
+            || launcher.is_some_and(LauncherIdentity::is_live),
+        binary_replaced,
     }
+}
+
+/// After releasing the old lease, arrange scheduling of queued roots on the
+/// installed build. A service manager owns its own replacement launch.
+pub(super) fn handoff_pending_admissions(
+    replacing: bool,
+    service_manager: Option<super::DaemonServiceManager>,
+    pending: bool,
+    start: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    if replacing && service_manager.is_none() && pending {
+        start()?;
+    }
+    Ok(())
 }
 
 /// An idle self-stop in progress: its reason, for termination evidence, and
@@ -539,6 +558,55 @@ mod tests {
             idle.decide(later + REPLACED_BINARY_STOP_AFTER * 10, &IDLE),
             LifetimeDecision::Continue
         );
+    }
+
+    #[test]
+    fn replaced_daemon_hands_pending_roots_to_installed_build_after_owned_jobs_finish() {
+        let start = Instant::now();
+        let mut idle = IdleLifetime::new(None, start);
+        let replaced = LifetimeObservation {
+            binary_replaced: true,
+            ..IDLE
+        };
+        assert_eq!(
+            idle.decide(
+                start,
+                &LifetimeObservation {
+                    busy: true,
+                    ..replaced
+                }
+            ),
+            LifetimeDecision::Continue
+        );
+        let decision = idle.decide(start + REPLACED_BINARY_STOP_AFTER, &replaced);
+        assert!(matches!(
+            decision,
+            LifetimeDecision::StopIfStillIdle(SelfStopReason::ReplacedBinary(_))
+        ));
+        crate::test_support::with_isolated_home(|_| {
+            let shutdown = AtomicBool::new(false);
+            let held = SelfStopGuards::default();
+            let LifetimeDecision::StopIfStillIdle(reason) = decision else {
+                unreachable!()
+            };
+            assert!(stop_if_still_idle(&shutdown, &held, reason, || replaced));
+            assert!(shutdown.load(Ordering::Acquire));
+            drop(held);
+            let mut starts = 0;
+            handoff_pending_admissions(true, None, true, || {
+                starts += 1;
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(starts, 1);
+            handoff_pending_admissions(
+                true,
+                Some(super::super::DaemonServiceManager::Systemd),
+                true,
+                || panic!("manager owns replacement"),
+            )
+            .unwrap();
+        });
     }
 
     #[test]
