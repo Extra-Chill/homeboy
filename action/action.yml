@@ -159,9 +159,9 @@ inputs:
     required: false
     default: ''
   pr-comment:
-    description: 'Post the default Homeboy PR comment. Set false when the workflow publishes a domain-specific report.'
+    description: 'PR comments: on-new-failures (default), always, or off. Legacy true/false map to always/off. Full reports always go to the step summary.'
     required: false
-    default: 'true'
+    default: 'on-new-failures'
 
   # ── PR policy gate ──
   pr-policy:
@@ -930,7 +930,7 @@ runs:
       run: bash ${{ github.action_path }}/scripts/pr/policy-gate.sh
 
     - name: Post PR comment
-      if: always() && github.event_name == 'pull_request' && steps.final-pr-state.outputs.active != 'false' && inputs.pr-comment != 'false'
+      if: always() && github.event_name == 'pull_request' && steps.final-pr-state.outputs.active != 'false'
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.app-token }}
@@ -940,6 +940,7 @@ runs:
         PR_NUMBER: ${{ github.event.pull_request.number }}
         HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         BINARY_SOURCE: ${{ steps.resolve-binary.outputs.binary-source || steps.provisioning.outputs.binary-source }}
+        PR_COMMENT_INPUT: ${{ inputs.pr-comment }}
         COMMENT_KEY_INPUT: ${{ inputs.comment-key }}
         COMMENT_SECTION_KEY_INPUT: ${{ inputs.comment-section-key }}
         COMMENT_SECTION_TITLE_INPUT: ${{ inputs.comment-section-title }}

@@ -181,6 +181,12 @@ outputs_have_actionable_content() {
 }
 
 comment_has_actionable_content() {
+  # Presentation is based on attributed items, not raw red statuses, scope,
+  # tooling fallback, or retained artifacts.
+  [ -s "${OUTPUT_DIR:-}/new-failures.md" ]
+}
+
+legacy_comment_has_actionable_content() {
   if commands_have_actionable_status; then
     return 0
   fi

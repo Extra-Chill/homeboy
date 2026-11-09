@@ -41,6 +41,7 @@ export GITHUB_WORKFLOW="CI" GITHUB_JOB="test"
 export GH_TOKEN="app-token" PR_NUMBER="123" HEAD_SHA="run-sha"
 export COMPONENT_NAME="homeboy" COMMANDS="review lint"
 export RESULTS='{"review lint":"fail"}'
+export PR_COMMENT_INPUT=always
 export SUPPORTS_GUARD=true
 export COMMENT_RESULT='{"data":{"action":"created","comment_id":123}}'
 

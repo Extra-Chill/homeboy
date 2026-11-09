@@ -31,6 +31,8 @@ build_section_body
 [[ "${SECTION_BODY}" == *':white_check_mark:'* && "${SECTION_BODY}" == *'no new findings'* && "${SECTION_BODY}" != *':x:'* ]]
 printf '{"summary":{"findings":1407}}' > "${OUTPUT_DIR}/review-lint.json"
 RESULTS="$(python3 "${ROOT}/scripts/core/apply-differential-gate.py" '{"review lint":"fail"}' "${OUTPUT_DIR}" "${TMP}/base")"
+export RESULTS
+python3 "${ROOT}/scripts/pr/comment/new-findings.py"
 comment_has_actionable_content
 build_section_body
 [[ "${SECTION_BODY}" == *':x:'* && "${SECTION_BODY}" == *'2 new finding(s)'* && "${SECTION_BODY}" != *'1407'* ]]
@@ -38,5 +40,6 @@ build_section_body
 # Missing/unmeasured evidence must not become a clean verdict.
 printf '{"commands":{},"schema":"homeboy/differential-comment/v1"}' > "${OUTPUT_DIR}/differential-comment.json"
 RESULTS='{"review lint":"inconclusive"}'
-comment_has_actionable_content
+python3 "${ROOT}/scripts/pr/comment/new-findings.py"
+if comment_has_actionable_content; then exit 1; fi
 printf 'PASS: matrix keys and differential comment verdicts\n'
