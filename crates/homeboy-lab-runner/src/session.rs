@@ -652,6 +652,10 @@ pub struct RunnerAdmissionSummary {
     /// Why Lab admission refuses this runner, from that same projection.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub reasons: Vec<String>,
+    /// Lab readiness state (`connected_ready`, `readiness_unobserved`, ...)
+    /// from that same projection. Present on `runner status` and `runner list`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub readiness_state: Option<String>,
     /// Runner-owned live count; absent when the job observation is unavailable.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub active_job_count: Option<usize>,
@@ -877,6 +881,7 @@ impl RunnerStatusReport {
             accepting_jobs,
             accepts_jobs: None,
             reasons: Vec::new(),
+            readiness_state: None,
             active_job_count: active_jobs_available.then_some(active_job_count),
             live_daemon_job_count: active_jobs_available.then_some(active_job_count),
             stale_job_count: self.stale_runner_job_count,

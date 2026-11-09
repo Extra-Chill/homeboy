@@ -131,40 +131,109 @@ pub fn runner_admission_snapshot_for_status(status: RunnerStatusReport) -> Runne
     RunnerAdmissionSnapshot::from_status(status)
 }
 
-/// The `runner status` admission projection. `accepts_jobs` and `reasons` are
-/// computed by the same `RunnerAvailability` projection Lab admission uses, so
-/// status cannot report a runner as accepting while admission refuses it.
+/// The `runner status` admission projection. `accepts_jobs`, `reasons` and
+/// `readiness_state` come from [`runner_readiness_for_status`], the same
+/// projection Lab admission uses, so status cannot report a runner as
+/// accepting while admission refuses it.
 pub fn runner_status_admission_snapshot(runner_id: &str) -> Result<RunnerAdmissionSnapshot> {
-    let runner = load(runner_id)?;
-    let snapshot = runner_admission_snapshot(runner_id)?;
-    let capabilities_ready = homeboy_runtime_ready(runner_id, &snapshot.status);
-    Ok(runner_status_admission_snapshot_for_status(
-        snapshot,
-        runner.settings.concurrency_limit,
-        capabilities_ready,
-        lab::offload::metadata::require_exact_runner_version(&runner.settings),
+    Ok(runner_readiness_admission_snapshot(
+        runner_admission_snapshot(runner_id)?,
     ))
 }
 
-/// Attach the Lab admission availability verdict to an observed snapshot.
+/// Attach the shared readiness verdict to an observed snapshot, reading the
+/// runner's configured capacity and version policy. `runner status` and
+/// `runner list` both project through here.
+pub fn runner_readiness_admission_snapshot(
+    snapshot: RunnerAdmissionSnapshot,
+) -> RunnerAdmissionSnapshot {
+    let runner = load(&snapshot.status.runner_id).ok();
+    let capabilities_ready = homeboy_runtime_ready(&snapshot.status.runner_id, &snapshot.status);
+    let capacity = runner
+        .as_ref()
+        .and_then(|runner| runner.settings.concurrency_limit);
+    let exact_version = runner.as_ref().is_some_and(|runner| {
+        lab::offload::metadata::require_exact_runner_version(&runner.settings)
+    });
+    runner_status_admission_snapshot_for_status(
+        snapshot,
+        capacity,
+        capabilities_ready,
+        exact_version,
+    )
+}
+
+/// Attach the Lab admission readiness verdict to an observed snapshot.
 pub fn runner_status_admission_snapshot_for_status(
     mut snapshot: RunnerAdmissionSnapshot,
     capacity: Option<usize>,
     capabilities_ready: bool,
     exact_version: bool,
 ) -> RunnerAdmissionSnapshot {
-    let availability = lab_runner_admission_candidate(
-        &snapshot.status.runner_id,
-        capacity,
+    let readiness = runner_readiness_for_status(
         &snapshot.status,
+        capacity,
         capabilities_ready,
         exact_version,
-    )
-    .availability();
-    snapshot.summary.accepting_jobs &= availability.accepts_jobs;
-    snapshot.summary.accepts_jobs = Some(availability.accepts_jobs);
-    snapshot.summary.reasons = availability.reasons;
+    );
+    let accepts_jobs = !readiness.available_runner_ids.is_empty();
+    snapshot.summary.accepting_jobs &= accepts_jobs;
+    snapshot.summary.accepts_jobs = Some(accepts_jobs);
+    snapshot.summary.reasons = readiness.reasons;
+    snapshot.summary.readiness_state = Some(readiness.state.as_str().to_string());
     snapshot
+}
+
+/// The one runner readiness function. Lab admission, `runner status` and
+/// `runner list`'s `admission=` column all derive from it.
+pub fn runner_readiness_for_status(
+    status: &RunnerStatusReport,
+    capacity: Option<usize>,
+    capabilities_ready: bool,
+    exact_version: bool,
+) -> LabRunnerReadiness {
+    lab_runner_readiness_from_candidates(
+        Some(&status.runner_id),
+        vec![lab_runner_admission_candidate(
+            &status.runner_id,
+            capacity,
+            status,
+            capabilities_ready,
+            exact_version,
+        )],
+    )
+}
+
+/// The `runner list` `admission=` label for a snapshot that carries the shared
+/// readiness verdict.
+pub fn runner_admission_label(snapshot: &RunnerAdmissionSnapshot) -> String {
+    let summary = &snapshot.summary;
+    // A recent failed job observation keeps an accepting runner degraded; a
+    // current one explains why it is not accepting.
+    let observing_now = snapshot
+        .status
+        .daemon_freshness
+        .as_ref()
+        .is_some_and(|freshness| freshness.is_observation_unavailable());
+    if summary
+        .pressure
+        .as_ref()
+        .is_some_and(|pressure| pressure.admission_reason.is_some())
+    {
+        return "pressure".to_string();
+    }
+    match summary.degraded.as_deref() {
+        Some(reason) if summary.accepting_jobs || observing_now => format!("degraded: {reason}"),
+        _ if summary.accepting_jobs => "accepting".to_string(),
+        _ if summary.readiness_state.as_deref()
+            == Some(LabRunnerReadinessState::ReadinessUnobserved.as_str()) =>
+        {
+            LabRunnerReadinessState::ReadinessUnobserved
+                .as_str()
+                .to_string()
+        }
+        _ => "blocked".to_string(),
+    }
 }
 
 pub mod auto_placement_reconnect;
@@ -907,7 +976,20 @@ pub enum LabRunnerReadinessState {
     Stale,
     CapacityBlocked,
     Disconnected,
+    /// A connected runner whose readiness evidence is missing, stale, or
+    /// failed transiently (`daemon_freshness_unavailable`, a timed-out status
+    /// probe, no observation yet). Admission waits and re-observes.
+    ReadinessUnobserved,
 }
+
+/// Reasons that name missing readiness evidence on a connected runner rather
+/// than a proven refusal. A runner refused only for these is
+/// [`LabRunnerReadinessState::ReadinessUnobserved`].
+const TRANSIENT_READINESS_REASONS: &[&str] = &[
+    "daemon_freshness_unavailable",
+    "daemon_unverified",
+    "active_jobs_unavailable",
+];
 
 // A detached admission retry must not turn an operator command into an
 // unbounded sweep across every configured remote runner.
@@ -922,6 +1004,7 @@ impl LabRunnerReadinessState {
             Self::Stale => "stale",
             Self::CapacityBlocked => "capacity_blocked",
             Self::Disconnected => "disconnected",
+            Self::ReadinessUnobserved => "readiness_unobserved",
         }
     }
 }
@@ -993,14 +1076,20 @@ pub fn refresh_lab_runner_readiness_for_admission() -> Result<LabRunnerReadiness
 /// Read one explicitly selected runner for immediate workload admission. Unlike
 /// the bounded inventory refresh, this never substitutes another runner.
 pub fn lab_runner_readiness_for_admission(runner_id: &str) -> Result<LabRunnerReadiness> {
-    let candidate = retry_admission_candidate(
+    match retry_admission_candidate(
         runner_id,
         std::time::Instant::now() + std::time::Duration::from_secs(20),
-    )?;
-    Ok(lab_runner_readiness_from_candidates(
-        Some(runner_id),
-        vec![candidate],
-    ))
+    ) {
+        Ok(candidate) => Ok(lab_runner_readiness_from_candidates(
+            Some(runner_id),
+            vec![candidate],
+        )),
+        // A timed-out status probe is unobserved readiness, not a refusal.
+        Err(error) if error.code == homeboy_core::error::ErrorCode::RemoteCommandTimeout => {
+            lab_runner_readiness_from_refresh_observations(Some(runner_id), vec![Err(error)])
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn retry_admission_candidate(
@@ -1039,9 +1128,15 @@ fn retry_admission_candidate(
             candidate
         })
         .map_err(|error| {
-            let mut blocker = Error::internal_unexpected(format!(
+            let message = format!(
                 "blocked_runner_unavailable: {error}; run homeboy runner connect {runner_id}"
-            ));
+            );
+            let mut blocker = if error.code == homeboy_core::error::ErrorCode::RemoteCommandTimeout
+            {
+                Error::new(error.code, message, serde_json::Value::Null)
+            } else {
+                Error::internal_unexpected(message)
+            };
             blocker.details = serde_json::json!({
                 "classification": "blocked_runner_unavailable",
                 "runner": runner_id,
@@ -1159,6 +1254,20 @@ fn lab_runner_readiness_from_refresh_observations(
         failure.get("code").and_then(serde_json::Value::as_str)
             == Some(homeboy_core::error::ErrorCode::RemoteCommandTimeout.as_str())
     });
+    if timeout {
+        // Every status probe timed out: readiness is unobserved, so admission
+        // waits and re-observes instead of refusing on missing evidence.
+        return Ok(LabRunnerReadiness {
+            state: LabRunnerReadinessState::ReadinessUnobserved,
+            selected_runner_id: preferred.map(str::to_string),
+            available_runner_ids: Vec::new(),
+            reasons: vec!["status_probe_timeout".to_string()],
+            remediation_commands: vec![preferred.map_or_else(
+                || "homeboy runner status --full".to_string(),
+                |runner_id| format!("homeboy runner status {runner_id}"),
+            )],
+        });
+    }
     Err(homeboy_core::error::Error::new(
         if timeout {
             homeboy_core::error::ErrorCode::RemoteCommandTimeout
@@ -1197,6 +1306,13 @@ fn lab_runner_readiness_from_candidates(
         LabRunnerReadinessState::Absent
     } else if !available_runner_ids.is_empty() {
         LabRunnerReadinessState::ConnectedReady
+    } else if candidates.iter().any(|candidate| candidate.connected)
+        && candidates
+            .iter()
+            .filter(|candidate| candidate.connected)
+            .all(DefaultLabRunnerCandidate::readiness_unobserved)
+    {
+        LabRunnerReadinessState::ReadinessUnobserved
     } else if candidates.iter().any(|candidate| {
         candidate.stale_daemon || (!candidate.admission_fresh && !candidate.unverified_daemon)
     }) {
@@ -1244,6 +1360,11 @@ fn lab_runner_readiness_from_candidates(
         LabRunnerReadinessState::Disconnected => candidates
             .iter()
             .map(|candidate| format!("homeboy runner connect {}", candidate.id))
+            .collect(),
+        LabRunnerReadinessState::ReadinessUnobserved => candidates
+            .iter()
+            .filter(|candidate| candidate.connected)
+            .map(|candidate| format!("homeboy runner status {}", candidate.id))
             .collect(),
     };
     LabRunnerReadiness {
@@ -1333,6 +1454,21 @@ impl DefaultLabRunnerCandidate {
             availability.reasons.push("daemon_unverified".to_string());
         }
         availability
+    }
+
+    /// Connected, with no proven refusal: only readiness evidence is
+    /// missing. A known repair (`admission_remediation`) is a proven state.
+    fn readiness_unobserved(&self) -> bool {
+        let availability = self.availability();
+        self.connected
+            && !self.stale_daemon
+            && self.admission_remediation.is_none()
+            && !availability.accepts_jobs
+            && !availability.reasons.is_empty()
+            && availability
+                .reasons
+                .iter()
+                .all(|reason| TRANSIENT_READINESS_REASONS.contains(&reason.as_str()))
     }
 
     fn readiness(&self) -> DefaultLabRunnerReadiness {
@@ -2245,6 +2381,42 @@ mod tests {
     }
 
     #[test]
+    fn readiness_list_status_and_admission_agree_for_the_same_input() {
+        let ready = skewed_runner_status(homeboy_product_identity::product_version().to_string());
+        let mut unobserved = ready.clone();
+        unobserved.daemon_freshness = None;
+
+        for (status, state, label) in [
+            (ready, LabRunnerReadinessState::ConnectedReady, "accepting"),
+            (
+                unobserved,
+                LabRunnerReadinessState::ReadinessUnobserved,
+                "readiness_unobserved",
+            ),
+        ] {
+            let admission = runner_readiness_for_status(&status, Some(2), true, false);
+            let snapshot = runner_status_admission_snapshot_for_status(
+                runner_admission_snapshot_for_status(status),
+                Some(2),
+                true,
+                false,
+            );
+
+            assert_eq!(admission.state, state);
+            assert_eq!(
+                snapshot.summary.readiness_state.as_deref(),
+                Some(state.as_str())
+            );
+            assert_eq!(
+                snapshot.summary.accepts_jobs,
+                Some(!admission.available_runner_ids.is_empty())
+            );
+            assert_eq!(snapshot.summary.reasons, admission.reasons);
+            assert_eq!(runner_admission_label(&snapshot), label);
+        }
+    }
+
+    #[test]
     fn placement_accepts_recorded_daemon_identity_drift() {
         let mut status =
             skewed_runner_status(homeboy_product_identity::product_version().to_string());
@@ -2311,24 +2483,37 @@ mod tests {
     }
 
     #[test]
-    fn admission_refresh_reports_timeout_when_every_observation_times_out() {
-        let error = lab_runner_readiness_from_refresh_observations(
-            None,
+    fn admission_refresh_reports_unobserved_readiness_when_every_observation_times_out() {
+        let readiness = lab_runner_readiness_from_refresh_observations(
+            Some("lab-a"),
             vec![Err(homeboy_core::error::Error::new(
                 homeboy_core::error::ErrorCode::RemoteCommandTimeout,
                 "lab-a timed out",
                 serde_json::Value::Null,
             ))],
         )
-        .expect_err("no authoritative observation completed");
+        .expect("a timed-out probe is unobserved readiness");
 
         assert_eq!(
-            error.code,
-            homeboy_core::error::ErrorCode::RemoteCommandTimeout
+            readiness.state,
+            LabRunnerReadinessState::ReadinessUnobserved
         );
+        assert_eq!(readiness.selected_runner_id.as_deref(), Some("lab-a"));
+        assert_eq!(readiness.reasons, ["status_probe_timeout"]);
+        assert!(readiness.available_runner_ids.is_empty());
+
+        let error = lab_runner_readiness_from_refresh_observations(
+            None,
+            vec![Err(homeboy_core::error::Error::new(
+                homeboy_core::error::ErrorCode::RunnerLabTransportFailure,
+                "lab-a unreachable",
+                serde_json::Value::Null,
+            ))],
+        )
+        .expect_err("a transport failure is not a timeout");
         assert_eq!(
             error.details["runner_failures"][0]["code"],
-            "remote.command_timeout"
+            homeboy_core::error::ErrorCode::RunnerLabTransportFailure.as_str()
         );
     }
 
@@ -2352,7 +2537,7 @@ mod tests {
         let mut blocked = default_lab_candidate("lab", true);
         blocked.active_jobs_available = false;
         let blocked = lab_runner_readiness_from_candidates(None, vec![blocked]);
-        assert_eq!(blocked.state, LabRunnerReadinessState::ConnectedIneligible);
+        assert_eq!(blocked.state, LabRunnerReadinessState::ReadinessUnobserved);
         assert!(blocked
             .reasons
             .contains(&"active_jobs_unavailable".to_string()));
@@ -2381,10 +2566,22 @@ mod tests {
 
         let mut stale_candidate = default_lab_candidate("stale", true);
         stale_candidate.admission_fresh = false;
+        stale_candidate.stale_daemon = true;
         let stale = lab_runner_readiness_from_refresh_observations(None, vec![Ok(stale_candidate)])
             .expect("stale bounded evidence remains classified");
         assert_eq!(stale.state, LabRunnerReadinessState::Stale);
         assert!(stale.selected_runner_id.is_none());
+
+        let mut unobserved_candidate = default_lab_candidate("unobserved", true);
+        unobserved_candidate.admission_fresh = false;
+        let unobserved =
+            lab_runner_readiness_from_refresh_observations(None, vec![Ok(unobserved_candidate)])
+                .expect("unobserved freshness remains classified");
+        assert_eq!(
+            unobserved.state,
+            LabRunnerReadinessState::ReadinessUnobserved
+        );
+        assert_eq!(unobserved.reasons, ["daemon_freshness_unavailable"]);
 
         let absent = lab_runner_readiness_from_refresh_observations(None, Vec::new())
             .expect("an empty bounded inventory is an absence observation");
@@ -2398,7 +2595,7 @@ mod tests {
                 .expect("unavailable bounded evidence remains classified");
         assert_eq!(
             unavailable.state,
-            LabRunnerReadinessState::ConnectedIneligible
+            LabRunnerReadinessState::ReadinessUnobserved
         );
         assert!(unavailable.selected_runner_id.is_none());
     }
@@ -2498,7 +2695,7 @@ mod tests {
         let lease_missing = lab_runner_readiness_from_candidates(None, vec![lease_missing]);
         assert_eq!(
             lease_missing.state,
-            LabRunnerReadinessState::ConnectedIneligible
+            LabRunnerReadinessState::ReadinessUnobserved
         );
         assert!(lease_missing.available_runner_ids.is_empty());
         assert!(lease_missing
@@ -2506,7 +2703,7 @@ mod tests {
             .contains(&"daemon_freshness_unavailable".to_string()));
         assert_eq!(
             lease_missing.remediation_commands,
-            ["homeboy runner connect lease-missing"]
+            ["homeboy runner status lease-missing"]
         );
 
         let mut full = default_lab_candidate("full", true);

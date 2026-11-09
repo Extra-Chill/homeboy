@@ -360,11 +360,10 @@ pub fn resolve_parsed_command_preflight(
                 .unwrap_or_default()
         };
         remediation.extend(runner_reason);
-        return Err(crate::Error::validation_invalid_argument(
-            "selected_runner_id",
-            "selected runner requires admitted connected readiness evidence",
+        return Err(selected_runner_readiness_error(
             policy.selected_runner_id.clone(),
-            Some(remediation),
+            policy.lab_readiness.as_ref(),
+            remediation,
         ));
     }
     if policy.auto_local_capacity_fallback
@@ -575,6 +574,7 @@ fn lab_readiness_fallback_reason(readiness: &LabReadinessSnapshot) -> Option<Str
         "stale" => "the configured Lab runner's admission is stale",
         "connected_ineligible" => "the connected Lab runner is not eligible for this workload",
         "capacity_blocked" => "the configured Lab runner is at capacity",
+        READINESS_UNOBSERVED => "the connected Lab runner's readiness is not observed yet",
         other => {
             return Some(format!(
                 "no eligible Lab runner is currently ready ({other})"
@@ -582,6 +582,66 @@ fn lab_readiness_fallback_reason(readiness: &LabReadinessSnapshot) -> Option<Str
         }
     };
     Some(described.to_string())
+}
+
+/// Readiness state of a connected runner whose readiness evidence is missing,
+/// stale, or failed transiently. Admission waits and re-observes.
+pub const READINESS_UNOBSERVED: &str = "readiness_unobserved";
+
+/// Whether a refusal diagnostic (`{details|data: {...}}`) names unobserved
+/// readiness, so queued admission requeues instead of failing.
+pub fn readiness_unobserved_refusal(diagnostic: &serde_json::Value) -> bool {
+    [&diagnostic["details"], &diagnostic["data"]]
+        .into_iter()
+        .any(|details| details["admission_wait"] == READINESS_UNOBSERVED)
+}
+
+/// Structured readiness evidence attached to every Lab readiness refusal so
+/// the recorded failure keeps the state and reasons, not only the headline.
+fn attach_readiness_evidence(
+    mut error: crate::Error,
+    readiness: Option<&LabReadinessSnapshot>,
+) -> crate::Error {
+    let Some(readiness) = readiness else {
+        return error;
+    };
+    if !error.details.is_object() {
+        error.details = serde_json::json!({});
+    }
+    error.details["readiness_state"] = serde_json::json!(readiness.state);
+    error.details["readiness_reasons"] = serde_json::json!(readiness.reasons);
+    error.details["lab_readiness"] = serde_json::json!(readiness);
+    if readiness.state == READINESS_UNOBSERVED {
+        error.details["admission_wait"] = serde_json::json!(READINESS_UNOBSERVED);
+        error = error.with_retryable(true);
+    }
+    error
+}
+
+/// The refusal for an explicitly selected runner without admitted readiness.
+/// It names the readiness state and reasons.
+fn selected_runner_readiness_error(
+    runner_id: Option<String>,
+    readiness: Option<&LabReadinessSnapshot>,
+    remediation: Vec<String>,
+) -> crate::Error {
+    let mut problem = "selected runner requires admitted connected readiness evidence".to_string();
+    if let Some(readiness) = readiness {
+        problem.push_str(&format!(" (readiness: {}", readiness.state));
+        if !readiness.reasons.is_empty() {
+            problem.push_str(&format!("; reasons: {}", readiness.reasons.join(", ")));
+        }
+        problem.push(')');
+    }
+    attach_readiness_evidence(
+        crate::Error::validation_invalid_argument(
+            "selected_runner_id",
+            problem,
+            runner_id,
+            Some(remediation),
+        ),
+        readiness,
+    )
 }
 
 /// The typed refusal for a Lab-preferring `--placement auto` workload whose
@@ -599,7 +659,7 @@ fn lab_unavailable_error(readiness: &LabReadinessSnapshot) -> crate::Error {
         .first()
         .cloned()
         .unwrap_or_else(|| "homeboy runner connect <runner-id>".to_string());
-    crate::Error::new(
+    let error = crate::Error::new(
         crate::ErrorCode::RunnerLabUnavailable,
         format!(
             "lab_unavailable: Lab runner readiness is {} ({reason}); `--placement auto` does not run this workload on the controller. Next: `{next_action}`. Controller execution requires an explicit `--placement local`.",
@@ -615,7 +675,8 @@ fn lab_unavailable_error(readiness: &LabReadinessSnapshot) -> crate::Error {
             "run_created": false,
         }),
     )
-    .with_retryable(true)
+    .with_retryable(true);
+    attach_readiness_evidence(error, Some(readiness))
 }
 
 fn lab_route_inadmissible_reason(
@@ -1447,6 +1508,45 @@ mod tests {
         let error = resolve_parsed_command_preflight(vec!["fixture".into()], input, policy)
             .expect_err("stale runner evidence must fail closed");
         assert_eq!(error.details["field"], "selected_runner_id");
+    }
+
+    #[test]
+    fn unobserved_readiness_refusal_names_state_and_reasons_and_asks_to_wait() {
+        let mut policy = explicit_runner_policy(READINESS_UNOBSERVED, Vec::new(), true);
+        policy.lab_readiness.as_mut().unwrap().reasons =
+            vec!["daemon_freshness_unavailable".into()];
+
+        let error = resolve_parsed_command_preflight(Vec::new(), explicit_runner_input(), policy)
+            .expect_err("unobserved readiness is not admitted");
+
+        assert!(
+            error.message.ends_with(
+                "(readiness: readiness_unobserved; reasons: daemon_freshness_unavailable)"
+            ),
+            "{}",
+            error.message
+        );
+        assert_eq!(error.details["readiness_state"], READINESS_UNOBSERVED);
+        assert_eq!(
+            error.details["lab_readiness"]["reasons"],
+            serde_json::json!(["daemon_freshness_unavailable"])
+        );
+        assert_eq!(error.retryable, Some(true));
+        assert!(readiness_unobserved_refusal(
+            &serde_json::json!({"details": error.details})
+        ));
+
+        // A proven stale runner names its state but does not wait.
+        let stale = resolve_parsed_command_preflight(
+            Vec::new(),
+            explicit_runner_input(),
+            explicit_runner_policy("stale", Vec::new(), false),
+        )
+        .unwrap_err();
+        assert!(stale.message.contains("(readiness: stale)"));
+        assert!(!readiness_unobserved_refusal(
+            &serde_json::json!({"details": stale.details})
+        ));
     }
 
     #[test]

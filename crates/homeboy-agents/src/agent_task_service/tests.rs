@@ -724,6 +724,159 @@ fn public_admission_pressure_refusal_keeps_cook_pending_resource_admission() {
     });
 }
 
+/// The core preflight refusal for a pinned, connected runner whose daemon
+/// freshness probe has not produced readiness evidence.
+fn readiness_unobserved_refusal() -> homeboy_core::Error {
+    use homeboy_core::parsed_command_preflight::*;
+    resolve_parsed_command_preflight(
+        Vec::new(),
+        ParsedCommandPreflightInput {
+            identity: ParsedCommandIdentity {
+                family: "agent-task".into(),
+                operation: vec!["cook".into()],
+            },
+            resource_admission: ResourceAdmissionRequirement::Exempt,
+            controller_execution: ControllerExecution::SplitPlacementCoordinator,
+            deferred_workload: DeferredWorkloadPolicy::Eligible,
+            placement: PlacementIntent::Lab,
+            runner: RunnerIntent::Explicit("homeboy-lab".into()),
+            runner_normalization: RunnerNormalization::None,
+            lab_route: LabRouteIntent::Supported { automatic: true },
+            provenance: ProvenanceRequirement::None,
+        },
+        ParsedCommandPolicySnapshot {
+            resource_admission_evidence: ResourceAdmissionEvidence::Unavailable,
+            resource_policy: None,
+            lab_readiness: Some(LabReadinessSnapshot {
+                state: READINESS_UNOBSERVED.into(),
+                selected_runner_id: Some("homeboy-lab".into()),
+                available_runner_ids: Vec::new(),
+                reasons: vec!["daemon_freshness_unavailable".into()],
+                remediation_commands: vec!["homeboy runner status homeboy-lab".into()],
+                repair_admitted_runner_ids: Vec::new(),
+            }),
+            selected_runner_id: Some("homeboy-lab".into()),
+            generic_route: GenericRoutePolicySnapshot {
+                command_supports_lab: true,
+                automatic_authorized: true,
+                selected_runner_id: Some("homeboy-lab".into()),
+            },
+            deferred_pressure_refusal: false,
+            runner_admitted: true,
+            auto_local_capacity_fallback: false,
+        },
+    )
+    .expect_err("unobserved readiness is not admitted")
+}
+
+/// Drive one queued Cook admission tick refused for unobserved readiness.
+fn unobserved_readiness_admission_tick(
+    store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    subject: &str,
+) -> (Value, ExecutionStepIntent) {
+    struct UnobservedTransport;
+    impl ExecutionStepTransport for UnobservedTransport {
+        fn admission(&self, _: Vec<String>, _: Option<String>) -> homeboy_core::Result<i32> {
+            Err(readiness_unobserved_refusal())
+        }
+    }
+    let intent = current_intent(store, subject);
+    let error = execute_counted(
+        &intent.intent_id,
+        &Arc::new(AtomicUsize::new(0)),
+        &UnobservedTransport,
+    )
+    .unwrap_err();
+    let mut delivery = terminal_delivery(&intent);
+    delivery.outcome = homeboy_core::daemon::step_job::StepTerminalOutcome::Failed;
+    delivery.error = Some(serde_json::json!({
+        "message": error.message,
+        "details": error.details,
+        "retryable": error.retryable,
+    }));
+    (
+        consume_execution_terminal_in_store(store, &delivery).unwrap(),
+        intent,
+    )
+}
+
+fn record_queued_admission(
+    store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    root: &Path,
+    subject: &str,
+) {
+    agent_task_lifecycle::record_unmaterialized_cook_admission_in_store(
+        store,
+        subject,
+        admission_binding(root, subject, None),
+        "queued",
+        "test",
+    )
+    .unwrap();
+}
+
+#[test]
+fn unobserved_readiness_requeues_queued_cook_admission_instead_of_failing() {
+    with_isolated_home(|home| {
+        let store = test_lifecycle_store();
+        let subject = "readiness-wait";
+        record_queued_admission(&store, home.path(), subject);
+
+        let (receipt, intent) = unobserved_readiness_admission_tick(&store, subject);
+
+        assert_eq!(receipt["disposition"], "runner_wait");
+        let record = store.read_record(subject).unwrap();
+        assert_eq!(record.state(), AgentTaskRunState::Queued);
+        let scheduling = &record.metadata["execution_scheduling"];
+        assert_eq!(scheduling["recovery_failures"], 0);
+        assert_eq!(
+            scheduling["admission_wait"]["status"],
+            "pending_resource_admission"
+        );
+        assert_eq!(
+            scheduling["admission_wait"]["reason"],
+            "readiness_unobserved"
+        );
+        assert_eq!(scheduling["admission_wait"]["consecutive_observations"], 1);
+        assert_eq!(current_intent(&store, subject).epoch, intent.epoch + 1);
+    });
+}
+
+#[test]
+fn unobserved_readiness_fails_after_the_bound_with_readiness_evidence() {
+    with_isolated_home(|home| {
+        let store = test_lifecycle_store();
+        let subject = "readiness-exhausted";
+        record_queued_admission(&store, home.path(), subject);
+
+        let mut receipt = Value::Null;
+        for _ in 0..20 {
+            receipt = unobserved_readiness_admission_tick(&store, subject).0;
+            if receipt["disposition"] != "runner_wait" {
+                break;
+            }
+        }
+
+        assert_eq!(receipt["disposition"], "exhausted");
+        let record = store.read_record(subject).unwrap();
+        assert_eq!(record.state(), AgentTaskRunState::Failed);
+        assert_eq!(
+            record.metadata["execution_scheduling"]["readiness_unobserved_observations"],
+            20
+        );
+        let failure = &record.metadata["execution_step_failure"];
+        assert!(failure["message"]
+            .as_str()
+            .unwrap()
+            .contains("readiness: readiness_unobserved; reasons: daemon_freshness_unavailable"));
+        assert_eq!(failure["readiness"]["state"], "readiness_unobserved");
+        assert_eq!(
+            failure["readiness"]["reasons"],
+            serde_json::json!(["daemon_freshness_unavailable"])
+        );
+    });
+}
+
 #[test]
 fn capacity_blocked_retry_admission_queues_and_substrate_refusal_fails() {
     with_isolated_home(|_| {
