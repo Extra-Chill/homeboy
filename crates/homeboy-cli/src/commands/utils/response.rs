@@ -487,6 +487,7 @@ fn exit_code_for_error(code: ErrorCode) -> i32 {
         | ErrorCode::RigResourceConflict
         | ErrorCode::RunnerLabTransportFailure
         | ErrorCode::RunnerControllerDisconnected
+        | ErrorCode::RunnerLabUnavailable
         | ErrorCode::RuntimePromotionContended
         | ErrorCode::RuntimePromotionWaitTimeout
         | ErrorCode::DependencyStepFailed

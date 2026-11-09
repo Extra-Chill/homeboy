@@ -3,7 +3,6 @@ use homeboy::agents::agent_tasks::lifecycle as agent_task_lifecycle;
 use homeboy::cli_surface::{Cli, Commands};
 use homeboy::core::command_execution_plan::CommandSourceMaterialization;
 use homeboy::core::component::{self, TargetSpec};
-use homeboy::core::error::{ActionSafety, ExecutableAction};
 use homeboy::core::git;
 use homeboy::core::lab_routing::{
     self, ExecutionPlacementOutcomeTarget, LabDispatchObserver, LabRouteOutcome, LabRoutingRequest,
@@ -215,14 +214,6 @@ pub(crate) fn route_after_parse_with_provenance(
         })
         .flatten();
     if cook_requires_unmaterialized_admission(cli, &preflight) {
-        if let Some(error) =
-            auto_cook_unavailable_lab_replay_error(cli, &preflight, &normalized_args)
-        {
-            // Auto + stale/disconnected Lab must not persist a 20-retry
-            // `pending_resource_admission` park. Reject with the same local
-            // cook replay `runner status` already computed (#14715).
-            return Err(error);
-        }
         // Persist before provider execution. The scoped replay selector owns
         // ready-runner admission after this durable boundary.
         return admit_unmaterialized_cook(
@@ -835,25 +826,14 @@ pub(crate) fn cook_requires_unmaterialized_admission_for_placement(
             || matches!(preflight.input.runner, homeboy::core::parsed_command_preflight::RunnerIntent::Explicit(_))))
         || (matches!(placement, homeboy::cli_surface::Placement::Auto)
             && preflight.selected_runner_id.is_none()
-            && (auto_cook_unavailable_lab_state(preflight).is_some()
-                || matches!(
-                    preflight.resource_admission,
-                    homeboy::core::parsed_command_preflight::ResourceAdmissionDecision::Rejected { .. }
-                ))
+            && matches!(
+                preflight.resource_admission,
+                homeboy::core::parsed_command_preflight::ResourceAdmissionDecision::Rejected { .. }
+            )
             && !matches!(
                 preflight.fallback,
                 homeboy::core::parsed_command_preflight::FallbackDirective::LocalCapacity
             ))
-}
-
-pub(crate) fn auto_cook_unavailable_lab_state(
-    preflight: &homeboy::core::parsed_command_preflight::ParsedCommandPreflightResult,
-) -> Option<&str> {
-    let state = preflight
-        .lab_readiness
-        .as_ref()
-        .map(|readiness| readiness.state.as_str())?;
-    matches!(state, "stale" | "disconnected").then_some(state)
 }
 
 /// Admission facts shared by Cook routing and its read-only projection.
@@ -879,16 +859,8 @@ impl CookAdmissionDecision {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CookAdmissionPhase {
-    Submission,
-    Execution,
-}
-
 pub(crate) fn cook_admission_decision(
-    phase: CookAdmissionPhase,
     preflight: &homeboy::core::parsed_command_preflight::ParsedCommandPreflightResult,
-    local_replay: impl FnOnce() -> String,
 ) -> CookAdmissionDecision {
     use homeboy::core::parsed_command_preflight::{
         ResourceAdmissionDecision, ResourceAdmissionEvidence,
@@ -899,12 +871,9 @@ pub(crate) fn cook_admission_decision(
         return CookAdmissionDecision::Admitted;
     }
     if preflight.placement.selected == EffectiveExecutionPlacement::Local {
-        if let (
-            CookAdmissionPhase::Execution,
-            ResourceAdmissionDecision::Rejected {
-                label, evidence, ..
-            },
-        ) = (phase, &preflight.resource_admission)
+        if let ResourceAdmissionDecision::Rejected {
+            label, evidence, ..
+        } = &preflight.resource_admission
         {
             let state = if *evidence == ResourceAdmissionEvidence::Unavailable {
                 "unavailable"
@@ -918,14 +887,6 @@ pub(crate) fn cook_admission_decision(
         }
         let unmaterialized =
             cook_requires_unmaterialized_admission_for_placement(requested, preflight);
-        if unmaterialized && requested == Placement::Auto {
-            if let Some(state) = auto_cook_unavailable_lab_state(preflight) {
-                return CookAdmissionDecision::Blocked {
-                    reason: cook_unavailable_lab_reason(preflight, state),
-                    next_action: Some(local_replay()),
-                };
-            }
-        }
         return if requested == Placement::LabOrLocal || !unmaterialized {
             CookAdmissionDecision::Admitted
         } else {
@@ -2678,81 +2639,6 @@ fn unmaterialized_admission_state(
         Some("stale") => ("blocked_runner_stale", reported(unavailable())),
         _ => ("blocked_runner_unavailable", reported(unavailable())),
     }
-}
-
-fn cook_unavailable_lab_reason(
-    preflight: &homeboy::core::parsed_command_preflight::ParsedCommandPreflightResult,
-    state: &str,
-) -> String {
-    preflight
-        .lab_readiness
-        .as_ref()
-        .and_then(|r| r.reasons.first())
-        .cloned()
-        .unwrap_or_else(|| format!("Lab runner readiness is {state}"))
-}
-
-fn auto_cook_unavailable_lab_replay_error(
-    cli: &Cli,
-    preflight: &homeboy::core::parsed_command_preflight::ParsedCommandPreflightResult,
-    normalized_args: &[String],
-) -> Option<Error> {
-    if !matches!(cli.placement, homeboy::cli_surface::Placement::Auto) {
-        return None;
-    }
-    let state = auto_cook_unavailable_lab_state(preflight).unwrap_or("absent");
-    if state == "absent" {
-        return None;
-    }
-    let local_args = cook_placement_replay_args(normalized_args, "local");
-    let lab_or_local_args = cook_placement_replay_args(normalized_args, "lab-or-local");
-    let local_command = homeboy::core::engine::shell::quote_args(&local_args);
-    let lab_or_local_command = homeboy::core::engine::shell::quote_args(&lab_or_local_args);
-    let CookAdmissionDecision::Blocked { reason, .. } =
-        cook_admission_decision(CookAdmissionPhase::Submission, preflight, || {
-            local_command.clone()
-        })
-    else {
-        return None;
-    };
-    let mut error = Error::validation_invalid_argument(
-        "placement",
-        format!(
-            "Auto Cook cannot use Lab ({reason}); not parking a 20-retry admission. Replay locally with `--placement local`, or authorize fallback with `--placement lab-or-local`."
-        ),
-        Some("auto".to_string()),
-        Some(vec![
-            local_command.clone(),
-            lab_or_local_command,
-            "Use `--placement lab-or-local` to authorize controller execution when no Lab runner is ready.".to_string(),
-        ]),
-    )
-    .with_retryable(false);
-    error.details["next_action"] = serde_json::Value::String(local_command);
-    error.details["runner_readiness"] = serde_json::Value::String(state.to_string());
-    error.details["run_created"] = serde_json::Value::Bool(false);
-    Some(
-        error.with_action(ExecutableAction::new(
-            "replay-cook-on-local",
-            "replay Cook on this controller",
-            local_args
-                .first()
-                .cloned()
-                .unwrap_or_else(|| "homeboy".to_string()),
-            local_args.iter().skip(1).cloned(),
-            ActionSafety::Mutating,
-        )),
-    )
-}
-
-pub(crate) fn cook_placement_replay_args(args: &[String], placement: &str) -> Vec<String> {
-    let mut replay = portable_route_args(args);
-    if replay.is_empty() {
-        replay.push("homeboy".to_string());
-    }
-    replay.insert(1, "--placement".to_string());
-    replay.insert(2, placement.to_string());
-    replay
 }
 
 /// Explain a Lab placement that cannot be served, without contradicting the

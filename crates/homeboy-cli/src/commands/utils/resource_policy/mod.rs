@@ -72,8 +72,10 @@ pub(crate) fn parsed_command_preflight_input(
         || is_local_registry_management(&cli.command)
     {
         ControllerExecution::ControllerOnly
-    } else if !is_executable_agent_task_retry(&cli.command)
-        && hot_command(&cli.command).is_some_and(|command| command.allows_warm_runner_coordination)
+    } else if is_lab_preferring_cook(&cli.command)
+        || (!is_executable_agent_task_retry(&cli.command)
+            && hot_command(&cli.command)
+                .is_some_and(|command| command.allows_warm_runner_coordination))
     {
         ControllerExecution::SplitPlacementCoordinator
     } else {
@@ -123,7 +125,8 @@ pub(crate) fn parsed_command_preflight_input(
                 LabRouteIntent::ReadPolling
             } else {
                 LabRouteIntent::Supported {
-                    automatic: matches!(contract.portability, LabCommandPortability::Portable),
+                    automatic: is_lab_preferring_cook(&cli.command)
+                        || matches!(contract.portability, LabCommandPortability::Portable),
                 }
             }
         });
@@ -159,6 +162,19 @@ pub(crate) fn parsed_command_preflight_input(
             .then_some(ProvenanceRequirement::CaptureExecution)
             .unwrap_or(ProvenanceRequirement::None),
     }
+}
+
+/// A verified Cook's coordinator stays on the controller, but its provider
+/// attempt routes to Lab automatically under `--placement auto`. Preview,
+/// queue-only admission, and real admission all classify it the same way so
+/// the shared preflight resolver makes one placement decision for all three.
+fn is_lab_preferring_cook(command: &Commands) -> bool {
+    matches!(
+        command,
+        Commands::AgentTask(agent_task::AgentTaskArgs {
+            command: agent_task::AgentTaskCommand::Cook(cook),
+        }) if cook.gates.has_deterministic_gate()
+    )
 }
 
 fn parsed_command_identity(
@@ -2114,6 +2130,130 @@ mod tests {
             Some("homeboy-lab"),
             Some(&ready_lab()),
         ));
+    }
+
+    fn cook_cli(placement: &str, preview: bool) -> Cli {
+        let mut argv = vec![
+            "homeboy",
+            "--placement",
+            placement,
+            "agent-task",
+            "cook",
+            "--prompt",
+            "implement the fix",
+            "--to-worktree",
+            "homeboy@cook-routing",
+            "--verify",
+            "cargo test --locked",
+        ];
+        if preview {
+            argv.push("--preview");
+        }
+        Cli::parse_from(argv)
+    }
+
+    fn configured_lab(
+        state: &str,
+        reasons: &[&str],
+    ) -> crate::core::parsed_command_preflight::LabReadinessSnapshot {
+        crate::core::parsed_command_preflight::LabReadinessSnapshot {
+            state: state.to_string(),
+            selected_runner_id: None,
+            available_runner_ids: Vec::new(),
+            reasons: reasons.iter().map(|reason| reason.to_string()).collect(),
+            remediation_commands: vec!["homeboy runner connect homeboy-lab".to_string()],
+            repair_admitted_runner_ids: Vec::new(),
+        }
+    }
+
+    /// #17286: a configured but unverified, disconnected, or stale Lab must
+    /// never turn `--placement auto` Cook into controller execution. Preview
+    /// and real admission reach the same typed refusal through one resolver.
+    #[test]
+    fn auto_cook_fails_closed_with_lab_unavailable_in_preview_and_admission() {
+        for (state, reasons) in [
+            (
+                "connected_ineligible",
+                &["daemon_freshness_unavailable", "daemon_unverified"][..],
+            ),
+            ("disconnected", &["runner_disconnected"][..]),
+            ("stale", &["stale_daemon"][..]),
+        ] {
+            let refusals = [true, false].map(|preview| {
+                crate::cli_runtime::resolve_preflight_for_test(
+                    &cook_cli("auto", preview),
+                    Some(configured_lab(state, reasons)),
+                )
+                .expect_err("auto Cook must not resolve local while Lab is unavailable")
+            });
+            for error in &refusals {
+                assert_eq!(
+                    error.code,
+                    crate::core::ErrorCode::RunnerLabUnavailable,
+                    "{state}"
+                );
+                assert_eq!(error.details["reason"], "lab_unavailable");
+                assert_eq!(error.details["readiness_state"], state);
+                assert_eq!(
+                    error.details["next_action"],
+                    "homeboy runner connect homeboy-lab"
+                );
+                assert_eq!(error.details["run_created"], false);
+                for reason in reasons {
+                    assert!(error.message.contains(reason), "{}", error.message);
+                }
+            }
+            assert_eq!(
+                refusals[0].message, refusals[1].message,
+                "preview and admission must make one decision for {state}"
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_local_cook_stays_local_with_an_unavailable_lab() {
+        for preview in [true, false] {
+            let cli = cook_cli("local", preview);
+            // Runtime never reads Lab inventory for explicit local placement.
+            let result = crate::cli_runtime::resolve_preflight_for_test(&cli, None)
+                .expect("explicit local placement is operator-approved");
+            assert_eq!(
+                result.placement.selected,
+                homeboy_lab_contract::EffectiveExecutionPlacement::Local
+            );
+            assert!(result.placement.override_authorization.authorized);
+        }
+    }
+
+    #[test]
+    fn auto_cook_without_configured_lab_resolves_local() {
+        for preview in [true, false] {
+            let result =
+                crate::cli_runtime::resolve_preflight_for_test(
+                    &cook_cli("auto", preview),
+                    Some(
+                        crate::core::parsed_command_preflight::LabReadinessSnapshot {
+                            state: "absent".to_string(),
+                            selected_runner_id: None,
+                            available_runner_ids: Vec::new(),
+                            reasons: Vec::new(),
+                            remediation_commands: vec![
+                                "homeboy runner connect <runner-id>".to_string()
+                            ],
+                            repair_admitted_runner_ids: Vec::new(),
+                        },
+                    ),
+                )
+                .expect("a host without Lab runners keeps auto Cook local");
+            assert_eq!(
+                result.placement.selected,
+                homeboy_lab_contract::EffectiveExecutionPlacement::Local
+            );
+            assert_eq!(
+                result.placement.fallback.reason.as_deref(),
+                Some("no Lab runner is configured")
+            );
+        }
     }
 
     #[test]
