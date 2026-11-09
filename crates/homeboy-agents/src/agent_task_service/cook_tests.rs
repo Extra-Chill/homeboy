@@ -3622,6 +3622,62 @@ fn moved_base_rebase_conflict_blocks_with_paths_and_no_continuation() {
     });
 }
 
+/// #17649: a rebased candidate whose regate could not reach the Lab is
+/// `gate_environment_unavailable`, never `gate_failed`.
+#[test]
+fn cook_delivery_rebased_candidate_with_unavailable_gates_is_never_gate_failed() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let run_id = "cook-17649-rebase-attempt-1";
+        let (options, _) = seed_moving_base_attempt("cook-17649-rebase", run_id);
+        let report = run_cook(CookContext {
+            side_effects: Some(CookSideEffects::for_test(
+                |store, options, run_id| promote_or_load_attempt_in_store(store, options, run_id),
+                |_, _: &CookRequest, promotion: &AgentTaskPromotionReport| {
+                    let mut rebased = rebased_onto(promotion, "moved-base");
+                    let error = homeboy_core::Error::new(
+                        homeboy_core::ErrorCode::RunnerLabTransportFailure,
+                        "Lab gate runner admission is stale or unavailable",
+                        serde_json::json!({"stage":"admission"}),
+                    );
+                    rebased.deterministic_gates = vec![
+                        crate::agent_task_gate::placement::gate_non_execution_report(
+                            1,
+                            vec!["composer".to_string(), "test".to_string()],
+                            crate::agent_task_gate::AgentTaskGateVisibility::Visible,
+                            crate::agent_task_gate::AgentTaskGateRevealPolicy::FullEvidence,
+                            &error,
+                        ),
+                    ];
+                    rebased.status = AgentTaskPromotionStatus::GateDeferred;
+                    Ok(BaseCatchUp::Rebased { promotion: rebased })
+                },
+                |_, _: &_, _: &_, _: &_| panic!("an unverified candidate must not finalize"),
+            )),
+            ..CookContext::new(options, Arc::new(UnusedExecutor))
+        })
+        .unwrap();
+
+        assert_eq!(report.exit_code, 1);
+        let reason = report.value.stop_reason.as_deref().unwrap_or_default();
+        assert!(
+            reason.starts_with("gate_environment_unavailable: "),
+            "{reason}"
+        );
+        let blocker = delivery_of(run_id).blocker.expect("environment blocker");
+        assert_eq!(
+            blocker.code,
+            crate::agent_task_service::CookDeliveryBlockerCode::GatesDeferred
+        );
+        assert!(
+            blocker.message.contains(
+                "Lab gate did not execute: [runner.lab_transport_failure] stage admission"
+            ),
+            "{}",
+            blocker.message
+        );
+    });
+}
+
 /// #16049: a base that keeps moving under finalization exhausts the
 /// per-invocation budget as a `base_conflict` blocker.
 #[test]
