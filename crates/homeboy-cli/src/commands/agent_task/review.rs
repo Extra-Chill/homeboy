@@ -962,6 +962,7 @@ pub(crate) fn finalize_pull_request(mut args: FinalizePrArgs) -> CmdResult<Value
             .iter()
             .map(|raw| parse_override(raw))
             .collect::<homeboy::core::Result<Vec<_>>>()?,
+        out_of_scope_changes: Vec::new(),
     };
     review_dossier.apply_overrides()?;
     let review_profile = resolve_review_profile(args.component.as_deref(), &path)?;

@@ -137,6 +137,12 @@ pub struct AgentTaskReviewDossier {
     pub source_relationships: Vec<AgentTaskReviewIssueRelationship>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub overrides: Vec<AgentTaskReviewOverride>,
+    /// Files a remediation attempt changed outside the original candidate's
+    /// files and the conflict or gate-failure paths it was dispatched to fix.
+    /// Homeboy derives these; a reviewer sees them before anything else in
+    /// the change list (#17651).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub out_of_scope_changes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1002,6 +1008,17 @@ pub fn render_review_dossier(
         .collect::<Vec<_>>();
     if !steps.is_empty() {
         blocks.push(format!("## How to test\n{}", steps.join("\n")));
+    }
+    if !dossier.out_of_scope_changes.is_empty() {
+        let files = dossier
+            .out_of_scope_changes
+            .iter()
+            .map(|file| format!("`{}`", code(file)))
+            .collect::<Vec<_>>();
+        blocks.push(format!(
+            "## Out-of-scope changes\nA remediation attempt changed files outside the original candidate and the paths it was asked to fix:\n{}",
+            bullets(&files)
+        ));
     }
     if dossier.ai_assistance.used {
         blocks.push(render_ai_disclosure(&dossier.ai_assistance));
@@ -2207,6 +2224,7 @@ mod tests {
                 reference: "#8058".into(),
             }],
             overrides: Vec::new(),
+            out_of_scope_changes: Vec::new(),
         }
     }
 

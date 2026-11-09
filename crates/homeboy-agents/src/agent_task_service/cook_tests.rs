@@ -3967,20 +3967,30 @@ fn normal_cook_promotion_fixture(cancel_gate: bool) {
 
 #[test]
 fn moved_base_catch_up_rebases_real_owned_candidate_and_refuses_divergence() {
-    exercise_real_git_base_advance(false, false);
+    exercise_real_git_base_advance(false, false, false);
 }
 
+/// With no remediation budget left, a base conflict still ends the Cook as a
+/// typed `base_conflict` blocker without publication.
 #[test]
 fn moved_base_conflict_stops_real_git_cook_without_publication() {
-    exercise_real_git_base_advance(true, false);
+    exercise_real_git_base_advance(true, false, false);
+}
+
+/// #17651: a gate-green candidate that conflicts with its moved base is
+/// remediation input. The next attempt is dispatched with the conflicting
+/// paths and the base change in its prompt, and the Cook does not end.
+#[test]
+fn cook_delivery_base_conflict_dispatches_remediation_with_paths_and_base_change() {
+    exercise_real_git_base_advance(true, false, true);
 }
 
 #[test]
 fn rewritten_base_stops_real_git_cook_without_publication() {
-    exercise_real_git_base_advance(false, true);
+    exercise_real_git_base_advance(false, true, false);
 }
 
-fn exercise_real_git_base_advance(conflicting: bool, rewritten: bool) {
+fn exercise_real_git_base_advance(conflicting: bool, rewritten: bool, remediate: bool) {
     use crate::agent_task::{AgentTaskArtifact, AgentTaskOutcome, AgentTaskOutcomeStatus};
     use crate::agent_task_scheduler::{AgentTaskAggregate, AgentTaskAggregateTotals};
 
@@ -4096,13 +4106,17 @@ fn exercise_real_git_base_advance(conflicting: bool, rewritten: bool) {
         let advanced_base = git_output(&advance, &["rev-parse", "HEAD"]).unwrap();
 
         let run_id = "moving-base-real-git";
+        let dispatches = Arc::new(AtomicUsize::new(0));
         let mut options = batch_cook_options(
             "moving-base-real-git",
             Arc::new(RecordingDetachedAttemptDispatcher {
-                dispatches: Arc::new(AtomicUsize::new(0)),
+                dispatches: Arc::clone(&dispatches),
             }),
         );
         options.identity.initial_run_id = run_id.to_string();
+        if remediate {
+            options.retry_policy.max_attempts = 2;
+        }
         options.finalization.no_finalize = false;
         options.gates = VerifyGateOptions {
             verify: vec![
@@ -4175,6 +4189,16 @@ fn exercise_real_git_base_advance(conflicting: bool, rewritten: bool) {
                 "operator_notification": {"status": "completed", "message": "green"}
             }))
             .unwrap();
+        let mut applied = applied;
+        if remediate {
+            // A remediation starts from the immutable candidate commit.
+            applied.target.head = Some(verified_base.clone());
+            applied.provenance["candidate_commit"] = serde_json::json!({
+                "base_sha": verified_base,
+                "candidate_sha": candidate_sha,
+                "tree_sha": candidate_tree,
+            });
+        }
         agent_task_lifecycle::record_promotion(run_id, serde_json::to_value(&applied).unwrap())
             .unwrap();
         agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
@@ -4194,6 +4218,56 @@ fn exercise_real_git_base_advance(conflicting: bool, rewritten: bool) {
         let finalization_calls = Arc::new(AtomicUsize::new(0));
         let finalization_calls_for_finalizer = Arc::clone(&finalization_calls);
         let expected_base = advanced_base.clone();
+        if remediate {
+            let report = run_cook(CookContext {
+                side_effects: Some(CookSideEffects::new(|_, _, _, _| {
+                    panic!("conflicting candidate must never be published")
+                })),
+                ..CookContext::new(options.clone(), Arc::new(UnusedExecutor))
+            })
+            .unwrap();
+            assert_ne!(report.value.status, "blocked", "{:#?}", report.value);
+            assert_eq!(dispatches.load(Ordering::SeqCst), 1, "{:#?}", report.value);
+            let remediation_run_id = report.value.latest_run_id.clone().unwrap();
+            assert_ne!(remediation_run_id, run_id);
+            assert!(
+                agent_task_lifecycle::exact_record(run_id).unwrap().metadata["cook_delivery"]
+                    ["blocker"]
+                    .is_null()
+            );
+            let plan = test_lifecycle_store()
+                .read_controller_plan(&remediation_run_id)
+                .unwrap();
+            let request = &plan.tasks[0];
+            let conflict = &request.inputs["cook_loop"]["base_conflict"];
+            assert_eq!(conflict["paths"], serde_json::json!(["src/lib.rs"]));
+            assert_eq!(conflict["resolved_base"], serde_json::json!(advanced_base));
+            assert_eq!(conflict["verified_base"], serde_json::json!(verified_base));
+            assert!(
+                conflict["base_change"]
+                    .as_str()
+                    .unwrap()
+                    .contains("+conflicting upstream edit"),
+                "{conflict:#}"
+            );
+            assert_eq!(
+                request.inputs["cook_loop"]["remediation_scope"],
+                serde_json::json!(["src/lib.rs"])
+            );
+            assert!(request.instructions.contains("- `src/lib.rs`"));
+            assert!(request.instructions.contains("+conflicting upstream edit"));
+            assert!(request.instructions.contains(&advanced_base));
+            assert_eq!(
+                git_output(&remote, &["for-each-ref", "--format=%(refname)"]).unwrap(),
+                "refs/heads/main",
+                "a conflicting candidate must not publish a branch"
+            );
+            assert_eq!(
+                std::fs::read_to_string(destination.join("src/lib.rs")).unwrap(),
+                "new\n"
+            );
+            return;
+        }
         if conflicting || rewritten {
             let report = run_cook(CookContext {
                 side_effects: Some(CookSideEffects::new(|_, _, _, _| {
@@ -4805,6 +4879,69 @@ fn cook_publishes_draft_when_review_form_provider_times_out() {
             ),
             "{}",
             fixture.backend.body
+        );
+        assert!(fixture.backend.committed && fixture.backend.pushed && fixture.backend.created);
+    });
+}
+
+/// The provider-shaped review timeout from #17361: supervision kills the
+/// review after `timeout_ms` and classifies it as a provider timeout.
+#[derive(Clone)]
+struct SupervisedReviewTimeoutExecutor;
+
+impl AgentTaskExecutorAdapter for SupervisedReviewTimeoutExecutor {
+    fn execute(
+        &self,
+        request: crate::agent_task::AgentTaskRequest,
+        _context: crate::agent_task_scheduler::AgentTaskExecutionContext,
+    ) -> crate::agent_task::AgentTaskOutcome {
+        assert_eq!(request.policy.write, "none");
+        crate::agent_task::AgentTaskOutcome {
+            task_id: request.task_id,
+            status: crate::agent_task::AgentTaskOutcomeStatus::Timeout,
+            failure_classification: Some(
+                crate::agent_task::AgentTaskFailureClassification::Timeout,
+            ),
+            summary: Some("timeout: provider exceeded timeout_ms=900000".to_string()),
+            diagnostics: vec![crate::agent_task::AgentTaskDiagnostic {
+                class: "agent_task.provider_timeout".to_string(),
+                message: "provider exceeded timeout_ms=900000".to_string(),
+                data: serde_json::json!({ "timeout_ms": 900000 }),
+            }],
+            ..Default::default()
+        }
+    }
+}
+
+/// #17651: a review that times out on a candidate that passed every
+/// deterministic gate publishes that candidate as a draft marked
+/// `review: unavailable`; it neither re-requests the form nor ends the Cook.
+#[test]
+fn cook_delivery_review_timeout_publishes_gate_green_candidate_marked_review_unavailable() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let temp = tempfile::tempdir().unwrap();
+        let fixture = adopt_green_candidate_missing_review_form(
+            temp.path(),
+            "cook-17651-review-timeout",
+            Arc::new(SupervisedReviewTimeoutExecutor),
+        );
+        let result = fixture
+            .result
+            .expect("a review timeout must not end the Cook");
+        assert_eq!(result.exit_code, 0, "{:?}", result.value);
+        assert_eq!(result.value.status, "draft_published");
+        assert_eq!(result.value.terminal_phase.as_deref(), Some("review_form"));
+        assert!(fixture.backend.draft);
+        assert!(
+            fixture.backend.body.starts_with("review: unavailable\n"),
+            "{}",
+            fixture.backend.body
+        );
+        let latest = result.value.latest_run_id.as_deref().unwrap();
+        let record = agent_task_lifecycle::exact_record(latest).unwrap();
+        assert_eq!(
+            record.metadata["review_form_unavailable"]["phase"],
+            "review_form"
         );
         assert!(fixture.backend.committed && fixture.backend.pushed && fixture.backend.created);
     });
@@ -15750,6 +15887,24 @@ fn adopt_green_candidate_missing_review_form_with_title(
     review_executor: SharedAgentTaskExecutor,
     title: &str,
 ) -> AdoptedMissingFormFixture {
+    adopt_green_candidate_missing_review_form_with_scope(
+        temp,
+        cook_id,
+        review_executor,
+        title,
+        None,
+    )
+}
+
+/// `remediation_scope` dispatches the candidate-producing attempt as a
+/// remediation bound to that scope, as a gate-fix or base-conflict attempt is.
+fn adopt_green_candidate_missing_review_form_with_scope(
+    temp: &std::path::Path,
+    cook_id: &str,
+    review_executor: SharedAgentTaskExecutor,
+    title: &str,
+    remediation_scope: Option<&[&str]>,
+) -> AdoptedMissingFormFixture {
     let source = temp.join("source");
     let target = temp.join("target");
     std::fs::create_dir(&source).expect("create source repository");
@@ -15839,6 +15994,13 @@ fn adopt_green_candidate_missing_review_form_with_title(
     })
     .expect("register fixture destination workspace");
     options.workspace.to_worktree = workspace_handle.clone();
+    if let Some(scope) = remediation_scope {
+        let inputs = &mut options.identity.initial_plan.tasks[0].inputs;
+        if !inputs.is_object() {
+            *inputs = serde_json::json!({});
+        }
+        inputs["cook_loop"] = serde_json::json!({ "remediation_scope": scope });
+    }
     super::super::persist_initial_recipe(&options).unwrap();
     agent_task_lifecycle::submit_plan(&options.identity.initial_plan, Some(&run_id)).unwrap();
     seed_substantive_candidate_aggregate(
@@ -15897,6 +16059,54 @@ fn adopt_green_candidate_missing_review_form_with_title(
         target,
         workspace_handle,
         plan: options.identity.initial_plan.clone(),
+    }
+}
+
+/// #17651: a remediation attempt that changed files outside its dispatched
+/// scope (the original candidate's files plus the conflict or gate-failure
+/// paths) publishes them as `out_of_scope_changes` in the review dossier and
+/// the PR body; an in-scope remediation lists none.
+#[test]
+fn cook_promotion_lists_remediation_out_of_scope_changes_in_dossier_and_pr_body() {
+    for (cook_id, scope, expected) in [
+        (
+            "cook-17651-out-of-scope",
+            &["conflict.rs"][..],
+            vec!["lib.rs".to_string()],
+        ),
+        ("cook-17651-in-scope", &["lib.rs"][..], Vec::new()),
+    ] {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let temp = tempfile::tempdir().expect("temporary repositories");
+            let fixture = adopt_green_candidate_missing_review_form_with_scope(
+                temp.path(),
+                cook_id,
+                Arc::new(ReviewFormOnlyExecutor),
+                "fix(cook): batch cook",
+                Some(scope),
+            );
+            let result = fixture.result.expect("remediated candidate publishes");
+            assert_eq!(result.value.status, "review_ready", "{:?}", result.value);
+            let finalization = result.value.finalization.as_ref().unwrap();
+            assert_eq!(
+                finalization["review_dossier"]["out_of_scope_changes"],
+                if expected.is_empty() {
+                    Value::Null
+                } else {
+                    serde_json::json!(expected)
+                },
+                "{finalization:#}"
+            );
+            let body = &fixture.backend.body;
+            assert_eq!(
+                body.contains("## Out-of-scope changes\n"),
+                !expected.is_empty(),
+                "{body}"
+            );
+            for file in &expected {
+                assert!(body.contains(&format!("- `{file}`")), "{body}");
+            }
+        });
     }
 }
 
