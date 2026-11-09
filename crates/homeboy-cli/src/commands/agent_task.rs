@@ -408,6 +408,84 @@ pub(crate) fn run_with_cook_progress_and_provenance(
             let exit_code = crate::commands::route::run_terminal_cook_worker(&request, &outcome)?;
             Ok((Value::Null, exit_code))
         }
+        AgentTaskCommand::Gate { cook_id, id } => {
+            use homeboy::agents::agent_tasks::gate;
+            let recipe = if let Some(root) = std::env::var_os("HOMEBOY_GATE_VERDICT_DATA_ROOT") {
+                homeboy::agents::agent_tasks::service::CookRecipeStore::from_data_root(
+                    std::path::PathBuf::from(root),
+                )
+                .load_recipe(&cook_id)?
+            } else {
+                homeboy::agents::agent_tasks::service::load_recipe(&cook_id)?
+            };
+            let gates: gate::VerifyGateOptions = serde_json::from_value(recipe.gate_policy)
+                .map_err(|error| {
+                    homeboy::core::Error::invalid_argument("gate_policy", error.to_string())
+                })?;
+            let index = id
+                .strip_prefix("gate-")
+                .and_then(|id| id.parse::<usize>().ok())
+                .filter(|index| *index > 0)
+                .ok_or_else(|| {
+                    homeboy::core::Error::invalid_argument(
+                        "gate.id",
+                        "expected gate-1, gate-2, ...",
+                    )
+                })?;
+            let offset = usize::from(gates.test_execution_plan.is_some());
+            let command = index
+                .checked_sub(offset + 1)
+                .and_then(|index| gates.verify.get(index));
+            if command.is_none() && !(index == 1 && offset == 1) {
+                return Err(homeboy::core::Error::invalid_argument(
+                    "gate.id",
+                    "not a declared public gate",
+                ));
+            }
+            let cwd = std::env::current_dir()
+                .map_err(|error| homeboy::core::Error::internal_io(error.to_string(), None))?;
+            let supervision = gate::GateSupervision {
+                timeout: gates.gate_timeout(),
+                no_progress_timeout: gates.gate_no_progress_timeout(),
+                heartbeat_interval: gates.gate_heartbeat_interval(),
+                on_spawn: std::sync::Arc::new(|_, _| Ok(())),
+                on_heartbeat: std::sync::Arc::new(|_| Ok(())),
+                is_cancelled: std::sync::Arc::new(|| false),
+            };
+            let runtime = tempfile::tempdir()
+                .map_err(|error| homeboy::core::Error::internal_io(error.to_string(), None))?;
+            let report = if let Some(command) = command {
+                gate::run_gate_command_with_supervision(
+                    &cwd,
+                    index,
+                    command,
+                    gate::AgentTaskGateVisibility::Visible,
+                    gate::AgentTaskGateRevealPolicy::FullEvidence,
+                    Some(runtime.path()),
+                    Some(&supervision),
+                    &gates.gate_environment,
+                    &gates.gate_package_artifacts,
+                )?
+            } else {
+                gate::run_declared_test_with_supervision(
+                    &cwd,
+                    index,
+                    gates.test_execution_plan.as_ref().unwrap(),
+                    gate::AgentTaskGateVisibility::Visible,
+                    gate::AgentTaskGateRevealPolicy::FullEvidence,
+                    Some(runtime.path()),
+                    Some(&supervision),
+                    &gates.gate_environment,
+                    &gates.gate_package_artifacts,
+                )?
+            };
+            let exit = if report.status == gate::AgentTaskGateStatus::Succeeded {
+                0
+            } else {
+                1
+            };
+            Ok((serde_json::to_value(report).unwrap_or(Value::Null), exit))
+        }
         AgentTaskCommand::GateExecute {
             request,
             resources,
