@@ -13,6 +13,8 @@
 //! 1. [`Plan::Blocked`]: something could not be read, a live daemon process
 //!    owns no lease, or the evidence authorizes no recovery.
 //! 2. [`Plan::Wait`]: live work stands in the way of the next step.
+//!    [`Plan::Draining`] is the drain's own wait: it names each protected job
+//!    still holding the drain open, and the blocker, if any.
 //! 3. [`Plan::NeedsAttestation`]: dead-generation jobs that startup recovery
 //!    left untouched have no proof that their workload is gone. Only an
 //!    operator can supply it, with `homeboy daemon recover --attest-absent`.
@@ -30,10 +32,22 @@ use crate::error::{Error, Result};
 #[serde(rename_all = "snake_case", tag = "plan")]
 pub enum Plan {
     Converged,
-    Transition { step: Step },
+    Transition {
+        step: Step,
+    },
     NeedsAttestation(Attestation),
-    Wait { cause: WaitCause, reason: String },
-    Blocked { cause: BlockCause, reason: String },
+    Wait {
+        cause: WaitCause,
+        reason: String,
+    },
+    Draining {
+        reason: String,
+        holders: Vec<DrainHolder>,
+    },
+    Blocked {
+        cause: BlockCause,
+        reason: String,
+    },
 }
 
 /// What the planner is waiting for.
@@ -77,6 +91,85 @@ pub struct Attestation {
     /// The dead-generation jobs with no recorded child identity, each named to
     /// `homeboy daemon recover --attest-absent`.
     pub job_ids: Vec<Uuid>,
+}
+
+/// A continuation worker that has recorded no progress for this long holds a
+/// drain open without advancing, so it is reported as the drain blocker.
+pub const DRAIN_HOLDER_NO_PROGRESS_MS: u64 = 15 * 60 * 1000;
+
+/// A protected job holding a daemon drain open.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DrainHolder {
+    pub job_id: Uuid,
+    pub operation: String,
+    /// Seconds since the job was admitted.
+    pub age_seconds: u64,
+    /// Seconds since the job last recorded progress.
+    pub no_progress_seconds: u64,
+    /// The durable run this job continues, when it is a continuation worker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owning_run_id: Option<String>,
+    /// A continuation worker with no progress past
+    /// [`DRAIN_HOLDER_NO_PROGRESS_MS`].
+    #[serde(default)]
+    pub blocker: bool,
+    /// The exact command that releases a blocker's hold on the drain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_command: Option<String>,
+}
+
+/// The protected jobs holding a drain open, oldest first. Work queued for the
+/// replacement and work a replacement recovers on its own hold nothing.
+pub fn drain_holders(status: &DaemonStatus, now_ms: u64) -> Vec<DrainHolder> {
+    status
+        .active_job_recovery_evidence
+        .iter()
+        .filter(|job| job.disposition.blocks_daemon_replacement())
+        .filter(|job| {
+            status.freshness.lease_id.is_none()
+                || job.daemon_lease_id.is_none()
+                || job.daemon_lease_id == status.freshness.lease_id
+        })
+        .map(|job| {
+            let no_progress_ms = now_ms.saturating_sub(job.updated_at_ms);
+            let blocker = job.linked_durable_run_id.is_some()
+                && no_progress_ms >= DRAIN_HOLDER_NO_PROGRESS_MS;
+            DrainHolder {
+                job_id: job.job_id,
+                operation: job.operation.clone(),
+                age_seconds: now_ms.saturating_sub(job.created_at_ms) / 1000,
+                no_progress_seconds: no_progress_ms / 1000,
+                owning_run_id: job.linked_durable_run_id.clone(),
+                blocker,
+                recovery_command: blocker
+                    .then(|| job.linked_durable_run_id.as_deref())
+                    .flatten()
+                    .map(|run| format!("homeboy runs cancel {run}")),
+            }
+        })
+        .collect()
+}
+
+/// One line per holder, for plan reasons and summaries.
+pub fn describe_drain_holders(holders: &[DrainHolder]) -> String {
+    holders
+        .iter()
+        .map(|holder| {
+            let mut line = format!(
+                "{} {} (age {}s, no progress {}s, run {})",
+                holder.job_id,
+                holder.operation,
+                holder.age_seconds,
+                holder.no_progress_seconds,
+                holder.owning_run_id.as_deref().unwrap_or("none"),
+            );
+            if let Some(command) = &holder.recovery_command {
+                line.push_str(&format!(" BLOCKER: {command}"));
+            }
+            line
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 /// The lifecycle plan for one authoritative status report.

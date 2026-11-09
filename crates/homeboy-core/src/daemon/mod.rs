@@ -39,6 +39,8 @@ pub mod controller_job_driver;
 #[cfg(test)]
 mod controller_terminal_regression;
 mod daemon_lease;
+#[cfg(test)]
+mod drain_queue_tests;
 pub mod lifecycle_plan;
 mod lifetime;
 pub mod orchestration;
@@ -210,6 +212,7 @@ impl DaemonControllerJobService {
     pub fn admit(&self, request: ControllerJobRequest) -> Result<ControllerJobSubmission> {
         let admission = admit_controller_job(request, &self.job_store)?;
         Ok(ControllerJobSubmission {
+            pending_admission: admission.pending_admission(&self.job_store),
             job: admission.job,
             disposition: admission.disposition,
         })
@@ -273,6 +276,9 @@ impl ControllerJobSubmissionDisposition {
 pub struct ControllerJobSubmission {
     pub job: crate::api_jobs::Job,
     pub disposition: ControllerJobSubmissionDisposition,
+    /// `Some("daemon_draining")` when the job was queued in
+    /// `pending_resource_admission` for the replacement daemon.
+    pub pending_admission: Option<String>,
 }
 
 /// Extract the `job` a controller-job endpoint returned.
@@ -502,6 +508,10 @@ impl LocalControllerJobClient {
                 ));
             }
         };
+        let pending_admission = daemon_endpoint_payload(&value)
+            .and_then(|payload| payload.pointer("/admission/reason"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
         let response = self
             .client
             .post(format!(
@@ -539,7 +549,11 @@ impl LocalControllerJobClient {
                     Some("parse local controller job".to_string()),
                 )
             })?;
-        Ok(ControllerJobSubmission { job, disposition })
+        Ok(ControllerJobSubmission {
+            job,
+            disposition,
+            pending_admission,
+        })
     }
 
     pub fn status(&self, job_id: &str) -> Result<crate::api_jobs::Job> {
@@ -975,6 +989,11 @@ impl DaemonStatus {
             "waiting_for": if self.draining() || self.stale_serving() { Some("daemon_replacement") } else { None },
             "daemon_version": self.freshness.daemon_version,
             "active_jobs": self.freshness.active_jobs,
+            "drain_holders": if self.draining() {
+                Some(lifecycle_plan::drain_holders(self, crate::api_jobs::timestamp_ms()))
+            } else {
+                None
+            },
             "summary": self.render_summary(),
         })
     }
@@ -2135,9 +2154,10 @@ where
     }
     let replace = replacing
         && service_manager.is_none()
-        && crate::observation::ObservationStore::open_readonly_at(paths::observation_db()?)
-            .and_then(|store| store.has_pending_unmaterialized_cook_admission())
-            .unwrap_or(false);
+        && (job_store.has_pending_admissions()
+            || crate::observation::ObservationStore::open_readonly_at(paths::observation_db()?)
+                .and_then(|store| store.has_pending_unmaterialized_cook_admission())
+                .unwrap_or(false));
     if replace {
         // Release custody before launching ensure-running; it must not observe
         // this daemon's owner lock or listening socket as a competing serve.
@@ -2743,12 +2763,8 @@ where
         && intake_draining()
         && matches!(
             path.split('?').next().unwrap_or(path),
-            "/jobs"
-                | "/exec"
-                | "/controller/jobs"
-                | "/runner/jobs"
-                | "/admissions"
-                | "/v1/control-plane/runs"
+            // `/controller/jobs` queues for the replacement in admission.
+            "/jobs" | "/exec" | "/runner/jobs" | "/admissions" | "/v1/control-plane/runs"
         )
         && !post_admits_owned_work(path, body.as_ref(), job_store)
     {
@@ -2909,7 +2925,7 @@ where
             match with_daemon_job_admission(|| {
                 let request = parse_controller_job_request(body)?;
                 let admission = admit_controller_job(request, job_store)?;
-                Ok(controller_job_admission_response(&admission))
+                Ok(controller_job_admission_response(&admission, job_store))
             }) {
                 Ok(body) => daemon_endpoint_response("controller.jobs.create", body),
                 Err(err) => error_response(400, err),
@@ -4944,14 +4960,31 @@ pub(crate) struct ControllerJobAdmission {
     compacted: bool,
 }
 
+impl ControllerJobAdmission {
+    /// Why this job waits in `pending_resource_admission`, if it does.
+    fn pending_admission(&self, job_store: &JobStore) -> Option<String> {
+        (self.job.status == JobStatus::Queued)
+            .then(|| job_store.controller_job_state(self.job.id).ok())
+            .flatten()
+            .and_then(|state| state.pending_admission_reason)
+    }
+}
+
+/// The admission reason for work received while this lease drains.
+pub const DAEMON_DRAINING_ADMISSION_REASON: &str = "daemon_draining";
+
+/// Admit a typed controller job. A draining lease still persists new root
+/// work, queued in `pending_resource_admission` with reason `daemon_draining`;
+/// the replacement daemon's startup admission starts it (#17707).
 pub(crate) fn admit_controller_job(
     request: ControllerJobRequest,
     job_store: &JobStore,
 ) -> Result<ControllerJobAdmission> {
+    let mut controller_job = controller_job_state(&request)?;
     if !post_admits_owned_work("/controller/jobs", Some(&json!(request)), job_store) {
-        return Err(daemon_draining_error());
+        controller_job.pending_admission_reason =
+            Some(DAEMON_DRAINING_ADMISSION_REASON.to_string());
     }
-    let controller_job = controller_job_state(&request)?;
     let outcome = job_store.admit_controller_job(
         format!("controller.{}", request.job_type),
         request.idempotency_key.clone(),
@@ -5020,15 +5053,20 @@ pub(crate) fn controller_job_state(
         execution_claim_id: None,
         recovery_attempted: false,
         parent_job_id: None,
+        pending_admission_reason: None,
     };
     Ok(controller_job)
 }
 
-fn controller_job_admission_response(admission: &ControllerJobAdmission) -> serde_json::Value {
+fn controller_job_admission_response(
+    admission: &ControllerJobAdmission,
+    job_store: &JobStore,
+) -> serde_json::Value {
     let job_id = admission.job.id;
     json!({
         "command": "api.controller.jobs.create",
         "job": admission.job,
+        "admission": pending_admission_report(admission.pending_admission(job_store)),
         "submission": { "disposition": admission.disposition.as_str() },
         "terminal_tombstone": if admission.compacted { json!({ "status": "terminal", "compacted": true }) } else { serde_json::Value::Null },
         "poll": if admission.compacted { json!({ "job": serde_json::Value::Null, "events": serde_json::Value::Null }) } else { json!({ "job": format!("/jobs/{job_id}"), "events": format!("/jobs/{job_id}/events") }) },
@@ -5042,6 +5080,10 @@ pub(crate) fn start_controller_job(
 ) -> Result<crate::api_jobs::Job> {
     let controller = job_store.controller_job_state(job_id)?;
     if job_store.get(job_id)?.status != JobStatus::Queued {
+        return job_store.get(job_id);
+    }
+    // Queued for the replacement: this draining lease never starts it.
+    if controller.pending_admission_reason.is_some() && intake_draining() {
         return job_store.get(job_id);
     }
     // Resolve the persisted type/version, not caller-controlled input, before
@@ -5431,6 +5473,14 @@ fn recover_controller_job(
     job_id: Uuid,
     state: crate::api_jobs::ControllerJobState,
 ) {
+    // Work queued during a predecessor's drain is admitted here, through the
+    // normal start path, once this lease is not itself draining.
+    if state.pending_admission_reason.is_some() {
+        if !intake_draining() {
+            let _ = start_controller_job(job_id, job_store);
+        }
+        return;
+    }
     // Completion custody fences every recovery entry point, including explicit
     // cancellation recovery, before an already-finished driver can be resumed.
     if job_store
@@ -6210,6 +6260,7 @@ mod tests {
                     execution_claim_id: None,
                     recovery_attempted: false,
                     parent_job_id: None,
+                    pending_admission_reason: None,
                 },
             )
             .expect("admit staging dispatch");
@@ -6652,32 +6703,6 @@ mod tests {
                     .active_jobs,
                 1
             );
-        });
-    }
-
-    #[test]
-    fn daemon_recover_drain_preserves_protected_jobs_and_refuses_admission() {
-        with_isolated_home(|_| {
-            write_test_lease("drain-test-lease");
-            let store = JobStore::open_without_reconciliation(paths::observation_db().unwrap())
-                .unwrap()
-                .with_daemon_lease("drain-test-lease".to_string());
-            let protected = store.create("runner.exec");
-            store.start(protected.id).unwrap();
-            drain_then_replace("drain-test-lease").unwrap();
-            assert!(daemon_draining());
-            let response = route_with_job_store("POST", "/controller/jobs", &store);
-            assert_eq!(response.status_code, 503);
-            assert!(response.body.to_string().contains("daemon_draining"));
-            assert!(with_daemon_job_admission(|| Ok(())).is_ok());
-            assert_eq!(store.active_runner_jobs().len(), 1);
-            assert_eq!(
-                store.active_runner_jobs()[0].job_id,
-                protected.id.to_string()
-            );
-            // A replacement lease cannot inherit a previous generation's drain.
-            write_test_lease("replacement-lease");
-            assert!(!daemon_draining());
         });
     }
 
@@ -7711,7 +7736,7 @@ mod tests {
         assert!(error.message.contains("lease-b"));
     }
 
-    fn write_test_lease(lease_id: &str) {
+    pub(super) fn write_test_lease(lease_id: &str) {
         let now = chrono::Utc::now().to_rfc3339();
         let state = DaemonState {
             schema: DAEMON_LEASE_SCHEMA.to_string(),
@@ -9074,6 +9099,18 @@ fn daemon_draining_error() -> Error {
     );
     error.details["classification"] = json!("daemon_draining");
     error
+}
+
+/// The queued admission receipt callers see instead of a rejection.
+fn pending_admission_report(reason: Option<String>) -> serde_json::Value {
+    match reason {
+        Some(reason) => json!({
+            "status": "pending_resource_admission",
+            "reason": reason,
+            "waiting_for": "daemon_replacement",
+        }),
+        None => json!({ "status": "admitted" }),
+    }
 }
 
 fn drain_path() -> Result<std::path::PathBuf> {

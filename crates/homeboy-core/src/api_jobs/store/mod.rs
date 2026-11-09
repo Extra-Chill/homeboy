@@ -298,6 +298,11 @@ pub(crate) struct ControllerJobState {
     /// step jobs). Cancelling a parent cancels its active children.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) parent_job_id: Option<Uuid>,
+    /// Why this admitted job waits in `pending_resource_admission` instead of
+    /// starting (`daemon_draining`). A draining lease never starts it; the
+    /// replacement daemon's startup admission clears it and starts the job.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) pending_admission_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2462,6 +2467,7 @@ impl JobStore {
                 return Ok(ControllerJobStartOutcome::Existing);
             }
             controller.execution_claim_id = Some(Uuid::new_v4().to_string());
+            controller.pending_admission_reason = None;
             self.stamp_executing_lease(&mut stored.job);
             stored.job.status = JobStatus::Running;
             stored.job.started_at_ms.get_or_insert_with(timestamp_ms);
@@ -2550,6 +2556,14 @@ impl JobStore {
     }
 
     /// This scope's active controller jobs, the only ones its recovery resumes.
+    /// Whether controller work waits in `pending_resource_admission` for a
+    /// replacement daemon.
+    pub(crate) fn has_pending_admissions(&self) -> bool {
+        self.active_controller_jobs()
+            .iter()
+            .any(|(_, state)| state.pending_admission_reason.is_some())
+    }
+
     pub(crate) fn active_controller_jobs(&self) -> Vec<(Uuid, ControllerJobState)> {
         self.inner
             .lock()

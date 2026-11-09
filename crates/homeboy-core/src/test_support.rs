@@ -298,6 +298,7 @@ impl ControllerJobHarness {
                 execution_claim_id: None,
                 recovery_attempted: false,
                 parent_job_id: None,
+                pending_admission_reason: None,
             },
         )?;
         let ControllerJobSubmissionOutcome::Submitted(job_id) = outcome else {

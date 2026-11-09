@@ -91,6 +91,7 @@ fn running_job(store: &JobStore, request: serde_json::Value) -> Uuid {
                 execution_claim_id: None,
                 recovery_attempted: false,
                 parent_job_id: None,
+                pending_admission_reason: None,
             },
         )
         .expect("admit fixture job");
