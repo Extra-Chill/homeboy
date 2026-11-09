@@ -992,6 +992,25 @@ impl AgentTaskScheduler {
                     provider_capacity_key: scheduled.capacity_key.clone(),
                 };
 
+                // Assemble live operator context at the shared provider boundary,
+                // not in a recovery-specific plan builder or immutable recipe.
+                let feedback =
+                    match crate::agent_task_feedback::prepare_request(&mut request, &context) {
+                        Ok(feedback) => feedback,
+                        Err(error) => {
+                            let outcome =
+                                scratch_allocation_failure(task_id.clone(), error.to_string());
+                            let _ =
+                                release_scratch(&scratch, "feedback_preparation_failed", &outcome);
+                            record_completed_outcome(
+                                &mut completed_by_task,
+                                &mut outcomes,
+                                outcome,
+                            );
+                            continue;
+                        }
+                    };
+
                 if let Some(run_id) = self.run_id.as_deref() {
                     let reservation = self.durable_lifecycle_store().and_then(|store| {
                         store.reserve_provider_execution(run_id, &request, attempt)
@@ -1098,6 +1117,18 @@ impl AgentTaskScheduler {
                                     crate::agent_task_schedule::for_execution_timing(&context);
                                 let _provider =
                                     homeboy_core::observation::phase_timing::guard("provider");
+                                if let Some((store, cook_id, prepared)) = feedback {
+                                    if let Err(error) = store.acknowledge_attempt(
+                                        &cook_id,
+                                        &prepared,
+                                        context.run_id.as_deref(),
+                                    ) {
+                                        return scratch_allocation_failure(
+                                            task_id.clone(),
+                                            error.to_string(),
+                                        );
+                                    }
+                                }
                                 executor.execute(request, context)
                             }))
                             .unwrap_or_else(|_| provider_worker_panic(task_id.clone()));

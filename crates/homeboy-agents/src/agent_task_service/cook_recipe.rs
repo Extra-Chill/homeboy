@@ -3383,7 +3383,6 @@ fn consume_claimed_with_dispatcher_policy(
             return Err(error);
         }
     }
-    let record = lifecycle_store.read_record(&claim.continuation().run_id)?;
     if let Some(attempt) = recipe
         .attempts
         .iter()
@@ -3401,46 +3400,12 @@ fn consume_claimed_with_dispatcher_policy(
         claim.fail(&error.message)?;
         return Err(error);
     }
-    // Feedback is acknowledged only at the same durable continuation boundary
-    // that owns the next remediation. Candidate mismatch is recorded as stale
-    // by the feedback store and cannot leak into another attempt.
-    let prepared_feedback = if let Some(candidate) =
-        crate::agent_task_feedback::candidate_sha(&record)
-    {
-        let feedback_store = crate::agent_task_feedback::CookFeedbackStore::new(store.data_root());
-        let feedback = feedback_store.prepare_for_candidate(&recipe.cook_id, &candidate)?;
-        crate::agent_task_feedback::append_to_plan(
-            &record,
-            &mut options.identity.initial_plan,
-            &feedback,
-        )?;
-        Some(feedback)
-    } else {
-        None
-    };
-    let provider_executions_before = record
-        .metadata
-        .get("provider_executions_consumed")
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
     lifecycle_store.mutate_record(&claim.continuation().run_id, |record| {
         let metadata = record.ensure_metadata_object();
         let outcome = metadata.remove("cook_pass_outcome").is_some();
         metadata.remove("cook_progress").is_some() || outcome
     })?;
     let execution = execute(options);
-    if let Some(feedback) = prepared_feedback {
-        let current_recipe = store.load_recipe(&recipe.cook_id)?;
-        if provider_invocation_observed(
-            &lifecycle_store,
-            &current_recipe,
-            &claim.continuation().run_id,
-            provider_executions_before,
-        )? {
-            crate::agent_task_feedback::CookFeedbackStore::new(store.data_root())
-                .acknowledge(&recipe.cook_id, &feedback)?;
-        }
-    }
     match execution {
         Ok(0) => {
             let current = lifecycle_store.read_record(&claim.continuation().run_id)?;
@@ -3491,46 +3456,6 @@ fn consume_claimed_with_dispatcher_policy(
             Err(error)
         }
     }
-}
-
-fn provider_invocation_observed(
-    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
-    recipe: &AgentTaskCookRecipe,
-    source_run_id: &str,
-    source_executions_before: u64,
-) -> Result<bool> {
-    if lifecycle_store
-        .read_record(source_run_id)
-        .ok()
-        .and_then(|record| {
-            record
-                .metadata
-                .get("provider_executions_consumed")
-                .and_then(Value::as_u64)
-        })
-        .is_some_and(|executions| executions > source_executions_before)
-    {
-        return Ok(true);
-    }
-    let source_attempt = recipe
-        .attempts
-        .iter()
-        .find(|attempt| attempt.run_id == source_run_id)
-        .map(|attempt| attempt.attempt)
-        .unwrap_or(0);
-    Ok(recipe.attempts.iter().any(|attempt| {
-        attempt.attempt > source_attempt
-            && lifecycle_store
-                .read_record(&attempt.run_id)
-                .ok()
-                .and_then(|record| {
-                    record
-                        .metadata
-                        .get("provider_executions_consumed")
-                        .and_then(Value::as_u64)
-                })
-                .is_some_and(|executions| executions > 0)
-    }))
 }
 
 fn recipe_value_error(field: &'static str) -> impl FnOnce(serde_json::Error) -> Error {
@@ -5084,70 +5009,6 @@ mod tests {
         let delivery = super::super::CookDelivery::project(&artifacts, None);
         record.metadata["cook_delivery"] =
             super::super::CookDelivery::to_record(delivery.as_ref(), &Default::default());
-    }
-
-    #[test]
-    fn feedback_reaches_one_remediation_prompt_before_durable_acknowledgement() {
-        let context = homeboy_core::test_support::HermeticTestContext::new();
-        let (store, lifecycle_store) = rooted_stores(&context);
-        persist_recipe_run(&store, &lifecycle_store);
-        lifecycle_store
-            .mutate_record("run", |record| {
-                record_feedback_candidate(record);
-                record.metadata["provider_executions_consumed"] = serde_json::json!(1);
-                true
-            })
-            .unwrap();
-        store.enqueue_terminal_continuation("cook", "run").unwrap();
-        let feedback_store = crate::agent_task_feedback::CookFeedbackStore::new(
-            context.path_roots().data().to_path_buf(),
-        );
-        feedback_store
-            .submit(
-                "cook",
-                "candidate-a",
-                "reviewer",
-                "markdown",
-                "fix the regression",
-                "review-1",
-            )
-            .unwrap();
-        let claim = store
-            .claim_continuation_for("cook", "run")
-            .unwrap()
-            .unwrap();
-        let expected_gates: crate::agent_task_gate::VerifyGateOptions =
-            serde_json::from_value(store.load_recipe("cook").unwrap().gate_policy).unwrap();
-
-        let mut provider_prompt = None;
-        let exit = consume_claimed_with_dispatcher_policy(
-            &store,
-            claim,
-            |_| Ok(None),
-            |options| {
-                provider_prompt = Some(options.identity.initial_plan.tasks[0].instructions.clone());
-                assert_eq!(options.identity.cook_id, "cook");
-                assert_eq!(options.workspace.to_worktree, "target");
-                assert_eq!(options.gates, expected_gates);
-                lifecycle_store
-                    .mutate_record("run", |record| {
-                        record.metadata["provider_executions_consumed"] = serde_json::json!(2);
-                        true
-                    })
-                    .unwrap();
-                Ok(0)
-            },
-            CookMode::ContinueTerminal,
-        )
-        .unwrap();
-        assert_eq!(exit, 0);
-        assert!(provider_prompt
-            .expect("provider boundary was invoked")
-            .contains("fix the regression"));
-        assert_eq!(
-            feedback_store.list("cook").unwrap()[0].state,
-            crate::agent_task_feedback::FeedbackState::Consumed
-        );
     }
 
     #[test]

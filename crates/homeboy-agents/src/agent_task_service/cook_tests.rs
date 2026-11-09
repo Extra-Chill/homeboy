@@ -10649,6 +10649,148 @@ fn execute_reserved_retry_fixture(
     .unwrap()
 }
 
+#[test]
+fn cook_recovery_operator_feedback_reaches_dispatch_and_survives_pre_execution_failure() {
+    use crate::agent_task::AgentTaskOutcome;
+    use crate::agent_task_feedback::{CookFeedbackStore, FeedbackState};
+    use crate::agent_task_schedule::AgentTaskExecutionContext;
+    struct FeedbackExecutor;
+    impl AgentTaskExecutorAdapter for FeedbackExecutor {
+        fn execute(
+            &self,
+            request: AgentTaskRequest,
+            context: AgentTaskExecutionContext,
+        ) -> AgentTaskOutcome {
+            let items = request.inputs["homeboy"]["cook_feedback"]
+                .as_array()
+                .unwrap();
+            assert_eq!(items.len(), 2);
+            assert_eq!(items[0]["text"], "operator guidance");
+            assert!(!request.instructions.contains("operator guidance"));
+            let store =
+                CookFeedbackStore::new(context.lifecycle_store.as_ref().unwrap().data_root());
+            let feedback = store.list(items[0]["cook_id"].as_str().unwrap()).unwrap();
+            assert!(feedback
+                .iter()
+                .all(|item| item.state == FeedbackState::Consumed
+                    && item.consumed_by_attempt_id == context.run_id
+                    && item.consumed_at.is_some()));
+            ImmediateSuccessExecutor.execute(request, context)
+        }
+    }
+    struct Recovery {
+        options: CookRequest,
+        dispatch: bool,
+        consumed_attempt: std::cell::RefCell<String>,
+    }
+    impl crate::agent_task_service::CookRecoveryPerformer for Recovery {
+        fn continue_cook(
+            &self,
+            run_id: &str,
+            _: bool,
+            _: &crate::agent_task_service::CookRecoveryOverrides,
+        ) -> Result<(Value, i32)> {
+            *self.consumed_attempt.borrow_mut() = run_id.to_string();
+            agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+                record.set_state_for_test(agent_task_lifecycle::AgentTaskRunState::Queued);
+                record.lifecycle.execution.state = record.state().into();
+            })?;
+            crate::agent_task_service::execution::run_loaded_plan(
+                self.options.identity.initial_plan.clone(),
+                Some(run_id),
+                Arc::new(FeedbackExecutor),
+            )?;
+            Ok((serde_json::json!({"run_id": run_id}), 0))
+        }
+        fn preflight_continue_cook(&self, _: &str, _: bool) -> Result<(Value, i32)> {
+            unreachable!()
+        }
+        fn retry(&self, run_id: &str) -> Result<(Value, i32)> {
+            let retry = crate::agent_task_service::retry(run_id, None, false, false)?;
+            *self.consumed_attempt.borrow_mut() = retry.record.run_id.clone();
+            if self.dispatch {
+                execute_reserved_retry_fixture(&retry.record.run_id, Arc::new(FeedbackExecutor));
+            } else {
+                agent_task_lifecycle::record_pre_execution_failure(
+                    &retry.record.run_id,
+                    &self.options.identity.initial_plan,
+                    "gate_environment.preserve",
+                    &Error::validation_invalid_argument("environment", "unavailable", None, None)
+                        .with_retryable(true),
+                )?;
+            }
+            Ok((serde_json::json!({"run_id": retry.record.run_id}), 0))
+        }
+        fn reconcile(&self, _: &str) -> Result<(Value, i32)> {
+            unreachable!()
+        }
+        fn adopt(&self, _: &str, _: &str) -> Result<(Value, i32)> {
+            unreachable!()
+        }
+    }
+    for (continue_attempt, dispatch) in [(true, true), (false, true), (false, false)] {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let cook_id = "cook-feedback-recovery";
+            let options = if continue_attempt {
+                let options =
+                    batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+                super::super::persist_initial_recipe(&options).unwrap();
+                super::super::materialize_initial_cook_attempt(&options).unwrap();
+                agent_task_lifecycle::rewrite_record_for_test(
+                    &options.identity.initial_run_id,
+                    |record| {
+                        record.set_state_for_test(agent_task_lifecycle::AgentTaskRunState::Failed);
+                        record.lifecycle.execution.state = record.state().into();
+                    },
+                )
+                .unwrap();
+                options
+            } else {
+                retryable_pre_provider_cook(cook_id, 3)
+            };
+            let store = CookFeedbackStore::new(test_lifecycle_store().data_root());
+            for key in ["first", "second"] {
+                store
+                    .submit(
+                        cook_id,
+                        "reviewed-candidate",
+                        "operator",
+                        "cli",
+                        "operator guidance",
+                        key,
+                    )
+                    .unwrap();
+            }
+            let performer = Recovery {
+                options,
+                dispatch,
+                consumed_attempt: Default::default(),
+            };
+            let (report, _) =
+                crate::agent_task_service::recover_cook(cook_id, Default::default(), &performer)
+                    .unwrap();
+            assert_eq!(
+                report.step,
+                if continue_attempt {
+                    crate::agent_task_service::CookRecoveryStep::Continue
+                } else {
+                    crate::agent_task_service::CookRecoveryStep::Retry
+                }
+            );
+            let attempt_id = performer.consumed_attempt.borrow();
+            let feedback = store.list(cook_id).unwrap();
+            assert!(feedback.iter().all(|item| if dispatch {
+                item.state == FeedbackState::Consumed
+                    && item.consumed_by_attempt_id.as_deref() == Some(attempt_id.as_str())
+            } else {
+                item.state == FeedbackState::Pending
+                    && item.consumed_at.is_none()
+                    && item.consumed_by_attempt_id.is_none()
+            }));
+        });
+    }
+}
+
 fn retryable_pre_provider_cook(cook_id: &str, max_attempts: u32) -> CookRequest {
     let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
     options.identity.initial_run_id = format!("{cook_id}-attempt-1");
