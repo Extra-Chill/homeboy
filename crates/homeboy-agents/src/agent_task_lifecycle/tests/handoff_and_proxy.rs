@@ -3095,6 +3095,54 @@ fn status_keeps_fresh_planned_runner_submission_live() {
 }
 
 #[test]
+fn planned_lab_retry_uses_only_fresh_pre_provider_heartbeats() {
+    with_isolated_home(|_| {
+        let plan = test_plan();
+        let run_id = "run-planned-lab-retry-heartbeat";
+        submit_plan(&plan, Some(run_id)).expect("submitted");
+        mark_running(run_id).expect("running");
+        record_cook_progress_in_store(&test_lifecycle_store(), run_id, "retry", 2, None)
+            .expect("retry progress");
+        let remote_command = ["homeboy".to_string(), "agent-task".to_string()];
+        record_lab_offload_planned(LabOffloadProxyPlan {
+            run_id,
+            runner_id: "homeboy-lab",
+            remote_workspace: "/runner/workspace/homeboy",
+            remote_command: &remote_command,
+            durable_plan: Some(&plan),
+        })
+        .expect("planned Lab proxy");
+        rewrite_record_for_test(run_id, |record| {
+            record
+                .metadata
+                .as_object_mut()
+                .unwrap()
+                .remove("runner_pid");
+        })
+        .unwrap();
+        let fresh = reconcile_status(run_id).unwrap();
+        assert!(fresh.is_controller_pre_provider_phase());
+        assert!(fresh.has_fresh_controller_pre_provider_heartbeat());
+        assert!(fresh.metadata.get("stale_running").is_none());
+
+        rewrite_record_for_test(run_id, |record| {
+            let expired = (chrono::Utc::now()
+                - chrono::Duration::minutes(
+                    homeboy_core::observation::RUNNING_HEARTBEAT_STALE_MINUTES + 1,
+                ))
+            .to_rfc3339();
+            record.updated_at = Some(expired.clone());
+            record.metadata["cook_progress"]["updated_at"] = json!(expired);
+        })
+        .unwrap();
+        let stale = reconcile_status(run_id).unwrap();
+        assert!(!stale.has_fresh_controller_pre_provider_heartbeat());
+        assert_eq!(stale.metadata["stale_running"], true);
+        assert_eq!(stale.metadata["stale_running_reason"], "missing_runner_pid");
+    });
+}
+
+#[test]
 fn planned_lab_proxy_stamps_heartbeat_without_a_runner_pid() {
     with_isolated_home(|_| {
         let plan = test_plan();
