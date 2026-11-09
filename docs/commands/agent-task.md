@@ -19,6 +19,44 @@ paths that do not exist, and missing or empty secrets fail gate preflight.
 Secret values are read from the executing host environment; policy and gate
 evidence record only their names. This does not resolve external secret stores.
 
+The Node.js extension declares `playwright-browsers`, mapping
+`PLAYWRIGHT_BROWSERS_PATH` to the host's `HOME/.cache/ms-playwright`. The current
+mapping format has no per-platform paths, so this uses the **Linux default**,
+not macOS or Windows defaults. The cache must already exist; declaration does
+not install browsers. For example:
+
+```sh
+homeboy agent-task cook --prompt @task.md \
+  --gate-requirements '{"host_tools":["playwright-browsers"]}' \
+  --verify 'npx playwright test'
+```
+
+### Shared gate-file inputs
+
+Use one repeatable `--gate-file` declaration instead of pairing
+`--gate-env ACCEPT_GATE=/absolute/accept-gate.sh` with `--provider-evidence`
+for the same file:
+
+```sh
+homeboy agent-task cook --prompt @task.md \
+  --gate-file '{"id":"accept-gate","env":"ACCEPT_GATE","source":"/absolute/accept-gate.sh"}' \
+  --verify 'bash "$ACCEPT_GATE"'
+```
+
+The source must be an existing absolute regular file. `env` names the gate
+variable containing that host path; `id` names the provider's read-only evidence
+projection. Provider evidence admission, size limits, and immutable projection
+rules apply as with `--provider-evidence`. The gate reads the declared host file;
+this does not snapshot the gate's copy (use `--verify-file` to snapshot an entire
+verification program). The provider must use its projected evidence path, not
+assume the host path exists in its workspace. Only explicitly declared files are
+forwarded. The matching workflow `cook` key is `"gate-file"` (an array of JSON
+strings for repeated inputs), derived from the live command tree.
+
+`--gate-extension-input` only copies extension directories into isolated HOME;
+`--gate-input-source` records provenance for already-snapshotted verification
+programs. Neither supplies a shared gate/provider file.
+
 ## Incomplete Cook drafts
 
 `agent-task cook --publish-incomplete-draft` opts into preserving a non-empty

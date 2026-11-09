@@ -2,6 +2,11 @@
 
 All notable changes to the **nodejs** extension will be documented in this file.
 
+## [3.9.8] - 2026-11-09
+
+### Added
+- Declare the `playwright-browsers` gate host tool using the Linux default browser cache at `HOME/.cache/ms-playwright`.
+
 ## [3.9.7] - 2026-11-06
 
 ### Changed

@@ -44,6 +44,10 @@ pub struct CookOptionValues {
     /// Read-only workspace evidence supplied to the provider. Repeatable.
     #[arg(long = "provider-evidence", value_name = "JSON", help = PROVIDER_EVIDENCE_DECLARATION, value_parser = parse_provider_evidence_input)]
     pub provider_evidence_inputs: Vec<AgentTaskProviderEvidenceInput>,
+    /// Share a regular file with gates and the provider: JSON with id, source
+    /// (absolute file path), and env (gate environment variable name). Repeatable.
+    #[arg(long = "gate-file", value_name = "JSON", value_parser = parse_gate_file)]
+    pub gate_files: Vec<AgentTaskGateFile>,
     /// AI tool disclosure recorded in the PR's assistance attribution.
     #[arg(long, default_value = "AI-assisted", value_name = "TEXT")]
     pub ai_tool: String,
@@ -165,10 +169,22 @@ impl clap::FromArgMatches for CookOptions {
                 Some((long.to_string(), value))
             })
             .collect();
-        Ok(Self {
-            values: CookOptionValues::from_arg_matches(matches)?,
-            explicit,
-        })
+        let mut values = CookOptionValues::from_arg_matches(matches)?;
+        for input in values.gate_files.clone() {
+            values
+                .gates
+                .gate_environment
+                .push((input.env, input.source.clone()));
+            values
+                .provider_evidence_inputs
+                .push(AgentTaskProviderEvidenceInput {
+                    id: input.id,
+                    source: input.source,
+                    include: Vec::new(),
+                    exclude: Vec::new(),
+                });
+        }
+        Ok(Self { values, explicit })
     }
 
     fn update_from_arg_matches(&mut self, matches: &clap::ArgMatches) -> Result<(), clap::Error> {
@@ -236,6 +252,37 @@ pub struct AgentTaskProviderEvidenceInput {
     /// Relative globs removed after include selection. Exclude wins.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub exclude: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AgentTaskGateFile {
+    pub id: String,
+    pub source: String,
+    pub env: String,
+}
+
+fn parse_gate_file(value: &str) -> Result<AgentTaskGateFile, String> {
+    let input: AgentTaskGateFile = serde_json::from_str(value)
+        .map_err(|error| format!("invalid gate file declaration: {error}"))?;
+    if input.id.trim().is_empty()
+        || input.id.contains(['/', '\\'])
+        || input.id == "."
+        || input.id == ".."
+    {
+        return Err("gate file id must be a non-empty path-free name".into());
+    }
+    if input.env.is_empty()
+        || !input.env.bytes().enumerate().all(|(index, byte)| {
+            byte == b'_' || byte.is_ascii_alphabetic() || (index > 0 && byte.is_ascii_digit())
+        })
+    {
+        return Err("gate file env must be an environment variable name".into());
+    }
+    if !Path::new(&input.source).is_absolute() || !Path::new(&input.source).is_file() {
+        return Err("gate file source must be an existing absolute regular file".into());
+    }
+    Ok(input)
 }
 
 pub(crate) const PROVIDER_EVIDENCE_DECLARATION: &str = "JSON object with required `id` (unique, non-empty path-free name) and `source` (unique absolute regular file or directory): `--provider-evidence '{\"id\":\"evidence\",\"source\":\"/absolute/path\"}'`. Optional `include` and `exclude` are relative globs for directories. Each file is limited to 64 MiB. A directory is one immutable projection that preserves relative paths and a tree digest; media files over 1 MiB are omitted unless included, and the selected tree must stay within 64 MiB.";
@@ -743,6 +790,57 @@ mod tests {
     }
 
     #[test]
+    fn gate_file_supplies_gate_environment_and_provider_evidence() {
+        #[derive(Parser)]
+        struct OptionsCli {
+            #[command(flatten)]
+            cook: CookOptions,
+        }
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let source = file.path().display().to_string();
+        let declaration =
+            serde_json::json!({"id":"accept-gate", "env":"ACCEPT_GATE", "source":source})
+                .to_string();
+        let args = OptionsCli::try_parse_from(["cook", "--gate-file", &declaration]).unwrap();
+        assert_eq!(
+            args.cook.gates.gate_environment,
+            vec![("ACCEPT_GATE".into(), source.clone())]
+        );
+        assert_eq!(args.cook.provider_evidence_inputs[0].source, source);
+        assert_eq!(args.cook.provider_evidence_inputs[0].id, "accept-gate");
+        let flags = args.cook.child_flags().unwrap();
+        assert_eq!(flags["gate-file"], serde_json::json!([declaration]));
+        assert!(parse_gate_file(r#"{"id":"x","env":"BAD=NAME","source":"/tmp"}"#).is_err());
+    }
+
+    #[test]
+    fn gate_file_rejects_invalid_declarations_before_dispatch() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let valid = serde_json::json!({
+            "id": "accept-gate", "env": "ACCEPT_GATE", "source": file.path()
+        });
+        for (field, value) in [
+            ("id", ""),
+            ("id", "../gate"),
+            ("env", "1_GATE"),
+            ("env", "BAD=NAME"),
+            ("source", "relative.sh"),
+            ("source", directory.path().to_str().unwrap()),
+        ] {
+            let mut declaration = valid.clone();
+            declaration[field] = value.into();
+            assert!(
+                parse_gate_file(&declaration.to_string()).is_err(),
+                "{declaration}"
+            );
+        }
+        let mut unknown = valid;
+        unknown["unexpected"] = true.into();
+        assert!(parse_gate_file(&unknown.to_string()).is_err());
+    }
+
+    #[test]
     fn forwarding_keeps_explicit_defaults_and_raw_repeatable_values() {
         #[derive(Parser)]
         struct OptionsCli {
@@ -840,7 +938,9 @@ mod tests {
             let AgentTaskFanoutCommand::CookBatch(batch) = fanout.command;
             *batch
         }
+        let gate_file = serde_json::json!({"id":"shared-gate", "env":"SHARED_GATE", "source":std::env::current_dir().unwrap().join("Cargo.toml")}).to_string();
         let options = [
+            ("gate-file", gate_file.as_str()),
             ("backend", "fixture"), ("selector", "provider"), ("model", "model"),
             ("secret-env", "TOKEN"),
             ("provider-config", r#"{ "exact": true }"#),
