@@ -1226,6 +1226,9 @@ esac
 /// #10430: once recovery creates B, losing the controller's bounded health
 /// requests must leave enough durable evidence for the next invocation to
 /// authenticate B. It must never create an unjournaled C.
+///
+/// #17647: B still answers `/health` on its own host, so the failure is the
+/// tunnel's and B is left running rather than replaced.
 #[cfg(unix)]
 #[test]
 fn recovery_retry_reattaches_journaled_b_after_four_lost_health_requests() {
@@ -1237,7 +1240,8 @@ fn recovery_retry_reattaches_journaled_b_after_four_lost_health_requests() {
         let health_requests = Arc::new(AtomicUsize::new(0));
         let health_requests_for_server = Arc::clone(&health_requests);
         let endpoint = std::thread::spawn(move || {
-            for request_number in 0..10 {
+            // The first connect's host-side `/health` diagnosis is one extra request.
+            for request_number in 0..11 {
                 let (mut stream, _) = listener.accept().expect("endpoint request");
                 let mut request = [0; 4096];
                 let length = stream.read(&mut request).expect("read endpoint request");
@@ -1315,7 +1319,13 @@ esac
 
         let (first, first_exit) = connect("local-runner").expect("first connect result");
         assert_eq!(first_exit, 20);
+        assert_eq!(first.failure_kind, Some(RunnerFailureKind::TunnelFailure));
         let evidence = first.failure_evidence.expect("known B failure evidence");
+        assert_eq!(evidence.classification, "tunnel");
+        assert_eq!(
+            evidence.tunnel_state.as_deref(),
+            Some("established_then_health_failed")
+        );
         assert_eq!(evidence.known_remote_lease_id.as_deref(), Some("lease-b"));
         assert_eq!(evidence.known_remote_pid, Some(4242));
         assert_eq!(evidence.health_attempt_count, 4);
@@ -1358,10 +1368,164 @@ esac
             std::fs::read_to_string(&start_count).expect("generation count"),
             "1"
         );
-        assert_eq!(health_requests.load(Ordering::SeqCst), 7);
+        assert_eq!(health_requests.load(Ordering::SeqCst), 8);
         assert!(!journal_dir.join("pending-replacement.json").exists());
         assert!(!journal_dir.join("replacement-operation.json").exists());
         endpoint.join().expect("endpoint");
+    });
+}
+
+/// #17647: `ensure-running` reports a live daemon whose `/health` times out
+/// even on its own host. Connect must replace that exact daemon once (lease
+/// bound stop, then `ensure-running`) and attach the successor instead of
+/// looping on the wedged PID.
+#[cfg(unix)]
+#[test]
+fn runner_connect_replaces_an_owned_daemon_unresponsive_on_its_host() {
+    use std::os::unix::process::ExitStatusExt;
+
+    crate::test_support::with_isolated_home(|home| {
+        let daemon = home.path().join("remote-homeboy");
+        let started = home.path().join("started");
+        let stopped = home.path().join("stopped");
+        let stop_argv = home.path().join("stop-argv");
+        let mut wedged = std::process::Command::new("sleep")
+            .arg("600")
+            .spawn()
+            .expect("spawn wedged daemon process");
+        let wedged_pid = wedged.id();
+        // The wedged daemon accepts connections but never answers.
+        let wedged_listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+        let wedged_address = wedged_listener.local_addr().expect("address");
+        std::thread::spawn(move || {
+            for stream in wedged_listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let mut request = [0; 4096];
+                let _ = stream.read(&mut request);
+            }
+        });
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+        let address = listener.local_addr().expect("address");
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let mut request = [0; 4096];
+                let length = stream.read(&mut request).unwrap_or(0);
+                let request = String::from_utf8_lossy(&request[..length]);
+                let body = if request.starts_with("GET /health ") {
+                    r#"{"freshness":{"fresh":true,"restartable":true,"lease_id":"lease-new","pid":4343,"active_jobs":0},"pid":4343}"#
+                } else if request.starts_with("GET /jobs ") {
+                    r#"{"active_runner_jobs":[],"stale_runner_jobs":[]}"#
+                } else if request.starts_with("GET /version ") {
+                    r#"{"version":"0.284.0","build_identity":{"display":"homeboy 0.284.0+test"},"lease":{"lease_id":"lease-new"}}"#
+                } else {
+                    continue;
+                };
+                let _ = stream.write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        homeboy_test_support::write_executable(&daemon, format!(
+                r#"#!/bin/sh
+running() {{
+  printf '%s\n' "{{\"success\":true,\"data\":{{\"running\":true,\"fresh\":true,\"reachable\":true,\"state\":{{\"address\":\"$1\",\"pid\":$2,\"lease_id\":\"$3\",\"active_version\":\"0.284.0\",\"active_build\":\"homeboy 0.284.0+test\"}},\"freshness\":{{\"active_jobs\":0}}}}}}"
+}}
+case "$1 $2" in
+  "self identity")
+    printf '%s\n' '{{"success":true,"data":{{"version":"0.284.0","display":"homeboy 0.284.0+test","daemon_recovery_capabilities":[{{"id":"daemon-ensure-running-operation-id","version":1}}]}}}}'
+    ;;
+  "daemon status")
+    if [ -f "{stopped}" ]; then running "{address}" 4343 lease-new
+    elif [ -f "{started}" ]; then running "{wedged_address}" {wedged_pid} lease-wedged
+    else printf '%s\n' '{{"success":true,"data":{{"running":false,"fresh":false,"reachable":false,"freshness":{{"active_jobs":0}}}}}}'
+    fi
+    ;;
+  "daemon ensure-running")
+    if [ -f "{stopped}" ]; then
+      printf '%s\n' '{{"success":true,"data":{{"pid":4343,"address":"{address}","state_path":"/tmp/state.json","lease_id":"lease-new"}}}}'
+    else
+      : > "{started}"
+      printf '%s\n' '{{"success":true,"data":{{"pid":{wedged_pid},"address":"{wedged_address}","state_path":"/tmp/state.json","lease_id":"lease-wedged"}}}}'
+    fi
+    ;;
+  "daemon stop")
+    printf '%s\n' "$@" > "{stop_argv}"
+    kill -TERM {wedged_pid}
+    : > "{stopped}"
+    printf '%s\n' '{{"success":true,"data":{{"action":"stop"}}}}'
+    ;;
+esac
+"#,
+                address = address,
+                wedged_address = wedged_address,
+                wedged_pid = wedged_pid,
+                started = started.display(),
+                stopped = stopped.display(),
+                stop_argv = stop_argv.display(),
+            ), 0o755)
+        .expect("write remote Homeboy shim");
+
+        server::create(
+            &serde_json::json!({ "id": "local-runner", "host": "localhost", "user": "test" })
+                .to_string(),
+            false,
+        )
+        .expect("create local server");
+        crate::create(
+            &serde_json::json!({
+                "id": "local-runner",
+                "kind": "ssh",
+                "homeboy_path": daemon,
+            })
+            .to_string(),
+            false,
+        )
+        .expect("enable local runner");
+
+        let (report, exit_code) = connect("local-runner").expect("connect result");
+
+        let exited = (0..50).find_map(|_| {
+            let status = wedged.try_wait().expect("poll wedged daemon");
+            if status.is_none() {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            status
+        });
+        let _ = wedged.kill();
+        let _ = wedged.wait();
+        assert_eq!(exit_code, 0, "connect failed: {:?}", report.failure_message);
+        assert!(report.connected);
+        assert_eq!(report.remote_daemon_pid, Some(4343));
+        let warning = report.connection_warning.expect("replacement is reported");
+        assert!(
+            warning.starts_with("daemon_unresponsive_replaced:")
+                && warning.contains(&format!("PID {wedged_pid}")),
+            "{warning}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&stop_argv).expect("lease-bound stop ran"),
+            "daemon\nstop\n--lease-id\nlease-wedged\n"
+        );
+        assert_eq!(
+            exited.and_then(|status| status.signal()),
+            Some(libc::SIGTERM),
+            "the wedged daemon process was terminated"
+        );
+        let session = read_session("local-runner")
+            .expect("read session")
+            .expect("session");
+        assert_eq!(session.remote_daemon_lease_id.as_deref(), Some("lease-new"));
+        assert_eq!(session.remote_daemon_pid, Some(4343));
+        let journal_dir = homeboy_core::paths::runner_sessions_dir()
+            .expect("runner sessions")
+            .join("local-runner");
+        assert!(!journal_dir.join("pending-replacement.json").exists());
+        assert!(!journal_dir.join("replacement-operation.json").exists());
     });
 }
 
