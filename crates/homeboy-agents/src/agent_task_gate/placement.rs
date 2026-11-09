@@ -363,9 +363,21 @@ pub(super) fn dispatch(
     for attempt in 0..2 {
         let result = match active_transport().execute(cwd, request, supervision) {
             Ok(receipt) => receipt,
-            Err(error) => return Ok(non_execution_report(request, &error)),
+            Err(error) => {
+                let error = gate_execute_unavailable(error, "transport", None);
+                return Ok(non_execution_report(request, &error));
+            }
         };
-        request.verify_receipt(&result)?;
+        // A receipt the controller cannot bind is wrapper evidence, not a
+        // verdict on the candidate (#17649).
+        if let Err(error) = request.verify_receipt(&result) {
+            let error = gate_execute_unavailable(
+                error,
+                "receipt_verification",
+                result.artifact_ref.as_deref(),
+            );
+            return Ok(non_execution_report(request, &error));
+        }
         let failed = result
             .setup
             .iter()
@@ -410,6 +422,30 @@ pub(super) fn dispatch(
         report.setup = setup_attempts;
         return Ok(report);
     }
+    // `failed` means the declared command ran and returned non-zero (or
+    // rewrote the candidate it ran on). Any other failed receipt is the
+    // wrapper's own failure, so the gate is unavailable (#17649).
+    if receipt.report.status == AgentTaskGateStatus::Failed
+        && receipt.report.exit_code == 0
+        && receipt.report.workspace_mutation.is_none()
+    {
+        let mut details = serde_json::json!({});
+        if receipt.report.visibility != AgentTaskGateVisibility::Private {
+            details["stderr_tail"] = serde_json::json!(text_tail(&receipt.report.stderr, 20));
+        }
+        let error = gate_execute_unavailable(
+            Error::new(
+                homeboy_core::ErrorCode::InternalUnexpected,
+                "gate-execute reported a failed gate without a non-zero command exit",
+                details,
+            ),
+            "gate_execute",
+            receipt.artifact_ref.as_deref(),
+        );
+        let mut report = non_execution_report(request, &error);
+        report.setup = setup_attempts;
+        return Ok(report);
+    }
     let mut report = receipt.report;
     report.setup = setup_attempts;
     // The step is an in-memory compatibility view and is not on the wire.
@@ -430,6 +466,86 @@ pub(super) fn dispatch(
         "materialization": receipt.materialization,
     }));
     Ok(report)
+}
+
+/// Type a wrapper/receipt error as the retryable non-execution of its stage.
+/// A cancelled disposition stays cancelled; a missing stage is named.
+fn gate_execute_unavailable(mut error: Error, stage: &str, artifact_ref: Option<&str>) -> Error {
+    if !error.details.is_object() {
+        error.details = serde_json::json!({});
+    }
+    if error
+        .details
+        .get("stage")
+        .is_none_or(serde_json::Value::is_null)
+    {
+        error.details["stage"] = serde_json::json!(stage);
+    }
+    if error
+        .details
+        .get("gate_disposition")
+        .is_none_or(serde_json::Value::is_null)
+    {
+        error.details["gate_disposition"] = serde_json::json!("unavailable");
+    }
+    if let Some(artifact_ref) = artifact_ref {
+        error.details["artifact_ref"] = serde_json::json!(artifact_ref);
+    }
+    error.retryable.get_or_insert(true);
+    error
+}
+
+/// The typed cause `gate-execute` reports with its non-zero exit, so it never
+/// exits without one (#17649): the failed command with its exit code and
+/// output tail, the non-execution stage and cause, or `internal` with the
+/// stderr tail. `None` when the receipt passes.
+pub fn gate_execute_failure(receipt: &LabGateReceipt) -> Option<serde_json::Value> {
+    let report = &receipt.report;
+    let ready = receipt
+        .readiness
+        .as_ref()
+        .and_then(|value| value.get("status"))
+        .and_then(serde_json::Value::as_str)
+        == Some("ready");
+    if report.status == AgentTaskGateStatus::Succeeded || ready {
+        return None;
+    }
+    let visible = report.visibility != AgentTaskGateVisibility::Private;
+    let tail = |text: &str| visible.then(|| text_tail(text, 20));
+    let command = visible.then(|| report.command.join(" "));
+    let disposition = report.lab_receipt.as_ref().filter(|value| {
+        value.get("schema").and_then(serde_json::Value::as_str) == Some(LAB_GATE_DISPOSITION_SCHEMA)
+    });
+    let failure = if report.status == AgentTaskGateStatus::Failed
+        && (report.exit_code != 0 || report.workspace_mutation.is_some())
+    {
+        serde_json::json!({
+            "code": "gate.failed",
+            "message": format!("deterministic gate {} exited {}", report.id, report.exit_code),
+            "details": {"stage": "gate_command", "command": command, "exit_code": report.exit_code},
+            "stdout_tail": tail(&report.stdout),
+            "stderr_tail": tail(&report.stderr),
+            "retryable": false,
+        })
+    } else if let Some(disposition) = disposition {
+        serde_json::json!({
+            "code": disposition.get("error_code"),
+            "message": disposition.pointer("/diagnostic/message").and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("deterministic gate {} did not execute", report.id)),
+            "details": {"stage": disposition.get("stage"), "gate_disposition": disposition.get("disposition"), "command": command},
+            "retryable": disposition.get("retryable"),
+        })
+    } else {
+        serde_json::json!({
+            "code": homeboy_core::ErrorCode::InternalUnexpected.as_str(),
+            "message": format!("gate-execute ended without a gate result (gate status {:?})", report.status),
+            "details": {"stage": "gate_execute", "command": command},
+            "stderr_tail": tail(&report.stderr),
+            "retryable": true,
+        })
+    };
+    Some(homeboy_core::redaction::redact_json(&failure))
 }
 
 fn rebuild_terminal_step(report: &mut AgentTaskGateReport) {
@@ -860,9 +976,9 @@ fn execute_with_context_and_resources(
             )
         })
     } else if budget.remaining() < LAB_GATE_MIN_COMMAND_BUDGET {
-        // Setup finished but left no usable time: the gate timed out without
-        // running rather than starting under a meaningless limit.
-        Ok(budget.exhausted_before_command_report(&request))
+        // Setup finished but left no usable time: the command never started,
+        // so this is unavailable environment, not a candidate verdict.
+        Err(budget.exhausted_before_command_error())
     } else {
         let started = Instant::now();
         run_gate_argv_local(
@@ -1023,9 +1139,9 @@ impl LabGateBudget {
         }
     }
 
-    /// Setup left less than [`LAB_GATE_MIN_COMMAND_BUDGET`]: a timed-out gate
-    /// whose command never started (elapsed 0).
-    fn exhausted_before_command_report(&self, request: &LabGateRequest) -> AgentTaskGateReport {
+    /// Setup left less than [`LAB_GATE_MIN_COMMAND_BUDGET`]: the command never
+    /// started, so the gate is unavailable with the spent budget as its cause.
+    fn exhausted_before_command_error(&self) -> Error {
         let note = self
             .limit_note(
                 AgentTaskGateTermination::TimedOut,
@@ -1033,38 +1149,13 @@ impl LabGateBudget {
                 self.elapsed(),
             )
             .expect("timed-out note");
-        let stderr = format!("dependency setup left no time to run the gate; {note}");
-        let exit_code = 124;
-        let failure_evidence = gate_budget_failure_evidence(
-            &request.label,
-            exit_code,
-            "",
-            &stderr,
-            AgentTaskGateTermination::TimedOut,
-            false,
-            Some(self.remaining()),
-        )
-        .map(|mut evidence| {
-            evidence.summary = format!("{}; {note}", evidence.summary);
-            evidence
-        });
-        let mut report = AgentTaskGateReport::new(
-            format!("gate-{}", request.index),
-            request.argv.clone(),
-            exit_code,
-            "",
-            stderr,
-            failure_evidence,
-            request.visibility,
-            request.reveal_policy,
-            AgentTaskGateEnvironment::default(),
+        let mut error = Error::new(
+            homeboy_core::ErrorCode::DependencyStepFailed,
+            format!("dependency setup left no time to run the gate; {note}"),
+            serde_json::json!({"stage":"dependency_setup"}),
         );
-        report.termination = AgentTaskGateTermination::TimedOut;
-        report.test_execution_outcome = request
-            .declared_plan
-            .as_ref()
-            .map(|_| homeboy_engine_primitives::test_execution::TestExecutionOutcome::TimedOut);
-        report
+        error.retryable = Some(true);
+        error
     }
 }
 
@@ -1953,10 +2044,10 @@ mod tests {
         });
     }
 
-    /// #16938: setup that leaves less than the minimum command budget yields a
-    /// TimedOut gate report whose command never started.
+    /// #16938/#17649: setup that leaves less than the minimum command budget
+    /// never started the command, so the gate is unavailable, not failed.
     #[test]
-    fn exhausted_budget_before_the_command_is_a_timed_out_gate_report() {
+    fn exhausted_budget_before_the_command_is_unavailable() {
         let temp = tempfile::tempdir().unwrap();
         let request = request(temp.path());
         let budget = LabGateBudget {
@@ -1966,21 +2057,20 @@ mod tests {
             no_progress_limit: Duration::from_secs(30),
         };
 
-        let report = budget.exhausted_before_command_report(&request);
+        let report = non_execution_report(&request, &budget.exhausted_before_command_error());
 
-        assert_eq!(report.status, AgentTaskGateStatus::Failed);
-        assert_eq!(report.termination, AgentTaskGateTermination::TimedOut);
-        assert_eq!(report.exit_code, 124);
+        assert_eq!(report.status, AgentTaskGateStatus::Unavailable);
+        assert_eq!(report.exit_code, 0);
+        assert!(report.failure_evidence.is_none());
+        let receipt = report.lab_receipt.as_ref().unwrap();
+        assert_eq!(receipt["stage"], "dependency_setup");
+        assert_eq!(receipt["retryable"], true);
         assert!(
             report.stderr.contains(
                 "gate timed out after 0s (Lab gate limit 30s, 30s of it spent in dependency setup)"
             ),
             "{}",
             report.stderr
-        );
-        assert_eq!(
-            report.failure_evidence.unwrap().classification,
-            AgentTaskGateFailureClassification::ExecutionBudget
         );
     }
 
@@ -2301,6 +2391,179 @@ mod tests {
                 HomeboyGateResult::from(report.clone()).status,
                 HomeboyGateStatus::Failed
             );
+        });
+    }
+
+    /// A runner that executes the real gate on its own clone, then lets the
+    /// test break the wrapper the way production Lab infrastructure can.
+    struct TamperingRunnerTransport {
+        previous: Arc<dyn LabGateTransport>,
+    }
+    impl LabGateTransport for TamperingRunnerTransport {
+        fn declared_runner(&self, command: &str) -> Result<Option<String>> {
+            self.previous.declared_runner(command)
+        }
+        fn execute(
+            &self,
+            cwd: &Path,
+            request: &LabGateRequest,
+            supervision: Option<&GateSupervision>,
+        ) -> Result<LabGateReceipt> {
+            let Some(mode) = request.runner_id.strip_prefix("tamper-") else {
+                return self.previous.execute(cwd, request, supervision);
+            };
+            match mode {
+                "admission" => {
+                    return Err(Error::new(
+                        homeboy_core::ErrorCode::RunnerLabTransportFailure,
+                        "Lab gate runner admission is stale or unavailable",
+                        serde_json::json!({"gate_disposition":"unavailable", "stage":"admission"}),
+                    ))
+                }
+                "terminal-wait" => {
+                    return Err(Error::internal_unexpected("daemon job observation ended"))
+                }
+                _ => {}
+            }
+            let runner = tempfile::tempdir().unwrap();
+            assert!(Command::new("git")
+                .args(["clone", "-q"])
+                .arg(cwd)
+                .arg(runner.path())
+                .status()
+                .unwrap()
+                .success());
+            let mut receipt = execute_with_context(
+                request.clone(),
+                runner.path(),
+                &runner_context(&request.runner_id),
+            )?;
+            match mode {
+                // gate-execute exited 1 with a failed report its command never produced.
+                "causeless-exit" => receipt.report.status = AgentTaskGateStatus::Failed,
+                "unbound-receipt" => {
+                    receipt.candidate = AgentTaskPromotionCandidate::NonGit {
+                        disposition: "foreign".to_string(),
+                    }
+                }
+                _ => {}
+            }
+            Ok(receipt)
+        }
+    }
+
+    fn tampered_dispatch(script: &str, mode: &str) -> (LabGateRequest, AgentTaskGateReport) {
+        let previous = active_transport();
+        register_lab_gate_transport(Arc::new(TamperingRunnerTransport { previous }));
+        let temp = tempfile::tempdir().unwrap();
+        repository(temp.path());
+        let request = mutating_gate(temp.path(), &format!("tamper-{mode}"), script);
+        let report = dispatch(temp.path(), &request, None).unwrap();
+        (request, report)
+    }
+
+    /// #17649: a gate is `failed` only when its declared command ran and
+    /// returned non-zero, and that verdict carries command, exit and tail.
+    #[test]
+    fn only_a_command_that_ran_and_exited_non_zero_is_a_failed_gate() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let (request, report) = tampered_dispatch(
+                "printf 'ran\\n'; printf 'assertion failed\\n' >&2; exit 3",
+                "ran",
+            );
+
+            assert_eq!(report.status, AgentTaskGateStatus::Failed);
+            assert_eq!(report.exit_code, 3);
+            let evidence = report.failure_evidence.as_ref().unwrap();
+            assert_eq!(evidence.exit_code, 3);
+            assert_eq!(evidence.command, request.label);
+            assert!(report.command.join(" ").contains("exit 3"));
+            assert!(evidence.stderr_tail.contains("assertion failed"));
+            assert_eq!(
+                report.lab_receipt.as_ref().unwrap()["schema"],
+                LAB_GATE_RECEIPT_SCHEMA
+            );
+        });
+    }
+
+    /// #17649: admission, terminal-wait, unbound receipts and a failed report
+    /// no command produced are retryable `unavailable`, naming stage and cause.
+    #[test]
+    fn lab_infrastructure_failures_are_unavailable_with_stage_and_cause() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            for (mode, stage, code) in [
+                ("admission", "admission", "runner.lab_transport_failure"),
+                ("terminal-wait", "transport", "internal.unexpected"),
+                (
+                    "unbound-receipt",
+                    "receipt_verification",
+                    "validation.invalid_argument",
+                ),
+                ("causeless-exit", "gate_execute", "internal.unexpected"),
+            ] {
+                let (_, report) = tampered_dispatch("printf 'gate passed\\n' >&2", mode);
+
+                assert_eq!(report.status, AgentTaskGateStatus::Unavailable, "{mode}");
+                assert!(report.failure_evidence.is_none(), "{mode}");
+                let receipt = report.lab_receipt.as_ref().unwrap();
+                assert_eq!(receipt["executed"], false, "{mode}");
+                assert_eq!(receipt["stage"], stage, "{mode}");
+                assert_eq!(receipt["error_code"], code, "{mode}");
+                assert_eq!(receipt["retryable"], true, "{mode}");
+                assert_eq!(
+                    HomeboyGateResult::from(report.clone()).status,
+                    HomeboyGateStatus::Blocked,
+                    "{mode}"
+                );
+                if mode == "causeless-exit" {
+                    assert!(receipt["diagnostic"]["details"]["stderr_tail"]
+                        .as_str()
+                        .unwrap()
+                        .contains("gate passed"));
+                }
+            }
+        });
+    }
+
+    /// #17649: every non-passing receipt gives gate-execute a typed cause for
+    /// its non-zero exit: the failed command, the non-execution stage, or
+    /// `internal` with the stderr tail.
+    #[test]
+    fn gate_execute_never_exits_non_zero_without_a_typed_cause() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let temp = tempfile::tempdir().unwrap();
+            repository(temp.path());
+            let passed =
+                execute_with_context(request(temp.path()), temp.path(), &lab_context()).unwrap();
+            assert_eq!(gate_execute_failure(&passed), None);
+
+            let failing = mutating_gate(temp.path(), "lab", "printf 'boom\\n' >&2; exit 4");
+            let failed = execute_with_context(failing, temp.path(), &lab_context()).unwrap();
+            let failure = gate_execute_failure(&failed).unwrap();
+            assert_eq!(failure["code"], "gate.failed");
+            assert_eq!(failure["details"]["exit_code"], 4);
+            assert!(failure["details"]["command"]
+                .as_str()
+                .unwrap()
+                .contains("exit 4"));
+            assert!(failure["stderr_tail"].as_str().unwrap().contains("boom"));
+
+            let mut causeless = failed.clone();
+            causeless.report.exit_code = 0;
+            let failure = gate_execute_failure(&causeless).unwrap();
+            assert_eq!(failure["code"], "internal.unexpected");
+            assert_eq!(failure["details"]["stage"], "gate_execute");
+            assert!(failure["stderr_tail"].as_str().unwrap().contains("boom"));
+
+            let setup = tempfile::tempdir().unwrap();
+            repository_with_dependency_install(setup.path(), "echo install broke >&2; exit 1");
+            let unavailable =
+                execute_with_context(request(setup.path()), setup.path(), &lab_context()).unwrap();
+            assert_eq!(unavailable.report.status, AgentTaskGateStatus::Unavailable);
+            let failure = gate_execute_failure(&unavailable).unwrap();
+            assert_eq!(failure["code"], "dependency_step_failed");
+            assert_eq!(failure["details"]["stage"], "dependency_setup");
+            assert!(!failure["message"].as_str().unwrap().is_empty());
         });
     }
 }

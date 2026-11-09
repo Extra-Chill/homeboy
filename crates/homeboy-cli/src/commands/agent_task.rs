@@ -455,6 +455,9 @@ pub(crate) fn run_with_cook_progress_and_provenance(
             } else {
                 1
             };
+            // A non-zero exit always names its typed cause (#17649).
+            let failure =
+                homeboy::agents::agent_tasks::gate::placement::gate_execute_failure(&receipt);
             if let Some(path) = receipt_file {
                 let bytes = serde_json::to_vec(&receipt).map_err(|error| {
                     homeboy::core::Error::internal_json(error.to_string(), None)
@@ -479,20 +482,22 @@ pub(crate) fn run_with_cook_progress_and_provenance(
                 file.open(path)
                     .and_then(|mut file| file.write_all(&bytes))
                     .map_err(|error| homeboy::core::Error::internal_io(error.to_string(), None))?;
-                return Ok((
-                    serde_json::json!({"schema":"homeboy/lab-gate-receipt-location/v1", "sha256":homeboy_engine_primitives::content_hash::sha256_hex(&bytes), "status":receipt.report.status, "readiness":receipt.readiness.as_ref().map(|value| value.get("status")), "executed":receipt.readiness.is_none()}),
-                    exit_code,
-                ));
+                let mut location = serde_json::json!({"schema":"homeboy/lab-gate-receipt-location/v1", "sha256":homeboy_engine_primitives::content_hash::sha256_hex(&bytes), "status":receipt.report.status, "readiness":receipt.readiness.as_ref().map(|value| value.get("status")), "executed":receipt.readiness.is_none()});
+                if let Some(failure) = failure {
+                    location["failure"] = failure;
+                }
+                return Ok((location, exit_code));
             }
-            Ok((
-                serde_json::to_value(receipt).map_err(|error| {
-                    homeboy::core::Error::internal_json(
-                        error.to_string(),
-                        Some("serialize Lab gate receipt".to_string()),
-                    )
-                })?,
-                exit_code,
-            ))
+            let mut value = serde_json::to_value(receipt).map_err(|error| {
+                homeboy::core::Error::internal_json(
+                    error.to_string(),
+                    Some("serialize Lab gate receipt".to_string()),
+                )
+            })?;
+            if let Some(failure) = failure {
+                value["failure"] = failure;
+            }
+            Ok((value, exit_code))
         }
         AgentTaskCommand::GateFeedback(feedback_args) => review::gate_feedback(feedback_args),
         AgentTaskCommand::Providers(providers_args) => review::providers(providers_args),

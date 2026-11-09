@@ -659,19 +659,26 @@ pub(crate) fn connect_service_runner(runner_id: &str) -> Result<(RunnerConnectRe
     }
 
     let expected_version = daemon.version.clone().unwrap_or(identity.version.clone());
-    let (local_port, tunnel_pid, tunnel_process_start_identity, local_url, daemon) =
-        match connect_remote_daemon(connection_daemon::RemoteDaemonConnectRequest {
-            server: &target.server,
-            homeboy,
-            daemon,
-            expected_version: &expected_version,
-            expected_identity: &expected_identity,
-            runner_id,
-            session_path: &session_path,
-        }) {
-            Ok(connection) => connection,
-            Err(report) => return Ok(*report),
-        };
+    let connection_daemon::RemoteDaemonConnection {
+        local_port,
+        tunnel_pid,
+        tunnel_process_start_identity,
+        local_url,
+        daemon,
+        ..
+    } = match connect_remote_daemon(connection_daemon::RemoteDaemonConnectRequest {
+        server: &target.server,
+        homeboy,
+        daemon,
+        expected_version: &expected_version,
+        expected_identity: &expected_identity,
+        runner_id,
+        session_path: &session_path,
+        unresponsive_recovery: None,
+    }) {
+        Ok(connection) => connection,
+        Err(report) => return Ok(*report),
+    };
 
     if let Some(previous) = read_session(runner_id)? {
         if previous.tunnel_pid != tunnel_pid {

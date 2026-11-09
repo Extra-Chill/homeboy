@@ -2722,6 +2722,34 @@ where
     }
     // Health must never reconcile or inspect the job ledger on a request worker.
     if method == "GET" && path.split('?').next() == Some("/health") {
+        let lease = heartbeat_lease().ok();
+        let mut freshness = job_store
+            .daemon_freshness_snapshot
+            .lock()
+            .expect("health snapshot lock")
+            .clone();
+        if lease.is_none()
+            || freshness.as_ref().is_some_and(|snapshot| {
+                snapshot.lease_id.as_deref() != lease.as_ref().map(|lease| lease.lease_id.as_str())
+            })
+        {
+            // The cached lease is no longer proven live. Preserve the snapshot,
+            // but fail closed until the background updater observes this revision.
+            let stale_reason_code = if lease.is_none() {
+                state_path()
+                    .and_then(|path| validate_lease_file(&path))
+                    .ok()
+                    .and_then(|validation| validation.stale_reason_code)
+                    .unwrap_or(DaemonStaleReasonCode::LeaseMissing)
+            } else {
+                DaemonStaleReasonCode::LeaseMissing
+            };
+            if let Some(snapshot) = freshness.as_mut() {
+                snapshot.fresh = false;
+                snapshot.stale_reason_code = Some(stale_reason_code);
+            }
+            job_store.health_revision.fetch_add(1, Ordering::Release);
+        }
         return HttpResponse {
             status_code: 200,
             body: json!({
@@ -2729,9 +2757,8 @@ where
                 "pid": std::process::id(),
                 "version": VERSION,
                 "build_identity": build_identity::current(),
-                "lease": heartbeat_lease().ok(),
-                "freshness": job_store.daemon_freshness_snapshot.lock()
-                    .expect("health snapshot lock").clone(),
+                "lease": lease,
+                "freshness": freshness,
             }),
             artifact: None,
         };
@@ -6435,6 +6462,24 @@ mod tests {
             refresh_daemon_freshness_snapshot(&store);
             assert_eq!(
                 route_with_job_store("GET", "/health", &store).body["freshness"],
+                computed
+            );
+
+            // A publication gap must invalidate even a previously fresh snapshot.
+            assert_eq!(computed["fresh"], true);
+            fs::remove_file(state_path().unwrap()).unwrap();
+            let revision = store.health_revision.load(Ordering::Acquire);
+            let response = route_with_job_store("GET", "/health", &store);
+            assert!(response.body["lease"].is_null());
+            assert_eq!(response.body["freshness"]["fresh"], false);
+            assert_eq!(
+                response.body["freshness"]["stale_reason_code"],
+                "lease_missing"
+            );
+            assert!(store.health_revision.load(Ordering::Acquire) > revision);
+            assert_eq!(
+                serde_json::to_value(store.daemon_freshness_snapshot.lock().unwrap().clone())
+                    .unwrap(),
                 computed
             );
         });

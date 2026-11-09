@@ -978,37 +978,78 @@ fn ensure_remote_daemon_inner(
         }
         RemoteDaemonConnectAction::ReplaceIdleStale
         | RemoteDaemonConnectAction::ReplaceUnhealthyExactOwner => {
-            // Prove idempotent replacement support before stopping A. Otherwise
-            // a controller response loss could leave no recoverable owner.
-            negotiate_ensure_running_operation_id(
-                replacement_operation_id,
-                daemon_recovery_capabilities,
-            )?;
-            // Persist B's idempotent receipt key before removing A. A retry then
-            // replays this command before inspecting or replacing any lease.
-            journal_ensure_running_replay(
-                runner_id,
-                homeboy,
-                replacement_operation_id,
-                registry_lock_held,
-            )?;
             let daemon = status.daemon.as_ref().expect("replacement requires daemon");
             let lease_id = daemon
                 .lease_id
                 .as_deref()
                 .expect("replacement requires lease");
-            remote_daemon_force_stop(client, homeboy, runner_id, lease_id)?;
-            let replacement =
-                remote_daemon_ensure_running(client, homeboy, runner_id, replacement_operation_id)?;
-            Ok(verify_remote_daemon_replacement(
+            replace_owned_remote_daemon(OwnedDaemonReplacement {
                 client,
                 homeboy,
                 runner_id,
-                &replacement,
+                lease_id,
+                replacement_operation_id,
+                registry_lock_held,
+                daemon_recovery_capabilities,
                 configured_identity,
-            )?)
+            })
         }
     }
+}
+
+pub(super) struct OwnedDaemonReplacement<'a> {
+    pub(super) client: &'a SshClient,
+    pub(super) homeboy: &'a str,
+    pub(super) runner_id: &'a str,
+    /// The exact lease being replaced. The remote stop refuses any other lease.
+    pub(super) lease_id: &'a str,
+    pub(super) replacement_operation_id: Option<&'a str>,
+    pub(super) registry_lock_held: bool,
+    pub(super) daemon_recovery_capabilities: Option<&'a [LabCapabilityVersion]>,
+    pub(super) configured_identity: &'a str,
+}
+
+/// Replace one controller-owned daemon generation A with B.
+///
+/// The remote lease-bound `daemon stop` revalidates A's lease and startup-token
+/// ownership before SIGTERM and again before escalating to SIGKILL after a
+/// short grace. B then starts through the journaled `ensure-running` boundary,
+/// takes the store's owner lock, and re-adopts the detached jobs A left, as
+/// after any daemon restart.
+pub(super) fn replace_owned_remote_daemon(
+    request: OwnedDaemonReplacement<'_>,
+) -> std::result::Result<RemoteDaemon, RemoteDaemonEnsureError> {
+    let OwnedDaemonReplacement {
+        client,
+        homeboy,
+        runner_id,
+        lease_id,
+        replacement_operation_id,
+        registry_lock_held,
+        daemon_recovery_capabilities,
+        configured_identity,
+    } = request;
+    // Prove idempotent replacement support before stopping A. Otherwise
+    // a controller response loss could leave no recoverable owner.
+    negotiate_ensure_running_operation_id(replacement_operation_id, daemon_recovery_capabilities)?;
+    // Persist B's idempotent receipt key before removing A. A retry then
+    // replays this command before inspecting or replacing any lease.
+    journal_ensure_running_replay(
+        runner_id,
+        homeboy,
+        replacement_operation_id,
+        registry_lock_held,
+    )?;
+    remote_daemon_force_stop(client, homeboy, runner_id, lease_id)?;
+    let replacement =
+        remote_daemon_ensure_running(client, homeboy, runner_id, replacement_operation_id)?;
+    Ok(verify_remote_daemon_replacement(
+        client,
+        homeboy,
+        runner_id,
+        &replacement,
+        configured_identity,
+    )?)
 }
 
 pub(super) fn fence_daemon_admission(
@@ -2036,9 +2077,18 @@ pub(super) struct EnsureRunningFailure {
     pub(super) safe_next_action: String,
 }
 
-enum RemoteDaemonEnsureError {
+pub(super) enum RemoteDaemonEnsureError {
     Other(String),
     EnsureRunning(EnsureRunningFailure),
+}
+
+impl RemoteDaemonEnsureError {
+    pub(super) fn into_message(self) -> String {
+        match self {
+            Self::Other(message) => message,
+            Self::EnsureRunning(failure) => failure.message,
+        }
+    }
 }
 
 impl From<String> for RemoteDaemonEnsureError {
@@ -2559,12 +2609,8 @@ pub(super) fn restart_remote_daemon_in_place(
             "daemon lease `{previous_lease}` still serves after its stop; refusing to start a second owner on its state directory"
         ));
     }
-    let restarted = remote_daemon_ensure_running(client, homeboy, runner_id, None).map_err(
-        |error| match error {
-            RemoteDaemonEnsureError::Other(message) => message,
-            RemoteDaemonEnsureError::EnsureRunning(failure) => failure.message,
-        },
-    )?;
+    let restarted = remote_daemon_ensure_running(client, homeboy, runner_id, None)
+        .map_err(RemoteDaemonEnsureError::into_message)?;
     if restarted.lease_id.as_deref() == Some(previous_lease) {
         return Err(format!(
             "ensure-running returned the stopped daemon lease `{previous_lease}` instead of restarting it"

@@ -8,12 +8,13 @@ use serde_json::Value;
 
 use homeboy_core::daemon::{DaemonFreshnessReport, DaemonStaleReasonCode};
 use homeboy_core::engine::shell;
-use homeboy_core::server::Server;
+use homeboy_core::server::{Server, SshClient};
 
 use super::super::session::{RunnerStaleRuntimePath, RunnerTunnelProcessStartIdentity};
 use super::{
-    failed_connect, open_loopback_tunnel, parse_loopback_daemon_addr, reserve_loopback_port,
-    wait_for_tcp, RemoteDaemon,
+    failed_connect, open_loopback_tunnel, parse_loopback_daemon_addr, remote_daemon_status,
+    replace_owned_remote_daemon, reserve_loopback_port, wait_for_tcp, OwnedDaemonReplacement,
+    RemoteDaemon,
 };
 use crate::connection::remote_daemon::parse_json_from_mixed_stdout;
 use crate::daemon_repair;
@@ -42,18 +43,58 @@ pub(super) struct RemoteDaemonConnectRequest<'a> {
     pub(super) expected_identity: &'a str,
     pub(super) runner_id: &'a str,
     pub(super) session_path: &'a Path,
+    /// Present only for an automatic `runner connect` that owns `daemon`
+    /// through its session or `ensure-running` record. A tunnel health failure
+    /// is then diagnosed on the runner host, and a daemon that is also
+    /// unresponsive there is replaced once.
+    pub(super) unresponsive_recovery: Option<UnresponsiveDaemonRecovery<'a>>,
 }
 
-type RemoteDaemonConnectResult = std::result::Result<
-    (
-        u16,
-        Option<u32>,
-        Option<RunnerTunnelProcessStartIdentity>,
-        String,
-        RemoteDaemon,
-    ),
-    Box<(RunnerConnectReport, i32)>,
->;
+pub(super) struct UnresponsiveDaemonRecovery<'a> {
+    pub(super) client: &'a SshClient,
+    pub(super) server_id: &'a str,
+    pub(super) replacement_operation_id: &'a str,
+    pub(super) daemon_recovery_capabilities: Option<&'a [LabCapabilityVersion]>,
+}
+
+pub(super) struct RemoteDaemonConnection {
+    pub(super) local_port: u16,
+    pub(super) tunnel_pid: Option<u32>,
+    pub(super) tunnel_process_start_identity: Option<RunnerTunnelProcessStartIdentity>,
+    pub(super) local_url: String,
+    pub(super) daemon: RemoteDaemon,
+    /// Set when the requested daemon was alive but unresponsive on its own
+    /// host and `daemon` is its replacement.
+    pub(super) replaced_unresponsive: Option<ReplacedUnresponsiveDaemon>,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct ReplacedUnresponsiveDaemon {
+    pub(super) pid: u32,
+    pub(super) lease_id: String,
+    pub(super) host_health_error: String,
+}
+
+impl ReplacedUnresponsiveDaemon {
+    pub(super) const REASON: &'static str = "daemon_unresponsive_replaced";
+
+    pub(super) fn report_warning(&self, replacement: &RemoteDaemon) -> String {
+        format!(
+            "{}: remote daemon PID {} (lease `{}`) was alive but its /health did not answer on the runner host ({}); it was stopped and replaced by PID {}, which re-adopts its detached jobs",
+            Self::REASON,
+            self.pid,
+            self.lease_id,
+            self.host_health_error,
+            replacement
+                .pid
+                .map(|pid| pid.to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
+        )
+    }
+}
+
+type RemoteDaemonConnectResult =
+    std::result::Result<RemoteDaemonConnection, Box<(RunnerConnectReport, i32)>>;
 type TunnelOpenResult = std::result::Result<
     (
         u16,
@@ -64,18 +105,210 @@ type TunnelOpenResult = std::result::Result<
     Box<(RunnerConnectReport, i32)>,
 >;
 
+/// Why one tunnel attachment to a daemon failed.
+enum AttachFailure {
+    /// `/health` never answered through the established tunnel.
+    HealthUnreachable(Box<(RunnerConnectReport, i32)>),
+    Other(Box<(RunnerConnectReport, i32)>),
+}
+
 pub(super) fn connect_remote_daemon(
     request: RemoteDaemonConnectRequest<'_>,
 ) -> RemoteDaemonConnectResult {
+    let report = match attach_remote_daemon(&request, &request.daemon) {
+        Ok(tunnel) => return Ok(connection(tunnel, request.daemon, None)),
+        Err(AttachFailure::Other(report)) => return Err(report),
+        Err(AttachFailure::HealthUnreachable(report)) => report,
+    };
+    let Some(recovery) = request.unresponsive_recovery.as_ref() else {
+        return Err(report);
+    };
+    // The tunnel alone cannot tell "the tunnel can't reach it" from "the
+    // daemon is unresponsive on its own host". Ask the host.
+    let host_health_error = match probe_host_health(recovery.client, &request.daemon) {
+        HostHealth::Answers => return Err(tunnel_failure_report(report)),
+        HostHealth::Inconclusive => return Err(report),
+        HostHealth::Unresponsive(error) => error,
+    };
+    let (Some(pid), Some(lease_id)) = (request.daemon.pid, request.daemon.lease_id.clone()) else {
+        return Err(report);
+    };
+    if !owned_daemon_is_alive(&request, recovery, pid, &lease_id) {
+        return Err(report);
+    }
+    let replacement = match replace_unresponsive_daemon(&request, recovery, &lease_id) {
+        Ok(replacement) => replacement,
+        Err(message) => {
+            let (mut report, exit_code) = *report;
+            report.failure_message = Some(format!(
+                "{}; replacing unresponsive daemon PID {pid} failed: {message}",
+                report.failure_message.unwrap_or_default()
+            ));
+            return Err(Box::new((report, exit_code)));
+        }
+    };
+    // Exactly one replacement per connect: whatever the successor's attachment
+    // reports is the result.
+    match attach_remote_daemon(&request, &replacement) {
+        Ok(tunnel) => Ok(connection(
+            tunnel,
+            replacement,
+            Some(ReplacedUnresponsiveDaemon {
+                pid,
+                lease_id,
+                host_health_error,
+            }),
+        )),
+        Err(AttachFailure::HealthUnreachable(report) | AttachFailure::Other(report)) => Err(report),
+    }
+}
+
+fn connection(
+    (local_port, tunnel_pid, tunnel_process_start_identity, local_url): (
+        u16,
+        Option<u32>,
+        Option<RunnerTunnelProcessStartIdentity>,
+        String,
+    ),
+    daemon: RemoteDaemon,
+    replaced_unresponsive: Option<ReplacedUnresponsiveDaemon>,
+) -> RemoteDaemonConnection {
+    RemoteDaemonConnection {
+        local_port,
+        tunnel_pid,
+        tunnel_process_start_identity,
+        local_url,
+        daemon,
+        replaced_unresponsive,
+    }
+}
+
+/// A daemon that answers `/health` on its own host is healthy: the failure
+/// belongs to the tunnel, and the daemon is left untouched.
+fn tunnel_failure_report(
+    report: Box<(RunnerConnectReport, i32)>,
+) -> Box<(RunnerConnectReport, i32)> {
+    let (mut report, exit_code) = *report;
+    report.failure_kind = Some(RunnerFailureKind::TunnelFailure);
+    report.failure_message = Some(format!(
+        "{}; the daemon answered /health on the runner host, so the SSH tunnel failed and the daemon was left running",
+        report.failure_message.unwrap_or_default()
+    ));
+    if let Some(evidence) = report.failure_evidence.as_mut() {
+        evidence.classification = "tunnel".to_string();
+    }
+    Box::new((report, exit_code))
+}
+
+#[derive(Debug)]
+enum HostHealth {
+    Answers,
+    /// The daemon's listener refused, reset, or timed out on its own host.
+    Unresponsive(String),
+    /// The probe itself failed (SSH, missing curl), proving nothing.
+    Inconclusive,
+}
+
+/// Probe `/health` through the runner host's loopback over the existing SSH
+/// transport, bounded by the same budget as every controller health probe.
+fn probe_host_health(client: &SshClient, daemon: &RemoteDaemon) -> HostHealth {
+    if parse_loopback_daemon_addr(&daemon.address).is_err() {
+        return HostHealth::Inconclusive;
+    }
+    let command = format!(
+        "curl --fail --silent --show-error --max-time {} {}/health",
+        HEALTH_PROBE_TIMEOUT.as_secs(),
+        shell::quote_arg(&format!("http://{}", daemon.address))
+    );
+    let output =
+        client.execute_with_timeout(&command, HEALTH_PROBE_TIMEOUT + Duration::from_secs(5));
+    match output.exit_code {
+        // Success, or an HTTP error status: either way the daemon answered.
+        0 | 22 => HostHealth::Answers,
+        // Connection refused, timeout, empty reply, receive failure.
+        7 | 28 | 52 | 56 => HostHealth::Unresponsive(format!(
+            "curl exit {}: {}",
+            output.exit_code,
+            output.stderr.trim()
+        )),
+        _ => HostHealth::Inconclusive,
+    }
+}
+
+/// The daemon is ours only while the runner's daemon status still records the
+/// exact lease and PID this connect attached to, and that PID is alive.
+fn owned_daemon_is_alive(
+    request: &RemoteDaemonConnectRequest<'_>,
+    recovery: &UnresponsiveDaemonRecovery<'_>,
+    pid: u32,
+    lease_id: &str,
+) -> bool {
+    let Ok(status) = remote_daemon_status(recovery.client, request.homeboy, request.runner_id)
+    else {
+        return false;
+    };
+    status.reachable
+        && status.stale_reason_code != Some(DaemonStaleReasonCode::PidDead)
+        && status.daemon.as_ref().is_some_and(|live| {
+            live.pid == Some(pid)
+                && live.lease_id.as_deref() == Some(lease_id)
+                && live.address == request.daemon.address
+        })
+}
+
+fn replace_unresponsive_daemon(
+    request: &RemoteDaemonConnectRequest<'_>,
+    recovery: &UnresponsiveDaemonRecovery<'_>,
+    lease_id: &str,
+) -> std::result::Result<RemoteDaemon, String> {
+    let replacement = replace_owned_remote_daemon(OwnedDaemonReplacement {
+        client: recovery.client,
+        homeboy: request.homeboy,
+        runner_id: request.runner_id,
+        lease_id,
+        replacement_operation_id: Some(recovery.replacement_operation_id),
+        registry_lock_held: false,
+        daemon_recovery_capabilities: recovery.daemon_recovery_capabilities,
+        configured_identity: request.expected_identity,
+    })
+    .map_err(|error| error.into_message())?;
+    // The successor exists before its tunnel does. Journal its coordinates so
+    // an interrupted attach retries B rather than replacing it again.
+    super::pending_replacement_session(
+        request.runner_id,
+        recovery.server_id,
+        &replacement,
+        request.expected_version,
+        request.expected_identity,
+    )
+    .and_then(|session| {
+        super::replacement_journal::record_pending_replacement(request.runner_id, &session)
+    })
+    .map_err(|error| error.message)?;
+    Ok(replacement)
+}
+
+fn attach_remote_daemon(
+    request: &RemoteDaemonConnectRequest<'_>,
+    daemon: &RemoteDaemon,
+) -> std::result::Result<
+    (
+        u16,
+        Option<u32>,
+        Option<RunnerTunnelProcessStartIdentity>,
+        String,
+    ),
+    AttachFailure,
+> {
     let RemoteDaemonConnectRequest {
         server,
         homeboy,
-        daemon,
         expected_version,
         expected_identity,
         runner_id,
         session_path,
-    } = request;
+        ..
+    } = *request;
     let failed_after_tunnel =
         |tunnel_pid: Option<u32>,
          tunnel_process_start_identity: Option<RunnerTunnelProcessStartIdentity>,
@@ -112,10 +345,11 @@ pub(super) fn connect_remote_daemon(
             Box::new((report, exit_code))
         };
     let (local_port, tunnel_pid, tunnel_process_start_identity, local_url) =
-        open_daemon_tunnel(server, &daemon, runner_id, session_path)?;
+        open_daemon_tunnel(server, daemon, runner_id, session_path)
+            .map_err(AttachFailure::Other)?;
     match probe_daemon_health_until_durable(
         &local_url,
-        &daemon,
+        daemon,
         tunnel_pid,
         tunnel_process_start_identity.as_ref(),
     ) {
@@ -125,42 +359,50 @@ pub(super) fn connect_remote_daemon(
                 tunnel_pid,
                 tunnel_process_start_identity,
                 local_url,
-                daemon,
             ))
         }
-        Ok(()) => Err(failed_after_tunnel(
+        Ok(()) => Err(AttachFailure::Other(failed_after_tunnel(
             tunnel_pid,
             tunnel_process_start_identity,
             "remote daemon endpoint identity did not match the controller-selected generation; refusing to publish it".to_string(),
             Some("endpoint_identity".to_string()),
             Vec::new(),
             &local_url,
-        )),
+        ))),
         Err(failure) => {
             let durability_stage = Some(failure_stage(&failure).to_string());
             match failure {
-                DaemonHealthProbeFailure::IdentityMismatch(report) => Err(failed_after_tunnel(
+                DaemonHealthProbeFailure::IdentityMismatch(report) => Err(AttachFailure::Other(failed_after_tunnel(
                     tunnel_pid,
                     tunnel_process_start_identity,
                     format!(
                         "remote daemon health identity changed or is unavailable (expected lease {:?}, PID {:?}; got lease {:?}, PID {:?}); refusing to write session{}",
                         daemon.lease_id, daemon.pid, report.freshness.lease_id, report.pid,
-                        active_job_recovery_guidance(&daemon),
+                        active_job_recovery_guidance(daemon),
                     ),
                     durability_stage,
                     Vec::new(),
                     &local_url,
-                )),
-                DaemonHealthProbeFailure::Unreachable { message, attempts }
-                | DaemonHealthProbeFailure::TunnelExited { message, attempts } => {
-                    Err(failed_after_tunnel(
+                ))),
+                DaemonHealthProbeFailure::Unreachable { message, attempts } => {
+                    Err(AttachFailure::HealthUnreachable(failed_after_tunnel(
                         tunnel_pid,
                         tunnel_process_start_identity,
                         message,
                         durability_stage,
                         attempts,
                         &local_url,
-                    ))
+                    )))
+                }
+                DaemonHealthProbeFailure::TunnelExited { message, attempts } => {
+                    Err(AttachFailure::Other(failed_after_tunnel(
+                        tunnel_pid,
+                        tunnel_process_start_identity,
+                        message,
+                        durability_stage,
+                        attempts,
+                        &local_url,
+                    )))
                 }
             }
         }
