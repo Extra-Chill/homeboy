@@ -586,13 +586,18 @@ fn post_apply_checkpoint_resume_refuses_candidate_tree_mismatch_without_gating()
     );
 
     // Once the destination is the candidate tree again, the same checkpoint
-    // resumes.
+    // resumes, reusing the pass already recorded for that exact tree,
+    // command and environment (#17520).
     git(&worktree_path, &["checkout", "--", "."]);
     let restored = resume_promoted_patch(options, &worktree_path, &checkpoint)
         .expect("resume after the destination is the candidate again");
     assert_eq!(restored.status, AgentTaskPromotionStatus::Applied);
     assert_eq!(restored.candidate.as_ref().unwrap().candidate_sha, sha);
-    assert_eq!(gate_runs(), 2);
+    assert_eq!(
+        gate_runs(),
+        1,
+        "the restored candidate tree reuses its pass"
+    );
 }
 
 #[test]
