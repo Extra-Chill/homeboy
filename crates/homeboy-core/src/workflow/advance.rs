@@ -496,7 +496,9 @@ impl Machine<'_> {
                 .clone()
                 .unwrap_or_else(|| result.status.as_str().to_string())
         };
-        step.error = result.error.clone();
+        step.error = (outcome != "succeeded")
+            .then(|| result.error.clone())
+            .flatten();
         step.output = result.output.clone();
         step.run_id = result.run_id.clone();
         let attempt = step.attempt;
@@ -549,7 +551,9 @@ impl Machine<'_> {
                 .clone()
                 .unwrap_or_else(|| result.status.as_str().to_string())
         };
-        item.error = result.error.clone();
+        item.error = (outcome != "succeeded")
+            .then(|| result.error.clone())
+            .flatten();
         item.output = result.output.clone();
         item.run_id = result.run_id.clone();
         item.outcome = Some(outcome.clone());

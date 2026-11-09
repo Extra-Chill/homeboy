@@ -788,11 +788,71 @@ fn failure_diagnostics_for_data(
         return Some(declared_failure_diagnostics(exit_code, failure, "/message"));
     }
 
+    if let Some(hold) = data.get("hold").filter(|hold| hold["reason"].is_string()) {
+        let reason = hold["reason"].as_str()?;
+        let mut message = format!("held: {}", reason.replace('_', " "));
+        if reason == "head_moved" {
+            message.push_str(&format!(
+                " (expected {}, found {})",
+                data["expected_head_sha"].as_str().unwrap_or("unknown"),
+                data["actual_head_sha"].as_str().unwrap_or("unknown")
+            ));
+        }
+        if let Some(names) = hold["names"].as_array() {
+            message.push_str(&format!(
+                ": {}",
+                names
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        return Some(CommandDiagnostics {
+            code: format!("git.pr.hold.{reason}"),
+            message,
+            details: serde_json::json!({
+                "exit_code": exit_code,
+                "hold": hold,
+                "expected_head_sha": data["expected_head_sha"],
+                "actual_head_sha": data["actual_head_sha"],
+            }),
+            hints: None,
+            retryable: None,
+            failure_digest: None,
+        });
+    }
     let failure_digest = failure_digest_for_data(data).or_else(|| {
         run.as_ref()
             .and_then(|run| failure_digest_for_run(&run.id, artifacts))
     });
-    failure_digest.map(|failure_digest| command_failed_diagnostics(exit_code, failure_digest))
+    if let Some(digest) = failure_digest {
+        return Some(command_failed_diagnostics(exit_code, digest));
+    }
+    // A typed terminal result is itself an explanation, even without a
+    // separate failure digest. Keep its causal fields at the shared boundary.
+    if let Some(status) = data.get("status").and_then(Value::as_str) {
+        return Some(CommandDiagnostics {
+            code: "command.result".to_string(),
+            message: data
+                .get("reason")
+                .and_then(Value::as_str)
+                .filter(|reason| !reason.trim().is_empty())
+                .map(str::to_string)
+                .or_else(|| {
+                    data.get("stop_reason")
+                        .and_then(Value::as_str)
+                        .map(|reason| format!("{status}: {reason}"))
+                })
+                .unwrap_or_else(|| status.to_string()),
+            details: serde_json::json!({ "exit_code": exit_code, "result": data }),
+            hints: None,
+            retryable: None,
+            failure_digest: None,
+        });
+    }
+
+    None
 }
 
 fn deploy_failure_diagnostics(exit_code: i32, data: &Value) -> Option<CommandDiagnostics> {
@@ -3292,6 +3352,99 @@ mod tests {
         assert!(!value
             .to_string()
             .contains("without reporting a failure cause"));
+    }
+
+    #[test]
+    fn typed_nonzero_results_survive_public_response_boundary() {
+        for (identity, payload, code, summary) in [
+            (
+                CommandIdentity::with_operation("git", "pr merge-when-green"),
+                json!({"merged": false, "expected_head_sha": "abc123", "actual_head_sha": "def456", "hold": {"reason": "head_moved"}}),
+                "git.pr.hold.head_moved",
+                "held: head moved (expected abc123, found def456)",
+            ),
+            (
+                CommandIdentity::with_operation("git", "pr merge-when-green"),
+                json!({"merged": false, "hold": {"reason": "checks_failed", "names": ["lint", "tests"]}}),
+                "git.pr.hold.checks_failed",
+                "held: checks failed: lint, tests",
+            ),
+            (
+                CommandIdentity::with_operation("agent-task", "cook"),
+                json!({"schema": "homeboy/agent-task-cook/v1", "status": "execution_budget_exhausted", "stop_reason": "attempt limit reached"}),
+                "command.result",
+                "execution_budget_exhausted: attempt limit reached",
+            ),
+        ] {
+            let response =
+                cli_response_for_json_result_for_identity(&Ok(payload.clone()), 1, &identity, None);
+            // Check the actual stdout contract consumed by workflow children,
+            // not just the in-memory envelope's Serialize implementation.
+            let value: Value = serde_json::from_str(&response.stdout_json().unwrap()).unwrap();
+            assert_eq!(value["summary"], summary);
+            assert_eq!(value["diagnostics"]["message"], summary);
+            assert_eq!(value["diagnostics"]["code"], code);
+            assert_eq!(value["data"], payload);
+            // Exercise the public workflow boundary with the child's envelope
+            // summary, including a Cook whose durable outcome overrides exit 1.
+            use homeboy::core::workflow::{
+                advance, Event, FinishedStatus, InstanceState, StepResult, WorkflowDefinition,
+            };
+            let definition = WorkflowDefinition::from_value(json!({
+                "schema": "homeboy/workflow/v1", "id": "typed-result",
+                "steps": [{"id": "work", "foreach": [0, 1], "max_parallel": 2,
+                           "exec": {"program": "false"}}]
+            }))
+            .unwrap();
+            let initial = InstanceState::new(&definition, "wf-typed-result", Default::default());
+            let (mut state, _) = advance(&definition, &initial, &Event::Start, 0);
+            let keys: Vec<_> = state.steps["work"]
+                .items
+                .iter()
+                .map(|item| item.key.clone().unwrap())
+                .collect();
+            for (index, key) in keys.into_iter().enumerate() {
+                (state, _) = advance(
+                    &definition,
+                    &state,
+                    &Event::StepFinished(StepResult {
+                        key,
+                        status: FinishedStatus::Failed,
+                        outcome: Some(if index == 0 { "failed" } else { "succeeded" }.into()),
+                        error: value["summary"].as_str().map(str::to_string),
+                        output: Some(payload.clone()),
+                        run_id: None,
+                    }),
+                    1,
+                );
+            }
+            assert_eq!(
+                state.steps["work"].items[0].outcome.as_deref(),
+                Some("failed")
+            );
+            assert_eq!(state.steps["work"].items[0].error.as_deref(), Some(summary));
+            assert_eq!(
+                state.steps["work"].items[1].outcome.as_deref(),
+                Some("succeeded")
+            );
+            assert!(state.steps["work"].items[1].error.is_none());
+            assert!(!value
+                .to_string()
+                .contains("without reporting a failure cause"));
+            if payload["hold"].is_object() {
+                assert_eq!(value["diagnostics"]["details"]["hold"], payload["hold"]);
+                assert_eq!(
+                    value["diagnostics"]["details"]["expected_head_sha"],
+                    payload["expected_head_sha"]
+                );
+                assert_eq!(
+                    value["diagnostics"]["details"]["actual_head_sha"],
+                    payload["actual_head_sha"]
+                );
+            } else {
+                assert_eq!(value["diagnostics"]["details"]["result"], payload);
+            }
+        }
     }
 
     #[test]

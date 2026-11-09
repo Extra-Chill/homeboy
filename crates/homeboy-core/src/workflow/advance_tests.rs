@@ -59,6 +59,49 @@ fn foreach_failure_keeps_item_error_and_first_failure_reason() {
     );
 }
 
+#[test]
+fn succeeded_steps_and_items_discard_process_errors() {
+    for foreach in [false, true] {
+        let mut step = json!({"id": "work", "exec": {"program": "false"}});
+        if foreach {
+            step["foreach"] = json!(["a"]);
+        }
+        let definition = parse_definition(&json!({
+            "schema": "homeboy/workflow/v1", "id": "success-error", "steps": [step]
+        }));
+        let initial = InstanceState::new(&definition, INSTANCE, BTreeMap::new());
+        let (state, _) = advance(&definition, &initial, &Event::Start, 0);
+        let step = &state.steps["work"];
+        let key = if foreach {
+            step.items[0].key.clone()
+        } else {
+            step.key.clone()
+        }
+        .unwrap();
+        let (state, _) = advance(
+            &definition,
+            &state,
+            &Event::StepFinished(StepResult {
+                key,
+                status: FinishedStatus::Failed,
+                outcome: Some("succeeded".into()),
+                error: Some("process exited 1".into()),
+                output: None,
+                run_id: None,
+            }),
+            1,
+        );
+        let step = &state.steps["work"];
+        assert!(step.error.is_none());
+        if foreach {
+            assert_eq!(step.items[0].outcome.as_deref(), Some("succeeded"));
+            assert!(step.items[0].error.is_none());
+        } else {
+            assert_eq!(step.outcome.as_deref(), Some("succeeded"));
+        }
+    }
+}
+
 fn golden_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("src/workflow/golden")
 }
