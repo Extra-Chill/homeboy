@@ -4,7 +4,7 @@
 //! Shared imports, executors, and fixtures live in [`support`]; each concern
 //! submodule does `use super::support::*`.
 
-mod support;
+pub(super) mod support;
 
 mod candidate_ref;
 mod contract;
