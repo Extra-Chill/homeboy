@@ -663,7 +663,16 @@ fn every_wedged_cook_state_has_one_progressing_recovery_step() {
                     assert!(stored.finalization_eligible(), "{case:?}");
                 }
                 WedgedCook::MissingReviewForm | WedgedCook::ContinuationNotScheduled => {
-                    assert_eq!(plan.step, CookRecoveryStep::Continue, "{case:?}: {plan:?}");
+                    // A gate-green candidate missing only its form asks the
+                    // continuation's review-only step for it (#16292).
+                    let expected = match case {
+                        WedgedCook::MissingReviewForm => CookRecoveryStep::RequestReviewForm {
+                            missing: crate::agent_task_service::REVIEW_FORM_MISSING.into(),
+                            rearm: false,
+                        },
+                        _ => CookRecoveryStep::Continue,
+                    };
+                    assert_eq!(plan.step, expected, "{case:?}: {plan:?}");
                     let (report, exit) = crate::agent_task_service::recover_cook(
                         cook,
                         Default::default(),

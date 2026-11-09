@@ -10,6 +10,9 @@ mod cook_ci;
 pub use cook_ci::{cook_ci_status, repoll_cook_ci};
 mod cook_activity;
 mod cook_adoption;
+/// Fresh provider attempts start from a clean Cook base tree.
+mod cook_attempt_workspace;
+pub use cook_attempt_workspace::AttemptWorkspaceNotAtBase;
 mod cook_baseline;
 pub(crate) use cook_baseline::compare_gate_failures_to_verified_base;
 mod cook_budget;
@@ -76,7 +79,7 @@ pub use cook_recovery::{
     with_store_contention_backoff, CookPublishRequest, CookRecoveryOverrides,
     CookRecoveryPerformer, CookRecoveryPlan, CookRecoveryReport, CookRecoveryRequest,
     CookRecoveryStep, CookReplaceGatesRequest, CookReplacementProof, COOK_RECOVERY_SCHEMA,
-    STORE_BUSY_CODE,
+    REVIEW_FORM_MISSING, STORE_BUSY_CODE,
 };
 pub(crate) use cook_recovery::{cook_recovery_status, incomplete_review_recovery_command};
 
