@@ -536,6 +536,7 @@ fn daemon_stale_reason_code(reason: DaemonStaleReasonCode) -> &'static str {
         DaemonStaleReasonCode::VersionMismatch => "version_mismatch",
         DaemonStaleReasonCode::RuntimePathsDrift => "runtime_paths_drift",
         DaemonStaleReasonCode::TransportUnreachable => "transport_unreachable",
+        DaemonStaleReasonCode::ObservationUnavailable => "observation_unavailable",
     }
 }
 
@@ -647,6 +648,9 @@ pub(super) fn operator_summary(report: &RunnerStatusReport) -> RunnerOperatorSum
     }
     if let Some(error) = &report.active_job_error {
         risk.push(error.code.clone());
+    }
+    if let Some(reason) = report.observation_degraded_reason() {
+        risk.push(format!("degraded: {reason}"));
     }
     if let Some(warning) = report.stale_daemon.as_ref() {
         let controller = warning
@@ -1774,6 +1778,7 @@ mod tests {
             active_job_source: None,
             active_job_error: None,
             active_job_recovery_evidence: None,
+            recent_observation_failure: None,
             session_path: "/tmp/homeboy-lab.json".to_string(),
         }
     }

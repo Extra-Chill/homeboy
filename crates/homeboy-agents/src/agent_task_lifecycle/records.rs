@@ -1019,23 +1019,83 @@ impl AgentTaskRunRecord {
         RunExecutionState::from(self.state) == self.lifecycle.execution.state
     }
 
-    /// Whether this record reported an `updated_at` heartbeat recently enough
-    /// to count as live.
+    /// Whether this record carries liveness evidence recent enough to count as
+    /// live: its `updated_at` heartbeat, or the running job's own progress
+    /// evidence (see [`Self::latest_job_progress`]).
+    ///
+    /// The job's progress is recorded where the job runs, so a job that keeps
+    /// producing output or workspace activity stays live even when nothing
+    /// else (such as a delayed controller poll) bumps `updated_at` (#17648).
     ///
     /// The exact inverse of the staleness rule discovery applies, against the
     /// same shared threshold — this predicate carried its own bare `30` until
     /// the threshold was unified, which is precisely the drift the shared
     /// constant exists to prevent.
     pub(crate) fn has_fresh_update(&self) -> bool {
+        let fresh = |observed_at: chrono::DateTime<chrono::Utc>| {
+            chrono::Utc::now()
+                .signed_duration_since(observed_at)
+                .num_minutes()
+                < homeboy_core::observation::RUNNING_HEARTBEAT_STALE_MINUTES
+        };
         self.updated_at
             .as_deref()
-            .and_then(|timestamp| chrono::DateTime::parse_from_rfc3339(timestamp).ok())
-            .is_some_and(|updated_at| {
-                chrono::Utc::now()
-                    .signed_duration_since(updated_at.with_timezone(&chrono::Utc))
-                    .num_minutes()
-                    < homeboy_core::observation::RUNNING_HEARTBEAT_STALE_MINUTES
-            })
+            .and_then(parse_rfc3339)
+            .is_some_and(fresh)
+            || self
+                .latest_job_progress()
+                .is_some_and(|(_, observed_at)| fresh(observed_at))
+    }
+
+    /// The newest progress evidence of the running provider execution, as
+    /// recorded by the supervisor on the host that runs it: provider stream
+    /// and output files (by modification time), workspace activity, and the
+    /// supervisor's throttled progress heartbeat. Returns the evidence source
+    /// and when it was observed.
+    pub fn latest_job_progress(&self) -> Option<(String, chrono::DateTime<chrono::Utc>)> {
+        if self.state != AgentTaskRunState::Running {
+            return None;
+        }
+        let execution = self.metadata["provider_executions"]
+            .as_array()?
+            .iter()
+            .rev()
+            .find(|execution| execution["state"].as_str() == Some("running"))?;
+        let mut observations = Vec::new();
+        for (source, fields) in [
+            ("structured_progress", ["structured_progress"].as_slice()),
+            ("runtime_output", ["stdout", "stderr"].as_slice()),
+        ] {
+            for field in fields {
+                if let Some(observed_at) = execution
+                    .pointer(&format!("/runtime_evidence/{field}"))
+                    .and_then(Value::as_str)
+                    .and_then(observed_file_timestamp)
+                {
+                    observations.push((source.to_string(), observed_at));
+                }
+            }
+        }
+        if let Some(observed_at) = execution
+            .get("workspace_activity_observed_at")
+            .and_then(Value::as_str)
+            .and_then(parse_rfc3339)
+        {
+            observations.push(("workspace_activity".to_string(), observed_at));
+        }
+        if let Some(observed_at) = execution
+            .get("heartbeat_at")
+            .and_then(Value::as_str)
+            .and_then(parse_rfc3339)
+        {
+            let source = execution["heartbeat_source"]
+                .as_str()
+                .unwrap_or("runtime_output");
+            observations.push((source.to_string(), observed_at));
+        }
+        observations
+            .into_iter()
+            .max_by_key(|(_, observed_at)| *observed_at)
     }
 
     pub(crate) fn has_planned_runner_execution(&self) -> bool {
@@ -1350,10 +1410,16 @@ impl RunnerJobEvidence {
         events: &[homeboy_core::api_jobs::JobEvent],
         now_ms: u64,
     ) -> Self {
+        // The job's own progress evidence (provider stream, output, workspace
+        // activity) counts as a heartbeat alongside the job store's events.
+        let job_progress_at_ms = record
+            .latest_job_progress()
+            .and_then(|(_, observed_at)| u64::try_from(observed_at.timestamp_millis()).ok());
         let last_heartbeat_at_ms = events
             .iter()
             .map(|event| event.timestamp_ms)
             .chain(std::iter::once(job.updated_at_ms))
+            .chain(job_progress_at_ms)
             .max()
             .unwrap_or(job.updated_at_ms);
         let heartbeat_age_ms = now_ms.saturating_sub(last_heartbeat_at_ms);
@@ -1492,6 +1558,16 @@ fn observe_local_runner_job(
         &events,
         now_ms,
     ))
+}
+
+/// Modification time of a `file://` evidence stream. Only metadata is read.
+pub(crate) fn observed_file_timestamp(uri: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    let path = uri.strip_prefix("file://")?;
+    let modified = std::fs::metadata(std::path::Path::new(path))
+        .ok()?
+        .modified()
+        .ok()?;
+    Some(chrono::DateTime::<chrono::Utc>::from(modified))
 }
 
 fn parse_rfc3339(value: &str) -> Option<chrono::DateTime<chrono::Utc>> {

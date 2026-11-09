@@ -2483,6 +2483,11 @@ pub(super) fn terminal_runner_poll_failure(
         super::super::daemon_health::runner_daemon_health_failure(&source).is_some()
             || reattach_failure_is_transient(&source);
     let mut error = daemon_job_context_error(&runner.id, &job_id, persisted_run_id, source);
+    crate::observation_health::record_observation_failure(
+        &runner.id,
+        crate::observation_health::CONTROLLER_DISCONNECTED,
+        &error.message,
+    );
     if transient_transport_drop {
         // `daemon_job_context_error` already marks this recoverable
         // (retryable, status: "recoverable_followup_required") with durable-job

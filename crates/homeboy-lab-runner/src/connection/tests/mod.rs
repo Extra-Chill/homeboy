@@ -49,6 +49,104 @@ fn admission_observations_share_a_total_deadline() {
     );
 }
 
+/// #17648: a direct observation that runs out of time against a live but
+/// slow daemon endpoint is a retryable `observation_unavailable` result. It is
+/// never read as missing ownership evidence.
+#[test]
+fn exhausted_observation_deadline_is_retryable_not_an_ownership_blocker() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+    let address = listener.local_addr().expect("listener address");
+    std::thread::spawn(move || {
+        // Accept the describe request and stall past the observation budget,
+        // as a daemon busy with an active job can.
+        if let Ok((_stream, _)) = listener.accept() {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+    });
+    let mut session = direct_ssh_session("lease-busy");
+    session.local_url = Some(format!("http://{address}"));
+
+    for deadline in [
+        std::time::Instant::now() + std::time::Duration::from_millis(100),
+        std::time::Instant::now(),
+    ] {
+        let error = describe_direct_runner_until("homeboy-lab", &session, deadline)
+            .err()
+            .expect("the observation cannot complete in time");
+        assert_eq!(error.retryable, Some(true), "{error:?}");
+        let freshness = direct_observation_failure_freshness("homeboy-lab", &error);
+
+        assert!(freshness.is_observation_unavailable(), "{freshness:?}");
+        assert!(!freshness.has_terminal_recovery_ownership_blocker());
+        assert!(
+            freshness.blocks_automatic_recovery(),
+            "no mutation is authorized"
+        );
+        assert!(freshness
+            .ownership_evidence
+            .as_deref()
+            .is_some_and(|evidence| evidence.contains("retryable")));
+    }
+
+    // A daemon endpoint that refuses connections is not a slow observation.
+    let refused = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+    session.local_url = Some(format!("http://{}", refused.local_addr().expect("address")));
+    drop(refused);
+    let error = describe_direct_runner_until(
+        "homeboy-lab",
+        &session,
+        std::time::Instant::now() + std::time::Duration::from_secs(2),
+    )
+    .err()
+    .expect("refused endpoint");
+    assert!(
+        !direct_observation_failure_freshness("homeboy-lab", &error).is_observation_unavailable()
+    );
+}
+
+/// #17648: a job-observation failure recorded by a job path keeps the runner's
+/// status degraded even when the next status probe answers.
+#[test]
+fn status_reports_a_recent_job_observation_failure_as_degraded() {
+    crate::test_support::with_isolated_home(|_| {
+        crate::create(
+            &serde_json::json!({ "id": "observed-runner", "kind": "local" }).to_string(),
+            false,
+        )
+        .expect("create runner");
+        assert!(status("observed-runner")
+            .expect("status")
+            .recent_observation_failure
+            .is_none());
+
+        crate::observation_health::record_observation_failure(
+            "observed-runner",
+            crate::observation_health::CONTROLLER_DISCONNECTED,
+            "lost contact with in-flight runner job `job-1`",
+        );
+
+        let report = status("observed-runner").expect("status");
+        let failure = report
+            .recent_observation_failure
+            .clone()
+            .expect("recent failure is projected");
+        assert_eq!(failure.code, "controller_disconnected");
+        assert_eq!(
+            report.observation_degraded_reason().as_deref(),
+            Some("controller_disconnected")
+        );
+        assert_eq!(
+            report.admission_summary().degraded.as_deref(),
+            Some("controller_disconnected")
+        );
+        let rendered = serde_json::to_value(&report).expect("serialize status");
+        assert_eq!(
+            rendered["recent_observation_failure"]["code"],
+            "controller_disconnected"
+        );
+    });
+}
+
 #[test]
 fn proxy_forward_reuse_rejects_a_reused_pid_with_a_different_start_identity() {
     let forward = RunnerProxyForward {

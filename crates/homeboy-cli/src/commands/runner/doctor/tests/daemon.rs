@@ -634,6 +634,7 @@ fn disconnected_incompatible_daemon_with_unavailable_ownership_is_terminal() {
         daemon_build_identity: Some("homeboy 0.349.0+incompatible".to_string()),
         safe_to_rotate: false,
         next_action: None,
+        degraded: None,
     };
 
     let report =
@@ -816,6 +817,7 @@ mod repair_readiness {
             active_job_source: None,
             active_job_error: None,
             active_job_recovery_evidence: None,
+            recent_observation_failure: None,
             session_path: "test".to_string(),
         }
     }

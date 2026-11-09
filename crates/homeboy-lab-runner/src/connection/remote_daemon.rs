@@ -884,6 +884,20 @@ pub(super) fn unavailable_recovery_freshness(
     }
 }
 
+/// The bounded observation did not complete. Nothing was learned about the
+/// daemon, so this is a retryable observation result: it carries no ownership
+/// claim and authorizes no mutation (#17648).
+pub(super) fn observation_unavailable_freshness(error: impl Into<String>) -> DaemonFreshnessReport {
+    DaemonFreshnessReport {
+        stale_reason_code: Some(DaemonStaleReasonCode::ObservationUnavailable),
+        ownership_evidence: Some(format!(
+            "runner observation unavailable (retryable): {}",
+            error.into()
+        )),
+        ..unavailable_recovery_freshness("", "")
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum RemoteDaemonConnectAction {
     Reattach,

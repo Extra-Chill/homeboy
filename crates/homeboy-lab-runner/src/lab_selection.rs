@@ -1253,9 +1253,22 @@ pub(super) fn prepare_lab_runner_for_offload_with(
     status_fn: impl Fn(&str) -> Result<RunnerStatusReport>,
     connect_fn: impl Fn(&str) -> Result<(RunnerConnectReport, i32)>,
 ) -> Result<LabRunnerPreparation> {
-    let status = status_fn(&selection.runner_id)?;
+    let mut status = status_fn(&selection.runner_id)?;
+    if status.connected && observation_unavailable(&status) {
+        // An exhausted observation deadline says nothing about the daemon, so
+        // it is retried rather than read as missing ownership evidence.
+        status = status_fn(&selection.runner_id)?;
+    }
     if status.connected {
         if let Some(reason) = connected_runner_not_ready_reason(&selection.runner_id, &status) {
+            let retryable = observation_unavailable(&status);
+            if retryable {
+                crate::observation_health::record_observation_failure(
+                    &selection.runner_id,
+                    crate::observation_health::OBSERVATION_UNAVAILABLE,
+                    &reason,
+                );
+            }
             return automatic_fallback_or_explicit_error(
                 selection,
                 reason,
@@ -1265,7 +1278,14 @@ pub(super) fn prepare_lab_runner_for_offload_with(
                 ),
                 daemon_repair_command(&selection.runner_id, &status),
                 daemon_repair_action(&selection.runner_id, &status),
-            );
+            )
+            .map_err(|error| {
+                if retryable {
+                    error.with_retryable(true)
+                } else {
+                    error
+                }
+            });
         }
         eprintln!(
             "Lab offload: runner `{}` is connected via {} mode.",
@@ -1354,6 +1374,13 @@ fn automatic_fallback_or_explicit_error(
     }
 }
 
+fn observation_unavailable(status: &RunnerStatusReport) -> bool {
+    status
+        .daemon_freshness
+        .as_ref()
+        .is_some_and(|report| report.is_observation_unavailable())
+}
+
 fn connected_runner_not_ready_reason(
     runner_id: &str,
     status: &RunnerStatusReport,
@@ -1361,6 +1388,20 @@ fn connected_runner_not_ready_reason(
     if status.session.is_none() {
         return Some(format!(
             "connected runner `{runner_id}` has no connected daemon session; reconnect it with `homeboy runner connect {runner_id}`"
+        ));
+    }
+    if let Some(report) = status
+        .daemon_freshness
+        .as_ref()
+        .filter(|report| report.is_observation_unavailable())
+    {
+        return Some(format!(
+            "connected runner `{runner_id}` is degraded: {}; {}",
+            crate::observation_health::OBSERVATION_UNAVAILABLE,
+            report
+                .ownership_evidence
+                .as_deref()
+                .unwrap_or("runner observation did not complete")
         ));
     }
     if let Some(report) = status
@@ -1408,6 +1449,15 @@ fn connected_runner_not_ready_reason(
 /// reconnect is the last resort, reached only when neither the freshness report
 /// nor the stale-daemon warning knows anything specific about this daemon.
 fn daemon_repair_steps(runner_id: &str, status: &RunnerStatusReport) -> Vec<DaemonRepairStep> {
+    if observation_unavailable(status) {
+        return vec![DaemonRepairStep::text(
+            daemon_repair::RUNNER_DIAGNOSE,
+            format!(
+                "Runner observation did not complete in time ({}); retry the command or re-run `homeboy runner status {runner_id}`.",
+                crate::observation_health::OBSERVATION_UNAVAILABLE
+            ),
+        )];
+    }
     if let Some(report) = status
         .daemon_freshness
         .as_ref()
@@ -1560,6 +1610,7 @@ mod daemon_repair_step_tests {
             active_job_source: None,
             active_job_error: None,
             active_job_recovery_evidence: None,
+            recent_observation_failure: None,
             session_path: "/tmp/lab.json".to_string(),
         }
     }
@@ -1725,6 +1776,76 @@ mod daemon_repair_step_tests {
         assert!(!reason.contains("homeboy runner"));
     }
 
+    /// #17648: an exhausted observation deadline is retried and, if it
+    /// persists, reported as a retryable `observation_unavailable` result,
+    /// never as insufficient ownership evidence.
+    #[test]
+    fn observation_unavailable_admission_is_retried_and_never_an_ownership_blocker() {
+        crate::test_support::with_isolated_home(|_| {
+            let selection = LabRunnerSelection {
+                runner_id: "homeboy-lab".to_string(),
+                source: LabRunnerSelectionSource::Explicit,
+                mode: RunnerTunnelMode::DirectSsh,
+            };
+            let connected = |freshness: DaemonFreshnessReport| {
+                let mut report = status_report("homeboy-lab", Some(freshness), None);
+                report.session = Some(crate::test_support::direct_ssh_session("lease-live"));
+                report
+            };
+            let mut unavailable = freshness_with_plan(Vec::new());
+            unavailable.stale_reason_code =
+                Some(homeboy_core::daemon::DaemonStaleReasonCode::ObservationUnavailable);
+            unavailable.recovery_evidence =
+                Some(homeboy_core::daemon::DaemonRecoveryEvidence::Unavailable);
+            unavailable.ownership_evidence = Some(
+                "runner observation unavailable (retryable): runner observation deadline exhausted"
+                    .to_string(),
+            );
+            let mut fresh = freshness_with_plan(Vec::new());
+            fresh.fresh = true;
+            fresh.stale_reason_code = None;
+
+            let observations = std::cell::Cell::new(0);
+            let prepared = prepare_lab_runner_for_offload_with(
+                &selection,
+                |_| {
+                    observations.set(observations.get() + 1);
+                    Ok(connected(if observations.get() == 1 {
+                        unavailable.clone()
+                    } else {
+                        fresh.clone()
+                    }))
+                },
+                |_| panic!("a slow observation must not reconnect the runner"),
+            )
+            .expect("the retried observation admits the runner");
+            assert!(matches!(prepared, LabRunnerPreparation::Ready { .. }));
+            assert_eq!(observations.get(), 2);
+
+            let error = prepare_lab_runner_for_offload_with(
+                &selection,
+                |_| Ok(connected(unavailable.clone())),
+                |_| panic!("a slow observation must not reconnect the runner"),
+            )
+            .err()
+            .expect("a persistently unavailable observation is not ready");
+            assert_eq!(error.retryable, Some(true), "{error:?}");
+            assert!(
+                error.message.contains("observation_unavailable"),
+                "{error:?}"
+            );
+            assert!(!error
+                .message
+                .contains("typed ownership evidence is insufficient"));
+            assert_eq!(
+                crate::observation_health::recent_observation_failure("homeboy-lab")
+                    .map(|failure| failure.code)
+                    .as_deref(),
+                Some("observation_unavailable")
+            );
+        });
+    }
+
     #[test]
     fn typed_proof_without_a_validated_plan_offers_a_non_circular_terminal_diagnostic() {
         let mut freshness = freshness_with_plan(Vec::new());
@@ -1786,6 +1907,7 @@ mod placement_readiness_tests {
             active_job_source: None,
             active_job_error: None,
             active_job_recovery_evidence: None,
+            recent_observation_failure: None,
             session_path: "/tmp/lab.json".to_string(),
         }
     }

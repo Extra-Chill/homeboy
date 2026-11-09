@@ -537,6 +537,9 @@ pub struct RunnerStatusReport {
     pub active_job_source: Option<RunnerActiveJobSource>,
     pub active_job_error: Option<RunnerActiveJobError>,
     pub active_job_recovery_evidence: Option<RunnerActiveJobRecoveryEvidence>,
+    /// The most recent job-observation failure this controller recorded for
+    /// the runner, while it is still recent (#17648).
+    pub recent_observation_failure: Option<crate::observation_health::RunnerObservationFailure>,
     pub session_path: String,
 }
 
@@ -586,6 +589,9 @@ impl Serialize for RunnerStatusReport {
         }
         if let Some(evidence) = &self.active_job_recovery_evidence {
             state.serialize_field("active_job_recovery_evidence", evidence)?;
+        }
+        if let Some(failure) = &self.recent_observation_failure {
+            state.serialize_field("recent_observation_failure", failure)?;
         }
         state.serialize_field("session_path", &self.session_path)?;
         state.end()
@@ -657,6 +663,11 @@ pub struct RunnerAdmissionSummary {
     /// The single next actionable step, state-sensitive and executable.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_action: Option<String>,
+    /// Typed code of a current or recent job-observation failure, such as
+    /// `observation_unavailable`. A connected runner whose jobs keep losing
+    /// contact is degraded, not plainly accepting.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub degraded: Option<String>,
 }
 
 impl RunnerStatusReport {
@@ -666,6 +677,20 @@ impl RunnerStatusReport {
             .and_then(|report| report.runtime_paths.as_ref())
             .and_then(|paths| paths.pressure.as_ref())
             .is_some_and(|pressure| pressure.admission_reason.is_some())
+    }
+
+    /// The current or most recent job-observation failure code, if any.
+    pub fn observation_degraded_reason(&self) -> Option<String> {
+        if self
+            .daemon_freshness
+            .as_ref()
+            .is_some_and(DaemonFreshnessReport::is_observation_unavailable)
+        {
+            return Some(crate::observation_health::OBSERVATION_UNAVAILABLE.to_string());
+        }
+        self.recent_observation_failure
+            .as_ref()
+            .map(|failure| failure.code.clone())
     }
 
     /// The session state is the canonical connection view; `connected` is a
@@ -849,6 +874,7 @@ impl RunnerStatusReport {
             daemon_build_identity,
             safe_to_rotate,
             next_action,
+            degraded: self.observation_degraded_reason(),
         }
     }
 
@@ -1006,6 +1032,7 @@ mod status_serialization_tests {
             active_job_source: None,
             active_job_error: None,
             active_job_recovery_evidence: None,
+            recent_observation_failure: None,
             session_path: "test".to_string(),
         }
     }
@@ -1083,6 +1110,7 @@ mod status_serialization_tests {
             active_job_source: None,
             active_job_error: None,
             active_job_recovery_evidence: None,
+            recent_observation_failure: None,
             session_path: "test".to_string(),
         };
 

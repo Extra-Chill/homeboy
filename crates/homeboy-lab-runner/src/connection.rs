@@ -1283,14 +1283,7 @@ pub(crate) fn status_until(runner_id: &str, deadline: Instant) -> Result<RunnerS
         .map(|session| describe_direct_runner_until(runner_id, session, deadline));
     let local_daemon_freshness = match &direct_observation {
         Some(Ok(observation)) => Some(observation.freshness.clone()),
-        Some(Err(error)) => {
-            let mut freshness = unavailable_recovery_freshness(runner_id, error.message.clone());
-            if describe_capability_missing(error) {
-                freshness.stale_reason_code = None;
-                freshness.ownership_evidence = Some("runner service observation capability is unavailable; explicit upgrade requires separate ownership verification".to_string());
-            }
-            Some(freshness)
-        }
+        Some(Err(error)) => Some(direct_observation_failure_freshness(runner_id, error)),
         None => runner_daemon_freshness_until(&runner, session.as_ref(), connected, deadline)?,
     };
     let mut daemon_freshness = local_daemon_freshness
@@ -1321,6 +1314,8 @@ pub(crate) fn status_until(runner_id: &str, deadline: Instant) -> Result<RunnerS
                 Some(RunnerActiveJobError {
                     code: if describe_capability_missing(&error) {
                         PRE_DESCRIBE_CAPABILITY_MISSING.to_string()
+                    } else if crate::observation_health::is_observation_unavailable_error(&error) {
+                        crate::observation_health::OBSERVATION_UNAVAILABLE.to_string()
                     } else {
                         error.code.as_str().to_string()
                     },
@@ -1408,6 +1403,9 @@ pub(crate) fn status_until(runner_id: &str, deadline: Instant) -> Result<RunnerS
         active_job_source,
         active_job_error,
         active_job_recovery_evidence: None,
+        recent_observation_failure: crate::observation_health::recent_observation_failure(
+            runner_id,
+        ),
         session_path: session_path.display().to_string(),
     };
     Ok(status)
@@ -1517,6 +1515,7 @@ pub fn persisted_status_until(
         active_job_source: None,
         active_job_error: None,
         active_job_recovery_evidence: None,
+        recent_observation_failure: None,
         session_path: session_path.display().to_string(),
     })
 }
@@ -1827,10 +1826,8 @@ fn remote_daemon_recovery_freshness_until(
         Err(error) => return Some(unavailable_recovery_freshness(runner_id, error.message)),
     };
     let Some(timeout) = remaining_observation_budget(deadline) else {
-        return Some(unavailable_recovery_freshness(
-            runner_id,
-            "runner admission observation deadline exhausted before remote daemon recovery"
-                .to_string(),
+        return Some(observation_unavailable_freshness(
+            "runner admission observation deadline exhausted before remote daemon recovery",
         ));
     };
     match remote_daemon::bounded_remote_daemon_status_with_timeout(
@@ -1878,7 +1875,7 @@ fn runner_jobs_until(
     deadline: Instant,
 ) -> Result<(Vec<ActiveRunnerJobSummary>, Vec<ActiveRunnerJobSummary>)> {
     let timeout = remaining_observation_budget(deadline).ok_or_else(|| {
-        Error::internal_unexpected(
+        crate::observation_health::observation_unavailable_error(
             "runner admission observation deadline exhausted before typed jobs",
         )
     })?;
@@ -2004,13 +2001,30 @@ fn validate_pre_describe_upgrade_health(
     Ok(())
 }
 
+/// Classify a failed direct observation. A deadline or request timeout is a
+/// retryable `observation_unavailable` result, never ownership evidence.
+fn direct_observation_failure_freshness(runner_id: &str, error: &Error) -> DaemonFreshnessReport {
+    if crate::observation_health::is_observation_unavailable_error(error) {
+        return observation_unavailable_freshness(error.message.clone());
+    }
+    let mut freshness = unavailable_recovery_freshness(runner_id, error.message.clone());
+    if describe_capability_missing(error) {
+        freshness.stale_reason_code = None;
+        freshness.ownership_evidence = Some("runner service observation capability is unavailable; explicit upgrade requires separate ownership verification".to_string());
+    }
+    freshness
+}
+
 fn describe_direct_runner_until(
     runner_id: &str,
     session: &RunnerSession,
     deadline: Instant,
 ) -> Result<DirectRunnerObservation> {
-    let timeout = remaining_observation_budget(deadline)
-        .ok_or_else(|| Error::internal_unexpected("runner observation deadline exhausted"))?;
+    let timeout = remaining_observation_budget(deadline).ok_or_else(|| {
+        crate::observation_health::observation_unavailable_error(
+            "runner observation deadline exhausted",
+        )
+    })?;
     let client = Client::builder()
         .timeout(timeout)
         .build()

@@ -421,6 +421,7 @@ fn refreshed_daemon_status(connected: bool, identity: Option<&str>) -> RunnerSta
         active_job_source: None,
         active_job_error: None,
         active_job_recovery_evidence: None,
+        recent_observation_failure: None,
         session_path: String::new(),
     }
 }

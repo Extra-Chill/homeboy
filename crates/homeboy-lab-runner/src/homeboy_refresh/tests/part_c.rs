@@ -45,6 +45,7 @@ fn readiness_report(freshness: DaemonFreshnessReport) -> RunnerStatusReport {
         active_job_source: None,
         active_job_error: None,
         active_job_recovery_evidence: None,
+        recent_observation_failure: None,
         session_path: "test".to_string(),
     }
 }

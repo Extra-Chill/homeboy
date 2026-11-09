@@ -504,6 +504,7 @@ fn admission_status(session: &RunnerSession, connected: bool) -> RunnerStatusRep
         active_job_source: None,
         active_job_error: None,
         active_job_recovery_evidence: None,
+        recent_observation_failure: None,
         session_path: "test".to_string(),
     }
 }
@@ -2044,6 +2045,7 @@ fn pre_describe_upgrade_requires_stable_owned_idle_http_evidence() {
                 message: "describe not supported".to_string(),
             }),
             active_job_recovery_evidence: None,
+            recent_observation_failure: None,
             session_path: "fixture".to_string(),
         };
         let result = pre_describe_upgrade_status(&status);
