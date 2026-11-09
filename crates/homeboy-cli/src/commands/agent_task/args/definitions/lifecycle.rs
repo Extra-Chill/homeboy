@@ -600,8 +600,7 @@ impl RecoverArgs {
 }
 #[derive(Args, Debug, Clone)]
 pub struct RetryArgs {
-    /// Durable run ID to retry. A Cook ID retries the Cook's latest durable
-    /// attempt. A stopped Cook is recovered with
+    /// Durable run ID to retry. A stopped Cook is recovered with
     /// `agent-task recover <cook-or-attempt-id>`, which also takes explicit
     /// provider-route overrides for its next attempt.
     pub run_id: String,
