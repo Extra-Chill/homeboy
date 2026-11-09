@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.455.3] - 2026-11-09
+
+### Fixed
+- child processes keep the caller's PATH order; bench records the resolved node
+
 ## [0.455.2] - 2026-11-09
 
 ### Changed
