@@ -2,6 +2,11 @@
 
 All notable changes to the **nodejs** extension will be documented in this file.
 
+## [3.9.9] - 2026-11-09
+
+### Changed
+- Declare playwright-browsers and add --gate-file
+
 ## [3.9.8] - 2026-11-09
 
 ### Added
