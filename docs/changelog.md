@@ -4,6 +4,14 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.452.0] - 2026-11-09
+
+### Added
+- add candidate checkout and accept listed ids in runs artifact get
+
+### Fixed
+- enforce Cook destination ownership and snapshot staged candidates before reset
+
 ## [0.451.0] - 2026-11-09
 
 ### Added
