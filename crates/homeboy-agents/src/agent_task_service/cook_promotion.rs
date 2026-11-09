@@ -1225,10 +1225,9 @@ pub(crate) fn manual_finalization_intent_recorded(run_id: &str) -> bool {
         .is_ok_and(|record| recorded_manual_finalization_intent(&record.metadata).is_some())
 }
 
-pub(crate) fn manual_finalization_publication_pending(run_id: &str) -> bool {
-    let Ok(record) = agent_task_lifecycle::exact_record(run_id) else {
-        return false;
-    };
+fn manual_finalization_publication_pending(
+    record: &agent_task_lifecycle::AgentTaskRunRecord,
+) -> bool {
     recorded_manual_finalization_intent(&record.metadata).is_some()
         && !recorded_finalization_receipt(&record.metadata)
             .is_some_and(cook_finalization_is_pr_receipt)
@@ -6700,6 +6699,18 @@ pub(crate) fn cook_failure_context_with_stores(
                 super::cook_recipe::CookRecipeStore::for_lifecycle_store(lifecycle_store)
                     .foreign_cook_driver(cook_id)
                     .is_ok_and(|driver| driver.is_some());
+            // The previous `recover`'s no-progress marker and the operator's
+            // publication intent are planner inputs, so every surface reading
+            // this step agrees with what `recover` performs (#17650).
+            let no_progress = super::cook_recovery::matching_no_progress(
+                lifecycle_store,
+                cook_id,
+                record.as_ref(),
+            );
+            let manual_publication_pending = record
+                .as_ref()
+                .is_some_and(manual_finalization_publication_pending)
+                && !delivered_candidate.applied_gate_failure;
             cook_recovery_actions_with_prefix(
                 status,
                 &chronological_latest_run_id,
@@ -6720,6 +6731,8 @@ pub(crate) fn cook_failure_context_with_stores(
                 agent_incomplete_reason(lifecycle_store, record_run_id).as_deref(),
                 adoptable_candidate_ref.as_deref(),
                 delivered_candidate,
+                manual_publication_pending,
+                no_progress.as_ref(),
                 record.as_ref().and_then(lab_handoff_runtime_recovery),
                 record
                     .as_ref()
@@ -7349,6 +7362,8 @@ fn cook_recovery_actions(
         None,
         None,
         DeliveredCandidateFacts::default(),
+        false,
+        None,
         lab_runtime_recovery,
         None,
     )
@@ -7370,6 +7385,8 @@ fn cook_recovery_actions_with_prefix(
     agent_incomplete_reason: Option<&str>,
     adoptable_candidate_ref: Option<&str>,
     delivered_candidate: DeliveredCandidateFacts,
+    manual_publication_pending: bool,
+    no_progress: Option<&super::cook_recovery::CookRecoveryNoProgress>,
     lab_runtime_recovery: Option<agent_task_lifecycle::AgentTaskLabRuntimeRecovery>,
     prefix: Option<String>,
 ) -> CookRecoveryActions {
@@ -7395,6 +7412,8 @@ fn cook_recovery_actions_with_prefix(
             regate_ready: delivered_candidate.regate_ready,
             verified_unpublished: delivered_candidate.verified_unpublished,
             review_form_missing: delivered_candidate.review_form_missing,
+            manual_publication_pending,
+            no_progress,
         });
     if !recovery_legal {
         let reason = match &step {

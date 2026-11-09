@@ -5318,7 +5318,13 @@ fn persist_controller_completion(
             Err(_) if job.is_terminal() => return true,
             Err(_) if cancellation_interrupts && job.is_cancelled() => return false,
             Err(_) if job.completion_pending() => return true,
-            Err(error) if error.code != crate::error::ErrorCode::InternalIoError => {
+            Err(error)
+                if !matches!(
+                    error.code,
+                    crate::error::ErrorCode::InternalIoError
+                        | crate::error::ErrorCode::ObservationStoreBusy
+                ) =>
+            {
                 // Ownership and transition rejection is permanent, not an I/O
                 // outage. Never retry it, or rerun the completed driver.
                 eprintln!(

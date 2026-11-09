@@ -59,6 +59,10 @@ pub enum CookRecoveryStep {
     /// (`agent-task adopt <cook> --candidate-ref <head-sha>`) instead of
     /// replaying provider work that would end `no_changes` again (#16181).
     Adopt { candidate_ref: String },
+    /// The previous `recover` already performed `repeated` from this exact
+    /// durable state and left it unchanged. Performing it again would loop, so
+    /// recovery names the `blocker` instead (#17650).
+    Blocked { repeated: String, blocker: String },
     /// Nothing `recover` can perform; `reason` names what is required.
     None { reason: String },
 }
@@ -77,12 +81,13 @@ impl CookRecoveryStep {
             Self::ReplaceGates => "replace_gates",
             Self::Publish => "publish",
             Self::Adopt { .. } => "adopt",
-            Self::None { .. } => return None,
+            Self::Blocked { .. } | Self::None { .. } => return None,
         })
     }
 
+    /// No mutating step: nothing is legal, or the only one is blocked.
     pub fn is_none(&self) -> bool {
-        matches!(self, Self::None { .. })
+        matches!(self, Self::None { .. } | Self::Blocked { .. })
     }
 
     pub(crate) fn none(reason: impl Into<String>) -> Self {
@@ -166,10 +171,31 @@ pub(crate) struct CookRecoveryInputs<'a> {
     /// state is adoptable: the operator's committed work is the candidate the
     /// provider could not produce.
     pub adoptable_candidate_ref: Option<&'a str>,
+    /// A validated manual-finalization intent awaits publication and the
+    /// applied candidate holds a passing verdict: the operator's explicit
+    /// publication decision for this attempt.
+    pub manual_publication_pending: bool,
+    /// The previous `recover` performed a step from this exact attempt and
+    /// status without changing either (#17650).
+    pub no_progress: Option<&'a CookRecoveryNoProgress>,
 }
 
-/// Decide the single next recovery step from durable Cook evidence.
+/// Decide the single next recovery step from durable Cook evidence. This is
+/// the one planner: `status` "Next:", `diagnose`, `recover --preflight` and
+/// `recover` all read their step from it, so none can name a step another
+/// would not perform.
 pub(crate) fn cook_recovery_step(inputs: &CookRecoveryInputs<'_>) -> CookRecoveryStep {
+    let step = decide_cook_recovery_step(inputs);
+    match (inputs.no_progress, step.action_name()) {
+        (Some(previous), Some(action)) if previous.step == action => CookRecoveryStep::Blocked {
+            repeated: action.to_string(),
+            blocker: previous.blocker.clone(),
+        },
+        _ => step,
+    }
+}
+
+fn decide_cook_recovery_step(inputs: &CookRecoveryInputs<'_>) -> CookRecoveryStep {
     if !inputs.recovery_legal {
         return CookRecoveryStep::none(
             "No recovery command is legal because the durable recipe has no lifecycle record. Start a fresh Cook after preserving the recipe reference for investigation.",
@@ -193,6 +219,12 @@ pub(crate) fn cook_recovery_step(inputs: &CookRecoveryInputs<'_>) -> CookRecover
     }
     if inputs.blocking_claim {
         return CookRecoveryStep::Reconcile;
+    }
+    // A held claim precedes the operator's publication intent, and so does
+    // verification of an applied candidate without a passing verdict:
+    // publication refuses it, so selecting it would deadlock (#17494).
+    if inputs.manual_publication_pending {
+        return CookRecoveryStep::Publish;
     }
     // A publishable candidate whose agent declared the task incomplete stops
     // here whatever the gate status: rearming would replay provider work only
@@ -402,6 +434,9 @@ pub struct CookRecoveryRequest {
     pub preflight: bool,
     /// Re-verify the newest candidate-bearing attempt without provider work.
     pub regate: bool,
+    /// Perform a step the previous recovery reported `blocked`, after the
+    /// operator resolved its named blocker.
+    pub unblock: bool,
     /// Explicit successor-attempt overrides.
     pub overrides: CookRecoveryOverrides,
     /// Inputs for [`CookRecoveryStep::ReplaceGates`]. Supplying them selects
@@ -545,6 +580,23 @@ pub struct CookRecoveryReport {
 /// Exit code for a report whose step is [`CookRecoveryStep::None`], declaring
 /// the step's reason as the failure cause when the exit is nonzero.
 fn finish_without_step(mut report: CookRecoveryReport) -> (CookRecoveryReport, i32) {
+    if let CookRecoveryStep::Blocked { repeated, blocker } = &report.step {
+        report.failure = Some(serde_json::json!({
+            "code": "agent_task.recover_blocked",
+            "message": format!(
+                "`recover` already performed `{repeated}` from this exact durable state and it made no progress: {blocker}. Resolve that blocker, then run `homeboy agent-task recover {run} --unblock`, or supply explicit recovery inputs.",
+                blocker = blocker.trim_end_matches('.'),
+                run = report.cook_id,
+            ),
+            "details": {
+                "status": report.status,
+                "run_id": report.run_id,
+                "repeated_step": repeated,
+                "blocker": blocker,
+            },
+        }));
+        return (report, 1);
+    }
     let exit_code = i32::from(!CookStatus::from_status(&report.status).is_success_exit());
     if exit_code != 0 {
         if let CookRecoveryStep::None { reason } = &report.step {
@@ -602,23 +654,7 @@ pub fn plan_cook_recovery(id: &str) -> Result<CookRecoveryPlan> {
             });
         }
     }
-    let mut plan = match plan_cook_recovery_for_cook(id) {
-        Ok(plan) => plan,
-        Err(error) => return manual_finalization_plan(id).ok_or(error),
-    };
-    // A validated manual-finalization intent is the operator's explicit
-    // publication decision for this attempt; a held claim precedes it, and so
-    // does verification of an applied candidate whose gates failed, deferred
-    // or never completed: publication refuses that candidate, so selecting
-    // it would deadlock recovery on a guaranteed refusal (#17494).
-    if !CookStatus::from_status(&plan.status).is_in_flight()
-        && plan.step != CookRecoveryStep::Reconcile
-        && super::manual_finalization_publication_pending(&plan.run_id)
-        && !super::applied_candidate_awaits_verification(&plan.run_id)
-    {
-        plan.step = CookRecoveryStep::Publish;
-    }
-    Ok(plan)
+    plan_cook_recovery_for_cook(id).or_else(|error| manual_finalization_plan(id).ok_or(error))
 }
 
 /// A durable manual-finalization record outside any readable Cook recipe:
@@ -705,7 +741,30 @@ pub fn cook_recovery_delegation(id: &str) -> Option<CookRecoveryPlan> {
 /// With `preflight`, a continuation step also runs the continuation admission
 /// checks and a publication step validates the hydrated publication, both
 /// reported as `admission`; the exit code is the report's.
+///
+/// Recovery is bounded: observation-store lock contention re-plans and
+/// retries with backoff, then reports `observation_store.busy`. A step that
+/// left its durable state unchanged is recorded, so the next `recover` from
+/// that state reports [`CookRecoveryStep::Blocked`] instead of looping.
 pub fn recover_cook(
+    id: &str,
+    request: CookRecoveryRequest,
+    performer: &dyn CookRecoveryPerformer,
+) -> Result<(CookRecoveryReport, i32)> {
+    with_store_contention_backoff(
+        "agent-task recover",
+        |outcome: &Result<(CookRecoveryReport, i32)>| match outcome {
+            Ok((report, _)) => report
+                .failure
+                .as_ref()
+                .is_some_and(|failure| failure["code"] == STORE_BUSY_CODE),
+            Err(error) => is_store_contention(error),
+        },
+        || recover_cook_once(id, request.clone(), performer),
+    )
+}
+
+fn recover_cook_once(
     id: &str,
     request: CookRecoveryRequest,
     performer: &dyn CookRecoveryPerformer,
@@ -713,11 +772,22 @@ pub fn recover_cook(
     let CookRecoveryRequest {
         preflight,
         regate,
+        unblock,
         overrides,
         mut replace_gates,
         mut corrected_gates,
         publish,
     } = request;
+    // Explicit operator inputs change what the step does, so they are never
+    // a repeat of the previous recovery's step.
+    let explicit_inputs = regate
+        || !overrides.is_empty()
+        || replace_gates.is_some()
+        || corrected_gates.is_some()
+        || !publish.is_empty();
+    if unblock && !preflight {
+        clear_no_progress_for(id);
+    }
     if let Some(ci) = super::cook_ci::cook_ci_status(id)? {
         if corrected_gates.is_some() {
             return Err(Error::validation_invalid_argument(
@@ -947,6 +1017,11 @@ pub fn recover_cook(
     if report.step.is_none() {
         return Ok(finish_without_step(report));
     }
+    let before = (
+        report.run_id.clone(),
+        report.status.clone(),
+        report.step.clone(),
+    );
     let none = CookRecoveryOverrides::default();
     let result = (|| {
         Ok(match &report.step {
@@ -982,10 +1057,16 @@ pub fn recover_cook(
                 (result, exit_code)
             }
             CookRecoveryStep::Publish => performer.publish(run_id, &publish, false)?,
-            CookRecoveryStep::None { .. } => unreachable!("no-step handled before performing"),
+            CookRecoveryStep::Blocked { .. } | CookRecoveryStep::None { .. } => {
+                unreachable!("no-step handled before performing")
+            }
         })
     })();
-    Ok(finish_performed_step(report, result))
+    let (report, exit_code) = finish_performed_step(report, result);
+    if !explicit_inputs {
+        record_recovery_progress(id, before, &report);
+    }
+    Ok((report, exit_code))
 }
 
 fn finish_performed_step(
@@ -1029,8 +1110,13 @@ fn finish_performed_step(
             (report, exit_code)
         }
         Err(error) => {
+            let code = if is_store_contention(&error) {
+                STORE_BUSY_CODE
+            } else {
+                error.code.as_str()
+            };
             report.failure = Some(serde_json::json!({
-                "code": error.code.as_str(),
+                "code": code,
                 "message": error.message,
                 "details": error.details,
             }));
@@ -1155,7 +1241,11 @@ fn validate_step_inputs(
     }
     match &plan.step {
         step if *step == selected => Ok(()),
-        CookRecoveryStep::Continue | CookRecoveryStep::Rearm | CookRecoveryStep::Regate | CookRecoveryStep::None { .. } => {
+        CookRecoveryStep::Continue
+        | CookRecoveryStep::Rearm
+        | CookRecoveryStep::Regate
+        | CookRecoveryStep::Blocked { .. }
+        | CookRecoveryStep::None { .. } => {
             plan.step = selected;
             Ok(())
         }
@@ -1197,6 +1287,158 @@ fn validate_overrides(plan: &CookRecoveryPlan, preflight: bool) -> Result<()> {
             "the recovery step forks a replacement attempt that preserves the checkpoint; it accepts no overrides",
         ),
         _ => Ok(()),
+    }
+}
+
+/// The previous `recover` performed `step` from this attempt and status and
+/// left both unchanged (#17650). The marker lives beside the Cook recipe; the
+/// planner reports [`CookRecoveryStep::Blocked`] while it still matches.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct CookRecoveryNoProgress {
+    pub run_id: String,
+    pub status: String,
+    pub step: String,
+    pub blocker: String,
+}
+
+const NO_PROGRESS_MARKER: &str = "recover-no-progress.json";
+
+/// The no-progress marker of `cook_id` when it still describes `record`.
+pub(crate) fn matching_no_progress(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    cook_id: &str,
+    record: Option<&agent_task_lifecycle::AgentTaskRunRecord>,
+) -> Option<CookRecoveryNoProgress> {
+    let record = record?;
+    let path = lifecycle_store.cook_dir(cook_id).join(NO_PROGRESS_MARKER);
+    let marker: CookRecoveryNoProgress = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+    (marker.run_id == record.run_id && marker.status == cook_recovery_status(record))
+        .then_some(marker)
+}
+
+fn no_progress_path(id: &str) -> Option<std::path::PathBuf> {
+    let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment().ok()?;
+    let key = resolve_cook_key(id).ok()?;
+    let recipe = super::load_recipe(&key)
+        .ok()
+        .or_else(|| super::load_recipe_for_attempt(&key).ok().flatten())?;
+    Some(store.cook_dir(&recipe.cook_id).join(NO_PROGRESS_MARKER))
+}
+
+fn clear_no_progress_for(id: &str) {
+    if let Some(path) = no_progress_path(id) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+/// Compare the Cook's plan after a performed step with the plan it was
+/// performed from. An unchanged attempt, status and step is no progress, and
+/// is recorded so the planner blocks the repeat; anything else clears it.
+fn record_recovery_progress(
+    id: &str,
+    (run_id, status, step): (String, String, CookRecoveryStep),
+    report: &CookRecoveryReport,
+) {
+    // Contention is transient, not evidence that the step cannot progress.
+    if report
+        .failure
+        .as_ref()
+        .is_some_and(|failure| failure["code"] == STORE_BUSY_CODE)
+    {
+        return;
+    }
+    let Some(path) = no_progress_path(id) else {
+        return;
+    };
+    let Some(action) = step.action_name() else {
+        return;
+    };
+    let after = plan_cook_recovery(id).ok();
+    let repeated = after.as_ref().is_some_and(|after| {
+        after.run_id == run_id && after.status == status && after.step.action_name() == Some(action)
+    });
+    if !repeated {
+        let _ = std::fs::remove_file(path);
+        return;
+    }
+    let blocker = report
+        .failure
+        .as_ref()
+        .and_then(|failure| failure["message"].as_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            format!(
+                "`{action}` returned `{}` and left the Cook at `{status}`",
+                report.status
+            )
+        });
+    let marker = CookRecoveryNoProgress {
+        run_id,
+        status,
+        step: action.to_string(),
+        blocker,
+    };
+    if let (Some(parent), Ok(bytes)) = (path.parent(), serde_json::to_vec_pretty(&marker)) {
+        let staged = path.with_extension("json.tmp");
+        let _ = std::fs::create_dir_all(parent)
+            .and_then(|()| std::fs::write(&staged, bytes))
+            .and_then(|()| std::fs::rename(&staged, &path));
+    }
+}
+
+/// Error code of the typed `store_busy` outcome of a bounded recovery or retry.
+pub const STORE_BUSY_CODE: &str = "observation_store.busy";
+const STORE_CONTENTION_ATTEMPTS: u32 = 5;
+const STORE_CONTENTION_BASE_BACKOFF: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Whether `error` is observation-store lock contention: the typed busy
+/// error, or a SQLite write whose contention budget ran out.
+pub fn is_store_contention(error: &Error) -> bool {
+    if error.code == homeboy_core::ErrorCode::ObservationStoreBusy {
+        return true;
+    }
+    let message = error.message.to_ascii_lowercase();
+    message.contains("database is locked")
+        || message.contains("database is busy")
+        || message.contains("writer contention budget exhausted")
+}
+
+/// Run `attempt` until `busy` no longer reports contention, sleeping with
+/// exponential backoff between a bounded number of attempts. Contention that
+/// outlasts the budget is returned as the typed `observation_store.busy`.
+pub fn with_store_contention_backoff<T>(
+    operation: &str,
+    busy: impl Fn(&Result<T>) -> bool,
+    mut attempt: impl FnMut() -> Result<T>,
+) -> Result<T> {
+    let started = std::time::Instant::now();
+    let mut backoff = STORE_CONTENTION_BASE_BACKOFF;
+    let mut attempts = 1;
+    loop {
+        let outcome = attempt();
+        if attempts >= STORE_CONTENTION_ATTEMPTS || !busy(&outcome) {
+            return match outcome {
+                Err(error) if is_store_contention(&error) => {
+                    let path = error.details["path"]
+                        .as_str()
+                        .unwrap_or("observation store")
+                        .to_string();
+                    Err(Error::observation_store_busy(
+                        path,
+                        operation,
+                        started.elapsed().as_millis() as u64,
+                    )
+                    .with_hint(format!(
+                        "`{operation}` gave up after {attempts} attempts behind another observation-store writer: {}",
+                        error.message
+                    )))
+                }
+                outcome => outcome,
+            };
+        }
+        std::thread::sleep(backoff);
+        backoff = backoff.saturating_mul(2);
+        attempts += 1;
     }
 }
 
@@ -1727,6 +1969,52 @@ mod tests {
         assert_eq!(report.run_id, "cook-attempt-2");
         assert_eq!(report.status, "running");
         assert_eq!(report.step, CookRecoveryStep::Continue);
+    }
+
+    /// #17650: lock contention re-runs the operation with backoff a bounded
+    /// number of times, then reports the typed `observation_store.busy`.
+    #[test]
+    fn cook_recovery_store_contention_is_bounded_and_typed() {
+        let locked = || {
+            Error::internal_unexpected(
+                "SQLite observation store error: upsert imported run with canonical events (writer contention budget exhausted): database is locked",
+            )
+        };
+        let busy =
+            |outcome: &Result<u32>| matches!(outcome, Err(error) if is_store_contention(error));
+        let started = std::time::Instant::now();
+        let mut attempts = 0;
+        let error = with_store_contention_backoff("agent-task recover", busy, || {
+            attempts += 1;
+            Err::<u32, _>(locked())
+        })
+        .unwrap_err();
+        assert_eq!(attempts, STORE_CONTENTION_ATTEMPTS);
+        assert_eq!(error.code.as_str(), STORE_BUSY_CODE);
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+
+        let mut attempts = 0;
+        let value = with_store_contention_backoff("agent-task retry", busy, || {
+            attempts += 1;
+            if attempts < 3 {
+                Err(locked())
+            } else {
+                Ok(attempts)
+            }
+        })
+        .unwrap();
+        assert_eq!(value, 3, "contention that clears completes the operation");
+
+        let mut attempts = 0;
+        let refused = with_store_contention_backoff("agent-task retry", busy, || {
+            attempts += 1;
+            Err::<u32, _>(Error::validation_invalid_argument(
+                "run_id", "refused", None, None,
+            ))
+        })
+        .unwrap_err();
+        assert_eq!(attempts, 1, "other refusals are not retried");
+        assert_ne!(refused.code.as_str(), STORE_BUSY_CODE);
     }
 
     #[test]

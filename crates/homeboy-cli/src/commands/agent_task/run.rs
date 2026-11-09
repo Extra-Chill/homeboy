@@ -1701,20 +1701,7 @@ fn preview_placement_policy_with_admission(replay_args: &[String]) -> Value {
         return policy;
     }
     let decision = homeboy::core::parsed_command_preflight::captured_result()
-        .map(|result| {
-            crate::commands::infra::route::cook_admission_decision(
-                crate::commands::infra::route::CookAdmissionPhase::Execution,
-                &result,
-                || {
-                    homeboy::core::engine::shell::quote_args(
-                        &crate::commands::infra::route::cook_placement_replay_args(
-                            replay_args,
-                            "local",
-                        ),
-                    )
-                },
-            )
-        })
+        .map(|result| crate::commands::infra::route::cook_admission_decision(&result))
         .unwrap_or_else(crate::commands::infra::route::CookAdmissionDecision::unchecked);
     policy["admission"] = render_cook_admission(decision);
     policy
@@ -3738,16 +3725,6 @@ process.stdout.write(JSON.stringify({type:'message_end',message:{role:'assistant
                 (
                     "auto",
                     None,
-                    true,
-                    false,
-                    CookAdmissionDecision::Blocked {
-                        reason: "not_connected".into(),
-                        next_action: Some("local replay".into()),
-                    },
-                ),
-                (
-                    "auto",
-                    None,
                     false,
                     true,
                     CookAdmissionDecision::Indeterminate {
@@ -3792,7 +3769,7 @@ process.stdout.write(JSON.stringify({type:'message_end',message:{role:'assistant
                 } else {
                     ResourceAdmissionDecision::Admitted
                 };
-                assert_eq!(cook_admission_decision(crate::commands::infra::route::CookAdmissionPhase::Execution, &result, || "local replay".into()), expected,
+                assert_eq!(cook_admission_decision(&result), expected,
                     "{placement}, runner={runner:?}, unavailable={unavailable}, rejected={rejected}");
             }
         });
@@ -11509,18 +11486,32 @@ pub(super) fn run_resume_with_executor(
     ))
 }
 
-/// `retry` submits a fresh run from any run's plan. Given a Cook ID whose
-/// durable state names a recovery step, `retry --run` performs that step
-/// through `agent-task recover` instead of re-deciding it; any other retry of
-/// that Cook alias is refused toward `recover`, because only an exact attempt
-/// ID names the run a plain retry reserves from (#15925).
+/// `retry` submits a fresh run from any run's plan. A Cook ID whose durable
+/// state names a recovery step is delegated to `agent-task recover`, the one
+/// Cook planner (#15925). Store contention is bounded: it retries with
+/// backoff and then reports `observation_store.busy`.
 pub(super) fn retry(args: RetryArgs) -> CmdResult<Value> {
-    if let Some(plan) = agent_task_service_direct::cook_recovery_delegation(&args.run_id) {
-        return retry_cook_alias(args, &plan);
-    }
-    retry_exact(args)
+    agent_task_service_direct::with_store_contention_backoff(
+        "agent-task retry",
+        |outcome: &CmdResult<Value>| {
+            outcome
+                .as_ref()
+                .is_err_and(agent_task_service_direct::is_store_contention)
+        },
+        || retry_cook_or_run(args.clone()),
+    )
 }
 
+fn retry_cook_or_run(args: RetryArgs) -> CmdResult<Value> {
+    match agent_task_service_direct::cook_recovery_delegation(&args.run_id) {
+        Some(plan) => retry_cook_alias(args, &plan),
+        None => retry_exact(args),
+    }
+}
+
+/// A Cook ID names the Cook, whose one planner is `agent-task recover`
+/// (#15925). A plain `--run` performs that step; any other retry is refused
+/// toward `recover` with the exact attempt it would reserve from.
 fn retry_cook_alias(
     args: RetryArgs,
     plan: &agent_task_service_direct::CookRecoveryPlan,

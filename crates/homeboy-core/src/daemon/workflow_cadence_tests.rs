@@ -15,6 +15,23 @@ use crate::daemon::workflow_job::{register_workflow_job_driver, WORKFLOW_JOB_REQ
 use crate::env_materialization_plan::EnvMaterializationPlan;
 use crate::test_support::with_isolated_home;
 
+thread_local! {
+    static WRITE_HELD_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Runs once on this thread while the next registration write holds the
+/// SQLite writer.
+fn on_write_held(hook: impl FnOnce() + 'static) {
+    WRITE_HELD_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
+pub(super) fn run_write_held_hook() {
+    if let Some(hook) = WRITE_HELD_HOOK.with(|slot| slot.borrow_mut().take()) {
+        hook();
+    }
+}
+
 const MINUTE: u64 = 60_000;
 const HOUR: u64 = 60 * MINUTE;
 
@@ -390,5 +407,59 @@ fn the_tick_fires_skips_overlap_and_never_fires_a_slot_twice() {
         );
         let lines = std::fs::read_to_string(&runs).unwrap();
         assert_eq!(lines.lines().count(), 2);
+    });
+}
+
+/// A job-store write holds the store's lock while it waits for the SQLite
+/// writer. A skipped slot's registration write must not read the job store
+/// while it holds that writer, or the two wait on each other until the busy
+/// budget fails the job-store write (#17645).
+#[test]
+fn a_skipped_slot_never_reads_the_job_store_while_holding_the_writer() {
+    with_isolated_home(|home| {
+        register_workflow_job_driver();
+        let store = JobStore::open_without_reconciliation(crate::paths::observation_db().unwrap())
+            .unwrap()
+            .with_daemon_lease("cadence-test".to_string());
+        let base = 1_791_900_000_000;
+        let request = template(json!({"interval": "2m"}), "true", home.path());
+        let (mut cadence, _) = register(request.clone(), false, base).unwrap();
+        // A previous instance that is still running, without a driver thread.
+        let running = slot_request(&request, &slot_instance_name(base));
+        let envelope = serde_json::from_value(running.submission().unwrap()).unwrap();
+        let job_id = super::super::admit_controller_job(envelope, &store)
+            .unwrap()
+            .job
+            .id;
+        store.start_controller_execution(job_id).unwrap();
+        cadence.last_instance = Some(running.instance.clone());
+        cadence.next_due_ms = base + 2 * MINUTE;
+        write(&open().unwrap(), &cadence).unwrap();
+
+        let writer = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let (hook_store, hook_writer) = (store.clone(), writer.clone());
+        on_write_held(move || {
+            let job_store = hook_store.clone();
+            let handle = std::thread::spawn(move || {
+                job_store.append_event(job_id, crate::api_jobs::JobEventKind::Progress, None, None)
+            });
+            // The job-store writer now holds the store lock and queues for
+            // the SQLite writer this registration write holds.
+            while !hook_store.state_lock_held() {
+                assert!(!handle.is_finished(), "job-store write did not queue");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            *hook_writer.lock().unwrap() = Some(handle);
+        });
+
+        let skipped = admit_due(&store, base + 2 * MINUTE + 1_000);
+        assert_eq!(skipped[0]["skipped"], base + 2 * MINUTE, "{skipped:?}");
+        let handle = writer.lock().unwrap().take().expect("hook ran");
+        handle
+            .join()
+            .unwrap()
+            .expect("the job-store write commits after the registration write");
+        let after = list().unwrap().remove(0);
+        assert_eq!((after.skipped, after.next_due_ms), (1, base + 4 * MINUTE));
     });
 }

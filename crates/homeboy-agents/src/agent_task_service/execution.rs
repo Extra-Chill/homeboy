@@ -2713,6 +2713,16 @@ fn retryable_cook_attempt(
                 None,
             ));
         }
+        // A terminal failed successor is authoritative evidence. It cannot be
+        // resumed, so its plan is never replayed and is not compared; a later
+        // attempt may be allocated below if the durable retry budget permits
+        // it (#17650).
+        if record.state().is_terminal()
+            && record.state() != agent_task_lifecycle::AgentTaskRunState::Succeeded
+        {
+            materialized_attempt_seen = true;
+            continue;
+        }
         if !cook_retry_plans_match(
             &recipe_attempt.plan,
             &agent_task_lifecycle::load_plan_in_store(lifecycle_store, &recipe_attempt.run_id)?,
@@ -2725,21 +2735,14 @@ fn retryable_cook_attempt(
             ));
         }
         if record.state().is_terminal() {
-            if record.state() == agent_task_lifecycle::AgentTaskRunState::Succeeded {
-                return Ok(Some(CookRetryAttempt {
-                    cook_id: cook_id.to_string(),
-                    attempt: recipe_attempt.attempt,
-                    pending_run_id: Some(recipe_attempt.run_id.clone()),
-                    plan: recipe_attempt.plan.clone(),
-                    recipe_replacement: materialized_attempt_seen,
-                    replaces_source_attempt: false,
-                }));
-            }
-            materialized_attempt_seen = true;
-            // A terminal failed successor is authoritative evidence. It cannot
-            // be resumed; a later attempt may be allocated below if the durable
-            // retry budget permits it.
-            continue;
+            return Ok(Some(CookRetryAttempt {
+                cook_id: cook_id.to_string(),
+                attempt: recipe_attempt.attempt,
+                pending_run_id: Some(recipe_attempt.run_id.clone()),
+                plan: recipe_attempt.plan.clone(),
+                recipe_replacement: materialized_attempt_seen,
+                replaces_source_attempt: false,
+            }));
         }
         if record.state() != agent_task_lifecycle::AgentTaskRunState::Queued {
             return Err(Error::validation_invalid_argument(

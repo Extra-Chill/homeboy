@@ -1181,7 +1181,16 @@ fn lab_runner_readiness_from_candidates(
         LabRunnerReadinessState::ConnectedIneligible | LabRunnerReadinessState::CapacityBlocked => {
             candidates
                 .iter()
-                .map(|candidate| format!("homeboy runner status {}", candidate.id))
+                .map(|candidate| {
+                    // A connected runner without attributable daemon freshness
+                    // (unverified lease) recovers by reconnecting, not by
+                    // re-reading the same unverified status.
+                    if candidate.admission_fresh {
+                        format!("homeboy runner status {}", candidate.id)
+                    } else {
+                        format!("homeboy runner connect {}", candidate.id)
+                    }
+                })
                 .collect()
         }
         LabRunnerReadinessState::Stale => candidates
@@ -2416,7 +2425,7 @@ mod tests {
             .contains(&"daemon_freshness_unavailable".to_string()));
         assert_eq!(
             lease_missing.remediation_commands,
-            ["homeboy runner status lease-missing"]
+            ["homeboy runner connect lease-missing"]
         );
 
         let mut full = default_lab_candidate("full", true);
