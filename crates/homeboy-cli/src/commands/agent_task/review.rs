@@ -1084,6 +1084,27 @@ pub(crate) fn supplied_review_form(
     let Some(review_form) = review_form else {
         return Ok(None);
     };
+    let missing = [
+        (tool, "--review-form-tool"),
+        (model, "--review-form-model"),
+        (author, "--review-form-author"),
+    ]
+    .into_iter()
+    .filter_map(|(value, flag)| {
+        value
+            .filter(|value| !value.trim().is_empty())
+            .is_none()
+            .then_some(flag)
+    })
+    .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "review_form",
+            format!("{} are required with --review-form", missing.join(", ")),
+            None,
+            None,
+        ));
+    }
     let raw = config::read_json_spec_to_string(review_form)?;
     let form = serde_json::from_str::<AiFilledReviewForm>(&raw).map_err(|error| {
         Error::validation_invalid_argument(
@@ -2993,6 +3014,37 @@ pub(crate) fn read_promotion_source(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn supplied_review_form_reports_all_missing_provenance_flags() {
+        for (tool, model, author, missing) in [
+            (
+                None,
+                None,
+                None,
+                vec![
+                    "--review-form-tool",
+                    "--review-form-model",
+                    "--review-form-author",
+                ],
+            ),
+            (
+                Some("pi"),
+                None,
+                Some(""),
+                vec!["--review-form-model", "--review-form-author"],
+            ),
+        ] {
+            let error = super::supplied_review_form(Some("{}"), tool, model, author).unwrap_err();
+            let message = error.to_string();
+            for flag in missing {
+                assert!(message.contains(flag), "{message}");
+            }
+        }
+        assert!(super::supplied_review_form(None, None, None, None)
+            .unwrap()
+            .is_none());
+    }
+
     use super::*;
     use crate::commands::agent_task::fake_pi_test::FakePi;
     use homeboy::agents::agent_tasks::provider::evaluate_provider_dispatchability;

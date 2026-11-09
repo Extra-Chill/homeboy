@@ -1470,7 +1470,7 @@ pub(crate) fn gate_feedback_current_diff(promotion: &AgentTaskPromotionReport) -
 /// the last one recorded in the aggregate. Returns `Ok(None)` when the agent
 /// emitted no form (the loop treats absence as a gap and nudges a retry). A
 /// present-but-malformed form is a hard error so garbage is never rendered.
-pub(super) fn review_form_from_aggregate(
+pub(crate) fn review_form_from_aggregate(
     aggregate: &crate::agent_task_schedule::AgentTaskAggregate,
 ) -> Result<Option<crate::agent_task_review_dossier::AiFilledReviewForm>> {
     let Some(outcome) = aggregate.selected_outcome().or_else(|| {

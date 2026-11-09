@@ -177,7 +177,7 @@ fn verdict_reason(run: &ControlPlaneRun, gates: &[CookVerdictGate]) -> Option<St
         if blocker
             .code
             .as_deref()
-            .is_some_and(|code| code.starts_with("outcome."))
+            .is_some_and(|code| code.starts_with("outcome.") || code == "review_form.incomplete")
         {
             return Some(blocker.message.clone());
         }
@@ -272,6 +272,26 @@ mod tests {
         let mut run = ControlPlaneRun::new(RunId::new("agent-task-verdict").expect("run id"));
         run.state = state;
         run
+    }
+
+    #[test]
+    fn incomplete_review_names_reason_and_full_override_for_read_surfaces() {
+        let mut run = resource(ControlPlaneRunState::CandidateRecoverable);
+        let command = "homeboy agent-task recover cook-incomplete --review-form @FILE --review-form-tool <tool> --review-form-model <model> --review-form-author <author>";
+        run.blocker = Some(ControlPlaneBlocker {
+            code: Some("review_form.incomplete".into()),
+            message: "The agent's review form declares the task incomplete: regression not covered"
+                .into(),
+            reason: Some(command.into()),
+            details: None,
+            state: None,
+            retry: None,
+            daemon: None,
+            output: None,
+        });
+        let verdict = cook_verdict(&run);
+        assert!(verdict.reason.unwrap().contains("regression not covered"));
+        assert_eq!(verdict.next_action, command);
     }
 
     #[test]
