@@ -25,7 +25,8 @@ with tempfile.TemporaryDirectory() as directory:
     stub.chmod(0o755)
     env = dict(os.environ, PATH=f'{tmp}/bin:' + os.environ['PATH'],
                GITHUB_OUTPUT=str(tmp / 'output'), COMPONENTS='changed',
-               BASE_SHA='base', HEAD_SHA='head', SHARED_PATHS='.github/**\ntooling/**')
+               BASE_SHA='base', HEAD_SHA='head', GITHUB_EVENT_NAME='push',
+               SHARED_PATHS='.github/**\ntooling/**')
 
     def plan(matrix, success=True):
         (tmp / 'output').unlink(missing_ok=True)
@@ -54,6 +55,34 @@ with tempfile.TemporaryDirectory() as directory:
     env['BASE_SHA'] = '0' * 40
     plan({'include': []})
     assert json.loads((tmp / 'args.json').read_text())[3] != '0' * 40
+    # Real diverged history, with a stub detector: no homeboy binary required.
+    def git(*args):
+        return subprocess.check_output(['git', '-c', 'user.name=Test', '-c',
+                                        'user.email=test@example.com', *args],
+                                       cwd=tmp, text=True).strip()
+
+    git('commit', '-q', '--allow-empty', '-m', 'branch point')
+    branch_point = git('rev-parse', 'HEAD')
+    git('commit', '-q', '--allow-empty', '-m', 'candidate')
+    head = git('rev-parse', 'HEAD')
+    git('checkout', '-q', '--detach', branch_point)
+    git('commit', '-q', '--allow-empty', '-m', 'base advanced')
+    base_tip = git('rev-parse', 'HEAD')
+    assert base_tip != branch_point
+    # Leave HEAD at the base tip to verify the explicit HEAD_SHA is used.
+    env.update(BASE_SHA=base_tip, HEAD_SHA=head)
+    for event in ('pull_request', 'pull_request_target', 'push'):
+        env['GITHUB_EVENT_NAME'] = event
+        plan(matrix)
+        args = json.loads((tmp / 'args.json').read_text())
+        assert args[3] == (base_tip if event == 'push' else branch_point)
+        assert args[5] == head
+    env['GITHUB_EVENT_NAME'] = 'pull_request'
+    env['BASE_SHA'] = 'missing-base'
+    plan(matrix, False)
+    env['BASE_SHA'] = ''
+    plan(matrix, False)
+
     env['COMPONENTS'] = 'all'
     all_rows = json.loads(plan(None)['matrix'])['include']
     assert sorted(all_rows, key=lambda row: row['component']) == sorted(matrix['include'], key=lambda row: row['component'])
@@ -99,6 +128,9 @@ assert step['with']['pr-policy-merge'] == 'false'
 assert '0.436.4' in str(jobs['detect-components'])
 detect = next(step for step in jobs['detect-components']['steps'] if step.get('id') == 'detect')
 assert detect['env']['BASE_SHA'] == '${{ github.event.pull_request.base.sha || github.event.before }}'
+checkout = jobs['detect-components']['steps'][0]
+assert checkout['with']['fetch-depth'] == 0
+assert checkout['with']['ref'] == '${{ github.event.pull_request.head.sha || github.sha }}'
 assert any(step.get('id') == 'prepare-detection' for step in jobs['detect-components']['steps'])
 assert "inputs.components == ''" in jobs['binary']['if']
 planner = jobs['plan']['steps'][-1]

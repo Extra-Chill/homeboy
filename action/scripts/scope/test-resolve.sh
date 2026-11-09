@@ -75,6 +75,28 @@ for scope in auto changed; do
   assert_env_contains "${env_file}" "SCOPE_BASE_REF=${base_sha}" "${scope} PR records base ref"
 done
 
+# The base branch advanced after the candidate branched: only the branch point
+# belongs in PR diffs and differential baselines, including explicit full scope.
+candidate_sha="$(git rev-parse HEAD)"
+git checkout -q --detach "${base_sha}"
+git -c user.name=Test -c user.email=test@example.com commit -q --allow-empty -m base-advanced
+base_tip="$(git rev-parse HEAD)"
+git checkout -q --detach "${candidate_sha}"
+[ "${base_tip}" != "${base_sha}" ]
+for event in pull_request pull_request_target; do
+  for scope in auto changed full; do
+    env_file="$(run_resolve env GITHUB_EVENT_NAME="${event}" SCOPE_INPUT="${scope}" BASE_SHA="${base_tip}")"
+    assert_env_contains "${env_file}" "SCOPE_BASE_REF=${base_sha}" "${scope} ${event} uses merge base, not advanced base tip"
+    expected_mode=changed
+    [ "${scope}" != full ] || expected_mode=full
+    assert_env_contains "${env_file}" "SCOPE_MODE=${expected_mode}" "${scope} ${event} preserves scope mode"
+  done
+done
+
+# Explicit changed scope on pushes retains its existing base-tip behavior.
+env_file="$(run_resolve env GITHUB_EVENT_NAME=push SCOPE_INPUT=changed BASE_SHA="${base_tip}")"
+assert_env_contains "${env_file}" "SCOPE_BASE_REF=${base_tip}" "changed push preserves supplied base"
+
 # A baseline ref must not imply changed-file behaviour in context helpers.
 (
   source "${SCRIPT_DIR}/context.sh"

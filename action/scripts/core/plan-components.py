@@ -10,6 +10,20 @@ def git(*args):
     return subprocess.check_output(['git', *args], text=True).strip()
 
 
+def resolve_base(base, head, event):
+    if not base:
+        raise ValueError('components: changed requires a PR base or push before SHA; use all for dispatch/schedule')
+    if event in ('pull_request', 'pull_request_target'):
+        # The detector checkout uses fetch-depth: 0, including base ancestry.
+        # Fail detection rather than silently comparing against a moving base tip.
+        return git('merge-base', base, head)
+    if set(base) == {'0'}:
+        tree = git('hash-object', '-t', 'tree', '/dev/null')
+        return git('-c', 'user.name=CI', '-c', 'user.email=ci@example.com',
+                   'commit-tree', tree, '-m', 'Initial empty tree')
+    return base
+
+
 def discover():
     files = subprocess.check_output(
         ['git', 'ls-files', '-z', '--cached', '--others', '--exclude-standard']
@@ -28,14 +42,9 @@ def plan():
     if mode == 'all':
         matrix = discover()
     elif mode == 'changed':
-        base = os.environ.get('BASE_SHA', '')
         head = os.environ['HEAD_SHA']
-        if base and set(base) == {'0'}:
-            tree = git('hash-object', '-t', 'tree', '/dev/null')
-            base = git('-c', 'user.name=CI', '-c', 'user.email=ci@example.com',
-                       'commit-tree', tree, '-m', 'Initial empty tree')
-        if not base:
-            raise ValueError('components: changed requires a PR base or push before SHA; use all for dispatch/schedule')
+        base = resolve_base(os.environ.get('BASE_SHA', ''), head,
+                            os.environ.get('GITHUB_EVENT_NAME', ''))
         command = ['homeboy', 'component', 'changed', '--base', base, '--head', head,
                    '--path', '.', '--format', 'matrix']
         for pattern in os.environ.get('SHARED_PATHS', '').splitlines():
