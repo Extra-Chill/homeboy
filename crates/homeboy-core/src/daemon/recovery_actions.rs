@@ -340,6 +340,22 @@ fn plan_recovery_steps(status: &DaemonStatus) -> DaemonRecoveryPlan {
         );
     }
 
+    // A drain waits on the protected jobs it still holds; name each one, and
+    // the blocker with its recovery command, instead of a bare wait (#17707).
+    if status.running && status.draining() {
+        let holders = super::lifecycle_plan::drain_holders(status, crate::api_jobs::timestamp_ms());
+        let reason = if holders.is_empty() {
+            "daemon draining: no protected jobs remain; the replacement admits queued work on startup".to_string()
+        } else {
+            format!(
+                "daemon draining: {} protected job(s) hold the drain: {}",
+                holders.len(),
+                super::lifecycle_plan::describe_drain_holders(&holders)
+            )
+        };
+        return DaemonRecoveryPlan::diagnose(reason, |reason| Plan::Draining { reason, holders });
+    }
+
     let attestation = needs_attestation(status);
     if freshness.fresh && freshness.stale_reason_code.is_none() {
         if !attestation.is_empty() {

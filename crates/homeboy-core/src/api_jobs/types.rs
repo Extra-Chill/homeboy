@@ -363,6 +363,10 @@ pub enum DaemonActiveJobRecoveryDisposition {
     NeedsAttestation,
     ProtectedLive,
     BlockingAmbiguous,
+    /// Admitted while its daemon drained and held in
+    /// `pending_resource_admission`: nothing has started, and the replacement
+    /// daemon's startup admission starts it.
+    QueuedForReplacement,
 }
 
 impl DaemonActiveJobRecoveryDisposition {
@@ -374,7 +378,10 @@ impl DaemonActiveJobRecoveryDisposition {
     pub fn blocks_daemon_replacement(self) -> bool {
         !matches!(
             self,
-            Self::TerminalEvidence | Self::NeedsAttestation | Self::DriverRecovery
+            Self::TerminalEvidence
+                | Self::NeedsAttestation
+                | Self::DriverRecovery
+                | Self::QueuedForReplacement
         )
     }
 }

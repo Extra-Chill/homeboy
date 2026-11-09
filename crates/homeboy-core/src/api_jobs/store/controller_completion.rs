@@ -51,6 +51,7 @@ mod tests {
             execution_claim_id: None,
             recovery_attempted: false,
             parent_job_id: None,
+            pending_admission_reason: None,
         };
         let ControllerJobSubmissionOutcome::Submitted(id) = store
             .admit_controller_job(

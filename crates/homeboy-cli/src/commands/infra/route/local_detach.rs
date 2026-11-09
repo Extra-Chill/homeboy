@@ -280,7 +280,26 @@ pub(super) fn intercept_local_detached_cook(
         &cwd,
         environment,
     );
-    let job_id = submit_step(&controller_client, &request)?;
+    let submission = controller_client.submit_with_disposition(request.submission()?)?;
+    let job_id = submission.job.id.to_string();
+    // A draining daemon persists the step in `pending_resource_admission`; the
+    // replacement daemon starts it, and its child binds this handoff (#17707).
+    if let Some(reason) = submission.pending_admission {
+        admission.release();
+        let envelope = json!({
+            "schema": HANDOFF_SCHEMA,
+            "status": "pending_resource_admission",
+            "reason": reason,
+            "waiting_for": "daemon_replacement",
+            "cook_id": cook_id,
+            "controller_job": { "state": "queued", "job_id": job_id },
+            "status_command": format!("homeboy agent-task status {cook_id}"),
+            "cancel_command": format!("homeboy agent-task cancel {cook_id}"),
+        });
+        print!("{}", finalize_handoff_envelope(&envelope, output_file)?);
+        return Ok(Some(0));
+    }
+    controller_client.start(&job_id)?;
     pause_after_controller_start_for_test()?;
     let store = &admission.store;
     let bound = await_step_binding(&controller_client, &job_id, handoff_timeout(), || {
