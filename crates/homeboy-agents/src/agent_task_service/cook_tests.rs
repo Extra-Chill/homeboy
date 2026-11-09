@@ -20679,6 +20679,71 @@ fn verify_replacement_gates_recovers_pending_verification_and_replays_completed_
         .expect("completed replacement proof replays without rerunning gates");
         assert_eq!(replay.status, replacement.status);
         assert_eq!(replay.command_evidence, replacement.command_evidence);
+
+        // #17703: a green attempt remains replayable after a newer retry
+        // records an aggregate with no outcome. Bind the source to the
+        // persisted promotion, never to the retry's mutable Cook selection.
+        let retry_id = "run-verify-replacement-2";
+        agent_task_lifecycle::submit_plan(&options.identity.initial_plan, Some(retry_id))
+            .expect("persist retry lifecycle");
+        agent_task_lifecycle::record_run_aggregate(
+            retry_id,
+            &options.identity.initial_plan,
+            &crate::agent_task_scheduler::AgentTaskAggregate {
+                schema: crate::agent_task::AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
+                plan_id: options.identity.initial_plan.plan_id.clone(),
+                totals: Default::default(),
+                outcomes: Vec::new(),
+                events: Vec::new(),
+                artifact_lineage: Vec::new(),
+                child_runs: Vec::new(),
+                artifact_bindings: Vec::new(),
+                queue: Default::default(),
+            },
+        )
+        .expect("persist empty retry aggregate");
+        agent_task_lifecycle::record_cook_attempt_in_store(
+            &test_lifecycle_store(),
+            "cook-verify-replacement",
+            2,
+            retry_id,
+        )
+        .expect("index empty retry");
+        let recovered = verify_replacement_gates(
+            "run-verify-replacement",
+            VerifyGateOptions {
+                verify: vec![reviewer_gate.clone()],
+                ..Default::default()
+            },
+            "reuse green candidate after empty retry".to_string(),
+            None,
+        )
+        .expect("recover the exact green attempt after an empty retry");
+        assert!(recovered.finalization_eligible());
+        assert_eq!(recovered.command_evidence, replacement.command_evidence);
+        assert!(replacement.finalization_eligible());
+        let (raw, path) =
+            crate::agent_task_service::cook_promotion::persisted_promotion_source_in_store(
+                &test_lifecycle_store(),
+                &replacement,
+                "run-verify-replacement",
+            )
+            .expect("green candidate source survives empty retry");
+        let bound: Value = serde_json::from_str(&raw).expect("bound source");
+        assert_eq!(bound["outcomes"][0]["task_id"], replacement.source.task_id);
+        assert_eq!(
+            bound["outcomes"][0]["candidate"],
+            replacement.provenance["candidate_commit"]
+        );
+        assert_eq!(
+            path,
+            Some(
+                test_lifecycle_store()
+                    .aggregate_source_exact("run-verify-replacement")
+                    .expect("original aggregate")
+                    .1
+            )
+        );
         assert_eq!(
             std::fs::read_to_string(gate_log).expect("read gate log"),
             "ranran"
