@@ -408,11 +408,22 @@ pub(crate) fn declared_transport<'a>(
                 .map(move |transport| (extension, transport))
         })
         .collect();
-    let mut matches = transports
+    // An exact id wins; otherwise accept the unambiguous short alias, the
+    // id prefix before its first `.` (for example `discord`).
+    let exact: Vec<_> = transports
         .iter()
-        .filter(|(_, transport)| transport.id == id);
-    if let (Some(declared), None) = (matches.next(), matches.next()) {
-        return Ok(*declared);
+        .filter(|(_, transport)| transport.id == id)
+        .collect();
+    let matches = if exact.is_empty() && !id.contains('.') {
+        transports
+            .iter()
+            .filter(|(_, transport)| transport.id.split('.').next() == Some(id))
+            .collect()
+    } else {
+        exact
+    };
+    if let [declared] = matches.as_slice() {
+        return Ok(**declared);
     }
     let mut installed: Vec<_> = transports
         .iter()
@@ -421,7 +432,7 @@ pub(crate) fn declared_transport<'a>(
     installed.sort_unstable();
     installed.dedup();
     Err(crate::Error::validation_invalid_argument("notification_transport", format!(
-        "notification transport `{id}` must be declared by exactly one installed extension; installed transport ids: {}", installed.join(", ")
+        "notification transport `{id}` must name exactly one installed transport id or unambiguous short alias; installed transport ids: {}", installed.join(", ")
     ), None, None))
 }
 
@@ -611,6 +622,47 @@ mod tests {
             .unwrap();
         manifest.id = "test-transport".to_string();
         crate::extension::catalog::save_manifest(&manifest).unwrap();
+    }
+
+    #[test]
+    fn notification_transport_resolves_unambiguous_short_alias() {
+        let manifest = |ids: &[&str]| -> homeboy_extension_contract::ExtensionManifest {
+            let transports: Vec<_> = ids
+                .iter()
+                .map(|id| serde_json::json!({
+                    "schema": homeboy_extension_contract::notification_transport_config::NOTIFICATION_TRANSPORT_SCHEMA,
+                    "id": id,
+                    "command": ["true"],
+                }))
+                .collect();
+            serde_json::from_value(serde_json::json!({
+                "name": "Test transport",
+                "version": "1.0.0",
+                "notification_transports": transports,
+            }))
+            .unwrap()
+        };
+        let extensions = vec![manifest(&[
+            "discord.run-completion",
+            "slack.post",
+            "slack.thread",
+        ])];
+
+        let (_, exact) = declared_transport(&extensions, "discord.run-completion").unwrap();
+        assert_eq!(exact.id, "discord.run-completion");
+        let (_, alias) = declared_transport(&extensions, "discord").unwrap();
+        assert_eq!(alias.id, "discord.run-completion");
+
+        for rejected in ["slack", "teams"] {
+            let error = declared_transport(&extensions, rejected).unwrap_err();
+            assert!(
+                error.message.contains(
+                    "installed transport ids: discord.run-completion, slack.post, slack.thread"
+                ),
+                "{}",
+                error.message
+            );
+        }
     }
 
     #[test]

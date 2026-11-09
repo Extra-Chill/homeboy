@@ -371,9 +371,7 @@ pub(super) fn batch_prepare(args: AgentTaskBatchPrepareArgs) -> CmdResult<Value>
                     .replace("{repo}", &repository)
                     .replace("{branch}", &branch)
                     .replace("{worktree}", &worktree),
-                // Homeboy authors no agent-facing prose (#15818): the issue
-                // itself is the task.
-                None => issue.url.clone(),
+                None => default_task_prompt(&issue.url),
             };
             json!({
                 "issue_url": issue.url,
@@ -648,6 +646,13 @@ fn child_run(cook_id: &str) -> Option<Vec<(&'static str, Value)>> {
         ("pr_url", json!(pr_url)),
         ("next_action", json!(verdict.next_action)),
     ])
+}
+
+/// The prompt a Cook runs when none is given: the task URL itself. Homeboy
+/// authors no agent-facing prose (#15818), so the issue is the task. Shared by
+/// cook-batch children and a single `agent-task cook --task-url`.
+pub(crate) fn default_task_prompt(task_url: &str) -> String {
+    task_url.to_string()
 }
 
 fn slugify(value: &str) -> String {

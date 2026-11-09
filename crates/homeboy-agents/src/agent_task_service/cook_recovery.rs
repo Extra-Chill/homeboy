@@ -709,6 +709,9 @@ pub fn plan_cook_recovery(id: &str) -> Result<CookRecoveryPlan> {
                 ),
             });
         }
+        if let Some(plan) = unmaterialized_cook_recovery_plan(&record) {
+            return Ok(plan);
+        }
     }
     if let Ok(index) = store.read_cook_index(id) {
         if index.cancellation_fence.is_some() {
@@ -723,6 +726,37 @@ pub fn plan_cook_recovery(id: &str) -> Result<CookRecoveryPlan> {
         }
     }
     plan_cook_recovery_for_cook(id).or_else(|error| manual_finalization_plan(id).ok_or(error))
+}
+
+/// A Cook that failed before materializing (its admission failed) has no
+/// durable recipe. Its recorded admission request is the replay intent:
+/// recovery re-admits it through the same `retry` path, which reserves a new
+/// admission from that request and revalidates runner readiness.
+fn unmaterialized_cook_recovery_plan(
+    record: &agent_task_lifecycle::AgentTaskRunRecord,
+) -> Option<CookRecoveryPlan> {
+    if record.state() != agent_task_lifecycle::AgentTaskRunState::Failed
+        || !agent_task_lifecycle::is_unmaterialized_cook_admission(record)
+        || super::load_recipe(&record.run_id).is_ok()
+    {
+        return None;
+    }
+    let replayable = record
+        .metadata
+        .pointer("/unmaterialized_cook_admission/binding/admission_inputs/argv")
+        .is_some_and(Value::is_array);
+    Some(CookRecoveryPlan {
+        cook_id: record.run_id.clone(),
+        run_id: record.run_id.clone(),
+        status: cook_recovery_status(record),
+        step: if replayable {
+            CookRecoveryStep::Retry
+        } else {
+            CookRecoveryStep::none(
+                "The Cook failed before materializing and recorded no admission request to replay; re-run the original Cook command.",
+            )
+        },
+    })
 }
 
 /// A durable manual-finalization record outside any readable Cook recipe:
@@ -781,12 +815,19 @@ fn plan_cook_recovery_for_cook(id: &str) -> Result<CookRecoveryPlan> {
 /// [`recover_cook`] instead of deciding a Cook's next step itself.
 ///
 /// `Some` only when `id` is a durable Cook ID (the Cook alias, not one exact
-/// attempt) whose durable state names a step `recover` performs. `None` keeps
+/// attempt) or a Cook that failed before materializing, whose durable state
+/// names a step `recover` performs. `None` keeps
 /// the calling verb's own behavior: a non-Cook run, an exact attempt ID, an
 /// in-flight Cook (for example a queued admission `resume` re-arms), a Cook
 /// whose state admits no step, or a Cook whose recovery plan cannot be read.
 pub fn cook_recovery_delegation(id: &str) -> Option<CookRecoveryPlan> {
-    super::load_recipe(id).ok()?;
+    if super::load_recipe(id).is_err() {
+        // A Cook that failed before materializing re-admits through the
+        // same recovery step `recover` performs.
+        let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment().ok()?;
+        return unmaterialized_cook_recovery_plan(&store.read_record(id).ok()?)
+            .filter(|plan| !plan.step.is_none());
+    }
     // Replacement gates need explicit operator authorization that the
     // delegating verb never carries, so only `recover` performs them.
     plan_cook_recovery(id)
@@ -2177,6 +2218,83 @@ mod tests {
         .unwrap_err();
         assert_eq!(attempts, 1, "other refusals are not retried");
         assert_ne!(refused.code.as_str(), STORE_BUSY_CODE);
+    }
+
+    /// #17709: a Cook whose admission failed has no durable recipe; recover
+    /// re-admits it from its recorded request through the retry path.
+    #[test]
+    fn cook_recover_readmits_an_unmaterialized_failed_cook() {
+        struct RetryPerformer(std::cell::RefCell<Vec<String>>);
+        impl CookRecoveryPerformer for RetryPerformer {
+            fn continue_cook(
+                &self,
+                _: &str,
+                _: bool,
+                _: &CookRecoveryOverrides,
+            ) -> Result<(Value, i32)> {
+                unreachable!("an unmaterialized Cook has no attempt to continue")
+            }
+            fn preflight_continue_cook(&self, _: &str, _: bool) -> Result<(Value, i32)> {
+                unreachable!()
+            }
+            fn retry(&self, run_id: &str) -> Result<(Value, i32)> {
+                self.0.borrow_mut().push(run_id.to_string());
+                let retry = crate::agent_task_service::retry(run_id, None, false, false)?;
+                Ok((serde_json::json!({ "run_id": retry.record.run_id }), 0))
+            }
+            fn reconcile(&self, _: &str) -> Result<(Value, i32)> {
+                unreachable!()
+            }
+            fn adopt(&self, _: &str, _: &str) -> Result<(Value, i32)> {
+                unreachable!()
+            }
+        }
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let cook_id = "cook-admission-failed";
+            let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment().unwrap();
+            agent_task_lifecycle::record_unmaterialized_cook_admission_in_store(
+                &store,
+                cook_id,
+                serde_json::json!({
+                    "schema": "homeboy/unmaterialized-cook-binding/v1",
+                    "request_ref": "sha256:request",
+                    "worktree_ref": "repo@branch",
+                    "admission_inputs": { "cook_id": cook_id, "argv": ["cook"] },
+                }),
+                "blocked_runner_unavailable",
+                "selected runner requires admitted connected readiness evidence",
+            )
+            .unwrap();
+            store
+                .mutate_record(cook_id, |record| {
+                    record.metadata["detached_cook_handoff"]["state"] =
+                        serde_json::json!("exited_before_handoff");
+                    record.set_state_for_test(agent_task_lifecycle::AgentTaskRunState::Failed);
+                    true
+                })
+                .unwrap();
+
+            let plan = plan_cook_recovery(cook_id).expect("unmaterialized Cook is recoverable");
+            assert_eq!(plan.step, CookRecoveryStep::Retry);
+            // `retry <cook> --run` delegates to this same recovery step.
+            assert_eq!(
+                cook_recovery_delegation(cook_id).map(|plan| plan.step),
+                Some(CookRecoveryStep::Retry)
+            );
+
+            let performer = RetryPerformer(Default::default());
+            let (report, exit_code) =
+                recover_cook(cook_id, CookRecoveryRequest::default(), &performer).unwrap();
+            assert_eq!(exit_code, 0, "{report:?}");
+            assert_eq!(*performer.0.borrow(), [cook_id.to_string()]);
+            assert_ne!(report.run_id, cook_id);
+            let readmitted = store.read_record(&report.run_id).unwrap();
+            assert!(agent_task_lifecycle::is_unmaterialized_cook_admission(
+                &readmitted
+            ));
+            assert!(!readmitted.state().is_terminal());
+            assert_eq!(readmitted.metadata["retry_of"], cook_id);
+        });
     }
 
     #[test]

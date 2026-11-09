@@ -697,6 +697,7 @@ pub(crate) fn preview_cook(
 ) -> CmdResult<Value> {
     let mut progress = Vec::new();
     record_preview_phase(&mut progress, "prompt_input");
+    default_cook_prompt_from_task_url(&mut args);
     if args
         .dispatch
         .prompt
@@ -2673,6 +2674,46 @@ mod preview_tests {
             assert_eq!(
                 preview["resolved"]["placement"]["admission"]["deferred_to"],
                 "execution_placement_admission"
+            );
+        });
+    }
+
+    /// #17709: preview without `--prompt` runs the `--task-url` task exactly
+    /// as cook-batch children do.
+    #[test]
+    fn cook_preview_without_prompt_uses_the_task_url_prompt() {
+        crate::test_support::with_isolated_home(|_| {
+            let (repository, workspace) = linked_preview_workspace();
+            let _capacity = declare_preview_fixture_capacity(repository.path());
+            let task_url = "https://example.test/issues/17709";
+            let args = cook(&[
+                "homeboy",
+                "agent-task",
+                "cook",
+                "--base",
+                "main",
+                "--preview",
+                "--backend",
+                "fixture",
+                "--repo",
+                "fixture-repository",
+                "--task-url",
+                task_url,
+                "--to-worktree",
+                workspace.to_str().expect("UTF-8 workspace"),
+                "--no-finalize",
+                "--verify",
+                "true",
+            ]);
+            assert!(args.dispatch.prompt.is_none());
+            let (preview, exit_code) = preview_cook(args.clone(), None).expect("compile preview");
+            assert_eq!(exit_code, 0, "{preview}");
+
+            let mut live = args;
+            snapshot_cook_prompt(&mut live).expect("derive prompt");
+            assert_eq!(
+                live.dispatch.prompt.as_deref(),
+                Some(super::super::cook_batch::default_task_prompt(task_url).as_str())
             );
         });
     }
@@ -8567,6 +8608,7 @@ pub(super) fn resolve_dispatch_prompt(
 /// Snapshot stdin at the Cook ingress boundary. Later compilation may happen in
 /// a detached child or retry a plan, neither of which owns the original stream.
 pub(crate) fn snapshot_cook_prompt(args: &mut AgentTaskCookArgs) -> homeboy::core::Result<()> {
+    default_cook_prompt_from_task_url(args);
     if args.prompt_snapshot.is_some()
         || args.attempt_plan.is_some()
         || !args
@@ -8599,6 +8641,20 @@ pub(crate) fn snapshot_cook_prompt(args: &mut AgentTaskCookArgs) -> homeboy::cor
         size_bytes,
     });
     Ok(())
+}
+
+/// Without `--prompt`, Cook runs the `--task-url` task exactly as cook-batch
+/// children do.
+fn default_cook_prompt_from_task_url(args: &mut AgentTaskCookArgs) {
+    if args.dispatch.prompt.is_some()
+        || args.prompt_snapshot.is_some()
+        || args.attempt_plan.is_some()
+    {
+        return;
+    }
+    if let Some(task_url) = args.dispatch.task_url.as_deref() {
+        args.dispatch.prompt = Some(super::cook_batch::default_task_prompt(task_url));
+    }
 }
 
 /// Preview uses the same literal snapshot contract as live Cook, but bounds the
