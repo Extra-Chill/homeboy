@@ -563,6 +563,7 @@ fn build_follow_up_request(
             "retry_policy": retry_policy(failure_progression),
             "current_diff": options.current_diff,
             "candidate_commit": options.promotion_report.provenance.get("candidate_commit"),
+            "remediation_scope": remediation_scope(options, gate_failure_paths(failed_gates)),
         }
     });
     restore_homeboy_facts(&mut request, homeboy_facts);
@@ -624,6 +625,103 @@ fn build_follow_up_request(
         }),
     );
     request
+}
+
+/// A gate-green candidate that no longer applies to its moved base (#17651).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskCookLoopBaseConflict {
+    /// The declared base branch the candidate must converge onto.
+    pub base_ref: String,
+    /// The base the candidate's gates verified it on.
+    pub verified_base: String,
+    /// The moved base the candidate does not apply to.
+    pub resolved_base: String,
+    /// Candidate files the base also changed.
+    pub paths: Vec<String>,
+    /// The base's own change to `paths`, bounded.
+    pub base_change: String,
+}
+
+/// Turn a base conflict into the next remediation attempt (#17651). It is a
+/// candidate continuation like gate feedback, so it keeps that kind and its
+/// immutable candidate baseline; the conflict travels as
+/// `inputs.cook_loop.base_conflict` and a prompt section naming the paths and
+/// the base change the candidate must stop colliding with.
+pub fn build_base_conflict_follow_up_request(
+    options: &AgentTaskCookLoopOptions,
+    conflict: &AgentTaskCookLoopBaseConflict,
+) -> AgentTaskRequest {
+    let progression = failure_progression(options, &[]);
+    let mut request = build_follow_up_request(options, &[], &progression);
+    request.task_id = format!(
+        "{}-base-conflict-{}",
+        options.source_request.task_id,
+        options.attempt.saturating_add(1)
+    );
+    request.inputs["cook_loop"]["base_conflict"] = json!(conflict);
+    request.inputs["cook_loop"]["remediation_scope"] =
+        json!(remediation_scope(options, conflict.paths.clone()));
+    request.metadata["cook_loop"]["remediation"] = json!("base_conflict");
+    request.instructions = format!(
+        "{}\n\n{}",
+        request.instructions.trim_end(),
+        base_conflict_prompt_section(conflict)
+    );
+    request
+}
+
+fn base_conflict_prompt_section(conflict: &AgentTaskCookLoopBaseConflict) -> String {
+    let paths = conflict
+        .paths
+        .iter()
+        .map(|path| format!("- `{path}`"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "{GATE_FAILURE_PROMPT_HEADING_PREFIX}base conflict\n\nThe previous attempt's candidate passed every deterministic gate, but it no longer applies to `{}` at {} (verified on {}). Homeboy replays your change onto that base, so rework it in these conflicting paths so it no longer overlaps the base change below, keeping the base's lines intact:\n\n{paths}\n\nBase change to the conflicting paths:\n\n```diff\n{}\n```",
+        conflict.base_ref,
+        conflict.resolved_base,
+        conflict.verified_base,
+        conflict.base_change.trim_end()
+    )
+}
+
+/// Files a remediation attempt may change: the original candidate's files
+/// (carried forward from earlier remediations) plus the paths this
+/// remediation is about. Anything else it changes is out of scope (#17651).
+fn remediation_scope(options: &AgentTaskCookLoopOptions, paths: Vec<String>) -> Vec<String> {
+    let original = options
+        .source_request
+        .inputs
+        .pointer("/cook_loop/remediation_scope")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_else(|| options.promotion_report.changed_files.clone());
+    original
+        .into_iter()
+        .chain(paths)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+/// Repository paths named by failing gates' producer diagnostics.
+fn gate_failure_paths(failed_gates: &[AgentTaskCookLoopGateFailure]) -> Vec<String> {
+    failed_gates
+        .iter()
+        .flat_map(|failure| &failure.diagnostics)
+        .filter_map(|diagnostic| diagnostic.source_location.as_deref())
+        .filter_map(|location| location.split(':').next())
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 /// Build a follow-up attempt for an attempt that produced no change (#15364).
@@ -703,6 +801,8 @@ fn build_no_change_follow_up_request(
     request
 }
 
+/// Heading prefix of every remediation section Homeboy appends to a prompt.
+const GATE_FAILURE_PROMPT_HEADING_PREFIX: &str = "## Homeboy cook loop: ";
 /// Heading of the gate failure section appended to a gate-fix prompt.
 const GATE_FAILURE_PROMPT_HEADING: &str = "## Homeboy cook loop: deterministic gate failure output";
 
@@ -722,11 +822,11 @@ fn gate_failure_prompt_section(failed_gates: &[AgentTaskCookLoopGateFailure]) ->
     })
 }
 
-/// Instructions without a gate failure section left by an earlier gate-fix
-/// attempt, so excerpts never accumulate across retries.
+/// Instructions without a remediation section (gate failure output or base
+/// conflict) left by an earlier attempt, so they never accumulate across retries.
 fn strip_gate_failure_prompt_section(instructions: &str) -> &str {
     instructions
-        .find(GATE_FAILURE_PROMPT_HEADING)
+        .find(GATE_FAILURE_PROMPT_HEADING_PREFIX)
         .map(|index| instructions[..index].trim_end())
         .unwrap_or(instructions)
 }

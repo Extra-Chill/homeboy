@@ -3536,6 +3536,9 @@ pub(crate) fn dispatch_cook_follow_up(
         for request in [&mut incoming, &mut frozen] {
             if let Some(inputs) = request.inputs["cook_loop"].as_object_mut() {
                 inputs.remove("execution_budget_authority");
+                // Derived reviewer scope (#17651); attempts persisted before
+                // it existed must still replay.
+                inputs.remove("remediation_scope");
             }
         }
         if incoming != frozen {
@@ -3671,7 +3674,11 @@ pub(crate) fn dispatch_cook_follow_up(
             }
         }
     } else {
-        (known_same_executor || review_form_only_follow_up)
+        // A base-conflict remediation reworks the same gate-authenticated
+        // candidate, exactly like gate remediation (#17651).
+        let base_conflict_remediation =
+            follow_up_request.inputs["cook_loop"]["base_conflict"].is_object();
+        (known_same_executor || review_form_only_follow_up || base_conflict_remediation)
             .then_some(true)
             .or_else(|| {
                 cook_remediation_same_provider(
@@ -7985,15 +7992,87 @@ fn run_cook_spine(
                 return Ok(report);
             }
             AgentTaskCookLoopStatus::GreenCompleted => {
-                let mut report = super::cook_delivery::ensure_published(&mut delivery, promotion)?;
-                if review_form_unavailable {
-                    report.value.terminal_phase = Some("review_form".to_string());
-                    report.value.stop_reason = Some(
-                        "review form unavailable; published the gated candidate as a draft"
-                            .to_string(),
+                let publication =
+                    super::cook_delivery::ensure_published(&mut delivery, promotion.clone())?;
+                let conflict = match publication {
+                    super::cook_delivery::CookPublication::Ended(mut report) => {
+                        if review_form_unavailable {
+                            report.value.terminal_phase = Some("review_form".to_string());
+                            report.value.stop_reason = Some(
+                                "review form unavailable; published the gated candidate as a draft"
+                                    .to_string(),
+                            );
+                        }
+                        return Ok(report);
+                    }
+                    super::cook_delivery::CookPublication::BaseConflict(conflict) => conflict,
+                };
+                // A base conflict is remediation input (#17651): the next
+                // attempt reworks the candidate against the base change. Only
+                // an exhausted remediation budget ends the Cook on it.
+                if attempt >= attempt_limit {
+                    return super::cook_delivery::block_base_conflict(
+                        &mut delivery,
+                        conflict,
+                        "remediation budget exhausted",
                     );
                 }
-                return Ok(report);
+                let follow_up_request =
+                    crate::agent_task_cook_loop::build_base_conflict_follow_up_request(
+                        &AgentTaskCookLoopOptions {
+                            source_request: source_request.clone(),
+                            promotion_report: promotion.clone(),
+                            attempt,
+                            max_attempts: attempt_limit,
+                            source_run_id: Some(run_id.clone()),
+                            current_diff: gate_feedback_current_diff(&promotion),
+                            require_review_form: false,
+                            review_form: None,
+                            metadata: Value::Null,
+                        },
+                        &conflict.conflict,
+                    );
+                let budget_limit = budget_limit
+                    .as_ref()
+                    .expect("budget is initialized from the loaded attempt plan");
+                match dispatch_cook_follow_up(
+                    (store, lifecycle_store),
+                    &options,
+                    executor.clone(),
+                    &cook_id,
+                    attempt,
+                    &run_id,
+                    &plan,
+                    &aggregate,
+                    &promotion,
+                    follow_up_request,
+                    false,
+                    CookFollowUpBudgetScope::Cook,
+                    budget_limit,
+                    budget_used,
+                    &mut remediation_category_usage,
+                )? {
+                    CookFollowUpDispatch::Dispatched {
+                        run_id: next_run_id,
+                    } => {
+                        run_id = next_run_id;
+                        attempt = attempt.saturating_add(1);
+                    }
+                    CookFollowUpDispatch::BudgetExhausted { reason } => {
+                        return super::cook_delivery::block_base_conflict(
+                            &mut delivery,
+                            conflict,
+                            &format!("remediation budget exhausted ({reason})"),
+                        );
+                    }
+                    CookFollowUpDispatch::PolicyFailure { reason } => {
+                        return super::cook_delivery::block_base_conflict(
+                            &mut delivery,
+                            conflict,
+                            &format!("remediation could not be dispatched: {reason}"),
+                        );
+                    }
+                }
             }
             AgentTaskCookLoopStatus::BaselineRed => {
                 if promotion.finalization_eligible() {
@@ -8343,7 +8422,7 @@ pub(super) fn publish_incomplete_draft<
         options.finalization.title.clone()
     };
     let note = if review_form_unavailable {
-        "Review form unavailable: completion not assessed; deterministic gates passed"
+        "review: unavailable\n\nReview form unavailable: completion not assessed; deterministic gates passed"
     } else {
         "Incomplete candidate; deterministic verification failed."
     };
