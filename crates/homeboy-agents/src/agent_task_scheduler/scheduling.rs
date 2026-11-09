@@ -1183,7 +1183,8 @@ impl AgentTaskScheduleSupport {
     }
 
     /// Rotation triggers only on provider capacity failures (`provider`,
-    /// `transient`, `timeout`, `stalled`, `rate_limited`, and
+    /// `transient`, `timeout`, `provider_timeout_no_progress`,
+    /// `provider_request_rejected`, `stalled`, `rate_limited`, and
     /// `provider_account_blocked` classifications).
     /// Task-level failures (`execution_failed`, `policy_denied`,
     /// `invalid_input`, `capability_missing`, `unknown`) never rotate so a
@@ -1214,6 +1215,8 @@ impl AgentTaskScheduleSupport {
                     AgentTaskFailureClassification::Provider
                         | AgentTaskFailureClassification::Transient
                         | AgentTaskFailureClassification::Timeout
+                        | AgentTaskFailureClassification::ProviderTimeoutNoProgress
+                        | AgentTaskFailureClassification::ProviderRequestRejected
                         | AgentTaskFailureClassification::Stalled
                         | AgentTaskFailureClassification::RateLimited
                         | AgentTaskFailureClassification::ProviderAccountBlocked
@@ -1222,6 +1225,31 @@ impl AgentTaskScheduleSupport {
                         | AgentTaskFailureClassification::ProviderCredentialsExhausted
                 )
             )
+    }
+
+    /// A provider timeout that left no candidate made no progress worth
+    /// keeping: classify it `provider_timeout_no_progress` so the rotation
+    /// decision moves the next attempt to another configured route. A timeout
+    /// that produced a candidate keeps the plain `timeout` classification.
+    pub(super) fn classify_provider_timeout_without_progress(outcome: &mut AgentTaskOutcome) {
+        if outcome.status == AgentTaskOutcomeStatus::Timeout
+            && outcome.failure_classification == Some(AgentTaskFailureClassification::Timeout)
+            && outcome.outcome_candidate().is_none()
+        {
+            outcome.failure_classification =
+                Some(AgentTaskFailureClassification::ProviderTimeoutNoProgress);
+        }
+    }
+
+    /// A no-progress timeout should not spend a same-route retry while the
+    /// rotation decision can still move the task to another route.
+    pub(super) fn rotation_preempts_retry(
+        outcome: &AgentTaskOutcome,
+        rotation_takes_over: bool,
+    ) -> bool {
+        rotation_takes_over
+            && outcome.failure_classification
+                == Some(AgentTaskFailureClassification::ProviderTimeoutNoProgress)
     }
 
     /// Apply one rotation entry onto the re-dispatched request's executor.
@@ -1652,11 +1680,19 @@ impl AgentTaskScheduleSupport {
                 != Some(AgentTaskFailureClassification::ProviderBillingBlocked)
             && outcome.failure_classification
                 != Some(AgentTaskFailureClassification::ProviderCredentialsExhausted)
+            && outcome.failure_classification
+                != Some(AgentTaskFailureClassification::ProviderRequestRejected)
             && (retryable_failure_classifications.is_empty()
                 || outcome
                     .failure_classification
                     .map(|classification| {
+                        // A no-progress timeout refines `timeout`; a policy
+                        // that retries timeouts also retries it.
                         retryable_failure_classifications.contains(&classification)
+                            || (classification
+                                == AgentTaskFailureClassification::ProviderTimeoutNoProgress
+                                && retryable_failure_classifications
+                                    .contains(&AgentTaskFailureClassification::Timeout))
                     })
                     .unwrap_or(false))
             && !matches!(

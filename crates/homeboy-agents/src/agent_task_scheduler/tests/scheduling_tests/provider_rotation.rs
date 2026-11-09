@@ -1107,6 +1107,78 @@ mod provider_rotation_tests {
     }
 
     #[test]
+    fn no_progress_timeouts_and_rejected_requests_rotate_instead_of_retrying_the_same_route() {
+        for (status, classification, recorded) in [
+            (
+                AgentTaskOutcomeStatus::Timeout,
+                AgentTaskFailureClassification::Timeout,
+                AgentTaskFailureClassification::ProviderTimeoutNoProgress,
+            ),
+            (
+                AgentTaskOutcomeStatus::ProviderError,
+                AgentTaskFailureClassification::ProviderRequestRejected,
+                AgentTaskFailureClassification::ProviderRequestRejected,
+            ),
+        ] {
+            let executor =
+                RotationScriptedExecutor::new(vec![(status, Some(classification)), success()]);
+            let observed = Arc::clone(&executor.observed);
+            let scheduler = AgentTaskScheduler::new(Arc::new(executor));
+            let mut plan = plan_with_tasks(1);
+            plan.tasks[0].executor.backend = "pi".to_string();
+            plan.options.rotation = Some(AgentTaskProviderRotationPolicy {
+                entries: vec![
+                    AgentTaskProviderRotationEntry {
+                        backend: Some("pi".to_string()),
+                        model: Some("openai/gpt-heavy".to_string()),
+                        ..Default::default()
+                    },
+                    AgentTaskProviderRotationEntry {
+                        backend: Some("pi".to_string()),
+                        model: Some("anthropic/claude-opus".to_string()),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            });
+            plan.options.execution_budget = AgentTaskExecutionBudget {
+                version: AgentTaskExecutionBudget::VERSION,
+                deadline_unix_ms: None,
+                max_provider_executions: 4,
+                max_same_provider_retries: 2,
+                max_provider_rotations: 2,
+            };
+
+            let aggregate = scheduler.run(plan);
+
+            assert_eq!(aggregate.status(), AgentTaskRunState::Succeeded);
+            let models = observed
+                .lock()
+                .expect("observed requests")
+                .iter()
+                .map(|request| request.executor.model.clone())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                models,
+                vec![
+                    Some("openai/gpt-heavy".to_string()),
+                    Some("anthropic/claude-opus".to_string())
+                ],
+                "{classification:?} must move to the next route"
+            );
+            let outcome = &aggregate.outcomes[0];
+            assert_eq!(
+                outcome.metadata["execution_budget"]["same_provider_retries_used"], 0,
+                "{classification:?} must not spend a same-route retry"
+            );
+            assert_eq!(
+                outcome.metadata["provider_rotation"]["attempts"][0]["failure_classification"],
+                serde_json::to_value(recorded).unwrap()
+            );
+        }
+    }
+
+    #[test]
     fn permanent_provider_capacity_rejections_rotate_within_budget_and_keep_terminal_evidence() {
         for classification in [
             AgentTaskFailureClassification::ProviderQuotaExhausted,

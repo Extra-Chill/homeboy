@@ -146,7 +146,7 @@ mod timeout_tests {
         );
         assert_eq!(
             aggregate.outcomes[0].failure_classification,
-            Some(AgentTaskFailureClassification::Timeout)
+            Some(AgentTaskFailureClassification::ProviderTimeoutNoProgress)
         );
         assert!(aggregate.outcomes[0].artifacts.is_empty());
         assert_eq!(aggregate.totals.candidate_recoverable, 0);
@@ -652,7 +652,7 @@ mod timeout_tests {
         assert_eq!(outcome.status, AgentTaskOutcomeStatus::Timeout);
         assert_eq!(
             outcome.failure_classification,
-            Some(AgentTaskFailureClassification::Timeout)
+            Some(AgentTaskFailureClassification::ProviderTimeoutNoProgress)
         );
         assert!(outcome.artifacts.iter().any(|artifact| {
             artifact.kind == "patch"

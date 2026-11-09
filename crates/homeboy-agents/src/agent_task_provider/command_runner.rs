@@ -396,6 +396,9 @@ fn classify_provider_policy_denial(
 /// provider blip. Leaves permanent provider failures untouched so they keep
 /// failing fast.
 fn classify_transient_provider_outcome(outcome: &mut AgentTaskOutcome) {
+    if classify_provider_http_failure(outcome) {
+        return;
+    }
     if outcome_text_is_rate_limited(outcome) {
         outcome.failure_classification = Some(AgentTaskFailureClassification::RateLimited);
         annotate_usage_cap(outcome);
@@ -421,6 +424,164 @@ fn classify_transient_provider_outcome(outcome: &mut AgentTaskOutcome) {
     if outcome_text_is_transient(outcome) {
         outcome.failure_classification = Some(AgentTaskFailureClassification::Transient);
     }
+}
+
+/// Byte budget for the redacted provider response body kept on a typed
+/// `provider_http_<status>` diagnostic.
+const PROVIDER_HTTP_BODY_LIMIT_BYTES: usize = 2 * 1024;
+
+/// Classify a provider failure that carries an HTTP status. The typed
+/// `provider_http_<status>` diagnostic keeps the status and a bounded,
+/// redacted response body. 4xx other than 408/429 cannot succeed on the same
+/// route (`provider_request_rejected`); 408 and 5xx stay transient and 429
+/// stays rate-limited. Returns whether an HTTP status was classified.
+fn classify_provider_http_failure(outcome: &mut AgentTaskOutcome) -> bool {
+    let provider_failure = matches!(
+        outcome.status,
+        AgentTaskOutcomeStatus::ProviderError | AgentTaskOutcomeStatus::Failed
+    ) && matches!(
+        outcome.failure_classification,
+        Some(
+            AgentTaskFailureClassification::Provider
+                | AgentTaskFailureClassification::ExecutionFailed
+        ) | None
+    );
+    if !provider_failure {
+        return false;
+    }
+    let Some((status, body)) = outcome_provider_http_status(outcome) else {
+        return false;
+    };
+    let classification = provider_http_failure_classification(status);
+    let retryable = classification != AgentTaskFailureClassification::ProviderRequestRejected;
+    let redacted = redact_provider_http_body(&body);
+    let truncated = redacted.len() > PROVIDER_HTTP_BODY_LIMIT_BYTES;
+    let mut end = redacted.len().min(PROVIDER_HTTP_BODY_LIMIT_BYTES);
+    while !redacted.is_char_boundary(end) {
+        end -= 1;
+    }
+    outcome.failure_classification = Some(classification);
+    push_unique_diagnostic(
+        &mut outcome.diagnostics,
+        format!("provider_http_{status}"),
+        format!("provider request failed with HTTP {status}"),
+        json!({
+            "status": status,
+            "retryable": retryable,
+            "body": &redacted[..end],
+            "body_truncated": truncated,
+        }),
+    );
+    if classification == AgentTaskFailureClassification::RateLimited {
+        annotate_usage_cap(outcome);
+    }
+    true
+}
+
+/// Redact a provider response body. A JSON payload is redacted by key, so a
+/// quoted `"api_key":"..."` field is covered as well as inline assignments.
+fn redact_provider_http_body(body: &str) -> String {
+    let policy = homeboy_core::redaction::RedactionPolicy::default();
+    let json_payload = body.find('{').and_then(|start| {
+        serde_json::from_str::<Value>(&body[start..])
+            .ok()
+            .map(|payload| (start, payload))
+    });
+    match json_payload {
+        Some((start, payload)) => format!(
+            "{}{}",
+            policy.redact_string(&body[..start]),
+            policy.redact_json(&payload)
+        ),
+        None => policy.redact_string(body),
+    }
+}
+
+/// Same-route retry semantics for an HTTP status: 408 and 5xx are transient,
+/// 429 is a rate limit, and every other 4xx is a permanent rejection.
+pub(super) fn provider_http_failure_classification(status: u16) -> AgentTaskFailureClassification {
+    match status {
+        429 => AgentTaskFailureClassification::RateLimited,
+        408 | 500..=599 => AgentTaskFailureClassification::Transient,
+        _ => AgentTaskFailureClassification::ProviderRequestRejected,
+    }
+}
+
+/// First HTTP error status surfaced by the outcome, with the text carrying it.
+fn outcome_provider_http_status(outcome: &AgentTaskOutcome) -> Option<(u16, String)> {
+    outcome
+        .summary
+        .iter()
+        .cloned()
+        .chain(
+            outcome
+                .diagnostics
+                .iter()
+                .flat_map(|diagnostic| [diagnostic.message.clone(), diagnostic.data.to_string()]),
+        )
+        .find_map(|text| provider_http_status(&text).map(|status| (status, text)))
+}
+
+/// Detect an HTTP 4xx/5xx status in provider error text. A bare number is not
+/// enough: it must follow an HTTP/status label, precede a reason phrase or a
+/// JSON body, or open the text.
+pub(super) fn provider_http_status(text: &str) -> Option<u16> {
+    const LABELS: [&str; 6] = [
+        "http",
+        "status",
+        "status code",
+        "statuscode",
+        "status_code",
+        "code",
+    ];
+    const FOLLOWERS: [&str; 18] = [
+        "{",
+        "status code",
+        "bad request",
+        "unauthorized",
+        "payment required",
+        "forbidden",
+        "not found",
+        "method not allowed",
+        "request timeout",
+        "conflict",
+        "payload too large",
+        "unprocessable",
+        "too many requests",
+        "internal server error",
+        "bad gateway",
+        "service unavailable",
+        "gateway timeout",
+        "overloaded",
+    ];
+    let lowered = text.to_ascii_lowercase();
+    let bytes = lowered.as_bytes();
+    (0..bytes.len().saturating_sub(2)).find_map(|index| {
+        let token = bytes.get(index..index + 3)?;
+        let standalone = token.iter().all(u8::is_ascii_digit)
+            && !(index > 0 && bytes[index - 1].is_ascii_alphanumeric())
+            && !bytes
+                .get(index + 3)
+                .is_some_and(|after| after.is_ascii_alphanumeric());
+        if !standalone {
+            return None;
+        }
+        let status: u16 = lowered[index..index + 3].parse().ok()?;
+        if !(400..=599).contains(&status) {
+            return None;
+        }
+        let before = lowered[..index]
+            .trim_end_matches(|ch: char| ch.is_whitespace() || matches!(ch, ':' | '=' | '"' | '/'));
+        let after = lowered[index + 3..]
+            .trim_start_matches(|ch: char| ch.is_whitespace() || matches!(ch, ':' | '-'));
+        let labelled = LABELS.iter().any(|label| before.ends_with(label))
+            || before.ends_with("http/1.1")
+            || before.ends_with("http/1.0")
+            || before.ends_with("http/2");
+        let opens_text = before.is_empty() || before.ends_with("failed");
+        let explained = FOLLOWERS.iter().any(|follower| after.starts_with(follower));
+        (labelled || explained || (opens_text && after.is_empty())).then_some(status)
+    })
 }
 
 /// Attach a [`super::usage_cap::AGENT_TASK_PROVIDER_USAGE_CAP_DIAGNOSTIC_CLASS`]

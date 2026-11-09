@@ -3104,7 +3104,8 @@ fn classification_next_actions(
         }
         // A wall-clock timeout can still have left a complete candidate patch,
         // so review comes before spending another attempt.
-        AgentTaskFailureClassification::Timeout => {
+        AgentTaskFailureClassification::Timeout
+        | AgentTaskFailureClassification::ProviderTimeoutNoProgress => {
             let mut actions = vec![failure_evidence, review];
             actions.extend(retry);
             actions
@@ -3142,7 +3143,8 @@ fn classification_next_actions(
         AgentTaskFailureClassification::ProviderAccountBlocked
         | AgentTaskFailureClassification::ProviderQuotaExhausted
         | AgentTaskFailureClassification::ProviderBillingBlocked
-        | AgentTaskFailureClassification::ProviderCredentialsExhausted => vec![
+        | AgentTaskFailureClassification::ProviderCredentialsExhausted
+        | AgentTaskFailureClassification::ProviderRequestRejected => vec![
             failure_evidence,
             CommandNextAction::new(
                 "list registered providers to rotate to",

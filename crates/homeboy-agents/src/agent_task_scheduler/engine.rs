@@ -1418,7 +1418,13 @@ impl AgentTaskScheduler {
                             }),
                         });
                     }
-                    let retry_allowed = AgentTaskScheduleSupport::should_retry(
+                    AgentTaskScheduleSupport::classify_provider_timeout_without_progress(
+                        &mut outcome,
+                    );
+                    let retry_allowed = !AgentTaskScheduleSupport::rotation_preempts_retry(
+                        &outcome,
+                        rotation_takes_over,
+                    ) && AgentTaskScheduleSupport::should_retry(
                         &outcome,
                         result.attempt,
                         execution_budget.max_same_provider_retries,
@@ -1453,8 +1459,13 @@ impl AgentTaskScheduler {
                     if retry_allowed
                         && outcome.status != AgentTaskOutcomeStatus::CandidateRecoverable
                     {
-                        let timeout_compaction = (outcome.failure_classification
-                            == Some(AgentTaskFailureClassification::Timeout))
+                        let timeout_compaction = matches!(
+                            outcome.failure_classification,
+                            Some(
+                                AgentTaskFailureClassification::Timeout
+                                    | AgentTaskFailureClassification::ProviderTimeoutNoProgress
+                            )
+                        )
                         .then_some("timeout");
                         let authorization = cleanup_attempt_workspace(
                             &mut outcome,

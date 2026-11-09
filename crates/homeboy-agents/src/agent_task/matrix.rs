@@ -324,6 +324,8 @@ fn matrix_execution_state_for_outcome(
                     AgentTaskFailureClassification::Provider
                         | AgentTaskFailureClassification::Transient
                         | AgentTaskFailureClassification::Timeout
+                        | AgentTaskFailureClassification::ProviderTimeoutNoProgress
+                        | AgentTaskFailureClassification::ProviderRequestRejected
                         | AgentTaskFailureClassification::ProviderAccountBlocked
                         | AgentTaskFailureClassification::ProviderQuotaExhausted
                         | AgentTaskFailureClassification::ProviderBillingBlocked

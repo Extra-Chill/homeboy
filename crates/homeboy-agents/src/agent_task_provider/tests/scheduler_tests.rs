@@ -761,10 +761,16 @@ fn provider_timeout_returns_structured_outcome() {
     let aggregate = scheduler.run(AgentTaskPlan::new("plan-timeout", vec![request]));
 
     assert_eq!(aggregate.totals.timed_out, 1);
-    assert_eq!(
+    // A provider-observed timeout without a candidate is a no-progress timeout;
+    // a scheduler grace expiry cannot inspect the still-owned workspace and
+    // stays a plain timeout. Either deadline may fire first here.
+    assert!(matches!(
         aggregate.outcomes[0].failure_classification,
-        Some(AgentTaskFailureClassification::Timeout)
-    );
+        Some(
+            AgentTaskFailureClassification::Timeout
+                | AgentTaskFailureClassification::ProviderTimeoutNoProgress
+        )
+    ));
 }
 
 #[test]
@@ -1638,12 +1644,19 @@ fn transient_then_success_script(state_path: &Path, fail_until: u32) -> String {
 /// Node script that increments a counter file and always emits a permanent
 /// auth/validation provider error. Used to prove permanent errors fail fast.
 fn permanent_error_script(state_path: &Path) -> String {
+    provider_error_script(state_path, "401 Unauthorized: invalid token")
+}
+
+/// Node script that increments a counter file and always emits `message` as
+/// the provider error.
+fn provider_error_script(state_path: &Path, message: &str) -> String {
     let state = state_path.to_string_lossy().replace('\\', "\\\\");
+    let message = serde_json::to_string(message).expect("message literal");
     script(&format!(
         "let fs=require('fs'); \
          let p='{state}'; let n=0; try {{ n=parseInt(fs.readFileSync(p,'utf8'))||0; }} catch(e) {{}} \
          n+=1; fs.writeFileSync(p, String(n)); \
-         process.stdout.write(JSON.stringify({{type:'message_end',message:{{role:'assistant',stopReason:'error',errorMessage:'401 Unauthorized: invalid token',content:[]}}}})+'\\n');",
+         process.stdout.write(JSON.stringify({{type:'message_end',message:{{role:'assistant',stopReason:'error',errorMessage:{message},content:[]}}}})+'\\n');",
     ))
 }
 
@@ -1700,7 +1713,7 @@ fn provider_does_not_retry_permanent_error() {
     assert_eq!(outcome.status, AgentTaskOutcomeStatus::ProviderError);
     assert_eq!(
         outcome.failure_classification,
-        Some(AgentTaskFailureClassification::Provider),
+        Some(AgentTaskFailureClassification::ProviderRequestRejected),
         "permanent auth/validation failures stay non-retryable"
     );
     let attempts: u32 = fs::read_to_string(&state_path)
@@ -1716,6 +1729,72 @@ fn provider_does_not_retry_permanent_error() {
         "permanent failures should not record retry history"
     );
     let _ = fs::remove_file(&state_path);
+}
+
+#[test]
+fn provider_http_errors_keep_status_and_body_and_classify_route_retryability() {
+    for (label, message, status, classification, attempts) in [
+        (
+            "http-400",
+            r#"400 Bad Request: {"error":"unsupported parameter: reasoning","api_key":"sk-live-secret-value"}"#,
+            400,
+            AgentTaskFailureClassification::ProviderRequestRejected,
+            1,
+        ),
+        (
+            "http-429",
+            "429 Too Many Requests",
+            429,
+            AgentTaskFailureClassification::RateLimited,
+            1,
+        ),
+        (
+            "http-503",
+            "503 Service Unavailable",
+            503,
+            AgentTaskFailureClassification::Transient,
+            PROVIDER_TRANSIENT_MAX_ATTEMPTS,
+        ),
+    ] {
+        let state_path = unique_state_path(label);
+        let _ = fs::remove_file(&state_path);
+        let command = format!("node {}", provider_error_script(&state_path, message));
+        let (request, provider) = request(&format!("task-{label}"), command);
+
+        let outcome = run_provider_command(&request, &provider, None);
+
+        assert_eq!(outcome.status, AgentTaskOutcomeStatus::ProviderError);
+        assert_eq!(
+            outcome.failure_classification,
+            Some(classification),
+            "{label}"
+        );
+        let executed: u32 = fs::read_to_string(&state_path)
+            .ok()
+            .and_then(|raw| raw.trim().parse().ok())
+            .unwrap_or_default();
+        assert_eq!(executed, attempts, "{label} same-route attempts");
+        let http = outcome
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.class == format!("provider_http_{status}"))
+            .unwrap_or_else(|| panic!("{label} keeps a typed provider_http diagnostic"));
+        assert_eq!(http.data["status"], status);
+        assert_eq!(
+            http.data["retryable"],
+            classification != AgentTaskFailureClassification::ProviderRequestRejected
+        );
+        let body = http.data["body"].as_str().expect("response body");
+        assert!(
+            body.contains(message.split(':').next().unwrap()),
+            "{label}: {body}"
+        );
+        assert!(
+            !body.contains("sk-live-secret-value"),
+            "{label} body is redacted"
+        );
+        let _ = fs::remove_file(&state_path);
+    }
 }
 
 #[test]
