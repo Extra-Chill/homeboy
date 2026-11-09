@@ -291,6 +291,9 @@ where
 }
 
 pub fn connect(runner_id: &str) -> Result<(RunnerConnectReport, i32)> {
+    if load(runner_id)?.settings.staged_homeboy_path.is_some() {
+        super::homeboy_refresh::select_staged_on_reconnect(runner_id)?;
+    }
     connect_with_live_lease(runner_id, None)
 }
 
@@ -306,6 +309,10 @@ pub fn connect(runner_id: &str) -> Result<(RunnerConnectReport, i32)> {
 /// never re-enters itself. Convergence never fails connect: its outcome is
 /// reported on [`RunnerConnectReport::binary_convergence`].
 pub fn connect_converging_binary(runner_id: &str) -> Result<(RunnerConnectReport, i32)> {
+    // A staged operator selection takes precedence over implicit convergence.
+    if load(runner_id)?.settings.staged_homeboy_path.is_some() {
+        return connect(runner_id);
+    }
     let convergence = binary_convergence::converge_runner_binary(
         runner_id,
         &homeboy_product_identity::build_identity(),
@@ -329,6 +336,11 @@ pub fn connect_converging_binary(runner_id: &str) -> Result<(RunnerConnectReport
 /// is the answer and never reaches `connect`. A runner with no daemon session
 /// at all goes straight to `connect`.
 pub(crate) fn reach_runner(runner_id: &str) -> Result<()> {
+    // After drain_then_replace or an idle exit, consume the verified staged
+    // build before admitting the next job. Busy daemons retain their child.
+    if load(runner_id)?.settings.staged_homeboy_path.is_some() {
+        super::homeboy_refresh::select_staged_when_idle(runner_id)?;
+    }
     reach_runner_with(
         runner_id,
         |runner_id| Ok(read_session(runner_id)?.is_some()),
