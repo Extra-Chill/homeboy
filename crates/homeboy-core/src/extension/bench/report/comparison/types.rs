@@ -6,6 +6,7 @@ use serde_json::Value;
 
 use super::super::{BenchArtifactRef, BenchPersistedRun};
 use crate::extension::bench::diagnostic::BenchDiagnostic;
+use crate::extension::bench::error_chain::BenchErrorChain;
 use crate::extension::bench::parsing::{BenchMetricPhase, BenchMetricPolicy, BenchResults};
 use crate::extension::bench::run::BenchRunFailure;
 use crate::extension::bench::side_by_side::BenchSideBySideReport;
@@ -135,6 +136,8 @@ pub struct BenchComparisonRigSummary {
     pub passed: bool,
     pub status: String,
     pub exit_code: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_chain: Option<BenchErrorChain>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub diagnostics: Vec<BenchDiagnostic>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -159,6 +162,8 @@ pub struct BenchComparisonFailure {
     pub scenario_id: Option<String>,
     pub exit_code: i32,
     pub stderr_tail: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_chain: Option<BenchErrorChain>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub diagnostics: Vec<BenchDiagnostic>,
 }
@@ -204,6 +209,7 @@ impl From<BenchComparisonOutput> for BenchComparisonSummaryOutput {
                     passed: rig.passed,
                     status: rig.status,
                     exit_code: rig.exit_code,
+                    error_chain: rig.failure.and_then(|failure| failure.error_chain),
                     diagnostics: rig.diagnostics,
                     persisted_run: rig.persisted_run,
                 })

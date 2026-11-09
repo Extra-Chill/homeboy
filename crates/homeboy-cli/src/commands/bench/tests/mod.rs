@@ -148,6 +148,43 @@ exit 7
     .expect("write bench script");
 }
 
+/// Extension whose runtime fails during startup and leaves a typed output
+/// envelope with a nested cause at `$HOMEBOY_BENCH_OUTPUT_ENVELOPE_FILE`.
+fn write_failing_envelope_bench_extension(home: &TempDir) {
+    write_failing_bench_extension(home);
+    let script_path = home
+        .path()
+        .join(".config/homeboy/extensions/fixture-bench/bench-runner.sh");
+    homeboy_test_support::write_executable(
+        &script_path,
+        r#"#!/bin/sh
+if [ "$HOMEBOY_BENCH_LIST_ONLY" = "1" ]; then
+  printf '{"component_id":"%s","iterations":0,"scenarios":[]}' "$HOMEBOY_COMPONENT_ID" > "$HOMEBOY_BENCH_RESULTS_FILE"
+  exit 0
+fi
+cat > "$HOMEBOY_BENCH_OUTPUT_ENVELOPE_FILE" <<'JSON'
+{
+  "success": false,
+  "error": {
+    "name": "RecipeError",
+    "code": "recipe-runtime-create-failed",
+    "message": "Runtime creation failed before recipe workflow execution.",
+    "cause": {
+      "name": "SyntaxError",
+      "message": "Unexpected identifier 'source'",
+      "stack": "SyntaxError: Unexpected identifier 'source'\n    at compileSourceTextModule (node:internal/modules/esm/utils:340:16)"
+    }
+  }
+}
+JSON
+printf 'Runtime creation failed before recipe workflow execution.\n' >&2
+exit 1
+"#,
+        0o755,
+    )
+    .expect("write bench script");
+}
+
 fn write_registered_component(home: &TempDir, component_id: &str, path: &std::path::Path) {
     let component_dir = home
         .path()

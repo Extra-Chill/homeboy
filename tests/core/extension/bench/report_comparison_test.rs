@@ -229,6 +229,7 @@ mod fixtures {
                 scenario_id: None,
                 exit_code: 2,
                 stderr_tail: "ERROR: Homeboy bench helper not found at /Users/user/.homeboy/runtime/bench-helper.sh".to_string(),
+                error_chain: None,
                 failure_classification: None,
                 responsiveness: None,
                 memory_sample: None,

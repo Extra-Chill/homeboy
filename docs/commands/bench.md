@@ -990,6 +990,15 @@ variables:
   `missed_ping_count`, `max_ping_gap_ms`, and `last_ping_at` in bench output.
 - `HOMEBOY_BENCH_RESPONSIVENESS_MISSED_MS` — ping gap threshold used to
   classify missed responsiveness windows. Defaults to `10000`.
+- `HOMEBOY_BENCH_OUTPUT_ENVELOPE_FILE` — optional file for the runtime's
+  structured output envelope (verbatim JSON). When the bench fails, Homeboy
+  reads the envelope's `error` object (`message`, optional `name`, `code`,
+  `stack`, and a nested `cause` of the same shape) into a bounded (~4 KB)
+  `failure.error_chain` on the bench result, cross-rig failures/rig summary
+  rows, and settings-matrix cells. The file is recorded as the
+  `bench_output_envelope` run artifact, so
+  `homeboy runs artifact get <run> <id>` returns it after tmp cleanup.
+  Concurrent instances receive `bench-output-envelope-i<n>.json`.
 - `HOMEBOY_RUN_DIR` — per-run directory (shared with test/lint/build).
 - `HOMEBOY_EXTENSION_ID`, `HOMEBOY_COMPONENT_ID`, `HOMEBOY_COMPONENT_PATH`,
   and the usual execution-context vars.

@@ -6,6 +6,7 @@ use serde::Serialize;
 
 use crate::extension::bench::baseline::BenchBaselineComparison;
 use crate::extension::bench::diagnostic::BenchDiagnostic;
+use crate::extension::bench::error_chain::BenchErrorChain;
 use crate::extension::bench::parsing::RigPackageEvidence;
 use crate::extension::bench::parsing::{BenchResults, BenchRunExecution, BenchScenario};
 use crate::extension::bench::phase_events::BenchPhaseFailureClassification;
@@ -100,6 +101,10 @@ pub struct BenchRunFailure {
     pub scenario_id: Option<String>,
     pub exit_code: i32,
     pub stderr_tail: String,
+    /// Bounded typed error chain from the runner's output envelope
+    /// (`$HOMEBOY_BENCH_OUTPUT_ENVELOPE_FILE`), when one was written.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_chain: Option<BenchErrorChain>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failure_classification: Option<BenchPhaseFailureClassification>,
     #[serde(skip_serializing_if = "Option::is_none")]

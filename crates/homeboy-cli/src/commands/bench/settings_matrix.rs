@@ -5,7 +5,7 @@ use serde::Serialize;
 
 use homeboy::agents::agent_tasks::AgentTaskMatrixExecutionState;
 use homeboy::core::matrix_artifact_summary;
-use homeboy_core::extension::bench::{BenchCommandOutput, BenchScenario};
+use homeboy_core::extension::bench::{BenchCommandOutput, BenchErrorChain, BenchScenario};
 
 use super::{filter_homeboy_flags, matrix as bench_runner, BenchRunArgs};
 
@@ -59,6 +59,8 @@ pub struct BenchSettingsMatrixCellOutput {
     pub status: String,
     pub exit_code: i32,
     pub metrics: Vec<BenchSettingsMatrixMetricSample>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_chain: Option<BenchErrorChain>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub hints: Vec<String>,
 }
@@ -175,6 +177,10 @@ fn cell_output(
 ) -> BenchSettingsMatrixCellOutput {
     let hints = output.hints.clone().unwrap_or_default();
     let metrics = collect_metric_samples(&output);
+    let error_chain = output
+        .failure
+        .as_ref()
+        .and_then(|failure| failure.error_chain.clone());
     BenchSettingsMatrixCellOutput {
         index,
         settings,
@@ -184,6 +190,7 @@ fn cell_output(
         status: output.status,
         exit_code,
         metrics,
+        error_chain,
         hints,
     }
 }
@@ -715,6 +722,7 @@ mod tests {
             status: if passed { "pass" } else { "fail" }.to_string(),
             exit_code: if passed { 0 } else { 1 },
             metrics: Vec::new(),
+            error_chain: None,
             hints: Vec::new(),
         }
     }

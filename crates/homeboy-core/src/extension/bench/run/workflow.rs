@@ -5,6 +5,9 @@ use std::path::Path;
 
 use crate::extension::bench::baseline::BenchAdapter;
 use crate::extension::bench::diagnostic::{self, BenchDiagnostic};
+use crate::extension::bench::error_chain::{
+    clear_output_envelopes, output_envelope_path, read_run_error_chain, OUTPUT_ENVELOPE_ENV,
+};
 use crate::extension::bench::failure_diagnostic::bench_failure_stderr_tail;
 use crate::extension::bench::parsing::{BenchRunMetadata, BenchRunnerMetadata};
 use crate::extension::bench::responsiveness::{memory_sample, read_responsiveness_summary};
@@ -106,6 +109,8 @@ pub fn run_main_bench_workflow(
             )
         })?;
     }
+
+    clear_output_envelopes(run_dir, args.execution.concurrency);
 
     if component.has_script(ExtensionCapability::Bench) && args.extra_workloads.is_empty() {
         clear_responsiveness_file(run_dir)?;
@@ -209,6 +214,7 @@ pub fn run_main_bench_workflow(
             scenario_id: failure_scenario_id(&args.scenario_ids),
             exit_code: script_output.exit_code,
             stderr_tail: bench_failure_stderr_tail(&script_output.stderr, &args),
+            error_chain: read_run_error_chain(run_dir, 1),
             failure_classification,
             responsiveness,
             memory_sample: None,
@@ -435,6 +441,7 @@ pub fn run_main_bench_workflow(
             scenario_id: failure_scenario_id(&execution_args.scenario_ids),
             exit_code: runner_exit_code,
             stderr_tail,
+            error_chain: read_run_error_chain(run_dir, execution_args.execution.concurrency),
             failure_classification,
             responsiveness,
             memory_sample: failure_memory_sample,
@@ -478,6 +485,12 @@ pub(crate) fn bench_component_script_env(
         (
             "HOMEBOY_BENCH_RESULTS_FILE".to_string(),
             results_file.to_string_lossy().to_string(),
+        ),
+        (
+            OUTPUT_ENVELOPE_ENV.to_string(),
+            output_envelope_path(run_dir, None)
+                .to_string_lossy()
+                .to_string(),
         ),
         (
             "HOMEBOY_BENCH_ITERATIONS".to_string(),
