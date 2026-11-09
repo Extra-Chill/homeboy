@@ -4841,46 +4841,65 @@ impl AgentTaskExecutorAdapter for TimeoutReviewFormExecutor {
         crate::agent_task::AgentTaskOutcome {
             task_id: request.task_id,
             status: crate::agent_task::AgentTaskOutcomeStatus::Timeout,
-            summary: Some("review provider exceeded timeout".to_string()),
+            summary: Some("review provider budget exhausted".to_string()),
+            diagnostics: vec![crate::agent_task::AgentTaskDiagnostic {
+                class: "agent_task.execution_budget_exhausted".to_string(),
+                message: "review provider budget exhausted".to_string(),
+                data: serde_json::json!({}),
+            }],
             ..Default::default()
         }
     }
 }
 
 #[test]
-fn cook_publishes_draft_when_review_form_provider_times_out() {
+fn cook_finalization_publishes_gated_sha_when_review_budget_is_exhausted() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let temp = tempfile::tempdir().unwrap();
-        let fixture = adopt_green_candidate_missing_review_form(
+        let mut fixture = adopt_green_candidate_missing_review_form(
             temp.path(),
-            "cook-review-unavailable",
+            "cook-review-budget",
             Arc::new(TimeoutReviewFormExecutor),
         );
         let result = fixture
             .result
-            .expect("optional review failure must not block Cook");
-        assert_eq!(result.exit_code, 0, "{:?}", result.value);
-        assert_eq!(result.value.status, "draft_published");
-        assert_eq!(result.value.terminal_phase.as_deref(), Some("review_form"));
-        assert!(result.value.finalization.as_ref().unwrap()["pr_number"].is_number());
+            .as_ref()
+            .expect("initial candidate publication");
+        let run_id = result.value.latest_run_id.as_deref().unwrap();
+        let lifecycle = test_lifecycle_store();
+        let plan = lifecycle.read_controller_plan(run_id).unwrap();
+        let mut aggregate = lifecycle.read_aggregate(run_id).unwrap();
+        aggregate.outcomes[0].outputs = serde_json::json!({});
+        aggregate.outcomes[0].diagnostics = vec![crate::agent_task::AgentTaskDiagnostic {
+            class: "agent_task.execution_budget_exhausted".to_string(),
+            message: "review provider budget exhausted".to_string(),
+            data: serde_json::json!({}),
+        }];
+        agent_task_lifecycle::record_run_aggregate(run_id, &plan, &aggregate).unwrap();
+        let mut options = batch_cook_options(
+            "cook-review-budget",
+            Arc::new(AcceptedDetachedAttemptDispatcher),
+        );
+        options.finalization.no_finalize = false;
+        options.finalization.head = Some("fix/review-budget".to_string());
+        let promotion = fixture.backend.synthetic_gate_proof.clone().unwrap();
+        let receipt = finalize_or_load_cook_pr_with_backend(
+            &options,
+            run_id,
+            &promotion,
+            &mut fixture.backend,
+        )
+        .expect("review budget exhaustion must publish");
+        assert_eq!(receipt["status"], "draft_published");
         assert!(fixture.backend.draft);
-        assert_eq!(fixture.backend.title, "fix(cook): batch cook");
-        assert!(fixture.backend.body.contains("Gate:"));
-        assert!(!fixture.backend.body.contains("fix: update"));
-        let latest = result.value.latest_run_id.as_deref().unwrap();
-        let record = agent_task_lifecycle::exact_record(latest).unwrap();
+        assert!(!fixture.backend.committed);
         assert_eq!(
-            record.metadata["review_form_unavailable"]["phase"],
-            "review_form"
+            fixture.backend.pushed_sha.as_deref(),
+            Some(fixture.candidate.as_str())
         );
-        assert!(
-            fixture.backend.body.contains(
-                "Review form unavailable: completion not assessed; deterministic gates passed"
-            ),
-            "{}",
-            fixture.backend.body
-        );
-        assert!(fixture.backend.committed && fixture.backend.pushed && fixture.backend.created);
+        assert!(fixture.backend.body.contains("Diff stat:"));
+        assert!(fixture.backend.body.contains("Gate:"));
+        assert!(fixture.backend.body.contains("execution_budget_exhausted"));
     });
 }
 
@@ -18469,6 +18488,7 @@ struct CaptureBackend {
     title: String,
     committed: bool,
     pushed: bool,
+    pushed_sha: Option<String>,
     created: bool,
     create_count: usize,
     updated: bool,
@@ -18645,6 +18665,7 @@ impl AgentTaskPrFinalizationBackend for CaptureBackend {
         head: &str,
     ) -> Result<AgentTaskPublicationGitTracking> {
         self.pushed = true;
+        self.pushed_sha = Some(_commit_sha.to_string());
         Ok(AgentTaskPublicationGitTracking {
             local_branch: head.to_string(),
             remote: "origin".to_string(),

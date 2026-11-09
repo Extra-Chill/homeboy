@@ -4323,18 +4323,6 @@ fn make_provider_timeout_actionable(
     remaining_budget: Option<AgentTaskExecutionBudget>,
     provider_execution_active: bool,
 ) {
-    if plan_is_review_form_only(plan) {
-        make_review_form_timeout_actionable(
-            lifecycle_store,
-            report,
-            aggregate,
-            plan,
-            run_id,
-            remaining_budget,
-            provider_execution_active,
-        );
-        return;
-    }
     let Some(timeout_ms) = provider_timeout_ms(aggregate, plan) else {
         return;
     };
@@ -4545,174 +4533,6 @@ fn make_provider_rotation_actionable(
         context.phase = "provider".to_string();
         context.reason_code = "provider_rotation_exhausted".to_string();
         context.diagnostic = Some(diagnostic_value);
-    }
-}
-
-fn make_review_form_timeout_actionable(
-    lifecycle_store: Option<&AgentTaskLifecycleStore>,
-    report: &mut AgentTaskRunResult<AgentTaskCookReport>,
-    aggregate: &crate::agent_task_schedule::AgentTaskAggregate,
-    plan: &AgentTaskPlan,
-    run_id: &str,
-    remaining_budget: Option<AgentTaskExecutionBudget>,
-    provider_execution_active: bool,
-) {
-    let Some(timeout_ms) = provider_timeout_ms(aggregate, plan) else {
-        return;
-    };
-    let remaining_executions = remaining_budget
-        .as_ref()
-        .map(|budget| budget.max_provider_executions)
-        .unwrap_or(0);
-    let remaining_retries = remaining_budget
-        .as_ref()
-        .map(|budget| budget.max_same_provider_retries)
-        .unwrap_or(0);
-    let remaining_rotations = remaining_budget
-        .as_ref()
-        .map(|budget| budget.max_provider_rotations)
-        .unwrap_or(0);
-    let next_timeout_ms = timeout_ms
-        .saturating_add(timeout_ms.max(1))
-        .min(MAX_REVIEW_FORM_TIMEOUT_MS);
-    let remaining_deadline_ms = remaining_budget
-        .as_ref()
-        .and_then(|budget| budget.remaining_deadline_ms(crate::agent_task_timeout::now_unix_ms()));
-    let deadline_expired = remaining_deadline_ms == Some(0);
-    let can_retry = remaining_executions > 0
-        && remaining_retries > 0
-        && next_timeout_ms > timeout_ms
-        && !deadline_expired;
-    let command = can_retry.then(|| {
-        let continuation = lifecycle_store.map_or_else(
-            || cook_recover_command(None, run_id),
-            |store| cook_recovery_command_in_store(store, run_id, &["recover", run_id]),
-        );
-        format!(
-            "{} --review-form-timeout-ms {next_timeout_ms}",
-            continuation
-        )
-    });
-    let recovery_guidance = if deadline_expired {
-        "The durable provider execution deadline is exhausted.".to_string()
-    } else {
-        command
-            .as_deref()
-            .map(|command| {
-                format!(
-                    "After any deferred cleanup completes, retry the review form with `{command}`."
-                )
-            })
-            .unwrap_or_else(|| {
-                format!(
-                    "No review-form timeout retry remains (deadline {timeout_ms}ms, cap {}ms).",
-                    MAX_REVIEW_FORM_TIMEOUT_MS
-                )
-            })
-    };
-    let deferred_cleanup_pending = provider_execution_active
-        || aggregate.outcomes.iter().any(|outcome| {
-            outcome.metadata["deferred_cleanup_pending"] == Value::Bool(true)
-                && !super::execution::deferred_cleanup_receipt_is_terminal(outcome, run_id)
-        });
-    let selected_candidate_retained =
-        report
-            .value
-            .selected_candidate
-            .as_ref()
-            .is_some_and(|candidate| {
-                candidate["incomplete"] != true
-                    && candidate["run_id"]
-                        .as_str()
-                        .is_some_and(|run_id| !run_id.is_empty())
-            });
-
-    report.value.status = CookStatus::ReviewFormTimeout.as_str().to_string();
-    report.value.terminal_phase = Some("review_form".to_string());
-    report.value.terminal_failure_classification = Some("review_form_timeout".to_string());
-    report.value.stop_reason = Some(if selected_candidate_retained {
-        format!(
-            "optional review form exceeded review_form_timeout_ms={timeout_ms}; the selected candidate and passed gates remain. Finalization still needs a valid review form. Review-form executions use the bounded fresh-review provider budget because they still invoke a provider. Remaining fresh-review budget: provider_executions={remaining_executions}, same_provider_retries={remaining_retries}, provider_rotations={remaining_rotations}. {recovery_guidance}"
-        )
-    } else {
-        format!(
-            "optional review form exceeded review_form_timeout_ms={timeout_ms} before a review form was produced. Review-form executions use the bounded fresh-review provider budget because they still invoke a provider. Remaining fresh-review budget: provider_executions={remaining_executions}, same_provider_retries={remaining_retries}, provider_rotations={remaining_rotations}. {recovery_guidance}"
-        )
-    });
-    if let Some(context) = report.value.failure_context.as_mut() {
-        context.phase = "review_form".to_string();
-        context.reason_code = "review_form_timeout".to_string();
-        context.diagnostic = Some(serde_json::json!({
-            "class": "agent_task.review_form_timeout",
-            "message": format!("review form exceeded review_form_timeout_ms={timeout_ms}"),
-            "data": {
-                "timeout_ms": timeout_ms,
-                "review_form_timeout_ms": timeout_ms,
-                "review_form_timeout_cap_ms": MAX_REVIEW_FORM_TIMEOUT_MS,
-                "default_review_form_timeout_ms": DEFAULT_REVIEW_FORM_TIMEOUT_MS,
-                "provider_budget_scope": "fresh_cook_review",
-                "review_form_provider_budget_is_distinct": true,
-                "review_form_provider_executions_consumed": 1,
-                "selected_candidate_retained": selected_candidate_retained,
-                "finalization_reached": false,
-                "finalization_not_reached_reason": "the optional review form timed out after the selected candidate passed gates",
-                "remaining_provider_executions": remaining_executions,
-                "remaining_same_provider_retries": remaining_retries,
-                "remaining_provider_rotations": remaining_rotations,
-                "remaining_execution_deadline_ms": remaining_deadline_ms,
-                "deferred_cleanup_pending": deferred_cleanup_pending,
-            }
-        }));
-        context.recovery_legal = can_retry && !deferred_cleanup_pending;
-        context.recovery_reason = if deadline_expired {
-            "the durable provider execution deadline is exhausted".to_string()
-        } else if !can_retry {
-            "review-form timeout retry budget is exhausted".to_string()
-        } else if deferred_cleanup_pending {
-            "review-form timeout retry is blocked until deferred cleanup is terminal".to_string()
-        } else {
-            "an explicit review-form timeout increase can consume the remaining retry budget"
-                .to_string()
-        };
-        context.legal_actions.clear();
-        context.next_actions.clear();
-        // A timeout retry spends budget on an explicitly larger deadline: an
-        // operator decision `recover` does not make on its own.
-        context.recovery_step = Some(CookRecoveryStep::none(
-            command
-                .as_deref()
-                .filter(|_| !deferred_cleanup_pending)
-                .map(|command| format!("Retry with an explicit timeout increase: `{command}`."))
-                .unwrap_or_else(|| context.recovery_reason.clone()),
-        ));
-        if deferred_cleanup_pending {
-            context.next_actions.push(AgentTaskCookRecoveryAction {
-                action: "status".to_string(),
-                command: lifecycle_store.map_or_else(
-                    || format!("homeboy agent-task diagnose {run_id} --full"),
-                    |store| {
-                        cook_recovery_command_in_store(
-                            store,
-                            run_id,
-                            &["diagnose", run_id, "--full"],
-                        )
-                    },
-                ),
-            });
-        }
-        // See the identical reasoning in `make_provider_timeout_actionable`:
-        // a resume command is only offered when it is admitted right now, not
-        // merely once deferred cleanup finishes (#14732).
-        if let Some(command) = command {
-            if !deferred_cleanup_pending {
-                let action = AgentTaskCookRecoveryAction {
-                    action: "resume".to_string(),
-                    command,
-                };
-                context.legal_actions.push(action.clone());
-                context.next_actions.push(action);
-            }
-        }
     }
 }
 
@@ -7692,19 +7512,12 @@ fn run_cook_spine(
         } else {
             adopted_attempt_is_ready_for_cook_continuation(lifecycle_store, &record)?
         };
-        let review_form_unavailable = plan_is_review_form_only(&plan)
-            && retryable_review_form_terminal_failure_in_store(
-                lifecycle_store,
-                &record,
-                &aggregate,
-            )
-            && matches!(
-                record.state(),
-                agent_task_lifecycle::AgentTaskRunState::Failed
-                    | agent_task_lifecycle::AgentTaskRunState::PartialFailure
-            )
-            && persisted_promotion_for_attempt_in_store(lifecycle_store, &run_id)?
-                .is_some_and(|promotion| promotion.applied_with_passing_verdict());
+        let review_form_unavailable = persisted_promotion_for_attempt_in_store(
+            lifecycle_store,
+            &run_id,
+        )?
+        .is_some_and(|promotion| promotion.applied_with_passing_verdict())
+            && !matches!(review_form_from_aggregate(&aggregate), Ok(Some(form)) if form.validate().is_ok());
         if review_form_unavailable {
             lifecycle_store.record_metadata_value(
                 &run_id,
@@ -8012,7 +7825,7 @@ fn run_cook_spine(
         let review_form = if review_form_unavailable {
             None
         } else {
-            review_form_from_aggregate(&aggregate)?
+            review_form_from_aggregate(&aggregate).ok().flatten()
         };
         let intentional_no_change = intentional_no_change_from_aggregate(&aggregate);
         let previous_failure_set = delivery
@@ -8552,7 +8365,15 @@ pub(super) fn publish_incomplete_draft<
         .to_string(),
     };
     let title = if options.finalization.title.is_empty() {
-        format!("fix(cook): incomplete {}", options.identity.cook_id)
+        format!(
+            "fix(cook): {} {}",
+            if review_form_unavailable {
+                "verified candidate"
+            } else {
+                "incomplete"
+            },
+            options.identity.cook_id
+        )
     } else {
         options.finalization.title.clone()
     };
@@ -8570,6 +8391,17 @@ pub(super) fn publish_incomplete_draft<
     body.push_str(&format!(
         "\nCandidate from attempt {attempt} (`{run_id}`).\n"
     ));
+    if review_form_unavailable {
+        let lifecycle = AgentTaskLifecycleStore::from_environment()?;
+        let record = lifecycle.read_record(run_id)?;
+        let reason = record.metadata["review_form_unavailable"]["message"]
+            .as_str()
+            .unwrap_or("missing review_form output");
+        body.push_str(&format!(
+            "\nReview form failed: {}\n",
+            reason.replace(['\n', '\r'], " ")
+        ));
+    }
     if !later.is_empty() {
         body.push_str(&format!("\nLater attempts:\n{}\n", later.join("\n")));
     }
@@ -8590,8 +8422,32 @@ pub(super) fn publish_incomplete_draft<
             gate.id, tail
         ));
     }
-    backend.commit_all(path, &title)?;
-    let sha = git::run_git(root, &["rev-parse", "HEAD"], "resolve draft candidate")?;
+    let sha = if review_form_unavailable {
+        let candidate = promotion
+            .provenance
+            .pointer("/candidate_checkout/commit")
+            .and_then(Value::as_str)
+            .or(promotion.candidate_ref.as_deref())
+            .ok_or_else(|| Error::git_command_failed("gated candidate SHA is missing"))?;
+        let base = promotion
+            .verified_base
+            .as_ref()
+            .ok_or_else(|| Error::git_command_failed("verified base SHA is missing"))?;
+        body.push_str(&format!(
+            "\nDiff stat:\n```text\n{}\n```\n",
+            git::run_git(
+                root,
+                &["diff", "--stat", &base.sha, candidate],
+                "describe gated candidate"
+            )?
+        ));
+        candidate.to_string()
+    } else {
+        backend.commit_all(path, &title)?;
+        git::run_git(root, &["rev-parse", "HEAD"], "resolve draft candidate")?
+            .trim()
+            .to_string()
+    };
     backend.push_branch(path, sha.trim(), &head)?;
     let pr = match backend.find_open_pr(None, path, &options.finalization.base, &head)? {
         Some(pr) => {

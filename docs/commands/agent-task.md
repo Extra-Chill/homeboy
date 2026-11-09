@@ -59,6 +59,8 @@ programs. Neither supplies a shared gate/provider file.
 
 ## Incomplete Cook drafts
 
+Once deterministic gates pass, a missing or failed review form never blocks publication: Cook publishes the gated candidate SHA as a draft, with deterministic task, diff-stat and gate evidence plus the review failure reason. `--publish-incomplete-draft` remains opt-in preservation for candidates that failed their gates.
+
 `agent-task cook --publish-incomplete-draft` opts into preserving a non-empty
 candidate when the attempt budget is exhausted. Cook selects the most recent
 non-empty candidate that ran and failed a deterministic gate, ignoring later
