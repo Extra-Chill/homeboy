@@ -87,6 +87,7 @@ pub(super) fn agent_task_resource_behavior(
         | agent_task::AgentTaskCommand::Promote(_)
         | agent_task::AgentTaskCommand::Adopt(_)
         | agent_task::AgentTaskCommand::PromotionProvider(_)
+        | agent_task::AgentTaskCommand::Gate { .. }
         | agent_task::AgentTaskCommand::GateExecute { .. }
         | agent_task::AgentTaskCommand::TerminalContinuationWorker { .. }
         | agent_task::AgentTaskCommand::FinalizePr(_)

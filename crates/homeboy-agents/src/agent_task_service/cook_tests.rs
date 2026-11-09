@@ -20880,6 +20880,104 @@ fn with_corrected_gate_failure(lab: bool, test: impl FnOnce(CookRequest, PathBuf
     });
 }
 
+#[test]
+fn public_cook_gate_retry_records_executed_and_reused_verdicts() {
+    with_corrected_gate_failure(false, |options, _target| {
+        let evidence = tempfile::tempdir().unwrap();
+        let a_log = evidence.path().join("a-runs");
+        let b_log = evidence.path().join("b-runs");
+        let ready = evidence.path().join("b-ready");
+        let a = "sleep 0.1; echo A >> \"$A_LOG\"".to_string();
+        // Baseline is green; only the promoted candidate needs B's prerequisite.
+        let b =
+            "if grep -q promoted tracked.txt; then echo B >> \"$B_LOG\"; test -f \"$B_READY\"; fi"
+                .to_string();
+        let gates = || VerifyGateOptions {
+            verify: vec![a.clone(), b.clone()],
+            hydrate_dependencies: false,
+            gate_environment: crate::agent_task_gate::AgentTaskGateEnvironmentPolicy {
+                mode: crate::agent_task_gate::AgentTaskGateEnvironmentMode::Replace,
+                variables: std::collections::BTreeMap::from([
+                    ("A_LOG".to_string(), a_log.display().to_string()),
+                    ("B_LOG".to_string(), b_log.display().to_string()),
+                    ("B_READY".to_string(), ready.display().to_string()),
+                ]),
+                hydrate_dependencies: false,
+                hydrate_rust_cache: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let first_error = verify_replacement_gates(
+            &options.identity.initial_run_id,
+            gates(),
+            "two-gate retry proof".to_string(),
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(
+            first_error.details["failed_eligibility_predicate"],
+            "green_gate_status"
+        );
+        assert_eq!(std::fs::read_to_string(&a_log).unwrap().lines().count(), 1);
+        assert_eq!(std::fs::read_to_string(&b_log).unwrap().lines().count(), 1);
+        // Only B's external prerequisite changes. The immutable candidate is identical.
+        std::fs::write(&ready, "ready").unwrap();
+        let second = verify_replacement_gates(
+            &options.identity.initial_run_id,
+            gates(),
+            "retry B after restoring prerequisite".to_string(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(second.status, AgentTaskPromotionStatus::Applied);
+        let reused = second.deterministic_gates[0].verdict.as_ref().unwrap();
+        let original_report: crate::agent_task_gate::AgentTaskGateReport =
+            serde_json::from_slice(&std::fs::read(&reused.original_run).unwrap()).unwrap();
+        let original = original_report.verdict.as_ref().unwrap();
+        assert!(!original.reused);
+        let b_verdict = second.deterministic_gates[1].verdict.as_ref().unwrap();
+        let b_directory = std::path::Path::new(&b_verdict.original_run)
+            .parent()
+            .unwrap();
+        let first_b = std::fs::read_dir(b_directory)
+            .unwrap()
+            .filter_map(|entry| {
+                let report: crate::agent_task_gate::AgentTaskGateReport =
+                    serde_json::from_slice(&std::fs::read(entry.ok()?.path()).ok()?).ok()?;
+                (report.status == crate::agent_task_gate::AgentTaskGateStatus::Failed)
+                    .then_some(report)
+            })
+            .next()
+            .expect("durable failed B execution receipt");
+        assert!(!first_b.verdict.as_ref().unwrap().reused);
+        assert!(reused.reused);
+        assert_eq!(original.original_run, reused.original_run);
+        assert_eq!(reused.saved_ms, original.elapsed_ms);
+        assert!(reused.saved_ms >= 100);
+        assert!(
+            !second.deterministic_gates[1]
+                .verdict
+                .as_ref()
+                .unwrap()
+                .reused
+        );
+        assert_eq!(std::fs::read_to_string(a_log).unwrap().lines().count(), 1);
+        assert_eq!(std::fs::read_to_string(b_log).unwrap().lines().count(), 2);
+        println!(
+            "Cook gate retry: first A={}ms B={}ms; retry A=reused saved={}ms B={}ms",
+            original.elapsed_ms,
+            first_b.verdict.as_ref().unwrap().elapsed_ms,
+            reused.saved_ms,
+            second.deterministic_gates[1]
+                .verdict
+                .as_ref()
+                .unwrap()
+                .elapsed_ms
+        );
+    });
+}
+
 fn corrected_replacement_gates(run_id: &str, verify: &str) -> Result<AgentTaskPromotionReport> {
     verify_replacement_gates(
         run_id,
