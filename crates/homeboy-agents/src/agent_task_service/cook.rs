@@ -8236,6 +8236,23 @@ fn run_cook_spine(
                     .and_then(|form| form.incomplete_reason())
                     .unwrap_or("no reason recorded")
                     .to_string();
+                lifecycle_store.record_cook_delivery_blocker(
+                    &run_id,
+                    super::cook_delivery::CookDeliveryBlocker {
+                        code: super::cook_delivery::CookDeliveryBlockerCode::ReviewFormIncomplete,
+                        message: format!(
+                            "The agent's review form declares the task incomplete: {reason}"
+                        ),
+                        paths: Vec::new(),
+                        next_action: Some(
+                            super::cook_recovery::incomplete_review_recovery_command(&run_id),
+                        ),
+                        cause: None,
+                        evidence: "/cook_delivery/blocker".to_string(),
+                        output: None,
+                    },
+                    0,
+                )?;
                 return Ok(stores.report(CookReportInput {
                     cook_id,
                     status: "candidate_recoverable",
