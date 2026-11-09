@@ -593,7 +593,11 @@ fn post_apply_checkpoint_resume_refuses_candidate_tree_mismatch_without_gating()
         .expect("resume after the destination is the candidate again");
     assert_eq!(restored.status, AgentTaskPromotionStatus::Applied);
     assert_eq!(restored.candidate.as_ref().unwrap().candidate_sha, sha);
-    assert_eq!(gate_runs(), 1, "the restored candidate tree reuses its pass");
+    assert_eq!(
+        gate_runs(),
+        1,
+        "the restored candidate tree reuses its pass"
+    );
 }
 
 #[test]
