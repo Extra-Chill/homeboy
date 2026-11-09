@@ -1131,6 +1131,15 @@ fn classify_liveness(
     now: chrono::DateTime<chrono::Utc>,
     live: &BTreeSet<Uuid>,
 ) -> AgentTaskLiveness {
+    // Current controller custody is authoritative even after provider exit,
+    // or when an older projection carries stale/invalid execution metadata.
+    if record.owner_process_is_running()
+        || record.has_live_execution_step_owner()
+        || live_local_cook_retry_supervisor(record, live)
+        || live_local_cook_retry_child(record)
+    {
+        return AgentTaskLiveness::Active;
+    }
     // A detached Cook parent has no executable task or owner until its child
     // and supervisor are durably attached. It is an active admission record,
     // not stale queued work for the daemon reconciliation tick to cancel.
@@ -1140,28 +1149,10 @@ fn classify_liveness(
     if record.lab_handoff_validation_error().is_some() {
         return AgentTaskLiveness::Unreconciled;
     }
-    // The exact execution step owns the run, queued or running.
-    if record.has_live_execution_step_owner() {
-        return AgentTaskLiveness::Active;
-    }
     // A completed Retry action intentionally leaves its successor queued until
     // the durable queue consumer claims it. That reservation survives the
     // short-lived caller, so lack of a live PID is not stale ownership.
     if durable_queued_retry_is_live(record) {
-        return AgentTaskLiveness::Active;
-    }
-    // The retry child is the local execution owner, while the controller job is
-    // only its supervisor. Daemon recovery can temporarily make the job store
-    // unreachable or stale; do not let that observer outage override the exact
-    // child PID plus process-start identity persisted at spawn. This check is
-    // intentionally local-only and never treats PID presence alone as proof.
-    if live_local_cook_retry_child(record) {
-        return AgentTaskLiveness::Active;
-    }
-    // A local Cook retry owns a queued lifecycle reservation before its child
-    // begins provider execution. Its current daemon job is the authoritative
-    // owner, so test it before generic queued-record staleness.
-    if live_local_cook_retry_supervisor(record, live) {
         return AgentTaskLiveness::Active;
     }
     // Worktree lookup and materialization are controller-owned even when the
@@ -1209,20 +1200,6 @@ fn classify_liveness(
     }
 
     if record.is_stale_running() {
-        return AgentTaskLiveness::Stale;
-    }
-
-    // A record can carry a stale-running condition that has not yet been
-    // annotated onto its metadata (annotation happens on convergence, not
-    // at rest). Detect a dead owner process directly here so discovery agrees
-    // with `status` and `reconcile_stale_active_runs` actually terminalizes the
-    // ghost `running` record instead of classifying it Active because the
-    // owner_pid is merely PRESENT (#9718). A runner-backed job with a fresh
-    // heartbeat is authoritative liveness and is deliberately left alone.
-    let owner_process_dead = record.owner_pid().is_some()
-        && record.local_owner_liveness() == agent_task_lifecycle::LocalOwnerLiveness::Dead;
-    let runner_backed_and_fresh = record.runner_job_id().is_some() && record.has_fresh_update();
-    if owner_process_dead && !runner_backed_and_fresh {
         return AgentTaskLiveness::Stale;
     }
 

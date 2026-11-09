@@ -848,52 +848,9 @@ impl AgentTaskRunRecord {
         )
     }
 
-    /// Reconcile every local ownership projection before a caller classifies a
-    /// running record. A live supervisor or provider wins over stale heartbeat
-    /// metadata; an ambiguous process probe never becomes dead by inference.
+    /// Probe the current controller process, not its provider children.
+    /// Provider completion does not release the controller's ownership.
     pub(crate) fn local_owner_liveness(&self) -> LocalOwnerLiveness {
-        let provider_states = self
-            .metadata
-            .get("provider_executions")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter(|execution| execution["state"] == "running")
-            .map(|execution| {
-                let Some(pid) = execution["owner_pid"]
-                    .as_u64()
-                    .and_then(|pid| u32::try_from(pid).ok())
-                else {
-                    return homeboy_core::process::ProcessIdentityState::Unverifiable;
-                };
-                homeboy_core::process::process_identity_state(
-                    pid,
-                    execution
-                        .get("owner_linux_starttime_ticks")
-                        .and_then(Value::as_u64),
-                )
-            })
-            .collect::<Vec<_>>();
-        if provider_states
-            .iter()
-            .any(|state| *state == homeboy_core::process::ProcessIdentityState::Live)
-        {
-            return LocalOwnerLiveness::Live;
-        }
-        if !provider_states.is_empty() {
-            return if provider_states.iter().all(|state| {
-                matches!(
-                    state,
-                    homeboy_core::process::ProcessIdentityState::Dead
-                        | homeboy_core::process::ProcessIdentityState::IdentityMismatch
-                )
-            }) {
-                LocalOwnerLiveness::Dead
-            } else {
-                LocalOwnerLiveness::Unverifiable
-            };
-        }
-
         let Some(pid) = self
             .metadata
             .get("runner_pid")
@@ -924,22 +881,6 @@ impl AgentTaskRunRecord {
     }
 
     pub(crate) fn owner_pid(&self) -> Option<u32> {
-        let provider_pids = self
-            .metadata
-            .get("provider_executions")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter(|execution| execution["state"] == "running")
-            .filter_map(|execution| {
-                execution["owner_pid"]
-                    .as_u64()
-                    .and_then(|pid| u32::try_from(pid).ok())
-            })
-            .collect::<Vec<_>>();
-        if provider_pids.len() == 1 {
-            return provider_pids.into_iter().next();
-        }
         self.metadata
             .get("runner_pid")
             .and_then(Value::as_u64)

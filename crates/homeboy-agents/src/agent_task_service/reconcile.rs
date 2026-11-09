@@ -133,7 +133,11 @@ fn decision_status(
 ) -> Result<agent_task_lifecycle::AgentTaskRunRecord> {
     if dry_run {
         let mut record = agent_task_lifecycle::exact_record_in_store(lifecycle_store, run_id)?;
-        if !record.state().is_terminal() {
+        if !record.state().is_terminal()
+            && super::discovery::discover_reconcile_run(record.clone())
+                .liveness
+                .is_some_and(AgentTaskLiveness::is_reconcilable)
+        {
             agent_task_lifecycle::observe_terminal_runner_record_in_store(
                 lifecycle_store,
                 &mut record,
@@ -142,6 +146,32 @@ fn decision_status(
         }
         Ok(record)
     } else {
+        let record = agent_task_lifecycle::exact_record_in_store(lifecycle_store, run_id)?;
+        let observed = super::discovery::discover_reconcile_run(record.clone());
+        if record.state().is_terminal() {
+            return rooted_exact_status(lifecycle_store, run_id);
+        }
+        if !observed
+            .liveness
+            .is_some_and(AgentTaskLiveness::is_reconcilable)
+        {
+            return Ok(record);
+        }
+        // Status convergence can itself record an interrupted-owner failure.
+        // Retain the decision before that refresh, not only on cancellation.
+        lifecycle_store.mutate_record(run_id, |record| {
+            let owner_pid = record.owner_pid();
+            record.ensure_metadata_object().insert(
+                "reconciliation".to_string(),
+                serde_json::json!({
+                    "actor": RECONCILER_ACTOR,
+                    "liveness": observed.liveness.map(AgentTaskLiveness::as_str),
+                    "reason": observed.stale_reason.unwrap_or_else(|| "controller_owner_not_live".to_string()),
+                    "owner_pid": owner_pid,
+                }),
+            );
+            true
+        })?;
         rooted_exact_status(lifecycle_store, run_id)
     }
 }
@@ -458,7 +488,25 @@ pub(crate) fn reconcile_run_in_store(
     let mut reconciled = 0;
     let mut failed = 0;
     for resolved_run_id in &resolved_run_ids {
+        let before = agent_task_lifecycle::exact_record_in_store(lifecycle_store, resolved_run_id)?;
         let authoritative = decision_status(lifecycle_store, resolved_run_id, dry_run)?;
+        if !dry_run && !before.state().is_terminal() && authoritative.state().is_terminal() {
+            reconciled += 1;
+            runs.push(AgentTaskReconcileRun {
+                run_id: resolved_run_id.clone(),
+                liveness: super::discovery::discover_reconcile_run(before)
+                    .liveness
+                    .unwrap_or(AgentTaskLiveness::Unreconciled),
+                source: "local".to_string(),
+                authoritative_state: authoritative.state(),
+                stale_reason: authoritative.metadata["reconciliation"]["reason"]
+                    .as_str()
+                    .map(str::to_owned),
+                action: "reconciled",
+                error: None,
+            });
+            continue;
+        }
         let source = authoritative
             .runner_id()
             .map(|runner_id| format!("runner:{runner_id}"))
@@ -817,6 +865,50 @@ mod tests {
             record.metadata["runner_pid"] = serde_json::json!(999_999u32);
         })
         .expect("orphaned owner");
+    }
+
+    #[test]
+    fn exited_provider_does_not_release_live_controller_ownership() {
+        with_isolated_home(|_| {
+            let run_id = "reconcile-controller-after-provider-exit";
+            let plan = AgentTaskPlan::new("controller-after-provider-exit", Vec::new());
+            agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("submit");
+            agent_task_lifecycle::mark_running(run_id).expect("controller running");
+            agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+                record.metadata["provider_executions"] = serde_json::json!([{
+                    "state": "running",
+                    "owner_pid": 999_999u32,
+                    "owner_identity": "exited-provider"
+                }]);
+            })
+            .expect("exited provider awaiting controller bookkeeping");
+            let before = test_lifecycle_store().read_record(run_id).expect("before");
+            let report = reconcile_stale_active_runs(false).expect("live controller sweep");
+            assert_eq!(report.reconciled, 0, "{report:?}");
+            let retained = test_lifecycle_store()
+                .read_record(run_id)
+                .expect("retained");
+            assert_eq!(
+                retained.state(),
+                agent_task_lifecycle::AgentTaskRunState::Running
+            );
+            assert_eq!(retained.updated_at, before.updated_at);
+            assert!(retained.metadata.get("reconciliation").is_none());
+
+            agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+                record.metadata["runner_pid"] = serde_json::json!(999_999u32);
+            })
+            .expect("controller exited");
+            let report = reconcile_stale_active_runs(false).expect("dead controller sweep");
+            assert_eq!(report.reconciled, 1, "{report:?}");
+            assert_eq!(report.failed, 0, "{report:?}");
+            let reconciled = test_lifecycle_store()
+                .read_record(run_id)
+                .expect("reconciled");
+            assert!(reconciled.state().is_terminal());
+            assert_eq!(reconciled.metadata["reconciliation"]["liveness"], "stale");
+            assert!(reconciled.metadata["reconciliation"]["reason"].is_string());
+        });
     }
 
     #[test]

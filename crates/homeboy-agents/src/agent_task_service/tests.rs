@@ -3985,7 +3985,7 @@ fn dead_owner_process_run_is_classified_stale_and_reconciled() {
 }
 
 #[test]
-fn concurrent_provider_children_keep_liveness_attributed_to_their_own_processes() {
+fn concurrent_provider_children_do_not_replace_controller_liveness() {
     with_isolated_home(|_| {
         let mut child_a = std::process::Command::new("sleep")
             .arg("60")
@@ -4037,7 +4037,7 @@ fn concurrent_provider_children_keep_liveness_attributed_to_their_own_processes(
                     .find(|run| run.run_id == "run-child-a")
                     .expect("first child")
                     .liveness,
-                Some(AgentTaskLiveness::Stale)
+                Some(AgentTaskLiveness::Active)
             );
             assert_eq!(
                 observed
@@ -4047,7 +4047,7 @@ fn concurrent_provider_children_keep_liveness_attributed_to_their_own_processes(
                     .expect("first child")
                     .stale_reason
                     .as_deref(),
-                Some("owner_process_not_running")
+                None
             );
             assert_eq!(
                 observed
@@ -4811,7 +4811,7 @@ fn upgrade_admission_keeps_a_live_provider_owner_active_despite_heartbeat_lag() 
 }
 
 #[test]
-fn upgrade_admission_keeps_ambiguous_provider_evidence_fail_closed_and_read_only() {
+fn upgrade_admission_keeps_ambiguous_controller_evidence_fail_closed_and_read_only() {
     with_isolated_home(|_| {
         let run_id = "ambiguous-provider-owner";
         let plan = discovery_plan();
@@ -4828,7 +4828,7 @@ fn upgrade_admission_keeps_ambiguous_provider_evidence_fail_closed_and_read_only
             record.updated_at = Some("2000-01-01T00:00:00+00:00".to_string());
             // Zero is not a process identity and must not be treated as a dead
             // owner merely because the heartbeat is old.
-            record.metadata["provider_executions"][0]["owner_pid"] = serde_json::json!(0);
+            record.metadata["runner_pid"] = serde_json::json!(0);
             record.metadata[agent_task_lifecycle::METADATA_KEY_STALE_RUNNING] =
                 serde_json::json!(true);
         })
@@ -4852,7 +4852,7 @@ fn upgrade_admission_keeps_ambiguous_provider_evidence_fail_closed_and_read_only
 
 #[cfg(unix)]
 #[test]
-fn upgrade_admission_classifies_a_proven_dead_provider_owner_as_stale() {
+fn upgrade_admission_classifies_a_proven_dead_controller_owner_as_stale() {
     with_isolated_home(|_| {
         let run_id = "dead-provider-owner";
         let plan = discovery_plan();
@@ -4871,7 +4871,7 @@ fn upgrade_admission_classifies_a_proven_dead_provider_owner_as_stale() {
             .expect("owner process");
         agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
             record.updated_at = Some("2000-01-01T00:00:00+00:00".to_string());
-            record.metadata["provider_executions"][0]["owner_pid"] = serde_json::json!(owner.id());
+            record.metadata["runner_pid"] = serde_json::json!(owner.id());
             // The process is reaped below, so no start-time guess is needed to
             // prove it dead. Live identities remain checked by the lifecycle.
             record.metadata["provider_executions"][0]["owner_linux_starttime_ticks"] =

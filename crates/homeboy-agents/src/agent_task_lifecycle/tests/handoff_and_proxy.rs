@@ -260,9 +260,13 @@ fn retained_terminal_run(record: &AgentTaskRunRecord) -> homeboy_core::observati
 }
 
 #[test]
-fn reconcile_observes_terminal_lab_attempt_while_controller_is_running() {
+fn reconcile_observes_terminal_lab_attempt_after_controller_exits() {
     with_isolated_home(|_| {
         let record = accepted_detached_handoff("retained-reconcile");
+        rewrite_record_for_test(&record.run_id, |record| {
+            record.metadata["runner_pid"] = json!(999_999u32);
+        })
+        .expect("controller exited");
         let store = test_lifecycle_store();
         assert_eq!(record.state(), AgentTaskRunState::Running);
         let _provider = RunnerContinuationTestGuard::install(Box::new(ReconciliationProvider {
