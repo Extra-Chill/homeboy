@@ -350,6 +350,10 @@ pub fn cancel(workflow: &str, now_ms: u64) -> Result<Cadence> {
 
 /// Advance `workflow` only if it is still due at `expected_next_due_ms`, so
 /// a slot is consumed once even if two ticks race.
+///
+/// `update` runs while this connection holds the SQLite writer. It must be a
+/// pure edit of the registration: no job-store access, child waits or other
+/// I/O, because every job-store writer waits for the same SQLite writer.
 fn advance(
     workflow: &str,
     expected_next_due_ms: u64,
@@ -359,6 +363,8 @@ fn advance(
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|error| sql(error, "begin"))?;
+    #[cfg(test)]
+    tests::run_write_held_hook();
     let Some(mut cadence) = read(&transaction, workflow)? else {
         return Ok(false);
     };
@@ -466,21 +472,21 @@ fn admit_one(store: &JobStore, cadence: Cadence, now_ms: u64) -> Result<Value> {
             slot_ms,
             next_due_ms,
         } => {
+            // Read the job store before the registration's write transaction:
+            // a job-store writer holds the store's lock while it waits for the
+            // SQLite writer, so reading the store inside the transaction
+            // deadlocks both until the busy budget runs out (#17645).
+            let stalled = cadence
+                .last_instance
+                .as_deref()
+                .and_then(|instance| store.controller_job_for_key(instance))
+                .zip(cadence.last_skipped_at_ms)
+                .is_some_and(|(job, last)| job.updated_at_ms <= last);
             advance(&workflow, due, |cadence| {
-                if let Some(job) = cadence
-                    .last_instance
-                    .as_deref()
-                    .and_then(|instance| store.controller_job_for_key(instance))
-                {
-                    if cadence
-                        .last_skipped_at_ms
-                        .is_some_and(|last| job.updated_at_ms <= last)
-                    {
-                        cadence.last_error = Some(
-                            "previous instance has made no progress since the last skipped slot"
-                                .into(),
-                        );
-                    }
+                if stalled {
+                    cadence.last_error = Some(
+                        "previous instance has made no progress since the last skipped slot".into(),
+                    );
                 }
                 cadence.skipped += 1;
                 cadence.last_skipped_at_ms = Some(slot_ms);
@@ -681,6 +687,15 @@ fn to_value<T: Serialize>(value: &T) -> Result<Value> {
 }
 
 fn sql(error: rusqlite::Error, operation: &str) -> Error {
+    if crate::observation::store::is_transient_lock_error(&error) {
+        return Error::observation_store_busy(
+            crate::paths::observation_db()
+                .map(|path| path.display().to_string())
+                .unwrap_or_default(),
+            format!("{operation} workflow cadence store"),
+            crate::observation::store::SQLITE_CONTROL_PLANE_WRITE_TIMEOUT.as_millis() as u64,
+        );
+    }
     Error::internal_io(
         error.to_string(),
         Some(format!("{operation} workflow cadence store")),

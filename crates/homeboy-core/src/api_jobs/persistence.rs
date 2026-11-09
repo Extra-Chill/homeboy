@@ -54,6 +54,15 @@ fn tombstone_kind_name(kind: ReplayTombstoneKind) -> &'static str {
 }
 
 pub(super) fn tombstone_error(path: &Path, operation: &str, error: rusqlite::Error) -> Error {
+    // A writer that waited out the whole busy budget lost a race for the
+    // SQLite writer; that is retryable contention, not an I/O failure.
+    if crate::observation::store::is_transient_lock_error(&error) {
+        return Error::observation_store_busy(
+            path.display().to_string(),
+            operation,
+            crate::observation::store::SQLITE_CONTROL_PLANE_WRITE_TIMEOUT.as_millis() as u64,
+        );
+    }
     Error::internal_io(
         error.to_string(),
         Some(format!("{operation} {}", path.display())),

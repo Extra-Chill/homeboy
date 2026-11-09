@@ -1827,6 +1827,13 @@ impl JobStore {
         self.durable_write_skips.store(count, Ordering::SeqCst);
     }
 
+    /// Whether another thread holds the in-memory store lock, as a durable
+    /// write does while it waits for the SQLite writer.
+    #[cfg(test)]
+    pub(crate) fn state_lock_held(&self) -> bool {
+        self.inner.try_lock().is_err()
+    }
+
     pub(crate) fn controller_job_state(&self, job_id: Uuid) -> Result<ControllerJobState> {
         let inner = self.inner.lock().expect("job store mutex poisoned");
         inner
