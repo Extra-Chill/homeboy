@@ -7,10 +7,11 @@ single slot remains available for forward progress on a saturated host. Missing
 or invalid load data falls back to the CPU bound. Existing work is not killed
 when load rises.
 
-Direct runner executions retain their durable runner-capacity reservation and
-FIFO queue. Detached Cook execution steps also wait before launching heavy
-provider/gate work; launcher steps do not hold a slot while waiting for a nested
-execution step. Waiting progress reports `waiting_for: lab_capacity`,
+The budget is applied at one point: detached Cook execution steps (heavy
+provider/gate work) take a FIFO slot before launching. A waiting step polls
+actively and releases its ticket on cancellation, so it cannot block the queue.
+Launcher steps do not hold a slot while waiting for a nested execution step.
+Runner job reservations keep their configured concurrency limit unchanged. Waiting progress reports `waiting_for: lab_capacity`,
 `queue_position`, `load_average_1m`, and `effective_budget`. `eta_seconds` is null:
 load and provider durations do not support an honest completion estimate.
 

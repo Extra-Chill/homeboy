@@ -447,7 +447,6 @@ pub(crate) enum ControllerJobSubmissionOutcome {
     Existing(Box<Job>),
 }
 
-#[allow(clippy::large_enum_variant)]
 pub(crate) enum ControllerJobStartOutcome {
     Claimed(ControllerJobState),
     Existing,
@@ -2650,10 +2649,10 @@ impl JobStore {
                         .as_ref()
                         .expect("capacity admission requires a local runner")
                         .runner_id,
-                    crate::lab_capacity::observe(Some(capacity)).effective_budget,
+                    capacity,
                 ) {
                     Ok(true) => break,
-                    Ok(false) => thread::sleep(std::time::Duration::from_secs(1)),
+                    Ok(false) => thread::sleep(std::time::Duration::from_millis(10)),
                     Err(_) => return,
                 }
             }
@@ -2995,55 +2994,7 @@ impl JobStore {
                             .as_ref()
                             .is_some_and(|runner| runner.runner_id == runner_id)
                 });
-                let active_count = active.count();
-                let mut queued = inner
-                    .jobs
-                    .values()
-                    .filter(|candidate| {
-                        candidate.job.status == JobStatus::Queued
-                            && candidate.job.operation != "runner.admission"
-                            && candidate.local_child.is_none()
-                            && candidate
-                                .local_runner
-                                .as_ref()
-                                .is_some_and(|runner| runner.runner_id == runner_id)
-                    })
-                    .map(|candidate| (candidate.job.created_at_ms, candidate.job.id))
-                    .collect::<Vec<_>>();
-                queued.sort();
-                let position = queued.iter().position(|(_, id)| *id == job_id).unwrap_or(0) + 1;
-                if active_count >= capacity || position > 1 {
-                    let observed = crate::lab_capacity::observe(Some(capacity));
-                    let stored = inner.jobs.get_mut(&job_id).expect("job exists");
-                    // Refresh durable queue evidence without growing the event log every poll.
-                    let data = serde_json::json!({
-                        "waiting_for": "lab_capacity",
-                        "queue_position": position,
-                        "load_average_1m": observed.load_average_1m,
-                        "effective_budget": capacity,
-                        "active_work": active_count,
-                        "eta_seconds": null,
-                    });
-                    if let Some(event) = stored.events.last_mut().filter(|event| {
-                        event
-                            .data
-                            .as_ref()
-                            .is_some_and(|data| data["waiting_for"] == "lab_capacity")
-                    }) {
-                        event.data = Some(data);
-                        event.timestamp_ms = now;
-                    } else {
-                        let sequence = self.next_event_sequence.fetch_add(1, Ordering::SeqCst) + 1;
-                        stored.events.push(JobEvent {
-                            sequence,
-                            job_id,
-                            kind: JobEventKind::Progress,
-                            timestamp_ms: now,
-                            message: Some("waiting for Lab capacity".to_string()),
-                            data: Some(data),
-                        });
-                        stored.job.event_count = stored.events.len();
-                    }
+                if active.count() >= capacity {
                     return Ok(false);
                 }
             }
