@@ -813,3 +813,176 @@ fn applied_candidate_gate_verdicts_select_a_completing_recovery_step() {
         });
     }
 }
+
+/// Continues the way the CLI handler does when nothing can be claimed: it
+/// reports `continuation_not_scheduled` and leaves durable state unchanged.
+struct UnclaimedContinuation(std::sync::atomic::AtomicUsize);
+impl crate::agent_task_service::CookRecoveryPerformer for UnclaimedContinuation {
+    fn continue_cook(
+        &self,
+        run: &str,
+        _: bool,
+        _: &crate::agent_task_service::CookRecoveryOverrides,
+    ) -> Result<(Value, i32)> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok((
+            serde_json::json!({ "latest_run_id": run, "status": "continuation_not_scheduled" }),
+            0,
+        ))
+    }
+    fn preflight_continue_cook(&self, _: &str, _: bool) -> Result<(Value, i32)> {
+        panic!("recovery performs, it does not preflight")
+    }
+    fn retry(&self, _: &str) -> Result<(Value, i32)> {
+        panic!("must not retry")
+    }
+    fn reconcile(&self, _: &str) -> Result<(Value, i32)> {
+        panic!("must not reconcile")
+    }
+    fn adopt(&self, _: &str, _: &str) -> Result<(Value, i32)> {
+        panic!("must not adopt")
+    }
+}
+
+/// #17650: a step that left its durable state unchanged is not performed
+/// again. The next `recover`, its preflight and the status planner all name
+/// the same typed `blocked` step and its blocker; `--unblock` performs it once
+/// more after the operator resolved the blocker.
+#[test]
+fn cook_recovery_blocks_a_repeated_non_progressing_step_on_every_surface() {
+    use crate::agent_task_service::{CookRecoveryRequest, CookRecoveryStep};
+    with_corrected_gate_candidate(|options, _, _| {
+        wedge(WedgedCook::ContinuationNotScheduled, &options);
+        let cook = &options.identity.cook_id;
+        let performer = UnclaimedContinuation(Default::default());
+        let performed = || performer.0.load(std::sync::atomic::Ordering::SeqCst);
+
+        let (first, _) =
+            crate::agent_task_service::recover_cook(cook, Default::default(), &performer).unwrap();
+        assert_eq!(first.step, CookRecoveryStep::Continue, "{first:#?}");
+        assert_eq!(performed(), 1);
+
+        let (second, exit) =
+            crate::agent_task_service::recover_cook(cook, Default::default(), &performer).unwrap();
+        assert_eq!(exit, 1, "{second:#?}");
+        let CookRecoveryStep::Blocked { repeated, blocker } = &second.step else {
+            panic!("a repeated non-progressing step must be blocked: {second:#?}");
+        };
+        assert_eq!(repeated, "resume");
+        assert!(blocker.contains("continuation_not_scheduled"), "{blocker}");
+        assert_eq!(
+            second.failure.as_ref().unwrap()["code"],
+            "agent_task.recover_blocked"
+        );
+        assert_eq!(performed(), 1, "the blocked step is not performed again");
+
+        let (preflight, _) = crate::agent_task_service::recover_cook(
+            cook,
+            CookRecoveryRequest {
+                preflight: true,
+                ..Default::default()
+            },
+            &performer,
+        )
+        .unwrap();
+        assert_eq!(preflight.step, second.step);
+        let plan = crate::agent_task_service::plan_cook_recovery(cook).unwrap();
+        let context =
+            crate::agent_task_service::cook_failure_context(cook, Some(&plan.run_id), &plan.status)
+                .unwrap();
+        assert_eq!(context.recovery_step, Some(second.step.clone()));
+
+        let (unblocked, _) = crate::agent_task_service::recover_cook(
+            cook,
+            CookRecoveryRequest {
+                unblock: true,
+                ..Default::default()
+            },
+            &performer,
+        )
+        .unwrap();
+        assert_eq!(unblocked.step, CookRecoveryStep::Continue);
+        assert_eq!(performed(), 2);
+    });
+}
+
+/// Records whether publication was preflighted or performed.
+struct RecordingPublish(std::sync::Mutex<Vec<bool>>);
+impl crate::agent_task_service::CookRecoveryPerformer for RecordingPublish {
+    fn continue_cook(
+        &self,
+        run: &str,
+        rearm: bool,
+        _: &crate::agent_task_service::CookRecoveryOverrides,
+    ) -> Result<(Value, i32)> {
+        panic!("recover must publish {run}, not continue it (rearm: {rearm})")
+    }
+    fn preflight_continue_cook(&self, run: &str, rearm: bool) -> Result<(Value, i32)> {
+        panic!("preflight must validate publication of {run}, not continuation (rearm: {rearm})")
+    }
+    fn retry(&self, _: &str) -> Result<(Value, i32)> {
+        panic!("must not retry")
+    }
+    fn reconcile(&self, _: &str) -> Result<(Value, i32)> {
+        panic!("must not reconcile")
+    }
+    fn adopt(&self, _: &str, _: &str) -> Result<(Value, i32)> {
+        panic!("must not adopt")
+    }
+    fn publish(
+        &self,
+        _: &str,
+        _: &crate::agent_task_service::CookPublishRequest,
+        preflight: bool,
+    ) -> Result<(Value, i32)> {
+        self.0.lock().unwrap().push(preflight);
+        Ok((serde_json::json!({ "status": "validated" }), 0))
+    }
+}
+
+/// #17641: the operator's recorded publication intent is a planner input, not
+/// a `recover`-only override. Status, diagnose, `recover --preflight` and
+/// `recover` therefore all name `publish` for it, and `recover` performs the
+/// exact step its preflight validated rather than a continuation.
+#[test]
+fn cook_recovery_preflight_status_and_recover_name_one_step() {
+    use crate::agent_task_service::{CookRecoveryRequest, CookRecoveryStep};
+    with_corrected_gate_candidate(|options, _, _| {
+        wedge(WedgedCook::MissingReviewForm, &options);
+        let cook = &options.identity.cook_id;
+        let run = &options.identity.initial_run_id;
+        agent_task_lifecycle::record_manual_finalization_intent(
+            run,
+            serde_json::json!({ "run_id": run }),
+        )
+        .unwrap();
+
+        let plan = crate::agent_task_service::plan_cook_recovery(cook).unwrap();
+        assert_eq!(plan.step, CookRecoveryStep::Publish, "{plan:?}");
+        let context =
+            crate::agent_task_service::cook_failure_context(cook, Some(&plan.run_id), &plan.status)
+                .unwrap();
+        assert_eq!(context.recovery_step, Some(CookRecoveryStep::Publish));
+        assert!(context
+            .next_actions
+            .iter()
+            .any(|action| action.action == "publish"));
+
+        let performer = RecordingPublish(Default::default());
+        let (preflight, _) = crate::agent_task_service::recover_cook(
+            cook,
+            CookRecoveryRequest {
+                preflight: true,
+                ..Default::default()
+            },
+            &performer,
+        )
+        .unwrap();
+        let (performed, exit) =
+            crate::agent_task_service::recover_cook(cook, Default::default(), &performer).unwrap();
+        assert_eq!(exit, 0, "{performed:#?}");
+        assert_eq!(preflight.step, CookRecoveryStep::Publish);
+        assert_eq!(performed.step, CookRecoveryStep::Publish);
+        assert_eq!(*performer.0.lock().unwrap(), vec![true, false]);
+    });
+}

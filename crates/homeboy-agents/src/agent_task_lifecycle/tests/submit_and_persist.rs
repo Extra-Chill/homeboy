@@ -1246,6 +1246,51 @@ fn retry_lineage_refuses_an_active_successor_and_requires_force_after_terminal_s
     );
 }
 
+/// #17650: a failed Cook successor that never reached provider work is
+/// evidence, not a competing retry, so the next retry needs no `--force`;
+/// a failed successor that consumed provider work still requires it.
+#[test]
+fn retry_lineage_does_not_require_force_after_continuation_only_cook_successors() {
+    let context = homeboy_core::test_support::HermeticTestContext::new();
+    let lifecycle_store =
+        crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
+    let reserve = |requested_run_id: &str| {
+        retry_with_runtime_admission_in_store(
+            &lifecycle_store,
+            "continuation-only-source",
+            Some(requested_run_id),
+            false,
+            true,
+            None,
+            |_| Ok(json!({})),
+        )
+    };
+    let fail = |run_id: &str, provider_executions: u64| {
+        lifecycle_store
+            .mutate_record(run_id, |record| {
+                record.metadata["cook_id"] = json!("cook-without-recipe");
+                record.metadata["provider_executions_consumed"] = json!(provider_executions);
+                set_run_state(record, AgentTaskRunState::Failed);
+                true
+            })
+            .expect("terminalize successor");
+    };
+    lifecycle_store
+        .submit_plan_with_runtime_admission(&test_plan(), "continuation-only-source", |_| {
+            Ok(json!({}))
+        })
+        .expect("submit source");
+
+    let continuation = reserve("continuation-only-first").expect("first retry");
+    fail(&continuation.run_id, 0);
+    let substantive = reserve("continuation-only-second")
+        .expect("a failed continuation-only successor needs no --force");
+    fail(&substantive.run_id, 1);
+    let refused = reserve("continuation-only-third")
+        .expect_err("a failed substantive successor still requires --force");
+    assert_eq!(refused.details["field"], "force");
+}
+
 /// The exact intent claim preserves the reserved run's complete lineage in
 /// the same rooted store, while an ordinary resubmission cannot steal it.
 #[test]
