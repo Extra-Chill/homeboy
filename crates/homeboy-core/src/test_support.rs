@@ -661,6 +661,7 @@ impl HermeticTestContext {
             .env_remove(crate::runner_job_execution_context::RUNNER_JOB_ID_ENV)
             .env_remove(crate::runner_job_execution_context::RUNNER_CHILD_RESERVATION_ENV)
             .env_remove(crate::runner_job_execution_context::RUNNER_JOB_EXECUTION_CONTEXT_ID_ENV)
+            .env(crate::runner_pressure::SAMPLE_ENV, "{}")
             .env("HOMEBOY_NO_UPDATE_CHECK", "1");
         command
     }
@@ -986,6 +987,7 @@ pub struct HomeGuard {
     prior_runtime_tmpdir: Option<String>,
     prior_invocation_runtime: Option<String>,
     prior_no_update_check: Option<String>,
+    prior_pressure_sample: Option<String>,
     context: HermeticTestContext,
     // Each isolated-home test is its own "CLI invocation": it must not observe
     // a controller preflight captured by a concurrently running test.
@@ -1034,6 +1036,7 @@ impl HomeGuard {
         let prior_invocation_runtime =
             std::env::var(crate::engine::invocation::HOMEBOY_INVOCATION_RUNTIME_DIR_ENV).ok();
         let prior_no_update_check = std::env::var("HOMEBOY_NO_UPDATE_CHECK").ok();
+        let prior_pressure_sample = std::env::var(crate::runner_pressure::SAMPLE_ENV).ok();
         // The isolated HOME hosts `~/.config/homeboy/extensions/**/*.sh`
         // capability scripts that tests execute. On `noexec`-`/tmp` hosts a
         // plain `TempDir::new()` lands the whole HOME on a `noexec` mount,
@@ -1073,6 +1076,7 @@ impl HomeGuard {
             test_runner_process_group(),
         );
         std::env::set_var("HOMEBOY_NO_UPDATE_CHECK", "1");
+        std::env::set_var(crate::runner_pressure::SAMPLE_ENV, "{}");
         std::env::set_var("HOMEBOY_RUNTIME_TMPDIR", context.runtime_dir());
         crate::set_artifact_root_override(None);
         // Pin invocation runtime to a SHORT tempdir, isolated from `$TMPDIR`
@@ -1098,6 +1102,7 @@ impl HomeGuard {
             prior_runtime_tmpdir,
             prior_invocation_runtime,
             prior_no_update_check,
+            prior_pressure_sample,
             context,
             _captured_preflight: crate::parsed_command_preflight::isolate_captured_result_for_test(
             ),
@@ -1519,6 +1524,10 @@ impl Drop for HomeGuard {
             None => {
                 std::env::remove_var(crate::engine::invocation::HOMEBOY_INVOCATION_RUNTIME_DIR_ENV)
             }
+        }
+        match &self.prior_pressure_sample {
+            Some(value) => std::env::set_var(crate::runner_pressure::SAMPLE_ENV, value),
+            None => std::env::remove_var(crate::runner_pressure::SAMPLE_ENV),
         }
         match &self.prior_no_update_check {
             Some(value) => std::env::set_var("HOMEBOY_NO_UPDATE_CHECK", value),

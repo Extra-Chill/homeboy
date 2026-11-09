@@ -189,6 +189,9 @@ fn runner_inventory_summary(
         homeboy::runner::runner_admission_snapshot_for_status(status.clone()).summary
     });
     RunnerInventorySummary {
+        pressure: admission
+            .as_ref()
+            .and_then(|summary| summary.pressure.clone()),
         identity: identity.clone(),
         kind: format!("{:?}", configured.kind).to_ascii_lowercase(),
         connection_state: if is_local {
@@ -201,7 +204,13 @@ fn runner_inventory_summary(
         admission_state: if is_local {
             "local".to_string()
         } else if let Some(admission) = admission {
-            if admission.accepting_jobs {
+            if admission
+                .pressure
+                .as_ref()
+                .is_some_and(|pressure| pressure.admission_reason.is_some())
+            {
+                "pressure".to_string()
+            } else if admission.accepting_jobs {
                 "accepting".to_string()
             } else {
                 "blocked".to_string()

@@ -624,6 +624,7 @@ pub(super) struct RemoteDaemon {
 
 #[derive(Debug, Clone)]
 pub(super) struct RemoteDaemonStatus {
+    pub(super) runtime_paths: Option<homeboy_core::daemon::DaemonRuntimeSnapshot>,
     pub(super) daemon: Option<RemoteDaemon>,
     pub(super) stale_reason: Option<String>,
     pub(super) stale_reason_code: Option<DaemonStaleReasonCode>,
@@ -843,7 +844,13 @@ pub(super) fn remote_daemon_recovery_freshness_from_status(
         ownership_evidence,
         daemon_version: daemon.and_then(|daemon| daemon.version.clone()),
         daemon_build_identity: daemon.and_then(|daemon| daemon.build_identity.clone()),
-        runtime_paths: None,
+        runtime_paths: status.runtime_paths.clone().map(|mut paths| {
+            if let (Some(pressure), Ok(runner)) = (paths.pressure.as_mut(), crate::load(runner_id))
+            {
+                pressure.apply_thresholds(&runner.settings.pressure_thresholds);
+            }
+            paths
+        }),
         active_jobs: status.active_jobs,
         termination_evidence: status.termination_evidence.clone(),
         repair_plan,
@@ -1414,7 +1421,7 @@ fn remote_daemon_status_with_timeout(
     runner_id: &str,
     timeout: Duration,
 ) -> std::result::Result<RemoteDaemonStatus, String> {
-    let command = remote_daemon_command(runner_id, homeboy, "daemon status");
+    let command = remote_daemon_command(runner_id, homeboy, "daemon status --full");
     let started = std::time::Instant::now();
     let output = client.execute_with_timeout(&command, timeout);
     crate::readonly_probe::record_probe_outcome(
@@ -1461,6 +1468,10 @@ pub(super) fn remote_daemon_status_from_data(data: &Value) -> RemoteDaemonStatus
         .or_else(|| data.pointer("/recovery/stale_reason_code"))
         .cloned()
         .and_then(|code| serde_json::from_value(code).ok());
+    let runtime_paths = data
+        .pointer("/freshness/runtime_paths")
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok());
     let termination_evidence = data
         .get("termination_evidence")
         .cloned()
@@ -1488,6 +1499,7 @@ pub(super) fn remote_daemon_status_from_data(data: &Value) -> RemoteDaemonStatus
         .unwrap_or(false)
     {
         return RemoteDaemonStatus {
+            runtime_paths,
             daemon,
             stale_reason,
             stale_reason_code,
@@ -1504,6 +1516,7 @@ pub(super) fn remote_daemon_status_from_data(data: &Value) -> RemoteDaemonStatus
     }
     let Some(daemon) = daemon else {
         return RemoteDaemonStatus {
+            runtime_paths,
             daemon: None,
             stale_reason: Some(
                 stale_reason
@@ -1522,6 +1535,7 @@ pub(super) fn remote_daemon_status_from_data(data: &Value) -> RemoteDaemonStatus
         };
     };
     RemoteDaemonStatus {
+        runtime_paths,
         daemon: Some(daemon),
         stale_reason,
         stale_reason_code,

@@ -605,6 +605,7 @@ pub(super) fn remote_daemon_status_for_test_with_reason(
     stale_reason_code: Option<DaemonStaleReasonCode>,
 ) -> RemoteDaemonStatus {
     RemoteDaemonStatus {
+        runtime_paths: None,
         daemon: Some(RemoteDaemon {
             address: "127.0.0.1:49152".to_string(),
             pid: Some(pid),

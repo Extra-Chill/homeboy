@@ -18,6 +18,8 @@ use crate::commands::utils::response::CommandActionableMetadata;
 
 #[derive(Debug, Serialize)]
 pub struct RunnerExtra {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inventory: Option<Value>,
     pub variant: &'static str,
     /// Postcondition of a mutating session reconciliation. This is distinct
     /// from the command envelope: only `converged` restores runner admission.
@@ -83,6 +85,7 @@ impl Default for RunnerExtra {
             managed_followups: Vec::new(),
             connection: None,
             disconnect_status: None,
+            inventory: None,
             reconciliation: None,
             admission_summary: None,
             inspection: None,
@@ -160,6 +163,7 @@ pub struct RunnerOperatorSummary {
 /// Bounded default inventory row for one configured runner.
 #[derive(Debug, Serialize)]
 pub struct RunnerInventorySummary {
+    pub pressure: Option<homeboy::core::runner_pressure::RunnerPressure>,
     pub identity: String,
     pub kind: String,
     pub connection_state: String,

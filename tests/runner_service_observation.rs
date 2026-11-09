@@ -109,7 +109,18 @@ fn runner_service_lease_publication_race_retries_denial_and_preserves_job_identi
             "--workspace-root",
             root.to_str().unwrap(),
         ]);
-        cli(&["daemon", "ensure-running"]);
+        // env_clear() deliberately drops the harness environment. Start the
+        // daemon with the same deterministic pressure source explicitly.
+        let started = Command::new(binary)
+            .args(["daemon", "ensure-running"])
+            .env_clear()
+            .env("HOME", root)
+            .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+            .env(homeboy_core::runner_pressure::SAMPLE_ENV, "{}")
+            .env("HOMEBOY_NO_UPDATE_CHECK", "1")
+            .output()
+            .expect("start pressure-independent test daemon");
+        assert!(started.status.success(), "{started:?}");
         let _daemon_guard = DaemonGuard {
             binary,
             home: root.to_path_buf(),
@@ -630,6 +641,7 @@ esac
             .env("HOME", root)
             .env(homeboy_core::paths::DAEMON_STATE_DIR_ENV, &state_dir)
             .env(homeboy_core::paths::DAEMON_STARTUP_TOKEN_ENV, startup_token)
+            .env(homeboy_core::runner_pressure::SAMPLE_ENV, "{}")
             .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
             .env("HOMEBOY_NO_UPDATE_CHECK", "1")
             .stdout(std::process::Stdio::null())
