@@ -6,7 +6,9 @@ use std::path::Path;
 pub enum CandidateCommand {
     /// Fetch the selected candidate and check out the Cook's head branch.
     Checkout {
+        /// Cook id or attempt run id whose candidate to retrieve.
         cook_or_attempt: String,
+        /// Clean git worktree to fetch into and check out the Cook's head branch.
         #[arg(long)]
         into: std::path::PathBuf,
     },
