@@ -1620,8 +1620,8 @@ fn daemon_status_live_but_stale_daemon_reports_liveness_true_and_freshness_false
         Some(DaemonStaleReasonCode::VersionMismatch)
     );
     assert!(
-        status.admits_work(),
-        "a stale busy daemon keeps admitting work"
+        !status.admits_work(),
+        "a stale busy daemon admits no new root work; it serves only its owned runs"
     );
     assert!(
         status.replacement_blocked,

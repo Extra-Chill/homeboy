@@ -780,8 +780,8 @@ mod tests {
             assert_eq!(admission["active_jobs"], jobs);
             assert_eq!(admission["daemon_version"], "0.326.1");
             if state == "stale_serving" {
-                assert!(report.admits_work());
-                assert!(report.render_summary().contains("replaces when idle"));
+                assert!(!report.admits_work());
+                assert_eq!(admission["waiting_for"], "daemon_replacement");
                 assert!(matches!(
                     plan_recovery(&report).lifecycle,
                     Plan::Wait { .. }

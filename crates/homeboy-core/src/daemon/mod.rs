@@ -286,8 +286,8 @@ fn controller_job_response(value: &serde_json::Value) -> Option<&serde_json::Val
 }
 
 impl LocalControllerJobClient {
-    /// Connect to the installed build, or a stale busy daemon that continues
-    /// serving until idle. An explicitly draining daemon refuses new work.
+    /// Connect to the serving lease. Admission is checked per request so that
+    /// draining leases can still accept continuations of runs they own.
     pub fn connect_current_build() -> Result<Self> {
         // Dead-lease cleanup needs exclusive admission. Recover before taking
         // our shared guard, then retain the guarded validation below.
@@ -296,9 +296,6 @@ impl LocalControllerJobClient {
         }
         let admission_guard = acquire_daemon_admission_lock()?;
         let prior = read_status()?;
-        if daemon_draining() {
-            return Err(daemon_draining_error());
-        }
         match Self::connect() {
             Ok(mut client) => {
                 client.admission_guard = Mutex::new(Some(admission_guard));
@@ -939,14 +936,10 @@ pub struct DaemonStatus {
 }
 
 impl DaemonStatus {
-    /// The daemon is a live, reachable session running this exact Homeboy
-    /// build — the daemon a caller may submit work to right now.
-    ///
-    /// Deliberately a predicate over the independent liveness, reachability,
-    /// and freshness fields rather than an overloaded `running` field: build
-    /// incompatibility must not masquerade as process death (#13621).
+    /// Whether this lease can admit new root work. Stale and explicitly
+    /// draining leases remain available only for owned-run continuations.
     pub fn admits_work(&self) -> bool {
-        self.running && self.reachable && !self.draining() && (self.fresh || self.stale_serving())
+        self.running && self.reachable && self.fresh && !self.draining()
     }
 
     fn draining(&self) -> bool {
@@ -958,7 +951,7 @@ impl DaemonStatus {
         })
     }
 
-    /// A busy old build remains a serving execution plane until idle.
+    /// A busy old build serves only the durable runs it already owns.
     pub fn stale_serving(&self) -> bool {
         self.running
             && self.reachable
@@ -979,6 +972,7 @@ impl DaemonStatus {
     pub fn admission_report(&self) -> serde_json::Value {
         json!({
             "state": if self.draining() { "draining" } else if self.stale_serving() { "stale_serving" } else if self.admits_work() { "serving" } else { "unavailable" },
+            "waiting_for": if self.draining() || self.stale_serving() { Some("daemon_replacement") } else { None },
             "daemon_version": self.freshness.daemon_version,
             "active_jobs": self.freshness.active_jobs,
             "summary": self.render_summary(),
@@ -998,12 +992,12 @@ impl DaemonStatus {
     pub fn render_summary(&self) -> String {
         let mut summary = if self.draining() {
             format!(
-                "daemon draining: {} active jobs, replaces when idle",
+                "waiting_for: daemon_replacement; daemon draining: {} owned jobs remaining",
                 self.freshness.active_jobs
             )
         } else if self.stale_serving() {
             format!(
-                "stale_serving: daemon v{}, {} active jobs, replaces when idle",
+                "waiting_for: daemon_replacement; stale_serving: daemon v{}, {} owned jobs remaining",
                 self.freshness
                     .daemon_version
                     .as_deref()
@@ -1875,7 +1869,7 @@ where
     // A CLI-launched serve enforces its own lifetime; it needs the shutdown flag
     // to end itself through the same drain SIGTERM uses.
     let owned_lifetime = match shutdown.as_ref() {
-        Some(_) => lifetime::owned_idle_lifetime(service_manager)?,
+        Some(_) => Some(lifetime::owned_idle_lifetime(service_manager)?),
         None => None,
     };
     let state = write_state(local_addr, service_manager)?;
@@ -2042,6 +2036,7 @@ where
         }
     }
 
+    let replacing = intake_draining();
     drop(connection_tx);
     let shutdown_requested = daemon_draining()
         || shutdown
@@ -2137,6 +2132,38 @@ where
                 &DaemonLeaseIdentity::from_state(&state),
             )?;
         }
+    }
+    let replace = replacing
+        && service_manager.is_none()
+        && crate::observation::ObservationStore::open_readonly_at(paths::observation_db()?)
+            .and_then(|store| store.has_pending_unmaterialized_cook_admission())
+            .unwrap_or(false);
+    if replace {
+        // Release custody before launching ensure-running; it must not observe
+        // this daemon's owner lock or listening socket as a competing serve.
+        drop(listener);
+        drop(self_stop_guards);
+        drop(_owner_lock);
+        lifetime::handoff_pending_admissions(replacing, service_manager, true, || {
+            std::process::Command::new(lifetime::launchable_executable().map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some("locate replacement daemon".to_string()),
+                )
+            })?)
+            .args(["daemon", "ensure-running"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|error| {
+                Error::internal_io(
+                    error.to_string(),
+                    Some("start replacement daemon".to_string()),
+                )
+            })?;
+            Ok(())
+        })?;
     }
     serve_result.map(|()| state)
 }
@@ -2713,7 +2740,7 @@ where
     R: AnalysisJobRunner,
 {
     if method == "POST"
-        && daemon_draining()
+        && intake_draining()
         && matches!(
             path.split('?').next().unwrap_or(path),
             "/jobs"
@@ -2723,6 +2750,7 @@ where
                 | "/admissions"
                 | "/v1/control-plane/runs"
         )
+        && !post_admits_owned_work(path, body.as_ref(), job_store)
     {
         return error_response(503, daemon_draining_error());
     }
@@ -4920,6 +4948,9 @@ pub(crate) fn admit_controller_job(
     request: ControllerJobRequest,
     job_store: &JobStore,
 ) -> Result<ControllerJobAdmission> {
+    if !post_admits_owned_work("/controller/jobs", Some(&json!(request)), job_store) {
+        return Err(daemon_draining_error());
+    }
     let controller_job = controller_job_state(&request)?;
     let outcome = job_store.admit_controller_job(
         format!("controller.{}", request.job_type),
@@ -6638,7 +6669,7 @@ mod tests {
             let response = route_with_job_store("POST", "/controller/jobs", &store);
             assert_eq!(response.status_code, 503);
             assert!(response.body.to_string().contains("daemon_draining"));
-            assert!(with_daemon_job_admission(|| Ok(())).is_err());
+            assert!(with_daemon_job_admission(|| Ok(())).is_ok());
             assert_eq!(store.active_runner_jobs().len(), 1);
             assert_eq!(
                 store.active_runner_jobs()[0].job_id,
@@ -8910,10 +8941,134 @@ fn daemon_admission_fence_timeout_error_at(path: &Path, wait: Duration) -> Error
     error
 }
 
+/// One ownership rule for automatic replacement and manual drain. Only a
+/// controller continuation linked to an active run of this lease may enter.
+fn post_admits_owned_work(path: &str, body: Option<&serde_json::Value>, store: &JobStore) -> bool {
+    if !intake_draining() {
+        return true;
+    }
+    if path.split('?').next() != Some("/controller/jobs") {
+        return false;
+    }
+    let request = body
+        .cloned()
+        .and_then(|body| serde_json::from_value::<ControllerJobRequest>(body).ok());
+    let linked = request.as_ref().and_then(continuation_run_id);
+    let lease = heartbeat_lease().ok();
+    let Some(lease) = lease else { return false };
+    let evidence = store.active_daemon_job_recovery_evidence(Some(&lease.lease_id), pid_is_running);
+    let mut owned: Vec<String> = evidence
+        .iter()
+        .filter(|job| job.daemon_lease_id.as_deref() == Some(lease.lease_id.as_str()))
+        .filter_map(|job| job.linked_durable_run_id.clone())
+        .collect();
+    for (id, controller) in store.active_controller_jobs() {
+        if store
+            .get(id)
+            .is_ok_and(|job| job.daemon_lease_id.as_deref() == Some(lease.lease_id.as_str()))
+        {
+            if controller.job_type == "workflow" {
+                if let Some(instance) = controller
+                    .request
+                    .get("instance")
+                    .and_then(serde_json::Value::as_str)
+                {
+                    owned.push(instance.to_string());
+                }
+            }
+        }
+    }
+    admits_owned_run(true, linked.as_deref(), owned.iter().map(String::as_str))
+}
+
+/// Only step/work requests can continue a run during replacement; a linked
+/// workflow request still starts new root work.
+fn continuation_run_id(request: &ControllerJobRequest) -> Option<String> {
+    let step = match request.job_type.as_str() {
+        step_job::STEP_JOB_TYPE => &request.request,
+        "work" => request.request.get("request")?,
+        _ => return None,
+    };
+    step.get("root_durable_run_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .or_else(|| {
+            controller_job_driver::driver(&request.job_type, request.version)
+                .ok()?
+                .linked_durable_run_id(&request.request)
+        })
+}
+
+fn admits_owned_run<'a>(
+    draining: bool,
+    linked: Option<&str>,
+    owned: impl Iterator<Item = &'a str>,
+) -> bool {
+    !draining || linked.is_some_and(|run| owned.into_iter().any(|owned| owned == run))
+}
+
+#[cfg(test)]
+mod owned_admission_tests {
+    use super::*;
+
+    #[test]
+    fn only_step_and_work_requests_are_owned_continuations() {
+        for (job_type, payload, expected) in [
+            (
+                "step",
+                json!({"root_durable_run_id": "owned"}),
+                Some("owned"),
+            ),
+            (
+                "work",
+                json!({"request": {"root_durable_run_id": "owned"}}),
+                Some("owned"),
+            ),
+            ("workflow", json!({"instance": "owned"}), None),
+            ("workflow", json!({"root_durable_run_id": "owned"}), None),
+        ] {
+            let request = ControllerJobRequest {
+                job_type: job_type.to_string(),
+                version: 1,
+                idempotency_key: "continuation".to_string(),
+                active_idempotency_key: None,
+                request: payload,
+            };
+            assert_eq!(
+                continuation_run_id(&request).as_deref(),
+                expected,
+                "{job_type}"
+            );
+        }
+    }
+
+    #[test]
+    fn root_and_continuation_admission_table() {
+        // Automatic stale drain and explicit recover --drain use the same rule.
+        for (state, draining) in [("fresh", false), ("stale", true), ("draining", true)] {
+            for (linked, expected) in [
+                (None, !draining),
+                (Some("owned"), true),
+                (Some("foreign"), !draining),
+            ] {
+                assert_eq!(
+                    admits_owned_run(draining, linked, ["owned"].into_iter()),
+                    expected,
+                    "{state}: {linked:?}"
+                );
+            }
+        }
+    }
+}
+
+fn intake_draining() -> bool {
+    daemon_draining() || lifetime::running_executable_replaced()
+}
+
 fn daemon_draining_error() -> Error {
     let mut error = Error::validation_invalid_argument(
         "daemon_draining",
-        "daemon is draining; run homeboy daemon ensure-running after it becomes idle",
+        "waiting_for: daemon_replacement; this lease admits only continuations of its owned runs",
         None,
         None,
     );
@@ -8959,9 +9114,6 @@ pub fn drain_then_replace(lease_id: &str) -> Result<()> {
 
 pub(super) fn with_daemon_job_admission<T>(operation: impl FnOnce() -> Result<T>) -> Result<T> {
     let _guard = acquire_daemon_admission_lock()?;
-    if daemon_draining() {
-        return Err(daemon_draining_error());
-    }
     operation()
 }
 

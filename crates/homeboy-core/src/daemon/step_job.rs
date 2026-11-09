@@ -104,6 +104,9 @@ pub struct StepJobRequest {
     /// Durable run this step executes for; recovery reads its record.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub linked_durable_run_id: Option<String>,
+    /// Owning workflow instance, distinct from the child run this step starts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_durable_run_id: Option<String>,
     #[serde(default, skip_serializing_if = "StepWait::is_empty")]
     pub wait: StepWait,
 }
@@ -126,6 +129,7 @@ impl StepJobRequest {
             cwd: cwd.into(),
             env,
             linked_durable_run_id: None,
+            root_durable_run_id: None,
             wait: StepWait::default(),
         }
     }
@@ -232,6 +236,7 @@ impl StepJobRequest {
                 "secret_ref_names": self.env.secret_refs.iter().map(|secret| &secret.name).collect::<Vec<_>>(),
             },
             "linked_durable_run_id": self.linked_durable_run_id,
+            "root_durable_run_id": self.root_durable_run_id,
             "wait": self.wait,
         })
     }
