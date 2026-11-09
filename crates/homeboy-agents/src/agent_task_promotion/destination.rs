@@ -80,6 +80,23 @@ pub(crate) fn record(repo: &Path, cook: &str) -> Result<()> {
 /// Unmanaged Git checkouts remain caller-owned. A recorded Cook destination
 /// can never be adopted implicitly by a different invocation.
 pub(crate) fn check(repo: &Path, cook: Option<&str>) -> Result<()> {
+    admit(repo, cook, |owner| cook == Some(owner))
+}
+
+/// Attempt ids are `<cook>-attempt-<n>-<suffix>` (`cook_attempt_run_id`), so
+/// an attempt maps to its Cook without reading lifecycle state.
+pub(crate) fn check_run(repo: &Path, run: Option<&str>) -> Result<()> {
+    admit(repo, run, |owner| {
+        run.is_some_and(|run| {
+            run == owner
+                || run
+                    .strip_prefix(owner)
+                    .is_some_and(|rest| rest.starts_with("-attempt-"))
+        })
+    })
+}
+
+fn admit(repo: &Path, claimant: Option<&str>, owns: impl Fn(&str) -> bool) -> Result<()> {
     let path = marker(repo)?;
     let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
@@ -88,24 +105,13 @@ pub(crate) fn check(repo: &Path, cook: Option<&str>) -> Result<()> {
     };
     let owner: Owner = serde_json::from_slice(&bytes).map_err(|e| owner_mismatch(e.to_string()))?;
     let branch = git(repo, &["symbolic-ref", "--short", "HEAD"])?;
-    if cook != Some(owner.cook.as_str()) || branch != owner.branch {
+    if !owns(&owner.cook) || branch != owner.branch {
         return Err(owner_mismatch(format!(
             "destination belongs to Cook {} on {}, not {:?} on {}",
-            owner.cook, owner.branch, cook, branch
+            owner.cook, owner.branch, claimant, branch
         )));
     }
     Ok(())
-}
-
-/// Resolve attempts to the stable Cook identity before crossing the boundary.
-pub(crate) fn check_run(repo: &Path, run: Option<&str>) -> Result<()> {
-    let record = run.and_then(|run| crate::agent_task_lifecycle::exact_record(run).ok());
-    let cook = record
-        .as_ref()
-        .and_then(|record| record.metadata.get("cook_id"))
-        .and_then(serde_json::Value::as_str)
-        .or(run);
-    check(repo, cook)
 }
 
 /// Must succeed before any destructive recovery operation. The index is the
