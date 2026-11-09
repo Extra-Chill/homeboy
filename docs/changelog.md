@@ -4,6 +4,19 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.455.1] - 2026-11-09
+
+### Changed
+- Declare playwright-browsers and add --gate-file
+- Report typed non-zero results as command summaries
+
+### Fixed
+- Fix fleet reconciliation of live controller-owned runs
+- treat a Lab retry without a runner PID as stalled
+- publish redacted I/O and lock diagnostics on workflow/step job errors
+- classify Homeboy setup errors as gate infrastructure failures
+- bound a stale daemon to the work it owns so it replaces itself
+
 ## [0.455.0] - 2026-11-09
 
 ### Added
