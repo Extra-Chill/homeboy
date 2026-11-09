@@ -131,6 +131,7 @@ variables most runners care about:
 | `HOMEBOY_FIX_ONLY` | `homeboy review lint --fix` | `"1"` → run fixers, skip validation |
 | `HOMEBOY_DEBUG` | user | `"1"` → verbose runner output |
 | `HOMEBOY_RUNTIME_*` | core | Paths to core-provided runtime helpers (see below) |
+| `HOMEBOY_RUNTIME_EXECUTABLE` | core | The running Homeboy binary; runtime helpers emit JSON through it |
 | `HOMEBOY_DELEGATED_RUN_STATUS_FILE` | core | Optional delegated-runtime status JSON path for extension runners that hand work to a child provider |
 
 When an extension runner delegates to another runtime process that can outlive
@@ -387,6 +388,15 @@ Error details:
 
 Extensions using this helper get consistent failure presentation for free
 across the ecosystem.
+
+### JSON-emitting helpers
+
+`sidecar-writer.sh`, `emit-test-failure.sh`, and `bench-helper.sh` validate
+and write JSON through the running Homeboy binary, which core exports as
+`HOMEBOY_RUNTIME_EXECUTABLE` (a private `__homeboy_runtime_json` child
+protocol). They need no interpreter and do not depend on `homeboy` being on
+`PATH`. Direct (non-Homeboy) invocations of runners that source them must set
+`HOMEBOY_RUNTIME_EXECUTABLE` to a Homeboy binary.
 
 ### `write-test-results.sh` (env: `HOMEBOY_RUNTIME_WRITE_TEST_RESULTS`)
 

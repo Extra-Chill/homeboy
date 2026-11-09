@@ -159,6 +159,17 @@ pub(crate) fn run_with_options(
     } else {
         report.status = checks::overall_status(&report.checks);
     }
+    if let Ok(capacity) = homeboy::runner::lab_capacity::report(runner_id) {
+        let mut check = checks::ok(
+            "lab_capacity",
+            "Current Lab admission capacity".to_string(),
+            None,
+        );
+        check
+            .details
+            .insert("observation".to_string(), capacity.to_string());
+        report.checks.push(check);
+    }
     ensure_failure(&mut report);
     let exit_code = report.status.operational_exit_code();
     Ok((report, exit_code))
@@ -298,6 +309,9 @@ fn compact_projection(report: &RunnerDoctorOutput) -> serde_json::Value {
         .collect::<Vec<_>>();
     let projection = serde_json::json!({
         "schema": "homeboy/runner-doctor/v1",
+        "lab_capacity": report.checks.iter().find(|check| check.id == "lab_capacity")
+            .and_then(|check| check.details.get("observation"))
+            .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok()),
         "command": report.command,
         "runner_id": runner_id,
         "runner": compact_runner_summary(&report.runner),

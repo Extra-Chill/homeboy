@@ -646,6 +646,22 @@ impl ControllerJobDriver for StepJobDriver {
     }
 }
 
+fn write_launch_error(path: &std::path::Path, error: &Error) {
+    use std::io::Write;
+    let text = serde_json::json!({"message": error.message, "details": error.details}).to_string();
+    if let Ok(mut log) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        if writeln!(log, "{text}").is_ok() {
+            let _ = log.flush();
+            return;
+        }
+    }
+    println!("{text}");
+}
+
 fn run_step(mut checkpoint: StepJobCheckpoint, job: &ControllerJobHandle) -> Result<Value> {
     let job_id = job.job_id();
     match checkpoint.phase {
@@ -676,6 +692,34 @@ fn run_step(mut checkpoint: StepJobCheckpoint, job: &ControllerJobHandle) -> Res
         return Ok(checkpoint.result());
     }
 
+    // Launcher/continuation steps can submit execution steps themselves. They
+    // must not hold heavy-work slots while waiting on their own children.
+    let _capacity_permit = if checkpoint.request.terminal_consumer == "agent-task.execution-step" {
+        let limit = checkpoint
+            .request
+            .env
+            .public_env
+            .get("HOMEBOY_LAB_CONCURRENCY_LIMIT")
+            .and_then(|limit| limit.parse().ok());
+        let Some(permit) = crate::lab_capacity::acquire_step(limit, |position, capacity| {
+            if job.is_cancelled() {
+                return Ok(false);
+            }
+            job.progress(json!({
+                "waiting_for": "lab_capacity", "queue_position": position,
+                "load_average_1m": capacity.load_average_1m,
+                "effective_budget": capacity.effective_budget,
+                "eta_seconds": null,
+            }))?;
+            Ok(true)
+        })?
+        else {
+            return Ok(checkpoint.result());
+        };
+        Some(permit)
+    } else {
+        None
+    };
     let request = checkpoint.request.clone();
     let secrets = resolve_secrets(&request.env.secret_refs)?;
     let dir = step_job_dir(&job_id)?;
@@ -717,12 +761,16 @@ fn run_step(mut checkpoint: StepJobCheckpoint, job: &ControllerJobHandle) -> Res
     // The child leads its own session: a daemon restart must not take the
     // step down, and cancellation addresses the child's whole tree.
     crate::process::detach_from_caller_session(&mut command);
-    let mut process = command.spawn().map_err(|error| {
-        Error::internal_io(
+    let process = command.spawn().map_err(|error| {
+        let mut error = Error::internal_io(
             error.to_string(),
             Some(format!("spawn step program {}", request.program)),
-        )
+        );
+        error.details["classification"] = serde_json::json!("detached_launch_failed");
+        write_launch_error(&log_path, &error);
+        error
     })?;
+    let mut process = crate::child_reaper::ReapingChild::from(process);
     // Capture the start identity while the child is still unreaped.
     let start_identity = match crate::process::process_start_identity(process.id()) {
         Ok(Some(identity)) => identity,
@@ -1349,6 +1397,23 @@ mod tests {
         let job_id = harness.job().unwrap().id.to_string();
         std::fs::read_to_string(step_job_dir(&job_id).unwrap().join(STEP_LOG_FILE))
             .unwrap_or_default()
+    }
+
+    #[test]
+    fn detached_launch_failure_writes_typed_error() {
+        with_isolated_home(|home| {
+            let mut request = request("true", Default::default());
+            request.program = "/nonexistent/homeboy-detached".to_string();
+            let harness = step_harness(&request, home.path());
+            harness.start_via_controller_boundary().unwrap();
+            assert_eq!(
+                harness.wait_until_terminal().unwrap().status,
+                crate::api_jobs::JobStatus::Failed
+            );
+            let log = job_log(&harness);
+            assert!(log.contains("detached_launch_failed"), "{log}");
+            assert!(log.contains("spawn step program"), "{log}");
+        });
     }
 
     /// #16273: a failed step names the child's own cause, not only its status.

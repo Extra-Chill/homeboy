@@ -127,6 +127,29 @@ pub struct LabGateReceipt {
 
 /// A materialized gate workspace that is not the admitted candidate. Git
 /// workspaces also carry the typed tree difference.
+fn bounded_mismatch_paths(paths: &[String]) -> Vec<String> {
+    paths
+        .iter()
+        .take(50)
+        .map(|path| homeboy_core::transport_json::bounded_redacted(path, 256))
+        .collect()
+}
+
+#[cfg(test)]
+#[test]
+fn agent_task_gate_bounded_mismatch_paths() {
+    for count in [0, 1, 50, 75] {
+        let paths = vec![format!("https://user:password@example.com/{}", "界".repeat(300)); count];
+        let bounded = bounded_mismatch_paths(&paths);
+        assert_eq!(bounded.len(), count.min(50));
+        for path in bounded {
+            assert!(path.chars().count() <= 256);
+            assert!(!path.contains("password"));
+            assert!(!path.contains('�'));
+        }
+    }
+}
+
 struct CandidateMismatch {
     error: Error,
     mutation: Option<AgentTaskGateWorkspaceMutation>,
@@ -223,10 +246,11 @@ impl LabGateRequest {
             "gate.candidate",
             "Lab gate workspace differs from the controller candidate",
         );
-        if !mutation.differing_paths.is_empty() {
+        let diagnostic_paths = bounded_mismatch_paths(&mutation.differing_paths);
+        if !diagnostic_paths.is_empty() {
             error
                 .message
-                .push_str(&format!(": {}", mutation.differing_paths.join(", ")));
+                .push_str(&format!(": {}", diagnostic_paths.join(", ")));
         }
         error.details["expected_head"] = serde_json::json!(expected.head);
         error.details["actual_head"] = serde_json::json!(actual.head);
@@ -234,7 +258,7 @@ impl LabGateRequest {
         error.details["actual_tree"] = serde_json::json!(mutation.actual_tree);
         match &mutation.path_comparison_error {
             Some(cause) => error.details["path_comparison_error"] = serde_json::json!(cause),
-            None => error.details["differing_paths"] = serde_json::json!(mutation.differing_paths),
+            None => error.details["differing_paths"] = serde_json::json!(diagnostic_paths),
         }
         Ok(Some(CandidateMismatch {
             error,
@@ -381,6 +405,7 @@ pub(super) fn dispatch(
         if failed.termination == homeboy_core::deps::DependencyHydrationTermination::TimedOut {
             error.message = format!("{}; {}", error.message, failed.reason);
         }
+        error.details["artifact_ref"] = serde_json::json!(receipt.artifact_ref);
         let mut report = non_execution_report(request, &error);
         report.setup = setup_attempts;
         return Ok(report);
@@ -390,6 +415,12 @@ pub(super) fn dispatch(
     // The step is an in-memory compatibility view and is not on the wire.
     // Rebuild it from the verified terminal result, never its serde skip default.
     rebuild_terminal_step(&mut report);
+    if let Some(disposition) = report.lab_receipt.as_mut().filter(|value| {
+        value.get("schema").and_then(serde_json::Value::as_str) == Some(LAB_GATE_DISPOSITION_SCHEMA)
+    }) {
+        disposition["artifact_ref"] = serde_json::json!(receipt.artifact_ref);
+        return Ok(report);
+    }
     report.lab_receipt = Some(serde_json::json!({
         "schema": receipt.schema,
         "request_sha256": receipt.request_sha256,

@@ -4,6 +4,194 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.452.0] - 2026-11-09
+
+### Added
+- add candidate checkout and accept listed ids in runs artifact get
+
+### Fixed
+- enforce Cook destination ownership and snapshot staged candidates before reset
+
+## [0.451.0] - 2026-11-09
+
+### Added
+- re-gate an existing candidate without provider work
+
+### Changed
+- assert the current --repo inference help line
+
+### Fixed
+- validate and derive --to-worktree before admission
+- consume operator feedback at the shared provider dispatch boundary
+- stage a refreshed build until the daemon can restart onto it
+- serve /health from a cached freshness snapshot and give controller health probes a load-tolerant budget
+
+## [0.450.0] - 2026-11-08
+
+### Added
+- resolve cook --repo from owner/repo, a checkout path, or issue URLs
+- record workflow step spans and split provider time into model, tool and gate phases
+
+### Changed
+- keep Cook preview CLI tests offline with a stub gh
+
+## [0.449.6] - 2026-11-08
+
+### Changed
+- verify workflow Cooks survive daemon stop and restart
+
+## [0.449.5] - 2026-11-08
+
+### Fixed
+- keep timed-out edits as a recoverable candidate and heartbeat on progress
+- enforce conventional titles on every Cook PR title source
+- compare operator gate failures against the verified base
+- publish the completed producer despite later review-form-only attempts
+- authenticate GitHub API checks via gh and show rate-limit reset as RFC 3339
+- classify unexecuted gates as gate_environment_unavailable with the first error line
+
+## [0.449.4] - 2026-11-08
+
+### Changed
+- initialize observation stores once per process and slow idle polling loops
+
+## [0.449.3] - 2026-11-08
+
+### Changed
+- resolve an issue URL to its open PR or a fresh branch
+
+### Fixed
+- accept zero-success foreach joins
+
+## [0.449.2] - 2026-11-08
+
+### Changed
+- Cook gates: declare required host tools and secrets
+- Agent tasks: record the cancelling process on the run record
+
+## [0.449.1] - 2026-11-08
+
+### Changed
+- git pr merge-when-green: merge an exact reviewed head once checks are green
+- re-measure supersession when the dry run fails
+- Add native bounded workflow next passes
+
+### Fixed
+- keep a stale busy daemon serving, report it, and make drain opt-in
+- publish gated Cook candidates when review forms are unavailable
+
+## [0.449.0] - 2026-11-08
+
+### Added
+- skip PR comment publication for stale heads and closed PRs
+
+### Changed
+- Serialize the strict observation-store test against HomeGuard's home lock
+
+### Fixed
+- link sibling component extensions into isolated gate HOME
+
+## [0.448.2] - 2026-11-08
+
+### Fixed
+- page the release catalog past drafts so authenticated upgrades find releases
+
+## [0.448.1] - 2026-11-08
+
+### Fixed
+- render pr-comment failures as mention-safe markdown
+
+## [0.448.0] - 2026-11-08
+
+### Added
+- expose the applied Cook candidate as refs/homeboy/candidates/<cook>
+
+### Fixed
+- operator projection papercuts in status, capacity, gate refusals and review-form PR bodies
+
+## [0.447.9] - 2026-11-08
+
+### Fixed
+- deepen shallow Lab sources at admission, plan it read-only in preview
+
+## [0.447.8] - 2026-11-08
+
+### Fixed
+- rebase a gated candidate onto an advanced base and re-run its gates before publishing
+- keep transport context in Lab JSON decode errors and bound mismatch paths
+
+## [0.447.7] - 2026-11-08
+
+### Fixed
+- let recover replace gates for a gates_deferred Cook and supervise resumed gates
+
+## [0.447.6] - 2026-11-08
+
+### Fixed
+- project an in-flight Cook continuation instead of 'publication not attempted'
+- resolve component checkouts before gate preflight and give materialization IO errors context
+- skip ignored dependency dirs in gate snapshots and name refused paths
+- authenticate and status-check upgrade GitHub API requests
+
+## [0.447.5] - 2026-11-08
+
+### Changed
+- pass an explicit Cook base for the remote-less cleanliness fixture
+
+### Fixed
+- keep a Cook pass reclaimable until it reports a terminal outcome
+
+## [0.447.4] - 2026-11-08
+
+### Fixed
+- keep controller tool caches out of provider runtime staging
+
+## [0.447.3] - 2026-11-08
+
+### Fixed
+- re-admit recipe-owned Cook retries on their recorded Lab runner
+- Fix Cook validation ordering before destination and base resolution
+- dirty remote-git extensions materialize from the controller snapshot
+
+## [0.447.2] - 2026-11-08
+
+### Changed
+- runtime sidecar and bench helpers emit JSON through homeboy instead of python
+
+### Fixed
+- enforce version-target release-owned guard in review lint
+- one passing verdict for recovery step selection and the publication guard
+- release a terminal run's orphaned env-inheriting processes
+- publish green candidates with proven inherited gate failures
+
+## [0.447.1] - 2026-11-07
+
+### Changed
+- give the unrecoverable-source fixture its own workspace identity
+
+### Fixed
+- Fix Cook base resolution and recover legacy main fallbacks
+
+## [0.447.0] - 2026-11-07
+
+### Added
+- owned, TTL-leased scratch for agent verification work
+
+### Fixed
+- deferred Lab Cook attempts resume with their runner placement
+
+## [0.446.22] - 2026-11-07
+
+### Fixed
+- require conventional commit Cook PR titles
+- queued Cook admissions start and keep the on-demand daemon
+
+## [0.446.21] - 2026-11-07
+
+### Fixed
+- accept git-sync checkout names as Homeboy ownership proof
+- finalized existing-candidate status reads one durable scope
+
 ## [0.446.20] - 2026-11-07
 
 ### Changed

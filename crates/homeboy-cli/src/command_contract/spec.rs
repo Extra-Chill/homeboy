@@ -469,6 +469,19 @@ const RIG_STATIC_LINT_PATHS: &[&str] = &["lint", "package lint", "materialize"];
 const RIG_RUNTIME_MUTATING_PATHS: &[&str] = &["down", "repair", "install", "update"];
 const RIG_MANAGED_FILE_PATHS: &[&str] = &["app install", "app update", "app uninstall"];
 
+const SCRATCH_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[
+    paths_safety(
+        &["allocate", "pin", "unpin"],
+        mutating_safety(),
+        "allocates or re-leases an owned runtime-temp scratch directory",
+    ),
+    paths_safety(
+        &["release"],
+        mutating_safety(),
+        "deletes one scratch allocation, pinned or not",
+    ),
+];
+
 const DEPS_SUBCOMMAND_SAFETY: &[CommandPathSafetySpec] = &[paths_safety(
     DEPS_MUTATING_PATHS,
     mutating_safety(),

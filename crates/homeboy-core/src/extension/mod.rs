@@ -13,6 +13,7 @@ pub mod recipe_run_api;
 pub(crate) mod renamed_baseline;
 pub mod resolve;
 pub(crate) mod root_manifest;
+pub mod runtime_json;
 pub mod self_check;
 mod setup_env;
 pub mod test;

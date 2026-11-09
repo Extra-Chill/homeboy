@@ -1883,6 +1883,10 @@ impl AgentTaskLifecycleStore {
         // Terminal projection reads back the row this same commit just wrote,
         // self-healing its own resource projection if missing.
         let record = self.read_record(run_id)?;
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if record.state().is_terminal() {
+            super::run_processes::release(&record.run_id);
+        }
         self.workspace_terminal_authority_store()
             .persist_terminal_from_record(&record)
             .and_then(|_| {
@@ -2229,6 +2233,18 @@ pub(super) fn write_record_guarded(
     emit_events: bool,
     fence: RecordWriteFence<'_>,
 ) -> Result<GuardedRecordWrite> {
+    // Keep the first writer's identity on the run itself: daemon job receipts
+    // may be pruned long before someone inspects the cancellation.
+    let mut record = record.clone();
+    if record.state() == AgentTaskRunState::Cancelled
+        && record.metadata.get("cancellation_actor").is_none()
+    {
+        record.ensure_metadata_object().insert(
+            "cancellation_actor".into(),
+            homeboy_core::process::current_actor(),
+        );
+    }
+    let record = &record;
     let guard = fence.guard();
     super::cancellation::validate_cancellation_invariant(record)?;
     #[cfg(any(test, feature = "test-support"))]

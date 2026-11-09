@@ -67,7 +67,7 @@ Reused steps retain their recorded outputs, run ids, item records, and original 
 }
 ```
 
-`iterate` and `command` gates are not part of this version. Admission refuses them with a message that names the replacement: an `iterate` is replaced by a final `homeboy` step that runs `workflow run <this definition>` with the next pass's inputs, gated by `when`; a `{"command": [...]}` gate is replaced by an `exec` step plus an `outcome` gate. Unknown top-level fields are refused like any unknown field.
+Use `next_pass` for a bounded chain of passes. Unknown fields (including the removed `iterate`) are refused. Replace command gates with an `exec` step plus an `outcome` gate.
 
 ### Fan-out and join
 
@@ -79,9 +79,16 @@ A step with `foreach` expands, once its `needs` and `when` pass, into one step j
 - **The step's output** is `{"total", "succeeded", "join", "items": [{"item", "outcome", "run_id", "output", "error"}]}`.
 - **Cancelling the instance** cancels every running item, the Cook a `cook` item runs included, and starts no further one.
 
+Use `{"min_succeeded": 0}` when item failures are expected outcomes, such as Cooks or `git pr merge-when-green` holds in a `next_pass` loop: the step succeeds once every item settles, preserving each item's `outcome` and `error` (Example D).
+
 `agent-task fanout cook-batch` compiles to exactly this shape (Example C).
 
 ### Step kinds
+
+For a reviewed-head merge, use a `homeboy` step invoking
+[`git pr merge-when-green`](git.md#exact-head-green-merge). It owns bounded check
+and mergeability polling, typed holds, repository method selection, and the
+atomic head guard; workflows do not need an `exec` polling/merge wrapper.
 
 - **`exec`** runs a program directly, never through a shell. The program is resolved to an absolute path when the workflow is admitted. Its output is the JSON it writes to the file named by `$HOMEBOY_STEP_OUTPUT`.
 - **`homeboy`** runs `homeboy <argv>` with this Homeboy build. Its output is the `data` of the command's JSON envelope.
@@ -146,14 +153,30 @@ A step runs with `env_clear()` plus its admitted environment:
 - `homeboy` and `cook` steps also get the runtime environment a detached Cook gets (provider process variables and Homeboy's `HOMEBOY_*` configuration).
 - Every step also gets `HOMEBOY_WORKFLOW_INSTANCE`, the id of the instance whose step is running. `workflow run` reads it and records the admitting instance as the new instance's `parent`.
 
-### Self-admitting chains
+### Native next passes (`next_pass`)
 
-The replacement for `iterate` is a chain of instances: the definition's final step is a `homeboy` step that runs `workflow run <this definition>` with the next pass's inputs, gated by `when`. Each pass is one instance, so every pass has its own status, step jobs, and budget.
+`next_pass` starts another instance only after the current pass succeeds and its optional `when` gate passes. It forwards every input, replacing only `next_pass.inputs` (typed JSON values and templates). No self-admitting `again`/`retry` commands or caller-maintained stall counters are needed.
 
-- **The parent link.** An instance admitted by a step of another instance records that instance as its `parent`. `runs show <instance>` shows `parent` and `children`, so the chain is readable from either end.
-- **Replays converge.** The instance id hashes the definition and inputs, so a step re-running `workflow run` with the same inputs (a crash, a replayed decision) returns the existing child instead of admitting a second one.
-- **Watching follows the chain.** `workflow run --wait` and `runs watch <instance>` observe their instance to its terminal status, then follow `children` to the last instance of the chain and report that instance's terminal status.
-- **Termination is the author's job.** The re-admitting step's `when` gate decides whether the chain continues; with a false gate the chain ends and the last instance is the report. `workflow cancel` stops a chain by cancelling the instance that would re-admit.
+```json
+{
+"schema": "homeboy/workflow/v1",
+"id": "bounded-loop",
+"inputs": {"cursor": {"default": null}},
+"steps": [{"id": "evaluate", "exec": {"program": "evaluate"}}],
+"next_pass": {
+  "max_iterations": 10,
+  "when": {"step": "evaluate", "output": "/continue", "equals": true},
+  "inputs": {"cursor": "{{steps.evaluate.output/cursor}}"},
+  "stop_unchanged": {"step": "evaluate", "output": "/remaining", "passes": 3}
+}
+}
+```
+
+- `inputs.iteration` is a reserved positive JSON integer, starting at 1. `max_iterations` includes the first pass.
+- `inputs.previous` is null on the first pass; thereafter it contains `outputs` (a map keyed by step id) and `unchanged_passes`. A step can read the whole object with `{{inputs.previous}}`.
+- `stop_unchanged` counts consecutive passes with equal JSON values at the chosen output pointer, including the first observation. A changed value resets the count to 1; a missing output is an error.
+- Each pass has its own status, step jobs and budget. Parent/children links and `--wait` follow the chain. Child admission is idempotent across recovery.
+- Definitions and admitted environments/programs are pinned. For file-based admission, a modified or missing definition is refused with a clear error before the next pass; restart to adopt edits. Registry files are checked too; stdin/inline/built-in definitions remain pinned snapshots. `next_pass` cannot be combined with `every`.
 
 ### Cadence (`every`)
 
@@ -186,55 +209,6 @@ When the daemon that owns an instance dies or is stopped, the instance resumes o
 - **`workflow list`** lists the definitions in `~/.config/homeboy/workflows/`, the built-ins, and every registered cadence. `runs list --kind workflow` lists instances in the daemon without discovery filters.
 
 ## Examples
-
-### Example A: a self-admitting proof loop
-
-One definition, one instance per pass. `capture` and `evaluate` decide, `fix` is a Cook that only runs on findings, and `again` re-admits the same definition with the next iteration number when `evaluate` says to continue. Three iterations are three instances; each pass has its own status and budget.
-
-```json
-{
-  "schema": "homeboy/workflow/v1",
-  "id": "ssi-url-proof",
-  "inputs": {
-    "url": {"required": true},
-    "candidate_sha": {"required": true},
-    "workspace": {"required": true},
-    "iteration": {"default": 1}
-  },
-  "env": { "public": ["SSI_BLOCKS_ENGINE_PATH", "HOMEBOY_WP_CODEBOX_BIN"] },
-  "budget": { "max_step_runs": 6, "deadline": "4h" },
-  "steps": [
-    { "id": "capture", "timeout": "15m",
-      "homeboy": ["runner", "exec", "lab", "--cwd", "{{inputs.workspace}}", "--",
-                  "node", "tools/url-loop-controller.mjs", "capture", "--url", "{{inputs.url}}"] },
-    { "id": "evaluate", "needs": ["capture"], "timeout": "90m",
-      "homeboy": ["runner", "exec", "lab", "--", "node", "tools/url-loop-controller.mjs", "evaluate",
-                  "--fixture", "{{steps.capture.output/fixture_root}}", "--candidate-sha", "{{inputs.candidate_sha}}",
-                  "--iteration", "{{inputs.iteration}}"] },
-    { "id": "fix", "needs": ["evaluate"],
-      "when": { "step": "evaluate", "output": "/verdict", "equals": "findings" },
-      "retry": { "max": 1, "on": ["failed"] },
-      "cook": { "repo": "static-site-importer", "placement": "lab",
-                "prompt": "Fix the import findings in {{steps.evaluate.output/report_path}} for {{inputs.url}}.",
-                "verify": ["composer test", "node tools/url-loop-controller.mjs evaluate --fixture {{steps.capture.output/fixture_root}}"] } },
-    { "id": "again", "needs": ["evaluate"],
-      "when": { "step": "evaluate", "output": "/continue", "exists": true },
-      "homeboy": ["workflow", "run", "ssi-url-proof",
-                  "--input", "url={{inputs.url}}",
-                  "--input", "candidate_sha={{inputs.candidate_sha}}",
-                  "--input", "workspace={{inputs.workspace}}",
-                  "--input", "iteration={{steps.evaluate.output/next_iteration}}"] }
-  ]
-}
-```
-
-The contract between passes is in the inputs and the evaluate output:
-
-- **`evaluate` emits `{"verdict": …, "continue": …, "next_iteration": …}`** — a `continue` member means another pass is needed, and `next_iteration` is the number the next pass runs with. The `again` step re-admits the definition with it; the admission happens inside this pass's step, so this pass's status view lists the next pass under `children`.
-- **Each pass is one instance** with its own `wf-…` id (the definition and inputs decide it). `capture` runs in every pass; the controller reuses the fixture it already captured for the URL, so a later pass returns quickly and passes its `fixture_root` on to `evaluate`.
-- **A new candidate SHA is just new inputs:** `homeboy workflow run ssi-url-proof --input url=… --input candidate_sha=<new> --input workspace=…`. The same inputs are a no-op that returns the existing instance.
-- **`--wait` follows the chain:** `homeboy workflow run ssi-url-proof … --wait` exits when the last pass of the chain is terminal, non-zero unless it succeeded.
-- **A `capture` failure** (for example missing Chromium) fails that pass's instance with its output in the step job's log under `artifacts/jobs/<job_id>/`. It cannot park; the chain stops with it.
 
 ### Example B: nightly repeating task (cadence + gate → Cook → review)
 
@@ -285,3 +259,46 @@ This is the shape `homeboy --placement lab agent-task fanout cook-batch --repo h
   ]
 }
 ```
+
+### Example D: a fix loop (measure → Cook → confirm → approve → merge → next pass)
+
+A loop for any task whose steps you know. Only the domain-specific steps are your programs:
+- `measure` reports what is still wrong, one item per tracked issue;
+- `confirm` checks each fix PR at its head and lists the ones to merge.
+
+Homeboy owns the rest: the parallel Cooks, the human approval, the exact-head merge, and the chain of passes. `"join": {"min_succeeded": 0}` keeps one pass's failed Cooks or held merges from ending the chain, because the next pass measures again and retries them. The chain stops when nothing is left to fix, when `measure` reports the same failures three passes in a row, or after 20 passes.
+
+```json
+{
+  "schema": "homeboy/workflow/v1",
+  "id": "fix-loop",
+  "steps": [
+    { "id": "measure", "exec": { "program": "./measure" } },
+    { "id": "cook", "needs": ["measure"],
+      "when": { "step": "measure", "output": "/count", "gt": 0 },
+      "foreach": "{{steps.measure.output/items}}", "max_parallel": 3,
+      "join": { "min_succeeded": 0 },
+      "cook": { "repo": "{{item.repo}}", "task-url": "{{item.issue_url}}",
+                "prompt": "Fix {{item.issue_url}}.", "verify": ["{{item.verify}}"] } },
+    { "id": "confirm", "needs": ["cook"], "always": true,
+      "when": { "step": "measure", "output": "/count", "gt": 0 },
+      "exec": { "program": "./confirm" } },
+    { "id": "approve", "needs": ["confirm"],
+      "when": { "step": "confirm", "output": "/merge_count", "gt": 0 },
+      "approval": { "prompt": "Merge the confirmed fixes?" } },
+    { "id": "merge", "needs": ["approve"],
+      "when": { "step": "approve", "output": "/decision", "equals": "approved" },
+      "foreach": "{{steps.confirm.output/merge}}", "join": { "min_succeeded": 0 },
+      "homeboy": ["git", "pr", "merge-when-green", "--repo", "{{item.github}}",
+                  "--number", "{{item.number}}", "--sha", "{{item.sha}}", "--wait-seconds", "3600"],
+      "timeout": "65m" }
+  ],
+  "next_pass": {
+    "max_iterations": 20,
+    "when": { "step": "measure", "output": "/count", "gt": 0 },
+    "stop_unchanged": { "step": "measure", "output": "/ids", "passes": 3 }
+  }
+}
+```
+
+`measure` writes `{"count", "ids", "items": [{"repo", "issue_url", "verify"}]}` to `$HOMEBOY_STEP_OUTPUT`. `confirm` writes `{"merge": [{"github", "number", "sha"}], "merge_count"}`. Static Site Importer's import findings loop (`tools/import-loop/loop.json`) is a full instance of this shape: there, `measure` is the import, evaluate and triage steps, and a `shipped` step waits for releases before the next pass.

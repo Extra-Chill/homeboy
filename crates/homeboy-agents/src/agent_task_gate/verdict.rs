@@ -13,6 +13,23 @@ pub struct GateVerdictEvidence {
     pub saved_ms: u128,
 }
 
+thread_local! {
+    static DATA_ROOT: std::cell::RefCell<Option<Option<PathBuf>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Bind promotion verdict storage to its injected observation store, never the
+/// controller's ambient home. In-memory stores deliberately disable caching.
+pub(crate) fn with_data_root<T>(root: Option<&Path>, operation: impl FnOnce() -> T) -> T {
+    struct Restore(Option<Option<PathBuf>>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            DATA_ROOT.with(|slot| slot.replace(self.0.take()));
+        }
+    }
+    let _restore = Restore(DATA_ROOT.with(|slot| slot.replace(Some(root.map(Path::to_path_buf)))));
+    operation()
+}
+
 pub(super) struct GateVerdict {
     key: String,
     tree: String,
@@ -103,9 +120,13 @@ impl GateVerdict {
         Some(Self {
             key,
             tree,
-            root: std::env::var_os("HOMEBOY_GATE_VERDICT_DATA_ROOT")
-                .map(PathBuf::from)
-                .or_else(|| homeboy_core::paths::homeboy_data().ok())?
+            root: DATA_ROOT
+                .with(|slot| slot.borrow().clone())
+                .unwrap_or_else(|| {
+                    std::env::var_os("HOMEBOY_GATE_VERDICT_DATA_ROOT")
+                        .map(PathBuf::from)
+                        .or_else(|| homeboy_core::paths::homeboy_data().ok())
+                })?
                 .join("controller-state/gate-verdicts"),
         })
     }

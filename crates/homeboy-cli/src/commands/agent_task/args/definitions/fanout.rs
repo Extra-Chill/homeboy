@@ -26,7 +26,7 @@ pub enum AgentTaskFanoutCommand {
     /// --private-verify inputs. A child that cannot verify its work cannot
     /// promote it (#9838).
     #[command(
-        after_help = "Quick start:\n  homeboy agent-task fanout cook-batch --repo REPO --verify 'homeboy review test REPO' ISSUE_URL...\n\nOne repository per batch: every issue in a cook-batch belongs to --repo.\n\nTwo phases: without --run-plan, cook-batch validates the batch and prints the compiled workflow. Add --run-plan to admit it; then follow it with `homeboy runs watch <instance>` and stop it with `homeboy workflow cancel <instance>`.\n\nVerification is required: every child needs a shared --verify/--private-verify gate.\n\nPlacement: run every child on Lab with:\n  homeboy --placement lab agent-task fanout cook-batch --repo REPO --verify 'homeboy review test REPO' ISSUE_URL... --run-plan\n\nJoin: `--join all` (default) needs every child to succeed; `--join any` one; `--join N` at least N.\n\nUse --help-full for provider, gate, and environment controls."
+        after_help = "Quick start:\n  homeboy agent-task fanout cook-batch --repo REPO --verify 'homeboy review test REPO' ISSUE_URL...\n\nOmit --repo to infer a registered component from issue URLs in one GitHub repository. Pass --repo explicitly to select a component.\n\nTwo phases: without --run-plan, cook-batch validates the batch and prints the compiled workflow. Add --run-plan to admit it; then follow it with `homeboy runs watch <instance>` and stop it with `homeboy workflow cancel <instance>`.\n\nVerification is required: every child needs a shared --verify/--private-verify gate.\n\nPlacement: run every child on Lab with:\n  homeboy --placement lab agent-task fanout cook-batch --repo REPO --verify 'homeboy review test REPO' ISSUE_URL... --run-plan\n\nJoin: `--join all` (default) needs every child to succeed; `--join any` one; `--join N` at least N.\n\nUse --help-full for provider, gate, and environment controls."
     )]
     CookBatch(Box<AgentTaskFanoutCookBatchArgs>),
 }
@@ -42,13 +42,14 @@ pub struct AgentTaskFanoutCookBatchArgs {
     #[arg(long = "help-full", action = clap::ArgAction::HelpLong)]
     pub help_full: Option<bool>,
     /// GitHub issue URL cooked by one child of the wave. Repeat for multiple
-    /// issues; every URL must be unique.
+    /// issues; every URL must be unique. Without --repo, all URLs must belong
+    /// to one GitHub repository mapping to exactly one registered component.
     #[arg(value_name = "ISSUE_URL", required = true)]
     pub issues: Vec<String>,
     /// Registered repository/component slug, `owner/repo`, or exact registered
     /// primary checkout path, resolved as `agent-task cook --repo` resolves it.
     #[arg(long = "repo", value_name = "REPO_SLUG_OR_PRIMARY_PATH")]
-    pub repo: String,
+    pub repo: Option<String>,
     /// Pull-request base branch every child is cut from and targets. When
     /// omitted, `batch-prepare` resolves the repository's remote default branch.
     #[arg(long = "base", value_name = "BRANCH")]

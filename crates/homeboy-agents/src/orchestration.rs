@@ -2207,13 +2207,13 @@ impl OrchestrationService<LifecycleStoreLookup> {
                             project_record(&current, None)?,
                             ControlPlaneActionPayload {
                                 schema: CONTROL_PLANE_PLACEMENT_UPDATE_RESULT_SCHEMA.to_string(),
-                                data: serde_json::json!({
+                                data: with_scheduling_blocker(serde_json::json!({
                                     "schema": CONTROL_PLANE_PLACEMENT_UPDATE_RESULT_SCHEMA,
                                     "run_id": current.run_id,
                                     "placement": parameters.placement,
                                     "reconciliation": reconciliation,
                                     "preserved_identity": true,
-                                }),
+                                })),
                             },
                             None,
                         ),
@@ -2251,11 +2251,23 @@ impl OrchestrationService<LifecycleStoreLookup> {
                                 project_record(&retry.record, None)?,
                                 ControlPlaneActionPayload {
                                     schema: CONTROL_PLANE_RETRY_RESULT_SCHEMA.to_string(),
-                                    data: serde_json::json!({
-                                        "record": retry.record,
-                                        "runnable": retry.run,
-                                        "created": retry.created,
-                                    }),
+                                    data: {
+                                        let data = serde_json::json!({
+                                            "record": retry.record,
+                                            "runnable": retry.run,
+                                            "created": retry.created,
+                                        });
+                                        // A live retry with an execution fence
+                                        // is scheduled by the local daemon.
+                                        if !retry.record.state().is_terminal()
+                                            && retry.record.metadata["execution_scheduling"]
+                                                .is_object()
+                                        {
+                                            with_scheduling_blocker(data)
+                                        } else {
+                                            data
+                                        }
+                                    },
                                 },
                                 cook_retry.then(|| {
                                     if retry.record.state().is_terminal() {
@@ -2315,7 +2327,9 @@ impl OrchestrationService<LifecycleStoreLookup> {
                             project_record(&current, None)?,
                             ControlPlaneActionPayload {
                                 schema: CONTROL_PLANE_REARM_RESULT_SCHEMA.to_string(),
-                                data: serde_json::json!({ "record": current }),
+                                data: with_scheduling_blocker(
+                                    serde_json::json!({ "record": current }),
+                                ),
                             },
                             None,
                         ),
@@ -2438,28 +2452,15 @@ impl OrchestrationService<LifecycleStoreLookup> {
                         })();
                         match resumed {
                             Ok((current, reconciliation)) => {
-                                let mut data = serde_json::json!({
+                                // The re-armed admission waits on the local
+                                // controller daemon's scheduling.
+                                let data = with_scheduling_blocker(serde_json::json!({
                                     "schema": "homeboy/unmaterialized-cook-resume/v1",
                                     "status": current.metadata["unmaterialized_cook_admission"]["state"],
                                     "run_id": requested_id,
                                     "idempotent": true,
                                     "reconciliation": reconciliation,
-                                });
-                                // The re-armed admission waits on the local
-                                // controller daemon's scheduling. When that
-                                // daemon is down the resume cannot ever be
-                                // picked up, so name it and its recovery
-                                // instead of leaving the operator waiting
-                                // (#16181).
-                                if let Some(daemon) =
-                                    crate::agent_task_service::scheduling_daemon_evidence()
-                                        .filter(|daemon| !daemon.admits_work)
-                                {
-                                    data["blocker"] = serde_json::json!({
-                                        "daemon": daemon,
-                                        "next_action": "homeboy daemon recover",
-                                    });
-                                }
+                                }));
                                 (
                                     ControlPlaneActionOutcome::Succeeded,
                                     project_record(&current, None)?,
@@ -4163,7 +4164,12 @@ pub fn project_record(
     // interruption; the reconcile action remains the mutating path.
     let record = &project_dead_candidate_adoption(record);
     let mut resource = project_summary_fields(record, plan)?;
-    resource.action_eligibility = Some(lifecycle_action_eligibility(record, plan));
+    resource.action_eligibility =
+        if crate::agent_task_service::live_cook_continuation(record).is_some() {
+            None
+        } else {
+            Some(lifecycle_action_eligibility(record, plan))
+        };
     if record.metadata.get("cancellation_fence").is_some()
         || record.metadata.get("candidate_retirement").is_some()
     {
@@ -4251,6 +4257,16 @@ fn project_summary_fields(
     resource.publication = delivery.as_ref().and_then(publication);
     resource.recovery = projected_cook_recovery(record);
     project_live_gate_verification(&mut resource, record);
+    if let Some(continuation) = crate::agent_task_service::live_cook_continuation(record) {
+        resource.state = ControlPlaneRunState::Running;
+        resource.phase = Some("publishing".to_string());
+        resource.owner = Some(ControlPlaneOwner {
+            kind: "cook_continuation".to_string(),
+            id: continuation["owner_pid"].to_string(),
+        });
+        resource.blocker = None;
+        resource.recovery = None;
+    }
     if let Some(fence) = record
         .metadata
         .get("cancellation_fence")
@@ -4260,6 +4276,7 @@ fn project_summary_fields(
         resource.recovery = None;
         resource.phase = Some("cancelled".into());
         resource.blocker = Some(ControlPlaneBlocker {
+            details: None,
             code: Some("mission_cancelled".into()),
             message: redacted_bounded(
                 &format!(
@@ -4821,6 +4838,16 @@ fn live_provider_liveness(
     {
         observations.push(("workspace_activity", observed_at));
     }
+    if let Some(observed_at) = execution
+        .get("heartbeat_at")
+        .and_then(Value::as_str)
+        .and_then(parse_timestamp)
+    {
+        let source = execution["heartbeat_source"]
+            .as_str()
+            .unwrap_or("runtime_output");
+        observations.push((source, observed_at));
+    }
     let started_at = execution
         .get("started_at")
         .and_then(Value::as_str)
@@ -4874,6 +4901,14 @@ fn newest_timestamp(existing: Option<&str>, observed: Option<&str>) -> Option<St
     }
 }
 
+fn missing_argument_details(details: &Value) -> Option<Value> {
+    details.get("args").map(|args| {
+        serde_json::json!({
+            "args": homeboy_core::redaction::redact_json(args)
+        })
+    })
+}
+
 fn blocker(
     record: &AgentTaskRunRecord,
     delivery: Option<&CookDelivery>,
@@ -4885,8 +4920,9 @@ fn blocker(
             .or_else(|| quarantine.get("summary").and_then(|value| value.as_str()))
             .unwrap_or("run is quarantined");
         return Some(ControlPlaneBlocker {
+            details: None,
             code: Some("quarantine".to_string()),
-            message: redacted_bounded(message, MESSAGE_BOUND),
+            message: homeboy_core::redaction::redact_string(message),
             state: None,
             reason: Some(redacted_bounded(message, MESSAGE_BOUND)),
             retry: None,
@@ -4896,6 +4932,7 @@ fn blocker(
     }
     if let Some(reason) = record.stale_running_reason() {
         return Some(ControlPlaneBlocker {
+            details: None,
             code: Some("stale".to_string()),
             message: redacted_bounded(reason, MESSAGE_BOUND),
             state: None,
@@ -4909,8 +4946,9 @@ fn blocker(
         if let Some(failure) = record.metadata.get("execution_step_failure") {
             if let Some(message) = failure["message"].as_str() {
                 return Some(ControlPlaneBlocker {
+                    details: missing_argument_details(&failure["diagnostic"]["details"]),
                     code: failure["diagnostic"]["code"].as_str().map(str::to_string),
-                    message: redacted_bounded(message, MESSAGE_BOUND),
+                    message: homeboy_core::redaction::redact_string(message),
                     state: failure["classification"].as_str().map(str::to_string),
                     reason: Some(redacted_bounded(message, MESSAGE_BOUND)),
                     retry: None,
@@ -4925,6 +4963,7 @@ fn blocker(
             unmaterialized_admission_blocker(record, admission)
         {
             return Some(ControlPlaneBlocker {
+                details: None,
                 code: Some(state.clone()),
                 message: reason.clone(),
                 state: Some(state),
@@ -4948,8 +4987,9 @@ fn blocker(
         .filter(|value| !value.trim().is_empty())
     {
         return Some(ControlPlaneBlocker {
+            details: None,
             code: Some("controller_failure".to_string()),
-            message: redacted_bounded(message, MESSAGE_BOUND),
+            message: homeboy_core::redaction::redact_string(message),
             state: None,
             reason: None,
             retry: None,
@@ -4963,6 +5003,7 @@ fn blocker(
     ) {
         if let Some(stop) = homeboy_runner_contract::find_resource_guard_stop(&record.metadata) {
             return Some(ControlPlaneBlocker {
+                details: None,
                 code: Some(stop.violation.blocker_code()),
                 message: redacted_bounded(&stop.violation.observed_summary(), MESSAGE_BOUND),
                 state: None,
@@ -4980,12 +5021,13 @@ fn blocker(
             .filter(|value| !value.trim().is_empty())
         {
             return Some(ControlPlaneBlocker {
+                details: missing_argument_details(&failure["details"]),
                 code: failure
                     .get("error_code")
                     .and_then(|value| value.as_str())
                     .filter(|value| !value.trim().is_empty())
                     .map(|value| bounded(value, STATE_BOUND)),
-                message: redacted_bounded(message, MESSAGE_BOUND),
+                message: homeboy_core::redaction::redact_string(message),
                 state: None,
                 reason: None,
                 retry: None,
@@ -5000,8 +5042,9 @@ fn blocker(
         .and_then(|adoption| adoption.terminal_error.as_deref())
         .filter(|value| !value.trim().is_empty())
         .map(|message| ControlPlaneBlocker {
+            details: None,
             code: Some("adoption".to_string()),
-            message: redacted_bounded(message, MESSAGE_BOUND),
+            message: homeboy_core::redaction::redact_string(message),
             state: None,
             reason: None,
             retry: None,
@@ -5060,6 +5103,7 @@ fn recorded_failure_blocker(
         }
     };
     Some(ControlPlaneBlocker {
+        details: None,
         code: Some(bounded(&format!("outcome.{class}"), STATE_BOUND)),
         message: redacted_bounded(&message, MESSAGE_BOUND),
         state: Some(outcome.status.as_str().to_string()),
@@ -5123,6 +5167,15 @@ fn unmaterialized_admission_blocker(
         }),
         daemon,
     ))
+}
+
+/// Actions that queue daemon-scheduled work start the local controller daemon
+/// (#17506) and carry its blocker only when it cannot be started (#16181).
+fn with_scheduling_blocker(mut data: Value) -> Value {
+    if let Some(blocker) = crate::agent_task_service::ensure_scheduling_daemon() {
+        data["blocker"] = blocker;
+    }
+    data
 }
 
 fn owner(record: &AgentTaskRunRecord) -> ControlPlaneOwner {
@@ -5274,8 +5327,9 @@ fn heartbeat_at(record: &AgentTaskRunRecord) -> Option<String> {
 /// carries the next legal action, as it does for resource-guard stops.
 fn delivery_blocker(blocker: &CookDeliveryBlocker) -> ControlPlaneBlocker {
     ControlPlaneBlocker {
+        details: None,
         code: Some(blocker.code.as_str().to_string()),
-        message: redacted_bounded(&blocker.message, MESSAGE_BOUND),
+        message: homeboy_core::redaction::redact_string(&blocker.message),
         state: None,
         reason: blocker
             .next_action
@@ -5554,8 +5608,9 @@ fn generic_observation_run_summary(
         .pointer("/control_plane/blocker")
         .and_then(Value::as_str)
         .map(|message| ControlPlaneBlocker {
+            details: None,
             code: None,
-            message: redacted_bounded(message, MESSAGE_BOUND),
+            message: homeboy_core::redaction::redact_string(message),
             state: None,
             reason: None,
             retry: None,
@@ -7073,6 +7128,22 @@ mod tests {
         assert_eq!(
             liveness.last_observed_progress_at.as_deref(),
             Some("2020-01-01T00:00:05+00:00")
+        );
+        record.metadata["provider_executions"][0]["heartbeat_at"] = json!("2020-01-01T00:00:08Z");
+        record.metadata["provider_executions"][0]["heartbeat_source"] =
+            json!("descendant_activity");
+        let liveness = live_provider_liveness(
+            &record,
+            None,
+            chrono::DateTime::parse_from_rfc3339("2020-01-01T00:00:10Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+        )
+        .unwrap();
+        assert_eq!(liveness.source.as_deref(), Some("descendant_activity"));
+        assert_eq!(
+            liveness.last_observed_progress_at.as_deref(),
+            Some("2020-01-01T00:00:08+00:00")
         );
     }
 

@@ -2451,7 +2451,7 @@ mod tests {
 
     fn valid_review_form() -> AiFilledReviewForm {
         AiFilledReviewForm {
-            pr_title: "Guard the reload render path".to_string(),
+            pr_title: "fix(agent-task): guard the reload render path".to_string(),
             summary: "Fix the reload crash.".to_string(),
             what_changed: vec!["Guard the null render path.".to_string()],
             verification: Vec::new(),
@@ -3015,6 +3015,7 @@ mod tests {
         changed_files: Vec<String>,
     ) -> AgentTaskPromotionReport {
         AgentTaskPromotionReport {
+            candidate_ref: None,
             schema: AGENT_TASK_PROMOTION_REPORT_SCHEMA.to_string(),
             status,
             source: AgentTaskPromotionSource {

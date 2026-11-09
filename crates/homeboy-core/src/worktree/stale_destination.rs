@@ -199,38 +199,6 @@ pub fn classify_component_branch(
     Ok(classification)
 }
 
-/// Refuse an issue-derived Cook destination that holds work this Cook did not
-/// create. Only issue-derived destinations reach this: an explicit
-/// `--to-worktree` or `--head` stays authoritative. Read-only, so it is safe
-/// during preview. Uncommitted changes alone are left to Cook admission, which
-/// owns reuse of a Cook's own in-progress candidate.
-pub fn refuse_stale_derived_destination(
-    source: Option<&Path>,
-    handle: &str,
-    branch: &str,
-    base: &str,
-) -> Result<()> {
-    let classification = match super::resolve_workspace_ref_if_present(handle)? {
-        Some(super::WorkspaceRefRecord::Task(record))
-            if record.state == super::TaskWorktreeState::Active =>
-        {
-            if Path::new(&record.worktree_path).is_dir() {
-                super::convergence::require_issue_destination_without_pr(
-                    Path::new(&record.worktree_path),
-                    branch,
-                )?;
-            }
-            classify_worktree_destination(Path::new(&record.worktree_path), handle, branch, base)?
-        }
-        Some(_) => DestinationFreshness::Unclassified,
-        None => match source {
-            Some(source) => classify_component_branch(source, handle, branch, base)?,
-            None => DestinationFreshness::Unclassified,
-        },
-    };
-    refuse_foreign_history(classification)
-}
-
 /// A destination is refused for history this Cook did not create: commits
 /// ahead of the base, another branch, or a detached HEAD.
 pub(super) fn refuse_foreign_history(classification: DestinationFreshness) -> Result<()> {

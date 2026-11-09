@@ -639,55 +639,8 @@ pub(crate) fn promote_attempt_in_store(
     let repository_integrity_evidence =
         admitted_repository_integrity_evidence(lifecycle_store, run_id)?;
     let observation_store = lifecycle_store.open_observation_initialized()?;
-    let run_id = run_id.to_string();
-    let gate_store = lifecycle_store.clone();
-    let cook_id = options.identity.cook_id.clone();
     crate::agent_task_promotion::with_gate_supervision(
-        crate::agent_task_gate::GateSupervision {
-            timeout: options.gates.gate_timeout(),
-            no_progress_timeout: options.gates.gate_no_progress_timeout(),
-            heartbeat_interval: options.gates.gate_heartbeat_interval(),
-            on_spawn: Arc::new({
-                let run_id = run_id.clone();
-                let gate_store = gate_store.clone();
-                move |_, command| {
-                    agent_task_lifecycle::record_promotion_progress_in_store(
-                        &gate_store,
-                        &run_id,
-                        "gate",
-                        Some(command),
-                        Some("gate process started"),
-                        None,
-                    )
-                }
-            }),
-            on_heartbeat: Arc::new({
-                let run_id = run_id.clone();
-                let gate_store = gate_store.clone();
-                move |status| {
-                    agent_task_lifecycle::record_promotion_progress_in_store(
-                        &gate_store,
-                        &run_id,
-                        "gate",
-                        None,
-                        Some(&format!(
-                            "gate elapsed={}ms last-progress={}ms",
-                            status.elapsed_ms,
-                            status.last_progress_ms_ago.unwrap_or(status.elapsed_ms),
-                        )),
-                        Some(&status.output_tail),
-                    )
-                }
-            }),
-            is_cancelled: Arc::new({
-                let gate_store = gate_store.clone();
-                move || {
-                    gate_store
-                        .read_cook_index(&cook_id)
-                        .is_ok_and(|index| index.cancellation_fence.is_some())
-                }
-            }),
-        },
+        cook_gate_supervision(lifecycle_store, options, run_id),
         || {
             promote_with_checkpoint_in_observation_store(
                 AgentTaskPromotionRequest {
@@ -710,7 +663,7 @@ pub(crate) fn promote_attempt_in_store(
                 &observation_store,
                 |checkpoint| {
                     lifecycle_store.record_promotion(
-                        &run_id,
+                        run_id,
                         serde_json::to_value(checkpoint).map_err(|error| {
                             Error::internal_json(
                                 error.to_string(),
@@ -723,6 +676,62 @@ pub(crate) fn promote_attempt_in_store(
             )
         },
     )
+}
+
+/// Fresh and resumed gates share budgets and durable progress reporting.
+fn cook_gate_supervision(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    options: &CookRequest,
+    run_id: &str,
+) -> crate::agent_task_gate::GateSupervision {
+    let run_id = run_id.to_string();
+    let gate_store = lifecycle_store.clone();
+    let cook_id = options.identity.cook_id.clone();
+    crate::agent_task_gate::GateSupervision {
+        timeout: options.gates.gate_timeout(),
+        no_progress_timeout: options.gates.gate_no_progress_timeout(),
+        heartbeat_interval: options.gates.gate_heartbeat_interval(),
+        on_spawn: Arc::new({
+            let run_id = run_id.clone();
+            let gate_store = gate_store.clone();
+            move |_, command| {
+                agent_task_lifecycle::record_promotion_progress_in_store(
+                    &gate_store,
+                    &run_id,
+                    "gate",
+                    Some(command),
+                    Some("gate process started"),
+                    None,
+                )
+            }
+        }),
+        on_heartbeat: Arc::new({
+            let run_id = run_id.clone();
+            let gate_store = gate_store.clone();
+            move |status| {
+                agent_task_lifecycle::record_promotion_progress_in_store(
+                    &gate_store,
+                    &run_id,
+                    "gate",
+                    None,
+                    Some(&format!(
+                        "gate elapsed={}ms last-progress={}ms",
+                        status.elapsed_ms,
+                        status.last_progress_ms_ago.unwrap_or(status.elapsed_ms),
+                    )),
+                    Some(&status.output_tail),
+                )
+            }
+        }),
+        is_cancelled: Arc::new({
+            let gate_store = gate_store.clone();
+            move || {
+                gate_store
+                    .read_cook_index(&cook_id)
+                    .is_ok_and(|index| index.cancellation_fence.is_some())
+            }
+        }),
+    }
 }
 
 fn admitted_repository_integrity_evidence(
@@ -1057,33 +1066,46 @@ pub(crate) fn promote_or_load_attempt_in_store(
             let (source, source_path) = promotion_source_in_store(lifecycle_store, run_id)?;
             let source = bind_persisted_promotion_artifact(source, &promotion)?;
             let observation_store = lifecycle_store.open_observation_initialized()?;
-            let resumed = resume_promoted_patch_in_observation_store(
-                AgentTaskPromotionRequest {
-                    source,
-                    source_run_id: Some(run_id.to_string()),
-                    source_path,
-                    source_worktree_path: component_workspace_path(options)?
-                        .or_else(|| options.workspace.source_worktree_path.clone()),
-                    base_ref: Some(options.finalization.base.clone()),
-                    task_base_sha: cook_candidate_base_sha(options),
-                    candidate_ref: None,
-                    to_worktree: options.workspace.to_worktree.clone(),
-                    // A resumed verification must retain the scheduler-selected
-                    // candidate rather than falling back to aggregate outcome order.
-                    task_id: selected_candidate_task_id_in_store(lifecycle_store, run_id)?,
-                    // The checkpoint already authenticated this exact artifact;
-                    // retain its identity rather than selecting an equivalent alias.
-                    artifact_id: None,
-                    dry_run: false,
-                    gates: options.gates.clone(),
-                    provider_invocation: options.provider_transport.provider_invocation.clone(),
-                    repository_integrity_evidence: promotion.repository_integrity_evidence.clone(),
+            let mut resumed = crate::agent_task_promotion::with_gate_supervision(
+                cook_gate_supervision(lifecycle_store, options, run_id),
+                || {
+                    resume_promoted_patch_in_observation_store(
+                        AgentTaskPromotionRequest {
+                            source,
+                            source_run_id: Some(run_id.to_string()),
+                            source_path,
+                            source_worktree_path: component_workspace_path(options)?
+                                .or_else(|| options.workspace.source_worktree_path.clone()),
+                            base_ref: Some(options.finalization.base.clone()),
+                            task_base_sha: cook_candidate_base_sha(options),
+                            candidate_ref: None,
+                            to_worktree: options.workspace.to_worktree.clone(),
+                            // A resumed verification must retain the scheduler-selected
+                            // candidate rather than falling back to aggregate outcome order.
+                            task_id: selected_candidate_task_id_in_store(lifecycle_store, run_id)?,
+                            // The checkpoint already authenticated this exact artifact;
+                            // retain its identity rather than selecting an equivalent alias.
+                            artifact_id: None,
+                            dry_run: false,
+                            gates: options.gates.clone(),
+                            provider_invocation: options
+                                .provider_transport
+                                .provider_invocation
+                                .clone(),
+                            repository_integrity_evidence: promotion
+                                .repository_integrity_evidence
+                                .clone(),
+                        },
+                        &target_path,
+                        &serde_json::to_value(&promotion)
+                            .map_err(|error| Error::internal_json(error.to_string(), None))?,
+                        &observation_store,
+                    )
                 },
-                &target_path,
-                &serde_json::to_value(&promotion)
-                    .map_err(|error| Error::internal_json(error.to_string(), None))?,
-                &observation_store,
             )?;
+            if let Some(catch_up) = promotion.provenance.get("base_catch_up") {
+                resumed.provenance["base_catch_up"] = catch_up.clone();
+            }
             lifecycle_store.record_promotion(
                 run_id,
                 serde_json::to_value(&resumed)
@@ -1556,6 +1578,16 @@ fn replacement_green_gate_status_error(
         })
         .collect::<Vec<_>>();
     let suffix = match failing.first() {
+        Some(gate) if failing_gates[0]["executed"] == false => format!(
+            " (gate `{}` {}: {})",
+            gate.id,
+            failing_gates[0]["status"].as_str().unwrap_or("unavailable"),
+            gate.skip_reason
+                .as_ref()
+                .map(|skip| skip.reason.as_str())
+                .filter(|reason| !reason.is_empty())
+                .unwrap_or_else(|| failing_gates[0]["stderr_tail"].as_str().unwrap_or_default()),
+        ),
         Some(gate) => format!(" (gate `{}` exited {})", gate.id, gate.exit_code),
         None => String::new(),
     };
@@ -2147,9 +2179,10 @@ pub(crate) fn retryable_provider_discovery_failure_with_store(
 
 pub(crate) fn is_moving_base_finalization_error(error: &Error) -> bool {
     error.code == homeboy_core::ErrorCode::ValidationInvalidArgument
-        && error
+        && (error
             .message
             .contains("HEAD is behind or diverged from resolved base")
+            || error.message.contains("refusing to write declared base"))
 }
 
 /// What catching a Cook-owned candidate up to its resolved base did (#16049).
@@ -2162,9 +2195,8 @@ pub(crate) enum BaseCatchUp {
     /// does not own it and never rewrites it.
     NotOwned(String),
     /// The candidate was replayed onto the moved base without conflicts and
-    /// recorded as the latest promotion. It keeps its gate proof; the forge's
-    /// CI verifies the merged result (#16603). `provenance.base_catch_up`
-    /// names the base its gates actually ran on.
+    /// recorded as the latest promotion after rerunning the declared gates.
+    /// `provenance.base_catch_up` records its previous verification boundary.
     Rebased { promotion: AgentTaskPromotionReport },
     /// The candidate does not apply to the moved base. `paths` are the
     /// candidate files the base also changed; the destination is untouched.
@@ -2217,6 +2249,15 @@ pub(crate) fn catch_up_cook_candidate_to_base_in_store(
     if fresh_base == prior_base {
         return Ok(BaseCatchUp::Current);
     }
+    if !git_status(
+        path,
+        &["merge-base", "--is-ancestor", &prior_base, &fresh_base],
+    )? {
+        return Ok(BaseCatchUp::Conflict {
+            base: fresh_base,
+            paths: Vec::new(),
+        });
+    }
     let current = candidate_fingerprint(path)?;
     if current != expected
         && !is_exact_rebased_candidate(path, &expected, &current, &prior_base, &fresh_base)?
@@ -2242,17 +2283,10 @@ pub(crate) fn catch_up_cook_candidate_to_base_in_store(
             "destination branch carries changes beyond this Cook's candidate; it is published on the branch as it stands",
         );
     }
-    // The verified base can itself be the PR head. Its branch-only commits
-    // are invisible to the delta check above, but the candidate depends on
-    // them: projecting just that delta onto the base would discard history.
-    if !git_status(
-        path,
-        &["merge-base", "--is-ancestor", &prior_base, &fresh_base],
-    )? {
-        return not_owned(
-            "candidate builds on branch history that is not on the resolved base; it is published on the branch as it stands",
-        );
-    }
+    crate::agent_task_promotion::destination::before_reset(
+        Path::new(path),
+        &options.identity.cook_id,
+    )?;
     let tree = match apply_immutable_candidate_to_base(
         path,
         &expected,
@@ -2294,8 +2328,13 @@ pub(crate) fn catch_up_cook_candidate_to_base_in_store(
             &candidate_sha,
         ],
     )?;
-    caught_up["provenance"]["candidate_commit"] =
+    caught_up["candidate"] =
         json!({"base_sha":fresh_base,"candidate_sha":candidate_sha,"tree_sha":tree});
+    caught_up["provenance"]["candidate_commit"] = caught_up["candidate"].clone();
+    caught_up["status"] = json!("verification_pending");
+    caught_up["deterministic_gates"] = json!([]);
+    caught_up["gate_results"] = json!([]);
+    crate::agent_task_promotion::pin_applied_candidate(&options.identity.cook_id, &mut caught_up)?;
     caught_up["verified_base"] = json!({ "base": options.finalization.base, "sha": fresh_base });
     caught_up["provenance"]["candidate"] =
         serde_json::to_value(candidate_fingerprint(path)?).map_err(json_error)?;
@@ -2311,9 +2350,8 @@ pub(crate) fn catch_up_cook_candidate_to_base_in_store(
         "resolved_base": fresh_base,
     });
     lifecycle_store.record_promotion(run_id, caught_up.clone())?;
-    Ok(BaseCatchUp::Rebased {
-        promotion: serde_json::from_value(caught_up).map_err(json_error)?,
-    })
+    let promotion = promote_or_load_attempt_in_store(lifecycle_store, options, run_id)?;
+    Ok(BaseCatchUp::Rebased { promotion })
 }
 
 /// Accept an operator-rebased candidate only when its single commit is based on
@@ -2669,56 +2707,12 @@ fn git_with_index(path: &str, args: &[&str], index: &std::path::Path) -> Result<
     ))
 }
 
-/// The resolved base's current SHA, materialized locally. `None` when origin
-/// does not report the base.
+/// Resolve and materialize the advertised base using promotion's snapshot contract.
 fn observe_and_fetch_base(path: &str, base: &str) -> Result<Option<String>> {
-    let observed = std::process::Command::new("git")
-        .args([
-            "ls-remote",
-            "--heads",
-            "origin",
-            &format!("refs/heads/{base}"),
-        ])
-        .current_dir(path)
-        .output()
-        .map_err(|error| Error::git_command_failed(error.to_string()))?;
-    let Some(sha) = String::from_utf8_lossy(&observed.stdout)
-        .split_whitespace()
-        .next()
-        .filter(|sha| !sha.is_empty())
-        .map(str::to_string)
-    else {
-        return Ok(None);
-    };
-    let fetched = homeboy_core::git::with_remote_tracking_authority_until(
-        Path::new(path),
-        "materialize refreshed destination base",
-        std::time::Instant::now() + std::time::Duration::from_secs(30),
-        |remaining| {
-            homeboy_core::git::run_git_output_with_env_timeout(
-                Path::new(path),
-                &[
-                    "fetch",
-                    "--no-tags",
-                    "--no-write-fetch-head",
-                    "origin",
-                    &sha,
-                ],
-                "materialize refreshed destination base",
-                &[],
-                remaining,
-            )
-        },
-    )?;
-    if !fetched.status.success() {
-        return Err(Error::validation_invalid_argument(
-            "base",
-            format!("could not materialize refreshed destination base `{base}` at {sha}"),
-            None,
-            None,
-        ));
-    }
-    Ok(Some(sha))
+    Ok(
+        crate::agent_task_promotion::capture_declared_base(Path::new(path), Some(base))?
+            .map(|snapshot| snapshot.sha),
+    )
 }
 
 #[cfg(test)]
@@ -2938,6 +2932,25 @@ pub(crate) fn finalize_or_load_cook_pr_with_backend_with_stores<
             None,
         ));
     }
+    if lifecycle_store
+        .read_record(successful_run_id)?
+        .metadata
+        .get("review_form_unavailable")
+        .is_some()
+    {
+        let value = super::cook::publish_incomplete_draft(
+            options,
+            &promotion,
+            None,
+            0,
+            successful_run_id,
+            &[],
+            true,
+            backend,
+        )?;
+        lifecycle_store.record_cook_finalization(successful_run_id, value.clone())?;
+        return Ok(value);
+    }
     let finalization = cook_finalization_options_with_stores(
         store,
         lifecycle_store,
@@ -3110,6 +3123,14 @@ pub(crate) fn cook_finalization_options_with_stores(
     let pr_title = form_title
         .clone()
         .unwrap_or_else(|| options.finalization.title.clone());
+    if !homeboy_core::git::is_conventional_subject(&pr_title) {
+        return Err(Error::validation_invalid_argument(
+            "title",
+            "Cook PR title must be a conventional subject: type(scope)?!?: subject",
+            Some(pr_title),
+            None,
+        ));
+    }
     let commit_message = cook_commit_message(
         &options.finalization.commit_message,
         &pr_title,
@@ -3711,14 +3732,35 @@ pub(crate) fn recover_cook_pr_with_backend_and_review_form<B: AgentTaskPrFinaliz
     {
         run_or_cook_id.to_string()
     } else {
-        canonical_cook_recovery_run_id(&recipe.cook_id).ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "run_or_cook_id",
-                "durable Cook has no canonical promotable candidate",
-                Some(run_or_cook_id.to_string()),
-                None,
-            )
-        })?
+        review_form
+            .as_ref()
+            .and_then(|_| canonical_cook_candidate(&recipe.cook_id))
+            .and_then(|candidate| candidate["run_id"].as_str().map(str::to_string))
+            .or_else(|| canonical_cook_recovery_run_id(&recipe.cook_id))
+            .ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "run_or_cook_id",
+                    "durable Cook has no canonical promotable candidate",
+                    Some(run_or_cook_id.to_string()),
+                    None,
+                )
+            })?
+    };
+    // An exact form-only attempt is not a new publication authority when
+    // the selected producer already has a form (or the operator supplies it).
+    let run_id = if persisted_promotion_for_attempt(&run_id)?.is_some_and(|promotion| {
+        promotion.provenance["cook_follow_up"]["kind"] == "review_form_only"
+    }) {
+        let selected = canonical_cook_candidate(&recipe.cook_id)
+            .and_then(|candidate| candidate["run_id"].as_str().map(str::to_string));
+        selected
+            .filter(|producer| {
+                review_form.is_some()
+                    || canonical_cook_recovery_run_id(&recipe.cook_id).as_ref() == Some(producer)
+            })
+            .unwrap_or(run_id)
+    } else {
+        run_id
     };
     // A verified empty remediation is evidence about the already-applied
     // candidate, not a replacement candidate. Recover the source promotion so
@@ -4105,6 +4147,23 @@ pub(crate) fn canonical_cook_recovery_run_id_with_stores(
     let source_run_id = candidate["run_id"].as_str()?.to_string();
     if source_run_id.is_empty() {
         return None;
+    }
+    // Publication belongs to the selected producer once its form is complete.
+    // A later form-only execution cannot invalidate that candidate or replace
+    // the runtime identity used to disclose its implementation.
+    let aggregate = stores
+        .map(|(_, lifecycle)| lifecycle.read_aggregate(&source_run_id))
+        .unwrap_or_else(|| agent_task_lifecycle::read_attempt_aggregate(&source_run_id));
+    if aggregate
+        .ok()
+        .and_then(|aggregate| {
+            super::cook::review_form_from_aggregate(&aggregate)
+                .ok()
+                .flatten()
+        })
+        .is_some_and(|form| form.validate().is_ok())
+    {
+        return Some(source_run_id);
     }
     let recipe = stores
         .map(|(store, _)| store.load_recipe(cook_id))
@@ -4970,8 +5029,16 @@ fn cook_review_dossier_with_stores_and_review_form(
     Ok((
         AgentTaskReviewDossier {
             schema: "homeboy/agent-task-review-dossier/v1".to_string(),
-            summary: lineage.summary,
-            what_changed: lineage.what_changed,
+            summary: if review_form.is_some() {
+                terminal_form.summary.clone()
+            } else {
+                lineage.summary
+            },
+            what_changed: if review_form.is_some() {
+                terminal_form.what_changed.clone()
+            } else {
+                lineage.what_changed
+            },
             how_to_test: Vec::new(),
             // Deterministic evidence: orchestrator-owned. Each candidate-bound
             // gate renders once from `verified_commands`; `evidence` carries only
@@ -5857,14 +5924,8 @@ fn retry_descends_from_recipe(
 /// Load and validate the AI-authored review form for a finalizing run.
 ///
 /// The cook loop's review-form gate guarantees a valid form before finalization
-/// is reached; this re-reads it from the terminal outcome as the single source
-/// of the reviewer-facing prose. Its absence/invalidity here is an invariant
-/// violation (the gate would have looped), surfaced as a hard error rather than
-/// silently falling back to machine-templated prose.
-///
-/// This is the one decision whether the agent's form is usable. A missing,
-/// malformed, invalid or incomplete form is refused with the publish step's
-/// remedy: an operator-supplied `--review-form`, which replaces it.
+/// is reached. Unavailable forms take the incomplete-draft publication path
+/// instead. Missing or incomplete forms remain errors here.
 fn review_form_for_finalization_in_store(
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     run_id: &str,
@@ -7050,6 +7111,7 @@ struct DeliveredCandidateFacts {
     /// Applied candidate whose gates failed or never completed, without
     /// replacement proof.
     applied_gate_failure: bool,
+    regate_ready: bool,
     /// Verified, unpublished candidate; its review form is publication input.
     verified_unpublished: bool,
     /// The verified candidate has no publishable review form: neither the
@@ -7149,21 +7211,29 @@ fn delivered_candidate_facts(
         return DeliveredCandidateFacts::default();
     };
     let applied_gate_failure = applied_candidate_needs_replacement_gates(&promotion);
-    let verified_unpublished = matches!(
-        promotion.status,
-        AgentTaskPromotionStatus::Applied | AgentTaskPromotionStatus::GateFailed
-    ) && promotion.finalization_eligible()
+    let verified_unpublished = promotion.applied_with_passing_verdict()
         && promotion
             .candidate
             .as_ref()
             .is_some_and(|candidate| !candidate.tree_sha.is_empty())
         && !delivery.is_some_and(super::CookDelivery::published);
-    let review_form_missing =
-        verified_unpublished && review_form_missing_in_store(lifecycle_store, record);
+    let review_form_missing = review_form_missing_in_store(lifecycle_store, record);
+    let regate_ready = applied_gate_failure
+        && !review_form_missing
+        && agent_incomplete_reason(lifecycle_store, &record.run_id).is_none()
+        && promotion.finalization_blocking_gates().all(|gate| {
+            matches!(
+                gate.status,
+                crate::agent_task_gate::AgentTaskGateStatus::Deferred
+                    | crate::agent_task_gate::AgentTaskGateStatus::Unavailable
+                    | crate::agent_task_gate::AgentTaskGateStatus::Skipped
+            )
+        });
     DeliveredCandidateFacts {
         applied_gate_failure,
+        regate_ready,
         verified_unpublished,
-        review_form_missing,
+        review_form_missing: verified_unpublished && review_form_missing,
     }
 }
 
@@ -7198,9 +7268,7 @@ pub(crate) fn applied_candidate_awaits_verification(run_id: &str) -> bool {
     persisted_promotion_for_attempt(run_id)
         .ok()
         .flatten()
-        .is_some_and(|promotion| {
-            promotion.status.applied_without_passing_verdict() && !promotion.finalization_eligible()
-        })
+        .is_some_and(|promotion| applied_candidate_needs_replacement_gates(&promotion))
 }
 
 struct CookRecoveryActions {
@@ -7284,6 +7352,7 @@ fn cook_recovery_actions_with_prefix(
             agent_incomplete_reason,
             adoptable_candidate_ref,
             applied_gate_failure: delivered_candidate.applied_gate_failure,
+            regate_ready: delivered_candidate.regate_ready,
             verified_unpublished: delivered_candidate.verified_unpublished,
             review_form_missing: delivered_candidate.review_form_missing,
         });
@@ -7943,6 +8012,19 @@ mod replacement_green_gate_status_tests {
             .as_str()
             .unwrap()
             .contains("marker-16236"));
+    }
+
+    #[test]
+    fn unexecuted_replacement_names_status_and_transport_cause() {
+        let report = replacement(serde_json::json!([
+            {"id": "gate-1", "status": "unavailable", "command": ["true"],
+             "exit_code": 0, "stderr": "[runner.lab_transport_failure] Lab gate runner admission is stale or unavailable"}
+        ]));
+        let error = replacement_green_gate_status_error("run", &report);
+        assert!(error.message.contains("unavailable"));
+        assert!(error.message.contains("runner.lab_transport_failure"));
+        assert!(!error.message.contains("exited 0"));
+        assert_eq!(error.details["failing_gates"][0]["executed"], false);
     }
 
     #[test]

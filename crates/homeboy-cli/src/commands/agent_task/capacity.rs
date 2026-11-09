@@ -149,6 +149,20 @@ pub(crate) fn capacity_with_catalog(
         })
         .collect::<Vec<_>>();
 
+    let lab_routes = homeboy::runner::runners::list()?
+        .into_iter()
+        .map(|runner| {
+            let active = homeboy::runner::runners::runner_admission_snapshot(&runner.id)
+                .ok()
+                .and_then(|snapshot| snapshot.summary.active_job_count);
+            let free = runner
+                .settings
+                .concurrency_limit
+                .zip(active)
+                .map(|(limit, active)| limit.saturating_sub(active));
+            json!({ "runner_id": runner.id, "active_slots": active, "free_slots": free })
+        })
+        .collect::<Vec<_>>();
     let groups = group_outcomes_by_scope(outcomes);
     let next_reset = groups
         .iter()
@@ -165,6 +179,12 @@ pub(crate) fn capacity_with_catalog(
             "schema": "homeboy/agent-task-capacity/v1",
             "generated_at": chrono::Utc::now().to_rfc3339(),
             "routes": route_values,
+            "lab_routes": lab_routes,
+            "lab_capacity": homeboy::runner::list().unwrap_or_default().iter().map(|runner| {
+                homeboy::runner::lab_capacity::report(&runner.id).unwrap_or_else(|error| json!({
+                    "runner_id": runner.id, "unavailable": error.to_string(),
+                }))
+            }).collect::<Vec<_>>(),
             "next_reset": next_reset,
         }),
         0,

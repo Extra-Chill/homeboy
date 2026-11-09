@@ -3987,12 +3987,12 @@ pub(crate) fn record_provider_execution_runtime_evidence(
     })
 }
 
-/// Persist the timestamp of a workspace change observed by provider supervision.
-/// The status projection uses this finite lifecycle fact and never inspects a workspace.
-pub(crate) fn record_provider_execution_workspace_activity(
+/// Called only for observed progress, throttled by the provider supervisor.
+pub(crate) fn record_provider_execution_progress(
     run_id: &str,
     task_id: &str,
     attempt: u32,
+    source: &str,
 ) -> Result<AgentTaskRunRecord> {
     let lifecycle_store = AgentTaskLifecycleStore::from_environment()?;
     let run_id = sanitize_run_id(run_id);
@@ -4011,7 +4011,13 @@ pub(crate) fn record_provider_execution_workspace_activity(
         if execution["state"] != json!("running") {
             return false;
         }
-        execution["workspace_activity_observed_at"] = json!(now_timestamp());
+        let now = now_timestamp();
+        if source == "workspace_activity" {
+            execution["workspace_activity_observed_at"] = json!(now);
+        }
+        execution["heartbeat_at"] = json!(now);
+        execution["heartbeat_source"] = json!(source);
+        update_lifecycle_heartbeat(record);
         true
     })?;
     record.ok_or_else(|| {
@@ -7377,7 +7383,22 @@ pub(crate) fn attempt_preserves_candidate_or_gate(
     let Ok(record) = lifecycle_store.read_record_bounded(run_id) else {
         return false;
     };
-    if record.latest_executor_evidence.is_some() {
+    if let Some(evidence) = &record.latest_executor_evidence {
+        let setup_failure = record
+            .aggregate_path
+            .as_ref()
+            .and_then(|path| std::fs::read(path).ok())
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+            .and_then(|aggregate| aggregate.get("outcomes").and_then(Value::as_array).cloned())
+            .is_some_and(|outcomes| {
+                outcomes.iter().any(|outcome| {
+                    outcome["task_id"] == evidence.task_id
+                        && outcome["metadata"]["environment_setup_failure"] == true
+                })
+            });
+        if setup_failure && record.candidate.is_none() {
+            return false;
+        }
         return true;
     }
     use crate::agent_task_promotion::AgentTaskPromotionStatus as Status;
@@ -7484,9 +7505,13 @@ pub fn record_promotion_progress_frames(
 pub fn record_promotion_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
-    promotion: Value,
+    mut promotion: Value,
 ) -> Result<AgentTaskRunRecord> {
     let run_id = sanitize_run_id(run_id);
+    let owner = lifecycle_store.read_record(&run_id)?;
+    if let Some(cook_id) = owner.metadata.get("cook_id").and_then(Value::as_str) {
+        crate::agent_task_promotion::pin_applied_candidate(cook_id, &mut promotion)?;
+    }
     // The run state follows the delivery this promotion produces (see
     // `CookDelivery::lifecycle`): a candidate that has not completed
     // controller-owned verification is recoverable evidence, not a successful

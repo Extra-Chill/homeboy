@@ -904,6 +904,7 @@ fn path_setting_workspace_ref_resolves_to_controller_path_and_syncs_workspace() 
             store.join("repo_cook.json"),
             serde_json::json!({
                 "id": "repo@cook",
+                "workspace_identity": homeboy_core::worktree::task_worktree_workspace_identity("repo", "repo@cook").unwrap(),
                 "component_id": "repo",
                 "source_checkout": source.display().to_string(),
                 "worktree_path": worktree.display().to_string(),
@@ -911,7 +912,8 @@ fn path_setting_workspace_ref_resolves_to_controller_path_and_syncs_workspace() 
                 "base_ref": "HEAD",
                 "cleanup_policy": "preserve_on_failure",
                 "created_at": "2026-01-01T00:00:00Z",
-                "state": "active"
+                "state": "active",
+                "workspace_identity": homeboy_core::worktree::task_worktree_workspace_identity("repo", "repo@cook").unwrap()
             })
             .to_string(),
         )
@@ -966,6 +968,7 @@ fn path_setting_workspace_ref_resolves_inside_setting_json() {
             store.join("repo_cook.json"),
             serde_json::json!({
                 "id": "repo@cook",
+                "workspace_identity": homeboy_core::worktree::task_worktree_workspace_identity("repo", "repo@cook").unwrap(),
                 "component_id": "repo",
                 "source_checkout": source.display().to_string(),
                 "worktree_path": worktree.display().to_string(),
@@ -973,7 +976,8 @@ fn path_setting_workspace_ref_resolves_inside_setting_json() {
                 "base_ref": "HEAD",
                 "cleanup_policy": "preserve_on_failure",
                 "created_at": "2026-01-01T00:00:00Z",
-                "state": "active"
+                "state": "active",
+                "workspace_identity": homeboy_core::worktree::task_worktree_workspace_identity("repo", "repo@cook").unwrap()
             })
             .to_string(),
         )
@@ -1123,6 +1127,7 @@ fn path_setting_workspace_ref_removed_record_is_not_resolvable() {
             store.join("repo_old.json"),
             serde_json::json!({
                 "id": "repo@old",
+                "workspace_identity": homeboy_core::worktree::task_worktree_workspace_identity("repo", "repo@old").unwrap(),
                 "component_id": "repo",
                 "source_checkout": home.path().join("repo").display().to_string(),
                 "worktree_path": worktree.display().to_string(),

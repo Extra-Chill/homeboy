@@ -110,7 +110,7 @@ export EXTRA_ARGS="--format json"
 build_section_body
 
 assert_contains "${SECTION_BODY}" ":x: **review lint** — failed" "custom args render split lint status"
-assert_contains "${SECTION_BODY}" ":white_check_mark: **review lint** — passed" "custom args render split lint status"
+assert_not_contains "${SECTION_BODY}" ":white_check_mark: **review lint** — passed" "failed lint is not rendered as passed"
 assert_contains "${SECTION_BODY}" ":white_check_mark: **review test** — passed" "custom args render split test status"
 assert_not_contains "${SECTION_BODY}" ":x: **lint** _(changed files only)_" "custom args do not fall back to legacy command blocks"
 assert_not_contains "${SECTION_BODY}" "core PR-comment rendering currently supports the default" "custom args do not use unsupported warning"

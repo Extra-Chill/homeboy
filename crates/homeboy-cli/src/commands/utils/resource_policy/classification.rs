@@ -61,7 +61,8 @@ pub(super) fn agent_task_resource_behavior(
     };
 
     Some(match &args.command {
-        agent_task::AgentTaskCommand::ExecutionStep { .. }
+        agent_task::AgentTaskCommand::Candidate { .. }
+        | agent_task::AgentTaskCommand::ExecutionStep { .. }
         | agent_task::AgentTaskCommand::Doctor(_)
         | agent_task::AgentTaskCommand::Cancel(_)
         | agent_task::AgentTaskCommand::PlacementUpdate(_)

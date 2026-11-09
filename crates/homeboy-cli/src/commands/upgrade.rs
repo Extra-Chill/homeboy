@@ -535,6 +535,7 @@ mod tests {
     fn base_upgrade_result() -> upgrade::UpgradeResult {
         upgrade::UpgradeResult {
             command: "upgrade".to_string(),
+            token_source: "none".to_owned(),
             install_method: upgrade::InstallMethod::Binary,
             previous_version: "0.228.6".to_string(),
             new_version: Some("0.228.7".to_string()),

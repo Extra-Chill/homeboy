@@ -160,7 +160,13 @@ pub fn promote_with_checkpoint(
     // resolves once here and is passed down. The interior used to receive
     // `None` and re-resolve the environment partway through (#7505).
     let observation_store = homeboy_core::observation::ObservationStore::open_initialized()?;
-    promote_with_checkpoint_in_observation_store(options, &observation_store, &mut checkpoint)
+    let mut report = promote_with_checkpoint_in_observation_store(
+        options.clone(),
+        &observation_store,
+        &mut checkpoint,
+    )?;
+    compare_operator_gate_failures(&options, &mut report, None, &observation_store)?;
+    Ok(report)
 }
 
 pub(crate) fn promote_with_checkpoint_in_observation_store(
@@ -208,7 +214,14 @@ pub fn resume_promoted_patch(
     // resolves once here and is passed down. The interior used to receive
     // `None` and re-resolve the environment partway through (#7505).
     let observation_store = homeboy_core::observation::ObservationStore::open_initialized()?;
-    resume_promoted_patch_in_observation_store(options, target_path, previous, &observation_store)
+    let mut report = resume_promoted_patch_in_observation_store(
+        options.clone(),
+        target_path,
+        previous,
+        &observation_store,
+    )?;
+    compare_operator_gate_failures(&options, &mut report, None, &observation_store)?;
+    Ok(report)
 }
 
 pub(crate) fn resume_promoted_patch_in_observation_store(
@@ -332,10 +345,11 @@ fn resume_promoted_patch_internal<'a>(
         options.source_run_id.as_deref(),
     );
     let report = AgentTaskPromotionReport {
+        candidate_ref: None,
         schema: AGENT_TASK_PROMOTION_REPORT_SCHEMA.to_string(),
         status: gates.status,
         source: promotion_source(&source_kind, &outcome, &options),
-        to_worktree: options.to_worktree,
+        to_worktree: options.to_worktree.clone(),
         target: target.clone(),
         candidate: Some(commit.clone()),
         changed_files,
@@ -359,6 +373,39 @@ fn resume_promoted_patch_internal<'a>(
         operator_notification,
     };
     Ok(report)
+}
+
+/// Operator scripts use the same immutable-base replay and recorded baseline
+/// facts as Cook's differential gates, including on direct promotion and resume.
+fn compare_operator_gate_failures(
+    options: &AgentTaskPromotionRequest,
+    report: &mut AgentTaskPromotionReport,
+    gate_workspace: Option<&Path>,
+    store: &homeboy_core::observation::ObservationStore,
+) -> Result<()> {
+    if !report.status.gate_failed() {
+        return Ok(());
+    }
+    let (Some(base), Some(root)) = (&report.verified_base, &report.target.path) else {
+        return Ok(());
+    };
+    let root = PathBuf::from(root);
+    let base_sha = base.sha.clone();
+    let workspace = promotion_gate_workspace(options, &root, gate_workspace);
+    crate::agent_task_service::compare_gate_failures_to_verified_base(
+        store,
+        report,
+        &root,
+        &workspace,
+        &base_sha,
+        options.gates.gate_timeout(),
+        options
+            .gates
+            .gate_environment
+            .admitted_component_id
+            .as_deref(),
+        |_, _| Ok(()),
+    )
 }
 
 struct ResumePromotedPatchAdmission {
@@ -794,6 +841,7 @@ fn promote_candidate(
             AgentTaskPromotionTarget::from_worktree(options.to_worktree.clone(), path.as_deref());
         let status = AgentTaskPromotionStatus::NoChanges;
         return Ok(AgentTaskPromotionReport {
+            candidate_ref: None,
             schema: AGENT_TASK_PROMOTION_REPORT_SCHEMA.to_string(),
             status,
             source: promotion_source(source_kind, outcome, options),
@@ -818,6 +866,7 @@ fn promote_candidate(
             None,
         )
     })?;
+    super::destination::check_run(&path, options.source_run_id.as_deref())?;
     let feedback = outcome.metadata.get("gate_feedback_baseline");
     super::candidate_bundle::validate_destination(&path, commit, feedback)?;
     let base_tree = git_output(
@@ -921,6 +970,7 @@ fn promote_candidate(
         .as_ref()
         .and_then(|report| report.provenance.get("gate_feedback_baseline").cloned());
     Ok(AgentTaskPromotionReport {
+        candidate_ref: None,
         schema: AGENT_TASK_PROMOTION_REPORT_SCHEMA.to_string(),
         status: gates.status,
         source: promotion_source(source_kind, outcome, options),
@@ -1468,6 +1518,7 @@ fn promote_committed_changes(
             None,
         )
     })?;
+    super::destination::check_run(&path, options.source_run_id.as_deref())?;
     validate_candidate_commit(
         &path,
         outcome.candidate.as_ref().expect("adopted candidate"),
@@ -1578,6 +1629,7 @@ fn promote_committed_changes(
     });
 
     Ok(AgentTaskPromotionReport {
+        candidate_ref: None,
         schema: AGENT_TASK_PROMOTION_REPORT_SCHEMA.to_string(),
         status: gates.status,
         source: promotion_source(source_kind, &outcome, options),
@@ -1688,14 +1740,16 @@ fn run_promotion_gates(
     // One gate round: toolchain admission and every gate command share it.
     let _identities = crate::agent_task_gate::placement::runner_identity_scope();
     let operation = || {
-        run_promotion_gates_inner(
-            options,
-            worktree_path,
-            expected_candidate,
-            committed_candidate,
-            gate_workspace,
-            observation_store,
-        )
+        crate::agent_task_gate::verdict::with_data_root(observation_store.data_root(), || {
+            run_promotion_gates_inner(
+                options,
+                worktree_path,
+                expected_candidate,
+                committed_candidate,
+                gate_workspace,
+                observation_store,
+            )
+        })
     };
     if let Some(run_id) = options.source_run_id.as_deref() {
         observation_store.time_run_phase_with_outcome(run_id, "gate", operation, |gates| {
@@ -3707,9 +3761,43 @@ fn fetch_declared_base_sha(
         })
         .unwrap_or("<not advertised>");
     if advertised_sha != sha {
+        // Preserve the immutable prepared boundary when origin fast-forwards.
+        // Delivery owns rebasing and re-verifying the candidate; never write
+        // the old SHA into the remote-tracking ref here.
+        if advertised_sha != "<not advertised>" {
+            let fetched = run_declared_base_git(
+                worktree_path,
+                git,
+                &[
+                    "fetch",
+                    "--no-tags",
+                    "--no-write-fetch-head",
+                    "origin",
+                    advertised_sha,
+                ],
+                environment,
+                base_ref,
+                "fetch",
+                timeout,
+            )?;
+            if fetched.status.success() {
+                let ancestor = run_declared_base_git(
+                    worktree_path,
+                    git,
+                    &["merge-base", "--is-ancestor", sha, advertised_sha],
+                    environment,
+                    base_ref,
+                    "verify",
+                    timeout,
+                )?;
+                if ancestor.status.success() {
+                    return Ok(());
+                }
+            }
+        }
         return Err(Error::validation_invalid_argument(
             "base_ref",
-            format!("refusing to write declared base `{base_ref}` SHA {sha}: origin advertises {advertised_sha} for {remote_ref}"),
+            format!("refusing to write declared base `{base_ref}` SHA {sha}: origin advertises {advertised_sha} for {remote_ref}; recorded base is not an ancestor of the advertised tip; start a fresh Cook"),
             None,
             None,
         ));
@@ -4180,6 +4268,7 @@ fn post_apply_report(
             .flatten()
     });
     Ok(AgentTaskPromotionReport {
+        candidate_ref: None,
         schema: AGENT_TASK_PROMOTION_REPORT_SCHEMA.to_string(),
         status,
         source: promotion_source(source_kind, outcome, options),

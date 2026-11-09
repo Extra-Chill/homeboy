@@ -880,6 +880,67 @@ fn controller_routed_git_sync_rejects_shallow_source_checkout() {
             .join("\n");
         assert!(hint_text.contains("fetch --unshallow"));
         assert!(hint_text.contains("--method source"));
+
+        let refs = git_output(&source, &["show-ref"]).unwrap();
+        fs::write(source.join("untracked.txt"), "preserve me\n").unwrap();
+        homeboy_core::git::deepen_shallow_source(&source).expect("deepen source at admission");
+        assert_eq!(git_output(&source, &["show-ref"]).unwrap(), refs);
+        assert_eq!(
+            fs::read_to_string(source.join("untracked.txt")).unwrap(),
+            "preserve me\n"
+        );
+        fs::remove_file(source.join("untracked.txt")).unwrap();
+        let (output, status) = sync_workspace(
+            "lab-local-shallow-git",
+            RunnerWorkspaceSyncOptions {
+                path: source.display().to_string(),
+                mode: RunnerWorkspaceSyncMode::Git,
+                controller_routed_git: true,
+                changed_since_base: None,
+                git_fetch_refs: Vec::new(),
+                snapshot_includes: Vec::new(),
+                allow_dirty_lab_workspace: false,
+                validation_dependency_ids: None,
+                run_isolation_token: None,
+            },
+        )
+        .expect("deepened source bundles through runner sync");
+        assert_eq!(status, 0);
+        assert_eq!(
+            git_output(
+                Path::new(&output.remote_path),
+                &["rev-list", "--count", "HEAD"]
+            )
+            .unwrap(),
+            "2"
+        );
+        let bundle = clone_parent.path().join("deepened.bundle");
+        super::super::git::validate_controller_git_bundle_source(
+            &source,
+            &super::super::control::WorkspaceControl::default(),
+        )
+        .expect("deepened source passes shared bundle preflight");
+        git(
+            &source,
+            &["bundle", "create", bundle.to_str().unwrap(), "--all"],
+        );
+        let restored = clone_parent.path().join("restored");
+        git(
+            clone_parent.path(),
+            &[
+                "clone",
+                bundle.to_str().unwrap(),
+                restored.to_str().unwrap(),
+            ],
+        );
+        assert_eq!(
+            git_output(&restored, &["rev-list", "--count", "HEAD"]).unwrap(),
+            "2"
+        );
+        assert_eq!(
+            git_output(&restored, &["rev-parse", "--is-shallow-repository"]).unwrap(),
+            "false"
+        );
     });
 }
 

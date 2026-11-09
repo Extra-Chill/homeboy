@@ -29,6 +29,7 @@ pub mod template;
 pub mod test_execution;
 pub mod test_path;
 pub mod text;
+pub mod timestamp;
 pub mod validation;
 pub mod workload_compare;
 

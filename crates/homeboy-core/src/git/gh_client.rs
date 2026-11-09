@@ -95,6 +95,14 @@ impl GhClient {
         self
     }
 
+    /// Use a fixture executable without changing the process-wide PATH.
+    #[cfg(test)]
+    pub(super) fn with_test_path(mut self, path: &std::path::Path) -> Self {
+        self.env
+            .push(("PATH".into(), path.to_string_lossy().into_owned()));
+        self
+    }
+
     pub fn host(&self) -> &str {
         &self.host
     }
@@ -188,7 +196,7 @@ impl GhClient {
         Ok(output.stdout)
     }
 
-    fn output_until(&self, args: &[&str], deadline: Instant) -> Result<Output> {
+    pub(crate) fn output_until(&self, args: &[&str], deadline: Instant) -> Result<Output> {
         if Instant::now() >= deadline {
             return Err(Error::internal_io(
                 "GitHub API deadline exhausted before invocation",

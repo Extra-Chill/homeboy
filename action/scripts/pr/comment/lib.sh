@@ -2,9 +2,23 @@
 
 set -euo pipefail
 
+is_component_matrix() {
+  # The reusable workflow's component-ci job invokes the composite action;
+  # GITHUB_JOB is inherited even though action inputs are not.
+  [ "${GITHUB_JOB:-}" = "component-ci" ] || [ -n "${COMPONENTS:-}" ]
+}
+
+differential_verdict() {
+  local file="${OUTPUT_DIR:-}/differential-comment.json"
+  [ -f "${file}" ] || return 1
+  jq -ce --arg cmd "$1" 'select(.schema == "homeboy/differential-comment/v1") | .commands[$cmd] // empty' "${file}"
+}
+
 derive_comment_key() {
   if [ -n "${COMMENT_KEY_INPUT:-}" ]; then
     printf '%s\n' "${COMMENT_KEY_INPUT}"
+  elif is_component_matrix; then
+    printf '%s\n' "${GITHUB_WORKFLOW:-homeboy}"
   else
     printf '%s\n' "${GITHUB_WORKFLOW:-homeboy}:${COMP_ID}"
   fi
@@ -21,6 +35,8 @@ PY
 
   if [ -n "${COMMENT_SECTION_KEY_INPUT:-}" ]; then
     raw_key="${COMMENT_SECTION_KEY_INPUT}"
+  elif is_component_matrix; then
+    raw_key="${COMP_ID}"
   elif [ "${command_count}" = "1" ]; then
     raw_key="$(python3 - <<'PY'
 import os
@@ -46,6 +62,8 @@ PY
 derive_section_title() {
   if [ -n "${COMMENT_SECTION_TITLE_INPUT:-}" ]; then
     printf '%s\n' "${COMMENT_SECTION_TITLE_INPUT}"
+  elif is_component_matrix; then
+    printf '%s\n' "${COMP_ID}"
   else
     python3 - <<'PY'
 import os
@@ -109,6 +127,11 @@ commands_have_actionable_status() {
     command="$(echo "${command}" | xargs)"
     [ -n "${command}" ] || continue
 
+    local verdict
+    verdict="$(differential_verdict "${command}" 2>/dev/null || true)"
+    if [ -n "${verdict}" ] && printf '%s' "${verdict}" | jq -e '(.status == "pass" or .status == "baseline_red") and .new_findings == 0' >/dev/null; then
+      continue
+    fi
     status="$(command_status "${command}")"
     if [ "${status}" != "pass" ]; then
       return 0

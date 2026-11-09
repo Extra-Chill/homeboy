@@ -260,6 +260,23 @@ pub(super) enum PrCommand {
         #[command(flatten)]
         path_args: ComponentPathArgs,
     },
+    /// Wait for green checks and merge only the exact reviewed SHA, using repository policy.
+    /// Holds report head_moved, checks_failed (with names), checks_missing,
+    /// conflicting, or timeout. Available in workflows via a homeboy step.
+    MergeWhenGreen {
+        /// GitHub repository: owner/repo or host/owner/repo
+        #[arg(long)]
+        repo: String,
+        /// Pull request number
+        #[arg(long)]
+        number: u64,
+        /// Full reviewed head commit SHA (atomically enforced by GitHub)
+        #[arg(long)]
+        sha: String,
+        /// Total wait budget in seconds (maximum 3600)
+        #[arg(long, default_value_t = 3600, value_parser = clap::value_parser!(u64).range(1..=3600))]
+        wait_seconds: u64,
+    },
     /// Explain PR merge readiness without attempting a merge
     Readiness {
         /// Component ID
@@ -305,6 +322,12 @@ pub(super) enum PrCommand {
         /// Read body from a file ("-" for stdin)
         #[arg(long, value_name = "PATH")]
         body_file: Option<String>,
+
+        /// Only publish if the PR is open and its head matches this SHA.
+        /// Closed/merged PRs or stale heads return a successful skip (exit 0).
+        /// Omit to preserve unguarded publication.
+        #[arg(long, value_name = "SHA")]
+        expected_head_sha: Option<String>,
 
         /// Sticky whole-body key (mode 2, PR #1334).
         /// Mutually exclusive with --comment-key / --section-key.

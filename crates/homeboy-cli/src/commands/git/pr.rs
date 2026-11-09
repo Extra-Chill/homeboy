@@ -94,6 +94,17 @@ pub(super) fn run_pr(args: PrArgs) -> CmdResult<GitCommandOutput> {
             )?;
             Ok((GitCommandOutput::Find(output), 0))
         }
+        PrCommand::MergeWhenGreen {
+            repo,
+            number,
+            sha,
+            wait_seconds,
+        } => {
+            let output =
+                git::pr_merge_when_green(&repo, number, &sha, Duration::from_secs(wait_seconds))?;
+            let exit = if output.merged { 0 } else { 1 };
+            Ok((GitCommandOutput::MergeWhenGreen(output), exit))
+        }
         PrCommand::Readiness {
             component_id,
             number,
@@ -109,6 +120,7 @@ pub(super) fn run_pr(args: PrArgs) -> CmdResult<GitCommandOutput> {
             number,
             body,
             body_file,
+            expected_head_sha,
             key,
             comment_key,
             section_key,
@@ -160,6 +172,7 @@ pub(super) fn run_pr(args: PrArgs) -> CmdResult<GitCommandOutput> {
                     number,
                     body,
                     mode,
+                    expected_head_sha,
                     path,
                 },
             )?;

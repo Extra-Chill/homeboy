@@ -60,7 +60,86 @@ pub fn render_pr_comment_with_banners(
         out.push_str(&render_ai_review(result));
     }
 
-    strip_terminal_escapes(&out)
+    safe_pr_comment(&out)
+}
+
+/// Bound GitHub sections and neutralize even mentions hidden in tool-supplied markdown.
+/// Protecting all @ signs here also covers malicious/unbalanced tool backticks.
+pub fn safe_pr_comment(text: &str) -> String {
+    let text = strip_terminal_escapes(text).replace('@', "@\u{200b}");
+    if text.len() <= 24_000 {
+        return text;
+    }
+    let excerpt: String = text
+        .chars()
+        .scan(0, |bytes, ch| {
+            *bytes += ch.len_utf8();
+            (*bytes <= 6_000).then_some(ch)
+        })
+        .collect();
+    format!(
+        "{}\n\nOutput truncated. See artifacts/action logs for full output.\n",
+        fenced_output(&excerpt)
+    )
+}
+
+/// Choose a fence longer than every backtick run in untrusted content.
+pub fn fenced_output(text: &str) -> String {
+    let longest = text.split(|ch| ch != '`').map(str::len).max().unwrap_or(0);
+    let fence = "`".repeat(3.max(longest + 1));
+    format!("{fence}text\n{text}\n{fence}")
+}
+
+/// Render every early review failure as markdown, not a command-result envelope.
+pub fn render_pr_comment_error(error: &homeboy_core::Error) -> String {
+    fn field<'a>(value: &'a serde_json::Value, key: &str) -> Option<&'a serde_json::Value> {
+        value.get(key).filter(|v| !v.is_null()).or_else(|| {
+            ["cause", "details"]
+                .iter()
+                .find_map(|nested| value.get(nested).and_then(|v| field(v, key)))
+        })
+    }
+    fn short(value: &str, max: usize) -> String {
+        let mut out: String = value.chars().take(max).collect();
+        if value.chars().count() > max {
+            out.push_str(" … [truncated]");
+        }
+        out
+    }
+    let details = &error.details;
+    let mut context = format!(
+        "Summary: {}\nDiagnostic: {}",
+        short(&error.message, 1500),
+        error.code.as_str()
+    );
+    for key in ["step_id", "command", "exit_code", "status"] {
+        if let Some(value) = field(details, key) {
+            let _ = write!(context, "\n{key}: {}", short(&value.to_string(), 1000));
+        }
+    }
+    let mut out = format!("❌ **Review failed**\n\n{}\n", fenced_output(&context));
+    for stream in ["stderr", "stdout"] {
+        if let Some(text) = field(details, stream).and_then(|v| v.as_str()) {
+            let lines: Vec<_> = text.lines().collect();
+            let tail = lines[lines.len().saturating_sub(40)..].join("\n");
+            // Bound single enormous lines as well as line count, keeping the tail.
+            let tail: String = tail
+                .chars()
+                .rev()
+                .take(5000)
+                .collect::<String>()
+                .chars()
+                .rev()
+                .collect();
+            let _ = write!(
+                out,
+                "\n**{stream} (last up to 40 lines; truncated excerpt)**\n\n{}\n",
+                fenced_output(&tail)
+            );
+        }
+    }
+    out.push_str("\nSee artifacts/action logs for the full output.\n");
+    safe_pr_comment(&out)
 }
 
 /// Strip CSI styling and OSC links/titles from any captured extension text.
@@ -182,7 +261,7 @@ pub fn render_ai_review(result: &super::ai::AiReviewResult) -> String {
         let _ = writeln!(out, "\n> {}", reason);
     }
     render_test_findings(&mut out, &result.findings);
-    strip_terminal_escapes(&out)
+    safe_pr_comment(&out)
 }
 
 fn stage_header_icon(stage_ran: bool, stage_passed: bool) -> &'static str {
@@ -500,6 +579,46 @@ fn render_ci_body(out: &mut String, output: &CiRunOutput) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn dependency_failure_is_bounded_mention_safe_markdown() {
+        let stderr = format!(
+            "discard-me\n{}\n`````\nnpm warn @paulirish/trace_engine@1.0 ... @sentry/core",
+            "old output\n".repeat(100)
+        );
+        let error = homeboy_core::Error::dependency_step_failed(
+            "dependency.setup",
+            "artist-platform",
+            Some(217),
+            vec![],
+            vec![],
+            None,
+            Some(
+                serde_json::json!({"command": ["deps-runner.sh", "install"], "exit_code": 217, "stderr": stderr}),
+            ),
+        );
+        let md = super::render_pr_comment_error(&error);
+        assert!(md.starts_with("❌"));
+        for text in [
+            "dependency_step_failed",
+            "dependency.setup",
+            "deps-runner.sh",
+            "217",
+            "artifacts/action logs",
+            "truncated",
+        ] {
+            assert!(md.contains(text), "missing {text}");
+        }
+        assert!(!md.contains("discard-me"));
+        assert!(!md.contains("@paulirish"));
+        assert!(!md.contains("@sentry"));
+        assert!(!md.contains("\"schema\": \"homeboy/command-result"));
+        assert!(md.contains("``````text"));
+        assert!(md.len() < 24_000);
+        let mut huge = error;
+        huge.details["cause"]["stderr"] = serde_json::json!("@stranger".repeat(100_000));
+        assert!(super::render_pr_comment_error(&huge).len() < 24_000);
+    }
+
     use super::*;
 
     use homeboy_core::ci_profile::{CiContext, CiJobRunOutput, CiRunOutput, CiRunSelection};

@@ -1,11 +1,17 @@
 mod changes;
+mod shallow;
+pub use shallow::{deepen_shallow_source, is_shallow_repository, shallow_source_remote};
 mod commits;
 mod gh_client;
 mod github;
 pub use github::cook_ci;
 pub mod github_app;
 mod github_comment_sections;
+mod mention_safety;
+pub use mention_safety::neutralize_mentions;
 mod github_pr_comments;
+mod pr_merge_when_green;
+pub use pr_merge_when_green::{pr_merge_when_green, MergeHold, MergeWhenGreenOutput};
 mod github_types;
 mod operation_output;
 mod operations;
@@ -40,8 +46,9 @@ pub use commits::{
     get_latest_remote_release_with_prefix, get_latest_tag, get_latest_tag_any_with_prefix,
     get_latest_tag_any_with_prefix_with_timeout, get_latest_tag_with_prefix,
     get_previous_tag_before_any_with_prefix, get_previous_tag_before_with_prefix,
-    recommended_bump_from_commits, strip_conventional_prefix, CommitCategory, CommitCounts,
-    CommitInfo, MonorepoContext, RemoteReleaseCoordinate, SemverBump,
+    is_conventional_subject, recommended_bump_from_commits, strip_conventional_prefix,
+    CommitCategory, CommitCounts, CommitInfo, MonorepoContext, RemoteReleaseCoordinate, SemverBump,
+    CONVENTIONAL_COMMIT_TYPES,
 };
 pub use commits::{
     extract_version_from_tag, find_version_commit_with_prefix,

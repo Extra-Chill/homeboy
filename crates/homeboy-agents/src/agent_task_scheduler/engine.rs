@@ -992,6 +992,25 @@ impl AgentTaskScheduler {
                     provider_capacity_key: scheduled.capacity_key.clone(),
                 };
 
+                // Assemble live operator context at the shared provider boundary,
+                // not in a recovery-specific plan builder or immutable recipe.
+                let feedback =
+                    match crate::agent_task_feedback::prepare_request(&mut request, &context) {
+                        Ok(feedback) => feedback,
+                        Err(error) => {
+                            let outcome =
+                                scratch_allocation_failure(task_id.clone(), error.to_string());
+                            let _ =
+                                release_scratch(&scratch, "feedback_preparation_failed", &outcome);
+                            record_completed_outcome(
+                                &mut completed_by_task,
+                                &mut outcomes,
+                                outcome,
+                            );
+                            continue;
+                        }
+                    };
+
                 if let Some(run_id) = self.run_id.as_deref() {
                     let reservation = self.durable_lifecycle_store().and_then(|store| {
                         store.reserve_provider_execution(run_id, &request, attempt)
@@ -1098,6 +1117,18 @@ impl AgentTaskScheduler {
                                     crate::agent_task_schedule::for_execution_timing(&context);
                                 let _provider =
                                     homeboy_core::observation::phase_timing::guard("provider");
+                                if let Some((store, cook_id, prepared)) = feedback {
+                                    if let Err(error) = store.acknowledge_attempt(
+                                        &cook_id,
+                                        &prepared,
+                                        context.run_id.as_deref(),
+                                    ) {
+                                        return scratch_allocation_failure(
+                                            task_id.clone(),
+                                            error.to_string(),
+                                        );
+                                    }
+                                }
                                 executor.execute(request, context)
                             }))
                             .unwrap_or_else(|_| provider_worker_panic(task_id.clone()));
@@ -1279,16 +1310,27 @@ impl AgentTaskScheduler {
                     // tasks still follow the plan's candidate-completion policy;
                     // this only prevents sequential rotation of the same task.
                     //
-                    // A stalled provider is the one exception (#14965). Unlike a
-                    // genuine timeout or provider failure, a liveness stall says
-                    // nothing about the task itself — the provider simply went
-                    // silent — so holding its patch for human review would strand
-                    // the run exactly where an operator previously had to notice
-                    // the stall and move the work to the next provider by hand.
-                    // Falling through to the ordinary rotation path instead lets
-                    // a configured rotation entry's explicit `adoption` (never
-                    // applied implicitly — see `select_candidate_adoption`) carry
-                    // that patch into the next provider.
+                    // A supervisor-confirmed liveness timeout retains the same
+                    // immutable candidate contract as a wall-clock timeout.
+                    // Other provider-reported stalls still use explicit rotation
+                    // adoption; generic error text is not timeout authority.
+                    let provider_timed_out = outcome.diagnostics.iter().any(|diagnostic| {
+                        matches!(
+                            diagnostic.class.as_str(),
+                            "agent_task.provider_timeout" | "agent_task.provider_liveness_timeout"
+                        )
+                    }) && matches!(
+                        outcome.failure_classification,
+                        Some(
+                            AgentTaskFailureClassification::Timeout
+                                | AgentTaskFailureClassification::Stalled
+                        )
+                    );
+                    if provider_timed_out && outcome.outcome_candidate().is_some() {
+                        outcome.status = AgentTaskOutcomeStatus::Timeout;
+                        outcome.failure_classification =
+                            Some(AgentTaskFailureClassification::Timeout);
+                    }
                     let candidate_ready_for_convergence = outcome.failure_classification
                         != Some(AgentTaskFailureClassification::Stalled)
                         && outcome.outcome_candidate().is_some();

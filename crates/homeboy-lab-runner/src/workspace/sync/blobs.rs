@@ -1,5 +1,5 @@
 //! Plain, verified SHA-256 files shared by materialization stages.
-use super::protocol::io;
+use super::protocol::{io, MaterializationIo};
 use super::*;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -79,7 +79,7 @@ pub(super) fn assemble(
     control: &WorkspaceControl,
 ) -> Result<()> {
     let store = store(&root.remote_path);
-    fs::create_dir_all(destination).map_err(io)?;
+    fs::create_dir_all(destination).materialization("create_dir_all", destination, "runner")?;
     let mut links = Vec::<PathBuf>::new();
     for entry in &root.manifest.entries {
         control.checkpoint()?;
@@ -96,15 +96,20 @@ pub(super) fn assemble(
             continue;
         }
         let target = destination.join(relative);
-        fs::create_dir_all(target.parent().unwrap()).map_err(io)?;
+        fs::create_dir_all(target.parent().unwrap()).materialization(
+            "create_dir_all",
+            target.parent().unwrap(),
+            "runner",
+        )?;
         if let Some(link) = &entry.symlink_target {
             #[cfg(unix)]
-            std::os::unix::fs::symlink(link, &target).map_err(io)?;
+            std::os::unix::fs::symlink(link, &target)
+                .materialization("symlink", &target, "runner")?;
             #[cfg(not(unix))]
             return Err(io("symlink materialization requires Unix"));
             links.push(relative.to_path_buf());
         } else if entry.kind == "directory" {
-            fs::create_dir_all(&target).map_err(io)?;
+            fs::create_dir_all(&target).materialization("create_dir_all", &target, "runner")?;
         } else if entry.kind == "file" {
             let digest = entry
                 .sha256
@@ -117,7 +122,7 @@ pub(super) fn assemble(
             }
             // Execution views are mutable: sharing an inode with the cache
             // would let a build corrupt later stages (including chmod).
-            fs::copy(&blob, &target).map_err(io)?;
+            fs::copy(&blob, &target).materialization("copy", &target, "runner")?;
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
@@ -125,7 +130,7 @@ pub(super) fn assemble(
                     &target,
                     fs::Permissions::from_mode(entry.mode.unwrap_or(0o644)),
                 )
-                .map_err(io)?;
+                .materialization("set_permissions", &target, "runner")?;
             }
         } else {
             return Err(io("unsupported manifest entry"));
@@ -180,7 +185,7 @@ pub(in crate::workspace) struct Source {
 
 impl Source {
     pub(in crate::workspace) fn new(path: PathBuf, digest: String) -> Result<Self> {
-        let metadata = fs::metadata(&path).map_err(io)?;
+        let metadata = fs::metadata(&path).materialization("metadata", &path, "controller")?;
         Ok(Self {
             path,
             digest,
@@ -194,7 +199,7 @@ impl Source {
         name: &Path,
         control: &WorkspaceControl,
     ) -> Result<()> {
-        let file = fs::File::open(&self.path).map_err(io)?;
+        let file = fs::File::open(&self.path).materialization("open", &self.path, "controller")?;
         let mut reader = VerifiedReader {
             file,
             hash: Sha256::new(),
@@ -205,7 +210,7 @@ impl Source {
         header.set_size(self.metadata.len());
         let streamed = archive
             .append_data(&mut header, name, &mut reader)
-            .map_err(io);
+            .materialization("archive", &self.path, "controller");
         let changed = || {
             super::super::snapshot::snapshot_construction_failure(
                 "content",
@@ -214,7 +219,8 @@ impl Source {
                 "source file changed while streaming; refusing a mixed snapshot",
             )
         };
-        let after = fs::metadata(&self.path).map_err(|_| changed())?;
+        let after =
+            fs::metadata(&self.path).materialization("metadata", &self.path, "controller")?;
         let mut stable = self.metadata.len() == after.len()
             && self.metadata.modified().ok() == after.modified().ok();
         #[cfg(unix)]
@@ -255,7 +261,11 @@ pub(in crate::workspace) fn pipe<T: Send>(
     consume: impl FnOnce(fs::File) -> Result<T>,
 ) -> Result<T> {
     use std::os::fd::{FromRawFd, IntoRawFd};
-    let (reader, writer) = std::os::unix::net::UnixStream::pair().map_err(io)?;
+    let (reader, writer) = std::os::unix::net::UnixStream::pair().materialization(
+        "create transport socket pair",
+        Path::new("<materialization stream>"),
+        "controller",
+    )?;
     let reader = unsafe { fs::File::from_raw_fd(reader.into_raw_fd()) };
     let writer = unsafe { fs::File::from_raw_fd(writer.into_raw_fd()) };
     std::thread::scope(|scope| {

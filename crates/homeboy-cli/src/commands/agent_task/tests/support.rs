@@ -34,7 +34,24 @@ pub(crate) use homeboy::agents::agent_tasks::scheduler::{
     AgentTaskAggregate, AgentTaskExecutorAdapter, AgentTaskPlan,
 };
 
-pub(crate) use crate::test_support::with_isolated_home;
+/// An isolated home where commands that queue daemon-scheduled work never
+/// spawn this test binary as the scheduling daemon (#17506).
+pub(crate) fn with_isolated_home<R>(body: impl FnOnce(&tempfile::TempDir) -> R) -> R {
+    crate::test_support::with_isolated_home(|home| {
+        // Identity tests have no linked PRs unless they install their own gh.
+        let bin = home.path().join("issue-gh-bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let original_path = std::env::var("PATH").unwrap();
+        homeboy_test_support::write_executable(&bin.join("gh"), &format!(
+            "#!/bin/sh\ncase \"$*\" in api*timeline*) printf '[[]]' ;; 'pr list'*) printf '[]' ;; *) PATH='{}' exec gh \"$@\" ;; esac\n", original_path
+        ), 0o755).unwrap();
+        let _path = homeboy::core::test_support::EnvVarGuard::set(
+            "PATH",
+            format!("{}:{}", bin.display(), original_path),
+        );
+        homeboy::agents::agent_task_service::with_scheduling_daemon_start(|| Ok(()), || body(home))
+    })
+}
 pub(crate) use homeboy::agents::agent_tasks::lifecycle::{
     self as agent_task_lifecycle, reconcile_status as lifecycle_status, AgentTaskRunRecord,
     AgentTaskRunState,

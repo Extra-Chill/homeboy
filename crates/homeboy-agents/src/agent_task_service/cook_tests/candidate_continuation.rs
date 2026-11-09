@@ -367,15 +367,65 @@ fn continue_terminal(
 #[test]
 fn candidate_recoverable_with_own_green_bound_gates_publishes() {
     with_own_green_gates(|options, _| {
-        let mut backend = CaptureBackend {
-            hydrate_run_id: Some(options.identity.initial_run_id.clone()),
+        let run = &options.identity.initial_run_id;
+        let before = persisted_promotion_for_attempt(run).unwrap().unwrap();
+        let performer = PublishCandidate(std::sync::Mutex::new(CaptureBackend {
+            hydrate_run_id: Some(run.clone()),
             ..Default::default()
-        };
-        let result = continue_terminal(&options, &mut backend).unwrap();
-        assert_eq!(result.value.status, "review_ready", "{:#?}", result.value);
-        assert_eq!(result.exit_code, 0);
-        assert_eq!(backend.create_count, 1);
-        assert!(backend.body.contains("gpt-6.1-sol"));
+        }));
+        let (report, exit) = crate::agent_task_service::recover_cook(
+            &options.identity.cook_id,
+            Default::default(),
+            &performer,
+        )
+        .unwrap();
+        assert_eq!(exit, 0, "{report:#?}");
+        assert_eq!(
+            report.step,
+            crate::agent_task_service::CookRecoveryStep::Publish
+        );
+        assert_eq!(report.result.unwrap()["status"], "review_ready");
+        let after = persisted_promotion_for_attempt(run).unwrap().unwrap();
+        assert_eq!(before.deterministic_gates, after.deterministic_gates);
+        assert_eq!(performer.0.lock().unwrap().create_count, 1);
+    });
+}
+
+#[test]
+fn live_continuation_is_visible_and_recovery_leaves_its_claim_untouched() {
+    with_own_green_gates(|options, _| {
+        let (cook, run) = (&options.identity.cook_id, &options.identity.initial_run_id);
+        let recipes = CookRecipeStore::from_current_data_root().unwrap();
+        recipes.enqueue_terminal_continuation(cook, run).unwrap();
+        let _claim = recipes.claim_continuation_for(cook, run).unwrap().unwrap();
+        let store = test_lifecycle_store();
+        let before = store.read_record(run).unwrap();
+        let status = crate::orchestration::run_from_current_environment(cook).unwrap();
+        assert_eq!(
+            status.state,
+            homeboy_control_plane_contract::ControlPlaneRunState::Running
+        );
+        assert_eq!(status.phase.as_deref(), Some("publishing"));
+        assert_eq!(status.owner.unwrap().id, std::process::id().to_string());
+        let performer = PublishCandidate(std::sync::Mutex::new(CaptureBackend::default()));
+        let (report, exit) =
+            crate::agent_task_service::recover_cook(cook, Default::default(), &performer).unwrap();
+        assert_eq!(exit, 0);
+        assert!(report.step.is_none());
+        assert_eq!(
+            report.result.unwrap()["next_action"],
+            format!("homeboy agent-task status {cook} --watch")
+        );
+        let after = store.read_record(run).unwrap();
+        assert_eq!(
+            before.metadata["cook_continuation"],
+            after.metadata["cook_continuation"]
+        );
+        assert_eq!(
+            before.metadata["cook_delivery"],
+            after.metadata["cook_delivery"]
+        );
+        assert!(!performer.0.lock().unwrap().created);
     });
 }
 
@@ -425,7 +475,7 @@ fn refused_publication_ends_the_terminal_continuation_without_regating() {
         let diagnostic = continuation["diagnostic"].as_str().unwrap();
         assert!(
             diagnostic.starts_with("publish_refused: ")
-                && diagnostic.contains("durable run must have succeeded"),
+                && diagnostic.contains("publication refused:"),
             "{diagnostic}"
         );
         let blocker = crate::agent_task_service::CookDelivery::from_run_metadata(&record.metadata)
@@ -582,8 +632,8 @@ fn every_wedged_cook_state_has_one_progressing_recovery_step() {
             match case {
                 WedgedCook::DeferredGateBeforePublish => {
                     // The recipe's own gates re-run before anything publishes.
-                    assert_eq!(plan.status, "gates_deferred", "{case:?}");
-                    assert_eq!(plan.step, CookRecoveryStep::Continue, "{case:?}");
+                    assert_eq!(plan.status, "gate_environment_unavailable", "{case:?}");
+                    assert_eq!(plan.step, CookRecoveryStep::Regate, "{case:?}");
                     // The operator alternative is admitted for the same state.
                     let (report, exit) = crate::agent_task_service::recover_cook(
                         cook,
@@ -651,6 +701,115 @@ fn every_wedged_cook_state_has_one_progressing_recovery_step() {
                     assert!(!released.step.is_none(), "{case:?}: {released:?}");
                 }
             }
+        });
+    }
+}
+
+/// #17508: recovery step selection and the publication guard apply one
+/// passing verdict to an applied candidate's gates. A proven inherited
+/// failure passes, so the step recovery selects for it publishes instead of
+/// deadlocking between a refused publish and refused replacement gates.
+#[test]
+fn applied_candidate_gate_verdicts_select_a_completing_recovery_step() {
+    use crate::agent_task_gate::{
+        AgentTaskGateBaselineComparison, AgentTaskGateDifferentialResult,
+        AgentTaskGateFailureClassification, AgentTaskGateFailureEvidence, AgentTaskGateStatus,
+    };
+    use crate::agent_task_service::CookRecoveryStep;
+    for second in [
+        AgentTaskGateStatus::AcceptedInheritedFailure,
+        AgentTaskGateStatus::Failed,
+        AgentTaskGateStatus::Succeeded,
+    ] {
+        with_own_green_gates(|options, _| {
+            let cook = &options.identity.cook_id;
+            let run = &options.identity.initial_run_id;
+            let store = test_lifecycle_store();
+            let mut promotion = persisted_promotion_for_attempt(run).unwrap().unwrap();
+            let mut gate = promotion.deterministic_gates[0].clone();
+            gate.id = format!("{}-second", gate.id);
+            gate.status = second;
+            if second != AgentTaskGateStatus::Succeeded {
+                gate.exit_code = 1;
+                gate.failure_evidence = Some(AgentTaskGateFailureEvidence {
+                    classification: AgentTaskGateFailureClassification::CandidateCode,
+                    summary: "second gate failed".to_string(),
+                    command: gate.command.join(" "),
+                    exit_code: 1,
+                    stdout_tail: String::new(),
+                    stderr_tail: String::new(),
+                    agent_feedback: String::new(),
+                    diagnostics: Vec::new(),
+                });
+            }
+            if second == AgentTaskGateStatus::AcceptedInheritedFailure {
+                gate.baseline_comparison = Some(AgentTaskGateBaselineComparison {
+                    base_ref: "main".to_string(),
+                    exit_code: 1,
+                    failure_fingerprint: "inherited".to_string(),
+                    matches_candidate_failure: true,
+                    result: AgentTaskGateDifferentialResult::BaselineRed,
+                    diagnostic: None,
+                });
+            }
+            promotion.deterministic_gates.push(gate);
+            promotion.status = AgentTaskPromotionStatus::GateFailed;
+            promotion.normalize_gate_outcome();
+            store
+                .record_promotion(run, serde_json::to_value(&promotion).unwrap())
+                .unwrap();
+            let plan = crate::agent_task_service::plan_cook_recovery(cook).unwrap();
+            if second == AgentTaskGateStatus::Failed {
+                // A real failure never selects publication; replacement gates
+                // are admitted for it.
+                assert_ne!(plan.step, CookRecoveryStep::Publish, "{second:?}: {plan:?}");
+                let (report, exit) = crate::agent_task_service::recover_cook(
+                    cook,
+                    crate::agent_task_service::CookRecoveryRequest {
+                        replace_gates: Some(crate::agent_task_service::CookReplaceGatesRequest {
+                            proof: crate::agent_task_service::CookReplacementProof::Gates(
+                                VerifyGateOptions {
+                                    verify: vec!["test \"$(cat tracked.txt)\" = promoted".into()],
+                                    ..Default::default()
+                                },
+                            ),
+                            authorize_external_proof: "operator re-runs the failed gate".into(),
+                            authorize_interrupted_rerun: None,
+                        }),
+                        ..Default::default()
+                    },
+                    &ReplacementOnlyRecoveryPerformer,
+                )
+                .unwrap();
+                assert_eq!(exit, 0, "{second:?}: {report:#?}");
+                assert_eq!(report.step, CookRecoveryStep::ReplaceGates, "{second:?}");
+                assert_eq!(report.result.unwrap()["status"], "applied", "{second:?}");
+                return;
+            }
+            assert_eq!(plan.step, CookRecoveryStep::Publish, "{second:?}: {plan:?}");
+            let sha = promotion.provenance["candidate_commit"]["candidate_sha"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            let performer = PublishCandidate(std::sync::Mutex::new(CaptureBackend {
+                hydrate_run_id: Some(run.clone()),
+                committed_sha: Some(sha),
+                ..Default::default()
+            }));
+            let (report, exit) =
+                crate::agent_task_service::recover_cook(cook, Default::default(), &performer)
+                    .unwrap();
+            assert_eq!(exit, 0, "{second:?}: {report:#?}");
+            assert_eq!(report.step, CookRecoveryStep::Publish, "{second:?}");
+            assert_eq!(
+                report.result.unwrap()["status"],
+                "review_ready",
+                "{second:?}"
+            );
+            assert!(performer.0.lock().unwrap().created, "{second:?}");
+            // The inherited failure stays recorded as evidence, not erased.
+            let stored = persisted_promotion_for_attempt(run).unwrap().unwrap();
+            assert_eq!(stored.deterministic_gates[1].status, second);
         });
     }
 }

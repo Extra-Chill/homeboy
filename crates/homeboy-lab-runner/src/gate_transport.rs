@@ -99,6 +99,7 @@ fn is_pre_handoff_configuration_error(error: &Error) -> bool {
 /// report does not replace actionable diagnostics with a generic message.
 fn lab_gate_public_error(error: &Error, artifact_ref: String) -> Error {
     let mut details = serde_json::json!({
+        "entry_path": error.details.get("entry_path"),
         "stage": error.details.get("stage"),
         "gate_disposition": error.details.get("gate_disposition"),
         "job_id": error.details.get("job_id"),
@@ -549,22 +550,9 @@ fn execute_owned(
         .ok_or_else(|| {
             Error::invalid_argument("gate.receipt", "terminal runner gate has no receipt stream")
         })?;
-    let value: serde_json::Value = serde_json::from_str(stdout).map_err(|error| {
-        Error::invalid_argument(
-            "gate.receipt",
-            format!(
-                "Lab gate stdout truncated/unparseable ({} bytes): {error}; {}",
-                stdout.len(),
-                if request.visibility
-                    == homeboy_agents::agent_tasks::gate::AgentTaskGateVisibility::Private
-                {
-                    "private terminal stderr withheld"
-                } else {
-                    "terminal stderr retained in diagnostic artifact"
-                }
-            ),
-        )
-    })?;
+    let private =
+        request.visibility == homeboy_agents::agent_tasks::gate::AgentTaskGateVisibility::Private;
+    let value: serde_json::Value = decode_gate_json("gate_stdout", stdout.as_bytes(), private)?;
     let location = value.get("data").unwrap_or(&value);
     if location.get("schema").and_then(serde_json::Value::as_str)
         != Some("homeboy/lab-gate-receipt-location/v1")
@@ -606,12 +594,7 @@ fn execute_owned(
             "terminal gate artifact content identity changed during transport",
         ));
     }
-    let mut receipt: LabGateReceipt = serde_json::from_slice(&bytes).map_err(|error| {
-        Error::invalid_argument(
-            "gate.receipt",
-            format!("invalid terminal Lab gate receipt: {error}"),
-        )
-    })?;
+    let mut receipt: LabGateReceipt = decode_gate_json("gate_receipt", &bytes, private)?;
     request.verify_receipt(&receipt)?;
     if (receipt.report.status == homeboy_agents::agent_tasks::gate::AgentTaskGateStatus::Succeeded
         || receipt
@@ -752,6 +735,46 @@ fn settle_gate_observation_failure<T>(
     }
     cancel().map_err(|error| gate_observation_error(error, job_id))?;
     observe_terminal().map_err(|error| gate_observation_error(error, job_id))
+}
+
+/// Gate payloads keep the `gate.receipt` contract; private gates withhold the
+/// payload excerpt while retaining stage, position, category and size.
+fn decode_gate_json<T: serde::de::DeserializeOwned>(
+    stage: &str,
+    payload: &[u8],
+    private: bool,
+) -> Result<T> {
+    homeboy_core::transport_json::decode(stage, payload).map_err(|decode| {
+        let mut details = decode.details;
+        if private {
+            details["payload_excerpt"] = serde_json::json!("private gate payload withheld");
+        }
+        let mut error = Error::invalid_argument(
+            "gate.receipt",
+            format!(
+                "Lab gate {stage} unparseable ({} bytes) at line {} column {}: {}",
+                payload.len(),
+                details["line"],
+                details["column"],
+                details["error"].as_str().unwrap_or("invalid JSON")
+            ),
+        );
+        error.details["transport_json"] = details;
+        error
+    })
+}
+
+#[cfg(test)]
+#[test]
+fn private_gate_decode_withholds_payload_excerpt() {
+    for private in [false, true] {
+        let error = decode_gate_json::<serde_json::Value>("gate_stdout", b"{secret-token", private)
+            .unwrap_err();
+        assert_eq!(error.details["field"], "gate.receipt");
+        assert_eq!(error.details["transport_json"]["stage"], "gate_stdout");
+        let excerpt = error.details["transport_json"]["payload_excerpt"].to_string();
+        assert_eq!(excerpt.contains("secret-token"), !private, "{excerpt}");
+    }
 }
 
 fn gate_observation_error(mut error: Error, job_id: &str) -> Error {
@@ -949,6 +972,20 @@ mod public_error_tests {
         assert_eq!(public.details["diagnostic"]["code"], error.code.as_str());
         assert_eq!(public.details["diagnostic"]["details"]["job_id"], "job-1");
         assert_eq!(public.retryable, None);
+    }
+
+    #[test]
+    fn content_refusal_preserves_workspace_relative_entry_path() {
+        let mut error = Error::validation_invalid_argument(
+            "workspace",
+            "workspace content hash refused a symlink cycle at 'tracked/cycle'",
+            Some("tracked/cycle".into()),
+            None,
+        );
+        error.details["entry_path"] = serde_json::json!("tracked/cycle");
+        let public = lab_gate_public_error(&error, "homeboy://run/x/artifact/y".into());
+        assert!(public.message.contains("tracked/cycle"));
+        assert_eq!(public.details["entry_path"], "tracked/cycle");
     }
 
     #[test]

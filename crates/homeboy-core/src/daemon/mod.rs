@@ -284,11 +284,8 @@ fn controller_job_response(value: &serde_json::Value) -> Option<&serde_json::Val
 }
 
 impl LocalControllerJobClient {
-    /// Connect only when the resident daemon runs this exact Homeboy build.
-    ///
-    /// Controller-job drivers are in-process code, so a reachable older daemon
-    /// can deserialize a request while applying stale ownership semantics. Fail
-    /// before submission instead of handing new lifecycle records to it.
+    /// Connect to the installed build, or a stale busy daemon that continues
+    /// serving until idle. An explicitly draining daemon refuses new work.
     pub fn connect_current_build() -> Result<Self> {
         // Dead-lease cleanup needs exclusive admission. Recover before taking
         // our shared guard, then retain the guarded validation below.
@@ -297,6 +294,9 @@ impl LocalControllerJobClient {
         }
         let admission_guard = acquire_daemon_admission_lock()?;
         let prior = read_status()?;
+        if daemon_draining() {
+            return Err(daemon_draining_error());
+        }
         match Self::connect() {
             Ok(mut client) => {
                 client.admission_guard = Mutex::new(Some(admission_guard));
@@ -746,7 +746,7 @@ impl LocalControllerJobClient {
 /// it to converge an existing daemon before reporting success.
 pub fn converge_current_build_idle_daemon() -> Result<bool> {
     let status = read_status()?;
-    if !status.running || status.fresh {
+    if !status.running || status.fresh || status.stale_serving() {
         return Ok(false);
     }
 
@@ -944,7 +944,43 @@ impl DaemonStatus {
     /// and freshness fields rather than an overloaded `running` field: build
     /// incompatibility must not masquerade as process death (#13621).
     pub fn admits_work(&self) -> bool {
-        self.running && self.fresh && self.reachable
+        self.running && self.reachable && !self.draining() && (self.fresh || self.stale_serving())
+    }
+
+    fn draining(&self) -> bool {
+        self.freshness.lease_id.as_deref().is_some_and(|lease| {
+            drain_path()
+                .ok()
+                .and_then(|path| std::fs::read_to_string(path).ok())
+                .is_some_and(|marker| marker == lease)
+        })
+    }
+
+    /// A busy old build remains a serving execution plane until idle.
+    pub fn stale_serving(&self) -> bool {
+        self.running
+            && self.reachable
+            && !self.draining()
+            && !self.fresh
+            && self.freshness.active_jobs > 0
+            && matches!(
+                self.freshness.stale_reason_code,
+                Some(
+                    DaemonStaleReasonCode::VersionMismatch
+                        | DaemonStaleReasonCode::BuildIdentityMismatch
+                        | DaemonStaleReasonCode::ExecutableReplaced
+                )
+            )
+    }
+
+    /// Structured admission evidence shared by status and Cook.
+    pub fn admission_report(&self) -> serde_json::Value {
+        json!({
+            "state": if self.draining() { "draining" } else if self.stale_serving() { "stale_serving" } else if self.admits_work() { "serving" } else { "unavailable" },
+            "daemon_version": self.freshness.daemon_version,
+            "active_jobs": self.freshness.active_jobs,
+            "summary": self.render_summary(),
+        })
     }
 
     /// The service manager that owns the live daemon, if one does. Only that
@@ -958,7 +994,21 @@ impl DaemonStatus {
 
     /// Render [`DaemonStatus::summary`] from the status's own evidence.
     pub fn render_summary(&self) -> String {
-        let mut summary = if self.running && self.reachable {
+        let mut summary = if self.draining() {
+            format!(
+                "daemon draining: {} active jobs, replaces when idle",
+                self.freshness.active_jobs
+            )
+        } else if self.stale_serving() {
+            format!(
+                "stale_serving: daemon v{}, {} active jobs, replaces when idle",
+                self.freshness
+                    .daemon_version
+                    .as_deref()
+                    .unwrap_or("unknown"),
+                self.freshness.active_jobs
+            )
+        } else if self.running && self.reachable {
             if self.freshness.stale_reason_code == Some(DaemonStaleReasonCode::VersionMismatch) {
                 format!(
                     "daemon process is live and its API is reachable; live daemon from an older build ({}), with {} active job(s); replacement planned when idle",
@@ -1858,6 +1908,26 @@ where
     }
     let _ = daemon_runtime_snapshot();
     let loopback_bind = local_addr.ip().is_loopback();
+    refresh_daemon_freshness_snapshot(&job_store);
+    let (health_shutdown_tx, health_shutdown_rx) = mpsc::channel();
+    let health_store = job_store.clone();
+    let health_updater = std::thread::spawn(move || {
+        let mut revision = health_store.health_revision.load(Ordering::Acquire);
+        let mut refreshed = Instant::now();
+        loop {
+            if health_shutdown_rx.recv_timeout(Duration::from_millis(100))
+                != Err(mpsc::RecvTimeoutError::Timeout)
+            {
+                return;
+            }
+            let current = health_store.health_revision.load(Ordering::Acquire);
+            if current != revision || refreshed.elapsed() >= Duration::from_secs(5) {
+                refresh_daemon_freshness_snapshot(&health_store);
+                revision = current;
+                refreshed = Instant::now();
+            }
+        }
+    });
 
     let (local_shutdown_tx, local_shutdown_rx) = mpsc::channel();
     let (completion_shutdown_tx, completion_shutdown_rx) = mpsc::channel();
@@ -1906,6 +1976,11 @@ where
     let mut accepted = 0;
     let mut serve_result = Ok(());
     loop {
+        if daemon_draining()
+            && daemon_freshness_report(&job_store).is_ok_and(|report| report.active_jobs == 0)
+        {
+            break;
+        }
         if shutdown
             .as_ref()
             .is_some_and(|flag| flag.load(Ordering::Acquire))
@@ -1960,9 +2035,10 @@ where
     }
 
     drop(connection_tx);
-    let shutdown_requested = shutdown
-        .as_ref()
-        .is_some_and(|flag| flag.load(Ordering::Acquire));
+    let shutdown_requested = daemon_draining()
+        || shutdown
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::Acquire));
     // One budget covers the connection workers and the helpers, so a stop
     // never waits on back-to-back drains.
     let drain_deadline = Instant::now() + HELPER_DRAIN_DEADLINE;
@@ -1998,12 +2074,14 @@ where
         }
     }
 
+    let _ = health_shutdown_tx.send(());
     let _ = local_shutdown_tx.send(());
     let _ = completion_shutdown_tx.send(());
     let _ = orchestration_shutdown_tx.send(());
     let _ = work_intent_shutdown_tx.send(());
     let _ = lifetime_shutdown_tx.send(());
     let mut helpers = vec![
+        ("health-snapshot-updater", health_updater),
         ("local-child-reservation-reconciler", local_child_reconciler),
         ("completion-notifier", completion_notifier),
         ("orchestration-reconciler", orchestration_reconciler),
@@ -2035,7 +2113,14 @@ where
             resource_evidence:
                 "unavailable: foreground shutdown does not collect OS resource snapshots"
                     .to_string(),
-            os_evidence: "graceful shutdown requested by SIGINT or SIGTERM".to_string(),
+            os_evidence: self_stop_guards
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .as_ref()
+                .map_or_else(
+                    || "graceful shutdown requested by SIGINT or SIGTERM".to_string(),
+                    |stop| stop.reason.os_evidence(),
+                ),
             stop_requested: true,
         })?;
         if clean {
@@ -2619,6 +2704,36 @@ fn route_with_job_store_and_body_and_runner_and_auth<R>(
 where
     R: AnalysisJobRunner,
 {
+    if method == "POST"
+        && daemon_draining()
+        && matches!(
+            path.split('?').next().unwrap_or(path),
+            "/jobs"
+                | "/exec"
+                | "/controller/jobs"
+                | "/runner/jobs"
+                | "/admissions"
+                | "/v1/control-plane/runs"
+        )
+    {
+        return error_response(503, daemon_draining_error());
+    }
+    // Health must never reconcile or inspect the job ledger on a request worker.
+    if method == "GET" && path.split('?').next() == Some("/health") {
+        return HttpResponse {
+            status_code: 200,
+            body: json!({
+                "status": "ok",
+                "pid": std::process::id(),
+                "version": VERSION,
+                "build_identity": build_identity::current(),
+                "lease": heartbeat_lease().ok(),
+                "freshness": job_store.daemon_freshness_snapshot.lock()
+                    .expect("health snapshot lock").clone(),
+            }),
+            artifact: None,
+        };
+    }
     if let Err(error) = job_store.reconcile_expired_local_child_reservations() {
         return error_response(500, error);
     }
@@ -2635,18 +2750,6 @@ where
             },
             Err(err) => error_response(503, err),
         },
-        ("GET", "/health") => HttpResponse {
-            status_code: 200,
-            body: json!({
-                "status": "ok",
-                "pid": std::process::id(),
-                "version": VERSION,
-                "build_identity": build_identity::current(),
-                "lease": heartbeat_lease().ok(),
-                "freshness": daemon_freshness_report(job_store).ok(),
-            }),
-            artifact: None,
-        },
         ("GET", "/version") => HttpResponse {
             status_code: 200,
             body: json!({
@@ -2660,6 +2763,15 @@ where
             }),
             artifact: None,
         },
+        ("GET", "/capacity") => daemon_endpoint_response(
+            "daemon.capacity",
+            json!({
+                "capacity": crate::lab_capacity::observe(None),
+                "queued_steps": crate::lab_capacity::queued_steps(),
+                "queued_work": job_store.active_runner_jobs().into_iter()
+                    .filter(|job| job.status == JobStatus::Queued).collect::<Vec<_>>(),
+            }),
+        ),
         ("GET", "/capabilities") => daemon_endpoint_response(
             "daemon.capabilities",
             json!({
@@ -3745,6 +3857,16 @@ fn validate_lifecycle_stop_request(request: &LifecycleStopRequest) -> Result<()>
     Ok(())
 }
 
+fn refresh_daemon_freshness_snapshot(job_store: &JobStore) {
+    // Do the expensive recovery scan without holding the reader's lock. An
+    // unavailable validation must clear old evidence rather than serve it fresh.
+    let report = daemon_freshness_report(job_store).ok();
+    *job_store
+        .daemon_freshness_snapshot
+        .lock()
+        .expect("health snapshot lock") = report;
+}
+
 fn daemon_freshness_report(job_store: &JobStore) -> Result<DaemonFreshnessReport> {
     let path = state_path()?;
     let validation = validate_lease_file(&path)?;
@@ -4369,6 +4491,9 @@ fn enqueue_exec_request(
             existing_job,
             move |job| {
                 let mut plan = plan;
+                if let Some(limit) = plan.concurrency_limit {
+                    plan.env.insert("HOMEBOY_LAB_CONCURRENCY_LIMIT".to_string(), limit.to_string());
+                }
                 if let (Some(lease), Some(claim_store)) = (
                     workspace_owner_lease.as_ref(),
                     workspace_owner_claim_store.as_ref(),
@@ -6201,6 +6326,40 @@ mod tests {
     }
 
     #[test]
+    fn health_serves_snapshot_without_recovery_or_reconciliation() {
+        with_isolated_home(|_| {
+            write_test_lease("lease-health");
+            let store = JobStore::default();
+            for _ in 0..64 {
+                reserve_admission(
+                    Some(json!({
+                        "runner_id": "lab",
+                        "command": "homeboy generic-workload",
+                        "expected_daemon_lease_id": "lease-health",
+                        "admission_lease_protocol": 1,
+                    })),
+                    &store,
+                )
+                .expect("reservation");
+            }
+            let computed = serde_json::to_value(daemon_freshness_report(&store).unwrap()).unwrap();
+            refresh_daemon_freshness_snapshot(&store);
+            assert_eq!(computed["active_jobs"], 64);
+            let response = route_with_job_store("GET", "/health", &store);
+            assert_eq!(response.body["freshness"], computed);
+            // Clearing the cached evidence must not trigger an on-demand scan.
+            *store.daemon_freshness_snapshot.lock().unwrap() = None;
+            let response = route_with_job_store("GET", "/health", &store);
+            assert!(response.body["freshness"].is_null());
+            refresh_daemon_freshness_snapshot(&store);
+            assert_eq!(
+                route_with_job_store("GET", "/health", &store).body["freshness"],
+                computed
+            );
+        });
+    }
+
+    #[test]
     fn admission_reservation_blocks_daemon_replacement_until_released() {
         with_isolated_home(|_| {
             let lease_id = "lease-admission";
@@ -6317,6 +6476,32 @@ mod tests {
                     .active_jobs,
                 1
             );
+        });
+    }
+
+    #[test]
+    fn daemon_recover_drain_preserves_protected_jobs_and_refuses_admission() {
+        with_isolated_home(|_| {
+            write_test_lease("drain-test-lease");
+            let store = JobStore::open_without_reconciliation(paths::observation_db().unwrap())
+                .unwrap()
+                .with_daemon_lease("drain-test-lease".to_string());
+            let protected = store.create("runner.exec");
+            store.start(protected.id).unwrap();
+            drain_then_replace("drain-test-lease").unwrap();
+            assert!(daemon_draining());
+            let response = route_with_job_store("POST", "/controller/jobs", &store);
+            assert_eq!(response.status_code, 503);
+            assert!(response.body.to_string().contains("daemon_draining"));
+            assert!(with_daemon_job_admission(|| Ok(())).is_err());
+            assert_eq!(store.active_runner_jobs().len(), 1);
+            assert_eq!(
+                store.active_runner_jobs()[0].job_id,
+                protected.id.to_string()
+            );
+            // A replacement lease cannot inherit a previous generation's drain.
+            write_test_lease("replacement-lease");
+            assert!(!daemon_draining());
         });
     }
 
@@ -8578,8 +8763,58 @@ fn daemon_admission_fence_timeout_error_at(path: &Path, wait: Duration) -> Error
     error
 }
 
+fn daemon_draining_error() -> Error {
+    let mut error = Error::validation_invalid_argument(
+        "daemon_draining",
+        "daemon is draining; run homeboy daemon ensure-running after it becomes idle",
+        None,
+        None,
+    );
+    error.details["classification"] = json!("daemon_draining");
+    error
+}
+
+fn drain_path() -> Result<std::path::PathBuf> {
+    Ok(state_path()?.with_extension("drain"))
+}
+
+fn daemon_draining() -> bool {
+    let Ok(path) = drain_path() else { return false };
+    let Ok(lease) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    validate_lease_file(&match state_path() {
+        Ok(path) => path,
+        Err(_) => return false,
+    })
+    .ok()
+    .and_then(|validation| validation.state)
+    .is_some_and(|state| state.lease_id == lease)
+}
+
+/// Lease-bound drain: no signals are sent and protected jobs remain owned.
+pub fn drain_then_replace(lease_id: &str) -> Result<()> {
+    let _fence = try_acquire_daemon_job_admission_fence()?.ok_or_else(|| {
+        Error::internal_unexpected("daemon admission busy; retry homeboy daemon recover")
+    })?;
+    let state = validate_lease_file(&state_path()?)?
+        .state
+        .ok_or_else(|| Error::internal_unexpected("no daemon lease"))?;
+    if state.lease_id != lease_id {
+        return Err(Error::internal_unexpected(
+            "daemon lease changed before drain",
+        ));
+    }
+    std::fs::write(drain_path()?, lease_id).map_err(|error| {
+        Error::internal_io(error.to_string(), Some("request daemon drain".to_string()))
+    })
+}
+
 pub(super) fn with_daemon_job_admission<T>(operation: impl FnOnce() -> Result<T>) -> Result<T> {
     let _guard = acquire_daemon_admission_lock()?;
+    if daemon_draining() {
+        return Err(daemon_draining_error());
+    }
     operation()
 }
 

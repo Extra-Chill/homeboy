@@ -45,6 +45,13 @@ mod outputs {
         pub base: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         pub head: Option<String>,
+        /// Why guarded comment publication was skipped (a successful no-op).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub skip_reason: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub expected_head_sha: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub current_head_sha: Option<String>,
         /// Canonical comment id (sectioned flow). Omitted otherwise.
         #[serde(skip_serializing_if = "Option::is_none")]
         pub comment_id: Option<u64>,

@@ -159,6 +159,7 @@ pub(super) fn run_materialized_provider_command(
             }
             outcome.metadata["served_models"] = json!(served_models);
         }
+        classify_environment_stop(&mut outcome);
         classify_provider_policy_denial(request, &mut outcome);
         classify_structured_runtime_failure(
             &mut outcome,
@@ -286,6 +287,62 @@ fn outcome_is_transient(outcome: &AgentTaskOutcome) -> bool {
 /// A provider policy rejecting a controller-projected evidence path is an
 /// execution-environment contract failure, not a task failure. Mark it
 /// explicitly so scheduler retry policy terminates without spending retries.
+/// A terminal provider report about a broken execution environment is not a
+/// substantive no-change candidate. Do not classify recovered tool errors from
+/// earlier turns: only the surfaced terminal report is authoritative here.
+fn classify_environment_stop(outcome: &mut AgentTaskOutcome) {
+    // A produced patch is never discarded on the strength of provider prose;
+    // only a stop without a candidate can be an environment failure.
+    if outcome.candidate.is_some() {
+        return;
+    }
+    // A provider that explicitly completed despite a recovered tool error is
+    // not an environment-caused stop.
+    if outcome
+        .outputs
+        .to_string()
+        .contains("\"completion\":\"complete\"")
+    {
+        return;
+    }
+    let report = format!(
+        "{} {} {}",
+        outcome.summary.as_deref().unwrap_or_default(),
+        outcome.outputs,
+        outcome
+            .diagnostics
+            .iter()
+            .map(|d| d.message.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    let lower = report.to_ascii_lowercase();
+    let unusable_tool = lower.contains("exec format error")
+        || lower.contains("cannot execute binary file")
+        || (lower.contains("exit 126") && lower.contains("tool"));
+    let missing_base = lower.contains("origin/")
+        && (lower.contains("unknown revision")
+            || lower.contains("ambiguous argument")
+            || lower.contains("missing declared base")
+            || lower.contains("bad revision"));
+    if !unusable_tool && !missing_base {
+        return;
+    }
+    outcome.status = AgentTaskOutcomeStatus::Failed;
+    outcome.failure_classification = Some(AgentTaskFailureClassification::CapabilityMissing);
+    if !outcome.metadata.is_object() {
+        outcome.metadata = json!({});
+    }
+    outcome.metadata["environment_setup_failure"] = json!(true);
+    let runner = std::env::var("HOMEBOY_RUNNER_ID").unwrap_or_else(|_| "<runner>".into());
+    outcome.metadata["next_action"] = json!(format!("homeboy runner doctor {runner}"));
+    outcome.diagnostics.push(AgentTaskDiagnostic {
+        class: "agent_task.environment_setup_failure".into(),
+        message: "Provider stopped because its runner environment is unusable.".into(),
+        data: json!({"next_action": format!("homeboy runner doctor {runner}"), "phase": "environment_setup"}),
+    });
+}
+
 fn classify_provider_policy_denial(
     request: &AgentTaskExecutorRequest,
     outcome: &mut AgentTaskOutcome,
@@ -971,6 +1028,8 @@ pub(super) fn run_materialized_provider_command_once(
     let last_progress_ms: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
     let mut runtime_progress = runtime_progress_snapshot(&request.artifacts_path);
     let mut runtime_progress_events = 0_u64;
+    let mut last_heartbeat_ms = None::<u64>;
+    let mut observed_output_progress_ms = 0_u64;
     // Only sampled when the workspace root is known; a provider running
     // without a declared workspace (e.g. a preflight or repo-less task) keeps
     // relying on process output and artifacts-path progress alone.
@@ -1075,8 +1134,10 @@ pub(super) fn run_materialized_provider_command_once(
                 }
                 let elapsed = started.elapsed();
                 let elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
-                let mut progressed = false;
-                let mut workspace_progressed = false;
+                let output_progress_ms = last_progress_ms.load(Ordering::SeqCst);
+                let mut progressed = output_progress_ms > observed_output_progress_ms;
+                observed_output_progress_ms = output_progress_ms;
+                let mut progress_source = "runtime_output";
                 // Liveness is judged at this pass's observation instant, never
                 // after the samples below: on macOS each one forks `ps` and the
                 // workspace sample forks `git` twice, and charging that monitor
@@ -1095,17 +1156,15 @@ pub(super) fn run_materialized_provider_command_once(
                     runtime_progress_events = runtime_progress_events.saturating_add(1);
                 }
                 runtime_progress = current_runtime_progress;
-                // Liveness is the only consumer of the workspace signal, so it
-                // is only worth the `git` fork when a liveness deadline is
-                // actually in force and due for a fresh sample.
-                if liveness_timeout.is_some()
-                    && (liveness_expiring || elapsed_ms >= next_workspace_progress_check_ms)
-                {
+                // Sample even without a liveness deadline: status heartbeats
+                // also consume workspace and descendant activity evidence.
+                if liveness_expiring || elapsed_ms >= next_workspace_progress_check_ms {
                     next_workspace_progress_check_ms =
                         elapsed_ms.saturating_add(workspace_progress_check_interval_ms);
                     let current_activity = child.descendant_activity();
                     if current_activity.advanced_since(&descendant_activity) {
                         progressed = true;
+                        progress_source = "descendant_activity";
                         descendant_activity_events = descendant_activity_events.saturating_add(1);
                     }
                     descendant_activity = current_activity;
@@ -1116,7 +1175,7 @@ pub(super) fn run_materialized_provider_command_once(
                             &current_workspace_progress,
                         ) {
                             progressed = true;
-                            workspace_progressed = true;
+                            progress_source = "workspace_activity";
                             workspace_progress_events = workspace_progress_events.saturating_add(1);
                         }
                         workspace_progress = current_workspace_progress;
@@ -1124,15 +1183,18 @@ pub(super) fn run_materialized_provider_command_once(
                 }
                 if progressed {
                     last_progress_ms.store(elapsed_ms, Ordering::SeqCst);
+                    observed_output_progress_ms = elapsed_ms;
                 }
-                if workspace_progressed {
+                if progressed && last_heartbeat_ms.is_none_or(|last| elapsed_ms.saturating_sub(last) >= 30_000) {
                     if let Some(run_id) = run_id {
-                        let _ = crate::agent_task_lifecycle::record_provider_execution_workspace_activity(
+                        let _ = crate::agent_task_lifecycle::record_provider_execution_progress(
                             run_id,
                             &request.request.task_id,
                             attempt,
+                            progress_source,
                         );
                     }
+                    last_heartbeat_ms = Some(elapsed_ms);
                 }
                 if elapsed >= kill_at(current_deadline_ms) {
                     // A starved loop can first observe both deadlines on the
@@ -1181,13 +1243,16 @@ pub(super) fn run_materialized_provider_command_once(
                     let remaining_liveness = liveness_timeout.saturating_sub(progress_age);
                     let sleep_for = remaining_liveness
                         .min(kill_at(current_deadline_ms).saturating_sub(elapsed))
-                        .min(Duration::from_millis(50));
+                        .min(Duration::from_millis(250));
                     if sleep_for > Duration::ZERO {
                         std::thread::sleep(sleep_for);
                     }
                     continue;
                 }
-                std::thread::sleep(Duration::from_millis(10));
+                std::thread::sleep(
+                    Duration::from_millis(250)
+                        .min(kill_at(current_deadline_ms).saturating_sub(elapsed)),
+                );
             }
             Err(_) => break (None, false, false, false),
         }

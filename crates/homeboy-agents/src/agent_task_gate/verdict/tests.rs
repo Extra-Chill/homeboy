@@ -110,9 +110,38 @@ fn retry_executes_failed_gate_but_reuses_agent_pass() {
     );
     fs::write(repo.path().join("source"), "new tree").unwrap();
     assert!(!run(&pass, 1).verdict.unwrap().reused);
+    assert!(!run(&fail, 2).verdict.unwrap().reused);
     assert_eq!(
         fs::read_to_string(&passed_count).unwrap().lines().count(),
         2
+    );
+    assert_eq!(
+        fs::read_to_string(&failed_count).unwrap().lines().count(),
+        3
+    );
+    // Changed invocations and declared environments must execute, not borrow
+    // the passing receipt for the current tree.
+    assert!(!run(&format!("{pass}; true"), 1).verdict.unwrap().reused);
+    let mut changed_policy = policy.clone();
+    changed_policy
+        .variables
+        .insert("INPUT".into(), "changed".into());
+    let changed_environment = run_gate_command_with_supervision(
+        repo.path(),
+        1,
+        &pass,
+        AgentTaskGateVisibility::Visible,
+        AgentTaskGateRevealPolicy::FullEvidence,
+        None,
+        None,
+        &changed_policy,
+        &[],
+    )
+    .unwrap();
+    assert!(!changed_environment.verdict.unwrap().reused);
+    assert_eq!(
+        fs::read_to_string(&passed_count).unwrap().lines().count(),
+        4
     );
 }
 

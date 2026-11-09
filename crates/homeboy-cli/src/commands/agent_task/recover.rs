@@ -66,6 +66,7 @@ fn recovery_request(mut args: RecoverArgs) -> homeboy::core::Result<CookRecovery
     };
     Ok(CookRecoveryRequest {
         preflight: args.preflight,
+        regate: args.regate,
         overrides,
         replace_gates,
         corrected_gates,
@@ -217,6 +218,26 @@ mod tests {
 
     use crate::cli_surface::{Cli, Commands};
     use crate::commands::agent_task::AgentTaskCommand;
+
+    #[test]
+    fn recover_regate_reaches_the_service_request_with_or_without_preflight() {
+        for preflight in [false, true] {
+            let mut argv = vec!["homeboy", "agent-task", "recover", "cook-1", "--regate"];
+            if preflight {
+                argv.push("--preflight");
+            }
+            let cli = Cli::try_parse_from(argv).unwrap();
+            let Commands::AgentTask(task) = cli.command else {
+                panic!("agent-task")
+            };
+            let AgentTaskCommand::Recover(args) = task.command else {
+                panic!("recover")
+            };
+            let request = super::recovery_request(args).unwrap();
+            assert!(request.regate);
+            assert_eq!(request.preflight, preflight);
+        }
+    }
 
     #[test]
     fn recover_parses_its_id_and_preflight() {

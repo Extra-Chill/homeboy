@@ -13,6 +13,12 @@ fn main() -> std::process::ExitCode {
     if args.get(1).map(String::as_str) == Some("__homeboy_status_probe") {
         return homeboy::commands::status::run_status_probe_child(args.get(2));
     }
+    if args.get(1).map(String::as_str) == Some(homeboy_core::extension::runtime_json::CHILD_COMMAND)
+    {
+        return homeboy::commands::runtime_json::run_runtime_json_child(
+            args.get(2..).unwrap_or_default(),
+        );
+    }
     if let Some(exit_code) = homeboy::cli_runtime::run_update_help_fast_path(&args) {
         return exit_code;
     }

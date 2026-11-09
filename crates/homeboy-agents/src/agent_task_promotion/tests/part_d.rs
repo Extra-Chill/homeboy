@@ -669,6 +669,7 @@ fn explicit_candidate_rejections_leave_target_unmodified() {
 fn promotion_report_serializes_generic_command_evidence() {
     let _home = gate_home();
     let report = AgentTaskPromotionReport {
+        candidate_ref: None,
         schema: AGENT_TASK_PROMOTION_REPORT_SCHEMA.to_string(),
         status: AgentTaskPromotionStatus::Applied,
         source: AgentTaskPromotionSource {

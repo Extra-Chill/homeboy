@@ -32,6 +32,8 @@ pub enum CookRecoveryStep {
     /// Continue the Cook from its durable recipe. This also
     /// materializes a recipe-only attempt whose lifecycle record is absent.
     Continue,
+    /// Re-run the recorded gates on the existing candidate, then publish.
+    Regate,
     /// Rearm the attempt's failed terminal continuation.
     Rearm,
     /// Reserve and run a fresh successor attempt (`retry --run`).
@@ -67,6 +69,7 @@ impl CookRecoveryStep {
     pub fn action_name(&self) -> Option<&'static str> {
         Some(match self {
             Self::Continue => "resume",
+            Self::Regate => "regate",
             Self::Rearm => "rearm",
             Self::Retry => "retry",
             Self::ForkReplacement => "fork_replacement",
@@ -149,6 +152,7 @@ pub(crate) struct CookRecoveryInputs<'a> {
     /// The attempt's applied candidate failed (or never completed) its
     /// deterministic gates and holds no replacement proof yet.
     pub applied_gate_failure: bool,
+    pub regate_ready: bool,
     /// Applied, verified candidate with no publication receipt. Gates are
     /// never replayed for it (#16441).
     pub verified_unpublished: bool,
@@ -209,6 +213,9 @@ pub(crate) fn cook_recovery_step(inputs: &CookRecoveryInputs<'_>) -> CookRecover
         }
         return CookRecoveryStep::Publish;
     }
+    if inputs.regate_ready && !status_is_settled(&status) {
+        return CookRecoveryStep::Regate;
+    }
     // A stale destination checkpoint cannot authorize replacing a verified
     // candidate. Publication validates and uses its immutable candidate commit.
     if inputs.exact_checkpoint_candidate_mismatch && inputs.retry_admitted {
@@ -225,6 +232,12 @@ pub(crate) fn cook_recovery_step(inputs: &CookRecoveryInputs<'_>) -> CookRecover
                 candidate_ref: candidate_ref.to_string(),
             };
         }
+    }
+    if status == CookStatus::PreExecutionFailure && inputs.applied_gate_failure {
+        // Gate infrastructure can fail before a gate executes, after the
+        // provider candidate was applied. Continue that candidate, not provider
+        // execution; the recipe retains its admitted gate runner.
+        return continuation_step(inputs);
     }
     if status == CookStatus::PreExecutionFailure {
         if inputs.retry_admitted {
@@ -387,6 +400,8 @@ impl CookPublishRequest {
 pub struct CookRecoveryRequest {
     /// Report (and validate read-only) the step instead of performing it.
     pub preflight: bool,
+    /// Re-verify the newest candidate-bearing attempt without provider work.
+    pub regate: bool,
     /// Explicit successor-attempt overrides.
     pub overrides: CookRecoveryOverrides,
     /// Inputs for [`CookRecoveryStep::ReplaceGates`]. Supplying them selects
@@ -448,6 +463,38 @@ pub trait CookRecoveryPerformer {
                 .map_err(|error| Error::internal_json(error.to_string(), None))?,
             0,
         ))
+    }
+    /// Re-run the durable deterministic gates without a provider attempt.
+    fn regate(&self, run_id: &str) -> Result<(Value, i32)> {
+        if super::cook_promotion::persisted_promotion_for_attempt(run_id)?
+            .is_some_and(|promotion| promotion.applied_with_passing_verdict())
+        {
+            return self.publish(run_id, &CookPublishRequest::default(), false);
+        }
+        let recipe = super::load_recipe_for_attempt(run_id)?.ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "regate",
+                "candidate has no recipe",
+                Some(run_id.into()),
+                None,
+            )
+        })?;
+        let gates = serde_json::from_value(recipe.gate_policy)
+            .map_err(|error| Error::internal_json(error.to_string(), None))?;
+        let report = super::verify_replacement_gates(
+            run_id,
+            gates,
+            "recover regate recorded deterministic gates".into(),
+            None,
+        )?;
+        if !report.finalization_eligible() {
+            return Ok((
+                serde_json::to_value(report)
+                    .map_err(|error| Error::internal_json(error.to_string(), None))?,
+                1,
+            ));
+        }
+        self.publish(run_id, &CookPublishRequest::default(), false)
     }
     /// Publish (or with `preflight`, validate publication of) the verified
     /// candidate of `run_id`.
@@ -564,7 +611,8 @@ pub fn plan_cook_recovery(id: &str) -> Result<CookRecoveryPlan> {
     // does verification of an applied candidate whose gates failed, deferred
     // or never completed: publication refuses that candidate, so selecting
     // it would deadlock recovery on a guaranteed refusal (#17494).
-    if plan.step != CookRecoveryStep::Reconcile
+    if !CookStatus::from_status(&plan.status).is_in_flight()
+        && plan.step != CookRecoveryStep::Reconcile
         && super::manual_finalization_publication_pending(&plan.run_id)
         && !super::applied_candidate_awaits_verification(&plan.run_id)
     {
@@ -664,9 +712,10 @@ pub fn recover_cook(
 ) -> Result<(CookRecoveryReport, i32)> {
     let CookRecoveryRequest {
         preflight,
+        regate,
         overrides,
-        replace_gates,
-        corrected_gates,
+        mut replace_gates,
+        mut corrected_gates,
         publish,
     } = request;
     if let Some(ci) = super::cook_ci::cook_ci_status(id)? {
@@ -708,6 +757,112 @@ pub fn recover_cook(
         ));
     }
     let mut plan = plan_cook_recovery(id)?;
+    if regate {
+        let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
+        let fenced = store
+            .read_cook_index(&plan.cook_id)
+            .is_ok_and(|index| index.cancellation_fence.is_some());
+        if fenced
+            || CookStatus::from_status(&plan.status).is_in_flight()
+            || plan.step == CookRecoveryStep::Reconcile
+        {
+            return Err(Error::validation_invalid_argument(
+                "regate",
+                "Cook is fenced, in flight, or has a held claim",
+                Some(id.into()),
+                None,
+            ));
+        }
+        if !overrides.is_empty()
+            || replace_gates.is_some()
+            || corrected_gates.is_some()
+            || !publish.is_empty()
+        {
+            return Err(Error::validation_invalid_argument(
+                "regate",
+                "regate cannot be combined with other recovery inputs",
+                Some(id.into()),
+                None,
+            ));
+        }
+        let recipe = super::load_recipe(id)
+            .or_else(|error| super::load_recipe_for_attempt(id)?.ok_or(error))?;
+        let candidate = recipe
+            .attempts
+            .iter()
+            .rev()
+            .find(|attempt| {
+                if id != recipe.cook_id && id != attempt.run_id {
+                    return false;
+                }
+                super::cook_promotion::persisted_promotion_for_attempt(&attempt.run_id)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|promotion| promotion.candidate.is_some())
+            })
+            .ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "regate",
+                    "no candidate-bearing attempt",
+                    Some(id.into()),
+                    None,
+                )
+            })?;
+        plan.run_id = candidate.run_id.clone();
+        let record = agent_task_lifecycle::exact_record(&plan.run_id)?;
+        if record.metadata.get("cancellation_fence").is_some()
+            || record.metadata.get("candidate_retirement").is_some()
+        {
+            return Err(Error::validation_invalid_argument(
+                "regate",
+                "candidate is retired",
+                Some(plan.run_id),
+                None,
+            ));
+        }
+        plan.status = cook_recovery_status(&record);
+        plan.step = CookRecoveryStep::Regate;
+    }
+    // Ownership wins over every operator override and manual publication intent.
+    // Report the durable claim and progress without touching admission or gates.
+    let live_record = agent_task_lifecycle::exact_record(&plan.run_id).ok();
+    if let Some((record, owner)) = live_record
+        .as_ref()
+        .and_then(|record| super::live_cook_continuation(record).map(|owner| (record, owner)))
+    {
+        return Ok((
+            CookRecoveryReport {
+                schema: COOK_RECOVERY_SCHEMA,
+                cook_id: plan.cook_id.clone(),
+                run_id: plan.run_id,
+                status: "in_flight".into(),
+                step: CookRecoveryStep::none(format!(
+                    "Continuation owner pid {} is in flight; homeboy agent-task status {} --watch",
+                    owner["owner_pid"], plan.cook_id
+                )),
+                preflight,
+                overrides: None,
+                admission: None,
+                result: Some(serde_json::json!({
+                    "continuation": owner,
+                    "progress": record.metadata.get("cook_progress"),
+                    "next_action": format!("homeboy agent-task status {} --watch", plan.cook_id),
+                })),
+                failure: None,
+            },
+            0,
+        ));
+    }
+    // Executing corrected commands on the authenticated candidate is not an
+    // import of external proof. Keep recipe corrections for pre-provider runs,
+    // but route applied candidates through the single replacement predicate.
+    if corrected_gates.is_some() && super::applied_candidate_awaits_verification(&plan.run_id) {
+        replace_gates = Some(CookReplaceGatesRequest {
+            proof: CookReplacementProof::Gates(corrected_gates.take().unwrap()),
+            authorize_external_proof: "operator supplied replacement gates via recover".into(),
+            authorize_interrupted_rerun: None,
+        });
+    }
     validate_step_inputs(&mut plan, &overrides, replace_gates.is_some(), &publish)?;
     if !overrides.is_empty() {
         validate_overrides(&plan, preflight)?;
@@ -728,7 +883,7 @@ pub fn recover_cook(
                 "verify",
                 "recipe gate correction requires a pre-provider failure and cannot be combined with other recovery inputs",
                 Some(plan.run_id.clone()),
-                None,
+                Some(vec![format!("homeboy agent-task status {}", plan.run_id)]),
             ));
         }
         let store = super::CookRecipeStore::from_current_data_root()?;
@@ -803,6 +958,7 @@ pub fn recover_cook(
                     .schedule_recovery_continuation(&report.cook_id, run_id)?;
                 performer.continue_cook(run_id, false, &none)?
             }
+            CookRecoveryStep::Regate => performer.regate(run_id)?,
             CookRecoveryStep::Rearm => performer.continue_cook(run_id, true, &none)?,
             CookRecoveryStep::Retry | CookRecoveryStep::ForkReplacement => {
                 performer.retry(run_id)?
@@ -839,7 +995,13 @@ fn finish_performed_step(
     match result {
         Ok((value, exit_code)) => {
             if exit_code != 0 {
-                report.failure = performed_step_failure(&value);
+                report.failure = performed_step_failure(&value).or_else(|| {
+                    Some(serde_json::json!({
+                        "code": "agent_task.recover_incomplete",
+                        "message": format!("Recovery did not complete (status: {}). Inspect the persisted run before recovering again.", report.status),
+                        "next_command": format!("homeboy agent-task status {}", report.run_id),
+                    }))
+                });
             }
             if report.preflight {
                 report.admission = Some(value);
@@ -964,7 +1126,7 @@ fn validate_step_inputs(
             field,
             message,
             Some(plan.run_id.clone()),
-            None,
+            Some(vec![format!("homeboy agent-task recover {}", plan.run_id)]),
         ))
     };
     if replace_gates && publish {
@@ -993,7 +1155,7 @@ fn validate_step_inputs(
     }
     match &plan.step {
         step if *step == selected => Ok(()),
-        CookRecoveryStep::Continue | CookRecoveryStep::Rearm | CookRecoveryStep::None { .. } => {
+        CookRecoveryStep::Continue | CookRecoveryStep::Rearm | CookRecoveryStep::Regate | CookRecoveryStep::None { .. } => {
             plan.step = selected;
             Ok(())
         }
@@ -1024,6 +1186,7 @@ fn validate_overrides(plan: &CookRecoveryPlan, preflight: bool) -> Result<()> {
         return refuse("timeout and provider-route overrides cannot be combined with --preflight");
     }
     match &plan.step {
+        CookRecoveryStep::Regate => refuse("regate reserves no provider attempt to override"),
         CookRecoveryStep::Reconcile => refuse(
             "a promotion claim is still held; run `agent-task recover` without overrides to reconcile it first",
         ),
@@ -1043,7 +1206,12 @@ fn resolve_cook_key(id: &str) -> Result<String> {
     if super::load_recipe(id).is_ok() || super::load_recipe_for_attempt(id)?.is_some() {
         return Ok(id.to_string());
     }
-    agent_task_lifecycle::exact_record(id)
+    let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
+    let resolved = agent_task_lifecycle::resolve_cook_reader_run_id_in_store(&store, id)?;
+    if let Some(recipe) = super::load_recipe_for_attempt(&resolved)? {
+        return Ok(recipe.cook_id);
+    }
+    agent_task_lifecycle::exact_record(&resolved)
         .ok()
         .and_then(|record| {
             record
@@ -1070,6 +1238,9 @@ pub(crate) fn cook_recovery_status(record: &agent_task_lifecycle::AgentTaskRunRe
         State::Queued => return "queued".to_string(),
         State::Running => return "running".to_string(),
         _ => {}
+    }
+    if super::live_cook_continuation(record).is_some() {
+        return "in_flight".to_string();
     }
     if let Some(status) = super::CookDelivery::from_run_metadata(&record.metadata)
         .and_then(|delivery| delivery.lifecycle().cook_status)
@@ -1292,7 +1463,7 @@ mod tests {
     #[test]
     fn step_decision_covers_every_variant() {
         assert_eq!(
-            step("gates_deferred", |inputs| {
+            step("gate_environment_unavailable", |inputs| {
                 inputs.retry_admitted = false;
                 inputs.continuation_rearm_required = true;
             }),
@@ -1321,6 +1492,14 @@ mod tests {
             step("pre_execution_failure", |inputs| inputs.retry_admitted =
                 true),
             CookRecoveryStep::Retry
+        );
+        assert_eq!(
+            step("pre_execution_failure", |inputs| {
+                inputs.retry_admitted = true;
+                inputs.applied_gate_failure = true;
+                inputs.continuation_rearm_required = true;
+            }),
+            CookRecoveryStep::Rearm
         );
         assert_eq!(
             step("verification_pending", |inputs| {

@@ -150,7 +150,7 @@ pub(crate) fn render_comment(
         }
     }
 
-    out
+    super::neutralize_mentions(&out)
 }
 
 /// Apply the ordering rule: explicit-ordered keys first (in given order),
@@ -200,6 +200,15 @@ fn comment_key_markers(comment_key: &str) -> [String; 1] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn merged_comment_protects_all_prose_including_preserved_sections() {
+        let sections = vec![("old".into(), "@stranger `@code` a@b.com".into())];
+        let out = render_comment("ci", Some("@header"), &sections, None, Some("@footer"));
+        assert!(out.contains("@\u{200b}stranger `@code` a@b.com"));
+        assert!(out.contains("@\u{200b}header"));
+        assert!(out.contains("@\u{200b}footer"));
+    }
 
     #[test]
     fn parse_sections_new_markers() {

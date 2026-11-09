@@ -2577,6 +2577,60 @@ fn controller_owned_run_refuses_to_handoff_a_plan_without_a_workspace() {
 }
 
 #[test]
+fn queued_cook_admission_starts_its_scheduling_daemon_and_blocks_only_when_it_cannot() {
+    use homeboy::agents::agent_task_service::with_scheduling_daemon_start;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static STARTS: AtomicUsize = AtomicUsize::new(0);
+    crate::test_support::with_isolated_home(|home| {
+        let record = agent_task_lifecycle::prepare_unmaterialized_cook_admission(
+            "queued-admission-starts-daemon",
+            serde_json::json!({ "request_ref": "sha256:fixture" }),
+            "queued",
+            "admitted to homeboy-lab; waiting for execution scheduling",
+        )
+        .expect("record unmaterialized admission");
+        let cli = Cli::parse_from(["homeboy", "agent-task", "cook", "--prompt", "queued"]);
+        assert!(cli.detach_after_handoff);
+        let output = home.path().join("admission.json");
+        let report = |start: fn() -> homeboy::core::Result<()>| {
+            let exit = with_scheduling_daemon_start(start, || {
+                report_unmaterialized_cook_admission(
+                    &cli,
+                    &record,
+                    "connected_ready",
+                    Some(output.to_str().unwrap()),
+                )
+            })
+            .expect("report admission");
+            assert_eq!(exit, 0);
+            serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(&output).unwrap())
+                .unwrap()
+        };
+
+        let started = report(|| {
+            STARTS.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        });
+        assert_eq!(
+            STARTS.load(Ordering::SeqCst),
+            1,
+            "admission starts the daemon"
+        );
+        assert_eq!(started["status"], "pending_resource_admission");
+        assert!(started.get("blocker").is_none(), "{started}");
+
+        let failed = report(|| Err(homeboy::core::Error::internal_unexpected("spawn refused")));
+        assert_eq!(failed["blocker"]["next_action"], "homeboy daemon recover");
+        assert!(
+            failed["blocker"]["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("spawn refused")),
+            "{failed}"
+        );
+    });
+}
+
+#[test]
 fn unmaterialized_cook_run_stays_controller_local_before_lab_workspace_selection() {
     crate::test_support::with_isolated_home(|_| {
         let run_id = "controller-unmaterialized-cook";
@@ -2819,7 +2873,10 @@ fn lab_cook_retry_recovers_terminal_unmaterialized_admission_without_a_workspace
                 .expect("terminal admission retry stays controller-owned"),
             None
         );
-        homeboy::agents::orchestration::execute_action_from_current_environment(
+        homeboy::agents::agent_task_service::with_scheduling_daemon_start(
+            || Ok(()),
+            || {
+                homeboy::agents::orchestration::execute_action_from_current_environment(
             "failed-run",
             &homeboy_control_plane_contract::ControlPlaneActionRequest {
                 schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA
@@ -2840,6 +2897,8 @@ fn lab_cook_retry_recovers_terminal_unmaterialized_admission_without_a_workspace
                     }),
                 },
                 confirmed: true,
+            },
+        )
             },
         )
         .expect("recover terminal admission through the control plane");
@@ -3678,6 +3737,58 @@ fn auto_cook_stale_lab_does_not_persist_blocked_runner_stale_retries() {
 }
 
 #[test]
+fn cook_admission_and_handoff_validate_before_destination_io() {
+    crate::test_support::with_isolated_home(|_| {
+        for queue_only in [false, true] {
+            let mut argv = vec![
+                "homeboy",
+                "agent-task",
+                "cook",
+                "--backend",
+                "fixture",
+                "--prompt",
+                "fix",
+                "--to-worktree",
+                "fixture@missing",
+                "--no-finalize",
+            ];
+            if queue_only {
+                argv.push("--queue-only");
+            }
+            let cli = Cli::parse_from(&argv);
+            let normalized: Vec<String> = argv.into_iter().map(str::to_string).collect();
+            let preflight = homeboy::core::parsed_command_preflight::ParsedCommandPreflightResult::new(
+                normalized.clone(),
+                resource_policy::parsed_command_preflight_input(&cli, &normalized),
+                None, None,
+                homeboy::core::parsed_command_preflight::DeferredWorkloadDecision::NotApplicable,
+                homeboy::core::parsed_command_preflight::FallbackDirective::None,
+                crate::cli_runtime::placement_directive(&cli, None, false),
+                None,
+            );
+            let admission = admit_unmaterialized_cook(&cli, &normalized, &preflight, None, None)
+                .expect_err("invalid request cannot be queued");
+            let handoff = materialize_agent_task_cook_plan(&cli, None)
+                .expect_err("invalid request cannot be handed off");
+            for error in [admission, handoff] {
+                if queue_only {
+                    assert!(error
+                        .message
+                        .contains("cannot queue its controller-owned lifecycle"));
+                } else {
+                    let missing = error.details["args"]
+                        .as_array()
+                        .expect("creation requirements");
+                    assert_eq!(missing.len(), 2);
+                    assert!(missing[0].as_str().unwrap().starts_with("--repo <repo>"));
+                    assert!(missing[1].as_str().unwrap().starts_with("--head <branch>"));
+                }
+            }
+        }
+    });
+}
+
+#[test]
 fn unmaterialized_cook_admission_maps_runner_readiness_to_honest_states() {
     let readiness = |state: &str, reasons: &[&str]| {
         homeboy::core::parsed_command_preflight::LabReadinessSnapshot {
@@ -4504,8 +4615,10 @@ pub(super) fn reserved_retry_transport_fixture(
         .idempotency_key
         .clone()
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let acknowledgement =
-        homeboy::agents::orchestration::execute_retry_action_from_current_environment_with_preflight(
+    let acknowledgement = homeboy::agents::agent_task_service::with_scheduling_daemon_start(
+        || Ok(()),
+        || {
+            homeboy::agents::orchestration::execute_retry_action_from_current_environment_with_preflight(
             &retry.run_id,
             &homeboy_control_plane_contract::ControlPlaneActionRequest {
                 schema: homeboy_control_plane_contract::CONTROL_PLANE_ACTION_REQUEST_SCHEMA
@@ -4532,7 +4645,9 @@ pub(super) fn reserved_retry_transport_fixture(
             },
             retry.run,
             validate_generic_lab_command_replay_workspace,
-        )?;
+        )
+        },
+    )?;
     let retry_result = homeboy::agents::agent_task_action_result::retry(&acknowledgement)?;
     if !retry_result.runnable {
         return Ok(None);

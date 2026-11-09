@@ -20,6 +20,9 @@ on:
       - 'extensions/**'
       # Extension runners source these helpers from core at the same commit.
       - 'crates/homeboy-core/src/extension/runtime/**'
+      # ...and emit their JSON through this native writer.
+      - 'crates/homeboy-core/src/extension/runtime_json/**'
+      - 'crates/homeboy-cli/src/commands/runtime_json.rs'
       - '.github/workflows/extensions-self-checks.yml'
   workflow_dispatch:
 
@@ -76,9 +79,16 @@ jobs:
         with:
           node-version: 24
 
-      - name: Cache Rust tools
-        if: matrix.component == 'rust'
+      # Core runtime helpers emit sidecar, test-failure, and bench JSON through
+      # the Homeboy binary a runner exports as HOMEBOY_RUNTIME_EXECUTABLE, so
+      # the self-checks need this commit's binary.
+      - uses: dtolnay/rust-toolchain@1.95.0
+
+      - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
+
+      - name: Build Homeboy runtime executable
+        run: cargo build --locked --bin homeboy
 
       - name: Install cargo-nextest
         if: matrix.component == 'rust'
@@ -109,6 +119,7 @@ jobs:
         env:
           HOMEBOY_SELF_CHECK_SKIP: ${{ matrix.self_check_skip }}
           HOMEBOY_CORE_DIR: ${{ github.workspace }}
+          HOMEBOY_RUNTIME_EXECUTABLE: ${{ github.workspace }}/target/debug/homeboy
         working-directory: extensions
         run: bash scripts/ci/run-self-checks.sh "${{ matrix.component }}" lint
 
@@ -116,5 +127,6 @@ jobs:
         env:
           HOMEBOY_SELF_CHECK_SKIP: ${{ matrix.self_check_skip }}
           HOMEBOY_CORE_DIR: ${{ github.workspace }}
+          HOMEBOY_RUNTIME_EXECUTABLE: ${{ github.workspace }}/target/debug/homeboy
         working-directory: extensions
         run: bash scripts/ci/run-self-checks.sh "${{ matrix.component }}" test

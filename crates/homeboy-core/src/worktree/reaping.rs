@@ -29,6 +29,35 @@ pub(super) fn append_reaping_audit_in_root(
     force: bool,
     branch_deleted: bool,
 ) -> Result<TaskWorktreeReapingAudit> {
+    // Candidate refs belong to the Cook, not to the lifetime of its staged
+    // index. Drop the pin only when its owned destination is actually reaped.
+    let store = open_store(data_root)?;
+    if let Some(run_id) = record.run_id.as_deref() {
+        if let Some(run) = store.get_run(run_id)? {
+            if let Some(cook_id) = run
+                .metadata_json
+                .pointer("/agent_task_run/metadata/cook_id")
+                .and_then(serde_json::Value::as_str)
+            {
+                let reference = format!("refs/homeboy/candidates/{cook_id}");
+                let output = std::process::Command::new("git")
+                    .args([
+                        "-C",
+                        &record.source_checkout,
+                        "update-ref",
+                        "-d",
+                        &reference,
+                    ])
+                    .output()
+                    .map_err(|error| Error::internal_io(error.to_string(), None))?;
+                if !output.status.success() {
+                    return Err(Error::git_command_failed(
+                        String::from_utf8_lossy(&output.stderr).to_string(),
+                    ));
+                }
+            }
+        }
+    }
     let audit = TaskWorktreeReapingAudit {
         schema: TASK_WORKTREE_REAPING_AUDIT_SCHEMA.into(),
         at_ms,

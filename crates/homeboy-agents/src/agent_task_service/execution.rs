@@ -18,6 +18,7 @@ use crate::agent_task_lifecycle::{self, AgentTaskRunArtifacts, AgentTaskRunRecor
 use crate::agent_task_scheduler::{
     AgentTaskAggregate, AgentTaskExecutionBudget, AgentTaskPlan, SharedAgentTaskExecutor,
 };
+use homeboy_core::parsed_command_preflight::PlacementDirective;
 use homeboy_core::secret_env_plan::SecretEnvPlan;
 use homeboy_core::{config, worktree, Error, Result};
 
@@ -657,7 +658,7 @@ pub(crate) fn run_submitted_with_timeout_and_catalog(
         false,
         "homeboy-submitted",
     )?;
-    if let Err(error) = preflight_plan_provider_eligibility_with_catalog(&mut plan, catalog) {
+    if let Err(error) = preflight_plan_provider_eligibility_with_catalog(&mut plan, catalog, None) {
         crate::agent_task_submission_service::reject_prepared_plan(
             &request,
             crate::agent_task_submission_service::PreparedAgentTaskSubmission::new(plan)
@@ -743,8 +744,8 @@ pub fn run_next_with_cook_dispatcher(
         dispatcher,
         scoped_run_ids,
         |record, plan| {
-            validate_queued_cook_identity(record)?;
-            preflight_plan_provider_eligibility(plan)
+            let placement = queued_cook_placement(record)?;
+            preflight_plan_provider_eligibility(plan, placement.as_ref())
         },
     )
 }
@@ -926,12 +927,29 @@ fn execute_claimed_queue_record(
     })
 }
 
-fn validate_queued_cook_identity(record: &AgentTaskRunRecord) -> Result<()> {
+/// Validate a queued Cook attempt against its durable recipe and return the
+/// placement it was routed under. A Lab attempt dispatch owns provider
+/// readiness on its runner, so resuming it from the queue (for example after a
+/// runtime-admission deferral) must not probe the controller (#17528).
+pub(super) fn queued_cook_placement(
+    record: &AgentTaskRunRecord,
+) -> Result<Option<PlacementDirective>> {
     let Some(cook_id) = record.metadata.get("cook_id").and_then(Value::as_str) else {
-        return Ok(());
+        return Ok(None);
     };
     let recipe = super::load_recipe(cook_id)?;
-    super::validate_recipe_attempt_record(&recipe, &record.run_id, record)
+    super::validate_recipe_attempt_record(&recipe, &record.run_id, record)?;
+    let dispatch = &recipe.promotion_transport["attempt_dispatch"];
+    if dispatch["kind"] != "lab" {
+        return Ok(None);
+    }
+    Ok(
+        serde_json::from_value::<homeboy_lab_contract::ExecutionPlacementDecision>(
+            dispatch["execution_placement_decision"].clone(),
+        )
+        .ok()
+        .map(|decision| PlacementDirective::from(&decision)),
+    )
 }
 
 pub(super) fn execute_exact_queued_intent(
@@ -949,9 +967,9 @@ pub(super) fn execute_exact_queued_intent(
         store,
         intent,
         |record, plan| {
-            validate_queued_cook_identity(record)?;
+            let placement = queued_cook_placement(record)?;
             transport.queued_preflight(record, plan, intent)?;
-            preflight_plan_provider_eligibility(plan)
+            preflight_plan_provider_eligibility(plan, placement.as_ref())
         },
     )?;
     let Some(record) = record else {
@@ -1097,9 +1115,14 @@ fn retry_reservation_metadata(
     };
     let value = serde_json::to_value(&preparation)
         .map_err(|error| Error::internal_json(error.to_string(), None))?;
+    let recipe = recipes.load_recipe(&retry.cook_id)?;
     let metadata = serde_json::Map::from_iter([
         ("cook_id".into(), json!(retry.cook_id)),
         ("execution_retry_preparation".into(), value),
+        (
+            "cook_retry_placement".into(),
+            recipe.promotion_transport["attempt_dispatch"].clone(),
+        ),
     ]);
     Ok((preparation, metadata))
 }
@@ -1652,7 +1675,10 @@ where
     preflight(&source_plan)?;
     let unmaterialized_admission = source.state().is_terminal()
         && agent_task_lifecycle::is_unmaterialized_cook_admission(&source);
-    if !unmaterialized_admission {
+    // Recipe-owned retries freeze their admitted dispatch in the execution
+    // intent. Only generic retries still risk silently executing locally.
+    let recipe_owned_retry = retry_admission_in_store(&lifecycle_store, &source, false)?.is_some();
+    if !unmaterialized_admission && !recipe_owned_retry {
         if let Some(error) = lab_placed_retry_refusal(
             &source,
             &source_plan,
@@ -3024,6 +3050,15 @@ fn retry_admission_in_store(
             None,
         ));
     }
+    // Projection and execution share this acceptance check: never advertise
+    // a generic retry that would lose a required Lab placement.
+    if retry.is_none() && !agent_task_lifecycle::is_unmaterialized_cook_admission(source) {
+        let plan =
+            agent_task_lifecycle::load_controller_plan_in_store(lifecycle_store, &source.run_id)?;
+        if let Some(error) = lab_placed_retry_refusal(source, &plan, false) {
+            return Err(error);
+        }
+    }
     Ok(retry)
 }
 
@@ -3155,14 +3190,18 @@ pub(crate) fn preflight_plan_secret_env(plan: &AgentTaskPlan) -> Result<()> {
 /// Queue admission validates provider eligibility and credential provenance
 /// before a record is claimed Running. Workspace preparation remains after the
 /// claim because it creates controller-owned filesystem state.
-fn preflight_plan_provider_eligibility(plan: &mut AgentTaskPlan) -> Result<()> {
+fn preflight_plan_provider_eligibility(
+    plan: &mut AgentTaskPlan,
+    placement: Option<&PlacementDirective>,
+) -> Result<()> {
     let catalog = crate::agent_task_provider::AgentTaskProviderCatalog::discover();
-    preflight_plan_provider_eligibility_with_catalog(plan, &catalog)
+    preflight_plan_provider_eligibility_with_catalog(plan, &catalog, placement)
 }
 
 fn preflight_plan_provider_eligibility_with_catalog(
     plan: &mut AgentTaskPlan,
     catalog: &crate::agent_task_provider::AgentTaskProviderCatalog,
+    placement: Option<&PlacementDirective>,
 ) -> Result<()> {
     let catalog_owns_every_route = plan.tasks.iter().all(|task| {
         crate::agent_task_provider::is_fixture_backend(&task.executor.backend)
@@ -3178,7 +3217,7 @@ fn preflight_plan_provider_eligibility_with_catalog(
         plan,
         catalog,
         &mut crate::agent_task_provider::ProviderRuntimeReadinessCache::process_local(),
-        None,
+        placement,
     )?;
     // Admission owns live route selection. These are the remaining static and
     // material checks for the selected route, not a second route derivation.

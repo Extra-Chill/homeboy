@@ -37,7 +37,9 @@ enum WorkflowCommand {
         /// Definition file, registered workflow id, or `-`
         workflow: String,
     },
-    /// Admit a workflow instance; the same definition and inputs return the existing instance
+    /// Admit a workflow instance; next_pass forwards inputs with overrides, a typed iteration,
+    /// previous outputs, max_iterations and optional stop_unchanged. Changed file definitions are refused.
+    /// The same definition and inputs return the existing instance
     Run(RunArgs),
     /// Cancel an instance and every step it is running, or stop a registered cadence
     Cancel {
@@ -241,6 +243,14 @@ fn admit_with_resume(
                 parent_from_env(),
                 current_dir()?,
             )?;
+            if std::path::Path::new(source).is_file() {
+                request.definition_source = Some(
+                    std::fs::canonicalize(source)
+                        .map_err(|e| Error::internal_io(e.to_string(), None))?
+                        .display()
+                        .to_string(),
+                );
+            }
             request.resumed_from = resumed_from.map(str::to_string);
             client.submit(request.submission()?)?;
             "created"
@@ -371,6 +381,7 @@ fn admission_request(
         instance: instance.to_string(),
         instance_name: instance_name.map(str::to_string),
         resumed_from: None,
+        definition_source: None,
         definition_digest: definition.digest(),
         definition: definition.clone(),
         inputs,

@@ -325,6 +325,7 @@ impl ObservationStore {
             })?;
         }
 
+        let was_missing = !path.exists();
         let connection = schema::open_initialized_connection(&path)?;
         let store = Self {
             connection,
@@ -333,9 +334,22 @@ impl ObservationStore {
             roots,
         };
         if maintain_artifacts {
-            // Failure is returned to the caller and the next normal open
-            // deterministically retries; no detached work can be lost.
-            store.reconcile_unfinished_artifact_publications_with_retry(|| {})?;
+            static RECONCILED_PATHS: std::sync::OnceLock<
+                std::sync::Mutex<std::collections::HashSet<PathBuf>>,
+            > = std::sync::OnceLock::new();
+            let mut reconciled = RECONCILED_PATHS
+                .get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let canonical = schema::canonical_database_path(&store.path)?;
+            if was_missing {
+                reconciled.remove(&canonical);
+            }
+            if !reconciled.contains(&canonical) {
+                // Record only successful maintenance so the next normal open retries failures.
+                store.reconcile_unfinished_artifact_publications_with_retry(|| {})?;
+                reconciled.insert(canonical);
+            }
         }
         Ok(store)
     }
@@ -1558,6 +1572,25 @@ impl ObservationStore {
             "workspaces": workspaces.into_iter().map(|((repository, working_directory), run_ids)| serde_json::json!({"repository": repository, "working_directory": working_directory, "run_ids": run_ids})).collect::<Vec<_>>(),
             "pending_run_ids": pending_run_ids,
         }))
+    }
+
+    /// True while this store holds an unmaterialized Cook admission that is
+    /// neither materialized nor terminal. The local controller daemon schedules
+    /// those admissions from this same store, so it must stay up while one is
+    /// pending (#17506). Materialization terminates the parent record, so the
+    /// live-state filter alone excludes it. Reads the active-scope partial
+    /// index's rows only.
+    pub fn has_pending_unmaterialized_cook_admission(&self) -> Result<bool> {
+        self.connection
+            .query_row(
+                "SELECT EXISTS (SELECT 1 FROM runs
+                 WHERE kind = 'agent-task'
+                   AND json_extract(metadata_json, '$.agent_task_run.state') IN ('queued', 'running')
+                   AND json_type(metadata_json, '$.agent_task_run.metadata.unmaterialized_cook_admission') = 'object')",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(sqlite_error("read pending unmaterialized Cook admissions"))
     }
 
     pub fn list_runs(&self, filter: RunListFilter) -> Result<Vec<RunRecord>> {

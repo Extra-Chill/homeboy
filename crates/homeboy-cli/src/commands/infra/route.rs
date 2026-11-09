@@ -993,10 +993,9 @@ fn admit_unmaterialized_cook(
         ));
     };
     let mut args = *cook.clone();
-    let repository = crate::commands::agent_task::run::resolve_cook_repository(&mut args)?;
+    let repository = crate::commands::agent_task::run::prepare_cook_request(&mut args, provenance)?;
     let resolved =
         crate::commands::agent_task::run::resolve_cook_destination(args, repository.as_ref())?;
-    crate::commands::agent_task::run::validate_cook_request_with_provenance(&resolved, provenance)?;
     // Run every check the replay worker will run, including model-override
     // confirmation, before any admission record is persisted (#15009). A
     // queued Lab admission has no TTY to prompt against, so a submission that
@@ -1004,6 +1003,11 @@ fn admit_unmaterialized_cook(
     // time — not admitted only to fail the same deterministic check on every
     // bounded replay attempt for the next hour.
     crate::commands::agent_task::run::require_model_override_acknowledgement_for_cook(&resolved)?;
+    crate::commands::agent_task::run::preflight_cook_source_history(
+        &resolved,
+        repository.as_ref(),
+        false,
+    )?;
     let mut replay_args = normalized_args.to_vec();
     crate::commands::agent_task::run::rewrite_cook_identity_replay_argv(
         &mut replay_args,
@@ -1132,9 +1136,25 @@ fn admit_unmaterialized_cook(
             &cook_id,
         )?
     };
-    if !cli.detach_after_handoff {
+    report_unmaterialized_cook_admission(cli, &record, readiness_state, output_file)
+}
+
+/// Report a recorded unmaterialized Cook admission. The local controller
+/// daemon schedules it, so the submitter starts that daemon first (#17506);
+/// only a daemon that cannot be started is reported as the blocker, with its
+/// start error and recovery (#16181). A `--wait` submission waits on the
+/// scheduled work only when the daemon is up.
+fn report_unmaterialized_cook_admission(
+    cli: &Cli,
+    record: &agent_task_lifecycle::AgentTaskRunRecord,
+    readiness_state: &str,
+    output_file: Option<&str>,
+) -> homeboy::core::Result<i32> {
+    let cook_id = &record.run_id;
+    let blocker = homeboy::agents::agent_task_service::ensure_scheduling_daemon();
+    if !cli.detach_after_handoff && blocker.is_none() {
         let (output, exit_code) =
-            crate::commands::agent_task::status::wait_for_terminal_status(&cook_id)?;
+            crate::commands::agent_task::status::wait_for_terminal_status(cook_id)?;
         let stdout = serde_json::to_string_pretty(&output).map_err(|error| {
             Error::internal_json(
                 error.to_string(),
@@ -1147,7 +1167,7 @@ fn admit_unmaterialized_cook(
         println!("{stdout}");
         return Ok(exit_code);
     }
-    let admission = record.metadata["unmaterialized_cook_admission"].clone();
+    let admission = &record.metadata["unmaterialized_cook_admission"];
     let mut output = serde_json::json!({
         "schema": "homeboy/unmaterialized-cook-admission-result/v1",
         "status": "pending_resource_admission",
@@ -1159,18 +1179,8 @@ fn admit_unmaterialized_cook(
         "commands": admission["commands"],
         "execution_scheduling": record.metadata["execution_scheduling"],
     });
-    // The queued admission is scheduled by the local controller daemon. When
-    // that daemon is down the wait cannot ever be scheduled, so the admission
-    // result names the dead daemon and its recovery instead of leaving the
-    // operator waiting on nothing (#16181). A live (or unobservable) daemon
-    // keeps today's output unchanged.
-    if let Some(daemon) = homeboy::agents::agent_task_service::scheduling_daemon_evidence()
-        .filter(|daemon| !daemon.admits_work)
-    {
-        output["blocker"] = serde_json::json!({
-            "daemon": daemon,
-            "next_action": "homeboy daemon recover",
-        });
+    if let Some(blocker) = blocker {
+        output["blocker"] = blocker;
     }
     let stdout = serde_json::to_string_pretty(&output).map_err(|error| {
         Error::internal_json(
@@ -1813,7 +1823,7 @@ struct TerminalCookWorkHandler;
 const TERMINAL_COOK_WORK_TYPE: &str = "agent-task-cook-terminal-continuation";
 const TERMINAL_COOK_JOB_VERSION: u32 = 1;
 
-#[derive(Debug, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 struct TerminalCookJobRequest {
     schema: String,
@@ -2004,7 +2014,45 @@ impl crate::agents::agent_task_service::WorkJobHandler for TerminalCookWorkHandl
         _invocation: crate::agents::agent_task_service::WorkJobInvocation,
     ) -> homeboy::core::Result<crate::agents::agent_task_service::WorkJobStep> {
         let progress = self.initial_progress(&checkpoint)?;
-        supervise_terminal_cook_worker(parse_terminal_cook_job(&checkpoint)?, progress)
+        let request = parse_terminal_cook_job(&checkpoint)?;
+        let outcome = supervise_terminal_cook_worker(request.clone(), progress);
+        if let Err(error) = &outcome {
+            let worker_log_tail = error.details.get("worker_log_tail").cloned().or_else(|| {
+                request.worker.as_ref().and_then(|worker| worker.outcome_path.parent())
+                    .and_then(|dir| crate::agents::agent_task_provider::structured_error::read_runtime_stream_tail(&dir.join("worker.log")))
+                    .map(|tail| serde_json::Value::String(tail.redacted))
+            });
+            let diagnostic = homeboy::core::redaction::RedactionPolicy::default().redact_json(
+                &serde_json::json!({
+                    "code": error.code.as_str(),
+                    "message": error.message,
+                    "details": error.details,
+                    "worker_log_tail": worker_log_tail,
+                    "phase": "terminal_continuation",
+                }),
+            );
+            // Recording is diagnostic evidence; it must never replace the
+            // worker's own failure as the step outcome.
+            if let Err(record_error) =
+                agent_task_lifecycle::AgentTaskLifecycleStore::from_environment().and_then(
+                    |store| {
+                        crate::agents::agent_task_lifecycle::record_cook_controller_failure_in_store(
+                            &store,
+                            &request.run_id,
+                            &diagnostic,
+                        )
+                    },
+                )
+            {
+                homeboy::log_status!(
+                    "agent-task",
+                    "could not record terminal continuation failure for {}: {}",
+                    request.run_id,
+                    record_error.message
+                );
+            }
+        }
+        outcome
     }
 
     fn cancelled(
@@ -2333,6 +2381,18 @@ fn run_terminal_cook_continuation(
     );
     let failure = match outcome {
         Ok(0) => {
+            if crate::agents::agent_task_service::continuation_state_in_store(
+                &store,
+                &request.cook_id,
+                &request.run_id,
+            )? != CookContinuationState::Completed
+            {
+                return Ok(WorkJobStep::Continue {
+                    checkpoint,
+                    progress,
+                    wait: TERMINAL_COOK_WORKER_POLL,
+                });
+            }
             return Ok(WorkJobStep::Complete(serde_json::json!({
                 "claimed": true,
                 "cook_id": request.cook_id,
@@ -3474,21 +3534,15 @@ fn finalize_replacement_attempt(
     task: &str,
     source_path: Option<&Path>,
 ) -> homeboy_lab_contract::ExecutionPlacementDecision {
-    let directive = homeboy::core::parsed_command_preflight::PlacementDirective {
-        requested: prior.requested,
-        required: prior.required,
-        selected: prior.selected,
-        runner: Some(homeboy_lab_contract::ExecutionPlacementRunnerSelection {
-            runner_id: runner_id.to_string(),
-            source: prior
-                .runner
-                .as_ref()
-                .map(|runner| runner.source)
-                .unwrap_or(homeboy_lab_contract::RunnerSelectionSource::Explicit),
-        }),
-        fallback: prior.fallback.clone(),
-        override_authorization: prior.override_authorization.clone(),
-    };
+    let mut directive = homeboy::core::parsed_command_preflight::PlacementDirective::from(prior);
+    directive.runner = Some(homeboy_lab_contract::ExecutionPlacementRunnerSelection {
+        runner_id: runner_id.to_string(),
+        source: prior
+            .runner
+            .as_ref()
+            .map(|runner| runner.source)
+            .unwrap_or(homeboy_lab_contract::RunnerSelectionSource::Explicit),
+    });
     directive.finalize(homeboy_lab_contract::ExecutionPlacementIdentity {
         repository: source_path
             .and_then(|path| path.file_name())
@@ -3689,10 +3743,9 @@ fn materialize_agent_task_cook_plan(
         return Ok(None);
     };
     let mut args = *cook.clone();
-    let repository = crate::commands::agent_task::run::resolve_cook_repository(&mut args)?;
+    let repository = crate::commands::agent_task::run::prepare_cook_request(&mut args, provenance)?;
     let cook =
         crate::commands::agent_task::run::resolve_cook_destination(args, repository.as_ref())?;
-    crate::commands::agent_task::run::validate_cook_request_with_provenance(&cook, provenance)?;
     let provision = crate::commands::agent_task::run::provision_cook_destination(
         &cook,
         repository.as_ref(),

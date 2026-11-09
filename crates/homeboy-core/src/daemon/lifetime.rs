@@ -213,8 +213,9 @@ pub(super) struct LifetimeObservation {
     pub(super) state_dir_removed: bool,
     /// The published lease is this process's own.
     pub(super) own_lease: bool,
-    /// Active jobs in this daemon's scope (or an unreadable count), or a live
-    /// launcher still returning the startup handoff.
+    /// Active jobs in this daemon's scope, a pending unmaterialized Cook
+    /// admission this daemon schedules (#17506), an unreadable count of either,
+    /// or a live launcher still returning the startup handoff.
     pub(super) busy: bool,
     /// The executable this daemon started from was replaced (#15403).
     pub(super) binary_replaced: bool,
@@ -226,7 +227,32 @@ pub(super) enum LifetimeDecision {
     /// Stop without the lifecycle lock, which lived in the removed directory.
     StopNow,
     /// Stop only if the lifecycle lock is free and the daemon is still idle.
-    StopIfStillIdle,
+    StopIfStillIdle(SelfStopReason),
+}
+
+/// Why an idle daemon stopped itself, carried to its termination evidence so
+/// a self-stop never reads as a signal (#17506).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SelfStopReason {
+    /// The configured idle window lapsed with no work.
+    IdleTimeout(Duration),
+    /// The executable was replaced and the daemon stayed idle this long.
+    ReplacedBinary(Duration),
+}
+
+impl SelfStopReason {
+    pub(super) fn os_evidence(self) -> String {
+        match self {
+            Self::IdleTimeout(window) => format!(
+                "idle self-stop: no active jobs or pending admissions for the {}s idle window",
+                window.as_secs()
+            ),
+            Self::ReplacedBinary(settle) => format!(
+                "replaced-binary self-stop: the executable was replaced and the daemon stayed idle for {}s",
+                settle.as_secs()
+            ),
+        }
+    }
 }
 
 pub(super) struct IdleLifetime {
@@ -256,18 +282,20 @@ impl IdleLifetime {
             return LifetimeDecision::Continue;
         }
         let idle_for = now.saturating_duration_since(self.last_activity);
-        let expired = self.timeout.is_some_and(|timeout| idle_for >= timeout);
-        // An idle daemon whose binary was replaced stops after a short settle
-        // instead of serving stale code until its idle window lapses; the next
-        // command starts the installed binary (#15403).
-        let replaced = observation.binary_replaced && idle_for >= REPLACED_BINARY_STOP_AFTER;
-        if !expired && !replaced {
-            return LifetimeDecision::Continue;
-        }
+        let reason = match self.timeout {
+            Some(timeout) if idle_for >= timeout => SelfStopReason::IdleTimeout(timeout),
+            // An idle daemon whose binary was replaced stops after a short
+            // settle instead of serving stale code until its idle window
+            // lapses; the next command starts the installed binary (#15403).
+            _ if observation.binary_replaced && idle_for >= REPLACED_BINARY_STOP_AFTER => {
+                SelfStopReason::ReplacedBinary(REPLACED_BINARY_STOP_AFTER)
+            }
+            _ => return LifetimeDecision::Continue,
+        };
         // A stop that cannot proceed now is retried after another complete
         // idle window, not on every poll.
         self.last_activity = now;
-        LifetimeDecision::StopIfStillIdle
+        LifetimeDecision::StopIfStillIdle(reason)
     }
 }
 
@@ -277,7 +305,7 @@ pub(super) fn spawn_lifetime_monitor(
     mut idle: IdleLifetime,
     state_path: PathBuf,
     lease_id: String,
-    jobs: PathBuf,
+    observation_db: PathBuf,
     shutdown: Arc<AtomicBool>,
     held: SelfStopGuards,
     stop: mpsc::Receiver<()>,
@@ -286,7 +314,8 @@ pub(super) fn spawn_lifetime_monitor(
     std::thread::Builder::new()
         .name("daemon-lifetime".to_string())
         .spawn(move || {
-            let observe = || observe_lifetime(&state_path, &lease_id, &jobs, launcher.as_ref());
+            let observe =
+                || observe_lifetime(&state_path, &lease_id, &observation_db, launcher.as_ref());
             loop {
                 match stop.recv_timeout(LIFETIME_POLL) {
                     Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -298,8 +327,8 @@ pub(super) fn spawn_lifetime_monitor(
                         shutdown.store(true, Ordering::Release);
                         true
                     }
-                    LifetimeDecision::StopIfStillIdle => {
-                        stop_if_still_idle(&shutdown, &held, observe)
+                    LifetimeDecision::StopIfStillIdle(reason) => {
+                        stop_if_still_idle(&shutdown, &held, reason, observe)
                     }
                 };
                 if stopped {
@@ -310,10 +339,12 @@ pub(super) fn spawn_lifetime_monitor(
         .expect("spawn daemon lifetime monitor")
 }
 
+/// `observation_db` holds both this daemon's job ledger and the agent-task
+/// records whose queued admissions its work-intent scheduler drains.
 fn observe_lifetime(
     state_path: &Path,
     lease_id: &str,
-    jobs: &Path,
+    observation_db: &Path,
     launcher: Option<&LauncherIdentity>,
 ) -> LifetimeObservation {
     let own_lease = super::validate_lease_file(state_path)
@@ -321,20 +352,30 @@ fn observe_lifetime(
         .and_then(|validation| validation.state)
         .is_some_and(|state| state.lease_id == lease_id && state.pid == std::process::id());
     let scope = super::daemon_scope_for_state_path(state_path);
-    let active_jobs =
-        super::JobStore::active_count_at_path(jobs, Some(&scope)).map_or(true, |count| count > 0);
+    let active_jobs = super::JobStore::active_count_at_path(observation_db, Some(&scope))
+        .map_or(true, |count| count > 0);
+    let pending_admission = || {
+        crate::observation::ObservationStore::open_readonly_at(observation_db)
+            .and_then(|store| store.has_pending_unmaterialized_cook_admission())
+            .unwrap_or(true)
+    };
     LifetimeObservation {
         state_dir_removed: state_dir_removed(state_path),
         own_lease,
-        busy: active_jobs || launcher.is_some_and(LauncherIdentity::is_live),
+        busy: active_jobs || pending_admission() || launcher.is_some_and(LauncherIdentity::is_live),
         binary_replaced: running_executable_replaced(),
     }
 }
 
-/// The lifecycle lock and admission fence an idle self-stop holds until
-/// `serve` has drained and released its lease.
-pub(super) type SelfStopGuards =
-    Arc<std::sync::Mutex<Option<(super::DaemonOperationLock, super::DaemonAdmissionFence)>>>;
+/// An idle self-stop in progress: its reason, for termination evidence, and
+/// the lifecycle lock and admission fence it holds until `serve` has drained
+/// and released its lease.
+pub(super) struct SelfStop {
+    pub(super) reason: SelfStopReason,
+    _guards: (super::DaemonOperationLock, super::DaemonAdmissionFence),
+}
+
+pub(super) type SelfStopGuards = Arc<std::sync::Mutex<Option<SelfStop>>>;
 
 /// Serialize an idle self-stop with lifecycle commands, as `daemon stop` does.
 /// A busy lock or admission fence means a lifecycle command or an admission
@@ -347,6 +388,7 @@ pub(super) type SelfStopGuards =
 fn stop_if_still_idle(
     shutdown: &AtomicBool,
     held: &SelfStopGuards,
+    reason: SelfStopReason,
     observe: impl Fn() -> LifetimeObservation,
 ) -> bool {
     let Ok(Some(lock)) = super::try_acquire_daemon_operation_lock() else {
@@ -359,7 +401,10 @@ fn stop_if_still_idle(
     if observation.state_dir_removed || !observation.own_lease || observation.busy {
         return false;
     }
-    *held.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some((lock, fence));
+    *held.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(SelfStop {
+        reason,
+        _guards: (lock, fence),
+    });
     shutdown.store(true, Ordering::Release);
     true
 }
@@ -410,7 +455,9 @@ mod tests {
         );
         assert_eq!(
             idle.decide(start + Duration::from_secs(300), &IDLE),
-            LifetimeDecision::StopIfStillIdle
+            LifetimeDecision::StopIfStillIdle(SelfStopReason::IdleTimeout(Duration::from_secs(
+                300
+            )))
         );
         // A stop that could not take the lifecycle lock retries only after
         // another complete idle window.
@@ -420,7 +467,9 @@ mod tests {
         );
         assert_eq!(
             idle.decide(start + Duration::from_secs(600), &IDLE),
-            LifetimeDecision::StopIfStillIdle
+            LifetimeDecision::StopIfStillIdle(SelfStopReason::IdleTimeout(Duration::from_secs(
+                300
+            )))
         );
     }
 
@@ -442,7 +491,7 @@ mod tests {
         );
         assert_eq!(
             idle.decide(start + Duration::from_secs(1010), &IDLE),
-            LifetimeDecision::StopIfStillIdle
+            LifetimeDecision::StopIfStillIdle(SelfStopReason::IdleTimeout(Duration::from_secs(10)))
         );
     }
 
@@ -475,7 +524,9 @@ mod tests {
         );
         assert_eq!(
             idle.decide(start + REPLACED_BINARY_STOP_AFTER, &replaced),
-            LifetimeDecision::StopIfStillIdle
+            LifetimeDecision::StopIfStillIdle(SelfStopReason::ReplacedBinary(
+                REPLACED_BINARY_STOP_AFTER
+            ))
         );
         let busy = LifetimeObservation {
             busy: true,
@@ -501,6 +552,65 @@ mod tests {
             binary_replaced: false,
         };
         assert_eq!(idle.decide(start, &removed), LifetimeDecision::StopNow);
+    }
+
+    #[test]
+    fn a_pending_unmaterialized_cook_admission_keeps_the_daemon_busy_until_it_materializes() {
+        use crate::observation::{ObservationStore, RunRecord};
+        let temp = tempfile::tempdir().unwrap();
+        let state_path = temp.path().join("daemon").join("state.json");
+        let db = temp.path().join("homeboy.sqlite");
+        let observe = || observe_lifetime(&state_path, "lease", &db, None).busy;
+        assert!(!observe(), "no store means no pending admission");
+
+        let admission = |state: &str, admission_state: &str| RunRecord {
+            id: "cook-queued".to_string(),
+            kind: "agent-task".to_string(),
+            component_id: None,
+            started_at: "2026-10-04T13:05:28Z".to_string(),
+            finished_at: None,
+            status: "running".to_string(),
+            command: None,
+            cwd: None,
+            homeboy_version: None,
+            git_sha: None,
+            rig_id: None,
+            metadata_json: serde_json::json!({ "agent_task_run": {
+                "state": state,
+                "metadata": { "unmaterialized_cook_admission": { "state": admission_state } },
+            }}),
+        };
+        let store = ObservationStore::open_initialized_at(&db).unwrap();
+        store
+            .upsert_imported_run(&admission("queued", "queued"))
+            .unwrap();
+        assert!(observe(), "a queued admission waits on this daemon");
+
+        store
+            .upsert_imported_run(&admission("succeeded", "materialized"))
+            .unwrap();
+        assert!(!observe(), "a materialized admission no longer needs it");
+    }
+
+    #[test]
+    fn an_idle_self_stop_records_its_reason_not_a_signal() {
+        crate::test_support::with_isolated_home(|_| {
+            let shutdown = AtomicBool::new(false);
+            let held = SelfStopGuards::default();
+            let reason = SelfStopReason::IdleTimeout(Duration::from_secs(300));
+            assert!(stop_if_still_idle(&shutdown, &held, reason, || IDLE));
+            assert!(shutdown.load(Ordering::Acquire));
+            let evidence = held.lock().unwrap().as_ref().unwrap().reason.os_evidence();
+            assert_eq!(
+                evidence,
+                "idle self-stop: no active jobs or pending admissions for the 300s idle window"
+            );
+            assert!(!evidence.contains("SIGTERM"));
+        });
+        assert_eq!(
+            SelfStopReason::ReplacedBinary(REPLACED_BINARY_STOP_AFTER).os_evidence(),
+            "replaced-binary self-stop: the executable was replaced and the daemon stayed idle for 30s"
+        );
     }
 
     #[test]

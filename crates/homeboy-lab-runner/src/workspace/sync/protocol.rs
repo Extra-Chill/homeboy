@@ -62,6 +62,32 @@ fn materialization_error(mut error: Error, input: &Path) -> Error {
     error
 }
 
+/// Keep the filesystem boundary in both the human message and structured
+/// evidence. Callers supply the owning side, never infer it from the host.
+pub(super) trait MaterializationIo<T> {
+    fn materialization(self, operation: &str, path: &Path, side: &str) -> Result<T>;
+}
+
+impl<T, E: std::fmt::Display> MaterializationIo<T> for std::result::Result<T, E> {
+    fn materialization(self, operation: &str, path: &Path, side: &str) -> Result<T> {
+        self.map_err(|source| {
+            let context = format!("{side} materialization");
+            let mut error = Error::internal_io(source.to_string(), Some(context.clone()));
+            error.message = format!(
+                "{}: {operation} {}: {source} ({context})",
+                error.message,
+                path.display()
+            );
+            error.details["path"] = serde_json::json!(path);
+            error.details["operation"] = serde_json::json!(operation);
+            error.details["side"] = serde_json::json!(side);
+            error.retryable = Some(true);
+            error.details["gate_disposition"] = serde_json::json!("unavailable");
+            error
+        })
+    }
+}
+
 pub(super) fn io(error: impl std::fmt::Display) -> Error {
     Error::internal_io(
         error.to_string(),
@@ -70,11 +96,15 @@ pub(super) fn io(error: impl std::fmt::Display) -> Error {
 }
 
 pub(super) fn json<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T> {
-    serde_json::from_slice(bytes).map_err(|error| Error::internal_json(error.to_string(), None))
+    homeboy_core::transport_json::decode("workspace_materialization_protocol", bytes)
 }
 
 pub(super) fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {
-    fs::write(path, serde_json::to_vec(value).map_err(io)?).map_err(io)
+    fs::write(path, serde_json::to_vec(value).map_err(io)?).materialization(
+        "write",
+        path,
+        "controller",
+    )
 }
 
 /// Runner-side plan endpoint. Its response is the sole source of admission and
@@ -89,7 +119,7 @@ pub(super) fn materialization_plan_controlled(
     control: &WorkspaceControl,
 ) -> Result<serde_json::Value> {
     control.checkpoint()?;
-    let request: PlanRequest = json(&fs::read(input).map_err(io)?)?;
+    let request: PlanRequest = json(&fs::read(input).materialization("read", input, "runner")?)?;
     let version = request.lab_contract_version;
     if version != CONTRACT {
         return Err(io(format!(
@@ -103,7 +133,7 @@ pub(super) fn materialization_plan_controlled(
     let store_root = super::blobs::store(&first.remote_path);
     let _scratch = crate::staging_temp::Scope::new(store_root.parent().unwrap());
     let staging = store_root.parent().unwrap().join(".homeboy-tmp");
-    fs::create_dir_all(&staging).map_err(io)?;
+    fs::create_dir_all(&staging).materialization("create_dir_all", &staging, "runner")?;
     let probe = local_snapshot_filesystem_probe(&staging, "runner snapshot destination")?;
     let disk = local_runner_workspace_disk_probe(&staging)
         .ok_or_else(|| io("runner filesystem capacity unavailable"))?;
@@ -189,7 +219,11 @@ pub(super) fn materialization_commit_controlled(
     control: &WorkspaceControl,
 ) -> Result<serde_json::Value> {
     control.checkpoint()?;
-    let request: CommitRequest = json(&fs::read(input.join("commit.json")).map_err(io)?)?;
+    let request: CommitRequest = json(&fs::read(input.join("commit.json")).materialization(
+        "read",
+        &input.join("commit.json"),
+        "runner",
+    )?)?;
     let version = request.lab_contract_version;
     if version != CONTRACT {
         return Err(io(format!(
@@ -199,17 +233,21 @@ pub(super) fn materialization_commit_controlled(
     let first = request.roots.first().ok_or_else(|| io("empty commit"))?;
     let store = super::blobs::store(&first.summary.remote_path);
     let _scratch = crate::staging_temp::Scope::new(store.parent().unwrap());
-    fs::create_dir_all(&store).map_err(io)?;
+    fs::create_dir_all(&store).materialization("create_dir_all", &store, "runner")?;
     if let Ok(blobs) = fs::read_dir(input.join("blobs")) {
         for blob in blobs {
             control.checkpoint()?;
-            let blob = blob.map_err(io)?;
+            let blob = blob.materialization("read_dir entry", &input.join("blobs"), "runner")?;
             let digest = format!("sha256:{}", blob.file_name().to_string_lossy());
             let key = super::blobs::key(&digest)?;
             if !super::blobs::valid(&blob.path(), &digest, control)? {
                 return Err(io("transferred blob digest mismatch"));
             }
-            fs::rename(blob.path(), store.join(key)).map_err(io)?;
+            fs::rename(blob.path(), store.join(key)).materialization(
+                "rename",
+                &blob.path(),
+                "runner",
+            )?;
         }
     }
     let mut synthetic = Vec::new();
@@ -262,7 +300,7 @@ pub(super) fn materialization_commit_controlled(
                 Command::new("sh")
                     .args(["-c", &command])
                     .current_dir(input.join(index.to_string())),
-                fs::File::open(bundle).map_err(io)?,
+                fs::File::open(&bundle).materialization("open", &bundle, "runner")?,
                 "install materialization Git metadata",
             )?;
             if !output.status.success() {
@@ -291,7 +329,7 @@ pub(super) fn materialization_commit_controlled(
                 input.join(index.to_string()).join("git/.git"),
                 source.join(".git"),
             )
-            .map_err(io)?;
+            .materialization("rename Git metadata", &source.join(".git"), "runner")?;
             control.git(&source, &["read-tree", "HEAD"])?;
             let head = control.git(&source, &["rev-parse", "--verify", "HEAD"])?;
             if !root.prepared_git && root.metadata.source_commit.as_deref() != Some(head.as_str()) {
@@ -308,7 +346,7 @@ pub(super) fn materialization_commit_controlled(
                 .parent()
                 .ok_or_else(|| io("workspace has no parent"))?,
         )
-        .map_err(io)?;
+        .materialization("create_dir_all", destination.parent().unwrap(), "runner")?;
         // Never replace another job's live execution view. An interrupted
         // publish is accepted only if its exact bytes are already complete.
         if destination.exists() {
@@ -317,7 +355,11 @@ pub(super) fn materialization_commit_controlled(
             // share these siblings: require a lease only for job-owned roots.
             if root.source_evidence.is_none() {
                 let previous: RunnerWorkspaceMetadata = json(
-                    &fs::read(workspace_metadata_path(&root.summary.remote_path)).map_err(io)?,
+                    &fs::read(workspace_metadata_path(&root.summary.remote_path)).materialization(
+                        "read",
+                        Path::new(&workspace_metadata_path(&root.summary.remote_path)),
+                        "runner",
+                    )?,
                 )?;
                 if previous.workspace_lease != root.metadata.workspace_lease {
                     return Err(io("existing materialization belongs to another lease"));
@@ -344,7 +386,11 @@ pub(super) fn materialization_commit_controlled(
                 // job-owned source roots. Retire the old complete view only
                 // after its replacement has passed verification.
                 let retired = input.join(format!("retired-{index}"));
-                fs::rename(destination, retired).map_err(io)?;
+                fs::rename(destination, retired).materialization(
+                    "rename",
+                    destination,
+                    "runner",
+                )?;
             }
         }
         homeboy_core::observation::phase_timing::time(
@@ -357,16 +403,28 @@ pub(super) fn materialization_commit_controlled(
                         .parent()
                         .ok_or_else(|| io("metadata has no parent"))?,
                 )
-                .map_err(io)?;
-                let mut staged =
-                    tempfile::NamedTempFile::new_in(metadata_path.parent().unwrap()).map_err(io)?;
+                .materialization(
+                    "create_dir_all",
+                    metadata_path.parent().unwrap(),
+                    "runner",
+                )?;
+                let mut staged = tempfile::NamedTempFile::new_in(metadata_path.parent().unwrap())
+                    .materialization("create tempfile", &metadata_path, "runner")?;
                 staged
                     .write_all(&serde_json::to_vec(&root.metadata).map_err(io)?)
-                    .map_err(io)?;
-                staged.persist(metadata_path).map_err(io)?;
+                    .materialization("write", &metadata_path, "runner")?;
+                staged.persist(&metadata_path).materialization(
+                    "persist",
+                    &metadata_path,
+                    "runner",
+                )?;
                 if let Some(evidence) = &root.source_evidence {
                     let path = homeboy_lab_contract::lab::handoff::runner_workspace_lab_source_evidence_path(&root.summary.remote_path);
-                    fs::write(path, evidence).map_err(io)?;
+                    fs::write(&path, evidence).materialization(
+                        "write",
+                        Path::new(&path),
+                        "runner",
+                    )?;
                 }
                 Ok(())
             },
@@ -374,7 +432,7 @@ pub(super) fn materialization_commit_controlled(
         // Metadata is complete before the workspace becomes visible. Recovery
         // can finish a publish interrupted between these two atomic renames.
         if !destination.exists() {
-            fs::rename(source, destination).map_err(io)?;
+            fs::rename(&source, destination).materialization("rename", &source, "runner")?;
         }
     }
     control.checkpoint()?;

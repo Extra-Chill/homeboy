@@ -65,6 +65,9 @@ pub struct Server {
 pub struct RunnerSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub homeboy_path: Option<String>,
+    /// Verified build waiting for a daemon replacement; never used by jobs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub staged_homeboy_path: Option<String>,
     #[serde(default)]
     pub daemon: bool,
     /// The runner daemon runs as a host service (a systemd user unit) that the

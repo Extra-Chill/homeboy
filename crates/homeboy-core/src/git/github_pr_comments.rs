@@ -28,6 +28,9 @@ pub struct PrCommentOptions {
     pub number: u64,
     pub body: String,
     pub mode: PrCommentMode,
+    /// Only publish if the PR is open and its current head matches this SHA.
+    /// Omit to preserve unguarded comment publication.
+    pub expected_head_sha: Option<String>,
     /// Optional workspace path. See `IssueCreateOptions::path`.
     pub path: Option<String>,
 }
@@ -38,6 +41,7 @@ impl Default for PrCommentOptions {
             number: 0,
             body: String::new(),
             mode: PrCommentMode::Fresh,
+            expected_head_sha: None,
             path: None,
         }
     }
@@ -86,12 +90,61 @@ pub enum PrCommentMode {
 ///   `<!-- homeboy:comment-key=<comment_key> -->`.
 pub fn pr_comment(component_id: Option<&str>, options: PrCommentOptions) -> Result<GithubPrOutput> {
     let (id, repo, gh) = resolve_component_github(component_id, options.path.as_deref())?;
+    pr_comment_with_client(id, repo, &gh, options)
+}
+
+fn pr_comment_with_client(
+    id: String,
+    repo: GitHubRepo,
+    gh: &GhClient,
+    options: PrCommentOptions,
+) -> Result<GithubPrOutput> {
     gh.ensure_ready()?;
 
+    // Opt-in: legacy callers neither fetch the PR nor change closed-PR behavior.
+    // Read once before any comment lookup or mutation, for every posting mode.
+    if let Some(expected_head_sha) = options.expected_head_sha.as_deref() {
+        #[derive(serde::Deserialize)]
+        struct PrHead {
+            sha: String,
+        }
+        #[derive(serde::Deserialize)]
+        struct PrSnapshot {
+            state: String,
+            head: PrHead,
+        }
+        let pr: PrSnapshot = gh.api_json(&format!(
+            "repos/{}/{}/pulls/{}",
+            repo.owner, repo.repo, options.number
+        ))?;
+        let skip_reason = if pr.state != "open" {
+            Some("pr_not_open")
+        } else if pr.head.sha != expected_head_sha {
+            Some("stale_head")
+        } else {
+            None
+        };
+        if let Some(reason) = skip_reason {
+            return Ok(GithubPrOutput {
+                component_id: id,
+                owner: repo.owner,
+                repo: repo.repo,
+                action: "skipped".into(),
+                success: true,
+                number: Some(options.number),
+                state: Some(pr.state),
+                skip_reason: Some(reason.into()),
+                expected_head_sha: Some(expected_head_sha.into()),
+                current_head_sha: Some(pr.head.sha),
+                ..Default::default()
+            });
+        }
+    }
+
     match options.mode.clone() {
-        PrCommentMode::Fresh => pr_comment_fresh(id, repo, &gh, options),
+        PrCommentMode::Fresh => pr_comment_fresh(id, repo, gh, options),
         PrCommentMode::StickyWholeBody { key } => {
-            pr_comment_sticky_whole(id, repo, &gh, options.number, options.body, key)
+            pr_comment_sticky_whole(id, repo, gh, options.number, options.body, key)
         }
         PrCommentMode::Sectioned {
             comment_key,
@@ -102,7 +155,7 @@ pub fn pr_comment(component_id: Option<&str>, options: PrCommentOptions) -> Resu
         } => pr_comment_sectioned(
             id,
             repo,
-            &gh,
+            gh,
             options.number,
             options.body,
             comment_key,
@@ -131,7 +184,8 @@ fn pr_comment_fresh(
         repo_flag,
     ];
     let mut body_files = Vec::new();
-    push_markdown_body_file_arg(&mut args, &mut body_files, "--body-file", &options.body)?;
+    let body = super::neutralize_mentions(&options.body);
+    push_markdown_body_file_arg(&mut args, &mut body_files, "--body-file", &body)?;
     let output = gh.run(&args)?;
     Ok(GithubPrOutput {
         component_id: id,
@@ -154,7 +208,7 @@ fn pr_comment_sticky_whole(
     body: String,
     key: String,
 ) -> Result<GithubPrOutput> {
-    let full_body = format!("{}\n{}", marker_for_key(&key), body);
+    let full_body = super::neutralize_mentions(&format!("{}\n{}", marker_for_key(&key), body));
 
     if let Some(existing_id) = find_sticky_comment_id(gh, &repo, pr_number, &key)? {
         let args: Vec<String> = vec![
@@ -434,6 +488,84 @@ fn parse_comments_list_json(raw: &str, comment_key: &str) -> Result<Vec<FetchedC
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn publication_guard_checks_once_before_all_comment_modes() {
+        let modes = [
+            PrCommentMode::Fresh,
+            PrCommentMode::StickyWholeBody { key: "ci".into() },
+            PrCommentMode::Sectioned {
+                comment_key: "ci".into(),
+                section_key: "test".into(),
+                header: None,
+                footer: None,
+                section_order: None,
+            },
+        ];
+        for mode in modes {
+            for (state, head, expected, reason) in [
+                ("open", "new", Some("new"), None),
+                ("open", "new", Some("old"), Some("stale_head")),
+                ("closed", "new", Some("new"), Some("pr_not_open")),
+                // Merged PRs also have state=closed in the REST API.
+                ("closed", "new", Some("old"), Some("pr_not_open")),
+                ("closed", "new", None, None),
+                ("open", "new", None, None),
+            ] {
+                let fixture = tempfile::tempdir().unwrap();
+                let log = fixture.path().join("calls");
+                let quoted_log =
+                    homeboy_engine_primitives::shell::quote_path(&log.to_string_lossy());
+                homeboy_test_support::write_executable(
+                    &fixture.path().join("gh"),
+                    format!(
+                        "#!/bin/sh\necho \"$*\" >> {quoted_log}\ncase \"$1 $2\" in\n  '--version '| 'auth status') exit 0 ;;\n  'api repos/o/r/pulls/42') echo '{{\"state\":\"{state}\",\"head\":{{\"sha\":\"{head}\"}}}}' ;;\n  'api repos/o/r/issues/42/'*) case \"$*\" in *--jq*) echo ;; *) echo '[]' ;; esac ;;\n  'pr comment') echo 'https://github.com/o/r/pull/42#issuecomment-1' ;;\n  *) exit 99 ;;\nesac\n"
+                    ),
+                    0o755,
+                ).unwrap();
+                let repo = GitHubRepo {
+                    host: "github.com".into(),
+                    owner: "o".into(),
+                    repo: "r".into(),
+                };
+                let gh = GhClient::for_repo(&repo).with_test_path(fixture.path());
+                let output = pr_comment_with_client(
+                    "component".into(),
+                    repo,
+                    &gh,
+                    PrCommentOptions {
+                        number: 42,
+                        body: "results".into(),
+                        mode: mode.clone(),
+                        expected_head_sha: expected.map(str::to_string),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                let calls = std::fs::read_to_string(log).unwrap();
+                assert_eq!(
+                    calls.matches("api repos/o/r/pulls/42").count(),
+                    usize::from(expected.is_some())
+                );
+                assert!(output.success);
+                let json = serde_json::to_value(&output).unwrap();
+                if let Some(reason) = reason {
+                    assert_eq!(json["action"], "skipped");
+                    assert_eq!(json["skip_reason"], reason);
+                    assert_eq!(json["expected_head_sha"], expected.unwrap());
+                    assert_eq!(json["current_head_sha"], head);
+                    // Only readiness probes and the single PR read: no comment
+                    // lookup, create, PATCH, or duplicate DELETE is reachable.
+                    assert_eq!(calls.lines().count(), 3, "{calls}");
+                } else {
+                    assert!(output.action.ends_with("create"));
+                    assert!(!json.as_object().unwrap().contains_key("skip_reason"));
+                    assert_eq!(calls.matches("pr comment 42").count(), 1);
+                }
+            }
+        }
+    }
 
     #[test]
     fn marker_format_is_stable() {

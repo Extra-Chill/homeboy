@@ -73,25 +73,26 @@ fn collect_unportable(root: &Path, dir: &Path, omitted: &mut Vec<String>) -> Res
             .unwrap_or(&path)
             .to_string_lossy()
             .to_string();
-        if metadata.is_dir() {
-            if is_runner_unportable(&path, &metadata) {
-                omitted.push(format!("{rel}/"));
+        if is_runner_unportable(&path, &metadata) {
+            omitted.push(if metadata.is_dir() {
+                format!("{rel}/")
             } else {
-                collect_unportable(root, &path, omitted)?;
-            }
-        } else if metadata.is_file() && is_runner_unportable(&path, &metadata) {
-            omitted.push(rel);
+                rel
+            });
+        } else if metadata.is_dir() {
+            collect_unportable(root, &path, omitted)?;
         }
     }
     Ok(())
 }
 
-/// The single staging predicate: a `bin/` directory, or a regular file that
+/// The single staging predicate: a `bin` entry, or a regular file that
 /// carries native binary magic, is controller-platform specific and must not
 /// be staged onto a runner that may differ. Scripts stay: they are portable.
 pub(crate) fn is_runner_unportable(path: &Path, metadata: &fs::Metadata) -> bool {
-    if metadata.is_dir() {
-        return path.file_name().and_then(|name| name.to_str()) == Some("bin");
+    // Check the name before the file type: tool caches may be symlinks.
+    if path.file_name().and_then(|name| name.to_str()) == Some("bin") {
+        return true;
     }
     if !metadata.is_file() {
         return false;

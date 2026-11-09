@@ -41,8 +41,8 @@ use crate::commands::utils::response::{
     CommandNextActionKind, CommandResultRefs, CommandRunRef, ACTIONABLE_METADATA_KEY,
 };
 use crate::commands::utils::watch::{
-    parse_duration, watch_loop, WatchConclusion, WatchConfig, WatchPoller, WatchResult,
-    TIMEOUT_EXIT_CODE,
+    parse_duration, watch_loop, watch_loop_with_interval, WatchConclusion, WatchConfig,
+    WatchPoller, WatchResult, TIMEOUT_EXIT_CODE,
 };
 
 /// Cap the number of detail refs rendered in the compact summary so a noisy
@@ -293,6 +293,17 @@ pub(super) fn status(args: StatusArgs) -> CmdResult<Value> {
 }
 
 fn status_once(args: StatusArgs) -> CmdResult<Value> {
+    let (mut value, code) = status_without_feedback(args.clone())?;
+    let cook_id = bounded_exact_record(&args.run_id)
+        .ok()
+        .and_then(|record| record.metadata["cook_id"].as_str().map(str::to_string))
+        .unwrap_or(args.run_id);
+    let store = homeboy::agents::agent_task_feedback::CookFeedbackStore::from_current_data_root()?;
+    value["cook_feedback"] = store.status_value(&cook_id)?;
+    Ok((value, code))
+}
+
+fn status_without_feedback(args: StatusArgs) -> CmdResult<Value> {
     if !args.exact {
         if let Some(ci) = agent_task_service_direct::cook_ci_status(&args.run_id)? {
             return Ok((ci, 0));
@@ -339,6 +350,19 @@ fn status_once(args: StatusArgs) -> CmdResult<Value> {
     // Status is a pure projection (#13697, #15718): every read below is
     // bounded and never initializes, migrates, or reconciles durable state.
     if let Ok(record) = bounded_exact_record(&target.run_id) {
+        if let Some(promotion) = record
+            .metadata
+            .pointer("/cook_delivery/artifacts/promotion")
+        {
+            value["candidate_ref"] = promotion
+                .get("candidate_ref")
+                .cloned()
+                .unwrap_or(Value::Null);
+            value["candidate_sha"] = promotion
+                .pointer("/candidate/candidate_sha")
+                .cloned()
+                .unwrap_or(Value::Null);
+        }
         // The typed immutable candidate commit harvest recorded (#16303).
         if let Some(candidate) = &record.candidate {
             value["candidate_commit"] = json!(candidate);
@@ -505,6 +529,8 @@ fn compact_control_plane_status(value: Value) -> Value {
     }
     for key in [
         "candidate_commit",
+        "candidate_ref",
+        "candidate_sha",
         "lab_snapshot_failure",
         "lab_staging_diagnostic",
     ] {
@@ -981,15 +1007,64 @@ fn watch_status_until(
     };
     let started = Instant::now();
     let mut progress = StatusWatchProgress::default();
-    let result = watch_loop(
+    let mut backoff = StatusWaitInterval::default();
+    let result = watch_loop_with_interval(
         &poller,
         &args.run_id,
         &WatchConfig { interval, timeout },
         std::thread::sleep,
         || started.elapsed(),
         |(snapshot, _), poll| progress.observe(snapshot, poll, |line| eprintln!("{line}")),
+        |(snapshot, _)| {
+            if await_materialization {
+                backoff.observe(status_change_projection(snapshot))
+            } else {
+                interval
+            }
+        },
     )?;
     Ok(watch_status_output(&args, result, progress))
+}
+
+/// Unchanged durable status projections need progressively fewer reads.
+#[derive(Default)]
+struct StatusWaitInterval {
+    previous: Option<Value>,
+    seconds: u64,
+}
+
+impl StatusWaitInterval {
+    fn observe(&mut self, projection: Value) -> Duration {
+        self.seconds = if self.previous.as_ref() == Some(&projection) {
+            (self.seconds * 2).min(15)
+        } else {
+            1
+        };
+        self.previous = Some(projection);
+        Duration::from_secs(self.seconds)
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn status_wait_interval_tracks_projection_changes() {
+    let mut policy = StatusWaitInterval::default();
+    for (projection, seconds) in [
+        ("queued", 1),
+        ("queued", 2),
+        ("queued", 4),
+        ("queued", 8),
+        ("queued", 15),
+        ("queued", 15),
+        ("running", 1),
+        ("running", 2),
+        ("new progress", 1),
+    ] {
+        assert_eq!(
+            policy.observe(json!(projection)),
+            Duration::from_secs(seconds)
+        );
+    }
 }
 
 #[derive(Default)]

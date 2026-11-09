@@ -1,5 +1,9 @@
 mod implementation;
 
+pub use implementation::scratch::{
+    allocate_scratch, list_scratch, pin_scratch, release_scratch, unpin_scratch, ScratchAllocation,
+    ScratchLease, SCRATCH_PRODUCER,
+};
 pub(crate) use implementation::{
     bind_run_dir_owner, managed_run_temp_dir, mark_run_dir_succeeded, pin_runtime_temp_dir,
     retain_failed_run_dir, socket_safe_run_temp_dir, RuntimeTempPin, TempPlacement,

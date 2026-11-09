@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use homeboy_core::error::{Error, Result};
 use homeboy_core::gate::HomeboyGateResult;
+use homeboy_core::git::is_conventional_subject;
 
 pub const AGENT_TASK_REVIEW_DOSSIER_SCHEMA: &str = "homeboy/agent-task-review-dossier/v1";
 
@@ -390,7 +391,7 @@ impl AiFilledReviewForm {
         // instructions: Homeboy authors no agent-facing prose (#15818).
         "A valid `review_form` has non-empty `pr_title` (single line, at most 256 characters, specific to the change), \
 `summary`, `what_changed` (a non-empty list), and `completion` \
-(`complete` or `incomplete`; `incomplete` requires a non-empty `incomplete_reason`)."
+(`complete` or `incomplete`; `incomplete` requires a non-empty `incomplete_reason`). `pr_title` must use feat/fix/refactor/docs/chore/test/perf/ci/build, optional scope and `!`, then a non-empty subject; its type drives release bump (feat → minor, `!` → major, otherwise patch)."
     }
 
     /// Validate that the agent filled every required slot with real content.
@@ -410,6 +411,9 @@ impl AiFilledReviewForm {
             || (title.starts_with("Cook ") && title.split_whitespace().count() == 2)
         {
             return Err(review_form_gap("review_form.pr_title", "pr_title must be a specific, bounded, single-line title for the actual change (not a placeholder or generic Cook title)"));
+        }
+        if !is_conventional_subject(title) {
+            return Err(review_form_gap("review_form.pr_title", "pr_title must be a conventional commit subject using feat/fix/refactor/docs/chore/test/perf/ci/build, optional scope and !, then : and a non-empty title"));
         }
         if self.summary.trim().is_empty() {
             return Err(review_form_gap("review_form.summary", "summary is empty"));
@@ -2021,7 +2025,7 @@ mod tests {
         let outputs = serde_json::json!({
             "review_form": {
                 "summary": ["Adds the guard.", "Refs #12386."],
-                "pr_title": "Guard the reload render path",
+                "pr_title": "fix(agent-task): guard the reload render path",
                 "what_changed": ["one", "two"],
                 "completion": "complete",
             }
@@ -2047,7 +2051,7 @@ mod tests {
     fn multi_line_prose_is_flattened_so_the_dossier_accepts_it() {
         let outputs = serde_json::json!({
             "review_form": {
-                "pr_title": "Add a render-video ability",
+                "pr_title": "feat(render-video): add an ability",
                 "summary": "Adds a render plan.\n\nAlso adds\tsmoke tests for `<!-- wp:x /-->` and </p>.\r\n",
                 "what_changed": ["First line\nwraps here", "  ", "Second"],
                 "completion": "complete",
@@ -2079,7 +2083,7 @@ mod tests {
         let outputs = serde_json::json!({
             "review_form": {
                 "summary": "s",
-                "pr_title": "Guard the reload render path",
+                "pr_title": "fix(agent-task): guard the reload render path",
                 "what_changed": "first line\nsecond line\n",
                 "compatibility": "c",
                 "used_for": "Investigated, then implemented and verified the change.",
@@ -2104,7 +2108,7 @@ mod tests {
         let outputs = serde_json::json!({
             "review_form": {
                 "summary": "s",
-                "pr_title": "Guard the reload render path",
+                "pr_title": "fix(agent-task): guard the reload render path",
                 "what_changed": ["one"],
                 "compatibility": "c",
                 "used_for": "Investigated, then implemented and verified the change.",
@@ -2150,7 +2154,7 @@ mod tests {
     fn prose_completion_parses_as_an_incomplete_form() {
         let outputs = serde_json::json!({
             "review_form": {
-                "pr_title": "Guard the reload render path",
+                "pr_title": "fix(agent-task): guard the reload render path",
                 "summary": "Guard the reload path.",
                 "what_changed": ["Guard reloads"],
                 "compatibility": "Additive",
@@ -2163,7 +2167,10 @@ mod tests {
             .expect("a prose completion is not a parse error")
             .expect("form present");
         assert_eq!(form.completion, None);
-        assert_eq!(form.pr_title, "Guard the reload render path");
+        assert_eq!(
+            form.pr_title,
+            "fix(agent-task): guard the reload render path"
+        );
         assert_eq!(form.summary, "Guard the reload path.");
         assert_eq!(form.what_changed, vec!["Guard reloads".to_string()]);
         let gap = form
@@ -2231,7 +2238,7 @@ mod tests {
 
     fn valid_form() -> AiFilledReviewForm {
         AiFilledReviewForm {
-            pr_title: "Guard the reload render path".into(),
+            pr_title: "fix(agent-task): guard the reload render path".into(),
             summary: "Fix the widget so it renders on reload.".into(),
             what_changed: vec!["Guard the null path in render().".into()],
             verification: Vec::new(),
@@ -2307,7 +2314,7 @@ mod tests {
     #[test]
     fn incomplete_form_is_valid_but_never_publishable() {
         let value = serde_json::json!({ "review_form": {
-            "pr_title": "Guard the reload path against a null config",
+            "pr_title": "fix(agent-task): guard reload with null config",
             "summary": "Adds a guard.",
             "what_changed": ["Guard reload"],
             "compatibility": "No behaviour change for valid configs.",
@@ -2353,6 +2360,7 @@ mod tests {
             "two\nlines",
             " padded ",
             &"x".repeat(257),
+            "Add serial release mode",
         ] {
             let mut form = valid_form();
             form.pr_title = title.to_string();
@@ -2783,7 +2791,7 @@ mod tests {
     #[test]
     fn review_form_ignores_retired_used_for_and_compatibility_keys() {
         let outputs = serde_json::json!({ "review_form": {
-            "pr_title": "Guard the reload path",
+            "pr_title": "fix(agent-task): guard reload path",
             "summary": "Guard reloads.",
             "what_changed": ["Added the guard."],
             "compatibility": "Additive.",
@@ -2799,7 +2807,7 @@ mod tests {
     #[test]
     fn minimal_review_form_does_not_require_legacy_fields() {
         let form: AiFilledReviewForm = serde_json::from_value(serde_json::json!({
-            "pr_title": "Simplify review signatures",
+            "pr_title": "refactor(review): simplify signatures",
             "summary": "Remove redundant reviewer fields.",
             "what_changed": ["Simplified the form."],
             "completion": "complete"

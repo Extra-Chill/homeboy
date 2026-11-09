@@ -172,6 +172,8 @@ impl StepState {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InstanceState {
     pub schema: String,
+    #[serde(default)]
+    pub timing: super::timing::WorkflowTiming,
     pub instance: String,
     pub inputs: BTreeMap<String, Value>,
     pub status: InstanceStatus,
@@ -197,12 +199,22 @@ impl InstanceState {
         instance: impl Into<String>,
         inputs: BTreeMap<String, Value>,
     ) -> Self {
+        let iteration = if definition.next_pass.is_some() {
+            inputs
+                .get("iteration")
+                .and_then(Value::as_u64)
+                .and_then(|n| u32::try_from(n).ok())
+                .unwrap_or(1)
+        } else {
+            1
+        };
         Self {
             schema: WORKFLOW_STATE_SCHEMA.to_string(),
+            timing: Default::default(),
             instance: instance.into(),
             inputs,
             status: InstanceStatus::Running,
-            iteration: 1,
+            iteration,
             step_runs: 0,
             started_at_ms: None,
             steps: definition
@@ -395,6 +407,7 @@ pub fn advance(
         machine.enforce_timeouts();
         machine.progress();
     }
+    super::timing::capture(&mut machine.state, now_ms);
     (machine.state, machine.commands)
 }
 

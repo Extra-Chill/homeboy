@@ -134,6 +134,8 @@ pub(crate) fn project_runs_show_output(payload: &Value) -> Value {
         "component_id": run.get("component_id").map(super::operator_projection::value),
         "rig_id": run.get("rig_id").map(super::operator_projection::value),
         "git_sha": run.get("git_sha").map(super::operator_projection::value),
+        "candidate_sha": run.get("candidate_sha").map(super::operator_projection::value),
+        "candidate_ref": run.get("candidate_ref").map(super::operator_projection::value),
         "command": run.get("command").map(super::operator_projection::value),
         "cwd": run.get("cwd").map(super::operator_projection::value),
         "status_note": run.get("status_note").map(super::operator_projection::value),
@@ -459,6 +461,12 @@ fn render_run_detail(run: &Value) -> String {
     }
     if let Some(rig) = string_value(run, &["rig_id"]) {
         lines.push(format!("Rig: {rig}"));
+    }
+    if let Some(reference) = string_value(run, &["candidate_ref"]) {
+        lines.push(format!("Candidate ref: {reference}"));
+    }
+    if let Some(sha) = string_value(run, &["candidate_sha"]) {
+        lines.push(format!("Candidate SHA: {sha}"));
     }
     if let Some(sha) = string_value(run, &["git_sha"]) {
         lines.push(format!("Component SHA: {sha}"));

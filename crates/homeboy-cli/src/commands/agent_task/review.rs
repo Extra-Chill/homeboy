@@ -3612,6 +3612,7 @@ mod tests {
     #[test]
     fn promotion_handoff_marks_promoted_patch_without_pr_claim() {
         let report = AgentTaskPromotionReport {
+            candidate_ref: None,
             schema: "homeboy/agent-task-promotion-report/v1".to_string(),
             status: AgentTaskPromotionStatus::Applied,
             source: AgentTaskPromotionSource {

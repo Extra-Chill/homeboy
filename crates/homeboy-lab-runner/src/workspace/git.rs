@@ -1006,8 +1006,8 @@ pub(super) fn validate_controller_git_bundle_source(
     local_path: &Path,
     control: &WorkspaceControl,
 ) -> Result<()> {
-    let is_shallow = control.git(local_path, &["rev-parse", "--is-shallow-repository"])?;
-    if is_shallow.trim() != "true" {
+    control.checkpoint()?;
+    if !homeboy_core::git::is_shallow_repository(local_path)? {
         return Ok(());
     }
 

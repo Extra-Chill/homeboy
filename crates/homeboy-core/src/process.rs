@@ -16,6 +16,17 @@ use uuid::Uuid;
 #[cfg(target_os = "linux")]
 const PROCESS_SCOPE_ENV: &str = "HOMEBOY_PROCESS_SCOPE";
 
+/// Identity of the process performing a durable action. Capture this at the
+/// write boundary, not later in an observer which may be a different process.
+/// Arguments use the shared secret-redaction policy before persistence.
+pub fn current_actor() -> serde_json::Value {
+    serde_json::json!({
+        "pid": std::process::id(),
+        "argv": crate::redaction::redact_argv(&std::env::args_os()
+            .map(|arg| arg.to_string_lossy().into_owned()).collect::<Vec<_>>()),
+    })
+}
+
 /// Graceful-termination signal number for [`signal_pid`].
 ///
 /// Named here rather than used as `libc::SIGTERM` at call sites so every

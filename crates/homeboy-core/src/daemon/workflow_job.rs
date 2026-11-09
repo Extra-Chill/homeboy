@@ -72,6 +72,8 @@ pub struct WorkflowJobRequest {
     /// The definition, pinned at admission.
     pub definition: WorkflowDefinition,
     pub definition_digest: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub definition_source: Option<String>,
     pub inputs: BTreeMap<String, Value>,
     /// Absolute path of the Homeboy executable `homeboy` and `cook` steps run.
     pub homeboy_program: String,
@@ -440,10 +442,14 @@ fn run_instance(
             reuse_steps(request, &old_request, &old_state, &mut state)?;
         }
     }
+    // Repair a projection interrupted after the previous checkpoint commit.
+    if let Err(error) = project_timing(&state) {
+        crate::log_status!("observe", "workflow timing persistence failed: {}", error);
+    }
     job.progress(projection(&state, Some(store)))?;
     loop {
         if job.is_cancelled() {
-            return Ok(cancelled(request, &state, store));
+            return Ok(cancelled(request, &state, job_id, store));
         }
         if state.status.is_terminal() {
             return finish(request, &state, store);
@@ -458,7 +464,7 @@ fn run_instance(
             match commit(request, job_id, &next, &commands, store) {
                 Ok(()) => {}
                 Err(_) if job.is_cancelled() => {
-                    return Ok(cancelled(request, &state, store));
+                    return Ok(cancelled(request, &state, job_id, store));
                 }
                 Err(error) => return Err(error),
             }
@@ -486,13 +492,31 @@ fn run_instance(
 
 /// The instance was cancelled: stop every step job it still awaits (the
 /// daemon's cascade usually got there first) and report the final state.
-fn cancelled(request: &WorkflowJobRequest, state: &InstanceState, store: &JobStore) -> Value {
+fn cancelled(
+    request: &WorkflowJobRequest,
+    state: &InstanceState,
+    job_id: Uuid,
+    store: &JobStore,
+) -> Value {
     let (next, commands) = advance(
         &request.definition,
         state,
         &Event::Cancel { reason: None },
         now_ms(),
     );
+    // Cancellation admits no new work, but its terminal timing still commits.
+    let persisted =
+        to_value(&next).and_then(|value| store.record_controller_prepared(job_id, value));
+    match persisted {
+        Ok(()) => {
+            let _ = project_timing(&next);
+        }
+        Err(error) => crate::log_status!(
+            "observe",
+            "workflow cancellation checkpoint failed: {}",
+            error
+        ),
+    }
     for command in commands {
         if let Command::CancelStep { key, reason } = command {
             if let Some(child) = store.controller_job_for_key(&key) {
@@ -506,6 +530,15 @@ fn cancelled(request: &WorkflowJobRequest, state: &InstanceState, store: &JobSto
 }
 
 fn finish(request: &WorkflowJobRequest, state: &InstanceState, store: &JobStore) -> Result<Value> {
+    if state.status == InstanceStatus::Succeeded {
+        if let Some(child) = next_pass(request, state)? {
+            let envelope = serde_json::from_value(child.submission()?)
+                .map_err(|error| invalid(format!("invalid next pass: {error}")))?;
+            let admission =
+                super::with_daemon_job_admission(|| super::admit_controller_job(envelope, store))?;
+            super::start_controller_job(admission.job.id, store)?;
+        }
+    }
     let result = projection(state, Some(store));
     match state.status {
         InstanceStatus::Succeeded => Ok(result),
@@ -521,6 +554,100 @@ fn finish(request: &WorkflowJobRequest, state: &InstanceState, store: &JobStore)
             Err(error)
         }
     }
+}
+
+/// Build a replay-stable child from the admitted (pinned) definition.
+fn next_pass(
+    request: &WorkflowJobRequest,
+    state: &InstanceState,
+) -> Result<Option<WorkflowJobRequest>> {
+    let Some(next) = &request.definition.next_pass else {
+        return Ok(None);
+    };
+    if let Some(path) = &request.definition_source {
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| invalid(format!("cannot read next-pass definition {path}: {e}")))?;
+        if WorkflowDefinition::parse(&text)?.digest() != request.definition_digest {
+            return Err(invalid(format!("definition changed between passes: {path}; restart the workflow to use the new definition")));
+        }
+    }
+    let iteration = request
+        .inputs
+        .get("iteration")
+        .and_then(Value::as_u64)
+        .filter(|n| *n >= 1 && *n <= u64::from(u32::MAX))
+        .ok_or_else(|| invalid("next_pass requires a positive integer iteration"))?;
+    if iteration >= u64::from(next.max_iterations)
+        || next.when.as_ref().is_some_and(|gate| !gate.evaluate(state))
+    {
+        return Ok(None);
+    }
+    let mut streak = 1;
+    if let Some(stop) = &next.stop_unchanged {
+        let current = state
+            .steps
+            .get(&stop.step)
+            .and_then(|s| s.output.as_ref())
+            .and_then(|v| v.pointer(&stop.output))
+            .ok_or_else(|| invalid("next_pass.stop_unchanged output is missing"))?;
+        let previous = &request.inputs["previous"];
+        let old = previous
+            .get("outputs")
+            .and_then(|v| v.get(&stop.step))
+            .and_then(|v| v.pointer(&stop.output));
+        if old == Some(current) {
+            streak = previous
+                .get("unchanged_passes")
+                .and_then(Value::as_u64)
+                .unwrap_or(1)
+                + 1;
+        }
+        if streak >= u64::from(stop.passes) {
+            return Ok(None);
+        }
+    }
+    fn render(value: &Value, state: &InstanceState) -> Result<Value> {
+        Ok(match value {
+            Value::String(text) => {
+                crate::workflow::template::resolve_value(text, state).map_err(invalid)?
+            }
+            Value::Array(items) => Value::Array(
+                items
+                    .iter()
+                    .map(|v| render(v, state))
+                    .collect::<Result<_>>()?,
+            ),
+            Value::Object(items) => Value::Object(
+                items
+                    .iter()
+                    .map(|(k, v)| Ok((k.clone(), render(v, state)?)))
+                    .collect::<Result<_>>()?,
+            ),
+            other => other.clone(),
+        })
+    }
+    let mut child = request.clone();
+    for (name, value) in &next.inputs {
+        child.inputs.insert(name.clone(), render(value, state)?);
+    }
+    child
+        .inputs
+        .insert("iteration".into(), json!(iteration + 1));
+    let outputs: BTreeMap<_, _> = state
+        .steps
+        .iter()
+        .filter_map(|(id, step)| step.output.as_ref().map(|v| (id, v)))
+        .collect();
+    child.inputs.insert(
+        "previous".into(),
+        json!({"outputs": outputs, "unchanged_passes": streak}),
+    );
+    child.parent = Some(request.instance.clone());
+    child.resumed_from = None;
+    child.instance = child
+        .definition
+        .instance_id(&child.inputs, child.instance_name.as_deref());
+    Ok(Some(child))
 }
 
 /// Every event the ledger holds for this state, in a deterministic order.
@@ -745,6 +872,10 @@ fn commit(
         admissions,
         cancellations.clone(),
     )?;
+    // Projection follows the checkpoint commit; replay uses stable attempt identities.
+    if let Err(error) = project_timing(next) {
+        crate::log_status!("observe", "workflow timing persistence failed: {}", error);
+    }
     for child in admitted {
         let _ = crate::daemon::start_controller_job(child, store);
     }
@@ -756,6 +887,45 @@ fn commit(
         }
     }
     Ok(())
+}
+
+fn project_timing(state: &InstanceState) -> Result<()> {
+    crate::observation::ObservationStore::open_initialized()?.record_workflow_timing(state)
+}
+
+impl crate::observation::ObservationStore {
+    /// Replay completed attempts only after their checkpoint has committed.
+    pub fn record_workflow_timing(&self, state: &InstanceState) -> Result<()> {
+        use crate::observation::{NewRunRecord, RunStatus};
+        let store = self;
+        if store.get_run(&state.instance)?.is_none() {
+            store.start_run_with_id(
+                NewRunRecord::builder("workflow").build(),
+                state.instance.clone(),
+            )?;
+        }
+        for (index, span) in state.timing.completed.spans.iter().enumerate() {
+            store.record_phase_spans(
+                &state.instance,
+                &format!("workflow-attempt:{index}"),
+                &homeboy_engine_primitives::phase_timing::PhaseTimingReport {
+                    spans: vec![span.clone()],
+                },
+            )?;
+        }
+        if state.status.is_terminal() {
+            store.finish_run(
+                &state.instance,
+                if state.status == InstanceStatus::Succeeded {
+                    RunStatus::Pass
+                } else {
+                    RunStatus::Fail
+                },
+                None,
+            )?;
+        }
+        Ok(())
+    }
 }
 
 /// Compile one submission into the `step` job that runs it.

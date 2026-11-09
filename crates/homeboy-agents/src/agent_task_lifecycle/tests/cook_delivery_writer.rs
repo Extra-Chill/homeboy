@@ -42,6 +42,69 @@ fn gate(status: &str) -> Value {
     json!([{ "id": "cargo-test", "status": status, "command": ["cargo", "test"] }])
 }
 
+#[test]
+fn gate_environment_failure_retains_candidate_and_diagnostic() {
+    for (step, code, error, setup) in [
+        (
+            "extension_materialization",
+            "extension.not_found",
+            "Extension 'wordpress' failed to load: The extension is not installed.",
+            false,
+        ),
+        (
+            "promotion.gate_setup",
+            "dependency_step_failed",
+            "composer install failed",
+            true,
+        ),
+        (
+            "environment",
+            "gate.environment",
+            "required environment variable missing",
+            false,
+        ),
+    ] {
+        let context = homeboy_core::test_support::HermeticTestContext::new();
+        let store = store_with_run(&context, "environment-gate");
+        let mut gate = json!({
+            "id": "lint", "status": "unavailable", "command": ["homeboy", "review", "lint"],
+            "lab_receipt": {
+                "schema": "homeboy/lab-gate-disposition/v1", "executed": false,
+                "stage": step, "error_code": code,
+                "artifact_ref": "homeboy://run/lab-gate-1/artifact/result",
+                "diagnostic": {"message": error, "details": {"step_id": step}}
+            }
+        });
+        if setup {
+            gate["setup"] = json!([{"status":"failed", "stderr":format!("{error}\nsecond line")}]);
+        }
+        let record = record_promotion_in_store(
+            &store,
+            "environment-gate",
+            promotion("environment-gate", "gates_deferred", json!([gate])),
+        )
+        .expect("record environment failure");
+        let delivery = persisted_delivery(&record);
+        let blocker = delivery.blocker.as_ref().expect("environment blocker");
+        assert_eq!(
+            serde_json::to_value(blocker.code).unwrap(),
+            "gate_environment_unavailable"
+        );
+        assert_eq!(record.state(), AgentTaskRunState::CandidateRecoverable);
+        let output = blocker.output.as_deref().expect("diagnostic excerpt");
+        for expected in [
+            "gate: lint",
+            "command: homeboy review lint",
+            step,
+            error,
+            "homeboy://run/lab-gate-1/artifact/result",
+        ] {
+            assert!(output.contains(expected), "missing {expected}: {output}");
+        }
+        assert!(!output.contains("second line"));
+    }
+}
+
 fn published() -> Value {
     json!({
         "status": "review_ready",
@@ -180,9 +243,8 @@ fn concurrent_delivery_writers_do_not_lose_an_update() {
     );
 }
 
-/// A deferred gate leaves the run recoverable with a `gates_deferred`
-/// blocker; a later executed gate replaces it with its verdict and never
-/// leaves the run reporting `gates_deferred`.
+/// A deferred gate leaves the run recoverable with an environment blocker;
+/// a later executed gate replaces it with its verdict.
 #[test]
 fn a_deferred_then_executed_gate_never_stays_gates_deferred() {
     for (promoted, executed, state, blocker, run_state, cook_status) in [
@@ -230,7 +292,7 @@ fn a_deferred_then_executed_gate_never_stays_gates_deferred() {
         );
         assert_eq!(
             deferred.metadata["cook_delivery"]["delivery"]["blocker"]["code"],
-            "gates_deferred"
+            "gate_environment_unavailable"
         );
         assert_eq!(deferred.state(), AgentTaskRunState::CandidateRecoverable);
         // The Cook loop recorded its deferred result.

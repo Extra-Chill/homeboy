@@ -666,31 +666,46 @@ fn runner_extension_materialization_request(
     let local_revision = homeboy_core::extension::lifecycle::read_source_revision(extension_id)
         .filter(|revision| !revision.trim().is_empty())
         .ok_or_else(|| parity_error.clone())?;
-    let source =
-        extension::lifecycle::source_metadata::resolve_source_url(extension_id).map_err(|err| {
-            controller_extension_metadata_required_error(
+    let source = extension::lifecycle::source_metadata::resolve_source_url(extension_id);
+    let local_source_path = source
+        .as_ref()
+        .ok()
+        .and_then(|source| controller_local_source_path(&source.url));
+    let materialization_source = match (local_source_path, source) {
+        (Some(local_path), _) => {
+            RunnerExtensionMaterializationSource::ControllerSnapshot { local_path }
+        }
+        // A dirty checkout's revision names the committed bytes, not the ones
+        // on disk, so re-installing that revision on the runner can never
+        // reach parity. Snapshot the installed directory instead — the same
+        // content-hash overlay path linked extensions use.
+        (None, _)
+            if matches!(
+                homeboy_core::extension::lifecycle::read_source_cleanliness(extension_id),
+                homeboy_core::extension::lifecycle::ExtensionSourceCleanliness::Dirty { .. }
+            ) =>
+        {
+            RunnerExtensionMaterializationSource::ControllerSnapshot {
+                local_path: homeboy_core::paths::extension(extension_id)?,
+            }
+        }
+        (None, Err(err)) => {
+            return Err(controller_extension_metadata_required_error(
                 runner_id,
                 homeboy_path,
                 extension_id,
                 &local_revision,
                 err,
-            )
-        })?;
-    let materialization_source =
-        if let Some(local_source_path) = controller_local_source_path(&source.url) {
-            RunnerExtensionMaterializationSource::ControllerSnapshot {
-                local_path: local_source_path,
-            }
-        } else if !looks_like_remote_source(&source.url) {
-            RunnerExtensionMaterializationSource::RunnerPath {
-                path: source.url.clone(),
-            }
-        } else {
-            RunnerExtensionMaterializationSource::RemoteGit {
-                url: source.url.clone(),
-                git_ref: local_revision.clone(),
-            }
-        };
+            ))
+        }
+        (None, Ok(source)) if !looks_like_remote_source(&source.url) => {
+            RunnerExtensionMaterializationSource::RunnerPath { path: source.url }
+        }
+        (None, Ok(source)) => RunnerExtensionMaterializationSource::RemoteGit {
+            url: source.url,
+            git_ref: local_revision.clone(),
+        },
+    };
     Ok(RunnerExtensionMaterializationRequest {
         id: extension_id.to_string(),
         revision: local_revision,
@@ -1029,8 +1044,10 @@ fn validate_runner_extension_revision(
     // controller checkout is therefore stale parity by definition, whatever the
     // revisions say.
     let cleanliness = homeboy_core::extension::lifecycle::read_source_cleanliness(extension_id);
-    if let homeboy_core::extension::lifecycle::ExtensionSourceCleanliness::Dirty { changed_paths } =
-        &cleanliness
+    if let homeboy_core::extension::lifecycle::ExtensionSourceCleanliness::Dirty {
+        changed_paths,
+        ..
+    } = &cleanliness
     {
         return Err(uncommitted_controller_extension_source_error(
             runner_id,
@@ -1356,10 +1373,11 @@ mod tests {
         record_materialized_extension_overlay, remote_extension_core_compatibility,
         remote_extension_ready_status, remote_extension_setting_ids,
         remote_extension_source_revision, requested_setting_keys_for_command,
-        runner_extension_sync_command, same_git_revision, validate_extension_ready,
-        validate_runner_extension_core_compatibility, validate_runner_extension_ready,
-        validate_runner_extension_revision, validate_runner_extension_settings,
-        ExtensionParityPlan, ExtensionParityPlanStep, ExtensionParityProbe, ExtensionShowOutput,
+        runner_extension_materialization_request, runner_extension_sync_command, same_git_revision,
+        validate_extension_ready, validate_runner_extension_core_compatibility,
+        validate_runner_extension_ready, validate_runner_extension_revision,
+        validate_runner_extension_settings, ExtensionParityPlan, ExtensionParityPlanStep,
+        ExtensionParityProbe, ExtensionShowOutput,
     };
     use crate::test_support::with_isolated_home;
 
@@ -2094,6 +2112,161 @@ mod tests {
             // Classified as stale parity so the existing auto-materialization
             // path picks it up and snapshots the working bytes to the runner.
             assert!(is_stale_runner_extension_parity_error(&err));
+        });
+    }
+
+    /// Install a git-checkout extension the way a remote-git install leaves it:
+    /// committed source plus untracked generated provenance.
+    fn installed_remote_git_extension(
+        home: &std::path::Path,
+        source_url: Option<&str>,
+    ) -> (std::path::PathBuf, String) {
+        let extension_dir = home.join(".config/homeboy/extensions/wordpress");
+        fs::create_dir_all(&extension_dir).expect("extension dir");
+        fs::write(
+            extension_dir.join("wordpress.json"),
+            r#"{"name":"wordpress","version":"1.0.0"}"#,
+        )
+        .expect("manifest");
+        fs::write(extension_dir.join("lint.sh"), "echo committed\n").expect("step");
+        let revision = commit_extension_checkout(&extension_dir);
+        if let Some(url) = source_url {
+            fs::write(extension_dir.join(".source-url"), url).expect("source url");
+        }
+        fs::write(extension_dir.join(".source-revision"), &revision).expect("source revision");
+        fs::write(extension_dir.join(".source-requested-ref"), "main").expect("requested ref");
+        (extension_dir, revision)
+    }
+
+    #[test]
+    fn clean_remote_git_extension_materializes_from_remote_git() {
+        with_isolated_home(|home| {
+            installed_remote_git_extension(
+                home.path(),
+                Some("https://example.test/extensions.git"),
+            );
+
+            let request = runner_extension_materialization_request(
+                "homeboy-lab",
+                "homeboy",
+                "wordpress",
+                Error::internal_unexpected("stale extension parity".to_string()),
+            )
+            .expect("materialization request");
+
+            assert!(matches!(
+                request.source,
+                RunnerExtensionMaterializationSource::RemoteGit { ref url, .. }
+                    if url == "https://example.test/extensions.git"
+            ));
+        });
+    }
+
+    #[test]
+    fn dirty_git_extension_without_source_url_materializes_from_controller_snapshot() {
+        with_isolated_home(|home| {
+            let (extension_dir, _) = installed_remote_git_extension(home.path(), None);
+            fs::write(extension_dir.join("lint.sh"), "echo edited\n").expect("uncommitted edit");
+
+            let request = runner_extension_materialization_request(
+                "homeboy-lab",
+                "homeboy",
+                "wordpress",
+                Error::internal_unexpected("stale extension parity".to_string()),
+            )
+            .expect("dirty checkout without source metadata still materializes");
+
+            assert!(matches!(
+                request.source,
+                RunnerExtensionMaterializationSource::ControllerSnapshot { ref local_path }
+                    if local_path == &extension_dir
+            ));
+        });
+    }
+
+    /// #11783: re-installing the committed SHA can never satisfy parity for a
+    /// dirty checkout, so a dirty remote-git extension is snapshotted from the
+    /// controller and parity converges on the recorded content hash.
+    #[test]
+    fn dirty_remote_git_extension_converges_through_controller_snapshot() {
+        with_isolated_home(|home| {
+            let workspace = tempfile::tempdir().expect("runner workspace");
+            crate::create(
+                &format!(
+                    r#"{{"id":"homeboy-lab","kind":"local","workspace_root":"{}"}}"#,
+                    workspace.path().display()
+                ),
+                false,
+            )
+            .expect("create runner");
+            let (extension_dir, revision) = installed_remote_git_extension(
+                home.path(),
+                Some("https://example.test/extensions.git"),
+            );
+            fs::write(extension_dir.join("lint.sh"), "echo edited\n").expect("uncommitted edit");
+            let remote_stdout = extension_show_stdout("wordpress", &revision);
+
+            let parity_error = validate_runner_extension_revision(
+                "homeboy-lab",
+                &crate::load("homeboy-lab").expect("runner"),
+                "homeboy",
+                "wordpress",
+                &remote_stdout,
+            )
+            .expect_err("dirty checkout is stale parity");
+            assert!(is_stale_runner_extension_parity_error(&parity_error));
+
+            let request = runner_extension_materialization_request(
+                "homeboy-lab",
+                "homeboy",
+                "wordpress",
+                parity_error.clone(),
+            )
+            .expect("materialization request");
+            assert!(matches!(
+                request.source,
+                RunnerExtensionMaterializationSource::ControllerSnapshot { ref local_path }
+                    if local_path == &extension_dir
+            ));
+
+            let plan = ExtensionParityPlan {
+                runner_id: "homeboy-lab".to_string(),
+                homeboy_path: "homeboy".to_string(),
+                steps: vec![ExtensionParityPlanStep {
+                    id: "wordpress".to_string(),
+                    materialization: request,
+                    parity_error,
+                }],
+            };
+            ensure_extension_materialized_with_exec(&plan, &mut |_runner_id, _options| {
+                Ok((successful_runner_exec_output(), 0))
+            })
+            .expect("controller snapshot materializes");
+
+            let runner = crate::load("homeboy-lab").expect("runner after materialization");
+            let overlay = &runner.resources["dev_sync"]["extensions"][0];
+            assert_eq!(overlay["dirty"], true);
+            assert!(overlay["dirty_fingerprint"].is_string());
+            let synced = std::path::Path::new(overlay["synced_source_path"].as_str().unwrap());
+            assert_eq!(
+                fs::read_to_string(synced.join("lint.sh")).expect("synced step"),
+                "echo edited\n"
+            );
+            for generated in [".source-url", ".source-revision", ".source-requested-ref"] {
+                assert!(
+                    !synced.join(generated).exists(),
+                    "{generated} leaked into snapshot"
+                );
+            }
+
+            validate_runner_extension_revision(
+                "homeboy-lab",
+                &runner,
+                "homeboy",
+                "wordpress",
+                &remote_stdout,
+            )
+            .expect("parity converges after controller snapshot materialization");
         });
     }
 

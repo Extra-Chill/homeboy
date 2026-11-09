@@ -721,20 +721,10 @@ pub(crate) fn preview_cook(
     // validation, so preserve its precedence over backend guidance.
     validate_cook_source_authority(&args, provenance)?;
     bind_cook_preview_lifecycle(&mut args);
-    let repository_result = resolve_cook_repository(&mut args);
-    let component = repository_result
-        .as_ref()
-        .ok()
-        .and_then(|repo| repo.as_ref())
-        .map(|repo| &repo.component);
-    apply_component_default_verify_gates(&mut args, component)?;
-    // Source policy is a static validation and must apply to preview exactly as
-    // it applies before an execution route can inspect the destination.
-    validate_cook_request_with_provenance(&args, provenance)?;
+    let repository = prepare_cook_request(&mut args, provenance)?;
     let preview_request =
         dispatch_service::resolve_dispatch_request(resolved_dispatch_args_for_cook(&args)?.into())?;
     dispatch_service::require_model_override_acknowledgement(&preview_request)?;
-    let repository = repository_result?;
     record_preview_phase(&mut progress, "destination_resolution");
     let (mut args, mut provision) =
         with_preview_heartbeat(&mut progress, "destination_resolution", || {
@@ -950,8 +940,14 @@ pub(crate) fn preview_cook(
 fn preflight_cook_gates(args: &AgentTaskCookArgs) -> homeboy::core::Result<()> {
     let mut gates: homeboy::agents::agent_tasks::gate::VerifyGateOptions =
         args.gates.clone().into();
-    let current_dir = std::env::current_dir()
-        .map_err(|error| homeboy::core::Error::internal_io(error.to_string(), None))?;
+    let workspace = cook_gate_preflight_workspace(args)?;
+    preflight_resolved_cook_gates(&mut gates, &workspace)
+}
+
+fn cook_gate_preflight_workspace(args: &AgentTaskCookArgs) -> homeboy::core::Result<PathBuf> {
+    // Configured components deliberately omit repository_path from their
+    // durable identity. Resolve their checkout instead of snapshotting the
+    // controller's unrelated invocation directory during Lab preflight.
     let workspace = args
         .dispatch
         .cwd
@@ -963,8 +959,19 @@ fn preflight_cook_gates(args: &AgentTaskCookArgs) -> homeboy::core::Result<()> {
                 .and_then(|identity| identity["repository_path"].as_str())
                 .map(Path::new)
         })
-        .unwrap_or(&current_dir);
-    preflight_resolved_cook_gates(&mut gates, workspace)
+        .map(Path::to_path_buf);
+    let workspace = match workspace {
+        Some(workspace) => Some(workspace),
+        None => cook_component_id(args)
+            .map(cook_component_path_for_repository_name)
+            .transpose()?
+            .flatten(),
+    };
+    match workspace {
+        Some(workspace) => Ok(workspace),
+        None => std::env::current_dir()
+            .map_err(|error| homeboy::core::Error::internal_io(error.to_string(), None)),
+    }
 }
 
 pub(super) fn preflight_resolved_cook_gates(
@@ -1745,6 +1752,14 @@ fn render_cook_admission(decision: crate::commands::infra::route::CookAdmissionD
             admission["next_action"] = serde_json::json!(next_action);
         }
     }
+    // Report only an existing daemon: reading status opens the observation
+    // store, and preview admission must not create state.
+    let daemon_exists = homeboy::core::paths::daemon_state_file().is_ok_and(|path| path.exists());
+    if daemon_exists {
+        if let Ok(status) = homeboy::core::daemon::read_status() {
+            admission["daemon"] = status.admission_report();
+        }
+    }
     admission
 }
 
@@ -1802,6 +1817,20 @@ mod preview_tests {
     use crate::cli_surface::{Cli, Commands};
     use crate::commands::agent_task::fake_pi_test::FakePi;
     use clap::Parser;
+
+    fn issue_lookup_fixture() -> (tempfile::TempDir, homeboy::core::test_support::EnvVarGuard) {
+        let bin = tempfile::tempdir().unwrap();
+        homeboy_test_support::write_executable(&bin.path().join("gh"), "#!/bin/sh\ncase \"$*\" in api*timeline*) printf '[[]]' ;; 'pr list'*) printf '[]' ;; *) exit 1 ;; esac\n", 0o755).unwrap();
+        let _path = homeboy::core::test_support::EnvVarGuard::set(
+            "PATH",
+            format!(
+                "{}:{}",
+                bin.path().display(),
+                std::env::var("PATH").unwrap()
+            ),
+        );
+        (bin, _path)
+    }
 
     /// Lab placement binds on the runner: preview names no selected route and
     /// says the runner decides instead of presenting the configured primary
@@ -1916,11 +1945,67 @@ mod preview_tests {
         assert!(output.status.success(), "git spawn regression: {output:?}");
     }
 
+    #[test]
+    fn agent_task_component_preflight_materializes_repository_not_invocation_cwd() {
+        crate::test_support::with_isolated_home(|_| {
+            let (_fixture, checkout) =
+                crate::test_support::shared_committed_git_repo_fixture("fixture");
+            homeboy::core::component::write_standalone_component_config(
+                &homeboy::core::component::Component {
+                    id: "fixture".into(),
+                    local_path: checkout.display().to_string(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let mut args = cook(&[
+                "homeboy",
+                "agent-task",
+                "cook",
+                "--repo",
+                "fixture",
+                "--task-url",
+                "https://github.com/example/fixture/issues/17481",
+                "--prompt",
+                "x",
+                "--verify",
+                "homeboy review test fixture",
+            ]);
+            args.repository_identity = Some(serde_json::json!({
+                "component_id": "fixture", "component_registered": true
+            }));
+            let workspace = cook_gate_preflight_workspace(&args).unwrap();
+            assert_eq!(workspace, checkout);
+            assert!(workspace.join(".git").exists());
+            // Exercise the filesystem handoff, not just a serialized identity.
+            crate::test_support::run_git_command(&workspace, &["rev-parse", "HEAD"]);
+            let transfer = tempfile::NamedTempFile::new().unwrap();
+            crate::test_support::run_git_command(
+                &workspace,
+                &["archive", "HEAD", "-o", transfer.path().to_str().unwrap()],
+            );
+            let materialized = tempfile::tempdir().unwrap();
+            assert!(Command::new("tar")
+                .arg("-xf")
+                .arg(transfer.path())
+                .arg("-C")
+                .arg(materialized.path())
+                .status()
+                .unwrap()
+                .success());
+            assert!(std::fs::read_dir(materialized.path())
+                .unwrap()
+                .next()
+                .is_some());
+        });
+    }
+
     #[cfg(unix)]
     #[test]
     #[ignore = "isolated PATH and CWD owned by parent test"]
     fn cook_repository_resolution_git_spawn_child() {
         crate::test_support::with_isolated_home(|_| {
+            let _lookup = issue_lookup_fixture();
             let (fixture, checkout) =
                 crate::test_support::shared_committed_git_repo_fixture("fixture");
             let git = |args: &[&str]| crate::test_support::run_git_command(&checkout, args);
@@ -2012,8 +2097,8 @@ mod preview_tests {
             let count = calls.lines().count();
             eprintln!("Cook preview git spawns: {count}\n{calls}");
             assert!(
-                count <= 9,
-                "expected at most nine git spawns, got {count}:\n{calls}"
+                count <= 10,
+                "expected at most ten git spawns including source history preflight, got {count}:\n{calls}"
             );
             assert_eq!(
                 calls
@@ -2027,7 +2112,7 @@ mod preview_tests {
                     .lines()
                     .filter(|call| *call == "remote get-url origin")
                     .count(),
-                1
+                2
             );
             std::env::set_current_dir(fixture.path()).unwrap();
         });
@@ -2108,10 +2193,13 @@ mod preview_tests {
 
     #[test]
     fn preview_replay_argv_is_executable_cook_argv_without_preview() {
+        let _lookup = issue_lookup_fixture();
         let args = cook(&[
             "homeboy",
             "agent-task",
             "cook",
+            "--base",
+            "main",
             "--preview",
             "--prompt",
             "implement the issue",
@@ -2530,6 +2618,8 @@ mod preview_tests {
                 "homeboy".to_string(),
                 "agent-task".to_string(),
                 "cook".to_string(),
+                "--base".to_string(),
+                "main".to_string(),
                 "--preview".to_string(),
                 "--backend".to_string(),
                 "fixture".to_string(),
@@ -2664,6 +2754,8 @@ mod preview_tests {
                 "homeboy".to_string(),
                 "agent-task".to_string(),
                 "cook".to_string(),
+                "--base".to_string(),
+                "main".to_string(),
                 "--preview".to_string(),
                 "--backend".to_string(),
                 "fixture".to_string(),
@@ -2795,6 +2887,8 @@ mod preview_tests {
             "homeboy".to_string(),
             "agent-task".to_string(),
             "cook".to_string(),
+            "--base".to_string(),
+            "main".to_string(),
             "--preview".to_string(),
             "--backend".to_string(),
             "fixture".to_string(),
@@ -2989,6 +3083,8 @@ mod preview_tests {
                     "homeboy",
                     "agent-task",
                     "cook",
+                    "--base",
+                    "main",
                     "--preview",
                     "--backend",
                     "fixture",
@@ -3120,6 +3216,8 @@ mod preview_tests {
                 "homeboy",
                 "agent-task",
                 "cook",
+                "--base",
+                "main",
                 "--preview",
                 "--backend",
                 "fixture",
@@ -3436,6 +3534,8 @@ process.stdout.write(JSON.stringify({type:'message_end',message:{role:'assistant
             "fixture-repository".to_string(),
             "--prompt".to_string(),
             "Inspect the task workspace.".to_string(),
+            "--base".to_string(),
+            "main".to_string(),
             "--to-worktree".to_string(),
             workspace,
             "--no-finalize".to_string(),
@@ -3699,7 +3799,169 @@ process.stdout.write(JSON.stringify({type:'message_end',message:{role:'assistant
     }
 
     #[test]
+    fn shallow_source_preview_plans_fetch_without_mutation() {
+        crate::test_support::with_isolated_home(|_| {
+            let root = tempfile::tempdir().unwrap();
+            let _capacity = declare_preview_fixture_capacity(root.path());
+            let seed = root.path().join("seed");
+            std::fs::create_dir(&seed).unwrap();
+            let git = |path: &Path, args: &[&str]| {
+                let output = Command::new("git")
+                    .arg("-C")
+                    .arg(path)
+                    .args(args)
+                    .output()
+                    .unwrap();
+                assert!(
+                    output.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                String::from_utf8(output.stdout).unwrap().trim().to_string()
+            };
+            git(&seed, &["init", "-b", "main"]);
+            git(&seed, &["config", "user.email", "fixture@example.test"]);
+            git(&seed, &["config", "user.name", "Fixture"]);
+            for content in ["base", "tip"] {
+                std::fs::write(seed.join("file"), content).unwrap();
+                git(&seed, &["add", "."]);
+                git(&seed, &["commit", "-m", content]);
+            }
+            let remote = root.path().join("remote.git");
+            git(
+                root.path(),
+                &[
+                    "clone",
+                    "--bare",
+                    seed.to_str().unwrap(),
+                    remote.to_str().unwrap(),
+                ],
+            );
+            let source = root.path().join("source");
+            git(
+                root.path(),
+                &[
+                    "clone",
+                    "--depth",
+                    "1",
+                    "--branch",
+                    "main",
+                    &format!("file://{}", remote.display()),
+                    source.to_str().unwrap(),
+                ],
+            );
+            let mut args = cook(&[
+                "homeboy",
+                "agent-task",
+                "cook",
+                "--preview",
+                "--backend",
+                "fixture",
+                "--prompt",
+                "implement",
+                "--repo",
+                source.to_str().unwrap(),
+                "--base",
+                "main",
+                "--head",
+                "fix/shallow",
+                "--to-worktree",
+                "source@fix-shallow",
+                "--no-finalize",
+            ]);
+            let (preview, _) = preview_cook(args.clone(), None).expect("read-only Cook preview");
+            assert_eq!(
+                preview["resolved"]["workspace"]["action"],
+                "planned_unshallow"
+            );
+            let repository = prepare_cook_request(&mut args, None).unwrap();
+            let args = resolve_cook_destination(args, repository.as_ref()).unwrap();
+            assert_eq!(
+                git(&source, &["rev-parse", "--is-shallow-repository"]),
+                "true"
+            );
+            git(&source, &["remote", "remove", "origin"]);
+            let error = provision_cook_destination(&args, repository.as_ref(), true).unwrap_err();
+            assert!(error
+                .message
+                .contains("source checkout is shallow and has no fetchable remote"));
+            assert_eq!(
+                git(&source, &["rev-parse", "--is-shallow-repository"]),
+                "true"
+            );
+        });
+    }
+
+    #[test]
+    fn cook_validation_rejects_mismatched_native_handles() {
+        crate::test_support::with_isolated_home(|_| {
+            for preview in [false, true] {
+                for handle in ["other@fix-17598", "homeboy@wrong-head"] {
+                    let mut args = cook(&[
+                        "homeboy",
+                        "agent-task",
+                        "cook",
+                        "--repo",
+                        "homeboy",
+                        "--head",
+                        "fix/17598",
+                        "--to-worktree",
+                        handle,
+                        "--prompt",
+                        "fix the issue",
+                        "--no-finalize",
+                    ]);
+                    args.preview = preview;
+                    let error = validate_cook_request_with_provenance(&args, None)
+                        .expect_err("mismatched handle must fail before admission");
+                    assert!(
+                        error.message.contains("expected `homeboy@fix-17598`"),
+                        "{error:?}"
+                    );
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn cook_derives_native_handle_from_repository_and_head() {
+        crate::test_support::with_isolated_home(|_| {
+            let root = tempfile::tempdir().unwrap();
+            let checkout = root.path().join("repository");
+            std::fs::create_dir(&checkout).unwrap();
+            for repository in ["repository".to_string(), checkout.display().to_string()] {
+                for (head, expected) in [
+                    ("fix/17598", "repository@fix-17598"),
+                    ("Fix/Mixed__Case", "repository@Fix-Mixed__Case"),
+                ] {
+                    let mut args = cook(&[
+                        "homeboy",
+                        "agent-task",
+                        "cook",
+                        "--repo",
+                        &repository,
+                        "--head",
+                        head,
+                        "--base",
+                        "main",
+                        "--prompt",
+                        "fix the issue",
+                        "--no-finalize",
+                    ]);
+                    // Component identity must not replace repository identity.
+                    args.repository_identity = Some(
+                        json!({"component_id": "renamed-component", "repository_path": repository}),
+                    );
+                    let resolved = resolve_cook_destination(args, None).unwrap();
+                    assert_eq!(resolved.to_worktree.as_deref(), Some(expected));
+                }
+            }
+        });
+    }
+
+    #[test]
     fn unmaterialized_preview_admits_replay_and_cook_materializes_origin_base() {
+        let _lookup = issue_lookup_fixture();
         crate::test_support::with_isolated_home(|_| {
             let root = tempfile::tempdir().expect("repository root");
             let _capacity = declare_preview_fixture_capacity(root.path());
@@ -3872,6 +4134,7 @@ process.stdout.write(JSON.stringify({type:'message_end',message:{role:'assistant
 
     #[test]
     fn cook_preview_and_provision_defer_restoration_of_a_missing_native_task_checkout() {
+        let _lookup = issue_lookup_fixture();
         crate::test_support::with_isolated_home(|home| {
             let (_root, source) =
                 homeboy::core::test_support::shared_committed_git_repo_fixture("fixture");
@@ -5344,11 +5607,53 @@ fn cook_report_with_continuation(mut value: Value) -> Value {
 
 /// Converge a Cook promotion destination before compiling a task plan. This is
 /// controller-owned so local and Lab dispatch use the same managed checkout.
+/// Check source history before any durable admission or capacity wait. Preview
+/// only plans the fetch; admission performs it once against the source remote.
+pub(crate) fn preflight_cook_source_history(
+    args: &AgentTaskCookArgs,
+    repository: Option<&ResolvedCookRepository>,
+    preview: bool,
+) -> homeboy::core::Result<bool> {
+    if homeboy::core::parsed_command_preflight::captured_result().is_some_and(|result| {
+        result.placement.selected == homeboy_lab_contract::EffectiveExecutionPlacement::Local
+    }) {
+        return Ok(false);
+    }
+    let source = if let Some(repository) = repository {
+        PathBuf::from(&repository.source_checkout)
+    } else if let Some(path) = args.dispatch.cwd.as_deref().or_else(|| {
+        args.to_worktree
+            .as_deref()
+            .filter(|path| Path::new(path).is_dir())
+    }) {
+        PathBuf::from(path)
+    } else {
+        let Some(repo) = cook_provision_repository(args) else {
+            return Ok(false);
+        };
+        let target =
+            homeboy::core::component::resolve_target(homeboy::core::component::TargetSpec {
+                component_id: Some(&repo),
+                allow_synthetic: true,
+                accept_bare_directory: true,
+                ..Default::default()
+            })?;
+        PathBuf::from(target.git_root.as_deref().unwrap_or(&target.source_path))
+    };
+    if preview {
+        Ok(homeboy::core::git::shallow_source_remote(&source)?.is_some())
+    } else {
+        homeboy::core::git::deepen_shallow_source(&source)?;
+        Ok(false)
+    }
+}
+
 pub(crate) fn provision_cook_destination(
     args: &AgentTaskCookArgs,
     repository: Option<&ResolvedCookRepository>,
     preview: bool,
 ) -> homeboy::core::Result<Value> {
+    let planned_unshallow = preflight_cook_source_history(args, repository, preview)?;
     let handle = args.to_worktree.as_deref().ok_or_else(|| {
         homeboy::core::Error::validation_missing_argument(vec![
             "--to-worktree is required before provisioning a Cook destination".to_string(),
@@ -5385,7 +5690,7 @@ pub(crate) fn provision_cook_destination(
             validate_cook_base_before_provisioning(args, repository)?;
         }
         return Ok(serde_json::json!({
-            "action": if preview { "planned_reuse" } else { "existing" },
+            "action": if preview && planned_unshallow { "planned_unshallow" } else if preview { "planned_reuse" } else { "existing" },
             "kind": if preview { Some("preview_local") } else { kind.as_deref() },
             "handle": handle,
             "path": path,
@@ -5400,7 +5705,7 @@ pub(crate) fn provision_cook_destination(
         let (homeboy::core::worktree_provider::WorktreeProvisionPlan::Admitted(destination)
         | homeboy::core::worktree_provider::WorktreeProvisionPlan::Planned(destination)) = plan;
         return Ok(serde_json::json!({
-            "action": "planned_create", "kind": "native",
+            "action": if planned_unshallow { "planned_unshallow" } else { "planned_create" }, "kind": "native",
             "handle": destination.ownership.handle, "path": destination.ownership.path,
             "branch": destination.ownership.branch,
             "intent": { "handle": intent.handle, "repo": intent.repo, "base": intent.base,
@@ -5449,26 +5754,49 @@ fn cook_provider_provision_intent(
     args: &AgentTaskCookArgs,
     handle: &str,
 ) -> homeboy::core::Result<homeboy::core::worktree_provider::WorktreeProvisionIntent> {
+    let (repo, head) = cook_missing_destination_requirements(args)?;
     Ok(homeboy::core::worktree_provider::WorktreeProvisionIntent {
         handle: handle.to_string(),
-        repo: cook_provision_repository(args).ok_or_else(|| {
-            homeboy::core::Error::validation_missing_argument(vec![
-                "--repo <repo> is required to create a missing --to-worktree destination"
-                    .to_string(),
-            ])
-        })?,
+        repo,
         base: args
             .base
             .clone()
             .expect("Cook base is resolved before provider preflight"),
-        head: args.head.clone().ok_or_else(|| {
-            homeboy::core::Error::validation_missing_argument(vec![
-                "--head <branch> is required to create a missing --to-worktree destination"
-                    .to_string(),
-            ])
-        })?,
+        head,
         task_url: args.dispatch.task_url.clone(),
     })
+}
+
+/// Report all creation inputs together, independently of base inference. A task
+/// issue can supply the branch; PR refs have already been resolved by the caller.
+fn cook_missing_destination_requirements(
+    args: &AgentTaskCookArgs,
+) -> homeboy::core::Result<(String, String)> {
+    let repo = cook_provision_repository(args);
+    let head = args.head.clone().or_else(|| {
+        args.dispatch
+            .task_url
+            .as_deref()
+            .and_then(|url| derived_cook_branch(url).ok())
+    });
+    let mut missing = Vec::new();
+    if repo.is_none() {
+        missing.push(
+            "--repo <repo> is required to create a missing --to-worktree destination".to_string(),
+        );
+    }
+    if head.is_none() {
+        missing.push(
+            "--head <branch> is required to create a missing --to-worktree destination".to_string(),
+        );
+    }
+    if !missing.is_empty() {
+        return Err(homeboy::core::Error::validation_missing_argument(missing));
+    }
+    Ok((
+        repo.expect("repository checked"),
+        head.expect("branch checked"),
+    ))
 }
 
 /// Provider worktrees are rooted at a canonical repository primary, while Cook
@@ -5607,6 +5935,7 @@ pub(crate) fn resolve_cook_destination(
         let path = path.display().to_string();
         args.dispatch.cwd = Some(path.clone());
         args.to_worktree = Some(path);
+        resolve_cook_issue(&mut args)?;
         resolve_cook_pull_request(&mut args)?;
         resolve_cook_base(&mut args, repository)?;
         return Ok(args);
@@ -5623,8 +5952,16 @@ pub(crate) fn resolve_cook_destination(
             }
         }
     }
+    resolve_cook_issue(&mut args)?;
     resolve_cook_pull_request(&mut args)?;
-    if args.to_worktree.is_some() {
+    if let Some(handle) = args.to_worktree.as_deref() {
+        if !Path::new(handle).is_dir()
+            && homeboy::core::worktree_provider::resolve_native_worktree_mutation_target(handle)?
+                .is_none()
+        {
+            let (_, head) = cook_missing_destination_requirements(&args)?;
+            args.head = Some(head);
+        }
         resolve_cook_base(&mut args, repository)?;
         return Ok(args);
     }
@@ -5660,9 +5997,9 @@ pub(crate) fn resolve_cook_destination(
                 .map(Path::new)
                 .filter(|path| path.is_dir())
         });
-    let (head, open_pr) = match args.head.clone() {
-        Some(head) => (head, None),
-        None => next_live_derived_cook_branch(
+    let head = match args.head.clone() {
+        Some(head) => head,
+        None => fresh_derived_cook_branch(
             &handle_repository,
             &derived_cook_branch(
                 task_url
@@ -5670,42 +6007,21 @@ pub(crate) fn resolve_cook_destination(
                     .expect("task URL checked when --head is omitted"),
             )?,
             source_checkout,
-            args.attempt_run_id
-                .as_deref()
-                .or(args.dispatch.run_id.as_deref()),
         )?,
     };
-    // An issue-derived destination heading an open PR is that PR's rework.
-    if let Some(url) = open_pr {
-        args.dispatch.task_url = Some(url.clone());
-        resolve_cook_pull_request(&mut args).map_err(|error| {
-            let mut route = homeboy::core::worktree::convergence::pr_route(&head, Some(&url));
-            route.message = format!("Could not resolve the destination's open PR: {}; rerun with --task-url {url} and GitHub access before provider execution", error.message);
-            route
-        })?;
-        resolve_cook_base(&mut args, repository)?;
-        return Ok(args);
+    if args.issue_resolution.is_some() {
+        args.issue_resolution.as_mut().unwrap()["head"] = json!(head);
     }
-    let handle = format!("{handle_repository}@{}", slugify_cook_branch(&head));
+    let handle = homeboy::core::worktree_provider::native_handle_for_branch(
+        requested.as_deref().unwrap_or(repo),
+        &head,
+    );
     args.to_worktree = Some(handle.clone());
     let derived = args.head.is_none();
     if derived {
         args.head = Some(head.clone());
     }
     resolve_cook_base(&mut args, repository)?;
-    if derived {
-        // Read-only projection of convergence: preserve unique history and
-        // route an existing open PR to its exact PR-URL Cook command. Clean
-        // behind destinations converge once the service pins the base.
-        homeboy::core::worktree::stale_destination::refuse_stale_derived_destination(
-            repository
-                .as_ref()
-                .map(|repo| repo.source_checkout.as_path()),
-            &handle,
-            &head,
-            args.base.as_deref().unwrap_or("main"),
-        )?;
-    }
     Ok(args)
 }
 
@@ -5720,24 +6036,42 @@ fn resolve_cook_base(
         .or(args.dispatch.cwd.as_deref())
         .map(Path::new);
     let component = repository.map(|repo| Path::new(&repo.component.local_path));
-    let destination = args.to_worktree.as_deref().map(Path::new);
-    let resolution = super::default_branch::resolve_default_branch(
-        DefaultBranchRequest {
-            explicit_base: args.base.as_deref(),
-            explicit_from: None,
-            workspace,
-            component,
-            destination,
-            compatibility_fallback: Some("main"),
-        },
-        repository.map(|repo| {
-            (
-                Path::new(&repo.component.local_path),
-                repo.root.as_path(),
-                repo.remote.as_str(),
-            )
-        }),
-    )?;
+    let destination = match args.to_worktree.as_deref() {
+        Some(path) if Path::new(path).is_dir() => Some(PathBuf::from(path)),
+        Some(handle) => {
+            homeboy::core::worktree_provider::resolve_native_worktree_mutation_target(handle)?
+                .map(|target| target.path)
+        }
+        None => None,
+    };
+    let destination = destination.as_deref();
+    let resolution = if let Some(base) = &args.base {
+        super::default_branch::DefaultBranchResolution {
+            base: base.clone(),
+            from: format!("origin/{base}"),
+            sha: None,
+            source: "explicit".to_string(),
+            evidence_path: None,
+            precedence: vec!["explicit_base"],
+        }
+    } else {
+        super::default_branch::resolve_default_branch(
+            DefaultBranchRequest {
+                explicit_base: None,
+                explicit_from: None,
+                workspace,
+                component,
+                destination,
+            },
+            repository.map(|repo| {
+                (
+                    Path::new(&repo.component.local_path),
+                    repo.root.as_path(),
+                    repo.remote.as_str(),
+                )
+            }),
+        )?
+    };
     args.base = Some(resolution.base.clone());
     args.base_resolution = Some(serde_json::to_value(resolution).map_err(|error| {
         homeboy::core::Error::internal_unexpected(format!(
@@ -5751,6 +6085,84 @@ fn resolve_cook_base(
             args.head.clone(),
             None,
         ));
+    }
+    Ok(())
+}
+
+/// Resolve linked PRs from the issue, not from a guessed branch name.
+fn resolve_cook_issue(args: &mut AgentTaskCookArgs) -> homeboy::core::Result<()> {
+    let Some(url) = args
+        .dispatch
+        .task_url
+        .as_deref()
+        .filter(|url| url.starts_with("https://github.com/") && url.contains("/issues/"))
+    else {
+        return Ok(());
+    };
+    let url = normalize_cook_task_url(url);
+    derived_cook_branch(&url)?;
+    let path = url.strip_prefix("https://github.com/").ok_or_else(|| {
+        homeboy::core::Error::validation_invalid_argument(
+            "task_url",
+            "expected a GitHub issue URL",
+            Some(url.clone()),
+            None,
+        )
+    })?;
+    let output = std::process::Command::new("gh")
+        .args([
+            "api",
+            "--paginate",
+            "--slurp",
+            &format!("repos/{path}/timeline"),
+        ])
+        .output()
+        .map_err(|error| {
+            homeboy::core::Error::internal_io(
+                error.to_string(),
+                Some("gh api issue timeline".into()),
+            )
+        })?;
+    if !output.status.success() {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "task_url",
+            format!(
+                "could not resolve issue's linked PRs: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+            Some(url),
+            None,
+        ));
+    }
+    let pages: Vec<Vec<Value>> = serde_json::from_slice(&output.stdout)
+        .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))?;
+    let prs: std::collections::BTreeSet<String> = pages
+        .into_iter()
+        .flatten()
+        .filter(|event| event["event"] == "cross-referenced")
+        .filter_map(|event| {
+            let issue = &event["source"]["issue"];
+            (issue["state"] == "open" && issue["pull_request"].is_object())
+                .then(|| issue["html_url"].as_str().map(str::to_string))
+                .flatten()
+        })
+        .collect();
+    if prs.len() > 1 {
+        return Err(homeboy::core::Error::validation_invalid_argument(
+            "task_url",
+            format!(
+                "issue has several open linked PRs; choose one with --task-url <PR URL>: {}",
+                prs.into_iter().collect::<Vec<_>>().join(", ")
+            ),
+            Some(url),
+            None,
+        ));
+    }
+    if let Some(pr) = prs.into_iter().next() {
+        args.issue_resolution = Some(json!({"route": "pr_rework", "issue_url": url, "pr_url": pr}));
+        args.dispatch.task_url = Some(pr);
+    } else {
+        args.issue_resolution = Some(json!({"route": "fresh_branch", "issue_url": url}));
     }
     Ok(())
 }
@@ -5787,8 +6199,8 @@ fn resolve_cook_pull_request(args: &mut AgentTaskCookArgs) -> homeboy::core::Res
     }
     // Without a supplied checkout, the PR head determines the provider handle.
     if args.dispatch.workspace.is_none() && args.dispatch.cwd.is_none() {
-        if let Some(repo) = cook_component_id(args).or(args.dispatch.repo.as_deref()) {
-            let handle = format!("{repo}@{}", slugify_cook_branch(&head));
+        if let Some(repo) = cook_provision_repository(args) {
+            let handle = homeboy::core::worktree_provider::native_handle_for_branch(&repo, &head);
             if args
                 .to_worktree
                 .as_deref()
@@ -5991,7 +6403,7 @@ mod cook_pull_request_ref_tests {
                 "origin",
                 "https://github.com/example/repo.git",
             ]);
-            std::fs::write(&gh, "#!/bin/sh\ncase \"$*\" in *list*) printf '[{\"state\":\"OPEN\",\"url\":\"https://github.com/example/repo/pull/1895\"}]';; *) printf '{\"baseRefName\":\"release\",\"headRefName\":\"feature\"}';; esac\n").unwrap();
+            std::fs::write(&gh, "#!/bin/sh\ncase \"$*\" in api*) printf '[[{\"event\":\"cross-referenced\",\"source\":{\"issue\":{\"state\":\"open\",\"html_url\":\"https://github.com/example/repo/pull/1895\",\"pull_request\":{}}}}]]';; *list*) printf '[{\"state\":\"OPEN\",\"url\":\"https://github.com/example/repo/pull/1895\"}]';; *) printf '{\"baseRefName\":\"release\",\"headRefName\":\"feature\"}';; esac\n").unwrap();
             let mut issue = parse(&[]);
             issue.dispatch.task_url = Some("https://github.com/example/repo/issues/7".into());
             let resolved = {
@@ -6023,7 +6435,9 @@ mod cook_pull_request_ref_tests {
                 resolve_cook_destination(input, repository.as_ref())
             }
             .expect_err("lookup fails closed");
-            assert!(error.message.contains("--task-url https://github.com/"));
+            assert!(error
+                .message
+                .contains("could not resolve issue's linked PRs"));
             std::fs::write(
                 &gh,
                 "#!/bin/sh\nprintf '{\"baseRefName\":\"release\",\"headRefName\":\"feature\"}'\n",
@@ -6472,16 +6886,14 @@ fn durable_component_cwd(
 pub(crate) fn cook_repository_names_for_selection(
     repo: &str,
 ) -> homeboy::core::Result<(String, String)> {
-    let component = cook_components_for_repository_name(repo)?
+    let Some(component) = cook_components_for_repository_name(repo)?
         .into_iter()
-        .next();
-    let component_id = component
-        .as_ref()
-        .map(|component| component.id.clone())
-        .unwrap_or_else(|| normalize_repository_name(repo));
-    let repository_name = component
-        .as_ref()
-        .and_then(cook_component_repository_remote)
+        .next()
+    else {
+        return Err(cook_repository_not_registered_error(repo)?);
+    };
+    let component_id = component.id.clone();
+    let repository_name = cook_component_repository_remote(&component)
         .as_deref()
         .map(normalize_repository_name)
         .unwrap_or_else(|| normalize_repository_name(repo));
@@ -6569,6 +6981,18 @@ fn cook_component_id(args: &AgentTaskCookArgs) -> Option<&str> {
 fn cook_components_for_repository_name(
     repository_name: &str,
 ) -> homeboy::core::Result<Vec<homeboy::core::component::Component>> {
+    let path_id;
+    let repository_name = if Path::new(repository_name).is_absolute() {
+        match homeboy::core::component::resolve_registered_primary_identity(repository_name)? {
+            homeboy::core::component::RegisteredPrimaryPathResolution::Primary(id) => {
+                path_id = id;
+                path_id.as_str()
+            }
+            _ => return Ok(Vec::new()),
+        }
+    } else {
+        repository_name
+    };
     let repository_name = normalize_repository_name(repository_name);
     // An exact component ID is the common Cook path. Do not hydrate every
     // registered primary checkout before selecting it: portable enrichment of
@@ -6635,6 +7059,34 @@ fn cook_components_for_repository_name(
         ));
     }
     Ok(matches)
+}
+
+fn cook_repository_not_registered_error(
+    repository: &str,
+) -> homeboy::core::Result<homeboy::core::Error> {
+    let components = homeboy::core::component::inventory::registered_primary()?;
+    let listing = if components.is_empty() {
+        "  (none)".to_string()
+    } else {
+        components
+            .iter()
+            .map(|component| {
+                format!(
+                    "  {} — remote: {}; primary path: {}",
+                    component.id,
+                    component.remote_url.as_deref().unwrap_or("(none)"),
+                    component.local_path,
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    Ok(homeboy::core::Error::validation_invalid_argument(
+        "repo",
+        format!("--repo `{repository}` does not match a registered component. Registered components:\n{listing}"),
+        Some(repository.to_string()),
+        None,
+    ))
 }
 
 fn cook_components_matching_repository_name(
@@ -6949,26 +7401,15 @@ fn repository_identity_error(
     )
 }
 
-/// Upper bound on follow-up cooks for one issue before derivation gives up.
+/// Upper bound on branch-name collisions before derivation gives up.
 const MAX_DERIVED_COOK_GENERATIONS: u32 = 50;
 
-/// Pick the issue-derived branch whose destination is not retired.
-///
-/// The derived handle is a pure function of the issue, so once an earlier
-/// cook's destination is removed or finalized its terminal record would block
-/// every later cook on the same issue ("is no longer active"). Multi-phase
-/// work on one issue is normal, so a derived destination advances to the next
-/// generation (`-2`, `-3`, ...) instead. Finished PRs and destinations owned
-/// by another live run or bound to another source checkout also retire a
-/// generation. A generation headed by an
-/// open PR is returned with that PR's URL so the cook adopts PR rework.
-/// Explicit `--to-worktree` and `--head` never reach this path.
-pub(super) fn next_live_derived_cook_branch(
+/// A new issue attempt never adopts an earlier branch or workspace.
+pub(super) fn fresh_derived_cook_branch(
     repository: &str,
     base: &str,
     source_checkout: Option<&Path>,
-    run_id: Option<&str>,
-) -> homeboy::core::Result<(String, Option<String>)> {
+) -> homeboy::core::Result<String> {
     use homeboy::core::worktree::convergence::PrHistory;
     for generation in 1..=MAX_DERIVED_COOK_GENERATIONS {
         let branch = if generation == 1 {
@@ -6976,68 +7417,27 @@ pub(super) fn next_live_derived_cook_branch(
         } else {
             format!("{base}-{generation}")
         };
-        let handle = format!("{repository}@{}", slugify_cook_branch(&branch));
+        let handle =
+            homeboy::core::worktree_provider::native_handle_for_branch(repository, &branch);
         let record = homeboy::core::worktree::resolve_workspace_ref_if_present(&handle)?;
-        if let (Some(source), Some(homeboy::core::worktree::WorkspaceRefRecord::Task(record))) =
-            (source_checkout, record.as_ref())
-        {
-            let record_source = Path::new(&record.source_checkout);
-            if record_source
-                .canonicalize()
-                .unwrap_or_else(|_| record_source.to_path_buf())
-                != source
-                    .canonicalize()
-                    .unwrap_or_else(|_| source.to_path_buf())
+        if record.is_some() {
+            continue;
+        }
+        if let Some(path) = source_checkout {
+            if homeboy::core::worktree::stale_destination::adoptable_branch_ref(path, &branch)
+                .is_some()
             {
-                // Even a terminal owner cannot make a different source's record reusable.
+                continue;
+            }
+            // Remote PR history can outlive a deleted local branch.
+            if !matches!(
+                homeboy::core::worktree::convergence::pr_history(path, &branch, None)?,
+                PrHistory::None
+            ) {
                 continue;
             }
         }
-        let path = source_checkout.or_else(|| {
-            record.as_ref().map(|record| match record {
-                homeboy::core::worktree::WorkspaceRefRecord::Task(record) => {
-                    Path::new(&record.source_checkout)
-                }
-                homeboy::core::worktree::WorkspaceRefRecord::Adopted(record) => {
-                    Path::new(&record.path)
-                }
-            })
-        });
-        if let Some(path) = path.filter(|path| {
-            record.is_some()
-                || homeboy::core::worktree::stale_destination::adoptable_branch_ref(path, &branch)
-                    .is_some()
-        }) {
-            match homeboy::core::worktree::convergence::pr_history(path, &branch, None)? {
-                PrHistory::Finished => continue,
-                // An open PR owns its rework, even when another run owns the record.
-                PrHistory::Open(url) => return Ok((branch, Some(url))),
-                PrHistory::None => {}
-            }
-        }
-        let retired = match record {
-            Some(record)
-                if record.state() != &homeboy::core::worktree::TaskWorktreeState::Active =>
-            {
-                true
-            }
-            Some(homeboy::core::worktree::WorkspaceRefRecord::Task(record)) => match record
-                .run_id
-                .as_deref()
-                .filter(|owner| Some(*owner) != run_id)
-            {
-                Some(owner) => {
-                    let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
-                    store.record_exists_readonly(owner)?
-                        && !store.read_record(owner)?.state().is_terminal()
-                }
-                None => false,
-            },
-            _ => false,
-        };
-        if !retired {
-            return Ok((branch, None));
-        }
+        return Ok(branch);
     }
     Err(homeboy::core::Error::validation_invalid_argument(
         "to_worktree",
@@ -7150,11 +7550,74 @@ fn validate_cook_source_authority(
     Ok(())
 }
 
+/// Shared ordering boundary for preview, execution, handoff and admission.
+/// Repository metadata supplies default gates, but destination/base resolution
+/// must not start until the request (including queue-only refusal) is valid.
+pub(crate) fn prepare_cook_request(
+    args: &mut AgentTaskCookArgs,
+    provenance: Option<&crate::cli_surface::CommandArgumentProvenance>,
+) -> homeboy::core::Result<Option<ResolvedCookRepository>> {
+    let repository = resolve_cook_repository(args);
+    let component = repository
+        .as_ref()
+        .ok()
+        .and_then(|repo| repo.as_ref())
+        .map(|repo| &repo.component);
+    apply_component_default_verify_gates(args, component)?;
+    validate_cook_request_with_provenance(args, provenance)?;
+    repository
+}
+
+/// Validate operator-supplied publication subjects before Cook has side effects.
+fn validate_cook_subjects(
+    title: Option<&str>,
+    commit_message: Option<&str>,
+) -> homeboy::core::Result<()> {
+    for (argument, subject) in [
+        ("title", title),
+        (
+            "commit-message",
+            commit_message.map(|message| message.lines().next().unwrap_or("")),
+        ),
+    ] {
+        if let Some(subject) = subject {
+            if !homeboy::core::git::is_conventional_subject(subject) {
+                return Err(homeboy::core::Error::validation_invalid_argument(
+                    argument,
+                    format!(
+                        "Cook requires a conventional subject: type(scope)?!?: subject; types: {}. Bumps: feat = minor, fix and other types = patch, ! = major",
+                        homeboy::core::git::CONVENTIONAL_COMMIT_TYPES.join(", ")
+                    ),
+                    Some(subject.to_string()),
+                    None,
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_cook_request_with_provenance(
     args: &AgentTaskCookArgs,
     provenance: Option<&crate::cli_surface::CommandArgumentProvenance>,
 ) -> homeboy::core::Result<()> {
     validate_cook_source_authority(args, provenance)?;
+    validate_cook_subjects(args.title.as_deref(), args.commit_message.as_deref())?;
+    if args.dispatch.cwd.is_none() {
+        if let (Some(handle), Some(repository), Some(head)) = (
+            args.to_worktree.as_deref(),
+            cook_provision_repository(args),
+            args.head.as_deref(),
+        ) {
+            if !Path::new(handle).is_dir() {
+                homeboy::core::worktree_provider::validate_native_handle(
+                    handle,
+                    &repository,
+                    head,
+                )?;
+            }
+        }
+    }
     if args.dispatch.core.queue_only {
         return Err(homeboy::core::Error::validation_invalid_argument(
             "queue-only",
@@ -7322,19 +7785,11 @@ pub(crate) fn run_cook_with_executor_and_dispatcher_with_progress(
     progress: super::CookProgress<'_>,
     provenance: Option<&crate::cli_surface::CommandArgumentProvenance>,
 ) -> CmdResult<Value> {
-    let repository_result = resolve_cook_repository(&mut args);
-    let component = repository_result
-        .as_ref()
-        .ok()
-        .and_then(|repo| repo.as_ref())
-        .map(|repo| &repo.component);
     let retained_gate_contract = args.gates.has_retained_contract();
     snapshot_cook_prompt(&mut args)?;
     args.gates.snapshot_file_inputs()?;
-    apply_component_default_verify_gates(&mut args, component)?;
-    validate_cook_request_with_provenance(&args, provenance)?;
+    let repository = prepare_cook_request(&mut args, provenance)?;
     confirm_model_override(&mut args)?;
-    let repository = repository_result?;
     if !args.no_progress {
         if let Some(progress) = progress {
             progress(
@@ -8405,7 +8860,7 @@ pub(crate) fn compile_cook_plan(
 ) -> homeboy::core::Result<AgentTaskPlan> {
     let pending_lookup = matches!(
         provision.get("action").and_then(Value::as_str),
-        Some("lookup_pending" | "attestation_pending" | "planned_create")
+        Some("lookup_pending" | "attestation_pending" | "planned_create" | "planned_unshallow")
     );
     let requested_workspace = (!pending_lookup)
         .then(|| {
@@ -8483,6 +8938,9 @@ pub(crate) fn compile_cook_plan(
     }
     if let Some(resolution) = &args.base_resolution {
         plan.metadata["cook_base_resolution"] = resolution.clone();
+    }
+    if let Some(resolution) = &args.issue_resolution {
+        plan.metadata["cook_issue_resolution"] = resolution.clone();
     }
     if let Some(snapshot) = &args.prompt_snapshot {
         for task in &mut plan.tasks {
@@ -11892,6 +12350,35 @@ mod tests {
         assert!(summary.contains("test inventory unavailable without building test binaries"));
         assert!(summary.contains("Private gate selections deferred: 1 (details withheld)"));
         assert!(!summary.contains("private-command-secret"));
+    }
+
+    #[test]
+    fn cook_admission_requires_conventional_subjects() {
+        for (title, message, accepted) in [
+            (None, None, true),
+            (Some("feat(x): add thing"), None, true),
+            (Some("fix!: change contract"), None, true),
+            (Some("Add thing"), None, false),
+            (Some(""), None, false),
+            (None, Some("fix(cook): repair thing\n\nDetails"), true),
+            (
+                None,
+                Some("Add thing\n\nfix: body is not the subject"),
+                false,
+            ),
+            (None, Some("\nfix: later line"), false),
+            (None, Some(""), false),
+            (Some("feat: add thing"), Some("Invalid subject"), false),
+        ] {
+            let result = super::validate_cook_subjects(title, message);
+            assert_eq!(result.is_ok(), accepted, "{title:?} / {message:?}");
+            if let Err(error) = result {
+                let error = error.to_string();
+                assert!(error.contains("type(scope)?!?: subject"), "{error}");
+                assert!(error.contains("minor"), "{error}");
+                assert!(error.contains("major"), "{error}");
+            }
+        }
     }
 
     fn title_cook_args(extra: &[&str]) -> super::AgentTaskCookArgs {

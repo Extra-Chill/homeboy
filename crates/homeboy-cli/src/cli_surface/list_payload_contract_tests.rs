@@ -22,6 +22,7 @@ const ENTITY_LIST_COMMANDS: &[&str] = &[
     "project list",
     "rig list",
     "runner list",
+    "scratch list",
     "server list",
     "workflow list",
 ];

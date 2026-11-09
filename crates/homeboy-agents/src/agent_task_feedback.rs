@@ -34,6 +34,8 @@ pub struct CookFeedback {
     #[serde(default)]
     pub consumed_at: Option<String>,
     #[serde(default)]
+    pub consumed_by_attempt_id: Option<String>,
+    #[serde(default)]
     pub stale_reason: Option<String>,
 }
 
@@ -199,6 +201,7 @@ impl CookFeedbackStore {
             state: FeedbackState::Pending,
             submitted_at: Utc::now().to_rfc3339(),
             consumed_at: None,
+            consumed_by_attempt_id: None,
             stale_reason: None,
         };
         document.feedback.push(feedback.clone());
@@ -273,6 +276,15 @@ impl CookFeedbackStore {
         cook_id: &str,
         prepared: &[CookFeedback],
     ) -> Result<Vec<CookFeedback>> {
+        self.acknowledge_attempt(cook_id, prepared, None)
+    }
+
+    pub fn acknowledge_attempt(
+        &self,
+        cook_id: &str,
+        prepared: &[CookFeedback],
+        attempt_id: Option<&str>,
+    ) -> Result<Vec<CookFeedback>> {
         if prepared.is_empty() {
             return Ok(Vec::new());
         }
@@ -290,6 +302,7 @@ impl CookFeedbackStore {
                 {
                     feedback.state = FeedbackState::Consumed;
                     feedback.consumed_at = Some(now.clone());
+                    feedback.consumed_by_attempt_id = attempt_id.map(str::to_string);
                     acknowledged.push(feedback.clone());
                 }
             }
@@ -441,33 +454,26 @@ pub fn candidate_sha(record: &AgentTaskRunRecord) -> Option<String> {
         .map(|candidate| candidate.candidate_sha)
 }
 
-pub fn append_to_plan(
-    record: &AgentTaskRunRecord,
-    plan: &mut crate::agent_task_scheduler::AgentTaskPlan,
-    feedback: &[CookFeedback],
-) -> Result<()> {
-    if feedback.is_empty() {
-        return Ok(());
-    }
-    let candidate = candidate_sha(record).ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "cook_feedback.candidate_sha",
-            "cannot consume feedback because the durable Cook has no candidate identity",
-            Some(record.run_id.clone()),
-            None,
-        )
-    })?;
-    let mut section = format!(
-        "\n\nReviewer feedback for candidate `{candidate}` (address these findings; do not change the declared verification gates):"
+pub(crate) fn prepare_request(
+    request: &mut crate::agent_task::AgentTaskRequest,
+    context: &crate::agent_task_schedule::AgentTaskExecutionContext,
+) -> Result<Option<(CookFeedbackStore, String, Vec<CookFeedback>)>> {
+    let (Some(lifecycle), Some(run_id)) = (&context.lifecycle_store, &context.run_id) else {
+        return Ok(None);
+    };
+    let record = lifecycle.read_record(run_id)?;
+    let Some(cook_id) = record.metadata["cook_id"].as_str() else {
+        return Ok(None);
+    };
+    let store = CookFeedbackStore::new(lifecycle.data_root());
+    let pending = store
+        .list(cook_id)?
+        .into_iter()
+        .filter(|item| item.state == FeedbackState::Pending)
+        .collect::<Vec<_>>();
+    crate::agent_task_prompt_template::merge_homeboy_facts(
+        request,
+        serde_json::json!({ "cook_feedback": pending }),
     );
-    for item in feedback {
-        section.push_str(&format!(
-            "\n\n[{} by {}]\n{}",
-            item.source, item.author, item.text
-        ));
-    }
-    for task in &mut plan.tasks {
-        task.instructions.push_str(&section);
-    }
-    Ok(())
+    Ok(Some((store, cook_id.to_string(), pending)))
 }

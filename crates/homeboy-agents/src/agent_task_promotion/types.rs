@@ -55,6 +55,8 @@ pub struct AgentTaskPromotionReport {
     pub source: AgentTaskPromotionSource,
     pub to_worktree: String,
     pub target: AgentTaskPromotionTarget,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_ref: Option<String>,
     pub candidate: Option<crate::agent_task::AgentTaskCandidate>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub changed_files: Vec<String>,
@@ -89,6 +91,18 @@ impl AgentTaskPromotionReport {
     /// evidence.
     pub fn finalization_eligible(&self) -> bool {
         !self.deterministic_gates.is_empty() && self.finalization_blocking_gates().next().is_none()
+    }
+
+    /// Whether this report is an already-applied candidate carrying a passing
+    /// verdict: the one rule both recovery step selection and the publication
+    /// guard apply, so they cannot disagree about what may publish (#17508).
+    /// A proven inherited failure passes (see [`Self::finalization_eligible`])
+    /// while staying recorded as baseline-red evidence.
+    pub fn applied_with_passing_verdict(&self) -> bool {
+        matches!(
+            self.status,
+            AgentTaskPromotionStatus::Applied | AgentTaskPromotionStatus::GateFailed
+        ) && self.finalization_eligible()
     }
 
     /// Gates that keep the report from crossing the finalization boundary,

@@ -767,8 +767,8 @@ pub struct RunsArtifactGetArgs {
     /// Pull the artifact from a connected execution runner daemon
     #[arg(long)]
     pub runner: Option<String>,
-    /// Destination file path. Defaults to the recorded artifact filename.
-    #[arg(long, short = 'o')]
+    /// Destination file path. Defaults to the artifact name.
+    #[arg(long, short = 'o', alias = "to")]
     pub output: Option<PathBuf>,
     /// JSONPath selector(s) projected over the artifact-get result so callers
     /// extract only specific fields (e.g. `sha256`, `output_path`) instead of
@@ -1013,6 +1013,10 @@ pub type RunsArtifactCleanupPersistedRow = runs_service::PersistedArtifactCleanu
 
 #[derive(Serialize)]
 pub struct RunDetail {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub candidate_ref: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub candidate_sha: Option<String>,
     #[serde(flatten)]
     pub summary: RunSummary,
     /// The observation row's own status when the run is a durable agent-task

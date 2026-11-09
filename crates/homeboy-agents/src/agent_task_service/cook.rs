@@ -1000,6 +1000,85 @@ pub(super) fn promote_with_gate_setup_retries(
     }
 }
 
+/// Repair only the historical, unverified fallback. Explicit bases and transport
+/// failures retain their original promotion contract and are never rewritten.
+fn recover_compatibility_cook_base(
+    store: &CookRecipeStore,
+    lifecycle_store: &AgentTaskLifecycleStore,
+    options: &mut CookRequest,
+) -> Result<()> {
+    if options.identity.initial_plan.metadata["cook_base_resolution"]["source"]
+        != "compatibility_fallback"
+    {
+        return Ok(());
+    }
+    let target_path = if Path::new(&options.workspace.to_worktree).is_dir() {
+        PathBuf::from(&options.workspace.to_worktree)
+    } else {
+        let Some(target) =
+            homeboy_core::worktree_provider::resolve_native_worktree_mutation_target(
+                &options.workspace.to_worktree,
+            )?
+        else {
+            return Ok(());
+        };
+        target.path
+    };
+    match crate::agent_task_promotion::capture_declared_base(
+        &target_path,
+        Some(&options.finalization.base),
+    ) {
+        Ok(_) => return Ok(()),
+        Err(error)
+            if error.details["field"] == "base_ref"
+                && error
+                    .message
+                    .contains("was not found on origin before promotion gates") => {}
+        Err(error) => return Err(error),
+    }
+    let Some(remote_ref) = homeboy_core::git::default_remote_branch_until(
+        &target_path,
+        "origin",
+        std::time::Instant::now() + std::time::Duration::from_secs(5),
+    )?
+    else {
+        return Err(Error::validation_invalid_argument(
+            "base",
+            "Cook requires a remote default branch; specify --base",
+            None,
+            None,
+        ));
+    };
+    let base = remote_ref.strip_prefix("origin/").unwrap_or(&remote_ref);
+    let verified = crate::agent_task_promotion::capture_declared_base(&target_path, Some(base))?;
+    let resolution = serde_json::json!({
+        "base": base,
+        "from": remote_ref,
+        "source": "remote_head",
+        "sha": verified.map(|base| base.sha),
+        "evidence_path": target_path,
+    });
+    let mut recipe = store.load_recipe(&options.identity.cook_id)?;
+    recipe.finalization["base"] = serde_json::json!(base);
+    for attempt in &mut recipe.attempts {
+        if attempt.plan.metadata["cook_base_resolution"]["source"] == "compatibility_fallback" {
+            attempt.plan.metadata["cook_base_resolution"] = resolution.clone();
+        }
+    }
+    // The recipe is reconstruction authority. Publish it before the derived
+    // controller plan so an interruption cannot restore the guessed base.
+    store.persist_recipe(&recipe)?;
+    options.finalization.base = base.to_string();
+    options.identity.initial_plan.metadata["cook_base_resolution"] = resolution;
+    if lifecycle_store.record_exists(&options.identity.initial_run_id)? {
+        lifecycle_store.write_controller_plan(
+            &options.identity.initial_run_id,
+            &options.identity.initial_plan,
+        )?;
+    }
+    Ok(())
+}
+
 fn gate_setup_retry_delay(retry: u32) -> std::time::Duration {
     #[cfg(test)]
     {
@@ -1108,15 +1187,19 @@ fn promote_with_operation_claim_in_store(
 pub(crate) fn bounded_error_diagnostic(error: &Error) -> Value {
     let mut details = homeboy_core::redaction::redact_json(&error.details);
     bound_diagnostic_value(&mut details, 0);
-    let deepest_cause = deepest_typed_error(&details).unwrap_or_else(|| {
-        serde_json::json!({
-            "code": error.code.as_str(),
-            "field": details.get("field"),
-            "message": truncate_diagnostic_text(&homeboy_core::redaction::redact_string(
-                &error.attributed_message(),
-            )),
-        })
-    });
+    // Select the cause before bounding nested details, which may replace the
+    // path with a depth-limit marker in transport-wrapped failures.
+    let deepest_cause = deepest_typed_error(&homeboy_core::redaction::redact_json(&error.details))
+        .unwrap_or_else(|| {
+            serde_json::json!({
+                "code": error.code.as_str(),
+                "field": details.get("field"),
+                "entry_path": details.get("entry_path"),
+                "message": truncate_diagnostic_text(&homeboy_core::redaction::redact_string(
+                    &error.attributed_message(),
+                )),
+            })
+        });
     serde_json::json!({
         "status": "failed",
         "code": format!("{:?}", error.code),
@@ -1143,11 +1226,18 @@ fn typed_error_at(value: &Value) -> Option<Value> {
     let error = fields.get("error")?.as_object()?;
     let code = error.get("code")?.as_str()?;
     let message = error.get("message")?.as_str()?;
-    Some(serde_json::json!({
+    let mut diagnostic = serde_json::json!({
         "code": code,
         "field": error.get("details").and_then(|details| details.get("field")),
         "message": truncate_diagnostic_text(message),
-    }))
+    });
+    if let Some(path) = error
+        .get("details")
+        .and_then(|details| details.get("entry_path"))
+    {
+        diagnostic["entry_path"] = path.clone();
+    }
+    Some(diagnostic)
 }
 
 /// Only an explicitly named `cause` is causal. Provider transcripts and sibling
@@ -1174,11 +1264,18 @@ fn plain_cause_error(value: &Value) -> Option<Value> {
     let fields = value.as_object()?;
     let code = fields.get("code")?.as_str()?;
     let message = fields.get("message")?.as_str()?;
-    Some(serde_json::json!({
+    let mut diagnostic = serde_json::json!({
         "code": code,
         "field": fields.get("details").and_then(|details| details.get("field")),
         "message": truncate_diagnostic_text(&homeboy_core::redaction::redact_string(message)),
-    }))
+    });
+    if let Some(path) = fields
+        .get("details")
+        .and_then(|details| details.get("entry_path"))
+    {
+        diagnostic["entry_path"] = path.clone();
+    }
+    Some(diagnostic)
 }
 
 fn bound_diagnostic_value(value: &mut Value, depth: usize) {
@@ -1373,7 +1470,7 @@ pub(crate) fn gate_feedback_current_diff(promotion: &AgentTaskPromotionReport) -
 /// the last one recorded in the aggregate. Returns `Ok(None)` when the agent
 /// emitted no form (the loop treats absence as a gap and nudges a retry). A
 /// present-but-malformed form is a hard error so garbage is never rendered.
-fn review_form_from_aggregate(
+pub(super) fn review_form_from_aggregate(
     aggregate: &crate::agent_task_schedule::AgentTaskAggregate,
 ) -> Result<Option<crate::agent_task_review_dossier::AiFilledReviewForm>> {
     let Some(outcome) = aggregate.selected_outcome().or_else(|| {
@@ -2086,14 +2183,9 @@ fn canonical_finalization_recovery_run_id_with_stores(
 
 fn canonical_finalization_eligible(
     promotion: &AgentTaskPromotionReport,
-
     has_valid_review_form: bool,
 ) -> bool {
-    matches!(
-        promotion.status,
-        AgentTaskPromotionStatus::Applied | AgentTaskPromotionStatus::GateFailed
-    ) && promotion.finalization_eligible()
-        && has_valid_review_form
+    promotion.applied_with_passing_verdict() && has_valid_review_form
 }
 
 /// Read finalization from the canonical selected attempt or its authenticated
@@ -5183,6 +5275,23 @@ fn run_cook_with_runtime(
             lifecycle_store,
             result.exit_code != 0,
         );
+        // Persist the pass outcome on its source, even when the report's latest
+        // attempt is a detached review-form child. Exit zero can mean handoff.
+        if lifecycle_store.record_exists(&notification_options.identity.initial_run_id)? {
+            lifecycle_store.mutate_record(
+                &notification_options.identity.initial_run_id,
+                |record| {
+                    record.ensure_metadata_object().insert(
+                        "cook_pass_outcome".into(),
+                        serde_json::json!({
+                            "status": result.value.status,
+                            "terminal": result.value.disposition.is_terminal(),
+                        }),
+                    );
+                    true
+                },
+            )?;
+        }
         if result.value.disposition.is_terminal() {
             let finalized = lifecycle_store
                 .open_observation_initialized()
@@ -5802,6 +5911,20 @@ fn run_cook_spine(
                 let continuation_plan = lifecycle_store.read_controller_plan(&attempt.run_id)?;
                 rebind_baseline_continuation_workspace(&mut reconstructed, &continuation_plan)?;
                 reconstructed.identity.initial_plan = continuation_plan;
+                // Recipe-first correction can survive an interruption before
+                // the derived controller plan is rewritten.
+                if attempt.plan.metadata["cook_base_resolution"]["source"] == "remote_head"
+                    && reconstructed.identity.initial_plan.metadata["cook_base_resolution"]
+                        ["source"]
+                        == "compatibility_fallback"
+                {
+                    reconstructed.identity.initial_plan.metadata["cook_base_resolution"] =
+                        attempt.plan.metadata["cook_base_resolution"].clone();
+                    lifecycle_store.write_controller_plan(
+                        &attempt.run_id,
+                        &reconstructed.identity.initial_plan,
+                    )?;
+                }
             }
         }
         reconstructed
@@ -5812,6 +5935,9 @@ fn run_cook_spine(
         options.gates = super::cook_recipe::admitted_gate_policy(&options)?;
         options
     };
+    if existing_recipe {
+        recover_compatibility_cook_base(store, lifecycle_store, &mut options)?;
+    }
     // Candidate adoption records the concrete external model on the lifecycle
     // attempt. Reuse it only when the persisted promotion authenticates the
     // same candidate/model pair, including after a detached continuation.
@@ -7439,17 +7565,42 @@ fn run_cook_spine(
         } else {
             adopted_attempt_is_ready_for_cook_continuation(lifecycle_store, &record)?
         };
-        let review_form_continuation = mode.allows_historical_terminal()
-            && review_form_attempt_is_ready_for_cook_continuation_in_store(
-                lifecycle_store,
-                &plan,
-                &record,
-            )?
+        let review_form_unavailable = plan_is_review_form_only(&plan)
             && retryable_review_form_terminal_failure_in_store(
                 lifecycle_store,
                 &record,
                 &aggregate,
-            );
+            )
+            && matches!(
+                record.state(),
+                agent_task_lifecycle::AgentTaskRunState::Failed
+                    | agent_task_lifecycle::AgentTaskRunState::PartialFailure
+            )
+            && persisted_promotion_for_attempt_in_store(lifecycle_store, &run_id)?
+                .is_some_and(|promotion| promotion.applied_with_passing_verdict());
+        if review_form_unavailable {
+            lifecycle_store.record_metadata_value(
+                &run_id,
+                "review_form_unavailable",
+                serde_json::json!({
+                    "phase": "review_form",
+                    "message": "review form unavailable",
+                    "run_state": format!("{:?}", record.state()),
+                }),
+            )?;
+        }
+        let review_form_continuation = review_form_unavailable
+            || mode.allows_historical_terminal()
+                && review_form_attempt_is_ready_for_cook_continuation_in_store(
+                    lifecycle_store,
+                    &plan,
+                    &record,
+                )?
+                && retryable_review_form_terminal_failure_in_store(
+                    lifecycle_store,
+                    &record,
+                    &aggregate,
+                );
         let persisted_terminal_status = record.metadata["cook_progress"]["terminal_status"]
             .as_str()
             .map(str::to_string);
@@ -7731,7 +7882,11 @@ fn run_cook_spine(
         let _terminal_phase = terminal_timing
             .as_ref()
             .map(|store| store.run_phase_guard(&run_id, "terminal.decision"));
-        let review_form = review_form_from_aggregate(&aggregate)?;
+        let review_form = if review_form_unavailable {
+            None
+        } else {
+            review_form_from_aggregate(&aggregate)?
+        };
         let intentional_no_change = intentional_no_change_from_aggregate(&aggregate);
         let previous_failure_set = delivery
             .attempts
@@ -7767,7 +7922,7 @@ fn run_cook_spine(
             current_diff: gate_feedback_current_diff(&promotion),
             // The form is publication evidence. A no-finalize Cook preserves
             // the verified patch for review without entering finalization.
-            require_review_form: !options.finalization.no_finalize,
+            require_review_form: !options.finalization.no_finalize && !review_form_unavailable,
             review_form: review_form.clone(),
             metadata: serde_json::json!({
                 "previous_failure_set": previous_failure_set,
@@ -7830,7 +7985,15 @@ fn run_cook_spine(
                 return Ok(report);
             }
             AgentTaskCookLoopStatus::GreenCompleted => {
-                return super::cook_delivery::ensure_published(&mut delivery, promotion);
+                let mut report = super::cook_delivery::ensure_published(&mut delivery, promotion)?;
+                if review_form_unavailable {
+                    report.value.terminal_phase = Some("review_form".to_string());
+                    report.value.stop_reason = Some(
+                        "review form unavailable; published the gated candidate as a draft"
+                            .to_string(),
+                    );
+                }
+                return Ok(report);
             }
             AgentTaskCookLoopStatus::BaselineRed => {
                 if promotion.finalization_eligible() {
@@ -7926,7 +8089,7 @@ fn run_cook_spine(
                 let stop_reason = gates_deferred_stop_reason(&promotion, &cook_id);
                 return Ok(stores.report(CookReportInput {
                     cook_id,
-                    status: "gates_deferred",
+                    status: "gate_environment_unavailable",
                     disposition: CookDisposition::Terminal,
                     attempts,
                     finalization: None,
@@ -8129,7 +8292,10 @@ fn publish_latest_incomplete_draft(
                     attempt.attempt,
                     &attempt.run_id,
                     &later,
-                );
+                    record.metadata.get("review_form_unavailable").is_some(),
+                    &mut crate::agent_task_finalization::RealAgentTaskPrFinalizationBackend,
+                )
+                .map(|_| ());
             }
         }
         later.push(format!(
@@ -8142,14 +8308,18 @@ fn publish_latest_incomplete_draft(
     Ok(())
 }
 
-fn publish_incomplete_draft(
+pub(super) fn publish_incomplete_draft<
+    B: crate::agent_task_finalization::AgentTaskPrFinalizationBackend,
+>(
     options: &CookRequest,
     promotion: &AgentTaskPromotionReport,
     form: Option<&crate::agent_task_review_dossier::AiFilledReviewForm>,
     attempt: u32,
     run_id: &str,
     later: &[String],
-) -> Result<()> {
+    review_form_unavailable: bool,
+    backend: &mut B,
+) -> Result<Value> {
     use homeboy_core::git;
     let path = promotion
         .provenance
@@ -8168,24 +8338,29 @@ fn publish_incomplete_draft(
         .to_string(),
     };
     let title = if options.finalization.title.is_empty() {
-        format!("Incomplete: {}", options.identity.cook_id)
+        format!("fix(cook): incomplete {}", options.identity.cook_id)
     } else {
         options.finalization.title.clone()
     };
-    let mut body = format!("Incomplete candidate; deterministic verification failed.\n\nTask: {}\n\nincomplete_reason: {}\n",
+    let note = if review_form_unavailable {
+        "Review form unavailable: completion not assessed; deterministic gates passed"
+    } else {
+        "Incomplete candidate; deterministic verification failed."
+    };
+    let mut body = format!(
+        "{note}\n\nTask: {}\n\nincomplete_reason: {}\n",
         options.workspace.source_refs.join("\n"),
-        form.map(|form| form.incomplete_reason.as_str()).unwrap_or("not recorded"));
+        form.map(|form| form.incomplete_reason.as_str())
+            .unwrap_or("completion not assessed")
+    );
     body.push_str(&format!(
         "\nCandidate from attempt {attempt} (`{run_id}`).\n"
     ));
     if !later.is_empty() {
         body.push_str(&format!("\nLater attempts:\n{}\n", later.join("\n")));
     }
-    for gate in promotion
-        .deterministic_gates
-        .iter()
-        .filter(|gate| gate.status == crate::agent_task_gate::AgentTaskGateStatus::Failed)
-    {
+    for gate in &promotion.deterministic_gates {
+        body.push_str(&format!("\nGate: {} — {:?}\n", gate.id, gate.status));
         let output = format!("{}\n{}", gate.stdout, gate.stderr);
         let tail = output
             .lines()
@@ -8197,61 +8372,45 @@ fn publish_incomplete_draft(
             .collect::<Vec<_>>()
             .join("\n");
         body.push_str(&format!(
-            "\nFailed gate: {}\n\n```text\n{}\n```\n",
+            "\nGate output: {}\n\n```text\n{}\n```\n",
             gate.id, tail
         ));
     }
-    git::stage_all(root)?;
-    if git::has_staged_changes(root)? {
-        git::run_git(
-            root,
-            &["commit", "-m", &title],
-            "commit incomplete candidate",
-        )?;
-    }
-    git::push_at(
-        None,
-        git::PushOptions {
-            refspec: Some(format!("HEAD:refs/heads/{head}")),
-            non_interactive: true,
-            ..Default::default()
-        },
-        Some(path),
-    )?;
-    let existing = git::pr_find(
-        None,
-        git::PrFindOptions {
-            head: Some(head.clone()),
-            state: git::PrState::Open,
-            limit: 1,
-            path: Some(path.to_string()),
-            ..Default::default()
-        },
-    )?;
-    if let Some(pr) = existing.items.first() {
-        git::pr_comment(
+    backend.commit_all(path, &title)?;
+    let sha = git::run_git(root, &["rev-parse", "HEAD"], "resolve draft candidate")?;
+    backend.push_branch(path, sha.trim(), &head)?;
+    let pr = match backend.find_open_pr(None, path, &options.finalization.base, &head)? {
+        Some(pr) => {
+            if !pr.is_draft {
+                let capability = backend.quarantine_capability(false, false)?;
+                backend.quarantine_pr(path, &pr, capability)?;
+            }
+            if review_form_unavailable {
+                backend.update_pr(None, path, pr.number, &title, &body)?
+            } else {
+                git::pr_comment(
+                    None,
+                    git::PrCommentOptions {
+                        number: pr.number,
+                        body,
+                        path: Some(path.to_string()),
+                        ..Default::default()
+                    },
+                )?;
+                pr
+            }
+        }
+        None => backend.create_pr(
             None,
-            git::PrCommentOptions {
-                number: pr.number,
-                body,
-                path: Some(path.to_string()),
-                ..Default::default()
-            },
-        )?;
-    } else {
-        git::pr_create(
-            None,
-            git::PrCreateOptions {
-                path: Some(path.to_string()),
-                base: options.finalization.base.clone(),
-                head,
-                title,
-                body,
-                draft: true,
-            },
-        )?;
-    }
-    Ok(())
+            path,
+            &options.finalization.base,
+            &head,
+            &title,
+            &body,
+            true,
+        )?,
+    };
+    Ok(serde_json::json!({"status": "draft_published", "pr_number": pr.number, "pr_url": pr.url}))
 }
 
 /// A deferred gate never executed, so the stop reason names each typed cause
@@ -8864,6 +9023,7 @@ fn preflight_cook_workspace_base_ancestry_with_provider(
     adopted_dirty_candidate: bool,
     tracked_candidate: bool,
 ) -> Result<Option<CookWorkspaceBaseValidation>> {
+    crate::agent_task_promotion::destination::check(target, Some(&options.identity.cook_id))?;
     // Explicit CWDs are caller-owned and must remain untouched. Resolve their
     // declared ref into an isolated scheduler snapshot instead of treating the
     // persisted pin as authority to converge the caller's checkout.
@@ -8931,6 +9091,7 @@ fn preflight_cook_workspace_base_ancestry_with_provider(
             // the immutable base, not in the earlier read-only preflight.
             return Ok(None);
         };
+        crate::agent_task_promotion::destination::before_reset(target, &options.identity.cook_id)?;
         let resolved = materialize_prepared_cook_base(target, &options.finalization.base, pin)?;
         let issue_owned = options
             .identity
@@ -9791,14 +9952,19 @@ fn provision_pending_cook_workspace(
         &options.identity.initial_run_id,
         &options.identity.initial_plan,
     )?;
-    homeboy_core::worktree_provider::ensure_worktree_provision(
+    let provision = homeboy_core::worktree_provider::ensure_worktree_provision(
         &create_intent,
         &homeboy_core::worktree_provider::WorktreeProvisionLifecycle {
             purpose,
             owner_run_ref: options.identity.initial_run_id.clone(),
             cleanup_policy,
         },
-    )
+    )?;
+    crate::agent_task_promotion::destination::record(
+        Path::new(&provision.destination.ownership.path),
+        &options.identity.cook_id,
+    )?;
+    Ok(provision)
 }
 
 fn validate_pending_cook_repository_identity(_plan: &AgentTaskPlan, _target: &Path) -> Result<()> {
@@ -10706,6 +10872,25 @@ mod io_error_attribution_tests {
             diagnostic["message"],
             "IO error: write promotion checkpoint: Permission denied (os error 13)"
         );
+    }
+
+    #[test]
+    fn bounded_error_diagnostic_preserves_refused_path_through_gate_wrappers() {
+        let error = Error::new(
+            homeboy_core::ErrorCode::ValidationInvalidArgument,
+            "Cook gate failed",
+            serde_json::json!({"cause": {
+                "code": "validation.invalid_argument",
+                "message": "workspace content hash refused a symlink cycle at 'tracked/cycle'",
+                "details": {"entry_path": "tracked/cycle"}
+            }}),
+        );
+        let diagnostic = bounded_error_diagnostic(&error);
+        assert_eq!(diagnostic["deepest_cause"]["entry_path"], "tracked/cycle");
+        assert!(diagnostic["deepest_cause"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("tracked/cycle"));
     }
 
     #[test]

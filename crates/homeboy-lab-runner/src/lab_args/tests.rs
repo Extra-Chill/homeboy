@@ -118,6 +118,7 @@ mod lab_source_path_tests {
                 store.join("homeboy_smoke.json"),
                 serde_json::json!({
                     "id": "homeboy@smoke",
+                    "workspace_identity": homeboy_core::worktree::task_worktree_workspace_identity("homeboy", "homeboy@smoke").unwrap(),
                     "component_id": "homeboy",
                     "source_checkout": source_checkout,
                     "worktree_path": worktree_path.display().to_string(),
@@ -125,7 +126,8 @@ mod lab_source_path_tests {
                     "base_ref": "HEAD",
                     "cleanup_policy": "preserve_on_failure",
                     "created_at": "2026-01-01T00:00:00Z",
-                    "state": "active"
+                    "state": "active",
+                    "workspace_identity": homeboy_core::worktree::task_worktree_workspace_identity("homeboy", "homeboy@smoke").expect("fixture identity")
                 })
                 .to_string(),
             )

@@ -5350,6 +5350,8 @@ mod tests {
                         "--preview",
                         "--prompt",
                         "Check built-in Pi backend resolution",
+                        "--base",
+                        "main",
                         "--no-finalize",
                         "--repo",
                         "preview-fixture",

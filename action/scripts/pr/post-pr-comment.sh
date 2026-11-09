@@ -56,6 +56,9 @@ COMMENT_KEY="$(derive_comment_key)"
 SECTION_KEY="$(derive_section_key)"
 SECTION_TITLE="$(derive_section_title)"
 HEADER="## Homeboy Results — \`${COMP_ID}\`"
+if is_component_matrix; then
+  HEADER="## Homeboy Results"
+fi
 # Preserve the current rendered section order (lint, build, test, bench).
 # Tooling versions are passed as the core-managed footer instead of an action-
 # rendered pseudo-section.
@@ -75,11 +78,21 @@ trap 'rm -f "${SECTION_FILE}" "${TOOLING_FOOTER_FILE}"' EXIT
 printf '%s' "${SECTION_BODY}" > "${SECTION_FILE}"
 build_tooling_footer > "${TOOLING_FOOTER_FILE}"
 
+# Older pinned binaries do not support the atomic PR lifecycle/head guard.
+HEAD_GUARD_ARGS=()
+if [ -n "${HEAD_SHA:-}" ]; then
+  COMMENT_HELP="$(homeboy git pr comment --help 2>/dev/null || true)"
+  if [[ "${COMMENT_HELP}" == *"--expected-head-sha"* ]]; then
+    HEAD_GUARD_ARGS=(--expected-head-sha "${HEAD_SHA}")
+  fi
+fi
+
 # --- Post this job's section -------------------------------------------------
 POST_RESULT="$(
   homeboy git pr comment "${COMP_ID}" \
     --path "${WORKSPACE}" \
     --number "${PR_NUMBER}" \
+    ${HEAD_GUARD_ARGS[@]+"${HEAD_GUARD_ARGS[@]}"} \
     --comment-key "${COMMENT_KEY}" \
     --section-key "${SECTION_KEY}" \
     --body-file "${SECTION_FILE}" \
@@ -95,7 +108,18 @@ if [ -z "${POST_RESULT}" ]; then
 fi
 
 POSTED_COMMENT_ID="$(printf '%s' "${POST_RESULT}" | jq -r '.data.comment_id // empty' 2>/dev/null || true)"
-POSTED_ACTION="$(printf '%s' "${POST_RESULT}" | jq -r '.action // empty' 2>/dev/null || true)"
+POSTED_ACTION="$(printf '%s' "${POST_RESULT}" | jq -r '.data.action // .action // empty' 2>/dev/null || true)"
+
+if [ "${POSTED_ACTION}" = "skipped" ]; then
+  SKIP_REASON="$(printf '%s' "${POST_RESULT}" | jq -r '.data.skip_reason // "unknown"' 2>/dev/null || true)"
+  if [ "${SKIP_REASON}" = "stale_head" ]; then
+    PR_HEAD_SHA="$(printf '%s' "${POST_RESULT}" | jq -r '.data.current_head_sha // "unknown"' 2>/dev/null || true)"
+    echo "Skipped PR comment: stale_head (run ${HEAD_SHA:-unknown}, PR head ${PR_HEAD_SHA})"
+  else
+    echo "Skipped PR comment: ${SKIP_REASON}"
+  fi
+  exit 0
+fi
 
 echo "Posted section '${SECTION_KEY}' to comment #${POSTED_COMMENT_ID:-?} (${POSTED_ACTION:-unknown})"
 

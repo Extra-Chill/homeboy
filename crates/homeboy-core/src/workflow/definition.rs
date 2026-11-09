@@ -34,7 +34,30 @@ pub struct WorkflowDefinition {
     /// daemon, which admits one instance per due slot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub every: Option<Every>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_pass: Option<NextPass>,
     pub steps: Vec<StepDefinition>,
+}
+
+/// Continue the pinned definition after a successful pass.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NextPass {
+    pub max_iterations: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub when: Option<Gate>,
+    #[serde(default)]
+    pub inputs: BTreeMap<String, Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_unchanged: Option<StopUnchanged>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StopUnchanged {
+    pub step: String,
+    pub output: String,
+    pub passes: u32,
 }
 
 /// The shortest cadence: the daemon admits due cadences once per
@@ -195,9 +218,8 @@ impl TryFrom<Value> for Join {
                 .get("min_succeeded")
                 .and_then(Value::as_u64)
                 .and_then(|min| u32::try_from(min).ok())
-                .filter(|min| *min >= 1)
                 .map(Join::MinSucceeded)
-                .ok_or_else(|| "`join.min_succeeded` must be a positive integer".to_string()),
+                .ok_or_else(|| "`join.min_succeeded` must be a non-negative integer".to_string()),
             _ => Err(r#"`join` is "all", "any", or {"min_succeeded": N}"#.to_string()),
         }
     }
@@ -325,12 +347,6 @@ impl WorkflowDefinition {
     }
 
     pub fn from_value(raw: Value) -> Result<Self> {
-        if raw.get("iterate").is_some() {
-            return Err(invalid(
-                "iterate",
-                "`iterate` is not supported: make the final step a `homeboy` step that runs `workflow run <this definition>` with the next pass's inputs, gated by `when`",
-            ));
-        }
         serde_path_to_error::deserialize(raw)
             .map_err(|error| invalid("definition", format!("invalid workflow: {error}")))
     }
@@ -354,6 +370,54 @@ impl WorkflowDefinition {
         if let Some(every) = &self.every {
             every.interval()?;
             every.at_offset()?;
+        }
+        if let Some(next) = &self.next_pass {
+            if next.max_iterations == 0 || self.every.is_some() {
+                return Err(invalid(
+                    "next_pass",
+                    "requires max_iterations >= 1 and no cadence",
+                ));
+            }
+            if self.inputs.contains_key("iteration") || self.inputs.contains_key("previous") {
+                return Err(invalid(
+                    "inputs",
+                    "iteration and previous are reserved for next_pass",
+                ));
+            }
+            let ids: BTreeSet<_> = self.steps.iter().map(|s| s.id.as_str()).collect();
+            if let Some(gate) = &next.when {
+                if !gate.referenced_steps().is_subset(&ids) {
+                    return Err(invalid("next_pass.when", "unknown step"));
+                }
+            }
+            if let Some(stop) = &next.stop_unchanged {
+                if stop.passes == 0
+                    || !ids.contains(stop.step.as_str())
+                    || (!stop.output.is_empty() && !stop.output.starts_with('/'))
+                {
+                    return Err(invalid(
+                        "next_pass.stop_unchanged",
+                        "requires a known step, JSON pointer, and passes >= 1",
+                    ));
+                }
+            }
+            for (name, value) in &next.inputs {
+                if !self.inputs.contains_key(name) {
+                    return Err(invalid(
+                        "next_pass.inputs",
+                        format!("undeclared input `{name}`"),
+                    ));
+                }
+                for reference in template::references(&value.to_string())
+                    .map_err(|e| invalid("next_pass.inputs", e))?
+                {
+                    self.check_reference(
+                        &reference,
+                        &ids.iter().map(|s| s.to_string()).collect(),
+                        "next_pass.inputs",
+                    )?;
+                }
+            }
         }
         for name in self.inputs.keys() {
             if !template::valid_name(name) {
@@ -560,7 +624,7 @@ impl WorkflowDefinition {
         field: &str,
     ) -> Result<()> {
         match reference {
-            Reference::Input(name) if !self.inputs.contains_key(name) => Err(invalid(
+            Reference::Input(name) if !self.inputs.contains_key(name) && !(self.next_pass.is_some() && matches!(name.as_str(), "iteration" | "previous")) => Err(invalid(
                 field,
                 format!("template reads undeclared input `{name}`"),
             )),
@@ -675,6 +739,10 @@ impl WorkflowDefinition {
                 (None, None) => Value::Null,
             };
             resolved.insert(name.clone(), value);
+        }
+        if self.next_pass.is_some() {
+            resolved.insert("iteration".into(), Value::from(1));
+            resolved.insert("previous".into(), Value::Null);
         }
         Ok(resolved)
     }
@@ -831,7 +899,7 @@ mod tests {
             (|v| v["steps"][0]["timeout"] = json!("90"), "unit required"),
             (
                 |v| v["iterate"] = json!({"until": {"step": "evaluate", "output": "/verdict", "equals": "accepted"}, "max_iterations": 3}),
-                "`workflow run <this definition>`",
+                "unknown field `iterate`",
             ),
             (
                 |v| v["notify"] = json!({"on": ["failed"]}),
@@ -881,13 +949,6 @@ mod tests {
             (
                 |v| {
                     v["steps"][1]["foreach"] = json!(["a"]);
-                    v["steps"][1]["join"] = json!({"min_succeeded": 0});
-                },
-                "positive integer",
-            ),
-            (
-                |v| {
-                    v["steps"][1]["foreach"] = json!(["a"]);
                     v["steps"][1]["max_parallel"] = json!(0);
                 },
                 "at least 1",
@@ -920,12 +981,17 @@ mod tests {
         let mut value = base();
         value["steps"][1]["foreach"] = json!("{{steps.evaluate.output/children}}");
         value["steps"][1]["max_parallel"] = json!(2);
-        value["steps"][1]["join"] = json!({"min_succeeded": 2});
         value["steps"][1]["cook"]["prompt"] = json!("fix {{item.issue_url}} on {{item}}");
-        let parsed = definition(value.clone()).unwrap();
-        assert_eq!(parsed.steps[1].join, Some(Join::MinSucceeded(2)));
-        let serialized = serde_json::to_value(&parsed).unwrap();
-        assert_eq!(serialized["steps"][1]["join"], json!({"min_succeeded": 2}));
+        for min in [0, 2] {
+            value["steps"][1]["join"] = json!({"min_succeeded": min});
+            let parsed = definition(value.clone()).unwrap();
+            assert_eq!(parsed.steps[1].join, Some(Join::MinSucceeded(min)));
+            let serialized = serde_json::to_value(&parsed).unwrap();
+            assert_eq!(
+                serialized["steps"][1]["join"],
+                json!({"min_succeeded": min})
+            );
+        }
         for join in ["all", "any"] {
             value["steps"][1]["join"] = json!(join);
             assert_eq!(

@@ -14,7 +14,7 @@ use semver::Version;
 use serde::Deserialize;
 
 use super::constants::{
-    GITHUB_RELEASES_LIST_API, RELEASE_ASSET_DOWNLOAD_BASE, RELEASE_CATALOG_TIMEOUT, VERSION,
+    GITHUB_RELEASES_LIST_API, RELEASE_ASSET_DOWNLOAD_BASE, RELEASE_CATALOG_TIMEOUT,
 };
 
 /// Release artifacts are named `homeboy-<target triple>.tar.xz`, and the
@@ -327,29 +327,46 @@ pub(crate) fn fetch_release_catalog() -> Result<Vec<ReleaseEntry>> {
     let url = GITHUB_RELEASES_LIST_API;
     #[cfg(test)]
     let url = test_release_url(url);
-    let client = reqwest::blocking::Client::builder()
-        .user_agent(format!("homeboy/{}", VERSION))
-        .timeout(RELEASE_CATALOG_TIMEOUT)
-        .build()
-        .map_err(|e| Error::internal_io(e.to_string(), Some("create HTTP client".to_string())))?;
-
-    client
-        .get(url)
-        .send()
-        .and_then(reqwest::blocking::Response::error_for_status)
-        .map_err(|e| {
-            let mut error =
-                Error::internal_io(e.to_string(), Some("list GitHub releases".to_string()));
-            error.message = format!("Failed to list GitHub releases: {e}");
-            error
-        })?
-        .json::<Vec<ReleaseEntry>>()
-        .map_err(|e| {
+    let mut url = url.to_string();
+    let mut releases = Vec::new();
+    // Bound requests even if GitHub returns a cyclic or unexpectedly large catalog.
+    for _ in 0..5 {
+        let response = super::github_api::fetch(&url, RELEASE_CATALOG_TIMEOUT)?;
+        let next = response
+            .headers()
+            .get_all(reqwest::header::LINK)
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .find_map(next_page_url);
+        let page = response.json::<Vec<ReleaseEntry>>().map_err(|e| {
             Error::internal_json(
                 e.to_string(),
                 Some("parse GitHub release list response".to_string()),
             )
-        })
+        })?;
+        releases.extend(page);
+        if select_installable(&releases, running_target_triple())
+            .installable
+            .is_some()
+        {
+            break;
+        }
+        let Some(next) = next else {
+            break;
+        };
+        url = next;
+    }
+    Ok(releases)
+}
+
+fn next_page_url(link: &str) -> Option<String> {
+    link.split(',').find_map(|entry| {
+        let mut parts = entry.trim().split(';');
+        let url = parts.next()?.trim().strip_prefix('<')?.strip_suffix('>')?;
+        parts
+            .any(|part| part.trim() == "rel=\"next\"")
+            .then(|| url.to_string())
+    })
 }
 
 #[cfg(test)]
@@ -358,6 +375,16 @@ pub(super) mod tests {
 
     /// A thread-local URL seam keeps concurrent upgrade tests off the network.
     pub(crate) fn with_catalog_server(status: &str, body: &str, test: impl FnOnce(&str)) -> usize {
+        with_catalog_responder(
+            |_| (status.to_string(), String::new(), body.to_string()),
+            test,
+        )
+    }
+
+    fn with_catalog_responder(
+        respond: impl Fn(&str) -> (String, String, String) + Send + Sync,
+        test: impl FnOnce(&str),
+    ) -> usize {
         use std::io::{Read, Write};
         use std::net::TcpListener;
         use std::sync::{
@@ -368,27 +395,29 @@ pub(super) mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let url = format!(
-            "http://{}/releases?per_page=10",
+            "http://{}/releases?per_page=30",
             listener.local_addr().unwrap()
-        );
-        let response = format!(
-            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()
         );
         let stopped = Arc::new(AtomicBool::new(false));
         let count = Arc::new(AtomicUsize::new(0));
-        let server = {
-            let stopped = stopped.clone();
-            let count = count.clone();
-            std::thread::spawn(move || {
-                while !stopped.load(Ordering::SeqCst) {
+        std::thread::scope(|scope| {
+            let server_stopped = stopped.clone();
+            let server_count = count.clone();
+            let server = scope.spawn(move || {
+                while !server_stopped.load(Ordering::SeqCst) {
                     match listener.accept() {
                         Ok((mut stream, _)) => {
                             stream
                                 .set_read_timeout(Some(std::time::Duration::from_secs(2)))
                                 .unwrap();
                             let mut request = [0; 4096];
-                            let _ = stream.read(&mut request);
-                            count.fetch_add(1, Ordering::SeqCst);
+                            let length = stream.read(&mut request).unwrap();
+                            let request = String::from_utf8_lossy(&request[..length]);
+                            let (status, headers, body) = respond(&request);
+                            let response = format!(
+                                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()
+                            );
+                            server_count.fetch_add(1, Ordering::SeqCst);
                             stream.write_all(response.as_bytes()).unwrap();
                         }
                         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
@@ -397,17 +426,87 @@ pub(super) mod tests {
                         Err(error) => panic!("catalog fixture: {error}"),
                     }
                 }
-            })
-        };
-        TEST_RELEASE_URL.with_borrow_mut(|slot| *slot = Some(url.clone()));
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| test(&url)));
-        TEST_RELEASE_URL.with_borrow_mut(|slot| *slot = None);
-        stopped.store(true, Ordering::SeqCst);
-        server.join().unwrap();
-        if let Err(panic) = result {
-            std::panic::resume_unwind(panic);
-        }
+            });
+            TEST_RELEASE_URL.with_borrow_mut(|slot| *slot = Some(url.clone()));
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| test(&url)));
+            TEST_RELEASE_URL.with_borrow_mut(|slot| *slot = None);
+            stopped.store(true, Ordering::SeqCst);
+            server.join().unwrap();
+            if let Err(panic) = result {
+                std::panic::resume_unwind(panic);
+            }
+        });
         count.load(Ordering::SeqCst)
+    }
+
+    #[test]
+    fn catalog_pages_past_drafts_to_an_installable_stable_release() {
+        let target = running_target_triple().expect("test host has a published target");
+        let count = with_catalog_responder(
+            |request| {
+                assert!(request.contains("per_page=30"));
+                let host = request
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("host").then(|| value.trim())
+                    })
+                    .unwrap();
+                let headers = format!(
+                    "Link: <http://{host}/releases?per_page=30&page=3>; rel=\"last\", <http://{host}/releases?per_page=30&page=2>; rel=\"next\"\r\n"
+                );
+                let entry = serde_json::json!({
+                    "tag_name": "v0.447.9",
+                    "draft": !request.contains("page=2"),
+                    "assets": [
+                        {"name": asset_archive_name(target)},
+                        {"name": asset_checksum_name(target)}
+                    ]
+                });
+                // Even a draft with all required assets must not stop pagination.
+                (
+                    "200 OK".into(),
+                    headers,
+                    serde_json::json!([entry]).to_string(),
+                )
+            },
+            |_| {
+                let releases = fetch_release_catalog().unwrap();
+                let selection = select_installable(&releases, Some(target));
+                assert_eq!(selection.installable.unwrap().tag, "v0.447.9");
+            },
+        );
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn catalog_stops_after_five_pages_even_with_a_next_link() {
+        let count = with_catalog_responder(
+            |request| {
+                let host = request
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("host").then(|| value.trim())
+                    })
+                    .unwrap();
+                (
+                    "200 OK".into(),
+                    format!("Link: <http://{host}/releases?per_page=30>; rel=\"next\"\r\n"),
+                    "[]".into(),
+                )
+            },
+            |_| assert!(fetch_release_catalog().unwrap().is_empty()),
+        );
+        assert_eq!(count, 5);
+    }
+
+    #[test]
+    fn catalog_stops_when_no_next_page_exists() {
+        let count = with_catalog_server("200 OK", "[]", |_| {
+            assert!(fetch_release_catalog().unwrap().is_empty());
+        });
+        assert_eq!(count, 1);
     }
 
     #[test]

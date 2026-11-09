@@ -11,6 +11,7 @@ pub use cook_ci::{cook_ci_status, repoll_cook_ci};
 mod cook_activity;
 mod cook_adoption;
 mod cook_baseline;
+pub(crate) use cook_baseline::compare_gate_failures_to_verified_base;
 mod cook_budget;
 mod cook_delivery;
 /// The named readers of the artifacts the `cook_delivery` record holds.
@@ -87,6 +88,53 @@ pub fn scheduling_daemon_evidence(
         admits_work: status.admits_work(),
         summary: status.render_summary(),
     })
+}
+
+/// Start the local controller daemon that schedules queued work, as the
+/// submitter of daemon-scheduled work must under the on-demand model
+/// (#17506). `ensure_running` defers to a service manager and keeps routing to
+/// a busy older build. Returns the admission blocker only when the daemon
+/// cannot be started, naming the start error. Status readers never call this.
+pub fn ensure_scheduling_daemon() -> Option<serde_json::Value> {
+    let error = start_scheduling_daemon().err()?;
+    Some(serde_json::json!({
+        "daemon": scheduling_daemon_evidence(),
+        "error": error.message_with_cause(),
+        "next_action": "homeboy daemon recover",
+    }))
+}
+
+fn start_scheduling_daemon() -> homeboy_core::Result<()> {
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some(start) = SCHEDULING_DAEMON_START.with(std::cell::Cell::get) {
+        return start();
+    }
+    homeboy_core::daemon::ensure_running(homeboy_core::daemon::DEFAULT_ADDR).map(drop)
+}
+
+// This crate's own unit tests never start a daemon from their test binary.
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static SCHEDULING_DAEMON_START: std::cell::Cell<Option<fn() -> homeboy_core::Result<()>>> =
+        const { std::cell::Cell::new(if cfg!(test) { Some(scheduling_daemon_running) } else { None }) };
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn scheduling_daemon_running() -> homeboy_core::Result<()> {
+    Ok(())
+}
+
+/// Run `body` with `start` standing in for starting the scheduling daemon on
+/// this thread, so in-process tests never spawn their own binary as a daemon.
+#[cfg(any(test, feature = "test-support"))]
+pub fn with_scheduling_daemon_start<R>(
+    start: fn() -> homeboy_core::Result<()>,
+    body: impl FnOnce() -> R,
+) -> R {
+    let previous = SCHEDULING_DAEMON_START.with(|slot| slot.replace(Some(start)));
+    let result = body();
+    SCHEDULING_DAEMON_START.with(|slot| slot.set(previous));
+    result
 }
 #[cfg(test)]
 pub(crate) use cook_step::finalize_detached_cook_attempt;

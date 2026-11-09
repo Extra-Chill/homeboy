@@ -43,6 +43,11 @@ pub struct ActiveScopeArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum AgentTaskCommand {
+    /// Retrieve the canonical candidate into a clean git worktree.
+    Candidate {
+        #[command(subcommand)]
+        command: crate::commands::agent_task::candidate::CandidateCommand,
+    },
     #[command(hide = true)]
     ExecutionStep {
         #[arg(long)]
@@ -111,6 +116,7 @@ pub enum AgentTaskCommand {
     /// `--task <task-id>` for multi-task runs.
     ReplayProviderBoundary(ReplayProviderBoundaryArgs),
     /// Mark a queued or stale-running durable run as cancelled.
+    /// The durable run metadata retains cancellation_actor (PID and redacted argv).
     Cancel(CancelArgs),
     /// Exclude one exact queued record while preserving its lifecycle and evidence.
     Quarantine(QuarantineArgs),
