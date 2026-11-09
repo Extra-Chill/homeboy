@@ -637,10 +637,11 @@ fn runner_exec_accepts_a_live_daemon_with_a_different_build_identity() {
         ..authoritative_drained_freshness()
     });
 
-    assert!(!refuses_nonfresh_daemon_execution(
+    assert!(refuses_nonfresh_daemon_execution(
         &RunnerExecOptions::raw_command(vec!["cargo".to_string()]),
         &status,
-    ));
+    )
+    .is_none());
 }
 
 #[test]
@@ -648,7 +649,8 @@ fn runner_exec_keeps_stale_session_projections_fail_closed_without_fresh_daemon_
     assert!(refuses_nonfresh_daemon_execution(
         &RunnerExecOptions::raw_command(vec!["cargo".to_string()]),
         &stale_direct_daemon_status(),
-    ));
+    )
+    .is_some());
 }
 
 #[test]
@@ -661,7 +663,8 @@ fn raw_execution_rejects_version_mismatch_without_a_legacy_stale_warning() {
     assert!(refuses_nonfresh_daemon_execution(
         &RunnerExecOptions::raw_command(vec!["cargo".to_string()]),
         &status,
-    ));
+    )
+    .is_some());
 }
 
 #[test]
@@ -680,7 +683,129 @@ fn raw_execution_rejects_ambiguous_lease_missing_without_a_legacy_stale_warning(
     assert!(refuses_nonfresh_daemon_execution(
         &RunnerExecOptions::raw_command(vec!["cargo".to_string()]),
         &status,
-    ));
+    )
+    .is_some());
+}
+
+/// The non-fresh admission refusal names its failing check, the daemon it
+/// observed, and a matching next action, retryable only for transient causes
+/// (#17666).
+#[test]
+fn nonfresh_daemon_admission_refusal_names_its_failing_check() {
+    use crate::lab::offload::metadata::lab_runner_admission_refusal;
+    let fresh = || {
+        let mut status = stale_direct_daemon_status();
+        status.stale_daemon = None;
+        status.daemon_freshness = Some(homeboy_core::daemon::DaemonFreshnessReport {
+            fresh: true,
+            stale_reason_code: None,
+            ..authoritative_drained_freshness()
+        });
+        status
+    };
+    fn warning(status: &mut RunnerStatusReport) -> &mut RunnerStaleDaemonWarning {
+        status.stale_daemon = stale_direct_daemon_status().stale_daemon;
+        status.stale_daemon.as_mut().expect("stale warning")
+    }
+
+    let mut unverified = fresh();
+    let probe = warning(&mut unverified);
+    probe.verification = crate::RunnerDaemonVerification::ProbeFailed;
+    probe.probe_error = Some("ssh probe timed out".to_string());
+
+    let mut runtime_paths = fresh();
+    warning(&mut runtime_paths)
+        .stale_runtime_paths
+        .push(crate::RunnerStaleRuntimePath {
+            env: "HOMEBOY_EXTENSION_PATH".to_string(),
+            path: "/srv/extensions".to_string(),
+            loaded_fingerprint: "old".to_string(),
+            current_fingerprint: "new".to_string(),
+        });
+
+    let mut drifted = fresh();
+    drifted.session = Some(RunnerSession {
+        homeboy_version: "0.1.0".to_string(),
+        homeboy_build_identity: Some("homeboy 0.1.0+drifted".to_string()),
+        ..direct_daemon_session("lease-stale", "http://127.0.0.1:4545")
+    });
+
+    let mut unobserved = fresh();
+    unobserved.daemon_freshness = None;
+
+    let mut stale_lease = fresh();
+    stale_lease.daemon_freshness = Some(authoritative_drained_freshness());
+
+    let cases = [
+        (
+            unverified,
+            false,
+            "stale_daemon_unverified",
+            "ssh probe timed out",
+            true,
+            "runner doctor",
+        ),
+        (
+            runtime_paths,
+            false,
+            "stale_runtime_paths",
+            "HOMEBOY_EXTENSION_PATH=/srv/extensions",
+            false,
+            "refresh-homeboy",
+        ),
+        (
+            drifted,
+            true,
+            "version_drift",
+            "daemon `homeboy 0.1.0+drifted` differs from controller",
+            false,
+            "refresh-homeboy",
+        ),
+        (
+            unobserved,
+            false,
+            "lease_not_fresh",
+            "daemon freshness not observed yet",
+            true,
+            "runner connect",
+        ),
+        (
+            stale_lease,
+            false,
+            "lease_not_fresh",
+            "daemon reports itself stale (version_mismatch)",
+            false,
+            "refresh-homeboy",
+        ),
+    ];
+    for (status, require_exact, check, evidence, retryable, next_action) in cases {
+        let refusal = lab_runner_admission_refusal(&status, require_exact)
+            .unwrap_or_else(|| panic!("{check} must refuse admission"));
+        let error = nonfresh_daemon_admission_error("homeboy-lab", &status, &refusal);
+        let named = &error.details["admission_refusal"];
+
+        assert_eq!(named["check"], check);
+        assert!(error.message.contains(check), "{}", error.message);
+        assert!(
+            error.message.contains(evidence),
+            "{check}: {}",
+            error.message
+        );
+        assert_eq!(error.retryable, Some(retryable), "{check}");
+        assert!(
+            named["next_action"]
+                .as_str()
+                .is_some_and(|action| action.contains(next_action)),
+            "{check}: {named}"
+        );
+        if status.daemon_freshness.is_some() {
+            assert_eq!(named["daemon_pid"], 4242, "{check}");
+            assert_eq!(named["daemon_lease_id"], "lease-stale", "{check}");
+            assert_eq!(named["daemon_version"], "0.288.8", "{check}");
+            assert!(error.message.contains("pid 4242"), "{}", error.message);
+        }
+    }
+    assert_eq!(lab_runner_admission_refusal(&fresh(), true), None);
 }
 
 #[test]
@@ -694,15 +819,15 @@ fn read_only_artifact_retrieval_is_not_blocked_by_a_stale_admission_daemon() {
         ..RunnerExecOptions::raw_command(vec!["node".to_string()])
     };
 
-    assert!(!refuses_nonfresh_daemon_execution(
-        &read_only,
-        &stale_direct_daemon_status(),
-    ));
+    assert!(
+        refuses_nonfresh_daemon_execution(&read_only, &stale_direct_daemon_status(),).is_none()
+    );
     // A normal (mutating) exec against the same stale daemon still fails closed.
     assert!(refuses_nonfresh_daemon_execution(
         &RunnerExecOptions::raw_command(vec!["node".to_string()]),
         &stale_direct_daemon_status(),
-    ));
+    )
+    .is_some());
 }
 
 #[test]

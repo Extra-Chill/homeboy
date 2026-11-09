@@ -950,13 +950,14 @@ fn ensure_current_controller_daemon() -> Result<homeboy_core::daemon::DaemonStar
             if state.build_identity.display == expected {
                 return Ok(daemon);
             }
-            // Durable terminal evidence proves an active job's workload is
-            // finished, so it is reconciled during the lease-bound stop below
-            // and does not block this admission.
-            if status.active_job_recovery_evidence.iter().any(|evidence| {
-                evidence.disposition
-                    != homeboy_core::api_jobs::DaemonActiveJobRecoveryDisposition::TerminalEvidence
-            }) {
+            // Restart-safe jobs survive the lease-bound stop below (the
+            // successor's startup recovery reconciles or resumes them), so
+            // they do not block this admission.
+            if status
+                .active_job_recovery_evidence
+                .iter()
+                .any(|evidence| evidence.disposition.blocks_daemon_replacement())
+            {
                 return Err(Error::validation_invalid_argument(
                     "controller_daemon",
                     "controller daemon build does not match the submitting Homeboy binary while durable jobs are active",

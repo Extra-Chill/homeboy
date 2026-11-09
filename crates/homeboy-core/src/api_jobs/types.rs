@@ -365,6 +365,20 @@ pub enum DaemonActiveJobRecoveryDisposition {
     BlockingAmbiguous,
 }
 
+impl DaemonActiveJobRecoveryDisposition {
+    /// Whether a job with this disposition protects its daemon from being
+    /// replaced. Durable terminal evidence proves no workload remains; a job
+    /// awaiting attestation is left untouched by a replacement exactly as by
+    /// this daemon; and a driver-recovery job has no external execution, so
+    /// the successor's startup recovery resumes it from durable state.
+    pub fn blocks_daemon_replacement(self) -> bool {
+        !matches!(
+            self,
+            Self::TerminalEvidence | Self::NeedsAttestation | Self::DriverRecovery
+        )
+    }
+}
+
 impl DaemonLeaseJobDiagnostics {
     pub fn matching_count(&self) -> usize {
         self.matching_job_ids.len()

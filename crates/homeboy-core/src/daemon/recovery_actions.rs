@@ -428,21 +428,18 @@ fn plan_recovery_steps(status: &DaemonStatus) -> DaemonRecoveryPlan {
 /// This policy is intentionally independent of the command requesting daemon
 /// admission. It trusts only the authoritative status report and accepts only
 /// the bounded in-place replacement plan: an explicitly restartable lease whose active
-/// jobs all carry durable terminal evidence (so no workload remains), no
+/// jobs are all restart-safe (no workload a replacement would lose), no
 /// attestations, and no other mutation mixed into the plan.
 pub fn authorizes_automatic_idle_restart(status: &DaemonStatus) -> bool {
     let plan = plan_recovery(status);
     !status.fresh
         && status.freshness.active_jobs == 0
-        // Dead-generation jobs awaiting attestation are not this daemon's
-        // work; its replacement leaves them untouched, as it did.
-        && status.active_job_recovery_evidence.iter().all(|evidence| {
-            matches!(
-                evidence.disposition,
-                crate::api_jobs::DaemonActiveJobRecoveryDisposition::TerminalEvidence
-                    | crate::api_jobs::DaemonActiveJobRecoveryDisposition::NeedsAttestation
-            )
-        })
+        // Restart-safe jobs survive the replacement; see
+        // `blocks_daemon_replacement`.
+        && status
+            .active_job_recovery_evidence
+            .iter()
+            .all(|evidence| !evidence.disposition.blocks_daemon_replacement())
         && status.freshness.restartable
         && plan.executable
         && plan.required_confirmations.is_empty()
