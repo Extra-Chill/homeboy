@@ -32,6 +32,7 @@ fn try_pin_applied_candidate(cook_id: &str, promotion: &mut Value) -> Result<()>
     ) else {
         return Ok(());
     };
+    super::destination::check(Path::new(path), Some(cook_id))?;
     let reference = format!("refs/homeboy/candidates/{cook_id}");
     let git = |args: &[&str]| -> Result<String> {
         let output = std::process::Command::new("git")

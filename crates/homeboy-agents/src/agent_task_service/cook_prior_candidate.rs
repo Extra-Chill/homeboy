@@ -219,6 +219,7 @@ pub(crate) fn preserve_prior_attempt_candidate(
     let Some(owner) = prior_failed_attempt_owner(lifecycle_store, options)? else {
         return Ok(None);
     };
+    crate::agent_task_promotion::destination::check(&owner.path, Some(&options.identity.cook_id))?;
     let paths = dirty_paths(&owner.path)?;
     if paths.is_empty() {
         return Ok(None);

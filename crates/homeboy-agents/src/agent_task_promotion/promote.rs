@@ -866,6 +866,7 @@ fn promote_candidate(
             None,
         )
     })?;
+    super::destination::check_run(&path, options.source_run_id.as_deref())?;
     let feedback = outcome.metadata.get("gate_feedback_baseline");
     super::candidate_bundle::validate_destination(&path, commit, feedback)?;
     let base_tree = git_output(
@@ -1517,6 +1518,7 @@ fn promote_committed_changes(
             None,
         )
     })?;
+    super::destination::check_run(&path, options.source_run_id.as_deref())?;
     validate_candidate_commit(
         &path,
         outcome.candidate.as_ref().expect("adopted candidate"),

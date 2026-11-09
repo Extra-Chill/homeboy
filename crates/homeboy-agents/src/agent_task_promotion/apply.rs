@@ -69,6 +69,7 @@ pub fn apply_materialized_workspace_patch(workspace: &Path, request_json: &str) 
         ));
     }
     validate_provider_workspace_path(workspace)?;
+    super::destination::check(workspace, None)?;
     // The provider can run in a different materialized workspace from the
     // producer, so prefer the patch carried through the stdin request.
     let inline_patch = request

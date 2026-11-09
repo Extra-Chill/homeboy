@@ -174,6 +174,7 @@ pub(crate) fn validate_destination(
     Ok(())
 }
 pub fn materialize_candidate_tree(repo: &Path, candidate: &AgentTaskCandidate) -> Result<()> {
+    super::destination::check(repo, None)?;
     materialize_candidate_tree_with_feedback(repo, candidate, None)
 }
 
