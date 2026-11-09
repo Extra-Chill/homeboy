@@ -634,6 +634,11 @@ pub(crate) fn exec_lab_context(
                         .build(),
                 );
                 if let Some(job_id) = in_flight_job_id.as_deref() {
+                    crate::observation_health::record_observation_failure(
+                        runner_id,
+                        crate::observation_health::CONTROLLER_DISCONNECTED,
+                        &format!("lost contact with in-flight runner job `{job_id}`: {reason}"),
+                    );
                     if let Some(workspace) = context.materialized_workspace.as_mut() {
                         workspace.retain_for_reconciliation(
                             job_id,
@@ -3709,6 +3714,7 @@ mod tests {
             active_job_source: None,
             active_job_error: None,
             active_job_recovery_evidence: None,
+            recent_observation_failure: None,
             session_path: "/tmp/homeboy-lab.json".to_string(),
         }
     }

@@ -51,7 +51,6 @@ use homeboy_control_plane_contract::{
 use homeboy_core::control_plane::{register_control_plane_provider, ControlPlaneProvider};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::path::Path;
 use std::time::{Duration, Instant};
 
 use crate::agent_task_gate::AgentTaskGateStatus;
@@ -4816,47 +4815,13 @@ fn live_provider_liveness(
                 .saturating_add(999)
                 / 1_000
         });
-    let mut observations = Vec::new();
-    for (source, fields) in [
-        ("structured_progress", ["structured_progress"].as_slice()),
-        ("runtime_output", ["stdout", "stderr"].as_slice()),
-    ] {
-        for field in fields {
-            if let Some(observed_at) = execution
-                .pointer(&format!("/runtime_evidence/{field}"))
-                .and_then(Value::as_str)
-                .and_then(observed_file_timestamp)
-            {
-                observations.push((source, observed_at));
-            }
-        }
-    }
-    if let Some(observed_at) = execution
-        .get("workspace_activity_observed_at")
-        .and_then(Value::as_str)
-        .and_then(parse_timestamp)
-    {
-        observations.push(("workspace_activity", observed_at));
-    }
-    if let Some(observed_at) = execution
-        .get("heartbeat_at")
-        .and_then(Value::as_str)
-        .and_then(parse_timestamp)
-    {
-        let source = execution["heartbeat_source"]
-            .as_str()
-            .unwrap_or("runtime_output");
-        observations.push((source, observed_at));
-    }
     let started_at = execution
         .get("started_at")
         .and_then(Value::as_str)
         .and_then(parse_timestamp);
-    let latest = observations
-        .into_iter()
-        .max_by_key(|(_, observed_at)| *observed_at);
+    let latest = record.latest_job_progress();
     let (source, observed_at) = match latest {
-        Some((source, observed_at)) => (Some(source.to_string()), Some(observed_at)),
+        Some((source, observed_at)) => (Some(source), Some(observed_at)),
         None => (None, started_at),
     };
     let age_seconds = observed_at
@@ -4874,13 +4839,6 @@ fn live_provider_liveness(
         age_seconds,
         window_seconds,
     })
-}
-
-fn observed_file_timestamp(uri: &str) -> Option<DateTime<Utc>> {
-    let path = uri.strip_prefix("file://")?;
-    let metadata = std::fs::metadata(Path::new(path)).ok()?;
-    let modified = metadata.modified().ok()?;
-    Some(DateTime::<Utc>::from(modified))
 }
 
 fn parse_timestamp(timestamp: &str) -> Option<DateTime<Utc>> {
@@ -6353,12 +6311,13 @@ mod tests {
     use super::{
         bounded_review_evidence, decode_event_cursor, decode_mission_cursor, encode_event_cursor,
         encode_mission_cursor, event_page, live_provider_liveness, normalize_event_references,
-        observed_file_timestamp, phase, project_record, project_snapshot, references_for_record,
+        phase, project_record, project_snapshot, references_for_record,
         register_reference_in_store, review_failure_reasons, run_state, validate_event_scope,
         validate_external_event_append_request, LifecycleStoreLookup, OrchestrationService,
         RegisteredProvider, RunListLookup, RunLookup, RunPagePosition, RunSnapshot,
         RunSnapshotPage, EVENT_STREAM_DURABLE_PROGRESS, REVIEW_EVIDENCE_BOUND,
     };
+    use crate::agent_task_lifecycle::observed_file_timestamp;
     use crate::agent_task_lifecycle::{
         AgentTaskArtifactRef, AgentTaskLifecycleStore, AgentTaskRunRecord, AgentTaskRunState,
         AgentTaskRunTask,

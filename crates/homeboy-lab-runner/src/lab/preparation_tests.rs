@@ -44,6 +44,7 @@ fn lab_runner_preparation_falls_back_for_unreachable_default_runner() {
                 active_job_source: None,
                 active_job_error: None,
                 active_job_recovery_evidence: None,
+                recent_observation_failure: None,
                 session_path: "/tmp/lab.json".to_string(),
             })
         },
@@ -317,6 +318,7 @@ fn in_process_connect_authority_keeps_its_owned_tunnel_alive_through_admission_a
         active_job_source: None,
         active_job_error: None,
         active_job_recovery_evidence: None,
+        recent_observation_failure: None,
         session_path: "/tmp/lab.json".to_string(),
     };
     let connect_tunnel = Arc::clone(&tunnel);
@@ -654,6 +656,7 @@ fn lab_runner_preparation_uses_already_connected_runner() {
                 active_job_source: None,
                 active_job_error: None,
                 active_job_recovery_evidence: None,
+                recent_observation_failure: None,
                 session_path: "/tmp/lab.json".to_string(),
             })
         },
@@ -695,6 +698,7 @@ fn lab_runner_preparation_falls_back_for_stale_default_daemon_version_without_re
                 active_job_source: None,
                 active_job_error: None,
                 active_job_recovery_evidence: None,
+                recent_observation_failure: None,
                 session_path: "/tmp/lab.json".to_string(),
             })
         },
@@ -739,6 +743,7 @@ fn lab_runner_preparation_falls_back_for_stale_default_runtime_paths() {
                 active_job_source: None,
                 active_job_error: None,
                 active_job_recovery_evidence: None,
+                recent_observation_failure: None,
                 session_path: "/tmp/lab.json".to_string(),
             })
         },
@@ -785,6 +790,7 @@ fn lab_runner_preparation_errors_for_explicit_stale_daemon_version() {
                 active_job_source: None,
                 active_job_error: None,
                 active_job_recovery_evidence: None,
+                recent_observation_failure: None,
                 session_path: "/tmp/lab.json".to_string(),
             })
         },
@@ -858,6 +864,7 @@ fn lab_preparation_does_not_offer_an_unavailable_reconciliation_plan() {
                 active_job_source: None,
                 active_job_error: None,
                 active_job_recovery_evidence: None,
+                recent_observation_failure: None,
                 session_path: "/tmp/lab.json".to_string(),
             })
         },
@@ -919,6 +926,7 @@ fn concurrent_stale_handoffs_preserve_the_shared_tunnel() {
                             active_job_source: None,
                             active_job_error: None,
                             active_job_recovery_evidence: None,
+                            recent_observation_failure: None,
                             session_path: "/tmp/lab.json".to_string(),
                         })
                     },
@@ -1034,6 +1042,7 @@ fn compatible_reconnect_wait_reuses_the_owner_session_without_a_second_tunnel() 
                         active_job_source: None,
                         active_job_error: None,
                         active_job_recovery_evidence: None,
+                        recent_observation_failure: None,
                         session_path: "/tmp/lab.json".to_string(),
                     })
                 },
@@ -1113,6 +1122,7 @@ fn lab_runner_preparation_falls_back_for_stale_default_direct_session_without_da
                 active_job_source: None,
                 active_job_error: None,
                 active_job_recovery_evidence: None,
+                recent_observation_failure: None,
                 session_path: "/tmp/lab.json".to_string(),
             })
         },
@@ -1156,6 +1166,7 @@ fn lab_runner_preparation_errors_for_explicit_direct_session_without_daemon_url(
                 active_job_source: None,
                 active_job_error: None,
                 active_job_recovery_evidence: None,
+                recent_observation_failure: None,
                 session_path: "/tmp/lab.json".to_string(),
             })
         },
@@ -1204,6 +1215,7 @@ fn lab_runner_preparation_falls_back_when_connected_status_has_no_session() {
                 active_job_source: None,
                 active_job_error: None,
                 active_job_recovery_evidence: None,
+                recent_observation_failure: None,
                 session_path: "/tmp/lab.json".to_string(),
             })
         },
@@ -1247,6 +1259,7 @@ fn lab_runner_preparation_connects_disconnected_runner() {
                 active_job_source: None,
                 active_job_error: None,
                 active_job_recovery_evidence: None,
+                recent_observation_failure: None,
                 session_path: "/tmp/lab.json".to_string(),
             })
         },
@@ -1310,6 +1323,7 @@ fn lab_runner_preparation_errors_for_unreachable_explicit_runner() {
                 active_job_source: None,
                 active_job_error: None,
                 active_job_recovery_evidence: None,
+                recent_observation_failure: None,
                 session_path: "/tmp/lab.json".to_string(),
             })
         },
@@ -1415,6 +1429,7 @@ fn connected_direct_status(
         active_job_source: None,
         active_job_error: None,
         active_job_recovery_evidence: None,
+        recent_observation_failure: None,
         session_path: "/tmp/lab.json".to_string(),
     }
 }
@@ -1444,6 +1459,7 @@ fn unreachable_health_status(runner_id: &str, connected: bool) -> RunnerStatusRe
         active_job_source: None,
         active_job_error: None,
         active_job_recovery_evidence: None,
+        recent_observation_failure: None,
         session_path: "/tmp/lab-unreachable-health.json".to_string(),
     }
 }

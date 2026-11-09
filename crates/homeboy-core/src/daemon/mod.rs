@@ -1184,6 +1184,11 @@ pub enum DaemonStaleReasonCode {
     VersionMismatch,
     RuntimePathsDrift,
     TransportUnreachable,
+    /// The controller's bounded observation of a connected daemon did not
+    /// complete (deadline exhausted or request timed out). This says nothing
+    /// about daemon ownership: it is a retryable observation outcome, never a
+    /// terminal ownership blocker.
+    ObservationUnavailable,
 }
 
 /// Whether the daemon lease data is sufficient for an explicit recovery action.
@@ -1280,7 +1285,13 @@ impl DaemonFreshnessReport {
     /// A stale report without typed ownership proof is terminal: callers must
     /// surface its evidence rather than offer or execute any recovery action.
     pub fn has_terminal_recovery_ownership_blocker(&self) -> bool {
-        !self.fresh && !self.has_recovery_ownership_proof()
+        !self.fresh && !self.has_recovery_ownership_proof() && !self.is_observation_unavailable()
+    }
+
+    /// The observation itself did not complete; retry it instead of treating
+    /// the missing answer as ownership evidence.
+    pub fn is_observation_unavailable(&self) -> bool {
+        self.stale_reason_code == Some(DaemonStaleReasonCode::ObservationUnavailable)
     }
 
     /// A stale report may only enter automatic recovery through a validated

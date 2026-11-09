@@ -153,6 +153,8 @@ pub use lab_selection::{
 mod lab_workspace_provenance_provider;
 mod lab_workspaces;
 mod lab_workspaces_deps;
+mod observation_health;
+pub use observation_health::RunnerObservationFailure;
 mod offload_changed_since;
 mod offload_metadata;
 mod origin_refs;
@@ -1915,6 +1917,7 @@ mod tests {
             active_job_source: None,
             active_job_error: None,
             active_job_recovery_evidence: None,
+            recent_observation_failure: None,
             session_path: "test".to_string(),
         };
         let snapshot = RunnerAdmissionSnapshot::from_status(status);
@@ -1957,6 +1960,7 @@ mod tests {
             active_job_source: None,
             active_job_error: None,
             active_job_recovery_evidence: None,
+            recent_observation_failure: None,
             session_path: "test".to_string(),
         };
 
@@ -2010,6 +2014,7 @@ mod tests {
             active_job_source: None,
             active_job_error: None,
             active_job_recovery_evidence: None,
+            recent_observation_failure: None,
             session_path: "test".to_string(),
         };
 
@@ -2112,6 +2117,7 @@ mod tests {
             active_job_source: None,
             active_job_error: None,
             active_job_recovery_evidence: None,
+            recent_observation_failure: None,
             session_path: "fixture".to_string(),
         }
     }

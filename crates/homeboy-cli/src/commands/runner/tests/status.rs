@@ -89,6 +89,7 @@ fn admission_fixture() -> homeboy::runner::runners::RunnerAdmissionSummary {
         daemon_build_identity: None,
         safe_to_rotate: false,
         next_action: None,
+        degraded: None,
     }
 }
 
@@ -549,6 +550,7 @@ fn direct_runner_status_commands_include_lifecycle_operations() {
         active_job_source: Some(RunnerActiveJobSource::DirectDaemon),
         active_job_error: None,
         active_job_recovery_evidence: None,
+        recent_observation_failure: None,
         session_path: "/tmp/session.json".to_string(),
     };
 
@@ -624,6 +626,7 @@ fn direct_runner_status_exposes_the_explicit_session_reconcile_command() {
         active_job_source: RunnerActiveJobSource::DirectDaemon.into(),
         active_job_error: None,
         active_job_recovery_evidence: None,
+        recent_observation_failure: None,
         session_path: "test".to_string(),
     };
 
@@ -696,6 +699,7 @@ fn disconnected_split_view_status_exposes_bounded_reconciliation_command() {
             message: "freshness has one job while /jobs has none".to_string(),
         }),
         active_job_recovery_evidence: None,
+        recent_observation_failure: None,
         session_path: "/tmp/session.json".to_string(),
     };
 
@@ -1020,6 +1024,7 @@ fn runner_status_artifact_diagnostics_surface_controller_runner_checks_and_drift
         active_job_source: Some(RunnerActiveJobSource::DirectDaemon),
         active_job_error: None,
         active_job_recovery_evidence: None,
+        recent_observation_failure: None,
         session_path: "/tmp/session.json".to_string(),
     };
 
@@ -1085,6 +1090,7 @@ fn runner_homeboy_status_distinguishes_daemon_and_job_binary_roles() {
         active_job_source: Some(RunnerActiveJobSource::DirectDaemon),
         active_job_error: None,
         active_job_recovery_evidence: None,
+        recent_observation_failure: None,
         session_path: "/tmp/session.json".to_string(),
     };
 
@@ -1404,6 +1410,7 @@ fn connected_report() -> RunnerStatusReport {
         active_job_source: None,
         active_job_error: None,
         active_job_recovery_evidence: None,
+        recent_observation_failure: None,
         session_path: "test".to_string(),
     }
 }

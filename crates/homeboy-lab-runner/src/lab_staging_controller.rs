@@ -6568,6 +6568,7 @@ mod tests {
             active_job_source: None,
             active_job_error: None,
             active_job_recovery_evidence: None,
+            recent_observation_failure: None,
             session_path: "/tmp/lab-identity.json".to_string(),
         }
     }

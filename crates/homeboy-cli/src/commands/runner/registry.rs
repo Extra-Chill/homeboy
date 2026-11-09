@@ -204,16 +204,25 @@ fn runner_inventory_summary(
         admission_state: if is_local {
             "local".to_string()
         } else if let Some(admission) = admission {
+            // A recent failed job observation keeps an accepting runner
+            // degraded; a current one explains why it is not accepting.
+            let observing_now = status
+                .and_then(|status| status.daemon_freshness.as_ref())
+                .is_some_and(|freshness| freshness.is_observation_unavailable());
             if admission
                 .pressure
                 .as_ref()
                 .is_some_and(|pressure| pressure.admission_reason.is_some())
             {
                 "pressure".to_string()
-            } else if admission.accepting_jobs {
-                "accepting".to_string()
             } else {
-                "blocked".to_string()
+                match admission.degraded.as_deref() {
+                    Some(reason) if admission.accepting_jobs || observing_now => {
+                        format!("degraded: {reason}")
+                    }
+                    _ if admission.accepting_jobs => "accepting".to_string(),
+                    _ => "blocked".to_string(),
+                }
             }
         } else {
             "blocked".to_string()
@@ -755,6 +764,7 @@ mod tests {
                 active_job_source: None,
                 active_job_error: None,
                 active_job_recovery_evidence: None,
+                recent_observation_failure: None,
                 session_path: "test".to_string(),
             }
         }
@@ -923,6 +933,51 @@ mod tests {
             assert_eq!(value["admission_state"], "blocked");
             assert!(value["concurrency"]["active"].is_null());
             assert_eq!(value["drift"], "unverified");
+        }
+
+        /// #17648: a connected runner whose jobs keep losing contact is not
+        /// reported as plainly `accepting`.
+        #[test]
+        fn ssh_projection_reports_job_observation_failures_as_degraded() {
+            let mut configured = configured_runner("lab");
+            configured.kind = RunnerKind::Ssh;
+            let mut status = ssh_status("lab", runner::RunnerActiveJobState::Available);
+            status.daemon_freshness = Some(homeboy::core::daemon::DaemonFreshnessReport {
+                fresh: true,
+                stale_reason_code: None,
+                restartable: false,
+                lease_id: Some("lease-live".to_string()),
+                pid: Some(42),
+                recovery_evidence: None,
+                ownership_evidence: None,
+                daemon_version: None,
+                daemon_build_identity: None,
+                runtime_paths: None,
+                active_jobs: 0,
+                termination_evidence: None,
+                repair_plan: Vec::new(),
+            });
+            let admission = |status: &runner::RunnerStatusReport| {
+                let output = compact_list_output(&[descriptor(&configured)], &[status.clone()]);
+                serde_json::to_value(&output.runner_summaries()[0]).expect("summary serializes")
+                    ["admission_state"]
+                    .clone()
+            };
+            assert_eq!(admission(&status), "accepting");
+
+            status.recent_observation_failure = Some(runner::RunnerObservationFailure {
+                code: "controller_disconnected".to_string(),
+                message: "lost contact with in-flight runner job `job-1`".to_string(),
+                observed_at: chrono::Utc::now().to_rfc3339(),
+            });
+            assert_eq!(admission(&status), "degraded: controller_disconnected");
+
+            status.recent_observation_failure = None;
+            let freshness = status.daemon_freshness.as_mut().expect("freshness");
+            freshness.fresh = false;
+            freshness.stale_reason_code =
+                Some(homeboy::core::daemon::DaemonStaleReasonCode::ObservationUnavailable);
+            assert_eq!(admission(&status), "degraded: observation_unavailable");
         }
 
         #[test]

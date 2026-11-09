@@ -1719,6 +1719,91 @@ mod tests {
         });
     }
 
+    /// Age a daemon job's own heartbeat (its row, body, and events) as a job
+    /// that emitted no job event for two hours would look.
+    fn age_runner_job(job_id: uuid::Uuid) {
+        let aged_ms = (chrono::Utc::now() - chrono::Duration::hours(2)).timestamp_millis();
+        let ledger = rusqlite::Connection::open(test_lifecycle_store().observation_db_path())
+            .expect("open daemon job ledger");
+        ledger
+            .execute(
+                "UPDATE daemon_jobs SET updated_at_ms = ?1,
+                     body = json_set(body, '$.job.updated_at_ms', ?1)
+                 WHERE job_id = ?2",
+                rusqlite::params![aged_ms, job_id.to_string()],
+            )
+            .expect("age job row");
+        ledger
+            .execute(
+                "UPDATE daemon_job_events SET body = json_set(body, '$.timestamp_ms', ?1)
+                 WHERE job_id = ?2",
+                rusqlite::params![aged_ms, job_id.to_string()],
+            )
+            .expect("age job events");
+    }
+
+    /// #17648: a runner job that is still writing output is live from its own
+    /// progress evidence, even when its job events and the run projection have
+    /// aged past the liveness window.
+    #[test]
+    fn runner_job_progress_keeps_a_quiet_job_out_of_heartbeat_stale() {
+        with_isolated_home(|home| {
+            register_orchestration_driver();
+            let jobs = local_job_store();
+            let job = jobs.create("agent-task.run-plan");
+            jobs.start(job.id).expect("runner job is running");
+            age_runner_job(job.id);
+            let run_id = "reconcile-progressing-runner-job";
+            stale_runner_backed_run(run_id, &job.id.to_string());
+
+            let quiet = agent_task_lifecycle::exact_record(run_id).expect("run");
+            let evidence =
+                agent_task_lifecycle::observe_runner_job_in_store(&test_lifecycle_store(), &quiet)
+                    .expect("runner job evidence");
+            assert_eq!(
+                evidence.observation,
+                agent_task_lifecycle::RunnerJobObservation::HeartbeatStale,
+                "a job with no progress evidence is still heartbeat-stale"
+            );
+
+            // The provider keeps writing output on the runner host.
+            let stdout = home.path().join("provider-stdout.log");
+            std::fs::write(&stdout, "still working\n").expect("provider output");
+            agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+                record.metadata["provider_executions"] = serde_json::json!([{
+                    "key": "task:1",
+                    "task_id": "task",
+                    "state": "running",
+                    "started_at": "2020-01-01T00:00:00Z",
+                    "runtime_evidence": { "stdout": format!("file://{}", stdout.display()) },
+                }]);
+            })
+            .expect("record provider execution");
+
+            let progressing = agent_task_lifecycle::exact_record(run_id).expect("run");
+            let evidence = agent_task_lifecycle::observe_runner_job_in_store(
+                &test_lifecycle_store(),
+                &progressing,
+            )
+            .expect("runner job evidence");
+            assert_eq!(
+                evidence.observation,
+                agent_task_lifecycle::RunnerJobObservation::Live
+            );
+
+            let report = reconcile_stale_active_runs(false).expect("fleet reconcile");
+            assert_eq!(report.reconciled, 0, "{report:?}");
+            assert!(report.runs.iter().all(|run| run.run_id != run_id
+                || run.stale_reason.as_deref() != Some("runner_heartbeat_stale")));
+            let retained = agent_task_lifecycle::exact_record(run_id).expect("retained run");
+            assert_eq!(
+                retained.state(),
+                agent_task_lifecycle::AgentTaskRunState::Running
+            );
+            assert!(!retained.is_stale_running(), "{:?}", retained.metadata);
+        });
+    }
+
     #[test]
     fn fleet_reconcile_cancels_a_verifiably_gone_runner_job_with_reconciler_provenance() {
         with_isolated_home(|_| {
