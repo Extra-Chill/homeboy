@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.456.0] - 2026-11-09
+
+### Added
+- removed commands return a structured command.removed error naming the replacement
+- keep the full error chain and failing envelope as a run artifact
+
 ## [0.455.3] - 2026-11-09
 
 ### Fixed
