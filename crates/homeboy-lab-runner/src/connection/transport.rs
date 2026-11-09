@@ -252,17 +252,24 @@ fn open_transport(runner_id: &str, owner: &RunnerSession) -> Result<RunnerSessio
         inspected_freshness: None,
     };
     let session_path = session_path(runner_id)?;
-    let (local_port, tunnel_pid, tunnel_process_start_identity, local_url, daemon) =
-        connect_remote_daemon(connection_daemon::RemoteDaemonConnectRequest {
-            server: &server,
-            homeboy: "",
-            daemon,
-            expected_version: &owner.homeboy_version,
-            expected_identity: owner.homeboy_build_identity.as_deref().unwrap_or(""),
-            runner_id,
-            session_path: &session_path,
-        })
-        .map_err(|report| report_error(runner_id, report.0))?;
+    let connection_daemon::RemoteDaemonConnection {
+        local_port,
+        tunnel_pid,
+        tunnel_process_start_identity,
+        local_url,
+        daemon,
+        ..
+    } = connect_remote_daemon(connection_daemon::RemoteDaemonConnectRequest {
+        server: &server,
+        homeboy: "",
+        daemon,
+        expected_version: &owner.homeboy_version,
+        expected_identity: owner.homeboy_build_identity.as_deref().unwrap_or(""),
+        runner_id,
+        session_path: &session_path,
+        unresponsive_recovery: None,
+    })
+    .map_err(|report| report_error(runner_id, report.0))?;
     Ok(RunnerSession {
         local_port: Some(local_port),
         local_url: Some(local_url),

@@ -491,19 +491,26 @@ fn restart_direct_daemon_in_place(
     };
     terminate_tunnel_if_owned(previous);
     let expected_version = daemon.version.clone().unwrap_or(identity.version.clone());
-    let (local_port, tunnel_pid, tunnel_process_start_identity, local_url, daemon) =
-        match connect_remote_daemon(connection_daemon::RemoteDaemonConnectRequest {
-            server: &server,
-            homeboy,
-            daemon,
-            expected_version: &expected_version,
-            expected_identity: &configured_identity,
-            runner_id,
-            session_path: &session_path,
-        }) {
-            Ok(connection) => connection,
-            Err(report) => return Ok(*report),
-        };
+    let connection_daemon::RemoteDaemonConnection {
+        local_port,
+        tunnel_pid,
+        tunnel_process_start_identity,
+        local_url,
+        daemon,
+        ..
+    } = match connect_remote_daemon(connection_daemon::RemoteDaemonConnectRequest {
+        server: &server,
+        homeboy,
+        daemon,
+        expected_version: &expected_version,
+        expected_identity: &configured_identity,
+        runner_id,
+        session_path: &session_path,
+        unresponsive_recovery: None,
+    }) {
+        Ok(connection) => connection,
+        Err(report) => return Ok(*report),
+    };
     let session = RunnerSession {
         runner_id: runner_id.to_string(),
         mode: RunnerTunnelMode::DirectSsh,
@@ -919,12 +926,28 @@ fn connect_with_live_lease(
         expected_identity: &expected_identity,
         runner_id,
         session_path: &session_path,
+        // An explicit live-lease adoption names the exact daemon to attach, so
+        // it never replaces it.
+        unresponsive_recovery: live_lease_expectation.is_none().then_some(
+            connection_daemon::UnresponsiveDaemonRecovery {
+                client: &client,
+                server_id: &server_id,
+                replacement_operation_id: &replacement_operation_id,
+                daemon_recovery_capabilities,
+            },
+        ),
     });
-    let (local_port, tunnel_pid, tunnel_process_start_identity, local_url, daemon) =
-        match connection {
-            Ok(connection) => connection,
-            Err(report) => return Ok(*report),
-        };
+    let connection_daemon::RemoteDaemonConnection {
+        local_port,
+        tunnel_pid,
+        tunnel_process_start_identity,
+        local_url,
+        daemon,
+        replaced_unresponsive,
+    } = match connection {
+        Ok(connection) => connection,
+        Err(report) => return Ok(*report),
+    };
     // Proxy exposure belongs to explicitly requesting jobs. Connecting a runner
     // must not capture an ambient controller endpoint or create an idle tunnel.
     let proxy_forward = None;
@@ -949,10 +972,13 @@ fn connect_with_live_lease(
     if live_lease_expectation.is_some() {
         replacement_journal::terminalize_ensure_running_replay_for_live_lease_adoption(runner_id)?;
     }
-    let connection_warning = daemon
-        .inspected_freshness
-        .as_ref()
-        .and_then(|report| stale_reattach_warning_for_report(&runner.id, report));
+    let connection_warning = match replaced_unresponsive {
+        Some(replaced) => Some(replaced.report_warning(&daemon)),
+        None => daemon
+            .inspected_freshness
+            .as_ref()
+            .and_then(|report| stale_reattach_warning_for_report(&runner.id, report)),
+    };
     let session = RunnerSession {
         runner_id: runner.id.clone(),
         mode: RunnerTunnelMode::DirectSsh,
