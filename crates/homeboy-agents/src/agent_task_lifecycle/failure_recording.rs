@@ -168,7 +168,7 @@ fn record_interrupted_local_owner_locked(
         {
             for execution in executions {
                 if execution["state"] == json!("running") {
-                    execution["state"] = json!("cancelled");
+                    execution["state"] = json!("failed");
                     execution["finished_at"] = json!(now.clone());
                 }
             }
@@ -183,7 +183,7 @@ fn record_interrupted_local_owner_locked(
                 &record.run_id,
                 task,
                 has_succeeded,
-                has_failed,
+                has_cancelled,
                 consumed,
                 in_flight,
                 &stop_reason,
@@ -294,7 +294,7 @@ fn build_interrupted_owner_outcome(
     run_id: &str,
     task: &AgentTaskRequest,
     has_succeeded: bool,
-    has_failed: bool,
+    has_cancelled: bool,
     consumed: usize,
     in_flight: bool,
     stop_reason: &str,
@@ -304,10 +304,12 @@ fn build_interrupted_owner_outcome(
         task_id: task.task_id.clone(),
         status: if has_succeeded {
             AgentTaskOutcomeStatus::Succeeded
-        } else if has_failed {
-            AgentTaskOutcomeStatus::Failed
-        } else {
+        } else if has_cancelled {
             AgentTaskOutcomeStatus::Cancelled
+        } else {
+            // Losing the observer is an execution failure, not a request to
+            // cancel. Keep recovery legal even when no candidate was harvested.
+            AgentTaskOutcomeStatus::Failed
         },
         summary: Some(stop_reason.to_string()),
         failure_classification: if has_succeeded {
@@ -387,7 +389,7 @@ fn harvest_interrupted_owner_candidate(
         outcome.metadata["candidate_status"] = json!("harvested");
         return;
     }
-    // A cancelled owner stays cancelled: the aggregate status derives from it.
+    // Preserve a durable provider cancellation, not an observer interruption.
     if outcome.status != AgentTaskOutcomeStatus::Cancelled {
         outcome.status = AgentTaskOutcomeStatus::Failed;
     }

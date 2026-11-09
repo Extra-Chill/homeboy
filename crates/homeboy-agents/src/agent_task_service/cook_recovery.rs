@@ -1532,6 +1532,19 @@ mod tests {
     }
 
     #[test]
+    fn observer_failure_can_continue_while_operator_cancel_has_no_recovery_step() {
+        assert_eq!(step("failed", |_| {}), CookRecoveryStep::Continue);
+        assert_eq!(
+            step("candidate_recoverable", |_| {}),
+            CookRecoveryStep::Continue
+        );
+        assert!(matches!(
+            step("cancelled", |_| {}),
+            CookRecoveryStep::None { .. }
+        ));
+    }
+
+    #[test]
     fn recover_publication_failure_never_forks_a_green_applied_candidate() {
         assert_eq!(
             step("durable_failure", |inputs| {

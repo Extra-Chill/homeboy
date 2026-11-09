@@ -4303,7 +4303,7 @@ fn pid_starttime_mismatch_reclaims_a_reused_provider_pid_without_signalling_it()
         .expect("reused PID fixture");
 
         let record = reconcile_status("owner-pid-reused").expect("reconcile PID reuse");
-        assert_eq!(record.state(), AgentTaskRunState::Cancelled);
+        assert_eq!(record.state(), AgentTaskRunState::Failed);
         assert_eq!(
             record.metadata["provider_executions"][0]["owner_state"],
             json!("identity_mismatch")
@@ -4344,11 +4344,13 @@ fn dead_local_provider_owner_terminalizes_running_reservation_once() {
 
         let terminal = reconcile_status("owner-dead").expect("reconciled status");
         let replay = reconcile_status("owner-dead").expect("idempotent status");
-        assert_eq!(terminal.state(), AgentTaskRunState::Cancelled);
-        assert_eq!(replay.state(), AgentTaskRunState::Cancelled);
+        assert_eq!(terminal.state(), AgentTaskRunState::Failed);
+        assert_eq!(replay.state(), AgentTaskRunState::Failed);
+        assert_eq!(replay.metadata["retryable"], json!(true));
+        assert!(replay.metadata.get("cancel_reason").is_none());
         assert_eq!(
             replay.metadata["provider_executions"][0]["state"],
-            json!("cancelled")
+            json!("failed")
         );
         assert_eq!(
             replay.metadata["local_provider_ownership"]["state"],
@@ -4382,6 +4384,60 @@ fn dead_local_provider_owner_terminalizes_running_reservation_once() {
             .evidence_refs
             .iter()
             .any(|reference| { reference.kind == "interrupted-owner-candidate" }));
+    });
+}
+
+#[test]
+fn observer_interruption_is_retryable_but_operator_cancellation_stays_terminal() {
+    with_isolated_home(|_| {
+        let store = test_lifecycle_store();
+        let plan = test_plan();
+        for run_id in ["observer-interrupted", "operator-cancelled"] {
+            submit_plan(&plan, Some(run_id)).expect("submitted");
+            mark_running(run_id).expect("running");
+            reserve_provider_execution_in_store(&store, run_id, &plan.tasks[0], 1)
+                .expect("reserved");
+            rewrite_record_for_test(run_id, |record| {
+                record.ensure_metadata_object().remove("runner_pid");
+                record
+                    .ensure_metadata_object()
+                    .remove("runner_process_start_identity");
+                let execution = record.metadata["provider_executions"][0]
+                    .as_object_mut()
+                    .expect("provider execution");
+                execution.remove("owner_pid");
+                execution.remove("owner_linux_starttime_ticks");
+                execution.remove("owner_identity");
+            })
+            .expect("unverifiable owner");
+        }
+
+        let failed = record_interrupted_local_owner_in_store(&store, "observer-interrupted")
+            .expect("record interrupted observer");
+        assert_eq!(failed.state(), AgentTaskRunState::Failed);
+        assert_eq!(failed.tasks[0].state(), AgentTaskState::Failed);
+        assert_eq!(failed.metadata["retryable"], json!(true));
+        assert!(failed.metadata.get("cancel_reason").is_none());
+        let aggregate = store
+            .read_aggregate("observer-interrupted")
+            .expect("aggregate");
+        assert_eq!(aggregate.outcomes[0].status, AgentTaskOutcomeStatus::Failed);
+        assert_eq!(
+            aggregate.outcomes[0].failure_classification,
+            Some(AgentTaskFailureClassification::ExecutionFailed)
+        );
+        let replay = record_interrupted_local_owner_in_store(&store, "observer-interrupted")
+            .expect("replay interruption");
+        assert_eq!(replay.revision, failed.revision);
+
+        let cancelled = cancel_run_in_store(&store, "operator-cancelled", Some("operator stop"))
+            .expect("operator cancellation");
+        assert_eq!(cancelled.state(), AgentTaskRunState::Cancelled);
+        let observed = record_interrupted_local_owner_in_store(&store, "operator-cancelled")
+            .expect("observe after cancellation");
+        assert_eq!(observed.state(), AgentTaskRunState::Cancelled);
+        assert_eq!(observed.revision, cancelled.revision);
+        assert!(observed.metadata.get("interrupted_owner").is_none());
     });
 }
 
