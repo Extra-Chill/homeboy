@@ -165,6 +165,35 @@ A Cook-batch passes private gates to each child Cook as `--private-verify` flags
 in its workflow definition, which the daemon job store retains like any other
 admitted workflow; the same `--private-gate-reveal` policy applies to each child.
 
+### Repro gates
+
+Green gates show only that a candidate did not break them. Declare a repro to
+prove the candidate fixes the issue: `--repro <command>` or `--repro-file <path>`
+(repeatable, snapshotted like `--verify` / `--verify-file`) names a command that
+fails on the base and passes once the issue is fixed.
+
+```sh
+homeboy agent-task cook --prompt @task.md --to-worktree project@fix-reload \
+  --repro 'cargo test -p project reload_keeps_state' \
+  --verify 'cargo test -p project'
+```
+
+- Before the provider starts, Cook runs each repro against a detached checkout
+  of the pinned base, in the same placement and gate environment as the gates.
+  The result is recorded on the Cook's first run as `cook_repro_base`.
+- If a repro passes on the base, it does not reproduce the issue. The Cook
+  stops before dispatch with the outcome `repro_passes_on_base` and a next
+  action: change the repro to a command that fails on this base.
+- If every repro fails on the base, the Cook proceeds and each repro also runs
+  as a visible gate on the candidate.
+- The PR body's Verification section records `repro: verified` (failed on base
+  and passed on the candidate), `repro: failed_on_candidate`, or `repro: none`.
+
+Without a repro, `--preview` (`resolved.gates.repro_warning`) and the Cook start
+summary warn that the declared gates do not prove the issue, and the review
+evidence records `repro: none`. This is a warning, not a refusal. A repro needs a
+controller-local source checkout.
+
 ### Provider Execution Budgets
 
 Every agent-task plan serializes one `execution_budget` per task: total provider
@@ -613,7 +642,7 @@ steps and admits that workflow on the local daemon:
   least `N`.
 
 Every child needs a deterministic gate from `--verify`, `--verify-file`,
-`--private-verify`, or `--private-verify-file`.
+`--private-verify`, `--private-verify-file`, `--repro`, or `--repro-file`.
 
 Cook and cook-batch share the same provider, model, evidence, attempt and gate
 options. Batch forwards explicitly supplied options unchanged to each child;

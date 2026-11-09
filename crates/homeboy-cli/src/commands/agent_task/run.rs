@@ -505,6 +505,7 @@ pub(super) fn aggregate_value_with_failure_reasons(aggregate: &AgentTaskAggregat
 pub(crate) fn run_cook(mut args: AgentTaskCookArgs) -> CmdResult<Value> {
     snapshot_cook_prompt(&mut args)?;
     args.gates.snapshot_file_inputs()?;
+    args.repro.snapshot_file_inputs()?;
     run_cook_with_executor(
         args,
         Arc::new(ExtensionProviderAgentTaskExecutor::discover()),
@@ -717,6 +718,7 @@ pub(crate) fn preview_cook(
     record_preview_phase(&mut progress, "input_validation");
     let retained_gate_contract = args.gates.has_retained_contract();
     args.gates.snapshot_file_inputs()?;
+    args.repro.snapshot_file_inputs()?;
     // Authorization is a security boundary, not an unrelated task-input
     // validation, so preserve its precedence over backend guidance.
     validate_cook_source_authority(&args, provenance)?;
@@ -1233,6 +1235,10 @@ fn cook_preview_resolved_request(args: &AgentTaskCookArgs, placement: Value) -> 
             // time limit (#16938).
             "timeout_seconds": args.gates.gate_timeout_seconds.max(1),
             "no_progress_timeout_seconds": args.gates.gate_no_progress_timeout_seconds.max(1),
+            // A repro must fail on base and pass on the candidate (#17653).
+            "repro": args.repro.repro,
+            "repro_warning": (!args.repro.is_declared())
+                .then_some(homeboy::agents::agent_tasks::gate::NO_REPRO_GATE_WARNING),
         },
         "publication": {
             "finalize": !args.no_finalize,
@@ -2668,6 +2674,70 @@ mod preview_tests {
                 preview["resolved"]["placement"]["admission"]["deferred_to"],
                 "execution_placement_admission"
             );
+        });
+    }
+
+    /// #17653: a Cook without a repro warns in its preview that its gates do
+    /// not prove the issue; a declared repro is shown instead of the warning.
+    #[test]
+    fn preview_warns_when_no_repro_gate_is_declared() {
+        crate::test_support::with_isolated_home(|_| {
+            let (repository, workspace) = linked_preview_workspace();
+            let _capacity = declare_preview_fixture_capacity(repository.path());
+            let preview = |extra: &[&str]| {
+                let mut argv = vec![
+                    "homeboy",
+                    "agent-task",
+                    "cook",
+                    "--base",
+                    "main",
+                    "--preview",
+                    "--backend",
+                    "fixture",
+                    "--repo",
+                    "fixture-repository",
+                    "--prompt",
+                    "-",
+                    "--to-worktree",
+                    workspace.to_str().expect("UTF-8 workspace"),
+                    "--no-finalize",
+                    "--verify",
+                    "true",
+                ];
+                argv.extend_from_slice(extra);
+                let cli = Cli::try_parse_from(argv).expect("parse preview");
+                let Commands::AgentTask(agent_task) = cli.command else {
+                    panic!("agent-task command");
+                };
+                let super::super::AgentTaskCommand::Cook(mut args) = agent_task.command else {
+                    panic!("Cook command");
+                };
+                args.prompt_snapshot = Some(super::super::args::CookPromptSnapshot {
+                    content: "Inspect the task workspace.".to_string(),
+                    source: "stdin".to_string(),
+                    sha256: "sha256:fixture".to_string(),
+                    size_bytes: "Inspect the task workspace.".len(),
+                });
+                preview_cook(*args, None).expect("compile preview").0
+            };
+
+            let unproven = preview(&[]);
+            let gates = &unproven["resolved"]["gates"];
+            assert_eq!(gates["repro"], serde_json::json!([]), "{gates}");
+            let warning = gates["repro_warning"].as_str().unwrap_or_default();
+            assert!(
+                warning.contains("do not prove this issue") && warning.contains("repro: none"),
+                "{gates}"
+            );
+
+            let proven = preview(&["--repro", "test -f FIXED"]);
+            let gates = &proven["resolved"]["gates"];
+            assert_eq!(
+                gates["repro"],
+                serde_json::json!(["test -f FIXED"]),
+                "{gates}"
+            );
+            assert!(gates["repro_warning"].is_null(), "{gates}");
         });
     }
 
@@ -7640,7 +7710,7 @@ pub(crate) fn validate_cook_request_with_provenance(
         &dispatch.tasks,
         dispatch.core.tasks_json.as_deref(),
     )?;
-    if !args.gates.has_deterministic_gate() && !args.no_finalize {
+    if !args.gates.has_deterministic_gate() && !args.repro.is_declared() && !args.no_finalize {
         return Err(homeboy::core::Error::validation_invalid_argument(
             "verify",
             "agent-task cook requires at least one deterministic --verify or --private-verify gate before it can commit, push, and open a PR",
@@ -7656,6 +7726,7 @@ pub(crate) fn validate_cook_request_with_provenance(
     // The Cook spine enforces this too; preview and admission apply the same
     // static rule before any destination or provider work (#15672).
     homeboy::agents::agent_task_service::validate_reviewer_visible_gates(&args.gates.verify, None)?;
+    homeboy::agents::agent_task_service::validate_reviewer_visible_gates(&args.repro.repro, None)?;
     // Resolve against the same filtered rotation policy that compilation uses,
     // while Cook is still in its no-side-effect validation phase.
     let configured_rotations =
@@ -7765,6 +7836,7 @@ pub(crate) fn run_cook_with_executor_and_dispatcher_with_progress(
     let retained_gate_contract = args.gates.has_retained_contract();
     snapshot_cook_prompt(&mut args)?;
     args.gates.snapshot_file_inputs()?;
+    args.repro.snapshot_file_inputs()?;
     let repository = prepare_cook_request(&mut args, provenance)?;
     confirm_model_override(&mut args)?;
     if !args.no_progress {
@@ -7849,6 +7921,7 @@ pub(crate) fn preflight_cook_execution_request(
 ) -> homeboy::core::Result<()> {
     snapshot_cook_prompt(&mut *args)?;
     args.gates.snapshot_file_inputs()?;
+    args.repro.snapshot_file_inputs()?;
     validate_cook_request_with_provenance(args, provenance)?;
     confirm_model_override(args)?;
     Ok(())
@@ -8168,6 +8241,12 @@ fn run_preflight_cook_execution(
         eprintln!("{}", cook_rotation_disclosure(&initial_plan));
         eprintln!("{}", cook_provider_timeout_disclosure(&initial_plan));
         eprintln!("{}", cook_review_form_timeout_disclosure(&initial_plan));
+        if !args.repro.is_declared() {
+            eprintln!(
+                "cook: warning: {}",
+                homeboy::agents::agent_tasks::gate::NO_REPRO_GATE_WARNING
+            );
+        }
     }
     if let Some(provenance) = provenance {
         record_cook_argument_provenance(&mut initial_plan, provenance);
@@ -8295,7 +8374,11 @@ fn run_preflight_cook_execution(
                 }),
                 attempt_dispatcher,
             },
-            gates: args.dispatch.cook.values.gates.into(),
+            gates: {
+                let mut gates = args.dispatch.cook.values.gates.into();
+                args.dispatch.cook.values.repro.apply_to(&mut gates);
+                gates
+            },
             retry_policy: homeboy::agents::agent_task_service::CookRetryPolicy {
                 max_attempts: args.dispatch.cook.values.max_attempts,
             },

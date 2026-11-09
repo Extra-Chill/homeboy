@@ -1071,6 +1071,7 @@ pub(super) fn admitted_gate_policy(
     options: &CookRequest,
 ) -> Result<crate::agent_task_gate::VerifyGateOptions> {
     let mut gates = options.gates.clone();
+    gates.include_repro_in_candidate_gates();
     default_gate_lab_runner_from_attempt_dispatch(&mut gates, &durable_attempt_dispatch(options)?);
     Ok(gates)
 }

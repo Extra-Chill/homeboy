@@ -145,7 +145,7 @@ pub mod gate {
         component_lint_base, legacy_gate_argv, preflight_gate_toolchains,
         run_declared_test_with_supervision, run_gate_command_with_supervision,
         AgentTaskGateLiveStatus, AgentTaskGateReport, AgentTaskGateStatus,
-        AgentTaskGateTermination, GateSupervision,
+        AgentTaskGateTermination, GateSupervision, NO_REPRO_GATE_WARNING,
     };
     pub use super::super::agent_task_gate::{
         AgentTaskGateEnvironmentMode, AgentTaskGateEnvironmentPolicy, AgentTaskGateExecutionPolicy,

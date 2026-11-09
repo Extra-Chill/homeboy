@@ -76,10 +76,10 @@ fn cook_batch(mut args: AgentTaskFanoutCookBatchArgs, placement: Placement) -> C
             repositories.into_iter().next().expect("one repository")
         }
     };
-    if !args.cook.gates.has_deterministic_gate() {
+    if !args.cook.gates.has_deterministic_gate() && !args.cook.repro.is_declared() {
         return Err(Error::validation_invalid_argument(
             "verify",
-            "every cook-batch child needs a deterministic gate: pass --verify, --verify-file, --private-verify, or --private-verify-file",
+            "every cook-batch child needs a deterministic gate: pass --verify, --verify-file, --private-verify, --private-verify-file, --repro, or --repro-file",
             None,
             None,
         ));
@@ -90,6 +90,9 @@ fn cook_batch(mut args: AgentTaskFanoutCookBatchArgs, placement: Placement) -> C
     let mut visible = args.cook.gates.clone();
     visible.snapshot_file_inputs()?;
     homeboy::agents::agent_task_service::validate_reviewer_visible_gates(&visible.verify, None)?;
+    let mut repro = args.cook.repro.clone();
+    repro.snapshot_file_inputs()?;
+    homeboy::agents::agent_task_service::validate_reviewer_visible_gates(&repro.repro, None)?;
     if let CookBatchJoin::MinSucceeded(min) = args.join {
         if min as usize > children.len() {
             return Err(Error::validation_invalid_argument(

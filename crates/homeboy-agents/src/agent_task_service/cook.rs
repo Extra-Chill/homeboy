@@ -5227,6 +5227,8 @@ fn run_cook_with_runtime(
     durable_observer: &CookProgressObserver<'_>,
     mode: CookMode,
 ) -> Result<AgentTaskRunResult<AgentTaskCookReport>> {
+    // A repro also gates the candidate (#17653).
+    options.gates.include_repro_in_candidate_gates();
     // One controller drives a Cook at a time (#15566). Held for the whole
     // run, released when this returns or the process dies.
     let Some(_driver) = store.try_acquire_cook_driver(&options.identity.cook_id)? else {
@@ -6486,6 +6488,117 @@ fn run_cook_spine(
                 error,
                 Some(&options.identity.initial_run_id),
             ));
+        }
+    }
+    // A repro must fail on the pinned base before any provider work starts;
+    // one that passes there does not reproduce the issue (#17653).
+    if !options.gates.repro.is_empty()
+        && !verification_pending_continuation
+        && recipe.attempts.len() == 1
+        && cook_attempt_needs_execution_with_store(
+            lifecycle_store,
+            &options.identity.initial_run_id,
+        )
+        && !cook_has_provider_execution_in_store(lifecycle_store, &options.identity.cook_id)?
+        && super::cook_repro::recorded_repro_base_evidence(
+            lifecycle_store,
+            &options.identity.cook_id,
+        )
+        .is_none_or(|evidence| !evidence.reproduces())
+    {
+        let base_sha = options.workspace.task_base_sha.clone().or_else(|| {
+            options.identity.initial_plan.metadata["cook_workspace_base"]["sha"]
+                .as_str()
+                .map(str::to_string)
+        });
+        let evidence = run_cook_startup_phase(
+            lifecycle_store,
+            durable_observer,
+            &options.identity.cook_id,
+            &options.identity.initial_run_id,
+            "repro_base_check",
+            || {
+                let base_sha = base_sha.as_deref().ok_or_else(|| {
+                    Error::validation_invalid_argument(
+                        "repro",
+                        "--repro needs a pinned Cook base to run against before dispatch",
+                        Some(options.workspace.to_worktree.clone()),
+                        None,
+                    )
+                })?;
+                let evidence = super::cook_repro::run_repro_on_base(&options, base_sha)?;
+                super::cook_repro::record_repro_base_evidence(
+                    lifecycle_store,
+                    &options.identity.cook_id,
+                    &options.identity.initial_run_id,
+                    &evidence,
+                )?;
+                Ok(evidence)
+            },
+        );
+        let evidence = match evidence {
+            Ok(evidence) => evidence,
+            Err(error) => {
+                let error = with_pre_execution_phase(error, "repro_base_check");
+                record_pre_execution_failure(
+                    lifecycle_store,
+                    &options.identity.initial_plan,
+                    &options.identity.initial_run_id,
+                    &error,
+                    "repro_base_check",
+                )?;
+                return Ok(pre_execution_failure_report(
+                    stores,
+                    options.identity.cook_id.clone(),
+                    Vec::new(),
+                    pre_execution_failure_details(
+                        agent_task_lifecycle::exact_record_in_store(
+                            lifecycle_store,
+                            &options.identity.initial_run_id,
+                        )
+                        .ok()
+                        .as_ref(),
+                        &error,
+                    ),
+                    error,
+                    Some(&options.identity.initial_run_id),
+                ));
+            }
+        };
+        if !evidence.reproduces() {
+            let stop_reason = super::cook_repro::repro_passes_on_base_stop_reason(&evidence);
+            let mut error = with_pre_execution_phase(
+                Error::validation_invalid_argument(
+                    "repro",
+                    stop_reason.clone(),
+                    Some(evidence.base_sha.clone()),
+                    None,
+                ),
+                "repro_base_check",
+            );
+            error.details["classification"] =
+                Value::String(super::cook_repro::REPRO_PASSES_ON_BASE.to_string());
+            record_pre_execution_failure(
+                lifecycle_store,
+                &options.identity.initial_plan,
+                &options.identity.initial_run_id,
+                &error,
+                "repro_base_check",
+            )?;
+            let mut report = stores.report(CookReportInput {
+                cook_id: options.identity.cook_id.clone(),
+                status: CookStatus::ReproPassesOnBase.as_str(),
+                disposition: CookDisposition::Terminal,
+                attempts: Vec::new(),
+                finalization: None,
+                stop_reason: Some(stop_reason),
+                exit_code: 1,
+                invocation_latest_run_id: Some(&options.identity.initial_run_id),
+            });
+            report.value.terminal_phase = Some("repro_base_check".to_string());
+            report.value.terminal_failure_classification =
+                Some(super::cook_repro::REPRO_PASSES_ON_BASE.to_string());
+            return Ok(report);
         }
     }
     if let Some(latest_attempt) = recipe.attempts.last() {

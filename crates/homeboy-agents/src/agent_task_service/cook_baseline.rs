@@ -425,6 +425,186 @@ pub(crate) fn compare_gate_failures_to_verified_base(
         promotion.normalize_gate_outcome();
         return Ok(());
     }
+    with_detached_base_checkout(
+        repository_root,
+        gate_workspace,
+        base_sha,
+        component_id,
+        |baseline_gate_workspace| {
+            for (index, gate) in promotion.deterministic_gates.iter_mut().enumerate() {
+                if gate.status != AgentTaskGateStatus::Failed || gate.baseline_comparison.is_some()
+                {
+                    continue;
+                }
+                compared += 1;
+                checkpoint(compared, unresolved)?;
+                let Some(package_artifacts) =
+                    gate.environment.package_artifact_replay_requirements()
+                else {
+                    gate.baseline_comparison = Some(AgentTaskGateBaselineComparison {
+                    base_ref: base_sha.to_string(),
+                    exit_code: 124,
+                    failure_fingerprint: String::new(),
+                    matches_candidate_failure: false,
+                    result: AgentTaskGateDifferentialResult::Inconclusive,
+                    diagnostic: Some(
+                        "candidate gate declares package artifacts without recorded digests, so the immutable base cannot reconstruct the same inputs"
+                            .to_string(),
+                    ),
+                });
+                    continue;
+                };
+                let invocation = gate.invocation()?;
+                let baseline_run_dir = homeboy_core::engine::run_dir::RunDir::create()?;
+                let baseline = (|| {
+                    let runtime = homeboy_core::engine::invocation::InvocationGuard::acquire(
+                        &baseline_run_dir,
+                        &homeboy_core::engine::invocation::InvocationRequirements::default(),
+                    )?;
+                    match &invocation {
+                        AgentTaskGateInvocation::LegacyShell { command, .. } => {
+                            run_gate_command_with_timeout(
+                                baseline_gate_workspace,
+                                index + 1,
+                                command,
+                                gate.visibility,
+                                gate.reveal_policy,
+                                &runtime.context().tmp_dir,
+                                timeout,
+                                &replay_gate_policy(&gate.environment, component_id),
+                                &package_artifacts,
+                            )
+                        }
+                        AgentTaskGateInvocation::DeclaredTest { plan } => {
+                            run_declared_test_with_timeout(
+                                baseline_gate_workspace,
+                                index + 1,
+                                plan,
+                                gate.visibility,
+                                gate.reveal_policy,
+                                &runtime.context().tmp_dir,
+                                &replay_gate_policy(&gate.environment, component_id),
+                                &package_artifacts,
+                            )
+                        }
+                    }
+                })();
+                if let Ok(baseline) = &baseline {
+                    if baseline.invocation()?.identity_digest()? != invocation.identity_digest()? {
+                        gate.baseline_comparison = Some(AgentTaskGateBaselineComparison {
+                        base_ref: base_sha.to_string(),
+                        exit_code: baseline.exit_code,
+                        failure_fingerprint: String::new(),
+                        matches_candidate_failure: false,
+                        result: AgentTaskGateDifferentialResult::Inconclusive,
+                        diagnostic: Some(
+                            "baseline replay uses a different shell invocation contract than the recorded candidate; recapture candidate evidence"
+                                .to_string(),
+                        ),
+                    });
+                        baseline_run_dir.finish(true);
+                        continue;
+                    }
+                    if baseline.environment.package_artifacts != gate.environment.package_artifacts
+                    {
+                        gate.baseline_comparison = Some(AgentTaskGateBaselineComparison {
+                        base_ref: base_sha.to_string(),
+                        exit_code: baseline.exit_code,
+                        failure_fingerprint: String::new(),
+                        matches_candidate_failure: false,
+                        result: AgentTaskGateDifferentialResult::Inconclusive,
+                        diagnostic: Some(
+                            "baseline replay resolved different package artifacts than the candidate recorded, so the two runs are not comparable"
+                                .to_string(),
+                        ),
+                    });
+                        baseline_run_dir.finish(true);
+                        continue;
+                    }
+                }
+                let result: Result<()> = match baseline {
+                    Ok(baseline) if baseline.exit_code == 124 => {
+                        gate.baseline_comparison = Some(AgentTaskGateBaselineComparison {
+                        base_ref: base_sha.to_string(),
+                        exit_code: baseline.exit_code,
+                        failure_fingerprint: failure_fingerprint(
+                            baseline.exit_code,
+                            &baseline.stdout,
+                            &baseline.stderr,
+                            baseline
+                                .failure_evidence
+                                .as_ref()
+                                .map(|evidence| evidence.diagnostics.as_slice())
+                                .unwrap_or_default(),
+                        ),
+                        matches_candidate_failure: false,
+                        result: AgentTaskGateDifferentialResult::Inconclusive,
+                        diagnostic: Some(
+                            "baseline replay exceeded the gate timeout before producing a comparable result"
+                                .to_string(),
+                        ),
+                    });
+                        Ok(())
+                    }
+                    Ok(baseline) => {
+                        let facts = BaselineFacts::from_gate(&baseline);
+                        facts.apply(gate, base_sha, None);
+                        let key = baseline_record_key(gate, base_sha, component_id)?;
+                        let payload = serde_json::to_value(&facts).map_err(|error| {
+                            Error::internal_io(
+                                error.to_string(),
+                                Some("serialize baseline facts".to_string()),
+                            )
+                        })?;
+                        if facts.comparable() {
+                            store.put_coordination_record(
+                                BASELINE_RECORDS,
+                                &key,
+                                ExpectedRevision::Absent,
+                                RecordWrite {
+                                    state: "comparable",
+                                    payload: &payload,
+                                    expires_at_ms: None,
+                                },
+                            )?;
+                        }
+                        Ok(())
+                    }
+                    Err(error) => {
+                        gate.baseline_comparison = Some(AgentTaskGateBaselineComparison {
+                            base_ref: base_sha.to_string(),
+                            exit_code: 124,
+                            failure_fingerprint: String::new(),
+                            matches_candidate_failure: false,
+                            result: AgentTaskGateDifferentialResult::Inconclusive,
+                            diagnostic: Some(format!("baseline replay failed: {error}")),
+                        });
+                        // Preserve the inconclusive evidence and leave the candidate
+                        // gate red. A baseline execution failure must never convert a
+                        // candidate failure into an infrastructure error that loses
+                        // its durable comparison result.
+                        Ok(())
+                    }
+                };
+                baseline_run_dir.finish(result.is_ok());
+                result?;
+            }
+            promotion.normalize_gate_outcome();
+            Ok(())
+        },
+    )
+}
+
+/// Materialize the immutable `base_sha` as a detached checkout next to the
+/// repository, hydrate its dependencies, and run `run` in the base copy of
+/// `gate_workspace`. The checkout is removed before this returns.
+pub(crate) fn with_detached_base_checkout<T>(
+    repository_root: &std::path::Path,
+    gate_workspace: &std::path::Path,
+    base_sha: &str,
+    component_id: Option<&str>,
+    run: impl FnOnce(&std::path::Path) -> Result<T>,
+) -> Result<T> {
     let repository_root = repository_root.canonicalize().map_err(|error| {
         Error::internal_io(
             error.to_string(),
@@ -470,7 +650,7 @@ pub(crate) fn compare_gate_failures_to_verified_base(
             Some("materialize immutable Cook gate baseline".to_string()),
         ));
     }
-    let comparison = (|| -> Result<()> {
+    let result = (|| -> Result<T> {
         let canonical_baseline_path = baseline_path.canonicalize().map_err(|error| {
             Error::validation_invalid_argument(
                 "gate_workspace",
@@ -504,163 +684,7 @@ pub(crate) fn compare_gate_failures_to_verified_base(
             &baseline_gate_workspace,
             component_id,
         )?;
-        for (index, gate) in promotion.deterministic_gates.iter_mut().enumerate() {
-            if gate.status != AgentTaskGateStatus::Failed || gate.baseline_comparison.is_some() {
-                continue;
-            }
-            compared += 1;
-            checkpoint(compared, unresolved)?;
-            let Some(package_artifacts) = gate.environment.package_artifact_replay_requirements()
-            else {
-                gate.baseline_comparison = Some(AgentTaskGateBaselineComparison {
-                    base_ref: base_sha.to_string(),
-                    exit_code: 124,
-                    failure_fingerprint: String::new(),
-                    matches_candidate_failure: false,
-                    result: AgentTaskGateDifferentialResult::Inconclusive,
-                    diagnostic: Some(
-                        "candidate gate declares package artifacts without recorded digests, so the immutable base cannot reconstruct the same inputs"
-                            .to_string(),
-                    ),
-                });
-                continue;
-            };
-            let invocation = gate.invocation()?;
-            let baseline_run_dir = homeboy_core::engine::run_dir::RunDir::create()?;
-            let baseline = (|| {
-                let runtime = homeboy_core::engine::invocation::InvocationGuard::acquire(
-                    &baseline_run_dir,
-                    &homeboy_core::engine::invocation::InvocationRequirements::default(),
-                )?;
-                match &invocation {
-                    AgentTaskGateInvocation::LegacyShell { command, .. } => {
-                        run_gate_command_with_timeout(
-                            &baseline_gate_workspace,
-                            index + 1,
-                            command,
-                            gate.visibility,
-                            gate.reveal_policy,
-                            &runtime.context().tmp_dir,
-                            timeout,
-                            &replay_gate_policy(&gate.environment, component_id),
-                            &package_artifacts,
-                        )
-                    }
-                    AgentTaskGateInvocation::DeclaredTest { plan } => {
-                        run_declared_test_with_timeout(
-                            &baseline_gate_workspace,
-                            index + 1,
-                            plan,
-                            gate.visibility,
-                            gate.reveal_policy,
-                            &runtime.context().tmp_dir,
-                            &replay_gate_policy(&gate.environment, component_id),
-                            &package_artifacts,
-                        )
-                    }
-                }
-            })();
-            if let Ok(baseline) = &baseline {
-                if baseline.invocation()?.identity_digest()? != invocation.identity_digest()? {
-                    gate.baseline_comparison = Some(AgentTaskGateBaselineComparison {
-                        base_ref: base_sha.to_string(),
-                        exit_code: baseline.exit_code,
-                        failure_fingerprint: String::new(),
-                        matches_candidate_failure: false,
-                        result: AgentTaskGateDifferentialResult::Inconclusive,
-                        diagnostic: Some(
-                            "baseline replay uses a different shell invocation contract than the recorded candidate; recapture candidate evidence"
-                                .to_string(),
-                        ),
-                    });
-                    baseline_run_dir.finish(true);
-                    continue;
-                }
-                if baseline.environment.package_artifacts != gate.environment.package_artifacts {
-                    gate.baseline_comparison = Some(AgentTaskGateBaselineComparison {
-                        base_ref: base_sha.to_string(),
-                        exit_code: baseline.exit_code,
-                        failure_fingerprint: String::new(),
-                        matches_candidate_failure: false,
-                        result: AgentTaskGateDifferentialResult::Inconclusive,
-                        diagnostic: Some(
-                            "baseline replay resolved different package artifacts than the candidate recorded, so the two runs are not comparable"
-                                .to_string(),
-                        ),
-                    });
-                    baseline_run_dir.finish(true);
-                    continue;
-                }
-            }
-            let result: Result<()> = match baseline {
-                Ok(baseline) if baseline.exit_code == 124 => {
-                    gate.baseline_comparison = Some(AgentTaskGateBaselineComparison {
-                        base_ref: base_sha.to_string(),
-                        exit_code: baseline.exit_code,
-                        failure_fingerprint: failure_fingerprint(
-                            baseline.exit_code,
-                            &baseline.stdout,
-                            &baseline.stderr,
-                            baseline
-                                .failure_evidence
-                                .as_ref()
-                                .map(|evidence| evidence.diagnostics.as_slice())
-                                .unwrap_or_default(),
-                        ),
-                        matches_candidate_failure: false,
-                        result: AgentTaskGateDifferentialResult::Inconclusive,
-                        diagnostic: Some(
-                            "baseline replay exceeded the gate timeout before producing a comparable result"
-                                .to_string(),
-                        ),
-                    });
-                    Ok(())
-                }
-                Ok(baseline) => {
-                    let facts = BaselineFacts::from_gate(&baseline);
-                    facts.apply(gate, base_sha, None);
-                    let key = baseline_record_key(gate, base_sha, component_id)?;
-                    let payload = serde_json::to_value(&facts).map_err(|error| {
-                        Error::internal_io(
-                            error.to_string(),
-                            Some("serialize baseline facts".to_string()),
-                        )
-                    })?;
-                    if facts.comparable() {
-                        store.put_coordination_record(
-                            BASELINE_RECORDS,
-                            &key,
-                            ExpectedRevision::Absent,
-                            RecordWrite {
-                                state: "comparable",
-                                payload: &payload,
-                                expires_at_ms: None,
-                            },
-                        )?;
-                    }
-                    Ok(())
-                }
-                Err(error) => {
-                    gate.baseline_comparison = Some(AgentTaskGateBaselineComparison {
-                        base_ref: base_sha.to_string(),
-                        exit_code: 124,
-                        failure_fingerprint: String::new(),
-                        matches_candidate_failure: false,
-                        result: AgentTaskGateDifferentialResult::Inconclusive,
-                        diagnostic: Some(format!("baseline replay failed: {error}")),
-                    });
-                    // Preserve the inconclusive evidence and leave the candidate
-                    // gate red. A baseline execution failure must never convert a
-                    // candidate failure into an infrastructure error that loses
-                    // its durable comparison result.
-                    Ok(())
-                }
-            };
-            baseline_run_dir.finish(result.is_ok());
-            result?;
-        }
-        promotion.normalize_gate_outcome();
-        Ok(())
+        run(&baseline_gate_workspace)
     })();
     let cleanup = std::process::Command::new("git")
         .args(["worktree", "remove", "--force"])
@@ -679,7 +703,7 @@ pub(crate) fn compare_gate_failures_to_verified_base(
             Some("remove Cook gate baseline".to_string()),
         ));
     }
-    comparison
+    result
 }
 
 /// Re-materialize a follow-up baseline worktree at a specific path that was

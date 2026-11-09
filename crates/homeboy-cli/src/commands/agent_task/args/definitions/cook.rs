@@ -60,6 +60,54 @@ pub struct CookOptionValues {
     pub publish_incomplete_draft: bool,
     #[command(flatten)]
     pub gates: VerifyGateArgs,
+    #[command(flatten)]
+    pub repro: ReproGateArgs,
+}
+
+/// Repro gates (#17653): commands that must fail on the Cook's base before
+/// the provider starts and pass on the candidate. Without one, green gates do
+/// not prove the issue is fixed.
+#[derive(Args, Debug, Clone, PartialEq, Default)]
+pub struct ReproGateArgs {
+    /// Command that reproduces the issue: it must fail on the Cook's base and
+    /// pass once the issue is fixed. Before the provider starts, Cook runs it
+    /// against the base checkout in the same placement as the gates and records
+    /// the result. If it passes on base, the Cook stops with
+    /// `repro_passes_on_base` before dispatch. Otherwise it also runs as a
+    /// visible gate on the candidate, and the review evidence records
+    /// `repro: verified` or `repro: failed_on_candidate`. Without a repro the
+    /// review evidence records `repro: none`. Repeatable.
+    #[arg(long = "repro", value_name = "COMMAND")]
+    pub repro: Vec<String>,
+    /// Read one repro shell program from a file, like `--verify-file`. Homeboy
+    /// snapshots the exact file bytes before submission.
+    #[arg(long = "repro-file", value_name = "PATH", value_hint = clap::ValueHint::FilePath)]
+    pub repro_file: Vec<String>,
+}
+
+impl ReproGateArgs {
+    pub(crate) fn is_declared(&self) -> bool {
+        !self.repro.is_empty() || !self.repro_file.is_empty()
+    }
+
+    /// Resolve `--repro-file` inputs at the controller invocation directory.
+    pub(crate) fn snapshot_file_inputs(&mut self) -> homeboy::core::Result<()> {
+        for path in std::mem::take(&mut self.repro_file) {
+            let (program, _) = snapshot_gate_file(
+                &path,
+                AgentTaskGateVisibility::Visible,
+                AgentTaskGateRevealPolicy::FullEvidence,
+            )?;
+            self.repro.push(program);
+        }
+        Ok(())
+    }
+
+    /// Declare the repro on a Cook gate policy. The Cook also runs each repro
+    /// as a visible candidate gate.
+    pub(crate) fn apply_to(&self, gates: &mut VerifyGateOptions) {
+        gates.repro = self.repro.clone();
+    }
 }
 
 /// Retains the operator's raw, explicitly supplied options alongside typed values.
@@ -582,6 +630,8 @@ impl From<VerifyGateArgs> for VerifyGateOptions {
             verify: args.verify,
             verify_ci: args.verify_ci,
             private_verify: args.private_verify,
+            // `--repro` is Cook-only; see `ReproGateArgs::apply_to`.
+            repro: Vec::new(),
             test_execution_plan: None,
             input_sources: args.input_sources,
             private_gate_reveal: args.private_gate_reveal,
@@ -798,6 +848,7 @@ mod tests {
             ("ai-tool", "Test tool"), ("max-attempts", "7"),
             ("verify", "printf '%s' \"$VALUE\""), ("verify-file", "/public.sh"),
             ("private-verify", "private check"), ("private-verify-file", "/private.sh"),
+            ("repro", "test -f FIXED"), ("repro-file", "/repro.sh"),
             ("gate-input-source", r#"{"visibility":"visible","source_kind":"inline","sha256":"sha256:abc","size_bytes":1,"redaction_policy":"full_evidence"}"#),
             ("private-gate-reveal", "full-evidence"),
             ("gate-execution-policy", "continue-all"), ("gate-timeout-seconds", "42"),

@@ -143,6 +143,43 @@ pub struct AgentTaskReviewDossier {
     /// the change list (#17651).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub out_of_scope_changes: Vec<String>,
+    /// Whether a repro gate proves the issue: it failed on base and passed on
+    /// the candidate. Cook always records it; manual finalization omits it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repro: Option<AgentTaskReviewRepro>,
+}
+
+/// Repro evidence for a candidate. Only `verified` proves the issue.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentTaskReviewRepro {
+    /// No repro gate was declared, so the gates do not prove the issue.
+    None,
+    /// Every repro gate failed on base and passed on the candidate.
+    Verified,
+    /// A repro gate did not pass on the candidate (or has no base failure).
+    FailedOnCandidate,
+}
+
+impl AgentTaskReviewRepro {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Verified => "verified",
+            Self::FailedOnCandidate => "failed_on_candidate",
+        }
+    }
+
+    fn reviewer_line(self) -> String {
+        let meaning = match self {
+            Self::None => "no repro gate was declared, so these gates do not prove the issue",
+            Self::Verified => "the repro gate failed on base and passed on the candidate",
+            Self::FailedOnCandidate => {
+                "the repro gate did not both fail on base and pass on the candidate"
+            }
+        };
+        format!("- repro: {} ({meaning}).", self.as_str())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1117,15 +1154,19 @@ fn render_verification(dossier: &AgentTaskReviewDossier) -> Option<String> {
             }
         })
         .collect::<Vec<_>>();
+    let repro = dossier
+        .repro
+        .map(|repro| format!("{}\n", repro.reviewer_line()))
+        .unwrap_or_default();
     if !gate_lines.is_empty() {
         // The CI entry continues the gate entries with no blank line so the
         // whole Verification section renders as one list. (#16316)
-        visible.push(format!("{}\n- CI: pending", gate_lines.join("\n\n")));
+        visible.push(format!("{}\n{repro}- CI: pending", gate_lines.join("\n\n")));
     } else {
         if !base.is_empty() {
             visible.push(format!("{}.", base.trim_start_matches(". ")));
         }
-        visible.push("- CI: pending".to_string());
+        visible.push(format!("{repro}- CI: pending"));
     }
     let evidence = render_evidence(&dossier.evidence);
     if dossier.verified_commands.is_empty() {
@@ -2225,6 +2266,7 @@ mod tests {
             }],
             overrides: Vec::new(),
             out_of_scope_changes: Vec::new(),
+            repro: None,
         }
     }
 

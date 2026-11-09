@@ -4980,6 +4980,13 @@ fn cook_review_dossier_with_stores_and_review_form(
         successful_run_id,
         &terminal_form,
     )?;
+    let repro = super::cook_repro::candidate_repro_verdict(
+        &options.gates.repro,
+        // The base repro result is recorded on the Cook before dispatch (#17653).
+        super::cook_repro::recorded_repro_base_evidence(lifecycle_store, &options.identity.cook_id)
+            .as_ref(),
+        verification_promotion,
+    );
     let mut evidence = Vec::new();
     if let Some(form) = review_form {
         evidence.push(AgentTaskReviewEvidence {
@@ -5062,6 +5069,7 @@ fn cook_review_dossier_with_stores_and_review_form(
             source_relationships: Vec::new(),
             overrides: Vec::new(),
             out_of_scope_changes,
+            repro: Some(repro),
         },
         lineage.composed_model_disclosure,
     ))

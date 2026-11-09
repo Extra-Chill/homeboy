@@ -28686,3 +28686,183 @@ echo https://github.com/example/fixture/pull/1
         });
     }
 }
+
+/// A linked worktree of a local repository whose `origin` is itself, so Cook
+/// can pin its base.
+fn repro_cook_fixture(
+    cook_id: &str,
+    repro: &str,
+) -> (tempfile::TempDir, CookRequest, Arc<AtomicUsize>) {
+    let repository = tempfile::tempdir().expect("repository");
+    let path = repository.path();
+    let git = |args: &[&str]| {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(path)
+            .output()
+            .expect("run git");
+        assert!(output.status.success(), "git {args:?}: {output:?}");
+    };
+    git(&["init", "-q", "-b", "main"]);
+    git(&["config", "user.name", "Test"]);
+    git(&["config", "user.email", "test@example.com"]);
+    std::fs::write(path.join("tracked.txt"), "base\n").expect("write base");
+    git(&["add", "."]);
+    git(&["commit", "-q", "-m", "base"]);
+    let origin = path.join(".git").display().to_string();
+    git(&["remote", "add", "origin", &origin]);
+    git(&["fetch", "-q", "origin"]);
+    // Cook mutates only a dedicated linked worktree.
+    let source = path.join("source");
+    git(&[
+        "worktree",
+        "add",
+        "-q",
+        "--detach",
+        source.to_str().expect("source"),
+        "HEAD",
+    ]);
+    let path = source.as_path();
+
+    let dispatches = Arc::new(AtomicUsize::new(0));
+    let mut options = batch_cook_options(
+        cook_id,
+        Arc::new(RecordingDetachedAttemptDispatcher {
+            dispatches: Arc::clone(&dispatches),
+        }),
+    );
+    options.identity.initial_run_id = format!("{cook_id}-attempt-1");
+    options.identity.initial_plan.tasks[0].executor.model = Some("fixture-model".to_string());
+    options.workspace.to_worktree = path.display().to_string();
+    options.workspace.source_worktree_path = Some(path.to_path_buf());
+    options.identity.initial_plan.tasks[0].workspace.root = Some(path.display().to_string());
+    options.gates.repro = vec![repro.to_string()];
+    (repository, options, dispatches)
+}
+
+/// #17653: a repro that already passes on the base does not reproduce the
+/// issue, so Cook stops before dispatch with `repro_passes_on_base`.
+#[test]
+fn cook_repro_that_passes_on_base_stops_before_dispatch() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let (_repository, options, dispatches) =
+            repro_cook_fixture("cook-repro-passes-on-base", "test -f tracked.txt");
+
+        let report = run_cook(CookContext::new(options.clone(), Arc::new(UnusedExecutor)))
+            .expect("a passing repro is a typed Cook outcome");
+
+        assert_eq!(report.value.status, "repro_passes_on_base", "{report:#?}");
+        assert_eq!(dispatches.load(Ordering::SeqCst), 0);
+        let stop_reason = report.value.stop_reason.clone().unwrap_or_default();
+        assert!(
+            stop_reason.contains("does not reproduce the issue")
+                && stop_reason.contains("Next action")
+                && stop_reason.contains("test -f tracked.txt"),
+            "{stop_reason}"
+        );
+        let record = agent_task_lifecycle::reconcile_status(&options.identity.initial_run_id)
+            .expect("the stopped Cook has a durable run");
+        assert_eq!(record.state(), AgentTaskRunState::Failed);
+        assert_eq!(record.metadata["provider_executions_consumed"], 0);
+        let evidence = &record.metadata["cook_repro_base"];
+        assert_eq!(evidence["results"][0]["command"], "test -f tracked.txt");
+        assert_eq!(evidence["results"][0]["failed_on_base"], false);
+        assert_eq!(evidence["results"][0]["exit_code"], 0);
+    });
+}
+
+fn repro_candidate_promotion(
+    run_id: &str,
+    path: &std::path::Path,
+    command: &str,
+) -> AgentTaskPromotionReport {
+    let mut promotion = promotion_with_existing_path(run_id, path);
+    promotion.deterministic_gates[0].command =
+        vec!["sh".to_string(), "-c".to_string(), command.to_string()];
+    promotion.gate_results[0].name = command.to_string();
+    promotion
+}
+
+fn repro_pr_body(options: &CookRequest, promotion: &AgentTaskPromotionReport) -> String {
+    let run_id = options.identity.initial_run_id.as_str();
+    let mut finalization = cook_finalization_options(options, run_id, promotion, Vec::new())
+        .expect("Cook finalization options");
+    crate::agent_task_review_dossier::enrich_dossier(
+        &mut finalization.review_dossier,
+        &finalization.evidence.artifact_refs,
+        &[],
+    );
+    crate::agent_task_review_dossier::render_review_dossier(
+        &finalization.review_dossier,
+        &finalization.review_profile,
+    )
+}
+
+/// #17653: a repro that fails on base runs before dispatch, the Cook
+/// proceeds, and a candidate that passes it is recorded as `repro: verified`.
+#[test]
+fn cook_repro_that_fails_on_base_and_passes_on_candidate_is_verified() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let (repository, options, dispatches) =
+            repro_cook_fixture("cook-repro-verified", "test -f FIXED");
+
+        let report = run_cook(CookContext::new(options.clone(), Arc::new(UnusedExecutor)))
+            .expect("a reproducing repro admits the Cook");
+
+        assert_ne!(report.value.status, "repro_passes_on_base", "{report:#?}");
+        assert_eq!(dispatches.load(Ordering::SeqCst), 1);
+        let record = agent_task_lifecycle::reconcile_status(&options.identity.initial_run_id)
+            .expect("the dispatched Cook has a durable run");
+        assert_ne!(record.state(), AgentTaskRunState::Failed);
+        let evidence = super::super::cook_repro::recorded_repro_base_evidence(
+            &test_lifecycle_store(),
+            &options.identity.cook_id,
+        )
+        .expect("the base repro result is recorded on the Cook");
+        assert_eq!(evidence.results[0].command, "test -f FIXED");
+        assert!(evidence.results[0].failed_on_base);
+        let recipe = load_recipe(&options.identity.cook_id).expect("Cook recipe");
+        assert!(
+            recipe.gate_policy["verify"]
+                .as_array()
+                .is_some_and(|verify| verify.iter().any(|gate| gate == "test -f FIXED")),
+            "the repro also gates the candidate: {}",
+            recipe.gate_policy
+        );
+
+        seed_review_form_aggregate(
+            &options.identity.initial_run_id,
+            &options.identity.initial_plan,
+        );
+        let promotion = repro_candidate_promotion(
+            &options.identity.initial_run_id,
+            repository.path(),
+            "test -f FIXED",
+        );
+        let body = repro_pr_body(&options, &promotion);
+        assert!(body.contains("- repro: verified"), "{body}");
+    });
+}
+
+/// #17653: without a repro, the Cook review evidence records `repro: none`.
+#[test]
+fn cook_without_repro_records_repro_none_in_review_evidence() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let target = tempfile::tempdir().expect("target");
+        let cook_id = "cook-repro-none";
+        let run_id = "cook-repro-none-run";
+        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+        options.identity.initial_run_id = run_id.to_string();
+        options.identity.initial_plan.tasks[0].executor.model = Some("fixture-model".to_string());
+        persist_initial_recipe(&options).expect("persist recipe");
+        agent_task_lifecycle::submit_plan(&options.identity.initial_plan, Some(run_id))
+            .expect("submit Cook attempt");
+        seed_review_form_aggregate(run_id, &options.identity.initial_plan);
+        let promotion = promotion_with_existing_path(run_id, target.path());
+
+        let body = repro_pr_body(&options, &promotion);
+
+        assert!(body.contains("- repro: none"), "{body}");
+        assert!(body.contains("do not prove the issue"), "{body}");
+    });
+}
