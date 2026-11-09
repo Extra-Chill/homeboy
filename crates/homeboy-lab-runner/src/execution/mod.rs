@@ -1118,16 +1118,9 @@ fn exec_with_status_snapshot_attempt(
         return Ok((output, exit_code));
     }
 
-    if refuses_nonfresh_daemon_execution(&options, &connected) {
-        return Err(Error::validation_invalid_argument(
-            "runner",
-            format!(
-                "runner `{runner_id}` has a non-fresh daemon admission session; refusing to rotate its shared tunnel during execution"
-            ),
-            Some(runner_id.to_string()),
-            Some(vec![format!(
-                "Drain or recover known jobs. An explicit `homeboy runner refresh-homeboy {runner_id} --ref <version> --reconnect` can rotate this daemon only after `homeboy runner status {runner_id}` reports an authoritative zero active-job count."
-            )]),
+    if let Some(refusal) = refuses_nonfresh_daemon_execution(&options, &connected) {
+        return Err(nonfresh_daemon_admission_error(
+            runner_id, &connected, &refusal,
         ));
     }
     // A read-only retrieval never rotates the shared tunnel, so it is not
@@ -1290,27 +1283,75 @@ fn allows_idle_stale_daemon_refresh(
                 && status.active_job_error.is_none()))
 }
 
+/// The admission check this execution fails, when the connected daemon's
+/// admission session refuses it.
 fn refuses_nonfresh_daemon_execution(
     options: &RunnerExecOptions,
     status: &RunnerStatusReport,
-) -> bool {
-    let admission_fresh = crate::load(&status.runner_id).map_or_else(
-        |_| status.daemon_fresh_for_admission(),
-        |runner| {
-            crate::lab::offload::metadata::lab_runner_daemon_fresh_for_admission(
-                status,
-                crate::lab::offload::metadata::require_exact_runner_version(&runner.settings),
-            )
-        },
-    );
-    status.connected
-        && !admission_fresh
-        && !allows_idle_stale_daemon_refresh(options, status)
+) -> Option<crate::lab::offload::metadata::LabRunnerAdmissionRefusal> {
+    let require_exact = crate::load(&status.runner_id).is_ok_and(|runner| {
+        crate::lab::offload::metadata::require_exact_runner_version(&runner.settings)
+    });
+    if !status.connected
+        || allows_idle_stale_daemon_refresh(options, status)
         // A read-only retrieval routes to the generation that retains the run or
         // artifact and never rotates the shared tunnel, so admission-daemon
         // freshness must not block hydrating a completed run's retained evidence
         // (Extra-Chill/homeboy#9420).
-        && !options.read_only_artifact_access
+        || options.read_only_artifact_access
+    {
+        return None;
+    }
+    crate::lab::offload::metadata::lab_runner_admission_refusal(status, require_exact)
+}
+
+/// Refuse execution naming the failing admission check, the daemon it
+/// observed, and the next action that check calls for.
+fn nonfresh_daemon_admission_error(
+    runner_id: &str,
+    status: &RunnerStatusReport,
+    refusal: &crate::lab::offload::metadata::LabRunnerAdmissionRefusal,
+) -> Error {
+    let freshness = status.daemon_freshness.as_ref();
+    let version = freshness
+        .and_then(|freshness| freshness.daemon_version.clone())
+        .or_else(|| {
+            status
+                .session
+                .as_ref()
+                .map(|session| session.homeboy_version.clone())
+        });
+    let pid = freshness.and_then(|freshness| freshness.pid);
+    let lease = status.daemon_lease_verdict(None).generation_id;
+    let next_action = refusal.next_action(runner_id);
+    let mut error = Error::validation_invalid_argument(
+        "runner",
+        format!(
+            "runner `{runner_id}` has a non-fresh daemon admission session ({}: {}; daemon version {}, pid {}, lease {}); refusing to rotate its shared tunnel during execution",
+            refusal.code(),
+            refusal.evidence(),
+            version.as_deref().unwrap_or("unknown"),
+            pid.map_or_else(|| "unknown".to_string(), |pid| pid.to_string()),
+            lease.as_deref().unwrap_or("unknown"),
+        ),
+        Some(runner_id.to_string()),
+        Some(vec![next_action.clone()]),
+    )
+    .with_retryable(refusal.retryable());
+    if let Some(details) = error.details.as_object_mut() {
+        details.insert(
+            "admission_refusal".to_string(),
+            serde_json::json!({
+                "check": refusal.code(),
+                "evidence": refusal.evidence(),
+                "daemon_version": version,
+                "daemon_pid": pid,
+                "daemon_lease_id": lease,
+                "next_action": next_action,
+            }),
+        );
+    }
+    error
 }
 
 /// A read-only retrieval could not resolve a daemon endpoint able to serve the

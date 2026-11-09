@@ -456,39 +456,162 @@ fn canonical_build_identity(identity: &str) -> &str {
 
 /// Compare the recorded daemon to the controller's compatibility identity.
 pub(crate) fn lab_runner_homeboy_version_drift(status: &RunnerStatusReport) -> bool {
-    let controller = crate::controller_identity::compatibility_controller_identity();
-    status
-        .session
-        .as_ref()
-        .is_some_and(|session| match session.homeboy_build_identity.as_deref() {
-            Some(identity) => {
-                canonical_build_identity(identity) != canonical_build_identity(&controller.display)
-            }
-            None => {
-                canonical_build_identity(&session.homeboy_version)
-                    != canonical_build_identity(&controller.version)
-            }
-        })
+    observed_version_drift(status).is_some()
 }
 
-/// Genuine daemon faults always block; controller build drift only blocks
+/// The daemon and controller identities, compared at the same precision,
+/// when they differ.
+fn observed_version_drift(status: &RunnerStatusReport) -> Option<(String, String)> {
+    let controller = crate::controller_identity::compatibility_controller_identity();
+    let session = status.session.as_ref()?;
+    let (daemon, controller) = match session.homeboy_build_identity.as_deref() {
+        Some(identity) => (identity, controller.display),
+        None => (session.homeboy_version.as_str(), controller.version),
+    };
+    (canonical_build_identity(daemon) != canonical_build_identity(&controller))
+        .then(|| (daemon.to_string(), controller))
+}
+
+/// Why a lab runner's daemon refuses admission: the first failing check, in
+/// evaluation order. `None` means the daemon is fresh for admission.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum LabRunnerAdmissionRefusal {
+    /// The stale-daemon comparison could not run, so nothing proves the
+    /// daemon compatible.
+    StaleDaemonUnverified { probe_error: Option<String> },
+    /// Runtime paths the daemon loaded are stale or no longer configured.
+    StaleRuntimePaths { paths: Vec<String> },
+    /// Exact-build policy is on and the daemon build differs.
+    VersionDrift { daemon: String, controller: String },
+    /// The daemon's own lease/freshness observation does not authorize work.
+    LeaseNotFresh { reason: String, transient: bool },
+}
+
+impl LabRunnerAdmissionRefusal {
+    pub(crate) fn code(&self) -> &'static str {
+        match self {
+            Self::StaleDaemonUnverified { .. } => "stale_daemon_unverified",
+            Self::StaleRuntimePaths { .. } => "stale_runtime_paths",
+            Self::VersionDrift { .. } => "version_drift",
+            Self::LeaseNotFresh { .. } => "lease_not_fresh",
+        }
+    }
+
+    /// Whether the same request can succeed once a transient observation
+    /// settles, without anyone changing the daemon.
+    pub(crate) fn retryable(&self) -> bool {
+        match self {
+            Self::StaleDaemonUnverified { .. } => true,
+            Self::LeaseNotFresh { transient, .. } => *transient,
+            Self::StaleRuntimePaths { .. } | Self::VersionDrift { .. } => false,
+        }
+    }
+
+    pub(crate) fn evidence(&self) -> String {
+        match self {
+            Self::StaleDaemonUnverified { probe_error } => format!(
+                "the stale-daemon comparison is unverified ({})",
+                probe_error.as_deref().unwrap_or("no comparison ran")
+            ),
+            Self::StaleRuntimePaths { paths } => {
+                format!("stale or changed runtime paths: {}", paths.join(", "))
+            }
+            Self::VersionDrift { daemon, controller } => format!(
+                "exact version required: daemon `{daemon}` differs from controller `{controller}`"
+            ),
+            Self::LeaseNotFresh { reason, .. } => format!("lease not fresh: {reason}"),
+        }
+    }
+
+    pub(crate) fn next_action(&self, runner_id: &str) -> String {
+        match self {
+            Self::StaleDaemonUnverified { .. } => format!(
+                "Retry once `homeboy runner status {runner_id}` can compare the daemon; check `homeboy runner doctor {runner_id}` if the probe keeps failing."
+            ),
+            Self::StaleRuntimePaths { .. } | Self::VersionDrift { .. } => format!(
+                "Drain or recover known jobs, then run `homeboy runner refresh-homeboy {runner_id} --reconnect` once `homeboy runner status {runner_id}` reports an authoritative zero active-job count."
+            ),
+            Self::LeaseNotFresh { transient: true, .. } => format!(
+                "Retry once `homeboy runner status {runner_id}` observes the daemon lease; `homeboy runner connect {runner_id}` republishes it."
+            ),
+            Self::LeaseNotFresh { transient: false, .. } => format!(
+                "Restart the runner daemon with `homeboy runner refresh-homeboy {runner_id} --reconnect` once `homeboy runner status {runner_id}` reports an authoritative zero active-job count."
+            ),
+        }
+    }
+}
+
+/// The one admission-freshness decision: the first failing check, or `None`.
+/// Genuine daemon faults always refuse; controller build drift refuses only
 /// when exact-build policy is explicitly requested.
+pub(crate) fn lab_runner_admission_refusal(
+    status: &RunnerStatusReport,
+    require_exact: bool,
+) -> Option<LabRunnerAdmissionRefusal> {
+    if let Some(warning) = status.admission_blocking_stale_daemon() {
+        if !warning.verification.is_compared() {
+            return Some(LabRunnerAdmissionRefusal::StaleDaemonUnverified {
+                probe_error: warning.probe_error.clone(),
+            });
+        }
+        let paths = warning
+            .stale_runtime_paths
+            .iter()
+            .map(|path| format!("{}={}", path.env, path.path))
+            .chain(warning.changed_runtime_paths.iter().map(|path| {
+                format!(
+                    "{}: {} -> {}",
+                    path.env,
+                    path.loaded_path.as_deref().unwrap_or("<unset>"),
+                    path.configured_path.as_deref().unwrap_or("<unset>")
+                )
+            }))
+            .collect();
+        return Some(LabRunnerAdmissionRefusal::StaleRuntimePaths { paths });
+    }
+    if require_exact {
+        if let Some((daemon, controller)) = observed_version_drift(status) {
+            return Some(LabRunnerAdmissionRefusal::VersionDrift { daemon, controller });
+        }
+    }
+    let verdict = status.daemon_lease_verdict(None);
+    if verdict.fresh {
+        return None;
+    }
+    let (reason, transient) = if !verdict.freshness_observed {
+        ("daemon freshness not observed yet".to_string(), true)
+    } else if !verdict.lease_published {
+        (
+            "daemon freshness report publishes no lease".to_string(),
+            true,
+        )
+    } else {
+        let code = status
+            .daemon_freshness
+            .as_ref()
+            .and_then(|freshness| freshness.stale_reason_code)
+            .and_then(|code| serde_json::to_value(code).ok())
+            .and_then(|code| code.as_str().map(str::to_string))
+            .unwrap_or_else(|| "unspecified".to_string());
+        (format!("daemon reports itself stale ({code})"), false)
+    };
+    Some(LabRunnerAdmissionRefusal::LeaseNotFresh { reason, transient })
+}
+
+/// Daemon compatibility faults, excluding the lease observation.
 pub(crate) fn lab_runner_homeboy_has_blocking_status_drift(
     status: &RunnerStatusReport,
     require_exact: bool,
 ) -> bool {
-    status.admission_blocking_stale_daemon().is_some()
-        || (require_exact && lab_runner_homeboy_version_drift(status))
+    lab_runner_admission_refusal(status, require_exact)
+        .is_some_and(|refusal| !matches!(refusal, LabRunnerAdmissionRefusal::LeaseNotFresh { .. }))
 }
 
 pub(crate) fn lab_runner_daemon_fresh_for_admission(
     status: &RunnerStatusReport,
     require_exact: bool,
 ) -> bool {
-    if lab_runner_homeboy_has_blocking_status_drift(status, require_exact) {
-        return false;
-    }
-    status.daemon_fresh()
+    lab_runner_admission_refusal(status, require_exact).is_none()
 }
 
 /// Direct SSH runners execute jobs with their configured executable rather

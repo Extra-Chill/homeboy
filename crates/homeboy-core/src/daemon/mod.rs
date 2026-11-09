@@ -45,6 +45,8 @@ pub mod orchestration;
 mod patch_capture;
 pub mod recovery_actions;
 mod remote_runner;
+#[cfg(test)]
+mod restart_safe_jobs_tests;
 pub mod runner_exec_driver;
 pub mod runner_exec_job;
 pub mod runner_staging;
@@ -1629,19 +1631,12 @@ pub fn read_status_at_paths(path: PathBuf, jobs_path: PathBuf) -> Result<DaemonS
                 }
         })
         .collect::<Vec<_>>();
-    // Durable terminal evidence proves no workload remains, so those jobs are
-    // reported as evidence but do not protect the daemon from replacement.
-    // Neither do jobs awaiting attestation: a replacement leaves them as they
-    // are, exactly as this daemon did.
+    // Restart-safe jobs (terminal evidence, awaiting attestation, driver
+    // recovery) are reported as evidence but do not protect the daemon from
+    // replacement; see `blocks_daemon_replacement`.
     let blocking_active_jobs = active_job_recovery_evidence
         .iter()
-        .filter(|evidence| {
-            !matches!(
-                evidence.disposition,
-                crate::api_jobs::DaemonActiveJobRecoveryDisposition::TerminalEvidence
-                    | crate::api_jobs::DaemonActiveJobRecoveryDisposition::NeedsAttestation
-            )
-        })
+        .filter(|evidence| evidence.disposition.blocks_daemon_replacement())
         .count();
     let mut freshness = freshness_report_from_validation(&validation, blocking_active_jobs);
     let stale_reason = if !validation.running && owner_lock.is_held() {
@@ -3937,18 +3932,25 @@ fn refresh_daemon_freshness_snapshot(job_store: &JobStore) {
 fn daemon_freshness_report(job_store: &JobStore) -> Result<DaemonFreshnessReport> {
     let path = state_path()?;
     let validation = validate_lease_file(&path)?;
-    // Durable terminal evidence proves no workload remains, so those jobs do
-    // not protect this daemon from replacement either.
+    // Restart-safe jobs do not protect this daemon from replacement either.
     // Another daemon's jobs in the shared ledger neither occupy nor protect
-    // this daemon (#16089).
+    // this daemon (#16089). Classified against the live lease, as `status`
+    // does, so this daemon's own work is never mistaken for a dead
+    // generation's job awaiting attestation.
+    let current_lease = validation
+        .running
+        .then(|| {
+            validation
+                .state
+                .as_ref()
+                .map(|state| state.lease_id.as_str())
+        })
+        .flatten();
     let blocking_active_jobs = job_store
-        .active_daemon_job_recovery_evidence(None, pid_is_running)
+        .active_daemon_job_recovery_evidence(current_lease, pid_is_running)
         .into_iter()
         .filter(|evidence| job_store.executes_lease(evidence.daemon_lease_id.as_deref()))
-        .filter(|evidence| {
-            evidence.disposition
-                != crate::api_jobs::DaemonActiveJobRecoveryDisposition::TerminalEvidence
-        })
+        .filter(|evidence| evidence.disposition.blocks_daemon_replacement())
         .count();
     Ok(freshness_report_from_validation(
         &validation,
