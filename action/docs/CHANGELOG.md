@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.26.0] - 2026-11-09
+
+### Added
+- comment only on PR-introduced failures; step summary + check annotations
+
 ## [2.25.10] - 2026-11-09
 
 ### Fixed
