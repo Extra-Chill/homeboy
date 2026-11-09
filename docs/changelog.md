@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.457.0] - 2026-11-09
+
+### Added
+- homeboy workflow ab — byte-identical A/B parity at two refs
+
+### Fixed
+- queue admissions during a drain for the replacement; daemon plan names drain holders
+- unobserved runner readiness waits in the queue; one readiness projection for list/status/admission
+
 ## [0.456.0] - 2026-11-09
 
 ### Added
