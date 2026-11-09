@@ -72,6 +72,10 @@ fn reconcile_apply_owns_the_transitions_status_no_longer_performs() {
             store.read_record(runner).unwrap().state(),
             AgentTaskRunState::Running
         );
+        rewrite_record_for_test(runner, |record| {
+            record.metadata["runner_pid"] = json!(999_999u32);
+        })
+        .expect("controller exited");
         crate::agent_task_service::reconcile_run(runner, false).expect("reconcile runner run");
         let projected = store.read_record(runner).unwrap();
         assert_eq!(projected.state(), AgentTaskRunState::Succeeded);

@@ -620,9 +620,7 @@ mod tests {
         running.metadata["unmaterialized_cook_admission"] = serde_json::json!({
             "state": "blocked_runner_stale",
         });
-        running.metadata["provider_executions"] = serde_json::json!([{
-            "state": "running", "owner_pid": std::process::id()
-        }]);
+        running.metadata["runner_pid"] = serde_json::json!(std::process::id());
         assert_eq!(
             decision(
                 &lifecycle_action_eligibility(&running, None),
@@ -706,10 +704,7 @@ mod tests {
     #[test]
     fn cancel_remains_available_for_a_live_owner_after_candidate_recovery() {
         let mut record = record(AgentTaskRunState::CandidateRecoverable, false);
-        record.metadata["provider_executions"] = serde_json::json!([{
-            "state": "running",
-            "owner_pid": std::process::id()
-        }]);
+        record.metadata["runner_pid"] = serde_json::json!(std::process::id());
         assert_eq!(
             decision(
                 &lifecycle_action_eligibility(&record, None),
