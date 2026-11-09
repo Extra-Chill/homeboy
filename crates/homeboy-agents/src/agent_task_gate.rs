@@ -5414,6 +5414,7 @@ fn gate_failure_evidence(
     let missing_executable = gate_missing_executable(command, exit_code, stdout, stderr);
     let shell_rejection = gate_shell_rejection(exit_code, stderr);
     let target_unresolved = homeboy_gate_target_unresolved(stdout, stderr);
+    let setup_failure = homeboy_gate_setup_failure(exit_code, stdout, stderr);
     let classification = match selection_problem {
         Some((_, FocusedCargoSelectionProblem::NoTests)) => {
             AgentTaskGateFailureClassification::ZeroTestsSelected
@@ -5421,7 +5422,8 @@ fn gate_failure_evidence(
         None if missing_script.is_some()
             || missing_executable.is_some()
             || shell_rejection.is_some()
-            || target_unresolved =>
+            || target_unresolved
+            || setup_failure =>
         {
             AgentTaskGateFailureClassification::GateDeclaration
         }
@@ -5445,6 +5447,9 @@ fn gate_failure_evidence(
             (None, None) if target_unresolved => format!(
                 "gate environment cannot run `{command}`: Homeboy could not resolve the gate's target before checking the candidate"
             ),
+            (None, None) if setup_failure => {
+                "Homeboy gate setup failed before a candidate verdict; inspect the captured failure digest".to_string()
+            }
             (None, None) => {
                 format!("deterministic gate failed with exit code {exit_code}: {command}")
             }
@@ -5479,6 +5484,8 @@ fn gate_failure_evidence(
             (None, None) if target_unresolved => format!(
                 "The gate is invalid, not candidate-code feedback. `{command}` could not resolve its target in the gate environment before it checked the candidate (for example the component is registered only in operator config that isolated gate XDG hides, no extension provides the capability, or an extension manifest could not be read). Declare a gate that runs from the repository itself (such as its own test script), or give the component a portable homeboy.json with the needed extension, then rerun Cook. Do not change repository code to satisfy this gate."
             ),
+            (None, None) if setup_failure =>
+                "Homeboy reported an infrastructure/setup error (exit 2), not a candidate verdict. Inspect the captured failure digest and repair the gate environment before resuming verification. Do not rewrite candidate code based on this failure.".to_string(),
             (None, None) => format!(
                 "A deterministic verification gate failed after the candidate patch was applied. Fix the code so `{command}` passes, using the captured stdout/stderr tails as the primary failure evidence."
             ),
@@ -5588,6 +5595,25 @@ fn homeboy_gate_target_unresolved(stdout: &str, stderr: &str) -> bool {
                 .and_then(homeboy_error::ErrorCode::from_str)
                 .is_some_and(|code| code.is_unresolved_target())
     })
+}
+
+/// Exit 2 alone is not portable evidence of infrastructure failure (for
+/// example, test runners use it too). Require Homeboy's structured error
+/// envelope so an ordinary tool failure remains candidate feedback.
+fn homeboy_gate_setup_failure(exit_code: i32, stdout: &str, stderr: &str) -> bool {
+    exit_code == 2
+        && [stdout, stderr].into_iter().any(|stream| {
+            let Ok(result) = serde_json::from_str::<serde_json::Value>(stream.trim()) else {
+                return false;
+            };
+            result.get("success") == Some(&serde_json::Value::Bool(false))
+                && result
+                    .get("diagnostics")
+                    .or_else(|| result.get("error"))
+                    .and_then(|error| error.get("code"))
+                    .and_then(serde_json::Value::as_str)
+                    .is_some()
+        })
 }
 
 /// Detects a gate program rejected by the POSIX sh interpreter itself.
@@ -6353,6 +6379,30 @@ mod tests {
                 evidence.classification,
                 AgentTaskGateFailureClassification::GateDeclaration,
                 "stderr {stderr:?}"
+            );
+        }
+    }
+
+    /// A Homeboy setup/infrastructure error (structured envelope, exit 2)
+    /// never produced a candidate verdict, so it must not ask the provider to
+    /// rewrite code (Extra-Chill/homeboy#17585).
+    #[test]
+    fn homeboy_setup_errors_are_not_candidate_failures() {
+        let stdout = r#"{"success":false,"diagnostics":{"code":"extension.execution_failed","failure_digest":{"summary":"dependency install failed"}}}"#;
+        let evidence = gate_failure_evidence("homeboy review lint demo", 2, stdout, "", None);
+        assert_eq!(
+            evidence.classification,
+            AgentTaskGateFailureClassification::GateDeclaration
+        );
+        assert!(evidence.stdout_tail.contains("dependency install failed"));
+        assert!(evidence
+            .agent_feedback
+            .contains("Do not rewrite candidate code"));
+        for (exit_code, output) in [(1, stdout), (2, "lint failed")] {
+            let evidence = gate_failure_evidence("verify", exit_code, output, "", None);
+            assert_eq!(
+                evidence.classification,
+                AgentTaskGateFailureClassification::CandidateCode
             );
         }
     }
