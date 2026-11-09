@@ -22,6 +22,7 @@ pub struct MergeWhenGreenOutput {
     pub merged: bool,
     pub number: u64,
     pub expected_head_sha: String,
+    pub actual_head_sha: Option<String>,
     pub hold: Option<MergeHold>,
 }
 
@@ -48,6 +49,7 @@ pub fn pr_merge_when_green(
         merged: false,
         number,
         expected_head_sha: sha.clone(),
+        actual_head_sha: None,
         hold: None,
     };
     let hold = loop {
@@ -73,6 +75,7 @@ pub fn pr_merge_when_green(
         }
         let view: Value = serde_json::from_slice(&output.stdout)
             .map_err(|e| Error::internal_json(e.to_string(), None))?;
+        result.actual_head_sha = view["headRefOid"].as_str().map(str::to_string);
         if view["headRefOid"].as_str() != Some(&sha) {
             break MergeHold::HeadMoved;
         }
@@ -163,6 +166,12 @@ pub fn pr_merge_when_green(
             }
             let message = String::from_utf8_lossy(&output.stderr);
             if message.contains("409") {
+                // The atomic merge can race the checked view. Refresh the
+                // observed head rather than reporting that stale SHA as actual.
+                result.actual_head_sha = gh
+                    .api_json_until(&format!("repos/{repo}/pulls/{number}"), deadline)
+                    .ok()
+                    .and_then(|pr: Value| pr["head"]["sha"].as_str().map(str::to_string));
                 break MergeHold::HeadMoved;
             }
             return Err(Error::internal_io(
