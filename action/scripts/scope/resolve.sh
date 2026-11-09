@@ -15,7 +15,7 @@
 #
 # Outputs (GITHUB_ENV + GITHUB_OUTPUT):
 #   SCOPE_CONTEXT      — pr | push | cron | manual
-#   SCOPE_BASE_REF     — PR base SHA with verified common ancestry (also for full scope)
+#   SCOPE_BASE_REF     — PR merge base (also for full scope)
 #   SCOPE_MODE         — changed | full
 #   SCOPE_IS_FORK      — true | false
 
@@ -89,7 +89,11 @@ if [ "${SCOPE_CONTEXT}" = "pr" ] || [ "${SCOPE_INPUT}" = "changed" ]; then
     if git merge-base "${BASE_SHA}" HEAD >/dev/null 2>&1; then
       MERGE_BASE=$(git merge-base "${BASE_SHA}" HEAD)
       echo "Merge base found: ${MERGE_BASE:0:8}"
-      SCOPE_BASE_REF="${BASE_SHA}"
+      if [ "${SCOPE_CONTEXT}" = "pr" ]; then
+        SCOPE_BASE_REF="${MERGE_BASE}"
+      else
+        SCOPE_BASE_REF="${BASE_SHA}"
+      fi
       if [ "${SCOPE_INPUT}" != "full" ]; then
         SCOPE_MODE="changed"
       fi
