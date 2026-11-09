@@ -2,6 +2,11 @@
 
 All notable changes to Homeboy Action will be documented in this file.
 
+## [2.25.10] - 2026-11-09
+
+### Fixed
+- baseline and component detection against the PR merge base
+
 ## [2.25.9] - 2026-11-08
 
 ### Fixed
