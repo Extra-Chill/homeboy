@@ -9958,6 +9958,46 @@ mod tests {
     }
 
     #[test]
+    fn declared_playwright_browsers_resolves_nodejs_extension_mapping() {
+        let _guard = env_mutex();
+        let worktree = tempfile::tempdir().unwrap();
+        let ambient = tempfile::tempdir().unwrap();
+        let extensions = ambient.path().join(".config/homeboy/extensions/nodejs");
+        fs::create_dir_all(&extensions).unwrap();
+        fs::write(
+            extensions.join("nodejs.json"),
+            include_str!("../../../extensions/nodejs/nodejs.json"),
+        )
+        .unwrap();
+        let cache = ambient.path().join(".cache/ms-playwright");
+        fs::create_dir_all(&cache).unwrap();
+        let _env = EnvVarGuard::set(&[("HOME", ambient.path())]);
+        let policy = AgentTaskGateEnvironmentPolicy {
+            requirements: AgentTaskGateRequirements {
+                host_tools: vec!["playwright-browsers".into()],
+                secrets: Vec::new(),
+            },
+            ..Default::default()
+        };
+        let report = run_gate_command_with_policy_and_runtime_tmpdir_and_environment(
+            worktree.path(),
+            1,
+            &format!(
+                "test \"$PLAYWRIGHT_BROWSERS_PATH\" = '{}' && test \"$HOME\" != '{}'",
+                cache.display(),
+                ambient.path().display()
+            ),
+            AgentTaskGateVisibility::Visible,
+            AgentTaskGateRevealPolicy::FullEvidence,
+            Some(worktree.path()),
+            &policy,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(report.exit_code, 0, "{report:?}");
+    }
+
+    #[test]
     fn isolated_gate_discovers_only_selected_extension_copies_with_replayable_provenance() {
         let _guard = env_mutex();
         let worktree = tempfile::tempdir().expect("worktree");

@@ -1,6 +1,6 @@
 {
   "name": "Node.js",
-  "version": "3.9.7",
+  "version": "3.9.8",
   "source_url": "https://github.com/Extra-Chill/homeboy",
   "icon": "server.rack",
   "description": "Node.js project type — discovery, lint/test runners, and npm release lifecycle",
@@ -13,6 +13,11 @@
   },
   "composition": {
     "includes": []
+  },
+  "gate_host_tools": {
+    "playwright-browsers": {
+      "PLAYWRIGHT_BROWSERS_PATH": "HOME/.cache/ms-playwright"
+    }
   },
   "source_snapshot": {
     "sync_excludes": ["node_modules/", "node_modules/**"]
