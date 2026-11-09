@@ -569,3 +569,83 @@ fn profile_with_unknown_scenario_lists_discovered_scenarios() {
         assert!(message.contains("rig-slow"), "got: {}", message);
     });
 }
+
+/// #17679: the extension child resolves `node` in the caller's PATH order, and
+/// bench provenance records which `node` that was.
+#[cfg(unix)]
+#[test]
+fn extension_child_resolves_node_in_caller_path_order_and_records_it() {
+    with_isolated_home(|home| {
+        write_bench_extension(home);
+        let script = home
+            .path()
+            .join(".config/homeboy/extensions/fixture-bench/bench-runner.sh");
+        homeboy_test_support::write_executable(
+            &script,
+            r#"#!/bin/sh
+resolved="$(node)"
+cat > "$HOMEBOY_BENCH_RESULTS_FILE" <<JSON
+{
+  "component_id": "$HOMEBOY_COMPONENT_ID",
+  "iterations": 1,
+  "scenarios": [
+    { "id": "node-$resolved", "iterations": 1, "metrics": { "p95_ms": 1.0 } }
+  ]
+}
+JSON
+"#,
+            0o755,
+        )
+        .expect("write bench script");
+
+        let write_node = |dir: &std::path::Path, label: &str| {
+            fs::create_dir_all(dir).expect("node dir");
+            let node = dir.join("node");
+            homeboy_test_support::write_executable(
+                &node,
+                &format!(
+                    "#!/bin/sh\nif [ \"$1\" = --version ]; then echo v0.0.0-{label}; else echo {label}; fi\n"
+                ),
+                0o755,
+            )
+            .expect("write fake node");
+            node
+        };
+        let tools = tempfile::TempDir::new().expect("tools");
+        let first = write_node(&tools.path().join("first"), "first");
+        write_node(&tools.path().join("second"), "second");
+        // A Homeboy-discovered tool dir must not shadow the caller's PATH.
+        write_node(&home.path().join(".local/bin"), "discovered");
+        let caller_path = std::env::join_paths(
+            [tools.path().join("first"), tools.path().join("second")]
+                .into_iter()
+                .chain(std::env::split_paths(
+                    &std::env::var_os("PATH").unwrap_or_default(),
+                )),
+        )
+        .expect("caller PATH");
+        let _path = homeboy_core::test_support::EnvVarGuard::set("PATH", &caller_path);
+
+        let component_dir = tempfile::TempDir::new().expect("component dir");
+        write_registered_component(home, "studio", component_dir.path());
+
+        let (output, exit_code) =
+            run(run_args(Some("studio"), Vec::new(), Vec::new())).expect("bench should run");
+
+        assert_eq!(exit_code, 0);
+        let BenchOutput::Single(result) = output else {
+            panic!("expected single output");
+        };
+        let results = result.results.expect("results");
+        assert_eq!(results.scenarios[0].id, "node-first");
+        let node = results
+            .run_metadata
+            .expect("run metadata")
+            .runner
+            .expect("runner metadata")
+            .node
+            .expect("node provenance");
+        assert_eq!(node.path, first.to_string_lossy());
+        assert_eq!(node.version.as_deref(), Some("v0.0.0-first"));
+    });
+}

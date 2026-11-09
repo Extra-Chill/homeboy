@@ -10022,6 +10022,10 @@ mod tests {
         let cache = ambient.path().join(".cache/ms-playwright");
         fs::create_dir_all(&cache).unwrap();
         let _env = EnvVarGuard::set(&[("HOME", ambient.path())]);
+        // Gates (including Homeboy's own Lab gates) can export the runner's
+        // real PLAYWRIGHT_BROWSERS_PATH, which outranks the HOME mapping.
+        let _playwright =
+            homeboy_core::test_support::EnvVarGuard::unset("PLAYWRIGHT_BROWSERS_PATH");
         let policy = AgentTaskGateEnvironmentPolicy {
             requirements: AgentTaskGateRequirements {
                 host_tools: vec!["playwright-browsers".into()],

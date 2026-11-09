@@ -27,7 +27,7 @@ pub(super) fn status(id: Option<&str>, full: bool) -> CmdResult<RunnerOutput> {
         }
         let lab_readiness = runner::lab_runner_readiness()?;
         let preferred_lab_runner = lab_readiness.selected_runner_id.clone();
-        let admission_snapshot = runner::runner_admission_snapshot(id)?;
+        let admission_snapshot = runner::runner_status_admission_snapshot(id)?;
         let report = admission_snapshot.status;
         let capabilities =
             global_execution_capabilities(&runners, Some(&report), Some(&lab_readiness))?;

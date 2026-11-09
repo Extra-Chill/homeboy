@@ -35,14 +35,16 @@ pub(crate) fn run_sequential_runs(
     let mut first_failure_stderr_tail: Option<String> = None;
     let mut first_failure_memory_sample: Option<BenchFailureMemorySample> = None;
     let mut observed_elapsed_ms: Option<u128> = None;
+    let mut child_path: Option<String> = None;
 
     for _ in 0..args.execution.runs {
-        let (parsed, success, exit_code, stderr_tail, memory_sample, run_elapsed_ms) =
+        let (parsed, success, exit_code, stderr_tail, memory_sample, run_elapsed_ms, run_path) =
             if args.execution.concurrency <= 1 {
                 run_single_dispatcher(execution_context, component, args, run_dir)?
             } else {
                 run_concurrent_instances(execution_context, component, args, run_dir)?
             };
+        child_path = child_path.or(run_path);
         observed_elapsed_ms = Some(
             observed_elapsed_ms
                 .unwrap_or_default()
@@ -83,6 +85,7 @@ pub(crate) fn run_sequential_runs(
         first_failure_stderr_tail,
         first_failure_memory_sample,
         observed_elapsed_ms,
+        child_path,
     ))
 }
 
@@ -106,7 +109,8 @@ pub(crate) fn run_single_dispatcher(
         })?;
     }
 
-    let runner_output = build_runner(execution_context, component, args, run_dir, None)?.run()?;
+    let (runner_output, child_path) =
+        build_runner(execution_context, component, args, run_dir, None)?.run_with_child_path()?;
     let parsed = parse_execution_results_file(
         &results_file,
         &args.scenario_ids,
@@ -129,6 +133,7 @@ pub(crate) fn run_single_dispatcher(
             .child_resource
             .as_ref()
             .map(|resource| resource.duration_ms),
+        child_path,
     ))
 }
 
@@ -372,18 +377,22 @@ pub(crate) fn run_concurrent_instances(
         let comp = Arc::clone(&component);
         let a = Arc::clone(&args_arc);
         let rd = Arc::clone(&run_dir);
-        handles.push(thread::spawn(move || -> Result<(u32, _)> {
+        handles.push(thread::spawn(move || -> Result<(u32, _, _)> {
             let runner = build_runner(&ctx, &comp, &a, &rd, Some((instance_id, concurrency)))?;
-            let output = runner.run()?;
-            Ok((instance_id, output))
+            let (output, child_path) = runner.run_with_child_path()?;
+            Ok((instance_id, output, child_path))
         }));
     }
 
     let mut per_instance: Vec<(u32, crate::extension::invoke::RunnerOutput)> =
         Vec::with_capacity(concurrency as usize);
+    let mut child_path: Option<String> = None;
     for h in handles {
         match h.join() {
-            Ok(Ok(pair)) => per_instance.push(pair),
+            Ok(Ok((instance_id, output, instance_path))) => {
+                child_path = child_path.or(instance_path);
+                per_instance.push((instance_id, output));
+            }
             Ok(Err(e)) => return Err(e),
             Err(_) => return Err(Error::internal_unexpected("bench instance thread panicked")),
         }
@@ -519,5 +528,6 @@ pub(crate) fn run_concurrent_instances(
         first_failure_stderr_tail,
         first_failure_memory_sample,
         observed_elapsed_ms,
+        child_path,
     ))
 }

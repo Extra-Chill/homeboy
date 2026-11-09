@@ -424,10 +424,28 @@ pub(super) fn consume_execution_terminal_in_store(
                 delivery.key, delivery.outcome, delivery.exit_code
             )
         });
+    let runner_availability = diagnostic
+        .as_ref()
+        .and_then(|value| {
+            [&value["details"], &value["data"]]
+                .into_iter()
+                .map(|details| &details["runner_availability"])
+                .find(|availability| availability.is_object())
+        })
+        .cloned()
+        .unwrap_or(Value::Null);
     let runner_ineligible = diagnostic.as_ref().is_some_and(|value| {
         value["details"]["execution_step_disposition"] == "runner_ineligible"
             || value["data"]["execution_step_disposition"] == "runner_ineligible"
-    });
+    }) || runner_availability_awaits_resources(&runner_availability);
+    // The recorded failure keeps the structured Lab refusal, not just its
+    // headline, so the reasons survive after the step terminalizes.
+    let failure_record = |mut record: Value| {
+        if !runner_availability.is_null() {
+            record["runner_availability"] = runner_availability.clone();
+        }
+        homeboy_core::redaction::redact_json(&record)
+    };
     let recoverable = runner_ineligible
         || delivery.outcome == StepTerminalOutcome::SpawnInterrupted
         || (delivery.outcome == StepTerminalOutcome::Exited && command.is_none())
@@ -537,7 +555,7 @@ pub(super) fn consume_execution_terminal_in_store(
                     ("execution_scheduling".into(), scheduling),
                     (
                         "execution_step_failure".into(),
-                        homeboy_core::redaction::redact_json(&json!({
+                        failure_record(json!({
                             "message": reason, "diagnostic": diagnostic, "job_id": delivery.job_id,
                             "step_key": delivery.key, "classification": disposition,
                         })),
@@ -594,8 +612,8 @@ pub(super) fn consume_execution_terminal_in_store(
         prepared.metadata["execution_scheduling"]["epoch"] = json!(next.epoch);
         prepared.metadata["execution_scheduling"]["recovery_failures"] =
             json!(failures + u64::from(!runner_ineligible));
-        prepared.metadata["execution_step_failure"] = homeboy_core::redaction::redact_json(
-            &json!({"message": reason, "diagnostic": diagnostic, "step_key": delivery.key}),
+        prepared.metadata["execution_step_failure"] = failure_record(
+            json!({"message": reason, "diagnostic": diagnostic, "step_key": delivery.key}),
         );
         disposition = if runner_ineligible {
             "runner_wait"
@@ -646,6 +664,23 @@ pub(super) fn consume_execution_terminal_in_store(
         )?;
     }
     Ok(json!({"acknowledged": true, "job_id": delivery.job_id, "disposition": disposition}))
+}
+
+/// A Lab refusal naming only capacity or pressure waits for a slot through the
+/// same `runner_wait` requeue fresh Cook admission uses. Any substrate reason
+/// (`not_connected`, `stale_daemon`, `active_jobs_unavailable`, ...) fails.
+fn runner_availability_awaits_resources(runner_availability: &Value) -> bool {
+    runner_availability["reasons"]
+        .as_array()
+        .is_some_and(|reasons| {
+            !reasons.is_empty()
+                && reasons.iter().all(|reason| {
+                    matches!(
+                        reason.as_str(),
+                        Some("capacity_reached" | "pressure" | "capacity_unknown")
+                    )
+                })
+        })
 }
 
 pub(crate) fn schedule_execution_intent_with(

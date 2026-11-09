@@ -1478,6 +1478,29 @@ mod tests {
         });
     }
 
+    /// #17679: a caller's PATH travels in the admitted plan and reaches the
+    /// child verbatim, never reordered or replaced by the daemon's PATH.
+    #[test]
+    fn caller_path_reaches_the_child_verbatim() {
+        with_isolated_home(|home| {
+            let caller_path = "/caller/node/bin:/usr/local/bin:/usr/bin:/bin";
+            let mut env = EnvMaterializationPlan::default();
+            env.public_env
+                .insert("PATH".to_string(), caller_path.to_string());
+            let request = request("printf 'child-path=%s\\n' \"$PATH\"", env);
+            let harness = step_harness(&request, home.path());
+            harness.start_via_controller_boundary().unwrap();
+            let job = harness.wait_until_terminal().unwrap();
+            assert_eq!(job.status, crate::api_jobs::JobStatus::Succeeded);
+            let log = job_log(&harness);
+            assert!(
+                log.lines()
+                    .any(|line| line == format!("child-path={caller_path}")),
+                "{log}"
+            );
+        });
+    }
+
     #[test]
     fn secret_references_resolve_through_the_registered_resolver_only() {
         with_isolated_home(|home| {

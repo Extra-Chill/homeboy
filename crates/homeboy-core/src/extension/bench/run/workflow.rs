@@ -156,6 +156,7 @@ pub fn run_main_bench_workflow(
                     extension: "component-script".to_string(),
                     path: source_path.to_string_lossy().to_string(),
                     source_revision: None,
+                    node: None,
                 }),
                 rig_package: args.rig_package.clone(),
                 lifecycle: None,
@@ -265,18 +266,19 @@ pub fn run_main_bench_workflow(
         failure_stderr_tail,
         failure_memory_sample,
         responsiveness_observed_elapsed_ms,
+        child_path,
     ) = if execution_args.execution.runs > 1 {
         run_sequential_runs(&execution_context, component, &execution_args, run_dir)?
     } else if execution_args.execution.concurrency <= 1 {
         let results_file = run_dir.step_file(run_dir::files::BENCH_RESULTS);
-        let runner_output = build_runner(
+        let (runner_output, child_path) = build_runner(
             &execution_context,
             component,
             &execution_args,
             run_dir,
             None,
         )?
-        .run()?;
+        .run_with_child_path()?;
         preserve_memory_timeline_artifacts(runner_output.child_resource.as_ref(), run_dir, None)?;
         let parsed = parse_execution_results_file(
             &results_file,
@@ -312,6 +314,7 @@ pub fn run_main_bench_workflow(
                 .child_resource
                 .as_ref()
                 .map(|resource| resource.duration_ms),
+            child_path,
         )
     } else {
         run_concurrent_instances(&execution_context, component, &execution_args, run_dir)?
@@ -330,6 +333,7 @@ pub fn run_main_bench_workflow(
             component,
             &execution_args,
             &started_at,
+            child_path.as_deref(),
         );
     }
     let mut gate_failures = parsed
