@@ -272,6 +272,7 @@ impl ControllerJobDriver for WorkflowJobDriver {
             message: crate::redaction::redact_string(&error.message),
             data: json!({
                 "code": error.code.as_str(),
+                "diagnostic": controller_job_driver::public_io_diagnostic(error),
                 "instance_status": error.details.get("instance_status").cloned().unwrap_or(Value::Null),
                 "workflow": error.details.get("workflow").cloned().unwrap_or(Value::Null),
             }),

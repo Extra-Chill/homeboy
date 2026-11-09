@@ -17,6 +17,36 @@ mod notification_queue_tests;
 #[path = "workflow_notify_tests.rs"]
 mod notification_tests;
 
+#[test]
+fn workflow_job_errors_preserve_redacted_io_and_lock_diagnostics() {
+    use crate::daemon::step_job::StepJobDriver;
+
+    let mut io = Error::internal_io(
+        "Permission denied; token=private-value",
+        Some("create /state/workflows/output.json".into()),
+    );
+    io.details["env"] = json!({"SECRET": "must-not-be-published"});
+    let busy = Error::observation_store_busy("/state/observation.db", "begin commit", 10_000);
+    for driver in [
+        &WorkflowJobDriver as &dyn ControllerJobDriver,
+        &StepJobDriver,
+    ] {
+        let public = driver.public_error(&io);
+        let diagnostic = &public.data["diagnostic"];
+        assert_eq!(diagnostic["context"], "create /state/workflows/output.json");
+        assert!(diagnostic["error"]
+            .as_str()
+            .unwrap()
+            .contains("Permission denied"));
+        assert!(!public.data.to_string().contains("private-value"));
+        assert!(!public.data.to_string().contains("must-not-be-published"));
+        let public = driver.public_error(&busy);
+        assert_eq!(public.data["diagnostic"]["path"], "/state/observation.db");
+        assert_eq!(public.data["diagnostic"]["operation"], "begin commit");
+        assert_eq!(public.data["diagnostic"]["timeout_ms"], 10_000);
+    }
+}
+
 fn request(definition: Value, cwd: &Path) -> WorkflowJobRequest {
     register_workflow_step_terminal_consumer(crate::daemon::step_job::STEP_RECEIPT_CONSUMER);
     let definition = WorkflowDefinition::from_value(definition).unwrap();
