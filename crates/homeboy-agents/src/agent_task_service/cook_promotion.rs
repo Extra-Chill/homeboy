@@ -2926,9 +2926,14 @@ pub(crate) fn finalize_or_load_cook_pr_with_backend_with_stores<
     if !promotion.finalization_eligible() {
         return Err(Error::validation_invalid_argument(
             "promotion",
-            "agent-task cook finalization requires green gates or explicitly accepted inherited baseline failures",
-            None,
-            None,
+            format!(
+                "agent-task cook finalization requires green gates or proven inherited baseline failures; inspect the blocking gates with `homeboy agent-task status {successful_run_id}`, then run `homeboy agent-task recover {successful_run_id}`"
+            ),
+            Some(successful_run_id.to_string()),
+            Some(vec![
+                format!("homeboy agent-task status {successful_run_id}"),
+                format!("homeboy agent-task recover {successful_run_id}"),
+            ]),
         ));
     }
     if lifecycle_store

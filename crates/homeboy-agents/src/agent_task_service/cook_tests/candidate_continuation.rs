@@ -986,3 +986,153 @@ fn cook_recovery_preflight_status_and_recover_name_one_step() {
         assert_eq!(*performer.0.lock().unwrap(), vec![true, false]);
     });
 }
+
+/// A second gate Homeboy added to the declared verify gate, whose failure
+/// carries `status` and the given evidence.
+fn push_added_gate(
+    promotion: &mut AgentTaskPromotionReport,
+    status: crate::agent_task_gate::AgentTaskGateStatus,
+    setup: Vec<crate::agent_task_gate::AgentTaskGateSetupEvidence>,
+) {
+    use crate::agent_task_gate::{
+        AgentTaskGateBaselineComparison, AgentTaskGateDifferentialResult,
+        AgentTaskGateFailureClassification, AgentTaskGateFailureEvidence,
+    };
+    let mut gate = promotion.deterministic_gates[0].clone();
+    gate.id = "gate-2".to_string();
+    gate.status = status;
+    gate.exit_code = 1;
+    gate.setup = setup;
+    gate.failure_evidence = Some(AgentTaskGateFailureEvidence {
+        classification: AgentTaskGateFailureClassification::CandidateCode,
+        summary: "added gate failed identically on the immutable baseline".to_string(),
+        command: gate.command.join(" "),
+        exit_code: 1,
+        stdout_tail: String::new(),
+        stderr_tail: String::new(),
+        agent_feedback: String::new(),
+        diagnostics: Vec::new(),
+    });
+    gate.baseline_comparison = Some(AgentTaskGateBaselineComparison {
+        base_ref: "main".to_string(),
+        exit_code: 1,
+        failure_fingerprint: "inherited".to_string(),
+        matches_candidate_failure: true,
+        result: AgentTaskGateDifferentialResult::BaselineRed,
+        diagnostic: None,
+    });
+    promotion.deterministic_gates.push(gate);
+    promotion.status = AgentTaskPromotionStatus::GateFailed;
+}
+
+/// #17423: the declared gate passed and the only other failure is an
+/// `accepted_inherited_failure` reproduced on the immutable baseline, so the
+/// Cook is publishable: every surface plans `publish` with no flags, and no
+/// replacement-gate authorization is required.
+#[test]
+fn cook_recovery_plans_publish_for_declared_green_with_inherited_added_gate() {
+    use crate::agent_task_gate::AgentTaskGateStatus;
+    use crate::agent_task_service::CookRecoveryStep;
+    with_own_green_gates(|options, _| {
+        let cook = &options.identity.cook_id;
+        let run = &options.identity.initial_run_id;
+        let mut promotion = persisted_promotion_for_attempt(run).unwrap().unwrap();
+        assert_eq!(
+            promotion.deterministic_gates[0].status,
+            AgentTaskGateStatus::Succeeded
+        );
+        push_added_gate(
+            &mut promotion,
+            AgentTaskGateStatus::AcceptedInheritedFailure,
+            Vec::new(),
+        );
+        test_lifecycle_store()
+            .record_promotion(run, serde_json::to_value(&promotion).unwrap())
+            .unwrap();
+
+        let plan = crate::agent_task_service::plan_cook_recovery(cook).unwrap();
+        assert_eq!(plan.step, CookRecoveryStep::Publish, "{plan:?}");
+        let context =
+            crate::agent_task_service::cook_failure_context(cook, Some(&plan.run_id), &plan.status)
+                .unwrap();
+        assert_eq!(context.recovery_step, Some(CookRecoveryStep::Publish));
+        let (preflight, exit) = crate::agent_task_service::recover_cook(
+            cook,
+            crate::agent_task_service::CookRecoveryRequest {
+                preflight: true,
+                ..Default::default()
+            },
+            &RecordingPublish(Default::default()),
+        )
+        .unwrap();
+        assert_eq!(exit, 0, "{preflight:#?}");
+        assert_eq!(preflight.step, CookRecoveryStep::Publish);
+        // The inherited failure stays recorded as baseline-red evidence.
+        let stored = persisted_promotion_for_attempt(run).unwrap().unwrap();
+        assert_eq!(
+            stored.deterministic_gates[1].status,
+            AgentTaskGateStatus::AcceptedInheritedFailure
+        );
+    });
+}
+
+/// #17423: a gate whose `promotion.gate_setup` step stalled (`composer
+/// install stopped making progress`) never reached a verdict, even when the
+/// baseline stalled identically. It classifies as
+/// `gate_environment_unavailable` and recovery re-runs the gates instead of
+/// counting a required-gate failure or publishing over it.
+#[test]
+fn cook_recovery_classifies_stalled_gate_setup_as_gate_environment_unavailable() {
+    use crate::agent_task_gate::AgentTaskGateStatus;
+    use crate::agent_task_service::CookRecoveryStep;
+    use homeboy_core::cook_status::CookStatus;
+    use homeboy_core::deps::{DependencyHydrationStatus, DependencyHydrationTermination};
+    with_own_green_gates(|options, _| {
+        let cook = &options.identity.cook_id;
+        let run = &options.identity.initial_run_id;
+        let mut promotion = persisted_promotion_for_attempt(run).unwrap().unwrap();
+        let stall = homeboy_core::deps::DependencyHydrationOutcome {
+            schema: "homeboy/dependency-hydration-outcome/v1".to_string(),
+            workspace: "destination_gate_workspace".to_string(),
+            package_root: ".".to_string(),
+            provider_id: "composer".to_string(),
+            command: vec!["sh".into(), "-c".into(), "composer install".into()],
+            cwd: "/workspace".to_string(),
+            reason: "no_progress".to_string(),
+            download_cache: Default::default(),
+            download_auth: Default::default(),
+            termination: DependencyHydrationTermination::NoProgress,
+            status: DependencyHydrationStatus::Failed,
+            exit_code: None,
+            stdout: "Downloading phpstan/phpstan (2.3.0)".to_string(),
+            stderr: String::new(),
+            missing_outputs: Vec::new(),
+        };
+        // Recorded the way the issue's Cook did: accepted as inherited.
+        push_added_gate(
+            &mut promotion,
+            AgentTaskGateStatus::AcceptedInheritedFailure,
+            vec![stall],
+        );
+        assert!(!promotion.finalization_eligible());
+        test_lifecycle_store()
+            .record_promotion(run, serde_json::to_value(&promotion).unwrap())
+            .unwrap();
+
+        let stored = persisted_promotion_for_attempt(run).unwrap().unwrap();
+        assert_eq!(
+            stored.deterministic_gates[1].status,
+            AgentTaskGateStatus::Unavailable
+        );
+        assert!(stored.deterministic_gates[1].failure_evidence.is_none());
+        assert_eq!(stored.status, AgentTaskPromotionStatus::GateDeferred);
+        let promotion_status = serde_json::to_value(stored.status).unwrap();
+        assert_eq!(
+            CookStatus::from_status(promotion_status.as_str().unwrap()).as_str(),
+            "gate_environment_unavailable"
+        );
+
+        let plan = crate::agent_task_service::plan_cook_recovery(cook).unwrap();
+        assert_eq!(plan.step, CookRecoveryStep::Regate, "{plan:?}");
+    });
+}

@@ -1669,9 +1669,13 @@ impl AgentTaskGateReport {
         // Only a candidate-code failure can be explained by an identical base
         // replay. Gate declarations and invalid focused selections are intrinsic
         // policy failures, even when the base has the same bad configuration.
-        if !self.failure_evidence.as_ref().is_some_and(|evidence| {
-            evidence.classification == AgentTaskGateFailureClassification::CandidateCode
-        }) {
+        // A stalled dependency setup never reached a candidate verdict, so an
+        // identical stall on the baseline proves nothing about either (#17423).
+        if self.setup_stalled()
+            || !self.failure_evidence.as_ref().is_some_and(|evidence| {
+                evidence.classification == AgentTaskGateFailureClassification::CandidateCode
+            })
+        {
             return;
         }
         self.status = AgentTaskGateStatus::AcceptedInheritedFailure;
@@ -1698,6 +1702,57 @@ impl AgentTaskGateReport {
             )
             .gate_result(gate_result)
             .build();
+    }
+}
+
+impl AgentTaskGateReport {
+    /// Whether this gate's failure is its `promotion.gate_setup` dependency
+    /// step stalling or timing out (for example `composer install stopped
+    /// making progress`) rather than a verdict on the candidate (#17423).
+    pub(crate) fn setup_stalled(&self) -> bool {
+        if !matches!(
+            self.status,
+            AgentTaskGateStatus::Failed | AgentTaskGateStatus::AcceptedInheritedFailure
+        ) {
+            return false;
+        }
+        let stalled_outcome = self.setup.iter().any(|outcome| {
+            outcome.status == homeboy_core::deps::DependencyHydrationStatus::Failed
+                && matches!(
+                    outcome.termination,
+                    homeboy_core::deps::DependencyHydrationTermination::NoProgress
+                        | homeboy_core::deps::DependencyHydrationTermination::TimedOut
+                )
+        });
+        // Older reports recorded only the setup error text.
+        let stalled_text = [
+            self.stderr.as_str(),
+            self.failure_evidence
+                .as_ref()
+                .map_or("", |evidence| evidence.summary.as_str()),
+        ]
+        .iter()
+        .any(|text| {
+            text.contains("Dependency step 'promotion.gate_setup' failed")
+                && (text.contains("stopped making progress") || text.contains("timed out"))
+        });
+        stalled_outcome || stalled_text
+    }
+
+    /// Reclassify a stalled gate setup as the infrastructure fault it is: the
+    /// gate is `Unavailable` (Cook status `gate_environment_unavailable`), so
+    /// recovery re-runs it instead of counting a required-gate failure or an
+    /// inherited baseline failure. Returns whether the gate changed.
+    pub(crate) fn reclassify_setup_stall(&mut self) -> bool {
+        if !self.setup_stalled() {
+            return false;
+        }
+        self.status = AgentTaskGateStatus::Unavailable;
+        self.failure_evidence = None;
+        // The stall belongs to setup supervision, not to the gate's own budget.
+        self.termination = AgentTaskGateTermination::Completed;
+        placement::rebuild_terminal_step(self);
+        true
     }
 }
 

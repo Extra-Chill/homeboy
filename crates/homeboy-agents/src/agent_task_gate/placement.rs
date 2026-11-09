@@ -548,7 +548,7 @@ pub fn gate_execute_failure(receipt: &LabGateReceipt) -> Option<serde_json::Valu
     Some(homeboy_core::redaction::redact_json(&failure))
 }
 
-fn rebuild_terminal_step(report: &mut AgentTaskGateReport) {
+pub(super) fn rebuild_terminal_step(report: &mut AgentTaskGateReport) {
     report.step = PlanStep::builder(
         report.id.clone(),
         "agent_task.gate",

@@ -86,18 +86,22 @@ pub(super) fn replace_gates_request(
     if args.promotion.is_none() && !has_gates {
         return Ok(None);
     }
+    let id = args.id.clone();
     let invalid = |message: &str| {
         homeboy::core::Error::validation_invalid_argument(
             "replace-gates",
             message.to_string(),
-            Some(args.id.clone()),
-            None,
+            Some(id.clone()),
+            Some(vec![
+                format!("homeboy agent-task recover {id} --authorize-external-proof <AUTHORIZATION> --verify '<CANDIDATE-BOUND COMMAND>'"),
+                format!("homeboy agent-task recover {id} --authorize-external-proof <AUTHORIZATION> --promotion @replacement.json"),
+            ]),
         )
     };
     let Some(authorization) = args.authorize_external_proof.clone() else {
-        return Err(invalid(
-            "replacement gates and replacement proof require --authorize-external-proof",
-        ));
+        return Err(invalid(&format!(
+            "replacement gates and replacement proof require --authorize-external-proof <AUTHORIZATION>; a candidate whose declared gates passed and whose other failures are proven inherited baseline failures needs no replacement and publishes with `homeboy agent-task recover {id}`"
+        )));
     };
     let proof = match (args.promotion.as_deref(), has_gates) {
         (Some(_), true) => {
