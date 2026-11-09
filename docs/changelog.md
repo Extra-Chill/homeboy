@@ -4,6 +4,20 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.451.0] - 2026-11-09
+
+### Added
+- re-gate an existing candidate without provider work
+
+### Changed
+- assert the current --repo inference help line
+
+### Fixed
+- validate and derive --to-worktree before admission
+- consume operator feedback at the shared provider dispatch boundary
+- stage a refreshed build until the daemon can restart onto it
+- serve /health from a cached freshness snapshot and give controller health probes a load-tolerant budget
+
 ## [0.450.0] - 2026-11-08
 
 ### Added
