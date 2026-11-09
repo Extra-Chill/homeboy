@@ -18,6 +18,18 @@ pub struct ControllerJobPublicError {
     pub data: Value,
 }
 
+/// Preserve actionable I/O diagnostics without publishing arbitrary driver
+/// details (which may contain admitted environment values or secret references).
+pub(crate) fn public_io_diagnostic(error: &Error) -> Value {
+    let mut diagnostic = serde_json::Map::new();
+    for key in ["error", "context", "path", "operation", "timeout_ms"] {
+        if let Some(value) = error.details.get(key) {
+            diagnostic.insert(key.to_string(), value.clone());
+        }
+    }
+    crate::redaction::redact_json(&Value::Object(diagnostic))
+}
+
 /// Read-only projection of externally supervised work. This is not a daemon
 /// spawn reservation: the domain retains responsibility for cancellation and
 /// recovery, including collecting its durable outcome after process death.

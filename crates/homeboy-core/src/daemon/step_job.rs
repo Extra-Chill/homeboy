@@ -585,6 +585,7 @@ impl ControllerJobDriver for StepJobDriver {
             message: crate::redaction::redact_string(&error.message),
             data: json!({
                 "code": error.code.as_str(),
+                "diagnostic": controller_job_driver::public_io_diagnostic(error),
                 "exit_code": error.details.get("exit_code").cloned().unwrap_or(Value::Null),
                 "step_outcome": error.details.get("step_outcome").cloned().unwrap_or(Value::Null),
                 "step_child": error.details.get("step_child").cloned().unwrap_or(Value::Null),
