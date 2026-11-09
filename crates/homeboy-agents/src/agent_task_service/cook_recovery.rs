@@ -233,8 +233,10 @@ fn decide_cook_recovery_step(inputs: &CookRecoveryInputs<'_>) -> CookRecoverySte
     // took would race it, and `diagnose` reports the same Cook as running.
     if inputs.live_driver {
         return CookRecoveryStep::none(
-            "A live Cook driver is running this Cook; watch it with `agent-task status` instead.",
-        );
+format!(
+            "A live Cook driver is running this Cook; watch it with `homeboy agent-task status {} --watch` instead.",
+            inputs.run_id
+        ));
     }
     if inputs.disconnected_runner {
         return CookRecoveryStep::Continue;
@@ -242,8 +244,10 @@ fn decide_cook_recovery_step(inputs: &CookRecoveryInputs<'_>) -> CookRecoverySte
     let status = CookStatus::from_status(inputs.status);
     if status.is_in_flight() {
         return CookRecoveryStep::none(
-            "The Cook is still in flight; watch it with `agent-task status` instead.",
-        );
+format!(
+            "The Cook is still in flight; watch it with `homeboy agent-task status {} --watch` instead.",
+            inputs.run_id
+        ));
     }
     if inputs.blocking_claim {
         return CookRecoveryStep::Reconcile;
@@ -289,8 +293,10 @@ fn decide_cook_recovery_step(inputs: &CookRecoveryInputs<'_>) -> CookRecoverySte
     }
     if status == CookStatus::CandidateRecoverable && inputs.continuation_completed {
         return CookRecoveryStep::none(
-            "The candidate's terminal continuation is already completed; inspect it with `agent-task diagnose` before supplying publication inputs.",
-        );
+format!(
+            "The candidate's terminal continuation is already completed; inspect it with `homeboy agent-task diagnose {run}`, then publish it with `homeboy agent-task recover {run} --review-form @FORM.json --review-form-tool <TOOL> --review-form-model <MODEL> --review-form-author <IDENTITY>`.",
+            run = inputs.run_id
+        ));
     }
     if status == CookStatus::NoChanges {
         if let Some(candidate_ref) = inputs.adoptable_candidate_ref {
@@ -311,7 +317,8 @@ fn decide_cook_recovery_step(inputs: &CookRecoveryInputs<'_>) -> CookRecoverySte
         }
         if let Some(refusal) = inputs.retry_refusal {
             return CookRecoveryStep::none(format!(
-                "Retry admission refused this `pre_execution_failure` attempt: {refusal}. Inspect it with `agent-task diagnose`."
+                "Retry admission refused this `pre_execution_failure` attempt: {refusal}. Inspect it with `homeboy agent-task diagnose {}`.",
+                inputs.run_id
             ));
         }
     }
@@ -342,8 +349,8 @@ fn decide_cook_recovery_step(inputs: &CookRecoveryInputs<'_>) -> CookRecoverySte
             return CookRecoveryStep::ReplaceGates;
         }
         return CookRecoveryStep::none(format!(
-            "Cook status `{}` admits no recovery step; inspect it with `agent-task status` or `agent-task diagnose`.",
-            inputs.status
+            "Cook status `{}` admits no recovery step; inspect it with `homeboy agent-task diagnose {}`.",
+            inputs.status, inputs.run_id
         ));
     }
     continuation_step(inputs)
@@ -356,6 +363,16 @@ fn continuation_step(inputs: &CookRecoveryInputs<'_>) -> CookRecoveryStep {
     } else {
         CookRecoveryStep::Continue
     }
+}
+
+/// Stop reason for a Cook whose candidate and immutable baseline failed the
+/// same required gate without proof that would let it publish. It names the
+/// commands that make progress: re-run the gates once the shared environment
+/// is repaired, or re-verify the candidate with corrected gates.
+pub(crate) fn baseline_red_refusal(cook_id: &str) -> String {
+    format!(
+        "candidate and immutable baseline failed the same required gate; repair the inherited infrastructure or gate environment, then run `homeboy agent-task recover {cook_id} --regate`, or re-verify the candidate with corrected gates via `homeboy agent-task recover {cook_id} --authorize-external-proof <AUTHORIZATION> --verify '<CANDIDATE-BOUND COMMAND>'`"
+    )
 }
 
 /// Statuses whose candidate is already delivered or deliberately left
@@ -1297,7 +1314,10 @@ fn validate_step_inputs(
     if CookStatus::from_status(&plan.status).is_in_flight() {
         return refuse(
             field,
-            "the Cook is still in flight; watch it with `agent-task status` instead".to_string(),
+            format!(
+                "the Cook is still in flight; watch it with `homeboy agent-task status {} --watch` instead",
+                plan.run_id
+            ),
         );
     }
     match &plan.step {
@@ -1331,7 +1351,7 @@ fn validate_overrides(plan: &CookRecoveryPlan, preflight: bool) -> Result<()> {
             "recovery-override",
             message.to_string(),
             Some(plan.run_id.clone()),
-            None,
+            Some(vec![format!("homeboy agent-task recover {}", plan.run_id)]),
         ))
     };
     if preflight {

@@ -121,9 +121,27 @@ impl AgentTaskPromotionReport {
             .map(HomeboyGateResult::from)
             .collect::<Vec<_>>();
         let all_gates_passed = self.finalization_eligible();
+        // Gates that never executed (a stalled setup, #17423) leave the
+        // candidate unverified, not rejected.
+        let only_unexecuted_gates_block = self.finalization_blocking_gates().all(|gate| {
+            matches!(
+                gate.status,
+                AgentTaskGateStatus::Deferred
+                    | AgentTaskGateStatus::Unavailable
+                    | AgentTaskGateStatus::Skipped
+            )
+        }) && self.deterministic_gates.iter().any(|gate| {
+            matches!(
+                gate.status,
+                AgentTaskGateStatus::Deferred | AgentTaskGateStatus::Unavailable
+            )
+        });
         let status = match self.status {
             AgentTaskPromotionStatus::GateFailed if all_gates_passed => {
                 AgentTaskPromotionStatus::Applied
+            }
+            AgentTaskPromotionStatus::GateFailed if only_unexecuted_gates_block => {
+                AgentTaskPromotionStatus::GateDeferred
             }
             AgentTaskPromotionStatus::NoChangesGateFailed if all_gates_passed => {
                 AgentTaskPromotionStatus::VerifiedNoChanges
@@ -139,6 +157,11 @@ impl AgentTaskPromotionReport {
     /// Rebuild compatibility fields from the authoritative detailed reports
     /// before a report crosses a durable boundary.
     pub fn normalize_gate_outcome(&mut self) {
+        // A stalled gate setup is an infrastructure fault, never a gate
+        // verdict, including in reports persisted before it was classified.
+        for gate in &mut self.deterministic_gates {
+            gate.reclassify_setup_stall();
+        }
         let outcome = self.gate_outcome();
         let status_changed = self.status != outcome.status;
         self.status = outcome.status;
@@ -401,14 +424,16 @@ fn gate_finalization_eligible(gate: &AgentTaskGateReport) -> bool {
     match gate.status {
         AgentTaskGateStatus::Succeeded => gate.exit_code == 0,
         AgentTaskGateStatus::AcceptedInheritedFailure => {
-            gate.failure_evidence.as_ref().is_some_and(|evidence| {
-                evidence.classification
-                    == crate::agent_task_gate::AgentTaskGateFailureClassification::CandidateCode
-            }) && gate.baseline_comparison.as_ref().is_some_and(|comparison| {
-                comparison.matches_candidate_failure
-                    && comparison.result
-                        == crate::agent_task_gate::AgentTaskGateDifferentialResult::BaselineRed
-            })
+            !gate.setup_stalled()
+                && gate.failure_evidence.as_ref().is_some_and(|evidence| {
+                    evidence.classification
+                        == crate::agent_task_gate::AgentTaskGateFailureClassification::CandidateCode
+                })
+                && gate.baseline_comparison.as_ref().is_some_and(|comparison| {
+                    comparison.matches_candidate_failure
+                        && comparison.result
+                            == crate::agent_task_gate::AgentTaskGateDifferentialResult::BaselineRed
+                })
         }
         AgentTaskGateStatus::Failed
         | AgentTaskGateStatus::Skipped

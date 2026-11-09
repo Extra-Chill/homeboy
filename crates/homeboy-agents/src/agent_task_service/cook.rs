@@ -8197,16 +8197,14 @@ fn run_cook_spine(
                         Some("finalized with proven inherited baseline-red gate evidence"),
                     );
                 }
+                let stop_reason = super::cook_recovery::baseline_red_refusal(&cook_id);
                 return Ok(stores.report(CookReportInput {
                     cook_id,
                     status: "baseline_red",
                     disposition: CookDisposition::Terminal,
                     attempts,
                     finalization: None,
-                    stop_reason: Some(
-                        "candidate and immutable baseline failed the same required gate; repair the inherited infrastructure or gate environment before rerunning Cook"
-                            .to_string(),
-                    ),
+                    stop_reason: Some(stop_reason),
                     exit_code: 1,
                     invocation_latest_run_id: Some(&run_id),
                 }));

@@ -871,10 +871,10 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
             // Continue directly to finalization below; this adoption already has
             // durable baseline proof and must not spend another provider attempt.
         } else {
-            let reason = "candidate and immutable baseline failed the same required gate; repair the inherited infrastructure or gate environment before retrying adoption";
+            let reason = super::cook_recovery::baseline_red_refusal(cook_id);
             lifecycle_store.finish_candidate_adoption(
                 &record.run_id,
-                Some(reason.to_string()),
+                Some(reason.clone()),
                 false,
             )?;
             return Ok(stores.report(CookReportInput {
@@ -883,7 +883,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
                 disposition: CookDisposition::Terminal,
                 attempts: vec![attempt],
                 finalization: None,
-                stop_reason: Some(reason.to_string()),
+                stop_reason: Some(reason),
                 exit_code: 1,
                 invocation_latest_run_id: Some(record.run_id.as_str()),
             }));
