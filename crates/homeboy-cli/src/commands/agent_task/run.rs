@@ -1701,20 +1701,7 @@ fn preview_placement_policy_with_admission(replay_args: &[String]) -> Value {
         return policy;
     }
     let decision = homeboy::core::parsed_command_preflight::captured_result()
-        .map(|result| {
-            crate::commands::infra::route::cook_admission_decision(
-                crate::commands::infra::route::CookAdmissionPhase::Execution,
-                &result,
-                || {
-                    homeboy::core::engine::shell::quote_args(
-                        &crate::commands::infra::route::cook_placement_replay_args(
-                            replay_args,
-                            "local",
-                        ),
-                    )
-                },
-            )
-        })
+        .map(|result| crate::commands::infra::route::cook_admission_decision(&result))
         .unwrap_or_else(crate::commands::infra::route::CookAdmissionDecision::unchecked);
     policy["admission"] = render_cook_admission(decision);
     policy
@@ -3738,16 +3725,6 @@ process.stdout.write(JSON.stringify({type:'message_end',message:{role:'assistant
                 (
                     "auto",
                     None,
-                    true,
-                    false,
-                    CookAdmissionDecision::Blocked {
-                        reason: "not_connected".into(),
-                        next_action: Some("local replay".into()),
-                    },
-                ),
-                (
-                    "auto",
-                    None,
                     false,
                     true,
                     CookAdmissionDecision::Indeterminate {
@@ -3792,7 +3769,7 @@ process.stdout.write(JSON.stringify({type:'message_end',message:{role:'assistant
                 } else {
                     ResourceAdmissionDecision::Admitted
                 };
-                assert_eq!(cook_admission_decision(crate::commands::infra::route::CookAdmissionPhase::Execution, &result, || "local replay".into()), expected,
+                assert_eq!(cook_admission_decision(&result), expected,
                     "{placement}, runner={runner:?}, unavailable={unavailable}, rejected={rejected}");
             }
         });

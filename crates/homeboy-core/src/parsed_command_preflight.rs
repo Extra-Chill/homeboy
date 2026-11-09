@@ -289,9 +289,13 @@ pub fn resolve_parsed_command_preflight(
         && !selected_runner_admitted
         && !matches!(input.lab_route, LabRouteIntent::ReadPolling);
     // Split-placement Cook keeps its durable admission on the controller but
-    // requires an admitted Lab runner for the provider attempt. Do not let its
-    // preview silently choose local when execution will reject the same stale
-    // runner; explicit `lab-or-local` remains the opt-in fallback.
+    // requires an admitted Lab runner for the provider attempt whenever a Lab
+    // runner is configured. Auto never substitutes the controller for an
+    // unavailable, unverified, or stale Lab: preview and admission both fail
+    // with `lab_unavailable` here. Explicit `local` / `lab-or-local` remain the
+    // operator-approved local routes, and a host with no configured runner
+    // still resolves Auto locally. A capacity-blocked Lab is busy, not
+    // unavailable, and keeps its queued admission semantics.
     let auto_split_placement_requires_lab = matches!(
         (
             &input.controller_execution,
@@ -303,7 +307,10 @@ pub fn resolve_parsed_command_preflight(
             &PlacementIntent::Auto,
             &LabRouteIntent::Supported { automatic: true }
         )
-    );
+    ) && matches!(input.runner, RunnerIntent::Default)
+        && policy.lab_readiness.as_ref().is_some_and(|readiness| {
+            !matches!(readiness.state.as_str(), "absent" | "capacity_blocked")
+        });
     let required = if matches!(input.placement, PlacementIntent::Lab)
         || matches!(
             input.runner,
@@ -327,17 +334,17 @@ pub fn resolve_parsed_command_preflight(
         && matches!(input.runner, RunnerIntent::Default)
         && !auto_split_placement_requires_lab;
     if preferred_runner_inadmissible && !auto_route_fallback {
+        if auto_split_placement_requires_lab {
+            return Err(lab_unavailable_error(
+                policy
+                    .lab_readiness
+                    .as_ref()
+                    .expect("auto split placement requires configured Lab readiness"),
+            ));
+        }
         let runner_reason = policy.selected_runner_id.as_deref().map(|runner_id| {
             lab_route_inadmissible_reason(runner_id, policy.lab_readiness.as_ref())
         });
-        let local_admission = evaluate_resource_admission(
-            &input.resource_admission,
-            policy.resource_admission_evidence,
-        );
-        let local_reason = auto_split_placement_requires_lab
-            .then(|| local_route_inadmissible_reason(&local_admission))
-            .flatten();
-        let local_fallback_rejected = local_reason.is_some();
         let mut remediation = {
             policy
                 .lab_readiness
@@ -352,27 +359,10 @@ pub fn resolve_parsed_command_preflight(
                 })
                 .unwrap_or_default()
         };
-        remediation.extend(runner_reason.clone());
-        remediation.extend(local_reason.clone());
+        remediation.extend(runner_reason);
         return Err(crate::Error::validation_invalid_argument(
-            if auto_split_placement_requires_lab {
-                "placement"
-            } else {
-                "selected_runner_id"
-            },
-            if auto_split_placement_requires_lab {
-                if local_fallback_rejected {
-                    format!(
-                        "required Lab placement has no selected ready runner ({}); local fallback is inadmissible ({})",
-                        runner_reason.as_deref().unwrap_or("Lab readiness unavailable"),
-                        local_reason.as_deref().unwrap_or_default()
-                    )
-                } else {
-                    "required Lab placement has no selected ready runner".to_string()
-                }
-            } else {
-                "selected runner requires admitted connected readiness evidence".to_string()
-            },
+            "selected_runner_id",
+            "selected runner requires admitted connected readiness evidence",
             policy.selected_runner_id.clone(),
             Some(remediation),
         ));
@@ -461,18 +451,11 @@ pub fn resolve_parsed_command_preflight(
         DeferredWorkloadPolicy::Eligible => DeferredWorkloadDecision::NotApplicable,
     };
     if auto_split_placement_requires_lab && selected_runner_id.is_none() {
-        return Err(crate::Error::validation_invalid_argument(
-            "placement",
-            "required Lab placement has no selected ready runner",
-            Some("lab".to_string()),
-            policy.lab_readiness.as_ref().map(|readiness| {
-                readiness
-                    .remediation_commands
-                    .iter()
-                    .cloned()
-                    .chain(readiness.reasons.iter().cloned())
-                    .collect()
-            }),
+        return Err(lab_unavailable_error(
+            policy
+                .lab_readiness
+                .as_ref()
+                .expect("auto split placement requires configured Lab readiness"),
         ));
     }
     let runner = selected_runner_id
@@ -599,6 +582,40 @@ fn lab_readiness_fallback_reason(readiness: &LabReadinessSnapshot) -> Option<Str
         }
     };
     Some(described.to_string())
+}
+
+/// The typed refusal for a Lab-preferring `--placement auto` workload whose
+/// configured Lab has no admitted runner. It names the readiness reason and
+/// the runner reconnect as the next action; it never offers the controller,
+/// because local placement requires an explicit operator choice.
+fn lab_unavailable_error(readiness: &LabReadinessSnapshot) -> crate::Error {
+    let reason = if readiness.reasons.is_empty() {
+        lab_readiness_fallback_reason(readiness).unwrap_or_else(|| readiness.state.clone())
+    } else {
+        readiness.reasons.join("; ")
+    };
+    let next_action = readiness
+        .remediation_commands
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "homeboy runner connect <runner-id>".to_string());
+    crate::Error::new(
+        crate::ErrorCode::RunnerLabUnavailable,
+        format!(
+            "lab_unavailable: Lab runner readiness is {} ({reason}); `--placement auto` does not run this workload on the controller. Next: `{next_action}`. Controller execution requires an explicit `--placement local`.",
+            readiness.state
+        ),
+        serde_json::json!({
+            "field": "placement",
+            "reason": "lab_unavailable",
+            "readiness_state": readiness.state,
+            "readiness_reasons": readiness.reasons,
+            "next_action": next_action,
+            "remediation_commands": readiness.remediation_commands,
+            "run_created": false,
+        }),
+    )
+    .with_retryable(true)
 }
 
 fn lab_route_inadmissible_reason(
@@ -1234,77 +1251,68 @@ mod tests {
 
         let error = resolve_parsed_command_preflight(vec!["homeboy".into()], input, policy)
             .expect_err("stale Cook Lab admission must block before execution");
+        assert_eq!(error.code, crate::ErrorCode::RunnerLabUnavailable);
         assert_eq!(error.details["field"], "placement");
-        assert!(error.message.contains("required Lab placement"));
+        assert_eq!(error.details["reason"], "lab_unavailable");
+        assert!(error.message.contains("runner daemon is stale"));
     }
 
     #[test]
-    fn split_cook_auto_preserves_lab_route_when_local_admission_is_blocked() {
-        // Cook's split route is Lab-required under Auto, so a local admission
-        // failure must never become an implicit placement transition.
+    fn split_cook_auto_reports_lab_blocker_without_considering_local() {
+        // Cook's split route is Lab-required under Auto, so local admission is
+        // never evaluated as an implicit placement transition.
         let mut input = split_cook_input();
         input.resource_admission = ResourceAdmissionRequirement::Required {
             label: "agent-task cook local resource reserve".into(),
             engages_at: ResourceHeat::Warm,
         };
-        let error = resolve_parsed_command_preflight(
-            vec!["homeboy".into()],
-            input,
-            auto_route_policy(
-                Some("homeboy-lab"),
-                "connected_ineligible",
-                Vec::new(),
-                vec!["runner secret route is unavailable".into()],
-                false,
-                ResourceAdmissionEvidence::Observed {
-                    pressure: ResourceHeat::Hot,
-                },
-            ),
-        )
-        .expect_err("Cook must expose the Lab blocker before local workspace creation");
+        let mut policy = auto_route_policy(
+            Some("homeboy-lab"),
+            "connected_ineligible",
+            Vec::new(),
+            vec!["runner secret route is unavailable".into()],
+            false,
+            ResourceAdmissionEvidence::Observed {
+                pressure: ResourceHeat::None,
+            },
+        );
+        policy.lab_readiness.as_mut().unwrap().remediation_commands =
+            vec!["homeboy runner connect homeboy-lab".into()];
+        let error = resolve_parsed_command_preflight(vec!["homeboy".into()], input, policy)
+            .expect_err("Cook must expose the Lab blocker before local workspace creation");
 
-        assert_eq!(error.details["field"], "placement");
-        assert!(error
-            .message
-            .contains("Lab runner homeboy-lab inadmissible"));
+        assert_eq!(error.code, crate::ErrorCode::RunnerLabUnavailable);
         assert!(error.message.contains("runner secret route is unavailable"));
-        assert!(error.message.contains("local fallback is inadmissible"));
-        assert!(error.message.contains("local resource reserve"));
+        assert_eq!(
+            error.details["next_action"],
+            "homeboy runner connect homeboy-lab"
+        );
+        assert!(!error.message.contains("local fallback"));
     }
 
     #[test]
-    fn split_cook_auto_reports_runner_and_local_preflight_when_neither_route_is_ready() {
-        let mut input = split_cook_input();
-        input.resource_admission = ResourceAdmissionRequirement::Required {
-            label: "agent-task cook".into(),
-            engages_at: ResourceHeat::Warm,
-        };
-        let error = resolve_parsed_command_preflight(
+    fn split_cook_auto_without_configured_lab_resolves_local() {
+        let result = resolve_parsed_command_preflight(
             vec!["homeboy".into()],
-            input,
+            split_cook_input(),
             auto_route_policy(
-                Some("homeboy-lab"),
-                "connected_ineligible",
+                None,
+                "absent",
                 Vec::new(),
-                vec!["runner admission expired".into()],
+                Vec::new(),
                 false,
-                ResourceAdmissionEvidence::Observed {
-                    pressure: ResourceHeat::Hot,
-                },
+                ResourceAdmissionEvidence::Unavailable,
             ),
         )
-        .expect_err("automatic Cook must fail before attempting inadmissible local work");
-
-        assert_eq!(error.details["field"], "placement");
-        assert!(error
-            .message
-            .contains("Lab runner homeboy-lab inadmissible"));
-        assert!(error.message.contains("local fallback is inadmissible"));
-        assert!(error.message.contains("agent-task cook"));
-        assert!(error
-            .details
-            .to_string()
-            .contains("runner admission expired"));
+        .expect("a host without a Lab runner keeps Auto local");
+        assert_eq!(
+            result.placement.selected,
+            homeboy_lab_contract::EffectiveExecutionPlacement::Local
+        );
+        assert_eq!(
+            result.placement.fallback.reason.as_deref(),
+            Some("no Lab runner is configured")
+        );
     }
 
     #[test]

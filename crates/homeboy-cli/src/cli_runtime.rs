@@ -3102,9 +3102,22 @@ pub(crate) fn capture_preflight_result_for_test(
     lab_readiness: Option<crate::core::parsed_command_preflight::LabReadinessSnapshot>,
 ) {
     crate::core::parsed_command_preflight::reset_captured_result_for_test();
+    let result = resolve_preflight_for_test(cli, lab_readiness)
+        .expect("test preflight fixture resolves without a selected runner");
+    crate::core::parsed_command_preflight::capture_result(result);
+}
+
+/// Resolve the preflight a real dispatch computes for `cli` when Lab readiness
+/// yields no selected runner, returning the resolver's refusal instead of
+/// capturing it.
+#[cfg(test)]
+pub(crate) fn resolve_preflight_for_test(
+    cli: &Cli,
+    lab_readiness: Option<crate::core::parsed_command_preflight::LabReadinessSnapshot>,
+) -> crate::core::Result<crate::core::parsed_command_preflight::ParsedCommandPreflightResult> {
     let normalized_args = vec!["homeboy".to_string()];
     let input = resource_policy::parsed_command_preflight_input(cli, &normalized_args);
-    let result = crate::core::parsed_command_preflight::resolve_parsed_command_preflight(
+    crate::core::parsed_command_preflight::resolve_parsed_command_preflight(
         normalized_args,
         input,
         crate::core::parsed_command_preflight::ParsedCommandPolicySnapshot {
@@ -3119,8 +3132,6 @@ pub(crate) fn capture_preflight_result_for_test(
             auto_local_capacity_fallback: false,
         },
     )
-    .expect("test preflight fixture resolves without a selected runner");
-    crate::core::parsed_command_preflight::capture_result(result);
 }
 
 /// Capture an admitted Lab runner as the resolved placement, the same way a
@@ -4716,11 +4727,8 @@ mod tests {
     }
 
     #[test]
-    fn auto_cook_refreshes_stale_disconnected_inventory_then_uses_local_fallback() {
-        use crate::core::parsed_command_preflight::{
-            FallbackDirective, ParsedCommandPolicySnapshot,
-        };
-        use homeboy_lab_contract::EffectiveExecutionPlacement;
+    fn auto_cook_refreshes_stale_disconnected_inventory_then_fails_closed() {
+        use crate::core::parsed_command_preflight::ParsedCommandPolicySnapshot;
 
         let auto = Cli::parse_from([
             "homeboy",
@@ -4828,13 +4836,9 @@ mod tests {
                 auto_local_capacity_fallback: true,
             },
         )
-        .expect("auto placement permits its audited local fallback");
-        assert_eq!(
-            result.placement.selected,
-            EffectiveExecutionPlacement::Local
-        );
-        assert!(result.placement.runner.is_none());
-        assert_eq!(result.fallback, FallbackDirective::LocalCapacity);
+        .expect_err("auto Cook never substitutes local for a disconnected Lab");
+        assert_eq!(result.code, crate::core::ErrorCode::RunnerLabUnavailable);
+        assert_eq!(result.details["readiness_state"], "disconnected");
 
         let input = resource_policy::parsed_command_preflight_input(&explicit_runner, &[]);
         let error = crate::core::parsed_command_preflight::resolve_parsed_command_preflight(
