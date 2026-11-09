@@ -6838,11 +6838,24 @@ fn gate_failure_diagnostic(promotion: &Value, run_id: &str) -> Option<Value> {
             })
         })
         .flatten();
+    let classification = evidence
+        .and_then(|evidence| evidence.get("classification"))
+        .and_then(Value::as_str);
+    let infrastructure_failure = matches!(
+        classification,
+        Some("gate_declaration" | "execution_budget" | "zero_tests_selected")
+    );
     Some(json!({
-        "class": "agent_task.promotion_gate_failed",
-        "message": message,
+        "class": if infrastructure_failure {
+            "agent_task.gate_infrastructure_failed"
+        } else {
+            "agent_task.promotion_gate_failed"
+        },
+        "message": bounded_gate_detail(&homeboy_core::redaction::redact_string(&message)),
         "details": {
             "gate": gate.get("id").or_else(|| gate.get("name")),
+            "classification": classification,
+            "agent_feedback": if private_summary_only { None } else { output_tail("agent_feedback") },
             "command": command,
             "exit_code": exit_code,
             "termination": termination,
@@ -6874,6 +6887,30 @@ fn bounded_gate_detail(value: &str) -> String {
 mod gate_failure_diagnostic_tests {
     use super::gate_failure_diagnostic;
     use serde_json::json;
+
+    #[test]
+    fn setup_gate_diagnostic_surfaces_digest_without_candidate_blame() {
+        let promotion = json!({"deterministic_gates": [{
+            "id": "gate-2", "status": "failed", "exit_code": 2,
+            "failure_evidence": {
+                "classification": "gate_declaration",
+                "summary": "Homeboy gate setup failed",
+                "stdout_tail": "dependency installation failed",
+                "stderr_tail": "missing tool",
+                "agent_feedback": "Repair the gate environment"
+            }
+        }]});
+        let diagnostic = gate_failure_diagnostic(&promotion, "run").unwrap();
+        assert_eq!(diagnostic["class"], "agent_task.gate_infrastructure_failed");
+        assert_eq!(
+            diagnostic["details"]["stdout_tail"],
+            "dependency installation failed"
+        );
+        assert_eq!(
+            diagnostic["details"]["agent_feedback"],
+            "Repair the gate environment"
+        );
+    }
 
     #[test]
     fn failed_gate_diagnostic_is_bounded_actionable_and_candidate_bound() {
