@@ -104,6 +104,12 @@ pub struct VerifyGateOptions {
     /// gated from follow-up agents.
     #[serde(default)]
     pub private_verify: Vec<String>,
+    /// Repro gates: commands that must fail on the Cook's base before provider
+    /// work starts and pass on the candidate. Cook also runs each one as a
+    /// visible candidate gate. Empty means the declared gates do not prove the
+    /// task's issue (`repro: none`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub repro: Vec<String>,
     /// A declared adapter-owned test plan. This stays typed in Cook recipes;
     /// `verify` and `private_verify` are the explicit legacy shell paths.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -336,7 +342,21 @@ fn default_gate_no_progress_timeout_seconds() -> u64 {
     5 * 60
 }
 
+/// Warning for a Cook that declares no repro gate: nothing shows its gates
+/// fail on base, so a passing candidate does not prove the issue is fixed.
+pub const NO_REPRO_GATE_WARNING: &str = "no --repro gate declared: the declared gates are not shown to fail on base, so they do not prove this issue is fixed (repro: none). Add --repro <command> (or --repro-file <path>) that fails on base and passes once the issue is fixed";
+
 impl VerifyGateOptions {
+    /// Run every repro gate as a visible candidate gate too. Idempotent, so a
+    /// reconstructed recipe that already carries them is unchanged.
+    pub fn include_repro_in_candidate_gates(&mut self) {
+        for command in &self.repro {
+            if !self.verify.contains(command) {
+                self.verify.push(command.clone());
+            }
+        }
+    }
+
     /// Check declared gate toolchains and targets in their execution placement
     /// before admitting a run. Runner-backed environments use the runner probe.
     pub fn preflight(&self, workspace: &Path) -> Result<()> {
@@ -498,6 +518,7 @@ impl Default for VerifyGateOptions {
             verify_ci: false,
             verify: Vec::new(),
             private_verify: Vec::new(),
+            repro: Vec::new(),
             test_execution_plan: None,
             input_sources: Vec::new(),
             private_gate_reveal: default_private_gate_reveal(),

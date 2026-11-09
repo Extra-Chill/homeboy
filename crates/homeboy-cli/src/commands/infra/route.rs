@@ -1324,7 +1324,10 @@ fn stage_cook_admission_inputs(
             if unsafe_inline_admission_flag(flag) {
                 return Err(unsafe_inline_admission_error(flag));
             }
-            if matches!(flag, "--prompt" | "--verify" | "--private-verify") {
+            if matches!(
+                flag,
+                "--prompt" | "--verify" | "--private-verify" | "--repro"
+            ) {
                 let (replacement_flag, reference) =
                     snapshot_admission_input(&root, cook_id, flag, value, input_refs.len())?;
                 let replay_value = if replacement_flag == "--prompt" {
@@ -1367,7 +1370,10 @@ fn stage_cook_admission_inputs(
             index += 2;
             continue;
         }
-        if matches!(arg.as_str(), "--prompt" | "--verify" | "--private-verify") {
+        if matches!(
+            arg.as_str(),
+            "--prompt" | "--verify" | "--private-verify" | "--repro"
+        ) {
             let value = require_admission_value(normalized_args, index, arg)?;
             let (replacement_flag, reference) =
                 snapshot_admission_input(&root, cook_id, arg, value, input_refs.len())?;
@@ -1534,7 +1540,11 @@ fn unsafe_inline_admission_error(flag: &str) -> Error {
 fn admission_file_reference_flag(flag: &str) -> bool {
     matches!(
         flag,
-        "--provider-config" | "--client-context" | "--verify-file" | "--private-verify-file"
+        "--provider-config"
+            | "--client-context"
+            | "--verify-file"
+            | "--private-verify-file"
+            | "--repro-file"
     )
 }
 
@@ -1617,6 +1627,7 @@ fn snapshot_admission_input(
         ),
         "--verify" => ("--verify-file", "verify", value.to_string()),
         "--private-verify" => ("--private-verify-file", "private-verify", value.to_string()),
+        "--repro" => ("--repro-file", "repro", value.to_string()),
         _ => unreachable!("snapshot input flag is closed"),
     };
     if flag != "--prompt" && homeboy::core::redaction::redact_string(&content) != content {

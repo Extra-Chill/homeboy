@@ -21,6 +21,9 @@ pub(crate) mod cook_pre_execution;
 mod cook_prior_candidate;
 mod cook_promotion;
 mod cook_recipe;
+/// Repro gates that must fail on the Cook base and pass on the candidate.
+mod cook_repro;
+pub use cook_repro::{CookReproBaseEvidence, CookReproBaseResult};
 /// The one Cook recovery decision and its `agent-task recover` executor.
 mod cook_recovery;
 /// Detached Cook execution as a daemon `step` with an admitted environment.

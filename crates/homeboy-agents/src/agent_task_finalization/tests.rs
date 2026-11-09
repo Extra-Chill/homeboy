@@ -3973,6 +3973,7 @@ pub(super) fn options() -> AgentTaskPrFinalizationOptions {
             source_relationships: Vec::new(),
             overrides: Vec::new(),
             out_of_scope_changes: Vec::new(),
+            repro: None,
         },
         composed_ai_model_disclosure: false,
         review_profile: crate::agent_task_review_dossier::default_profile(),

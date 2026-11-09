@@ -106,6 +106,9 @@ pub enum CookStatus {
     /// The declared deterministic gate is invalid or selects an inadmissible
     /// test population; operator correction is required, not provider retry.
     GateDeclarationInvalid,
+    /// The declared repro gate passed on the Cook's base before dispatch, so it
+    /// does not reproduce the issue. Operator correction is required.
+    ReproPassesOnBase,
     /// Waiting on an independent acceptance verdict.
     AwaitingAcceptance,
     /// Published candidate waiting for required PR checks.
@@ -167,6 +170,7 @@ impl CookStatus {
             "gate_failed" => Self::GateFailed,
             "gate_environment_unavailable" | "gates_deferred" => Self::GatesDeferred,
             "gate_declaration_invalid" => Self::GateDeclarationInvalid,
+            "repro_passes_on_base" => Self::ReproPassesOnBase,
             "awaiting_acceptance" => Self::AwaitingAcceptance,
             "awaiting_ci" => Self::AwaitingCi,
             "candidate_recoverable" => Self::CandidateRecoverable,
@@ -205,6 +209,7 @@ impl CookStatus {
             Self::GateFailed => "gate_failed",
             Self::GatesDeferred => "gate_environment_unavailable",
             Self::GateDeclarationInvalid => "gate_declaration_invalid",
+            Self::ReproPassesOnBase => "repro_passes_on_base",
             Self::AwaitingAcceptance => "awaiting_acceptance",
             Self::AwaitingCi => "awaiting_ci",
             Self::CandidateRecoverable => "candidate_recoverable",
@@ -353,6 +358,7 @@ mod tests {
             "gate_failed",
             "gates_deferred",
             "gate_declaration_invalid",
+            "repro_passes_on_base",
             "awaiting_acceptance",
             "cancelled",
             "timed_out",
