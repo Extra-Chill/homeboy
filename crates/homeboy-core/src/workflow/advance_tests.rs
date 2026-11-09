@@ -59,6 +59,41 @@ fn foreach_failure_keeps_item_error_and_first_failure_reason() {
     );
 }
 
+/// #17708: cancelling a fan-out settles every item that never got a
+/// submission as `never_started` with the reason, instead of leaving it out.
+#[test]
+fn workflow_cancel_reports_unsubmitted_foreach_items_as_never_started() {
+    let definition = parse_definition(&json!({
+        "schema": "homeboy/workflow/v1",
+        "id": "fan-cancel",
+        "steps": [{
+            "id": "work", "foreach": ["a", "b", "c"], "max_parallel": 1,
+            "exec": {"program": "true"}
+        }]
+    }));
+    let initial = InstanceState::new(&definition, INSTANCE, BTreeMap::new());
+    let (state, _) = advance(&definition, &initial, &Event::Start, 0);
+    let (state, _) = advance(
+        &definition,
+        &state,
+        &Event::Cancel {
+            reason: Some("operator stop".to_string()),
+        },
+        1,
+    );
+    let items = &state.steps["work"].items;
+    assert_eq!(items[0].phase, StepPhase::Running);
+    for item in &items[1..] {
+        assert_eq!(item.phase, StepPhase::Done);
+        assert_eq!(item.outcome.as_deref(), Some(NEVER_STARTED));
+        assert_eq!(
+            item.error.as_deref(),
+            Some("cancelled before admission: operator stop")
+        );
+        assert!(item.run_id.is_none());
+    }
+}
+
 #[test]
 fn succeeded_steps_and_items_discard_process_errors() {
     for foreach in [false, true] {

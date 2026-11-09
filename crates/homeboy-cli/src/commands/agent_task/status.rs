@@ -286,6 +286,9 @@ pub(super) fn resolve_cook_reader_target(
 }
 
 pub(super) fn status(args: StatusArgs) -> CmdResult<Value> {
+    if super::cook_batch::is_workflow_instance(&args.run_id) {
+        return super::cook_batch::batch_rollup_from_daemon(&args.run_id, "status");
+    }
     if args.watch {
         return watch_status(args);
     }
@@ -2541,6 +2544,9 @@ pub(crate) fn evidence(args: EvidenceArgs) -> CmdResult<Value> {
 }
 
 pub(super) fn diagnose(args: DiagnoseArgs) -> CmdResult<Value> {
+    if super::cook_batch::is_workflow_instance(&args.run_id) {
+        return super::cook_batch::batch_rollup_from_daemon(&args.run_id, "diagnose");
+    }
     let target = resolve_cook_reader_target(&args.run_id, false)?;
     let run_id = &target.run_id;
     // Diagnosis starts from the bounded controller-local snapshot, then adds a

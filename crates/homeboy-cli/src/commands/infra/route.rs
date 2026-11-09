@@ -4913,6 +4913,15 @@ fn controller_owns_agent_task_lifecycle_command(cli: &Cli) -> homeboy::core::Res
     let Some(run_id) = run_id else {
         return Ok(false);
     };
+    // A cook-batch parent is a controller workflow instance (#17708).
+    if run_id.starts_with("wf-")
+        && matches!(
+            &agent_task.command,
+            AgentTaskCommand::Status(_) | AgentTaskCommand::Diagnose(_)
+        )
+    {
+        return Ok(true);
+    }
     let lifecycle_store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
     let present =
         agent_task_lifecycle::run_record_exists_resolved_in_store(&lifecycle_store, run_id)?;

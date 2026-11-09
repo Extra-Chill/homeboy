@@ -32,6 +32,9 @@ use super::template::{self, TemplateValues};
 
 pub const WORKFLOW_STATE_SCHEMA: &str = "homeboy/workflow-state/v1";
 
+/// The outcome of a `foreach` item the instance ended before submitting.
+pub const NEVER_STARTED: &str = "never_started";
+
 /// Step outcomes that fail the instance.
 pub const FAILURE_OUTCOMES: &[&str] = &["failed", "timed_out", "cancelled", "partial_failure"];
 
@@ -834,10 +837,38 @@ impl Machine<'_> {
         if reason.is_some() {
             self.state.reason = reason.clone();
         }
+        self.close_unstarted_items(status);
         self.commands.push(Command::Complete {
             status,
             reason: self.state.reason.clone(),
         });
+    }
+
+    /// A terminal instance starts nothing more: every `foreach` item still
+    /// waiting for its first submission settles as `never_started`, naming
+    /// why, so the result lists every declared item instead of omitting it.
+    fn close_unstarted_items(&mut self, status: InstanceStatus) {
+        let cause = self
+            .state
+            .reason
+            .clone()
+            .unwrap_or_else(|| format!("the workflow ended {}", status.as_str()));
+        let reason = match status {
+            InstanceStatus::Cancelled => format!("cancelled before admission: {cause}"),
+            InstanceStatus::BudgetExhausted => {
+                format!("budget exhausted before admission: {cause}")
+            }
+            _ => format!("batch ended before admission: {cause}"),
+        };
+        for step in self.state.steps.values_mut() {
+            for item in &mut step.items {
+                if item.phase == StepPhase::Pending && item.attempt == 0 {
+                    item.phase = StepPhase::Done;
+                    item.outcome = Some(NEVER_STARTED.to_string());
+                    item.error = Some(reason.clone());
+                }
+            }
+        }
     }
 
     /// Reserve one step run, or exhaust the budget. Returns whether to submit.
