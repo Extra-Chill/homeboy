@@ -27,6 +27,7 @@ impl Default for PressureThresholds {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
 pub struct RunnerPressure {
     /// Hundredths of one percent. None means unavailable, not zero pressure.
     pub cpu: Option<u32>,
@@ -84,7 +85,23 @@ fn psi(resource: &str, kind: &str) -> Option<u32> {
     Some((value.parse::<f64>().ok()? * 100.0) as u32)
 }
 
+/// Optional fixed JSON sample for controlled daemon environments. Unset or
+/// malformed values retain live host sampling; thresholds are always reapplied.
+pub const SAMPLE_ENV: &str = "HOMEBOY_RUNNER_PRESSURE_SAMPLE";
+
+fn configured_sample(value: Option<&str>) -> Option<RunnerPressure> {
+    serde_json::from_str(value?).ok()
+}
+
 pub fn sample(thresholds: &PressureThresholds) -> RunnerPressure {
+    if let Some(mut pressure) = configured_sample(std::env::var(SAMPLE_ENV).ok().as_deref()) {
+        pressure.apply_thresholds(thresholds);
+        return pressure;
+    }
+    sample_host(thresholds)
+}
+
+fn sample_host(thresholds: &PressureThresholds) -> RunnerPressure {
     let mut pressure = RunnerPressure {
         cpu: psi("cpu", "some "),
         io: psi("io", "full "),
@@ -106,6 +123,37 @@ pub fn sample(thresholds: &PressureThresholds) -> RunnerPressure {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pressure_sample_source_overrides_host_for_admission_and_telemetry() {
+        let _lock = crate::test_support::env_lock();
+        let _source = crate::test_support::EnvVarGuard::set(SAMPLE_ENV, r#"{"cpu":2185}"#);
+        let pressure = sample(&PressureThresholds::default());
+        assert_eq!(pressure.cpu, Some(2185));
+        assert_eq!(pressure.admission_reason.as_deref(), Some("pressure"));
+        let _quiet = crate::test_support::EnvVarGuard::set(SAMPLE_ENV, "{}");
+        assert_eq!(
+            sample(&PressureThresholds::default()),
+            RunnerPressure::default()
+        );
+    }
+
+    #[test]
+    fn fixed_pressure_sample_reapplies_thresholds() {
+        let mut pressure = configured_sample(Some(r#"{"cpu":2185}"#)).unwrap();
+        pressure.apply_thresholds(&PressureThresholds::default());
+        assert_eq!(pressure.admission_reason.as_deref(), Some("pressure"));
+        pressure.apply_thresholds(&PressureThresholds {
+            cpu: 30,
+            ..Default::default()
+        });
+        assert!(pressure.admission_reason.is_none());
+        let mut quiet = configured_sample(Some(r#"{}"#)).unwrap();
+        quiet.apply_thresholds(&PressureThresholds::default());
+        assert!(quiet.admission_reason.is_none());
+        assert!(configured_sample(None).is_none());
+        assert!(configured_sample(Some("invalid")).is_none());
+    }
 
     #[test]
     fn admission_refused_above_threshold() {
