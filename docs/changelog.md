@@ -4,6 +4,17 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.457.1] - 2026-11-09
+
+### Fixed
+- accepted inherited failures no longer block publishing a declared-green Cook
+- report never-started children and roll up children on the parent wf id
+- gate-green candidate missing a review form requests only the form; fresh attempts start from a clean base
+- wait out transient gate admission refusals and name the reasons
+- record observer interruption as recoverable failure
+- bind promotion recovery to persisted candidate attempt
+- surface incomplete review recovery and report all missing review-form flags
+
 ## [0.457.0] - 2026-11-09
 
 ### Added
