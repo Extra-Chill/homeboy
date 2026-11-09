@@ -4967,6 +4967,11 @@ fn cook_review_dossier_with_stores_and_review_form(
         None => review_form_for_finalization_in_store(lifecycle_store, successful_run_id)?,
     };
     let verified_commands = terminal_form.verify_against_promotion(verification_promotion)?;
+    let out_of_scope_changes = remediation_out_of_scope_changes(
+        lifecycle_store,
+        source_run_id.unwrap_or(successful_run_id),
+        terminal_promotion,
+    );
     let lineage = cook_ai_lineage_with_stores(
         store,
         lifecycle_store,
@@ -5056,9 +5061,44 @@ fn cook_review_dossier_with_stores_and_review_form(
             },
             source_relationships: Vec::new(),
             overrides: Vec::new(),
+            out_of_scope_changes,
         },
         lineage.composed_model_disclosure,
     ))
+}
+
+/// Files the candidate-producing remediation attempt changed outside its
+/// dispatched `remediation_scope`: the original candidate's files plus the
+/// conflict or gate-failure paths it was asked to fix (#17651). A first
+/// attempt carries no scope and has nothing out of scope.
+fn remediation_out_of_scope_changes(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    candidate_run_id: &str,
+    promotion: &AgentTaskPromotionReport,
+) -> Vec<String> {
+    let Some(scope) = lifecycle_store
+        .read_controller_plan(candidate_run_id)
+        .ok()
+        .and_then(|plan| plan.tasks.into_iter().next())
+        .and_then(|task| {
+            task.inputs
+                .pointer("/cook_loop/remediation_scope")
+                .and_then(Value::as_array)
+                .map(|paths| {
+                    paths
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect::<std::collections::BTreeSet<_>>()
+                })
+        })
+    else {
+        return Vec::new();
+    };
+    normalized_changed_files(&promotion.changed_files)
+        .into_iter()
+        .filter(|file| !scope.contains(file))
+        .collect()
 }
 
 struct CookAiLineage {
