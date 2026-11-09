@@ -198,6 +198,9 @@ pub fn restore(component: &Component, key: &str) -> bool {
     let Some(dir) = directory().map(|p| p.join(key)) else {
         return false;
     };
+    if component::resolve_artifact(component).ok() == Some(None) {
+        return dir.join("completed").is_file();
+    }
     let Ok(name) = fs::read_to_string(dir.join("path")) else {
         return false;
     };
@@ -218,25 +221,28 @@ pub fn restore(component: &Component, key: &str) -> bool {
 
 pub fn store(component: &Component, key: &str) {
     let Some(root) = directory() else { return };
-    let Some(artifact) = artifact(component) else {
-        return;
-    };
-    let Ok(relative) = artifact.strip_prefix(&component.local_path) else {
-        return;
-    };
     if fs::create_dir_all(&root).is_err() {
         return;
     }
     let Ok(temp) = tempfile::tempdir_in(&root) else {
         return;
     };
-    if fs::copy(&artifact, temp.path().join("package")).is_ok()
-        && fs::write(
-            temp.path().join("path"),
-            relative.to_string_lossy().as_bytes(),
-        )
-        .is_ok()
-    {
+    let stored = if component::resolve_artifact(component).ok() == Some(None) {
+        fs::write(temp.path().join("completed"), b"").is_ok()
+    } else if let Some(artifact) = artifact(component) {
+        let Ok(relative) = artifact.strip_prefix(&component.local_path) else {
+            return;
+        };
+        fs::copy(&artifact, temp.path().join("package")).is_ok()
+            && fs::write(
+                temp.path().join("path"),
+                relative.to_string_lossy().as_bytes(),
+            )
+            .is_ok()
+    } else {
+        false
+    };
+    if stored {
         let _ = fs::rename(temp.path(), root.join(key));
     }
 }
