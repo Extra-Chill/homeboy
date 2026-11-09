@@ -5,6 +5,7 @@
 //! by the pure [`advance::advance`] function, and the daemon driver commits
 //! its result in one store transaction.
 
+pub mod ab;
 pub mod advance;
 pub mod definition;
 pub mod gate;
@@ -39,7 +40,10 @@ const RETENTION_WORKFLOW: &str = r#"{
 
 /// Workflows that ship with Homeboy, addressable by id like registered ones.
 pub fn builtins() -> Vec<WorkflowDefinition> {
-    vec![WorkflowDefinition::parse(RETENTION_WORKFLOW).expect("built-in workflow parses")]
+    vec![
+        WorkflowDefinition::parse(RETENTION_WORKFLOW).expect("built-in workflow parses"),
+        ab::definition(),
+    ]
 }
 
 /// The built-in workflow named `id`, if any.

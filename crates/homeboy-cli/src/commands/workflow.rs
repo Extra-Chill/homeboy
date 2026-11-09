@@ -24,6 +24,9 @@ use super::CmdResult;
 
 use super::runs::workflow::{exit_code, watch_instance};
 
+mod ab;
+pub(crate) use ab::render_summary as render_ab_summary;
+
 #[derive(Args)]
 pub struct WorkflowArgs {
     #[command(subcommand)]
@@ -62,6 +65,12 @@ enum WorkflowCommand {
     },
     /// List registered definitions, built-ins, and daemon cadences
     List,
+    /// Prove a refactor byte-identical: run one command at two refs in isolated
+    /// checkouts, concurrently, and compare the declared outputs (`homeboy.ab`)
+    Ab(ab::AbArgs),
+    /// A `homeboy.ab` recipe step (side, verdict, cleanup)
+    #[command(hide = true)]
+    AbStep(ab::AbStepArgs),
 }
 
 #[derive(Args)]
@@ -87,11 +96,26 @@ pub struct RunArgs {
 }
 
 impl WorkflowArgs {
-    /// Project the global `--wait` onto `workflow run`.
+    /// Project the global `--wait` onto `workflow run` and `workflow ab`.
     pub(crate) fn absorb_wait(&mut self, wait: bool) {
-        if let WorkflowCommand::Run(run) = &mut self.command {
-            run.wait = wait;
+        match &mut self.command {
+            WorkflowCommand::Run(run) => run.wait = wait,
+            WorkflowCommand::Ab(ab) => ab.wait = wait,
+            _ => {}
         }
+    }
+
+    /// Project the global `--placement` onto `workflow ab`.
+    pub(crate) fn absorb_placement(&mut self, placement: crate::cli_surface::Placement) {
+        if let WorkflowCommand::Ab(ab) = &mut self.command {
+            ab.placement = placement;
+        }
+    }
+
+    /// `workflow ab` selects its own runner and admits its recipe there; the
+    /// front end itself always runs on this controller.
+    pub(crate) fn is_ab(&self) -> bool {
+        matches!(self.command, WorkflowCommand::Ab(_))
     }
 }
 
@@ -118,6 +142,8 @@ pub fn run(args: WorkflowArgs) -> CmdResult<Value> {
             ))
         }
         WorkflowCommand::Run(run) => run_workflow(run),
+        WorkflowCommand::Ab(args) => ab::run(args),
+        WorkflowCommand::AbStep(args) => ab::step(args),
         WorkflowCommand::Cancel { instance } => {
             let client = LocalControllerJobClient::connect()?;
             let view = match client.workflow(&instance) {
@@ -715,11 +741,12 @@ mod tests {
             std::fs::write(dir.join("bad.json"), "{").unwrap();
             let listed = registered_workflows().unwrap();
             let rows = listed["entities"].as_array().unwrap();
-            assert_eq!(rows.len(), 3);
+            assert_eq!(rows.len(), 4);
             assert_eq!(rows[0]["valid"], false);
             assert_eq!(rows[1]["id"], "ok");
             assert_eq!(rows[2]["id"], "homeboy.retention");
             assert_eq!(rows[2]["builtin"], true);
+            assert_eq!(rows[3]["id"], "homeboy.ab");
         });
     }
 }
