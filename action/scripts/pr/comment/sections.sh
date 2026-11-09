@@ -195,6 +195,9 @@ append_split_command_section() {
     else
       SECTION_BODY+="${icon} **${command}** — $(status_label "${status}") (differential); ${count} new finding(s)"$'\n\n'
     fi
+    if [ "${status}" = inconclusive ]; then
+      SECTION_BODY+="$(printf '%s' "${verdict}" | jq -r '.reason // "Differential evidence is insufficient; inspect the gate log for the producer diagnostic."' | python3 -c 'import sys; print(sys.stdin.read().replace("@", "@\u200b"))')"$'\n\n'
+    fi
     if [ "${baseline}" != unknown ] && [ "${baseline}" != 0 ]; then
       SECTION_BODY+="<details><summary>Baseline: ${baseline} pre-existing finding(s)</summary>"$'\n\n'
       SECTION_BODY+="Baseline debt is not attributed to this PR."$'\n\n</details>\n\n'

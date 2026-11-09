@@ -460,6 +460,7 @@ def main() -> int:
                     )
 
             comment_verdicts[command]["new_findings"] = len(introduced)
+            comment_verdicts[command]["new_failed_tests"] = sorted(introduced)
             if introduced:
                 infrastructure = set(retry.get("infrastructure_errors", [])) & introduced if retry else set()
                 if infrastructure:
@@ -638,6 +639,21 @@ def main() -> int:
 
     for command, verdict in comment_verdicts.items():
         verdict["status"] = adjusted[command]
+        if quality_base_command(command) == "lint":
+            candidate = unwrap(read_json(os.path.join(current_dir, f"{output_stem(command)}.json")))
+            baseline = unwrap(read_json(os.path.join(base_dir, f"{output_stem(command)}.json")))
+            current_items = candidate.get("lint_findings")
+            base_items = baseline.get("lint_findings")
+            if isinstance(current_items, list) and isinstance(base_items, list):
+                fingerprints = {item.get("fingerprint") for item in base_items if isinstance(item, dict)}
+                new_items = [item for item in current_items if isinstance(item, dict)
+                             and item.get("fingerprint") and item["fingerprint"] not in fingerprints]
+                verdict["new_finding_details"] = new_items
+                verdict["new_findings"] = len(new_items)
+                if new_items and results[command] == "fail" and adjusted[command] in {"pass", "baseline_red"}:
+                    verdict["status"] = "fail"
+        if adjusted[command] == "inconclusive":
+            verdict["reason"] = "Differential evidence is missing or insufficient; inspect the gate log for the producer diagnostic."
     # Retain the gate's verdict for downstream presentation. Consumers must not
     # infer success from raw candidate totals or run the gate a second time.
     with open(os.path.join(current_dir, "differential-comment.json"), "w", encoding="utf-8") as handle:

@@ -41,6 +41,23 @@ if [ -z "${OUTPUT_DIR}" ] || [ -z "${PR_NUMBER:-}" ]; then
   exit 0
 fi
 
+# Reports belong on the run page, including when comments are disabled or the
+# caller cannot authenticate. Rendering must not depend on PR write access.
+DIGEST_FILE="${HOMEBOY_FAILURE_DIGEST_FILE:-}"
+SECTION_TITLE="$(derive_section_title)"
+build_section_body
+if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+  { printf '%s\n' "${SECTION_BODY}"; build_tooling_footer; } >> "${GITHUB_STEP_SUMMARY}"
+fi
+export OUTPUT_DIR
+python3 "${GITHUB_ACTION_PATH}/scripts/pr/comment/new-findings.py"
+COMMENT_MODE="${PR_COMMENT_INPUT:-on-new-failures}"
+case "${COMMENT_MODE}" in
+  off|false) echo "Skipping PR comment — comments disabled"; exit 0 ;;
+  always|true|on-new-failures) ;;
+  *) echo "::warning::Unknown pr-comment mode; refusing to post"; exit 0 ;;
+esac
+
 if [ -z "${GH_TOKEN:-}" ]; then
   echo "::warning::Skipping PR comment — app-token was not provided. Refusing to post as github-actions[bot]; configure the homeboy-ci GitHub App token."
   exit 0
@@ -64,19 +81,38 @@ fi
 # rendered pseudo-section.
 SECTION_ORDER="lint,build,test,bench"
 
-if ! comment_has_actionable_content; then
-  echo "Skipping PR comment — run passed with no actionable content"
+if printf '%s' "${RESULTS}" | jq -e 'length > 0 and all(.[]; . == "inconclusive")' >/dev/null; then
+  echo "Skipping PR comment — inconclusive differential result"
   exit 0
 fi
 
-build_section_body
+if [ "${COMMENT_MODE}" != "always" ] && [ "${COMMENT_MODE}" != "true" ]; then
+  SECTION_BODY="$(<"${OUTPUT_DIR}/new-failures.md")"
+  if [ -z "${SECTION_BODY}" ]; then
+    # Never create a green comment. Replace only this invocation's existing
+    # section so concurrent matrix components retain their own failures.
+    EXISTING="$(gh api --paginate "repos/${REPO}/issues/${PR_NUMBER}/comments" 2>/dev/null || true)"
+    if ! printf '%s' "${EXISTING}" | jq -se --arg marker "<!-- homeboy:comment-key=${COMMENT_KEY} -->" \
+      'any(.[] | arrays | .[]; (.body // "") | contains($marker))' >/dev/null 2>&1; then
+      echo "Skipping PR comment — run passed with no actionable content"
+      exit 0
+    fi
+    # Unknown/inconclusive evidence must never clear a stale failure.
+    if ! printf '%s' "${RESULTS}" | jq -e 'all(.[]; . == "pass" or . == "baseline_red")' >/dev/null; then
+      echo "Skipping PR comment — no definite new failures"
+      exit 0
+    fi
+    SECTION_BODY="✅ resolved — no new findings"
+  fi
+fi
 
 SECTION_FILE="$(mktemp)"
 TOOLING_FOOTER_FILE="$(mktemp)"
 trap 'rm -f "${SECTION_FILE}" "${TOOLING_FOOTER_FILE}"' EXIT
 
 printf '%s' "${SECTION_BODY}" > "${SECTION_FILE}"
-build_tooling_footer > "${TOOLING_FOOTER_FILE}"
+# The tooling footer lives exclusively in the step summary.
+: > "${TOOLING_FOOTER_FILE}"
 
 # Older pinned binaries do not support the atomic PR lifecycle/head guard.
 HEAD_GUARD_ARGS=()
