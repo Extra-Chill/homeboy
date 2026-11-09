@@ -725,6 +725,101 @@ fn public_admission_pressure_refusal_keeps_cook_pending_resource_admission() {
 }
 
 #[test]
+fn capacity_blocked_retry_admission_queues_and_substrate_refusal_fails() {
+    with_isolated_home(|_| {
+        let store = test_lifecycle_store();
+        agent_task_lifecycle::submit_plan(&test_plan(), Some("lab-refusal-source")).unwrap();
+        // The Lab refusal `lab_runner_availability_error` reports for a
+        // `retry --run` whose selected runner cannot accept jobs.
+        struct LabRefusal(&'static [&'static str]);
+        impl ExecutionStepTransport for LabRefusal {
+            fn admission(&self, _: Vec<String>, _: Option<String>) -> homeboy_core::Result<i32> {
+                panic!("retry is not an initial admission")
+            }
+            fn queued_preflight(
+                &self,
+                _: &agent_task_lifecycle::AgentTaskRunRecord,
+                _: &mut AgentTaskPlan,
+                _: &ExecutionStepIntent,
+            ) -> homeboy_core::Result<()> {
+                let message = format!(
+                    "Lab offload selected runner `homeboy-lab` for `agent-task cook/run-plan/retry --run`, but that runner cannot accept jobs (reasons: {})",
+                    self.0.join(", ")
+                );
+                Err(homeboy_core::Error::new(
+                    homeboy_core::ErrorCode::ValidationInvalidArgument,
+                    message,
+                    serde_json::json!({
+                        "field": "runner",
+                        "runner_availability": {
+                            "selected": {"runner_id": "homeboy-lab", "capacity": 2, "active_job_count": 2},
+                            "reasons": self.0,
+                        },
+                    }),
+                ))
+            }
+        }
+        for (retry_id, reasons, queued) in [
+            (
+                "lab-refusal-capacity",
+                &["capacity_reached", "pressure"][..],
+                true,
+            ),
+            ("lab-refusal-substrate", &["not_connected"][..], false),
+        ] {
+            let retry = agent_task_lifecycle::retry_with_force_and_preflight_in_store(
+                &store,
+                "lab-refusal-source",
+                Some(retry_id),
+                true,
+                &|_| Ok(()),
+            )
+            .unwrap();
+            let intent = current_intent(&store, &retry.run_id);
+            let error = execute_counted(
+                &intent.intent_id,
+                &Arc::new(AtomicUsize::new(0)),
+                &LabRefusal(reasons),
+            )
+            .unwrap_err();
+            let mut delivery = terminal_delivery(&intent);
+            delivery.outcome = homeboy_core::daemon::step_job::StepTerminalOutcome::Failed;
+            delivery.error = Some(serde_json::json!({
+                "message": error.message,
+                "details": error.details,
+                "retryable": error.retryable,
+            }));
+            let receipt = consume_execution_terminal_in_store(&store, &delivery).unwrap();
+            let record = store.read_record(&retry.run_id).unwrap();
+            let failure = &record.metadata["execution_step_failure"];
+            assert!(failure["message"]
+                .as_str()
+                .unwrap()
+                .contains(&reasons.join(", ")));
+            assert_eq!(
+                failure["runner_availability"]["reasons"],
+                serde_json::json!(reasons)
+            );
+            if queued {
+                assert_eq!(receipt["disposition"], "runner_wait");
+                assert_eq!(record.state(), AgentTaskRunState::Queued);
+                assert_eq!(
+                    record.metadata["execution_scheduling"]["recovery_failures"],
+                    0
+                );
+                assert_eq!(
+                    current_intent(&store, &retry.run_id).epoch,
+                    intent.epoch + 1
+                );
+            } else {
+                assert_eq!(receipt["disposition"], "failed");
+                assert_eq!(record.state(), AgentTaskRunState::Failed);
+            }
+        }
+    });
+}
+
+#[test]
 fn execution_step_runner_ineligible_deferrals_never_consume_recovery_budget() {
     with_isolated_home(|_| {
         let store = test_lifecycle_store();
