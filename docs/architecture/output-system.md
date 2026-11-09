@@ -255,7 +255,7 @@ The `next_steps` array contains context-aware actionable guidance based on the c
 | Exit code | Meaning (by error code group) |
 |---:|---|
 | 1 | internal errors (`internal.*`) |
-| 2 | config/validation errors (`config.*`, `validation.*`) |
+| 2 | config/validation errors (`config.*`, `validation.*`), removed commands (`command.removed`) |
 | 4 | not found / missing state (`project.not_found`, `server.not_found`, `component.not_found`, `extension.not_found`, `project.no_active`) |
 | 5 | release skipped — no tag/package/GitHub Release produced (`release` when the plan reports `status: "skipped"`; the data payload still carries `skipped_reason` + an actionable force hint) |
 | 10 | SSH errors (`ssh.*`) |

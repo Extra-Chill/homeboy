@@ -106,6 +106,9 @@ pub enum ErrorCode {
     ValidationInvalidJson,
     ValidationMultipleErrors,
 
+    /// The invoked command path was removed from the CLI on purpose.
+    CommandRemoved,
+
     ProjectNotFound,
     ProjectNoActive,
     ServerNotFound,
@@ -197,6 +200,7 @@ impl ErrorCode {
             ErrorCode::ValidationInvalidArgument => "validation.invalid_argument",
             ErrorCode::ValidationInvalidJson => "validation.invalid_json",
             ErrorCode::ValidationMultipleErrors => "validation.multiple_errors",
+            ErrorCode::CommandRemoved => "command.removed",
 
             ErrorCode::ProjectNotFound => "project.not_found",
             ErrorCode::ProjectNoActive => "project.no_active",
@@ -264,6 +268,7 @@ impl ErrorCode {
             "validation.invalid_argument" => Self::ValidationInvalidArgument,
             "validation.invalid_json" => Self::ValidationInvalidJson,
             "validation.multiple_errors" => Self::ValidationMultipleErrors,
+            "command.removed" => Self::CommandRemoved,
             "project.not_found" => Self::ProjectNotFound,
             "project.no_active" => Self::ProjectNoActive,
             "server.not_found" => Self::ServerNotFound,

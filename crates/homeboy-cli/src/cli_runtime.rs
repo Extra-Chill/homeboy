@@ -1264,6 +1264,17 @@ impl CliRuntime {
                     ) {
                         err.exit();
                     }
+                    if let Some(removed) =
+                        crate::removed_commands::find_removed_command(&err, &diagnostic_args)
+                            .or_else(|| {
+                                crate::removed_commands::find_removed_command(
+                                    &static_err,
+                                    &diagnostic_args,
+                                )
+                            })
+                    {
+                        std::process::exit(removed.emit());
+                    }
                     if let Some(output) = try_augment_clap_error(
                         &err,
                         &diagnostic_args,
