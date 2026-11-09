@@ -25813,13 +25813,16 @@ fn malformed_agent_review_form_recovers_by_publishing_a_supplied_form() {
         };
 
         // Without an operator form, publication would refuse; recovery
-        // continues the Cook, whose bounded review-form follow-up replaces the
-        // unusable form (#17494).
+        // requests the form through the Cook's bounded review-only follow-up,
+        // which replaces the unusable form (#17494, #16292).
         assert_eq!(
             crate::agent_task_service::plan_cook_recovery(cook_id)
                 .expect("plan the verified candidate")
                 .step,
-            crate::agent_task_service::CookRecoveryStep::Continue
+            crate::agent_task_service::CookRecoveryStep::RequestReviewForm {
+                missing: crate::agent_task_service::REVIEW_FORM_MISSING.into(),
+                rearm: false,
+            }
         );
 
         let (published, exit_code) = crate::agent_task_service::recover_cook(

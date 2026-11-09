@@ -9308,6 +9308,11 @@ fn preflight_cook_workspace_base_ancestry_with_provider(
                 .first()
                 .and_then(|task| task.workspace.task_url.as_deref()),
         )?;
+        // An issue-owned attempt that adopts no earlier candidate must start
+        // from the exact pinned base and a clean tree (#16292).
+        if issue_owned && !adopted_dirty_candidate {
+            super::cook_attempt_workspace::assert_attempt_workspace_at_base(target, &resolved)?;
+        }
         return Ok(Some(CookWorkspaceBaseValidation::Convergence(
             serde_json::json!({
                 "schema": "homeboy/cook-workspace-base-convergence/v1",

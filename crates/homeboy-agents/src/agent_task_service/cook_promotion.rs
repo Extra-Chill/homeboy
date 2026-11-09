@@ -7233,21 +7233,7 @@ fn no_changes_adoption_candidate(recipe: &super::AgentTaskCookRecipe) -> Option<
     if !worktree.is_dir() {
         return None;
     }
-    let base = recipe
-        .finalization
-        .get("task_base_sha")
-        .and_then(Value::as_str)
-        .filter(|base| !base.trim().is_empty())
-        .or_else(|| {
-            recipe
-                .attempts
-                .first()
-                .and_then(|attempt| attempt.plan.metadata.pointer("/cook_workspace_base/sha"))
-                .and_then(Value::as_str)
-                .filter(|base| !base.trim().is_empty())
-        })?
-        .trim()
-        .to_string();
+    let base = super::cook_attempt_workspace::recorded_cook_base(recipe)?;
     head_ahead_of_base(&worktree, &base)
 }
 
@@ -7498,8 +7484,14 @@ fn cook_recovery_actions_with_prefix(
         .map(|action| action.action.as_str())
         .collect::<Vec<_>>()
         .join(", ");
+    let mut reason = format!("Legal recovery actions for this Cook state: {names}.");
+    if let (Some(missing), Some(action)) = (step.missing(), step.action_name()) {
+        reason.push_str(&format!(
+            " Missing: {missing}; planned step: {action} (a review-only provider step against the existing candidate, then publication)."
+        ));
+    }
     CookRecoveryActions {
-        reason: format!("Legal recovery actions for this Cook state: {names}."),
+        reason,
         legal_actions: actions,
         next_actions,
         step,
