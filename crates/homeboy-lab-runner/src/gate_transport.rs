@@ -5,7 +5,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use homeboy_agents::agent_tasks::gate::placement::{
-    LabGateReceipt, LabGateRequest, LabGateTransport,
+    LabGateAdmission, LabGateFreshness, LabGateReceipt, LabGateRequest, LabGateTransport,
 };
 use homeboy_agents::agent_tasks::gate::GateSupervision;
 use homeboy_core::{Error, Result};
@@ -15,6 +15,9 @@ struct NativeLabGateTransport;
 impl LabGateTransport for NativeLabGateTransport {
     fn declared_runner(&self, command: &str) -> Result<Option<String>> {
         crate::cli_resolver::resolve_gate_runner(command)
+    }
+    fn admission(&self, runner_id: &str) -> Result<LabGateAdmission> {
+        observe_gate_admission(runner_id).map(|(admission, _)| admission)
     }
     fn execute(
         &self,
@@ -250,6 +253,52 @@ fn materialize_gate_workspace(
     Ok(GateWorkspace { sync, handle })
 }
 
+/// Observe the runner once and project the gate admission from it. Whether
+/// the gate is admitted is unchanged (accepting, connected, fresh daemon); the
+/// reasons come from the `RunnerAvailability` projection `runner status`
+/// reports, so a refusal names why and whether waiting can clear it.
+fn observe_gate_admission(
+    runner_id: &str,
+) -> Result<(LabGateAdmission, crate::RunnerAdmissionSnapshot)> {
+    let runner = crate::load(runner_id)?;
+    let exact = crate::lab::offload::metadata::require_exact_runner_version(&runner.settings);
+    let snapshot = crate::runner_admission_snapshot(runner_id)?;
+    let status = &snapshot.status;
+    // Capabilities are not part of gate admission, so they are not projected
+    // as a refusal reason here.
+    let projected = crate::runner_status_admission_snapshot_for_status(
+        crate::runner_admission_snapshot_for_status(status.clone()),
+        runner.settings.concurrency_limit,
+        true,
+        exact,
+    );
+    use crate::lab::offload::metadata::{lab_runner_admission_refusal, LabRunnerAdmissionRefusal};
+    let freshness = match lab_runner_admission_refusal(status, exact) {
+        None => LabGateFreshness::Fresh,
+        Some(LabRunnerAdmissionRefusal::LeaseNotFresh {
+            transient: true, ..
+        }) => LabGateFreshness::NotObserved,
+        Some(refusal) => LabGateFreshness::Refused(refusal.code().to_string()),
+    };
+    let mut reasons = projected.summary.reasons;
+    if !status.connected && !reasons.iter().any(|reason| reason == "not_connected") {
+        reasons.insert(0, "not_connected".to_string());
+    }
+    let accepts_jobs = snapshot.summary.accepting_jobs
+        && status.connected
+        && status
+            .daemon_freshness
+            .as_ref()
+            .is_some_and(|freshness| freshness.fresh);
+    let admission = LabGateAdmission {
+        accepts_jobs,
+        reasons,
+        freshness,
+        next_action: snapshot.summary.next_action.clone(),
+    };
+    Ok((admission, snapshot))
+}
+
 fn execute_owned(
     cwd: &Path,
     request: &LabGateRequest,
@@ -264,26 +313,18 @@ fn execute_owned(
         return Err(error);
     }
     // Admission is observed before materializing any source or selecting
-    // private HOME. Native exec rechecks the live daemon at submission.
-    let admission = crate::runner_admission_snapshot(&request.runner_id).map_err(|mut error| {
-        error.details["gate_disposition"] = serde_json::json!("unavailable");
-        error.details["stage"] = serde_json::json!("admission");
-        error
-    })?;
-    let status = &admission.status;
-    if !admission.summary.accepting_jobs
-        || !status.connected
-        || status
-            .daemon_freshness
-            .as_ref()
-            .is_none_or(|freshness| !freshness.fresh)
-    {
-        return Err(Error::new(
-            homeboy_core::ErrorCode::RunnerLabTransportFailure,
-            "Lab gate runner admission is stale or unavailable",
-            serde_json::json!({"gate_disposition":"unavailable", "stage":"admission"}),
-        ));
+    // private HOME. The controller already waited out transient refusals;
+    // native exec rechecks the live daemon at submission.
+    let (admission, snapshot) =
+        observe_gate_admission(&request.runner_id).map_err(|mut error| {
+            error.details["gate_disposition"] = serde_json::json!("unavailable");
+            error.details["stage"] = serde_json::json!("admission");
+            error
+        })?;
+    if !admission.accepts_jobs {
+        return Err(admission.refusal(&request.runner_id, None));
     }
+    let status = &snapshot.status;
     let runner = crate::load(&request.runner_id)?;
     let resource_run = homeboy_core::engine::run_dir::RunDir::create()?;
     let resource_invocation = homeboy_core::engine::invocation::InvocationGuard::acquire(

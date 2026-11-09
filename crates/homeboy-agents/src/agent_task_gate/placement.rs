@@ -294,9 +294,198 @@ impl LabGateRequest {
     }
 }
 
+/// Freshness of the runner daemon observation behind one gate admission.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LabGateFreshness {
+    Fresh,
+    /// The daemon lease or freshness report has not been observed yet.
+    NotObserved,
+    /// A daemon fault refuses admission (for example `version_drift`).
+    Refused(String),
+}
+
+impl LabGateFreshness {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Fresh => "fresh",
+            Self::NotObserved => "not_observed",
+            Self::Refused(code) => code,
+        }
+    }
+}
+
+/// Reasons waiting can clear: capacity, pressure and a freshness that is not
+/// yet observed. Any other `RunnerAvailability` reason defers at once.
+const TRANSIENT_ADMISSION_REASONS: &[&str] = &[
+    "capacity_reached",
+    "capacity_unknown",
+    "pressure",
+    "daemon_freshness_unavailable",
+    "daemon_unverified",
+    "active_jobs_unavailable",
+    "active_jobs_not_queried",
+];
+
+/// One observation of a runner's Lab admission, carrying the same
+/// `RunnerAvailability` reasons `runner status` reports.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LabGateAdmission {
+    pub accepts_jobs: bool,
+    pub reasons: Vec<String>,
+    pub freshness: LabGateFreshness,
+    pub next_action: Option<String>,
+}
+
+impl LabGateAdmission {
+    pub fn accepting() -> Self {
+        Self {
+            accepts_jobs: true,
+            reasons: Vec::new(),
+            freshness: LabGateFreshness::Fresh,
+            next_action: None,
+        }
+    }
+
+    /// Whether re-observing can admit the gate without anyone acting on the
+    /// runner. Disconnected, stale and drifted daemons never are.
+    pub fn is_transient(&self) -> bool {
+        !self.accepts_jobs
+            && !self.reasons.is_empty()
+            && !matches!(self.freshness, LabGateFreshness::Refused(_))
+            && self
+                .reasons
+                .iter()
+                .all(|reason| TRANSIENT_ADMISSION_REASONS.contains(&reason.as_str()))
+    }
+
+    /// The typed admission refusal, naming the reasons and freshness state.
+    pub fn refusal(&self, runner_id: &str, waited: Option<Duration>) -> Error {
+        let reasons = if self.reasons.is_empty() {
+            "none reported".to_string()
+        } else {
+            self.reasons.join(", ")
+        };
+        let mut message = format!(
+            "Lab gate runner `{runner_id}` cannot accept jobs (reasons: {reasons}; daemon freshness: {})",
+            self.freshness.as_str()
+        );
+        if let Some(waited) = waited {
+            message.push_str(&format!(
+                " after waiting {}s for admission",
+                waited.as_secs()
+            ));
+        }
+        if let Some(next_action) = &self.next_action {
+            message.push_str(&format!("; next: {next_action}"));
+        }
+        Error::new(
+            homeboy_core::ErrorCode::RunnerLabTransportFailure,
+            message,
+            serde_json::json!({
+                "gate_disposition": "unavailable",
+                "stage": "admission",
+                "runner_id": runner_id,
+                "reasons": self.reasons,
+                "freshness": self.freshness.as_str(),
+                "transient": self.is_transient(),
+                "waited_seconds": waited.map(|waited| waited.as_secs()),
+                "next_action": self.next_action,
+            }),
+        )
+    }
+}
+
+const LAB_GATE_ADMISSION_INITIAL_BACKOFF: Duration = if cfg!(test) {
+    Duration::from_millis(10)
+} else {
+    Duration::from_secs(2)
+};
+const LAB_GATE_ADMISSION_MAX_BACKOFF: Duration = Duration::from_secs(30);
+
+fn lab_gate_cancelled_before_admission() -> Error {
+    let mut error =
+        Error::invalid_argument("gate.placement", "Lab gate was cancelled before admission");
+    error.details["gate_disposition"] = serde_json::json!("cancelled");
+    error.details["stage"] = serde_json::json!("admission");
+    error
+}
+
+/// Wait for the runner to admit the gate while its refusal is transient,
+/// re-observing with bounded backoff inside the gate's timeout and
+/// no-progress budget. Supervision cancellation stops the wait.
+fn await_lab_gate_admission(
+    request: &LabGateRequest,
+    supervision: Option<&GateSupervision>,
+) -> Result<()> {
+    let transport = active_transport();
+    let mut budget = Duration::from_secs(
+        request
+            .timeout_seconds
+            .min(request.no_progress_timeout_seconds)
+            .max(1),
+    );
+    if let Some(policy) = supervision {
+        budget = budget.min(policy.timeout).min(policy.no_progress_timeout);
+    }
+    let cancelled = || supervision.is_some_and(|policy| (policy.is_cancelled)());
+    let started = Instant::now();
+    let mut backoff = LAB_GATE_ADMISSION_INITIAL_BACKOFF;
+    loop {
+        if cancelled() {
+            return Err(lab_gate_cancelled_before_admission());
+        }
+        let admission = transport
+            .admission(&request.runner_id)
+            .map_err(|mut error| {
+                if !error.details.is_object() {
+                    error.details = serde_json::json!({});
+                }
+                error.details["stage"] = serde_json::json!("admission");
+                error
+            })?;
+        if admission.accepts_jobs {
+            return Ok(());
+        }
+        let remaining = budget.saturating_sub(started.elapsed());
+        if !admission.is_transient() || remaining.is_zero() {
+            let waited = (!started.elapsed().is_zero() && admission.is_transient())
+                .then(|| started.elapsed());
+            return Err(admission.refusal(&request.runner_id, waited));
+        }
+        if let Some(policy) = supervision {
+            (policy.on_heartbeat)(&AgentTaskGateLiveStatus {
+                visibility: request.visibility,
+                reveal_policy: request.reveal_policy,
+                elapsed_ms: started.elapsed().as_millis(),
+                last_progress_ms_ago: None,
+                progress: None,
+                output_tail: format!(
+                    "waiting for Lab runner admission (reasons: {})",
+                    admission.reasons.join(", ")
+                ),
+            })?;
+        }
+        let wake = Instant::now() + backoff.min(remaining);
+        while Instant::now() < wake && !cancelled() {
+            std::thread::sleep(
+                wake.saturating_duration_since(Instant::now())
+                    .min(Duration::from_millis(250)),
+            );
+        }
+        backoff = backoff
+            .saturating_mul(2)
+            .min(LAB_GATE_ADMISSION_MAX_BACKOFF);
+    }
+}
+
 pub trait LabGateTransport: Send + Sync {
     fn declared_runner(&self, _command: &str) -> Result<Option<String>> {
         Ok(None)
+    }
+    /// Observe the runner's Lab admission before the gate is handed off.
+    /// Transports without a runner admission owner admit at once.
+    fn admission(&self, _runner_id: &str) -> Result<LabGateAdmission> {
+        Ok(LabGateAdmission::accepting())
     }
     fn execute(
         &self,
@@ -358,6 +547,10 @@ pub(super) fn dispatch(
     request: &LabGateRequest,
     supervision: Option<&GateSupervision>,
 ) -> Result<AgentTaskGateReport> {
+    if let Err(error) = await_lab_gate_admission(request, supervision) {
+        let error = gate_execute_unavailable(error, "admission", None);
+        return Ok(non_execution_report(request, &error));
+    }
     let mut setup_attempts = Vec::new();
     let mut receipt = None;
     for attempt in 0..2 {
@@ -2187,6 +2380,125 @@ mod tests {
                         "no_progress"
                     );
                     assert!(report.failure_evidence.is_none());
+                }
+            }
+        });
+    }
+
+    /// #17725: a transient admission refusal (pressure) waits and the gate
+    /// runs once the runner accepts; a disconnected runner defers at once and
+    /// names its reasons.
+    #[test]
+    fn gate_admission_waits_out_pressure_and_defers_disconnected_runners() {
+        struct AdmissionTransport {
+            previous: Arc<dyn LabGateTransport>,
+            admissions: std::sync::Mutex<Vec<LabGateAdmission>>,
+            observed: Arc<std::sync::atomic::AtomicUsize>,
+            executed: Arc<std::sync::atomic::AtomicUsize>,
+        }
+        impl LabGateTransport for AdmissionTransport {
+            fn declared_runner(&self, command: &str) -> Result<Option<String>> {
+                self.previous.declared_runner(command)
+            }
+            fn admission(&self, runner_id: &str) -> Result<LabGateAdmission> {
+                if runner_id != "admission-runner" {
+                    return self.previous.admission(runner_id);
+                }
+                self.observed
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let mut admissions = self.admissions.lock().unwrap();
+                Ok(if admissions.len() > 1 {
+                    admissions.remove(0)
+                } else {
+                    admissions[0].clone()
+                })
+            }
+            fn execute(
+                &self,
+                cwd: &Path,
+                request: &LabGateRequest,
+                supervision: Option<&GateSupervision>,
+            ) -> Result<LabGateReceipt> {
+                if request.runner_id != "admission-runner" {
+                    return self.previous.execute(cwd, request, supervision);
+                }
+                self.executed
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                execute_with_context(request.clone(), cwd, &runner_context(&request.runner_id))
+            }
+        }
+        let refused = |reasons: &[&str], freshness: LabGateFreshness| LabGateAdmission {
+            accepts_jobs: false,
+            reasons: reasons.iter().map(|reason| reason.to_string()).collect(),
+            freshness,
+            next_action: None,
+        };
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let cases = [
+                (
+                    vec![
+                        refused(&["pressure"], LabGateFreshness::Fresh),
+                        refused(&["pressure"], LabGateFreshness::Fresh),
+                        LabGateAdmission::accepting(),
+                    ],
+                    true,
+                ),
+                (
+                    vec![refused(
+                        &["not_connected", "active_jobs_unavailable"],
+                        LabGateFreshness::NotObserved,
+                    )],
+                    false,
+                ),
+            ];
+            for (admissions, runs) in cases {
+                let previous = active_transport();
+                let observed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                let executed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                register_lab_gate_transport(Arc::new(AdmissionTransport {
+                    previous,
+                    admissions: std::sync::Mutex::new(admissions),
+                    observed: observed.clone(),
+                    executed: executed.clone(),
+                }));
+                let temp = tempfile::tempdir().unwrap();
+                repository(temp.path());
+                let mut request = request(temp.path());
+                request.runner_id = "admission-runner".to_string();
+                request.argv = vec![
+                    "sh".to_string(),
+                    "-c".to_string(),
+                    "printf executed".to_string(),
+                ];
+
+                let report = dispatch(temp.path(), &request, None).unwrap();
+
+                let observed = observed.load(std::sync::atomic::Ordering::SeqCst);
+                let executed = executed.load(std::sync::atomic::Ordering::SeqCst);
+                if runs {
+                    assert_eq!(observed, 3, "pressure is re-observed until accepting");
+                    assert_eq!(executed, 1);
+                    assert_eq!(report.status, AgentTaskGateStatus::Succeeded, "{report:?}");
+                    assert_eq!(report.stdout, "executed");
+                } else {
+                    assert_eq!(observed, 1, "a disconnected runner is not re-observed");
+                    assert_eq!(executed, 0);
+                    assert_eq!(report.status, AgentTaskGateStatus::Unavailable);
+                    assert!(
+                        report.stderr.contains(
+                            "cannot accept jobs (reasons: not_connected, active_jobs_unavailable; daemon freshness: not_observed)"
+                        ),
+                        "{}",
+                        report.stderr
+                    );
+                    let diagnostic = &report.lab_receipt.as_ref().unwrap()["diagnostic"];
+                    assert_eq!(diagnostic["details"]["stage"], "admission");
+                    assert_eq!(diagnostic["details"]["transient"], false);
+                    assert_eq!(
+                        diagnostic["details"]["reasons"],
+                        serde_json::json!(["not_connected", "active_jobs_unavailable"])
+                    );
+                    assert_eq!(diagnostic["details"]["freshness"], "not_observed");
                 }
             }
         });
