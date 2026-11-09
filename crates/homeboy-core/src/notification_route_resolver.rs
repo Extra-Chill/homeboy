@@ -128,13 +128,16 @@ pub fn resolve_from_cli_or_env_with_evidence(
     let context = crate::notification_route::from_cli_or_env(cli_transport, cli_route)
         .map_err(with_invalid_resolution_evidence)?;
     let mut resolved = match context {
-        NotificationRouteContext::Route(route) => {
+        NotificationRouteContext::Route(mut route) => {
             // Only argv is operator input. A propagated environment route was
             // validated by the ancestor that bound it, and a child such as a
             // gate may run in a home without that transport installed.
             if cli_transport.is_some() {
-                crate::notify::declared_transport(&load_all_extensions()?, &route.transport)
-                    .map_err(with_invalid_resolution_evidence)?;
+                let extensions = load_all_extensions()?;
+                let (_, declared) =
+                    crate::notify::declared_transport(&extensions, &route.transport)
+                        .map_err(with_invalid_resolution_evidence)?;
+                route.transport = declared.id.clone();
             }
             let mut evidence = NotificationRouteResolution::new(if cli_transport.is_some() {
                 "explicit"
@@ -171,6 +174,7 @@ pub fn resolve_from_cli_or_env_with_evidence(
 fn resolve_declared_transport_route(transport: &str) -> Result<ResolvedNotificationRoute> {
     let extensions = load_all_extensions()?;
     let (extension, declared) = crate::notify::declared_transport(&extensions, transport)?;
+    let transport = declared.id.as_str();
     let Some(resolver) = &declared.route_resolver else {
         let mut evidence = NotificationRouteResolution::new("route_less");
         evidence.transport = Some(transport.to_string());

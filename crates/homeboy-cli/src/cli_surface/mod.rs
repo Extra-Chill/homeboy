@@ -34,9 +34,11 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "PATH")]
     pub output: Option<PathBuf>,
 
-    /// Installed notification transport for this run. Pair with
-    /// `--notification-route`; the route is opaque, non-secret data owned by
-    /// that transport.
+    /// Installed notification transport id for this run, or its unambiguous
+    /// short alias (`discord` for `discord.run-completion`). An unknown id
+    /// lists the installed ids (also shown by `homeboy extension list`). Pair
+    /// with `--notification-route`; the route is opaque, non-secret data owned
+    /// by that transport.
     #[arg(
         long,
         global = true,
