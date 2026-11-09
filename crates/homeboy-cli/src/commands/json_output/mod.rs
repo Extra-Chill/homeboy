@@ -317,6 +317,10 @@ pub(crate) fn run_command_output(
                 })
             }
         }
+        Commands::Workflow(args) if args.is_ab() => command_run_with_summary(
+            dispatch(Commands::Workflow(args), spec, placement),
+            |payload, _| super::workflow::render_ab_summary(payload),
+        ),
         Commands::Release(args) => {
             let full = args.requests_full_output();
             release_command_run(

@@ -9,6 +9,7 @@ homeboy workflow cancel <instance|cadence-workflow-id>
 homeboy workflow approve <instance> <step>
 homeboy workflow list
 homeboy runs list --kind workflow
+homeboy [--placement auto|lab|lab-or-local|local] workflow ab <component|path> --base <ref> --candidate <ref> --run <command> --compare <path-or-glob>... [--instance NAME] [--wait]
 ```
 
 A workflow pre-defines multi-step and repeating agent work and runs it mechanically: steps run in dependency order, and gates decide which step runs next. The definition format is `homeboy/workflow/v1` (JSON).
@@ -190,13 +191,30 @@ A step runs with `env_clear()` plus its admitted environment:
 - **Where it lives.** Registrations are stored in the observation store beside the daemon job ledger, so they survive daemon restarts. A store schema bump starts fresh and drops them. A daemon that is not running admits nothing: run the always-on cadences on a resident daemon (`HOMEBOY_DAEMON_IDLE_TIMEOUT_SECS=0 homeboy daemon ensure-running`, or a runner's service daemon).
 - **Observe and stop.** `workflow list` shows every cadence with its next due time, fire and skip counts, last instance, and last admission error. `workflow cancel <workflow-id>` stops a cadence; its instances are ordinary instances you can cancel separately.
 
-**Built-in `homeboy.retention`.** Homeboy ships one workflow, `homeboy.retention`: every hour, one `homeboy` step runs `cleanup automatic-retention` with a 50-minute timeout. The daemon registers it when it starts, first due one hour later, unless an operator registered their own `homeboy.retention` or cancelled it; both are kept. `workflow run homeboy.retention` and `workflow validate homeboy.retention` resolve the built-in when no registry file has that id.
+**Built-in `homeboy.retention`.** Homeboy ships a retention workflow, `homeboy.retention`: every hour, one `homeboy` step runs `cleanup automatic-retention` with a 50-minute timeout. The daemon registers it when it starts, first due one hour later, unless an operator registered their own `homeboy.retention` or cancelled it; both are kept. `workflow run homeboy.retention` and `workflow validate homeboy.retention` resolve the built-in when no registry file has that id.
 
 ### Daemon restarts
 
 An instance's checkpoint is the daemon's job store. `runs show`, `runs watch`, `runs list --kind workflow`, and `workflow approve` go to the serving daemon.
 
 When the daemon that owns an instance dies or is stopped, the instance resumes on its own. The next Homeboy command restarts the daemon in the same state directory, and the replacement resumes the instance from its checkpoint. That directory's owner lock admits one daemon, so the instance has one driver, and submission keys keep every step to one job. A step whose child was still running when the daemon died is protected until the child exits; its result is then read from the job ledger (and, for a `cook` step, from the Cook's run record), so no step runs twice. `homeboy daemon recover --yes` applies the same restart immediately.
+
+## A/B parity (`workflow ab`)
+
+`homeboy workflow ab` proves a refactor is byte-identical. It runs one command at two refs and compares the files it produces:
+
+```text
+homeboy --wait workflow ab blocks-engine --base origin/main --candidate my-refactor \
+  --run 'composer build' --compare build --compare 'out/**/*.html'
+```
+
+- **Inputs.** The target is a component id or a repository path. `--base` and `--candidate` are any refs; both resolve to commit SHAs on the controller first. `--run` runs with `sh -c` in each checkout. `--compare` (repeatable) is a file, directory, or glob relative to the checkout. A directory includes every file under it, and `.git` is never compared.
+- **Placement.** `--placement` follows the usual rules. `auto` (the default) and `lab-or-local` use a ready Lab runner and run here when none is ready. `lab` requires a runner. `local` runs on this controller. On a runner, each commit is synced as its own snapshot-git workspace, and the recipe is admitted on that runner's daemon (`workflow run --on`).
+- **Execution.** `workflow ab` admits the built-in `homeboy.ab` recipe. Its `side` step fans out over `base` and `candidate` with `max_parallel: 2`, so both sides run at once as supervised step jobs. Each side gets an isolated checkout: a detached `git worktree` locally, or its own Lab workspace. Before running the command, the side asserts that the checkout's HEAD equals the resolved SHA, and refuses to run if it does not. A side records its SHA, run id (its step job), exit code, a 4 KiB log tail, and the sha256 of every compared file.
+- **Verdict.** The `verdict` step writes `homeboy/workflow-ab-verdict/v1`. It is `identical` when every compared file matches byte for byte on both sides and the exit codes are equal. Otherwise it is `different` and carries `differing` (path plus both sha256 values; a file missing on one side has `null`), a unified diff bounded to 64 KiB (`diff_truncated` marks a cut), the per-file sha256 for both sides, and both run ids. A compare set that matches no files on either side is an error, never a vacuous `identical`. The verdict is the step's output, so `homeboy runs show <instance>` keeps it as evidence.
+- **Output.** With `--wait`, human output is a short Markdown summary you can paste into a PR. The JSON envelope adds `ab` (refs and SHAs) and `verdict`. The exit code is 0 for `identical` and 1 for `different`. Without `--wait`, the command returns the admitted instance with its `status_command` and `cancel_command`.
+- **Cancel.** `homeboy workflow cancel <instance>` cancels both sides. On a Lab runner, run it through `homeboy runner exec <runner> -- …`, which is the `cancel_command` the front end prints. Each side is a step job that leads its own process group, and the command runs inside that group, so cancelling stops the whole tree with nothing left behind. The `always` `cleanup` step removes local worktrees after a verdict or a failed side. A cancelled instance runs no further steps, so its checkouts stay under the temp directory (`homeboy-ab/<instance>`) until `git worktree prune`.
+- **Identity.** The same refs, command, and compare set name the same instance. Pass `--instance NAME` to run them again.
 
 ## Commands
 
@@ -206,6 +224,7 @@ When the daemon that owns an instance dies or is stopped, the instance resumes o
 - **`workflow cancel`** cancels the instance; the daemon cancels every step job it is running. Once the cancellation is durable the instance admits no more steps. Given a workflow id that is not an instance, it stops that cadence.
 - **`workflow approve`** records an approval for a step that is awaiting one.
 - **`workflow reject <instance> <step> [--reason <text>]`** records a rejection for an awaiting approval, with optional feedback for downstream steps.
+- **`workflow ab`** compiles and admits the built-in `homeboy.ab` A/B parity recipe (see [A/B parity](#ab-parity-workflow-ab)). Its hidden `ab-step` verb runs the recipe's steps.
 - **`workflow list`** lists the definitions in `~/.config/homeboy/workflows/`, the built-ins, and every registered cadence. `runs list --kind workflow` lists instances in the daemon without discovery filters.
 
 ## Examples

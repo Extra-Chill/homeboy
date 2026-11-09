@@ -1460,6 +1460,7 @@ impl CliRuntime {
         }
         if let Commands::Workflow(args) = &mut cli.command {
             args.absorb_wait(!cli.detach_after_handoff);
+            args.absorb_placement(cli.placement);
         }
         if let Commands::Fuzz(args) = &mut cli.command {
             match args.absorb_planning_runner(cli.runner.take()) {

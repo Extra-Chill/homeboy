@@ -134,6 +134,12 @@ pub(crate) fn route_after_parse_with_provenance(
         return Ok(None);
     }
 
+    // `workflow ab` resolves placement itself: it admits its recipe on the
+    // selected runner's daemon, so the front end always runs here.
+    if matches!(&cli.command, Commands::Workflow(args) if args.is_ab()) {
+        return Ok(None);
+    }
+
     // Provider discovery without an explicit runner or Lab placement describes
     // this controller's extensions, runtime defaults, and credential readiness.
     // Keep that scope before generic routing can consume a previously captured
