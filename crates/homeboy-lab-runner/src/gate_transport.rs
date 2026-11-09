@@ -552,15 +552,27 @@ fn execute_owned(
         })?;
     let private =
         request.visibility == homeboy_agents::agent_tasks::gate::AgentTaskGateVisibility::Private;
-    let value: serde_json::Value = decode_gate_json("gate_stdout", stdout.as_bytes(), private)?;
+    let stderr = result
+        .get("stderr")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    // gate-execute that printed no envelope still names its stderr (#17649).
+    let value: serde_json::Value = decode_gate_json("gate_stdout", stdout.as_bytes(), private)
+        .map_err(|mut error| {
+            error.details["stage"] = serde_json::json!("terminal_projection");
+            error.details["job_id"] = serde_json::json!(job_id);
+            if !private {
+                let lines = stderr.lines().collect::<Vec<_>>();
+                let tail = lines[lines.len().saturating_sub(20)..].join("\n");
+                error.details["stderr_tail"] =
+                    serde_json::json!(homeboy_core::redaction::redact_string(&tail));
+            }
+            error
+        })?;
     let location = value.get("data").unwrap_or(&value);
     if location.get("schema").and_then(serde_json::Value::as_str)
         != Some("homeboy/lab-gate-receipt-location/v1")
     {
-        let stderr = result
-            .get("stderr")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("");
         return Err(Error::new(
             homeboy_core::ErrorCode::RunnerLabTransportFailure,
             if request.visibility

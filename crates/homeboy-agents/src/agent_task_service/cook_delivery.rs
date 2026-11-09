@@ -1160,12 +1160,28 @@ fn ensure_base_current(
             *base_movements += 1;
             ctx.update_attempt_promotion(&promotion);
             if promotion.status != AgentTaskPromotionStatus::Applied {
-                return ctx.blocked(
-                    CookDeliveryBlockerCode::GateFailed,
-                    "rebased candidate did not pass the declared gates; inspect gate evidence before starting a fresh Cook".to_string(),
-                    Vec::new(),
-                    *base_movements,
-                );
+                // Gates that could not execute are no verdict (#17649).
+                let (code, message) = if promotion.status.gate_failed() {
+                    (
+                        CookDeliveryBlockerCode::GateFailed,
+                        "rebased candidate did not pass the declared gates; inspect gate evidence before starting a fresh Cook".to_string(),
+                    )
+                } else {
+                    let causes = promotion
+                        .deterministic_gates
+                        .iter()
+                        .filter_map(|gate| {
+                            gate.non_execution_cause()
+                                .map(|cause| format!("gate `{}`: {cause}", gate.id))
+                        })
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    (
+                        CookDeliveryBlockerCode::GatesDeferred,
+                        format!("rebased candidate's declared gates did not execute ({causes}); recover the Cook once the gate environment is available"),
+                    )
+                };
+                return ctx.blocked(code, message, Vec::new(), *base_movements);
             }
             Ok(ControlFlow::Continue(promotion))
         }
