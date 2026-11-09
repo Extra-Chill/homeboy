@@ -496,6 +496,10 @@ pub struct RecoverArgs {
     /// continuation step also validates continuation admission read-only.
     #[arg(long)]
     pub preflight: bool,
+    /// Perform a step the previous `recover` reported `blocked` because it made
+    /// no progress, after resolving the blocker it named.
+    #[arg(long, conflicts_with = "preflight")]
+    pub unblock: bool,
 
     /// Explicitly increase the provider timeout for a new retry attempt of a
     /// terminal provider timeout. The override and its operator authority are
@@ -594,9 +598,10 @@ impl RecoverArgs {
         }
     }
 }
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Clone)]
 pub struct RetryArgs {
-    /// Durable run ID to retry. A stopped Cook is recovered with
+    /// Durable run ID to retry. A Cook ID retries the Cook's latest durable
+    /// attempt. A stopped Cook is recovered with
     /// `agent-task recover <cook-or-attempt-id>`, which also takes explicit
     /// provider-route overrides for its next attempt.
     pub run_id: String,

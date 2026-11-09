@@ -5751,7 +5751,11 @@ fn retry_unmaterialized_cook_admission_locked(
             retry_run_id = format!("retry-{}", uuid::Uuid::new_v4());
         }
     }
-    if !successors.is_empty() && !force {
+    if successors
+        .iter()
+        .any(|record| successor_requires_force(lifecycle_store, record))
+        && !force
+    {
         return Err(Error::validation_invalid_argument(
             "force",
             format!(
@@ -6083,7 +6087,11 @@ where
                 requested_run_id = None;
             }
         }
-        if !successors.is_empty() && !force {
+        if successors
+            .iter()
+            .any(|record| successor_requires_force(lifecycle_store, record))
+            && !force
+        {
             return Err(Error::validation_invalid_argument(
                 "force",
                 format!(
@@ -6324,6 +6332,32 @@ fn retry_root_run_id_in_store(
         Some(record.run_id.clone()),
         None,
     ))
+}
+
+/// Whether an existing successor makes another retry of its lineage need
+/// `--force`. A failed Cook successor that holds no substantive retry, a
+/// review-form-only follow-up or a continuation that never reached provider
+/// work, is evidence rather than a competing attempt, so it does not (#17650).
+fn successor_requires_force(
+    lifecycle_store: &AgentTaskLifecycleStore,
+    record: &AgentTaskRunRecord,
+) -> bool {
+    if !record.state().is_terminal()
+        || record.state() == AgentTaskRunState::Succeeded
+        || record.metadata["cook_id"].as_str().is_none()
+    {
+        return true;
+    }
+    let continuation_only = record.metadata["provider_executions_consumed"].as_u64() == Some(0);
+    let review_form_only = load_controller_plan_in_store(lifecycle_store, &record.run_id)
+        .is_ok_and(|plan| {
+            !plan.tasks.is_empty()
+                && plan
+                    .tasks
+                    .iter()
+                    .all(crate::agent_task_cook_loop::request_is_review_form_only)
+        });
+    !(continuation_only || review_form_only)
 }
 
 fn active_retry_successor_error(record: &AgentTaskRunRecord) -> Error {

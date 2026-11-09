@@ -11509,44 +11509,40 @@ pub(super) fn run_resume_with_executor(
     ))
 }
 
-/// `retry` submits a fresh run from any run's plan. Given a Cook ID whose
-/// durable state names a recovery step, `retry --run` performs that step
-/// through `agent-task recover` instead of re-deciding it; any other retry of
-/// that Cook alias is refused toward `recover`, because only an exact attempt
-/// ID names the run a plain retry reserves from (#15925).
+/// `retry` submits a fresh run from any run's plan. Given a Cook ID, `retry`
+/// targets the Cook: a plain `--run` whose durable state names a recovery
+/// step performs that step through `agent-task recover`; any other retry
+/// resolves the Cook's latest durable attempt itself instead of making the
+/// operator find it (#17650). Store contention is bounded: it retries with
+/// backoff and then reports `observation_store.busy`.
 pub(super) fn retry(args: RetryArgs) -> CmdResult<Value> {
-    if let Some(plan) = agent_task_service_direct::cook_recovery_delegation(&args.run_id) {
-        return retry_cook_alias(args, &plan);
-    }
-    retry_exact(args)
+    agent_task_service_direct::with_store_contention_backoff(
+        "agent-task retry",
+        |outcome: &CmdResult<Value>| {
+            outcome
+                .as_ref()
+                .is_err_and(agent_task_service_direct::is_store_contention)
+        },
+        || retry_cook_or_run(args.clone()),
+    )
 }
 
-fn retry_cook_alias(
-    args: RetryArgs,
-    plan: &agent_task_service_direct::CookRecoveryPlan,
-) -> CmdResult<Value> {
+fn retry_cook_or_run(mut args: RetryArgs) -> CmdResult<Value> {
     let plain_run =
         args.run && args.new_run_id.is_none() && !args.force && args.idempotency_key.is_none();
-    if plain_run {
+    if plain_run && agent_task_service_direct::cook_recovery_delegation(&args.run_id).is_some() {
         return super::recover::recover(super::RecoverArgs {
             id: args.run_id,
             ..Default::default()
         });
     }
-    let recover = format!(
-        "homeboy agent-task recover {}",
-        homeboy::core::engine::shell::quote_arg(&args.run_id)
-    );
-    Err(Error::validation_invalid_argument(
-        "run_id",
-        format!(
-            "`{}` is a Cook ID whose recovery step is performed by `agent-task recover`; pass the exact attempt `{}` to reserve a plain retry",
-            args.run_id, plan.run_id
-        ),
-        Some(args.run_id.clone()),
-        Some(vec![recover.clone()]),
-    )
-    .with_hint(format!("Run `{recover}`.")))
+    if let Some(latest) = agent_task_service::load_recipe(&args.run_id)
+        .ok()
+        .and_then(|recipe| recipe.attempts.last().map(|attempt| attempt.run_id.clone()))
+    {
+        args.run_id = latest;
+    }
+    retry_exact(args)
 }
 
 /// Retry exactly the run `args.run_id` resolves to, without consulting Cook

@@ -67,6 +67,7 @@ fn recovery_request(mut args: RecoverArgs) -> homeboy::core::Result<CookRecovery
     Ok(CookRecoveryRequest {
         preflight: args.preflight,
         regate: args.regate,
+        unblock: args.unblock,
         overrides,
         replace_gates,
         corrected_gates,
