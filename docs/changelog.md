@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.455.2] - 2026-11-09
+
+### Changed
+- isolate playwright mapping test from ambient PLAYWRIGHT_BROWSERS_PATH
+- pending-admission probe reads only live rows (daemon re-read the whole run history every second)
+
+### Fixed
+- name admission refusal reasons, report accepts_jobs in runner status, requeue capacity-only refusals
+
 ## [0.455.1] - 2026-11-09
 
 ### Changed

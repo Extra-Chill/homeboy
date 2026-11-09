@@ -131,6 +131,42 @@ pub fn runner_admission_snapshot_for_status(status: RunnerStatusReport) -> Runne
     RunnerAdmissionSnapshot::from_status(status)
 }
 
+/// The `runner status` admission projection. `accepts_jobs` and `reasons` are
+/// computed by the same `RunnerAvailability` projection Lab admission uses, so
+/// status cannot report a runner as accepting while admission refuses it.
+pub fn runner_status_admission_snapshot(runner_id: &str) -> Result<RunnerAdmissionSnapshot> {
+    let runner = load(runner_id)?;
+    let snapshot = runner_admission_snapshot(runner_id)?;
+    let capabilities_ready = homeboy_runtime_ready(runner_id, &snapshot.status);
+    Ok(runner_status_admission_snapshot_for_status(
+        snapshot,
+        runner.settings.concurrency_limit,
+        capabilities_ready,
+        lab::offload::metadata::require_exact_runner_version(&runner.settings),
+    ))
+}
+
+/// Attach the Lab admission availability verdict to an observed snapshot.
+pub fn runner_status_admission_snapshot_for_status(
+    mut snapshot: RunnerAdmissionSnapshot,
+    capacity: Option<usize>,
+    capabilities_ready: bool,
+    exact_version: bool,
+) -> RunnerAdmissionSnapshot {
+    let availability = lab_runner_admission_candidate(
+        &snapshot.status.runner_id,
+        capacity,
+        &snapshot.status,
+        capabilities_ready,
+        exact_version,
+    )
+    .availability();
+    snapshot.summary.accepting_jobs &= availability.accepts_jobs;
+    snapshot.summary.accepts_jobs = Some(availability.accepts_jobs);
+    snapshot.summary.reasons = availability.reasons;
+    snapshot
+}
+
 pub mod auto_placement_reconnect;
 mod git_dependency_materialization;
 mod homeboy_refresh;
@@ -2161,6 +2197,51 @@ mod tests {
             lab_runner_readiness_from_candidates(None, vec![default_lab_candidate("lab-a", true)]);
         assert_eq!(refreshed.state, LabRunnerReadinessState::ConnectedReady);
         assert_eq!(refreshed.selected_runner_id.as_deref(), Some("lab-a"));
+    }
+
+    #[test]
+    fn status_availability_agrees_with_admission_for_pressure_blocked_runner() {
+        let mut status =
+            skewed_runner_status(homeboy_product_identity::product_version().to_string());
+        status.daemon_freshness.as_mut().unwrap().runtime_paths =
+            Some(homeboy_core::daemon::DaemonRuntimeSnapshot {
+                pressure: Some(homeboy_core::runner_pressure::RunnerPressure {
+                    cpu: Some(10_900),
+                    load_fallback: true,
+                    admission_reason: Some("pressure".to_string()),
+                    ..Default::default()
+                }),
+                loaded_at: "2026-11-09T14:39:00Z".to_string(),
+                paths: Vec::new(),
+            });
+
+        let status_view = runner_status_admission_snapshot_for_status(
+            runner_admission_snapshot_for_status(status.clone()),
+            Some(2),
+            true,
+            false,
+        )
+        .summary;
+        let admission = lab_runner_readiness_from_candidates(
+            Some("homeboy-lab"),
+            vec![lab_runner_admission_candidate(
+                "homeboy-lab",
+                Some(2),
+                &status,
+                true,
+                false,
+            )],
+        );
+
+        assert!(admission.available_runner_ids.is_empty());
+        assert_eq!(admission.state, LabRunnerReadinessState::CapacityBlocked);
+        assert_eq!(status_view.accepts_jobs, Some(false));
+        assert!(!status_view.accepting_jobs);
+        assert_eq!(status_view.reasons, admission.reasons);
+        assert!(status_view.reasons.contains(&"pressure".to_string()));
+        let rendered = serde_json::to_value(&status_view).unwrap();
+        assert_eq!(rendered["accepts_jobs"], false);
+        assert_eq!(rendered["reasons"], serde_json::json!(status_view.reasons));
     }
 
     #[test]

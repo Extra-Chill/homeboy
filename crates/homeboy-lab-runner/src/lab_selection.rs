@@ -1102,7 +1102,7 @@ pub(super) fn lab_runner_availability_error(
                 .flat_map(|availability| availability.reasons.iter().cloned())
                 .collect()
         });
-    let message = if let Some(runner_id) = selected_runner_id.as_deref() {
+    let mut message = if let Some(runner_id) = selected_runner_id.as_deref() {
         format!(
             "Lab offload selected runner `{runner_id}` for `{command_label}`, but that runner cannot accept jobs"
         )
@@ -1111,6 +1111,13 @@ pub(super) fn lab_runner_availability_error(
             "Lab offload found eligible runners for `{command_label}`, but none can accept jobs"
         )
     };
+    if !reasons.is_empty() {
+        message.push_str(&format!(" (reasons: {})", reasons.join(", ")));
+    }
+    let pressure = selected_status
+        .and_then(|status| status.daemon_freshness.as_ref())
+        .and_then(|freshness| freshness.runtime_paths.as_ref())
+        .and_then(|paths| paths.pressure.clone());
 
     let stale_daemon_recovery = selected_status
         .and_then(|status| status.stale_daemon.as_ref())
@@ -1138,6 +1145,7 @@ pub(super) fn lab_runner_availability_error(
                 "selected": selected,
                 "eligible": eligible,
                 "reasons": reasons,
+                "pressure": pressure,
             },
             "runner_status": selected_status.map(sanitized_status_for_output),
             "stale_daemon_recovery_command": stale_daemon_recovery,
@@ -1631,6 +1639,55 @@ mod daemon_repair_step_tests {
             termination_evidence: None,
             repair_plan,
         }
+    }
+
+    #[test]
+    fn availability_refusal_message_names_its_reasons_and_keeps_structure() {
+        let mut freshness = freshness_with_plan(Vec::new());
+        freshness.runtime_paths = Some(homeboy_core::daemon::DaemonRuntimeSnapshot {
+            pressure: Some(homeboy_core::runner_pressure::RunnerPressure {
+                cpu: Some(10_900),
+                load_fallback: true,
+                admission_reason: Some("pressure".to_string()),
+                ..Default::default()
+            }),
+            loaded_at: "2026-11-09T14:39:00Z".to_string(),
+            paths: Vec::new(),
+        });
+        let status = status_report("homeboy-lab", Some(freshness), None);
+        let mut availability = RunnerAvailability::from_status_parts(
+            "homeboy-lab",
+            true,
+            false,
+            2,
+            &RunnerActiveJobState::Available,
+            Some(2),
+        );
+        availability.reasons.push("pressure".to_string());
+        availability.accepts_jobs = false;
+
+        let error = lab_runner_availability_error(
+            "agent-task cook/run-plan/retry --run",
+            Some(&availability),
+            Some(&status),
+            vec![availability.clone()],
+        );
+
+        assert!(
+            error
+                .message
+                .ends_with("cannot accept jobs (reasons: capacity_reached, pressure)"),
+            "{}",
+            error.message
+        );
+        let recorded = &error.details["runner_availability"];
+        assert_eq!(
+            recorded["reasons"],
+            serde_json::json!(["capacity_reached", "pressure"])
+        );
+        assert_eq!(recorded["selected"]["capacity"], 2);
+        assert_eq!(recorded["selected"]["active_job_count"], 2);
+        assert_eq!(recorded["pressure"]["cpu"], 10_900);
     }
 
     #[test]

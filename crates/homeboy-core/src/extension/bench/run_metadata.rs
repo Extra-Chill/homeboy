@@ -4,7 +4,8 @@ use std::path::{Path, PathBuf};
 use homeboy_engine_primitives::content_hash;
 
 use crate::extension::bench::parsing::{
-    BenchResults, BenchRunMetadata, BenchRunnerMetadata, BenchScenario, BenchWorkloadMetadata,
+    BenchNodeRuntime, BenchResults, BenchRunMetadata, BenchRunnerMetadata, BenchScenario,
+    BenchWorkloadMetadata,
 };
 use crate::extension::bench::run::BenchRunWorkflowArgs;
 use crate::extension::resolve::ExtensionExecutionContext;
@@ -16,6 +17,7 @@ pub(crate) fn stamp_run_metadata(
     component: &Component,
     args: &BenchRunWorkflowArgs,
     started_at: &str,
+    child_path: Option<&str>,
 ) {
     let mut workloads = workload_metadata(&results.scenarios, component, &args.extra_workloads);
     workloads.sort_by(|a, b| a.id.cmp(&b.id).then_with(|| a.path.cmp(&b.path)));
@@ -41,6 +43,7 @@ pub(crate) fn stamp_run_metadata(
                 .to_string_lossy()
                 .to_string(),
             source_revision: source_revision_at(&execution_context.extension_path),
+            node: child_path.and_then(node_runtime_on_path),
         }),
         rig_package: args.rig_package.clone(),
         lifecycle: None,
@@ -51,6 +54,26 @@ pub(crate) fn stamp_run_metadata(
             .unwrap_or_default(),
         diagnostics: Vec::new(),
     });
+}
+
+/// The `node` a child given `path` resolves, and that executable's version.
+fn node_runtime_on_path(path: &str) -> Option<BenchNodeRuntime> {
+    let node = homeboy_engine_primitives::command_path::resolve_command_on_path(
+        "node",
+        std::ffi::OsStr::new(path),
+    )?;
+    let version = std::process::Command::new(&node)
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        .filter(|version| !version.is_empty());
+    Some(BenchNodeRuntime {
+        path: node.to_string_lossy().to_string(),
+        version,
+    })
 }
 
 fn workload_metadata(
@@ -292,6 +315,7 @@ mod tests {
             &component,
             &args,
             "2026-04-28T00:00:00Z",
+            None,
         );
 
         let metadata = results.run_metadata.expect("metadata stamped");

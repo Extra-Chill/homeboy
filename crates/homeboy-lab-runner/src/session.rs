@@ -645,6 +645,13 @@ pub struct RunnerAdmissionSummary {
     /// Whether the runner can admit a new workload now: connected, fresh, and
     /// not otherwise blocked.
     pub accepting_jobs: bool,
+    /// Lab admission verdict from the same `RunnerAvailability` projection
+    /// Lab admission uses. Present on `runner status`; absent elsewhere.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub accepts_jobs: Option<bool>,
+    /// Why Lab admission refuses this runner, from that same projection.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub reasons: Vec<String>,
     /// Runner-owned live count; absent when the job observation is unavailable.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub active_job_count: Option<usize>,
@@ -868,6 +875,8 @@ impl RunnerStatusReport {
             daemon_lease_verdict,
             daemon_compatible,
             accepting_jobs,
+            accepts_jobs: None,
+            reasons: Vec::new(),
             active_job_count: active_jobs_available.then_some(active_job_count),
             live_daemon_job_count: active_jobs_available.then_some(active_job_count),
             stale_job_count: self.stale_runner_job_count,
