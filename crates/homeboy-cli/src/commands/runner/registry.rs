@@ -186,12 +186,14 @@ fn runner_inventory_summary(
     let is_local = configured.kind == RunnerKind::Local;
     let operator = status.map(super::status::operator_summary);
     let admission = status.map(|status| {
-        homeboy::runner::runner_admission_snapshot_for_status(status.clone()).summary
+        homeboy::runner::runners::runner_readiness_admission_snapshot(
+            homeboy::runner::runner_admission_snapshot_for_status(status.clone()),
+        )
     });
     RunnerInventorySummary {
         pressure: admission
             .as_ref()
-            .and_then(|summary| summary.pressure.clone()),
+            .and_then(|snapshot| snapshot.summary.pressure.clone()),
         identity: identity.clone(),
         kind: format!("{:?}", configured.kind).to_ascii_lowercase(),
         connection_state: if is_local {
@@ -203,29 +205,11 @@ fn runner_inventory_summary(
         },
         admission_state: if is_local {
             "local".to_string()
-        } else if let Some(admission) = admission {
-            // A recent failed job observation keeps an accepting runner
-            // degraded; a current one explains why it is not accepting.
-            let observing_now = status
-                .and_then(|status| status.daemon_freshness.as_ref())
-                .is_some_and(|freshness| freshness.is_observation_unavailable());
-            if admission
-                .pressure
-                .as_ref()
-                .is_some_and(|pressure| pressure.admission_reason.is_some())
-            {
-                "pressure".to_string()
-            } else {
-                match admission.degraded.as_deref() {
-                    Some(reason) if admission.accepting_jobs || observing_now => {
-                        format!("degraded: {reason}")
-                    }
-                    _ if admission.accepting_jobs => "accepting".to_string(),
-                    _ => "blocked".to_string(),
-                }
-            }
         } else {
-            "blocked".to_string()
+            admission
+                .as_ref()
+                .map(homeboy::runner::runners::runner_admission_label)
+                .unwrap_or_else(|| "blocked".to_string())
         },
         concurrency: RunnerInventoryConcurrency {
             active: status.and_then(|status| {
@@ -942,6 +926,9 @@ mod tests {
             let mut configured = configured_runner("lab");
             configured.kind = RunnerKind::Ssh;
             let mut status = ssh_status("lab", runner::RunnerActiveJobState::Available);
+            // A status that observed the job binary has proven its capabilities.
+            status.configured_job_binary_build_identity =
+                Some(homeboy::core::build_identity::current().display);
             status.daemon_freshness = Some(homeboy::core::daemon::DaemonFreshnessReport {
                 fresh: true,
                 stale_reason_code: None,

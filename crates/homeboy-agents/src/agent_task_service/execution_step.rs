@@ -438,15 +438,34 @@ pub(super) fn consume_execution_terminal_in_store(
         value["details"]["execution_step_disposition"] == "runner_ineligible"
             || value["data"]["execution_step_disposition"] == "runner_ineligible"
     }) || runner_availability_awaits_resources(&runner_availability);
+    // A connected runner whose readiness is unobserved waits through the same
+    // `runner_wait` requeue, bounded by consecutive failed observations.
+    let readiness_unobserved = diagnostic
+        .as_ref()
+        .is_some_and(homeboy_core::parsed_command_preflight::readiness_unobserved_refusal);
+    let readiness = diagnostic
+        .as_ref()
+        .and_then(|value| {
+            [&value["details"], &value["data"]]
+                .into_iter()
+                .map(|details| &details["lab_readiness"])
+                .find(|readiness| readiness.is_object())
+        })
+        .cloned()
+        .unwrap_or(Value::Null);
     // The recorded failure keeps the structured Lab refusal, not just its
     // headline, so the reasons survive after the step terminalizes.
     let failure_record = |mut record: Value| {
         if !runner_availability.is_null() {
             record["runner_availability"] = runner_availability.clone();
         }
+        if !readiness.is_null() {
+            record["readiness"] = readiness.clone();
+        }
         homeboy_core::redaction::redact_json(&record)
     };
     let recoverable = runner_ineligible
+        || readiness_unobserved
         || delivery.outcome == StepTerminalOutcome::SpawnInterrupted
         || (delivery.outcome == StepTerminalOutcome::Exited && command.is_none())
         || (delivery.child.is_some() && command.is_none())
@@ -533,7 +552,21 @@ pub(super) fn consume_execution_terminal_in_store(
         let failures = stored.metadata["execution_scheduling"]["recovery_failures"]
             .as_u64()
             .unwrap_or(0);
-        if delivery.cancelled || !recoverable || (!runner_ineligible && failures + 1 >= 20) {
+        let unobserved = if readiness_unobserved {
+            stored.metadata["execution_scheduling"][READINESS_UNOBSERVED_OBSERVATIONS]
+                .as_u64()
+                .unwrap_or(0)
+                + 1
+        } else {
+            0
+        };
+        let readiness_exhausted = unobserved >= EXECUTION_RECOVERY_LIMIT;
+        let runner_ineligible = runner_ineligible || (readiness_unobserved && !readiness_exhausted);
+        if delivery.cancelled
+            || !recoverable
+            || readiness_exhausted
+            || (!runner_ineligible && failures + 1 >= EXECUTION_RECOVERY_LIMIT)
+        {
             disposition = if delivery.cancelled {
                 "cancelled"
             } else if recoverable {
@@ -542,8 +575,11 @@ pub(super) fn consume_execution_terminal_in_store(
                 "failed"
             };
             let mut scheduling = stored.metadata["execution_scheduling"].clone();
-            if recoverable && !delivery.cancelled {
+            if recoverable && !delivery.cancelled && !readiness_exhausted {
                 scheduling["recovery_failures"] = json!(failures + 1);
+            }
+            if readiness_unobserved {
+                scheduling[READINESS_UNOBSERVED_OBSERVATIONS] = json!(unobserved);
             }
             return Some(AgentTaskTransition::Terminate {
                 outcome: if delivery.cancelled {
@@ -612,6 +648,20 @@ pub(super) fn consume_execution_terminal_in_store(
         prepared.metadata["execution_scheduling"]["epoch"] = json!(next.epoch);
         prepared.metadata["execution_scheduling"]["recovery_failures"] =
             json!(failures + u64::from(!runner_ineligible));
+        // Consecutive: any other requeue resets the unobserved-readiness count.
+        if readiness_unobserved {
+            prepared.metadata["execution_scheduling"][READINESS_UNOBSERVED_OBSERVATIONS] =
+                json!(unobserved);
+            prepared.metadata["execution_scheduling"]["admission_wait"] = json!({
+                "status": "pending_resource_admission",
+                "reason": homeboy_core::parsed_command_preflight::READINESS_UNOBSERVED,
+                "consecutive_observations": unobserved,
+                "limit": EXECUTION_RECOVERY_LIMIT,
+            });
+        } else if let Some(scheduling) = prepared.metadata["execution_scheduling"].as_object_mut() {
+            scheduling.remove("admission_wait");
+            scheduling.remove(READINESS_UNOBSERVED_OBSERVATIONS);
+        }
         prepared.metadata["execution_step_failure"] = failure_record(
             json!({"message": reason, "diagnostic": diagnostic, "step_key": delivery.key}),
         );
@@ -665,6 +715,11 @@ pub(super) fn consume_execution_terminal_in_store(
     }
     Ok(json!({"acknowledged": true, "job_id": delivery.job_id, "disposition": disposition}))
 }
+
+/// Bound on consecutive failed execution-step recoveries, shared by
+/// unobserved-readiness admission waits.
+const EXECUTION_RECOVERY_LIMIT: u64 = 20;
+const READINESS_UNOBSERVED_OBSERVATIONS: &str = "readiness_unobserved_observations";
 
 /// A Lab refusal naming only capacity or pressure waits for a slot through the
 /// same `runner_wait` requeue fresh Cook admission uses. Any substrate reason

@@ -711,6 +711,7 @@ pub(crate) fn admits_auto_local_capacity_fallback(
         readiness.state,
         crate::runner::runners::LabRunnerReadinessState::Disconnected
             | crate::runner::runners::LabRunnerReadinessState::Stale
+            | crate::runner::runners::LabRunnerReadinessState::ReadinessUnobserved
     ) {
         return false;
     }
@@ -828,7 +829,8 @@ pub(crate) fn admission_recovery(
                 Some(ResourceAdmissionRecoveryKind::RunnerConnection)
             }
             crate::runner::runners::LabRunnerReadinessState::ConnectedIneligible
-            | crate::runner::runners::LabRunnerReadinessState::CapacityBlocked => {
+            | crate::runner::runners::LabRunnerReadinessState::CapacityBlocked
+            | crate::runner::runners::LabRunnerReadinessState::ReadinessUnobserved => {
                 Some(ResourceAdmissionRecoveryKind::RunnerAvailability)
             }
             crate::runner::runners::LabRunnerReadinessState::Stale => {

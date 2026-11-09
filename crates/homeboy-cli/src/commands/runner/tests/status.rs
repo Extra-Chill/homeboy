@@ -85,6 +85,7 @@ fn admission_fixture() -> homeboy::runner::runners::RunnerAdmissionSummary {
         accepting_jobs: false,
         accepts_jobs: None,
         reasons: Vec::new(),
+        readiness_state: None,
         active_job_count: Some(0),
         live_daemon_job_count: Some(0),
         stale_job_count: 0,
