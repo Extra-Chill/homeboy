@@ -289,6 +289,12 @@ impl ExtensionRunner {
     /// 7. Prepare environment variables
     /// 8. Execute via shell
     pub fn run(&self) -> Result<RunnerOutput> {
+        self.run_with_child_path().map(|(output, _)| output)
+    }
+
+    /// [`Self::run`], also returning the `PATH` the child process received so
+    /// callers can record which executables the child resolved.
+    pub fn run_with_child_path(&self) -> Result<(RunnerOutput, Option<String>)> {
         let prepared = super::prepare_capability_run(
             &self.execution_context,
             self.pre_loaded_component
@@ -378,6 +384,13 @@ impl ExtensionRunner {
             initialize_structured_sidecars(run_dir_path, &declared_sidecars)?;
         }
 
+        let child_path = env_vars
+            .iter()
+            .rev()
+            .find(|(key, _)| key == "PATH")
+            .map(|(_, value)| value.clone())
+            .or_else(|| std::env::var("PATH").ok());
+
         let output = self.execute_script(
             &prepared.execution.extension_path,
             &env_vars,
@@ -435,7 +448,7 @@ impl ExtensionRunner {
             }
         }
 
-        Ok(RunnerOutput {
+        let output = RunnerOutput {
             exit_code: output.exit_code,
             success: output.success,
             stdout: output.stdout,
@@ -449,7 +462,8 @@ impl ExtensionRunner {
                 .transpose()?
                 .unwrap_or_default(),
             cargo_target: _cargo_target.as_ref().map(|target| target.evidence()),
-        })
+        };
+        Ok((output, child_path))
     }
 
     /// Structured sidecars the resolved extension declares in its manifest.

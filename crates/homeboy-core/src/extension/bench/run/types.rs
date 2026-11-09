@@ -117,6 +117,8 @@ pub(crate) type BenchRunExecutionOutcome = (
     Option<String>,
     Option<BenchFailureMemorySample>,
     Option<u128>,
+    // The `PATH` the runner child received, for executable provenance.
+    Option<String>,
 );
 
 #[derive(Debug, Clone)]

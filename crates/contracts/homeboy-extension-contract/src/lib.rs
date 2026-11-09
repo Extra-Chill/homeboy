@@ -102,9 +102,9 @@ pub use bench_metric_preset::{BenchMetricPolicyPreset, BenchMetricPolicyPresetKi
 pub use bench_responsiveness::{BenchFailureMemorySample, BenchResponsivenessSummary};
 pub use bench_result::{
     BenchChildCommandFailure, BenchMemory, BenchMetricDirection, BenchMetricPhase,
-    BenchMetricPolicy, BenchMetrics, BenchProvenance, BenchProvenanceLink, BenchRunExecution,
-    BenchRunnerMetadata, BenchWorkloadMetadata, RegressionTest, RigPackageEvidence,
-    RigPackageFreshness,
+    BenchMetricPolicy, BenchMetrics, BenchNodeRuntime, BenchProvenance, BenchProvenanceLink,
+    BenchRunExecution, BenchRunnerMetadata, BenchWorkloadMetadata, RegressionTest,
+    RigPackageEvidence, RigPackageFreshness,
 };
 pub use bench_results::{BenchResults, BenchRunMetadata, BenchRunSnapshot, BenchScenario};
 pub use bench_stage::{
