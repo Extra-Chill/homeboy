@@ -497,6 +497,8 @@ fn reconcile_outcome(outcome: &AgentTaskOutcome) -> (AgentTaskReconciliationDeci
             AgentTaskFailureClassification::Provider
                 | AgentTaskFailureClassification::Transient
                 | AgentTaskFailureClassification::Timeout
+                | AgentTaskFailureClassification::ProviderTimeoutNoProgress
+                | AgentTaskFailureClassification::ProviderRequestRejected
                 | AgentTaskFailureClassification::Stalled
                 | AgentTaskFailureClassification::RateLimited
                 | AgentTaskFailureClassification::ProviderAccountBlocked

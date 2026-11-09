@@ -41,6 +41,15 @@ pub enum AgentTaskFailureClassification {
     /// bounded backoff because the same request can succeed on a later attempt.
     Transient,
     Timeout,
+    /// Provider attempt hit its wall-clock timeout without producing a
+    /// candidate or workspace change. Rotation-eligible: when another route is
+    /// configured, the next attempt uses it instead of the same model.
+    ProviderTimeoutNoProgress,
+    /// Provider rejected the request with a non-retryable HTTP 4xx status
+    /// (anything but 408/429). Retrying the same route cannot succeed; the
+    /// typed `provider_http_<status>` diagnostic keeps the status and a
+    /// bounded, redacted response body.
+    ProviderRequestRejected,
     /// Provider attempt produced no output/progress within the configured
     /// liveness window. Distinguishes a silent hang from a wall-clock timeout
     /// so the scheduler can rotate instead of waiting indefinitely.
