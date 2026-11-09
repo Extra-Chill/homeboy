@@ -4,6 +4,19 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.454.0] - 2026-11-09
+
+### Added
+- pressure-aware admission and bounded disk inventory
+- reuse gate verdicts by candidate tree, command and environment
+
+### Fixed
+- stop the cadence skip write from reading the job store while holding the SQLite writer
+- one Cook recovery planner, no repeated non-progressing steps, bounded recover/retry, Cook-targeted retry
+- auto Cook fails closed with lab_unavailable instead of resolving local
+- bind cached health freshness to the live lease
+- gate-green candidates survive finalization (review timeout, base conflict, remediation scope)
+
 ## [0.453.0] - 2026-11-09
 
 ### Added
