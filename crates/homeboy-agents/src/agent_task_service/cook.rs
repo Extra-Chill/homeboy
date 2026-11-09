@@ -1470,7 +1470,7 @@ pub(crate) fn gate_feedback_current_diff(promotion: &AgentTaskPromotionReport) -
 /// the last one recorded in the aggregate. Returns `Ok(None)` when the agent
 /// emitted no form (the loop treats absence as a gap and nudges a retry). A
 /// present-but-malformed form is a hard error so garbage is never rendered.
-fn review_form_from_aggregate(
+pub(super) fn review_form_from_aggregate(
     aggregate: &crate::agent_task_schedule::AgentTaskAggregate,
 ) -> Result<Option<crate::agent_task_review_dossier::AiFilledReviewForm>> {
     let Some(outcome) = aggregate.selected_outcome().or_else(|| {
@@ -8089,7 +8089,7 @@ fn run_cook_spine(
                 let stop_reason = gates_deferred_stop_reason(&promotion, &cook_id);
                 return Ok(stores.report(CookReportInput {
                     cook_id,
-                    status: "gates_deferred",
+                    status: "gate_environment_unavailable",
                     disposition: CookDisposition::Terminal,
                     attempts,
                     finalization: None,
@@ -8338,7 +8338,7 @@ pub(super) fn publish_incomplete_draft<
         .to_string(),
     };
     let title = if options.finalization.title.is_empty() {
-        format!("Incomplete: {}", options.identity.cook_id)
+        format!("fix(cook): incomplete {}", options.identity.cook_id)
     } else {
         options.finalization.title.clone()
     };
@@ -9023,6 +9023,7 @@ fn preflight_cook_workspace_base_ancestry_with_provider(
     adopted_dirty_candidate: bool,
     tracked_candidate: bool,
 ) -> Result<Option<CookWorkspaceBaseValidation>> {
+    crate::agent_task_promotion::destination::check(target, Some(&options.identity.cook_id))?;
     // Explicit CWDs are caller-owned and must remain untouched. Resolve their
     // declared ref into an isolated scheduler snapshot instead of treating the
     // persisted pin as authority to converge the caller's checkout.
@@ -9090,6 +9091,7 @@ fn preflight_cook_workspace_base_ancestry_with_provider(
             // the immutable base, not in the earlier read-only preflight.
             return Ok(None);
         };
+        crate::agent_task_promotion::destination::before_reset(target, &options.identity.cook_id)?;
         let resolved = materialize_prepared_cook_base(target, &options.finalization.base, pin)?;
         let issue_owned = options
             .identity
@@ -9950,14 +9952,19 @@ fn provision_pending_cook_workspace(
         &options.identity.initial_run_id,
         &options.identity.initial_plan,
     )?;
-    homeboy_core::worktree_provider::ensure_worktree_provision(
+    let provision = homeboy_core::worktree_provider::ensure_worktree_provision(
         &create_intent,
         &homeboy_core::worktree_provider::WorktreeProvisionLifecycle {
             purpose,
             owner_run_ref: options.identity.initial_run_id.clone(),
             cleanup_policy,
         },
-    )
+    )?;
+    crate::agent_task_promotion::destination::record(
+        Path::new(&provision.destination.ownership.path),
+        &options.identity.cook_id,
+    )?;
+    Ok(provision)
 }
 
 fn validate_pending_cook_repository_identity(_plan: &AgentTaskPlan, _target: &Path) -> Result<()> {

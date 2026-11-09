@@ -42,6 +42,9 @@ enum DaemonCommand {
         /// Print the resolved plan without running it. This is the default.
         #[arg(long)]
         dry_run: bool,
+        /// Stop new admissions and replace when protected jobs finish (applies unless --dry-run).
+        #[arg(long, conflicts_with = "attest_absent")]
+        drain: bool,
         /// Run the resolved plan.
         #[arg(long, conflicts_with_all = ["dry_run", "attest_absent"])]
         yes: bool,
@@ -322,12 +325,17 @@ pub fn run(args: DaemonArgs) -> CmdResult<DaemonOutput> {
             0,
         )),
         DaemonCommand::Recover {
-            dry_run, yes, addr, ..
-        } => recover(
+            dry_run,
+            yes,
+            addr,
+            drain,
+            ..
+        } => recover_with_drain(
             // Dry run is the default: an unasked-for recovery is a mutation of
             // the daemon that owns the caller's durable jobs.
-            !yes || dry_run,
+            (!yes && !drain) || dry_run,
             &addr,
+            drain,
         ),
         DaemonCommand::Serve {
             addr,
@@ -615,7 +623,9 @@ const COMPACT_STATUS_JOB_LIMIT: usize = 8;
 /// a bounded decision surface; `--full` is the existing complete evidence view.
 fn status_output(status: DaemonStatus, full: bool) -> Value {
     if full {
-        return serde_json::to_value(status).expect("daemon status serializes");
+        let mut value = serde_json::to_value(&status).expect("daemon status serializes");
+        value["admission"] = status.admission_report();
+        return value;
     }
 
     bounded_status_projection(&status)
@@ -646,6 +656,7 @@ fn bounded_status_projection(status: &DaemonStatus) -> Value {
         .collect::<Vec<_>>();
     let projection = json!({
         "schema": "homeboy/daemon-status/v1",
+        "admission": status.admission_report(),
         "running": status.running,
         "fresh": status.fresh,
         "reachable": status.reachable,
@@ -716,15 +727,21 @@ fn bounded_text(value: &str) -> String {
 /// the typed step code, never on the rendered command string (#11105). There is
 /// one planner, so the reported lifecycle verdict is the same decision the
 /// executor follows.
-fn recover(dry_run: bool, addr: &str) -> CmdResult<DaemonOutput> {
+fn recover_with_drain(dry_run: bool, addr: &str, drain: bool) -> CmdResult<DaemonOutput> {
     let status = daemon::read_status()?;
-    recover_direct(status, dry_run, addr)
+    recover_direct_with_drain(status, dry_run, addr, drain)
 }
 
-fn recover_direct(status: DaemonStatus, dry_run: bool, addr: &str) -> CmdResult<DaemonOutput> {
+fn recover_direct_with_drain(
+    status: DaemonStatus,
+    dry_run: bool,
+    addr: &str,
+    drain: bool,
+) -> CmdResult<DaemonOutput> {
     let planned_status = status.clone();
-    recover_from_status(
+    recover_from_status_with_drain(
         status,
+        drain,
         dry_run,
         |plan, lease_id, job_ids| {
             let current = daemon::read_status()?;
@@ -768,6 +785,7 @@ fn stale_recovery_plan_error() -> Error {
 
 /// Resolve a recovery from one authoritative status report, execute it when
 /// requested, and prove the daemon is fresh before reporting success.
+#[cfg(test)]
 fn recover_from_status<Execute, ReadPostcondition>(
     status: DaemonStatus,
     dry_run: bool,
@@ -782,9 +800,27 @@ where
     ) -> homeboy::core::Result<Vec<String>>,
     ReadPostcondition: FnOnce() -> homeboy::core::Result<DaemonStatus>,
 {
+    recover_from_status_with_drain(status, false, dry_run, execute, read_postcondition)
+}
+
+fn recover_from_status_with_drain<Execute, ReadPostcondition>(
+    status: DaemonStatus,
+    drain: bool,
+    dry_run: bool,
+    execute: Execute,
+    read_postcondition: ReadPostcondition,
+) -> CmdResult<DaemonOutput>
+where
+    Execute: FnOnce(
+        &daemon::recovery_actions::DaemonRecoveryPlan,
+        &Option<String>,
+        &[Uuid],
+    ) -> homeboy::core::Result<Vec<String>>,
+    ReadPostcondition: FnOnce() -> homeboy::core::Result<DaemonStatus>,
+{
     use daemon::recovery_actions as actions;
 
-    let plan = actions::plan_recovery(&status);
+    let plan = actions::plan_recovery_with_drain(&status, drain);
     let lease_id = status.freshness.lease_id.clone();
     let job_ids: Vec<Uuid> = status
         .active_job_recovery_evidence
@@ -875,8 +911,21 @@ where
     output.lease_id = postcondition.freshness.lease_id;
     output.store_path = postcondition.state_path;
     output.active_jobs = postcondition.freshness.active_jobs;
-    output.next_command = "homeboy daemon status".to_string();
-    if !fresh {
+    output.next_command = if output
+        .applied_steps
+        .iter()
+        .any(|step| step == daemon::recovery_actions::DRAIN_THEN_REPLACE)
+    {
+        "homeboy daemon ensure-running".to_string()
+    } else {
+        "homeboy daemon status".to_string()
+    };
+    if !fresh
+        && !output
+            .applied_steps
+            .iter()
+            .any(|step| step == daemon::recovery_actions::DRAIN_THEN_REPLACE)
+    {
         output.blocked_on = Some(format!(
             "recovery executed but the authoritative status remains stale{}",
             postcondition
@@ -911,6 +960,12 @@ fn execute_recovery_plan(
                     )
                 })?;
                 daemon::stop_for_lease(lease_id)?;
+            }
+            code if code == actions::DRAIN_THEN_REPLACE => {
+                daemon::drain_then_replace(
+                    lease_id
+                        .ok_or_else(|| Error::internal_unexpected("drain requires a lease id"))?,
+                )?;
             }
             code if code == actions::DAEMON_ENSURE_RUNNING => {
                 daemon::ensure_running(addr)?;

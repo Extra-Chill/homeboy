@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -549,12 +550,45 @@ fn unsupported_store_error(path: &Path, found: Option<i64>) -> crate::Error {
 /// SQLite needs an exclusive lock to convert a rollback journal into WAL, and
 /// the process-local schema mutex cannot coordinate separate CLI processes.
 pub(crate) fn open_initialized_connection(path: &Path) -> Result<Connection> {
-    with_initialization_lock(path, || {
+    static INITIALIZED_PATHS: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+    let mut initialized = INITIALIZED_PATHS
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // Canonicalize the parent as well for files that have not been created yet.
+    let canonical = canonical_database_path(path)?;
+    if !path.exists() {
+        initialized.remove(&canonical);
+    }
+    if initialized.contains(&canonical) {
+        return open_connection(path);
+    }
+    let connection = with_initialization_lock(path, || {
         let connection = open_connection(path)?;
         ensure_incremental_auto_vacuum(&connection)?;
         ensure_wal_journal_mode(&connection)?;
         ensure_schema(&connection, path)?;
         Ok(connection)
+    })?;
+    initialized.insert(canonical);
+    Ok(connection)
+}
+
+pub(super) fn canonical_database_path(path: &Path) -> Result<PathBuf> {
+    let resolved = if path.exists() {
+        path.canonicalize()
+    } else {
+        path.parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."))
+            .canonicalize()
+            .map(|parent| parent.join(path.file_name().unwrap_or_default()))
+    };
+    resolved.map_err(|error| {
+        crate::Error::internal_io(
+            error.to_string(),
+            Some(format!("resolve observation store {}", path.display())),
+        )
     })
 }
 
@@ -866,6 +900,22 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn initialized_store_reopens_while_another_handle_holds_the_init_lock() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("observations.sqlite");
+        drop(crate::observation::ObservationStore::open_initialized_at(&path).unwrap());
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path.with_extension("sqlite.init.lock"))
+            .unwrap();
+        assert!(lock.try_lock_exclusive().unwrap());
+        // Also exercise canonical aliases rather than just identical path strings.
+        let alias = directory.path().join(".").join("observations.sqlite");
+        crate::observation::ObservationStore::open_initialized_at(alias).unwrap();
+    }
 
     #[test]
     fn read_only_busy_evidence_reads_the_store_without_sqlite() {

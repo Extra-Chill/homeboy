@@ -405,6 +405,7 @@ pub(super) fn dispatch(
         if failed.termination == homeboy_core::deps::DependencyHydrationTermination::TimedOut {
             error.message = format!("{}; {}", error.message, failed.reason);
         }
+        error.details["artifact_ref"] = serde_json::json!(receipt.artifact_ref);
         let mut report = non_execution_report(request, &error);
         report.setup = setup_attempts;
         return Ok(report);
@@ -414,6 +415,12 @@ pub(super) fn dispatch(
     // The step is an in-memory compatibility view and is not on the wire.
     // Rebuild it from the verified terminal result, never its serde skip default.
     rebuild_terminal_step(&mut report);
+    if let Some(disposition) = report.lab_receipt.as_mut().filter(|value| {
+        value.get("schema").and_then(serde_json::Value::as_str) == Some(LAB_GATE_DISPOSITION_SCHEMA)
+    }) {
+        disposition["artifact_ref"] = serde_json::json!(receipt.artifact_ref);
+        return Ok(report);
+    }
     report.lab_receipt = Some(serde_json::json!({
         "schema": receipt.schema,
         "request_sha256": receipt.request_sha256,

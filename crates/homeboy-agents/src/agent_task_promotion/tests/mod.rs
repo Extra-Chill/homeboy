@@ -10,6 +10,7 @@ use super::apply::AgentTaskPromotionApplyRequest;
 
 mod candidate_fixture;
 pub(crate) mod candidate_snapshot;
+mod destination_ownership;
 mod immutable_candidate;
 mod resume_candidate;
 mod retry_candidate;

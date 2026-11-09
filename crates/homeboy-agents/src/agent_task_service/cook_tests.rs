@@ -4734,7 +4734,7 @@ fn cook_publishes_draft_when_review_form_provider_times_out() {
         assert_eq!(result.value.terminal_phase.as_deref(), Some("review_form"));
         assert!(result.value.finalization.as_ref().unwrap()["pr_number"].is_number());
         assert!(fixture.backend.draft);
-        assert_eq!(fixture.backend.title, "Batch cook");
+        assert_eq!(fixture.backend.title, "fix(cook): batch cook");
         assert!(fixture.backend.body.contains("Gate:"));
         assert!(!fixture.backend.body.contains("fix: update"));
         let latest = result.value.latest_run_id.as_deref().unwrap();
@@ -4771,8 +4771,11 @@ fn cook_review_unavailable_draft_uses_default_title_without_source_lookup() {
         assert_eq!(result.value.status, "draft_published");
         assert_eq!(
             fixture.backend.title,
-            "Incomplete: cook-review-default-title"
+            "fix(cook): incomplete cook-review-default-title"
         );
+        assert!(homeboy_core::git::is_conventional_subject(
+            &fixture.backend.title
+        ));
         assert!(fixture.backend.draft);
         assert!(fixture.backend.body.contains(
             "Review form unavailable: completion not assessed; deterministic gates passed"
@@ -5809,7 +5812,7 @@ fn batch_cook_options(
             draft_pr: false,
             base: "main".to_string(),
             head: None,
-            title: "Batch cook".to_string(),
+            title: "fix(cook): batch cook".to_string(),
             commit_message: "test".to_string(),
             protected_branches: Vec::new(),
         },
@@ -10646,6 +10649,148 @@ fn execute_reserved_retry_fixture(
     .unwrap()
 }
 
+#[test]
+fn cook_recovery_operator_feedback_reaches_dispatch_and_survives_pre_execution_failure() {
+    use crate::agent_task::AgentTaskOutcome;
+    use crate::agent_task_feedback::{CookFeedbackStore, FeedbackState};
+    use crate::agent_task_schedule::AgentTaskExecutionContext;
+    struct FeedbackExecutor;
+    impl AgentTaskExecutorAdapter for FeedbackExecutor {
+        fn execute(
+            &self,
+            request: AgentTaskRequest,
+            context: AgentTaskExecutionContext,
+        ) -> AgentTaskOutcome {
+            let items = request.inputs["homeboy"]["cook_feedback"]
+                .as_array()
+                .unwrap();
+            assert_eq!(items.len(), 2);
+            assert_eq!(items[0]["text"], "operator guidance");
+            assert!(!request.instructions.contains("operator guidance"));
+            let store =
+                CookFeedbackStore::new(context.lifecycle_store.as_ref().unwrap().data_root());
+            let feedback = store.list(items[0]["cook_id"].as_str().unwrap()).unwrap();
+            assert!(feedback
+                .iter()
+                .all(|item| item.state == FeedbackState::Consumed
+                    && item.consumed_by_attempt_id == context.run_id
+                    && item.consumed_at.is_some()));
+            ImmediateSuccessExecutor.execute(request, context)
+        }
+    }
+    struct Recovery {
+        options: CookRequest,
+        dispatch: bool,
+        consumed_attempt: std::cell::RefCell<String>,
+    }
+    impl crate::agent_task_service::CookRecoveryPerformer for Recovery {
+        fn continue_cook(
+            &self,
+            run_id: &str,
+            _: bool,
+            _: &crate::agent_task_service::CookRecoveryOverrides,
+        ) -> Result<(Value, i32)> {
+            *self.consumed_attempt.borrow_mut() = run_id.to_string();
+            agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+                record.set_state_for_test(agent_task_lifecycle::AgentTaskRunState::Queued);
+                record.lifecycle.execution.state = record.state().into();
+            })?;
+            crate::agent_task_service::execution::run_loaded_plan(
+                self.options.identity.initial_plan.clone(),
+                Some(run_id),
+                Arc::new(FeedbackExecutor),
+            )?;
+            Ok((serde_json::json!({"run_id": run_id}), 0))
+        }
+        fn preflight_continue_cook(&self, _: &str, _: bool) -> Result<(Value, i32)> {
+            unreachable!()
+        }
+        fn retry(&self, run_id: &str) -> Result<(Value, i32)> {
+            let retry = crate::agent_task_service::retry(run_id, None, false, false)?;
+            *self.consumed_attempt.borrow_mut() = retry.record.run_id.clone();
+            if self.dispatch {
+                execute_reserved_retry_fixture(&retry.record.run_id, Arc::new(FeedbackExecutor));
+            } else {
+                agent_task_lifecycle::record_pre_execution_failure(
+                    &retry.record.run_id,
+                    &self.options.identity.initial_plan,
+                    "gate_environment.preserve",
+                    &Error::validation_invalid_argument("environment", "unavailable", None, None)
+                        .with_retryable(true),
+                )?;
+            }
+            Ok((serde_json::json!({"run_id": retry.record.run_id}), 0))
+        }
+        fn reconcile(&self, _: &str) -> Result<(Value, i32)> {
+            unreachable!()
+        }
+        fn adopt(&self, _: &str, _: &str) -> Result<(Value, i32)> {
+            unreachable!()
+        }
+    }
+    for (continue_attempt, dispatch) in [(true, true), (false, true), (false, false)] {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let cook_id = "cook-feedback-recovery";
+            let options = if continue_attempt {
+                let options =
+                    batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+                super::super::persist_initial_recipe(&options).unwrap();
+                super::super::materialize_initial_cook_attempt(&options).unwrap();
+                agent_task_lifecycle::rewrite_record_for_test(
+                    &options.identity.initial_run_id,
+                    |record| {
+                        record.set_state_for_test(agent_task_lifecycle::AgentTaskRunState::Failed);
+                        record.lifecycle.execution.state = record.state().into();
+                    },
+                )
+                .unwrap();
+                options
+            } else {
+                retryable_pre_provider_cook(cook_id, 3)
+            };
+            let store = CookFeedbackStore::new(test_lifecycle_store().data_root());
+            for key in ["first", "second"] {
+                store
+                    .submit(
+                        cook_id,
+                        "reviewed-candidate",
+                        "operator",
+                        "cli",
+                        "operator guidance",
+                        key,
+                    )
+                    .unwrap();
+            }
+            let performer = Recovery {
+                options,
+                dispatch,
+                consumed_attempt: Default::default(),
+            };
+            let (report, _) =
+                crate::agent_task_service::recover_cook(cook_id, Default::default(), &performer)
+                    .unwrap();
+            assert_eq!(
+                report.step,
+                if continue_attempt {
+                    crate::agent_task_service::CookRecoveryStep::Continue
+                } else {
+                    crate::agent_task_service::CookRecoveryStep::Retry
+                }
+            );
+            let attempt_id = performer.consumed_attempt.borrow();
+            let feedback = store.list(cook_id).unwrap();
+            assert!(feedback.iter().all(|item| if dispatch {
+                item.state == FeedbackState::Consumed
+                    && item.consumed_by_attempt_id.as_deref() == Some(attempt_id.as_str())
+            } else {
+                item.state == FeedbackState::Pending
+                    && item.consumed_at.is_none()
+                    && item.consumed_by_attempt_id.is_none()
+            }));
+        });
+    }
+}
+
 fn retryable_pre_provider_cook(cook_id: &str, max_attempts: u32) -> CookRequest {
     let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
     options.identity.initial_run_id = format!("{cook_id}-attempt-1");
@@ -15261,7 +15406,7 @@ fn cook_returns_after_accepted_detached_attempt_without_waiting_for_daemon_compl
                     draft_pr: false,
                     base: "main".to_string(),
                     head: None,
-                    title: "Detached cook".to_string(),
+                    title: "fix(cook): detached cook".to_string(),
                     commit_message: "test".to_string(),
                     protected_branches: Vec::new(),
                 },
@@ -15539,7 +15684,7 @@ fn adopt_green_candidate_missing_review_form(
         temp,
         cook_id,
         review_executor,
-        "Batch cook",
+        "fix(cook): batch cook",
     )
 }
 
@@ -20496,6 +20641,182 @@ fn persist_deferred_fixture(run_id: &str) {
 }
 
 #[test]
+fn recover_selects_regate_only_for_unjudged_complete_candidates() {
+    use crate::agent_task_gate::AgentTaskGateStatus as Gate;
+    use crate::agent_task_service::{CookRecoveryRequest, CookRecoveryStep};
+    for (status, missing_form, expected) in [
+        (Gate::Unavailable, false, CookRecoveryStep::Regate),
+        (Gate::Deferred, false, CookRecoveryStep::Regate),
+        (Gate::Skipped, false, CookRecoveryStep::Regate),
+        (Gate::Failed, false, CookRecoveryStep::Continue),
+        (Gate::Unavailable, true, CookRecoveryStep::Continue),
+    ] {
+        with_corrected_gate_failure(false, |options, _| {
+            let run = &options.identity.initial_run_id;
+            let store = test_lifecycle_store();
+            let mut promotion = persisted_promotion_for_attempt(run).unwrap().unwrap();
+            promotion.deterministic_gates[0].status = status;
+            promotion.normalize_gate_outcome();
+            store
+                .record_promotion(run, serde_json::to_value(promotion).unwrap())
+                .unwrap();
+            if missing_form {
+                let mut aggregate = store.read_aggregate(run).unwrap();
+                aggregate.outcomes[0].outputs = Value::Null;
+                store
+                    .record_run_aggregate(run, &options.identity.initial_plan, &aggregate)
+                    .unwrap();
+            }
+            let plan = crate::agent_task_service::plan_cook_recovery(run).unwrap();
+            assert_eq!(plan.step, expected, "{status:?}, missing={missing_form}");
+            let context = crate::agent_task_service::cook_failure_context(
+                &options.identity.cook_id,
+                Some(run),
+                &plan.status,
+            )
+            .unwrap();
+            assert_eq!(context.recovery_step, Some(expected.clone()));
+            if expected == CookRecoveryStep::Regate {
+                assert!(context
+                    .next_actions
+                    .iter()
+                    .any(|action| action.action == "regate"));
+            }
+            if expected == CookRecoveryStep::Regate {
+                let (report, exit) = crate::agent_task_service::recover_cook(
+                    run,
+                    CookRecoveryRequest {
+                        preflight: true,
+                        ..Default::default()
+                    },
+                    &ReplacementOnlyRecoveryPerformer,
+                )
+                .unwrap();
+                assert_eq!(exit, 0);
+                assert_eq!(report.step, CookRecoveryStep::Regate);
+            }
+        });
+    }
+}
+
+#[test]
+fn recover_regate_explicitly_selects_an_earlier_candidate_after_attempt_cancellation() {
+    with_corrected_gate_failure(false, |options, _| {
+        let cook = &options.identity.cook_id;
+        let run = &options.identity.initial_run_id;
+        let store = test_lifecycle_store();
+        let recipes = CookRecipeStore::from_current_data_root().unwrap();
+        let mut recipe = recipes.load_recipe(cook).unwrap();
+        let mut later = recipe.attempts[0].clone();
+        later.attempt = 2;
+        later.run_id = "cancelled-later-attempt".into();
+        let mut record = store.read_record(run).unwrap();
+        record.run_id = later.run_id.clone();
+        record.set_state_for_test(agent_task_lifecycle::AgentTaskRunState::Running);
+        store.write_record(&record).unwrap();
+        agent_task_lifecycle::cancel_exact_run_in_store_with_provenance(
+            &store,
+            &later.run_id,
+            Some("cancelled"),
+            Some(serde_json::json!({"actor": "runner", "cause": "runner_job_cancelled"})),
+        )
+        .unwrap();
+        recipe.attempts.push(later.clone());
+        recipes.persist_recipe(&recipe).unwrap();
+        let index = store
+            .write_cook_index_attempt(cook, 2, &later.run_id, "2026-01-01T00:00:00Z".into(), None)
+            .unwrap();
+        // The later cancelled record has no candidate of its own.
+        agent_task_lifecycle::rewrite_record_for_test(&index.latest_run_id, |record| {
+            record
+                .metadata
+                .as_object_mut()
+                .unwrap()
+                .remove("cook_delivery");
+        })
+        .unwrap();
+        let (report, exit) = crate::agent_task_service::recover_cook(
+            cook,
+            crate::agent_task_service::CookRecoveryRequest {
+                regate: true,
+                preflight: true,
+                ..Default::default()
+            },
+            &ReplacementOnlyRecoveryPerformer,
+        )
+        .unwrap();
+        assert_eq!(exit, 0, "{report:#?}");
+        assert_eq!(report.run_id, *run);
+        assert_eq!(
+            report.step,
+            crate::agent_task_service::CookRecoveryStep::Regate
+        );
+    });
+}
+
+#[test]
+fn recover_regate_executes_recorded_gates_and_hands_green_candidate_to_publication() {
+    struct RegatePerformer;
+    impl crate::agent_task_service::CookRecoveryPerformer for RegatePerformer {
+        fn continue_cook(
+            &self,
+            _: &str,
+            _: bool,
+            _: &crate::agent_task_service::CookRecoveryOverrides,
+        ) -> Result<(Value, i32)> {
+            panic!("no provider")
+        }
+        fn preflight_continue_cook(&self, _: &str, _: bool) -> Result<(Value, i32)> {
+            panic!("no continuation")
+        }
+        fn retry(&self, _: &str) -> Result<(Value, i32)> {
+            panic!("no retry")
+        }
+        fn reconcile(&self, _: &str) -> Result<(Value, i32)> {
+            panic!("no reconcile")
+        }
+        fn adopt(&self, _: &str, _: &str) -> Result<(Value, i32)> {
+            panic!("no adopt")
+        }
+        fn publish(
+            &self,
+            run: &str,
+            _: &crate::agent_task_service::CookPublishRequest,
+            _: bool,
+        ) -> Result<(Value, i32)> {
+            assert!(persisted_promotion_for_attempt(run)?
+                .unwrap()
+                .finalization_eligible());
+            Ok((serde_json::json!({"status": "review_ready"}), 0))
+        }
+    }
+    with_corrected_gate_failure(false, |options, target| {
+        persist_deferred_fixture(&options.identity.initial_run_id);
+        let store = CookRecipeStore::from_current_data_root().unwrap();
+        let mut recipe = store.load_recipe(&options.identity.cook_id).unwrap();
+        let marker = target.join("target/regate-ran");
+        let gates = VerifyGateOptions {
+            verify: vec!["test \"$(cat tracked.txt)\" = promoted && mkdir -p target && touch target/regate-ran".into()],
+            ..Default::default()
+        };
+        recipe.gate_policy = serde_json::to_value(gates).unwrap();
+        store.persist_recipe(&recipe).unwrap();
+        let (report, exit) = crate::agent_task_service::recover_cook(
+            &options.identity.cook_id,
+            Default::default(),
+            &RegatePerformer,
+        )
+        .unwrap();
+        assert_eq!(exit, 0, "{report:#?}");
+        assert_eq!(
+            report.step,
+            crate::agent_task_service::CookRecoveryStep::Regate
+        );
+        assert!(marker.exists());
+    });
+}
+
+#[test]
 fn deferred_candidate_recovers_with_verify_file_and_publishes() {
     with_corrected_gate_failure(false, |options, target| {
         let run_id = &options.identity.initial_run_id;
@@ -20569,7 +20890,11 @@ fn deferred_recovery_supervises_declared_gate_and_persists_unavailability() {
             &noop_cook_progress_observer,
         );
         let result = CookService::run(options, runtime, CookMode::ContinueTerminal).unwrap();
-        assert_eq!(result.value.status, "gates_deferred", "{:#?}", result.value);
+        assert_eq!(
+            result.value.status, "gate_environment_unavailable",
+            "{:#?}",
+            result.value
+        );
         assert_ne!(result.exit_code, 0);
         let record = store.read_record(&run_id).unwrap();
         assert!(record.state().is_terminal());
@@ -21275,7 +21600,7 @@ fn promotion_claim_options(cook_id: &str, run_id: &str) -> CookRequest {
             draft_pr: false,
             base: "main".to_string(),
             head: None,
-            title: "Cook".to_string(),
+            title: "fix(cook): cook".to_string(),
             commit_message: "test".to_string(),
             protected_branches: Vec::new(),
         },
@@ -22093,7 +22418,7 @@ fn cook_real_pi_response_persists_served_model_through_published_body() {
                 draft_pr: false,
                 base: "main".to_string(),
                 head: Some("fix/8058".to_string()),
-                title: "Close #8058".to_string(),
+                title: "fix(cook): close #8058".to_string(),
                 commit_message: "test".to_string(),
                 protected_branches: vec!["main".to_string()],
             },
@@ -24689,6 +25014,127 @@ fn recovery_publishes_historical_inherited_failure_without_running_gates() {
 }
 
 #[test]
+fn publication_uses_completed_producer_despite_later_review_form_attempts() {
+    use crate::agent_task::AgentTaskOutcomeStatus;
+
+    for (later_status, gates_passed) in [
+        (AgentTaskOutcomeStatus::Timeout, true),
+        (AgentTaskOutcomeStatus::Succeeded, true),
+        (AgentTaskOutcomeStatus::Failed, true),
+        (AgentTaskOutcomeStatus::Timeout, false),
+    ] {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let cook_id = "cook-producer-publication";
+            let producer = "cook-producer-publication-attempt-1";
+            let continuation = "cook-producer-publication-attempt-2";
+            let target = tempfile::tempdir().unwrap();
+            let mut options =
+                batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
+            options.identity.initial_run_id = producer.to_string();
+            options.identity.initial_plan.tasks[0].executor.model = Some("producer-model".into());
+            persist_initial_recipe(&options).unwrap();
+            agent_task_lifecycle::submit_plan(&options.identity.initial_plan, Some(producer))
+                .unwrap();
+            agent_task_lifecycle::record_cook_attempt_in_store(
+                &test_lifecycle_store(),
+                cook_id,
+                1,
+                producer,
+            )
+            .unwrap();
+            seed_substantive_candidate_aggregate(
+                producer, &options.identity.initial_plan, &target.path().join("candidate.patch"),
+                "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n",
+            );
+            let mut aggregate = agent_task_lifecycle::read_attempt_aggregate(producer).unwrap();
+            aggregate.outcomes[0].outputs = test_review_form_outputs();
+            agent_task_lifecycle::record_run_aggregate(
+                producer,
+                &options.identity.initial_plan,
+                &aggregate,
+            )
+            .unwrap();
+            let mut promotion = promotion_with_existing_path(producer, target.path());
+            if !gates_passed {
+                promotion.status = AgentTaskPromotionStatus::GateFailed;
+                promotion.deterministic_gates[0].status =
+                    crate::agent_task_gate::AgentTaskGateStatus::Failed;
+            }
+            agent_task_lifecycle::record_promotion(
+                producer,
+                serde_json::to_value(&promotion).unwrap(),
+            )
+            .unwrap();
+
+            let mut plan = options.identity.initial_plan.clone();
+            plan.tasks[0].executor.model = None;
+            plan.tasks[0].inputs["cook_loop"]["review_form_required"] = serde_json::json!(true);
+            plan.tasks[0].inputs["cook_loop"]["execution_budget_authority"] =
+                serde_json::json!({ "kind": "fresh_cook_review" });
+            super::super::record_recipe_attempt(cook_id, 2, continuation, &plan).unwrap();
+            agent_task_lifecycle::submit_plan(&plan, Some(continuation)).unwrap();
+            agent_task_lifecycle::record_cook_attempt_in_store(
+                &test_lifecycle_store(),
+                cook_id,
+                2,
+                continuation,
+            )
+            .unwrap();
+            let mut later = review_form_aggregate(&plan);
+            later.outcomes[0].status = later_status;
+            later.outcomes[0].outputs = Value::Null;
+            agent_task_lifecycle::record_run_aggregate(continuation, &plan, &later).unwrap();
+            let mut carried = promotion.clone();
+            carried.source.run_id = Some(continuation.to_string());
+            carried.provenance["cook_follow_up"] = serde_json::json!({
+                "kind": "review_form_only", "source_run_id": producer,
+            });
+            agent_task_lifecycle::record_promotion(
+                continuation,
+                serde_json::to_value(carried).unwrap(),
+            )
+            .unwrap();
+
+            for (recovery_id, supplied) in [
+                (cook_id, None),
+                (continuation, None),
+                (cook_id, Some(supplied_test_review_form())),
+                (continuation, Some(supplied_test_review_form())),
+            ] {
+                let result = recover_cook_pr_with_backend_and_review_form(
+                    recovery_id,
+                    supplied,
+                    None,
+                    Vec::new(),
+                    true,
+                    &mut CaptureBackend {
+                        synthetic_gate_proof: Some(promotion.clone()),
+                        ..Default::default()
+                    },
+                );
+                if gates_passed {
+                    let report = result.expect("later form execution cannot veto the producer");
+                    assert_eq!(report["status"], "validated");
+                    assert_eq!(
+                        report["review_dossier"]["ai_assistance"]["model"],
+                        "tier producer-model; served model not recorded"
+                    );
+                    assert_eq!(
+                        report["review_dossier"]["ai_assistance"]["tool"],
+                        "Homeboy (fixture)"
+                    );
+                } else {
+                    assert!(
+                        result.is_err(),
+                        "producer gate failure must still block publication"
+                    );
+                }
+            }
+        });
+    }
+}
+
+#[test]
 fn recovery_supplies_missing_historical_review_form_without_provider_dispatch() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let cook_id = "cook-9866";
@@ -25413,7 +25859,7 @@ fn cook_rejects_test_claim_without_matching_durable_gate() {
             draft_pr: false,
             base: "main".to_string(),
             head: Some("fix/8058".to_string()),
-            title: "Close #8058".to_string(),
+            title: "fix(cook): close #8058".to_string(),
             commit_message: "test".to_string(),
             protected_branches: vec!["main".to_string()],
         },

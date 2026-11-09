@@ -6,7 +6,10 @@ use std::time::Instant;
 use homeboy_core::error::{ActionSafety, ExecutableAction};
 use serde::Serialize;
 pub(super) fn session_is_live(session: &RunnerSession) -> bool {
-    session_is_live_with_timeout(session, Duration::from_secs(2))
+    session_is_live_with_timeout(
+        session,
+        crate::connection::connection_daemon::HEALTH_PROBE_TIMEOUT,
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

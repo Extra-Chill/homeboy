@@ -79,6 +79,8 @@ A step with `foreach` expands, once its `needs` and `when` pass, into one step j
 - **The step's output** is `{"total", "succeeded", "join", "items": [{"item", "outcome", "run_id", "output", "error"}]}`.
 - **Cancelling the instance** cancels every running item, the Cook a `cook` item runs included, and starts no further one.
 
+Use `{"min_succeeded": 0}` when item failures are expected outcomes, such as Cooks or `git pr merge-when-green` holds in a `next_pass` loop: the step succeeds once every item settles, preserving each item's `outcome` and `error` (Example D).
+
 `agent-task fanout cook-batch` compiles to exactly this shape (Example C).
 
 ### Step kinds
@@ -257,3 +259,46 @@ This is the shape `homeboy --placement lab agent-task fanout cook-batch --repo h
   ]
 }
 ```
+
+### Example D: a fix loop (measure → Cook → confirm → approve → merge → next pass)
+
+A loop for any task whose steps you know. Only the domain-specific steps are your programs:
+- `measure` reports what is still wrong, one item per tracked issue;
+- `confirm` checks each fix PR at its head and lists the ones to merge.
+
+Homeboy owns the rest: the parallel Cooks, the human approval, the exact-head merge, and the chain of passes. `"join": {"min_succeeded": 0}` keeps one pass's failed Cooks or held merges from ending the chain, because the next pass measures again and retries them. The chain stops when nothing is left to fix, when `measure` reports the same failures three passes in a row, or after 20 passes.
+
+```json
+{
+  "schema": "homeboy/workflow/v1",
+  "id": "fix-loop",
+  "steps": [
+    { "id": "measure", "exec": { "program": "./measure" } },
+    { "id": "cook", "needs": ["measure"],
+      "when": { "step": "measure", "output": "/count", "gt": 0 },
+      "foreach": "{{steps.measure.output/items}}", "max_parallel": 3,
+      "join": { "min_succeeded": 0 },
+      "cook": { "repo": "{{item.repo}}", "task-url": "{{item.issue_url}}",
+                "prompt": "Fix {{item.issue_url}}.", "verify": ["{{item.verify}}"] } },
+    { "id": "confirm", "needs": ["cook"], "always": true,
+      "when": { "step": "measure", "output": "/count", "gt": 0 },
+      "exec": { "program": "./confirm" } },
+    { "id": "approve", "needs": ["confirm"],
+      "when": { "step": "confirm", "output": "/merge_count", "gt": 0 },
+      "approval": { "prompt": "Merge the confirmed fixes?" } },
+    { "id": "merge", "needs": ["approve"],
+      "when": { "step": "approve", "output": "/decision", "equals": "approved" },
+      "foreach": "{{steps.confirm.output/merge}}", "join": { "min_succeeded": 0 },
+      "homeboy": ["git", "pr", "merge-when-green", "--repo", "{{item.github}}",
+                  "--number", "{{item.number}}", "--sha", "{{item.sha}}", "--wait-seconds", "3600"],
+      "timeout": "65m" }
+  ],
+  "next_pass": {
+    "max_iterations": 20,
+    "when": { "step": "measure", "output": "/count", "gt": 0 },
+    "stop_unchanged": { "step": "measure", "output": "/ids", "passes": 3 }
+  }
+}
+```
+
+`measure` writes `{"count", "ids", "items": [{"repo", "issue_url", "verify"}]}` to `$HOMEBOY_STEP_OUTPUT`. `confirm` writes `{"merge": [{"github", "number", "sha"}], "merge_count"}`. Static Site Importer's import findings loop (`tools/import-loop/loop.json`) is a full instance of this shape: there, `measure` is the import, evaluate and triage steps, and a `shipped` step waits for releases before the next pass.

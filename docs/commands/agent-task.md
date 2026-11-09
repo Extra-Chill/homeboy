@@ -6,6 +6,19 @@ Homeboy owns durable orchestration and provider-neutral outcomes. Runtime
 providers own backend-specific execution. For the provider fanout ownership seam,
 see [`docs/architecture/provider-fanout-boundary.md`](../architecture/provider-fanout-boundary.md).
 
+## Declared gate host inputs
+
+`agent-task cook --gate-requirements '{"host_tools":["asset-cache"],"secrets":["ACCESS_TOKEN"]}'`
+requests named host inputs. The matching workflow `cook` key is
+`"gate-requirements"`, with the same JSON string value.
+
+Installed extensions own `gate_host_tools` mappings, for example
+`{"asset-cache":{"ASSET_CACHE":"HOME/.cache/assets"}}`. Exactly one
+extension must declare each requested tool. Missing mappings, relative resource
+paths that do not exist, and missing or empty secrets fail gate preflight.
+Secret values are read from the executing host environment; policy and gate
+evidence record only their names. This does not resolve external secret stores.
+
 ## Incomplete Cook drafts
 
 `agent-task cook --publish-incomplete-draft` opts into preserving a non-empty
@@ -41,7 +54,7 @@ publication.
 | `reconcile <run-id>\|--all [--dry-run\|--apply]` | Preview one durable run/group or the active fleet; mutate only with `--apply`. |
 | `artifacts <run-id>` | List artifacts and evidence refs recorded for a completed run. |
 | `replay-provider-boundary <run-id> [--task <task-id>]` | Hydrate the latest raw executor input and print provider-boundary fields without relaunching a provider. |
-| `cancel <run-id>` | Mark a queued or stale-running durable run as cancelled. |
+| `cancel <run-id>` | Mark a queued or stale-running durable run as cancelled. Retains the writing process's PID and redacted argv in `metadata.cancellation_actor`, visible through status and independent of daemon job retention. |
 | `quarantine <run-id> --reason <text>` | Exclude one exact queued run while retaining its nonterminal lifecycle evidence. |
 | `rearm <run-id>` | Return one exact quarantined queued run to eligibility after repair. |
 | `resume <run-id>` | Resume a queued or stale-running durable run. Given a Cook ID whose durable state names a recovery step, it performs that step through `recover <cook-id>`. |
@@ -72,6 +85,16 @@ fragment fields are omitted from status; artifact selection does not preserve
 credential-bearing fragments or arbitrary URLs.
 
 `agent-task status <run-id> --watch` polls the same canonical resource. Every material resource change is emitted immediately as one bounded `homeboy/agent-task-status-watch-event/v2` JSONL event on stderr. Stdout is the bounded `homeboy/agent-task-status-watch/v2` final envelope. Polls default to every `5s` and stop after `30m`; `--interval <duration>` and `--timeout <duration>` require `--watch`. A terminal failure exits nonzero; a timeout returns the latest partial status and exits `124`.
+
+### Candidate checkout
+
+`homeboy agent-task candidate checkout <cook|attempt> --into <worktree>` fetches
+and checks out the canonical candidate on the Cook's declared head branch. Cook
+aliases use the durable candidate selection, not simply the newest attempt.
+The command prefers `refs/homeboy/candidates/<cook>` in the promotion target;
+otherwise it downloads the candidate git bundle and fetches its recorded
+`candidate_sha`. The destination must already be a git worktree with no staged,
+unstaged, or untracked changes. Git also refuses a branch held by another worktree.
 
 ### Resource Behavior
 
@@ -328,7 +351,7 @@ explains a stop. `agent-task status` projects both under
 | `cook` | Run one workspace task through the patch-artifact handoff workflow. |
 | `fanout cook-batch <issue-url>... --repo <repo>` | Cook independent issues as one workflow instance: one child Cook per issue, a bounded wave, and a join gate. |
 | `batch-prepare <issue-url>... --repo <repo>` | The `prepare` step of a cook-batch: resolve the base once, name each child, and prepare the shared Lab workspace bundle. |
-| `recover <cook-or-attempt-id> [--preflight] [--artifact-id <id>]` | Plan and perform the one recovery step a Cook needs (continue, retry, reconcile, choose an artifact, fork a replacement, replace gates, or publish). `--preflight` reports the step and its read-only admission without mutation; `--timeout-ms`, `--review-form-timeout-ms`, `--backend`, `--selector`, and `--model` re-dispatch a continuation with an explicit provider override. `--authorize-external-proof <TEXT>` with corrected gates (`--verify`/`--verify-file`, optionally `--authorize-interrupted-rerun <TEXT>`) or candidate-bound proof (`--promotion <SPEC>`) replaces the gates of an applied candidate that failed them; `--review-form <SPEC>` with `--review-form-tool`, `--review-form-model`, and `--review-form-author`, plus `--review-override` and `--component`, feed publication. |
+| `recover <cook-or-attempt-id> [--preflight] [--regate]` | Plan and perform the one recovery step a Cook needs (continue, regate, retry, reconcile, fork a replacement, replace gates, or publish). A complete candidate blocked only by gates that did not execute selects `regate`: run the recorded gates and publish on green without provider work. `--regate` explicitly selects the newest candidate-bearing attempt, even when a later attempt was cancelled; an exact attempt ID selects that candidate. `--preflight` reports the step and its read-only admission without mutation; `--timeout-ms`, `--review-form-timeout-ms`, `--backend`, `--selector`, and `--model` re-dispatch a continuation with an explicit provider override. `--authorize-external-proof <TEXT>` with corrected gates (`--verify`/`--verify-file`, optionally `--authorize-interrupted-rerun <TEXT>`) or candidate-bound proof (`--promotion <SPEC>`) replaces the gates of an applied candidate that failed them; `--review-form <SPEC>` with `--review-form-tool`, `--review-form-model`, and `--review-form-author`, plus `--review-override` and `--component`, feed publication. |
 | `review <run-id>` | Build a durable aggregate review envelope from run state, logs, artifacts, and promotion hints. |
 | `promote <source>` | Promote a completed generic patch artifact into a managed worktree. |
 | `adopt <run-or-cook-id> --candidate-ref <sha>` | Adopt an immutable commit candidate through the recorded cook gates and finalization policy. |
@@ -478,6 +501,16 @@ Normal finalization hydrates `--run-id`; `--manual-finalization` is the explicit
 migration mode for a manually prepared candidate with no durable run.
 
 #### Single-Issue Cook
+
+With `agent-task cook --task-url <GitHub issue URL>`, Cook reworks the issue's
+single open linked PR on that PR's head branch. With no open linked PR, it
+chooses a fresh issue-derived branch (adding `-2`, `-3`, … when an earlier
+attempt occupied the default name), rather than adopting closed or merged work.
+Several open linked PRs are refused; select one with `--task-url <PR URL>`.
+Output plan metadata `cook_issue_resolution` reports `pr_rework` or
+`fresh_branch` and the issue/PR URLs or chosen head. GitHub lookup failures
+stop resolution rather than guessing. Callers need not invent per-pass branch
+names or route issue URLs to PR URLs themselves.
 
 Use `agent-task cook` for one issue or one workspace task. It is the non-fanout
 path: create or reuse one task worktree, dispatch one provider run, promote the

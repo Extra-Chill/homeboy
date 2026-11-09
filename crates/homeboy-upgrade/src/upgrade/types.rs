@@ -2,6 +2,10 @@ use serde::{Deserialize, Serialize};
 
 use homeboy_extension_contract::update_output::ExtensionSourceUpdate;
 
+fn anonymous_token_source() -> String {
+    "none".to_owned()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InstallMethod {
     Homebrew,
@@ -71,6 +75,9 @@ pub enum RunnerConvergenceDisposition {
 
 pub struct VersionCheck {
     pub command: String,
+    /// GitHub credential source: `env`, `gh_cli`, or `none`.
+    #[serde(default = "anonymous_token_source")]
+    pub token_source: String,
     pub current_version: String,
     /// The release an upgrade would actually install. For asset-installed
     /// methods this is the newest release carrying an artifact for
@@ -164,6 +171,9 @@ impl RunnerServiceBinaryEntry {
 
 pub struct UpgradeResult {
     pub command: String,
+    /// GitHub credential source: `env`, `gh_cli`, or `none`.
+    #[serde(default = "anonymous_token_source")]
+    pub token_source: String,
     pub install_method: InstallMethod,
     pub previous_version: String,
     pub new_version: Option<String>,
@@ -449,6 +459,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn token_source_is_part_of_check_and_upgrade_json() {
+        let check = serde_json::json!({"command":"upgrade.check", "current_version":"1", "latest_version":"2", "update_available":true, "install_method":"binary"});
+        let upgrade = serde_json::json!({"command":"upgrade", "install_method":"binary", "previous_version":"1", "new_version":"2", "upgraded":true, "message":"ok", "restart_required":false});
+        for source in [None, Some("env"), Some("gh_cli"), Some("none")] {
+            for (mut input, is_check) in [(check.clone(), true), (upgrade.clone(), false)] {
+                if let Some(source) = source {
+                    input["token_source"] = source.into();
+                }
+                let output = if is_check {
+                    serde_json::to_value(serde_json::from_value::<VersionCheck>(input).unwrap())
+                        .unwrap()
+                } else {
+                    serde_json::to_value(serde_json::from_value::<UpgradeResult>(input).unwrap())
+                        .unwrap()
+                };
+                assert_eq!(output["token_source"], source.unwrap_or("none"));
+            }
+        }
+    }
+
+    #[test]
     fn exit_code_rejects_every_reported_failure() {
         let baseline: UpgradeResult = serde_json::from_str(r#"{"command":"upgrade","install_method":"binary","previous_version":"1","new_version":"2","upgraded":true,"message":"ok","restart_required":false}"#).unwrap();
         assert_eq!(baseline.exit_code(), 0);
@@ -498,6 +529,7 @@ mod tests {
     fn extension_skip_reason_reaches_serialized_result() {
         let mut result = UpgradeResult {
             command: "upgrade".to_string(),
+            token_source: crate::upgrade::github_api::token_source(),
             install_method: InstallMethod::Binary,
             previous_version: "0.327.5".to_string(),
             new_version: Some("0.338.0".to_string()),

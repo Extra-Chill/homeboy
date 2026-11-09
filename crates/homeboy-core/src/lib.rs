@@ -227,7 +227,9 @@ pub use homeboy_paths as paths;
 mod paths_tests;
 
 // Public extensions for CLI access
+pub mod child_reaper;
 pub mod defaults;
+pub mod lab_capacity;
 
 // Re-export relocated modules so existing `homeboy::api`, `homeboy::auth`, etc. paths keep working.
 // Consumers within the crate have been updated to canonical paths; these re-exports

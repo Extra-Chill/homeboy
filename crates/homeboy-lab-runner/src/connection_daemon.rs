@@ -231,6 +231,12 @@ fn probe_daemon_health_until_durable(
 
     let mut attempts = Vec::with_capacity(MAX_ATTEMPTS);
     for attempt in 1..=MAX_ATTEMPTS {
+        if !tunnel_process_identity_matches(tunnel_pid, tunnel_process_start_identity) {
+            return Err(DaemonHealthProbeFailure::TunnelExited {
+                message: "owned SSH tunnel exited before health probe".to_string(),
+                attempts,
+            });
+        }
         match daemon_health_report(local_url) {
             Ok(report) if health_identity_matches(&report, daemon) => break,
             Ok(report) => return Err(DaemonHealthProbeFailure::IdentityMismatch(Box::new(report))),
@@ -611,8 +617,11 @@ fn daemon_http_body(local_url: &str) -> std::result::Result<DaemonVersionRespons
     daemon_http_body_at(local_url, "version")
 }
 
+/// Slow under load is not dead; all controller health observations share this budget.
+pub(crate) const HEALTH_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+
 fn daemon_health_report(local_url: &str) -> std::result::Result<DaemonHealthReport, String> {
-    daemon_health_report_with_timeout(local_url, Duration::from_secs(2))
+    daemon_health_report_with_timeout(local_url, HEALTH_PROBE_TIMEOUT)
 }
 
 pub(crate) fn daemon_health_report_with_timeout(
@@ -1198,6 +1207,49 @@ mod tests {
             "identity mismatch must not burn the retry budget"
         );
         server.join().expect("server");
+    }
+
+    #[test]
+    fn slow_health_is_accepted_by_connect_and_admission() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut freshness = report("lease-live", 7331).freshness;
+        freshness.fresh = true;
+        freshness.stale_reason_code = None;
+        let body = serde_json::json!({
+            "freshness": freshness,
+            "pid": 7331,
+        })
+        .to_string();
+        let server = std::thread::spawn(move || {
+            for _ in 0..4 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0; 1024];
+                stream.read(&mut request).unwrap();
+                std::thread::sleep(Duration::from_millis(2200));
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+                .unwrap();
+            }
+        });
+        let daemon = RemoteDaemon {
+            address: address.to_string(),
+            pid: Some(7331),
+            lease_id: Some("lease-live".to_string()),
+            version: None,
+            build_identity: None,
+            inspected_freshness: None,
+        };
+        let url = format!("http://{address}");
+        assert!(probe_daemon_health_until_durable(&url, &daemon, None, None).is_ok());
+        let observation = crate::connection::probe_verified_direct_daemon_health(&url).unwrap();
+        assert!(observation.freshness.fresh);
+        assert!(health_identity_matches(&observation, &daemon));
+        server.join().unwrap();
     }
 
     #[test]

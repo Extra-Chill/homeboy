@@ -488,6 +488,7 @@ fn run_controller_upgrade_with_operation(
             };
             let mut result = UpgradeResult {
                 command: "upgrade".to_string(),
+                token_source: crate::upgrade::github_api::token_source(),
                 install_method,
                 previous_version: previous_version.clone(),
                 new_version: completion.version.clone(),
@@ -925,6 +926,7 @@ fn run_controller_upgrade_with_operation(
 
             let mut result = UpgradeResult {
                 command: "upgrade".to_string(),
+                token_source: crate::upgrade::github_api::token_source(),
                 install_method,
                 previous_version,
                 new_version: completion.version.clone(),
@@ -1028,6 +1030,7 @@ fn source_upgrade_noop_result(
 ) -> UpgradeResult {
     UpgradeResult {
         command: "upgrade".to_string(),
+        token_source: crate::upgrade::github_api::token_source(),
         install_method,
         new_version: Some(previous_version.clone()),
         previous_version,
@@ -1088,6 +1091,7 @@ fn runner_preflight_failure_result(
 ) -> UpgradeResult {
     UpgradeResult {
         command: "upgrade".to_string(),
+        token_source: crate::upgrade::github_api::token_source(),
         install_method,
         new_version: Some(previous_version.clone()),
         previous_version,
@@ -1136,6 +1140,7 @@ fn extension_preflight_failure_result(
 ) -> UpgradeResult {
     UpgradeResult {
         command: "upgrade".to_string(),
+        token_source: crate::upgrade::github_api::token_source(),
         install_method,
         new_version: Some(previous_version.clone()),
         previous_version,
@@ -1535,6 +1540,7 @@ fn run_targeted_runner_upgrade(
     Ok(UpgradeResult {
         daemon_pending_restart: None,
         command: "upgrade".to_string(),
+        token_source: crate::upgrade::github_api::token_source(),
         install_method,
         previous_version: previous_version.clone(),
         new_version: Some(previous_version.clone()),
@@ -4560,6 +4566,7 @@ mod convergence_tests {
         };
         let mut result = UpgradeResult {
             command: "upgrade".to_string(),
+            token_source: crate::upgrade::github_api::token_source(),
             install_method: InstallMethod::Binary,
             previous_version: "0.309.0".to_string(),
             new_version: Some("0.311.0".to_string()),

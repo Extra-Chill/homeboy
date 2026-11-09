@@ -2093,6 +2093,7 @@ mod tests {
     fn completed_upgrade_result() -> UpgradeResult {
         UpgradeResult {
             command: "upgrade".to_string(),
+            token_source: crate::upgrade::github_api::token_source(),
             install_method: super::super::types::InstallMethod::Binary,
             previous_version: "0.1.0".to_string(),
             new_version: Some("0.2.0".to_string()),

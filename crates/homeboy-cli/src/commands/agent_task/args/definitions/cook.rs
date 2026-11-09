@@ -295,6 +295,11 @@ pub struct VerifyGateArgs {
     /// Execute deterministic gates on this admitted Lab runner before selecting private HOME.
     #[arg(long = "gate-runner", value_name = "RUNNER")]
     pub gate_runner: Option<String>,
+    /// Required host inputs as JSON: host_tools names resolve through installed
+    /// extension gate_host_tools mappings; secrets name required host variables.
+    /// Missing inputs refuse admission without recording secret values.
+    #[arg(long = "gate-requirements", value_name = "JSON", value_parser = parse_gate_requirements)]
+    pub gate_requirements: Option<homeboy::agents::agent_tasks::gate::AgentTaskGateRequirements>,
     /// Extra environment variable for gate commands, as `NAME=VALUE`. Repeatable.
     #[arg(long = "gate-env", value_name = "NAME=VALUE", value_parser = parse_gate_environment)]
     pub gate_environment: Vec<(String, String)>,
@@ -591,6 +596,7 @@ impl From<VerifyGateArgs> for VerifyGateOptions {
 
             gate_environment: AgentTaskGateEnvironmentPolicy {
                 lab_runner: args.gate_runner,
+                requirements: args.gate_requirements.unwrap_or_default(),
                 mode: match args.gate_environment_mode.as_str() {
                     "replace" => AgentTaskGateEnvironmentMode::Replace,
                     _ => AgentTaskGateEnvironmentMode::Inherit,
@@ -656,6 +662,12 @@ fn parse_gate_toolchain_requirement(
 fn parse_gate_extension_input(value: &str) -> Result<AgentTaskGateExtensionInput, String> {
     serde_json::from_str(value)
         .map_err(|error| format!("invalid gate extension input declaration: {error}"))
+}
+
+fn parse_gate_requirements(
+    value: &str,
+) -> Result<homeboy::agents::agent_tasks::gate::AgentTaskGateRequirements, String> {
+    serde_json::from_str(value).map_err(|error| error.to_string())
 }
 
 fn parse_gate_environment(value: &str) -> Result<(String, String), String> {
@@ -791,6 +803,7 @@ mod tests {
             ("gate-execution-policy", "continue-all"), ("gate-timeout-seconds", "42"),
             ("gate-heartbeat-interval-seconds", "7"), ("gate-no-progress-timeout-seconds", "11"),
             ("gate-environment-mode", "replace"), ("gate-runner", "lab"),
+            ("gate-requirements", r#"{"host_tools":["tool"],"secrets":["TOKEN"]}"#),
             ("gate-env", "NAME=with=equals"), ("gate-env-from", "CACHE=HOME/cache"),
             ("gate-toolchain", "rustc"),
             ("gate-toolchain-spec", r#"{"command":"custom","probe_arguments":["probe"]}"#),
@@ -854,6 +867,30 @@ mod tests {
                 args.cook.child_flags().unwrap()
             );
         }
+    }
+
+    #[test]
+    fn declared_gate_requirements_refuse_missing_secret_at_public_preflight() {
+        let options: VerifyGateOptions = TestCli::try_parse_from([
+            "homeboy",
+            "--verify",
+            "true",
+            "--gate-requirements",
+            r#"{"secrets":["HOMEBOY_TEST_MISSING_GATE_SECRET_17592"]}"#,
+        ])
+        .unwrap()
+        .gates
+        .into();
+        let root = tempfile::tempdir().unwrap();
+        let error = options.preflight(root.path()).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("HOMEBOY_TEST_MISSING_GATE_SECRET_17592"),
+            "{error}"
+        );
+        let persisted = serde_json::to_string(&options).unwrap();
+        assert!(persisted.contains("HOMEBOY_TEST_MISSING_GATE_SECRET_17592"));
     }
 
     #[test]
@@ -1167,7 +1204,7 @@ mod tests {
             "--preview",
             "--run-plan",
             "--placement <PLACEMENT>",
-            "One repository per batch",
+            "Omit --repo to infer a registered component",
             "homeboy runs watch <instance>",
             "Two phases:",
             "Verification is required:",
@@ -1596,8 +1633,10 @@ pub struct AgentTaskCookArgs {
         value_parser = parse_prepared_base_sha
     )]
     pub prepared_base_sha: Option<String>,
-    /// Head branch to push and open the PR from. Defaults to the branch the
-    /// destination worktree is already on.
+    /// Head branch to push and open the PR from. With an issue task URL, Cook
+    /// reworks its single open linked PR, otherwise derives a fresh branch;
+    /// several open linked PRs require an explicit PR URL. The chosen route is
+    /// reported as cook_issue_resolution. An explicit head must match PR rework.
     #[arg(long, value_name = "BRANCH")]
     pub head: Option<String>,
     /// Title for the finalized pull request. Defaults to a title derived from
@@ -1628,6 +1667,9 @@ pub struct AgentTaskCookArgs {
     /// Controller-resolved base provenance persisted with the Cook plan.
     #[arg(skip)]
     pub base_resolution: Option<serde_json::Value>,
+    /// Issue routing decision persisted in output as cook_issue_resolution.
+    #[arg(skip)]
+    pub issue_resolution: Option<serde_json::Value>,
     /// Captured at CLI ingress when `--prompt -` is used. This survives route
     /// handoff and plan compilation without asking a later phase to reread stdin.
     #[arg(skip)]

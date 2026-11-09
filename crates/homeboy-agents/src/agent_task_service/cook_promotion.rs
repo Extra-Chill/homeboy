@@ -2283,6 +2283,10 @@ pub(crate) fn catch_up_cook_candidate_to_base_in_store(
             "destination branch carries changes beyond this Cook's candidate; it is published on the branch as it stands",
         );
     }
+    crate::agent_task_promotion::destination::before_reset(
+        Path::new(path),
+        &options.identity.cook_id,
+    )?;
     let tree = match apply_immutable_candidate_to_base(
         path,
         &expected,
@@ -3119,6 +3123,14 @@ pub(crate) fn cook_finalization_options_with_stores(
     let pr_title = form_title
         .clone()
         .unwrap_or_else(|| options.finalization.title.clone());
+    if !homeboy_core::git::is_conventional_subject(&pr_title) {
+        return Err(Error::validation_invalid_argument(
+            "title",
+            "Cook PR title must be a conventional subject: type(scope)?!?: subject",
+            Some(pr_title),
+            None,
+        ));
+    }
     let commit_message = cook_commit_message(
         &options.finalization.commit_message,
         &pr_title,
@@ -3720,14 +3732,35 @@ pub(crate) fn recover_cook_pr_with_backend_and_review_form<B: AgentTaskPrFinaliz
     {
         run_or_cook_id.to_string()
     } else {
-        canonical_cook_recovery_run_id(&recipe.cook_id).ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "run_or_cook_id",
-                "durable Cook has no canonical promotable candidate",
-                Some(run_or_cook_id.to_string()),
-                None,
-            )
-        })?
+        review_form
+            .as_ref()
+            .and_then(|_| canonical_cook_candidate(&recipe.cook_id))
+            .and_then(|candidate| candidate["run_id"].as_str().map(str::to_string))
+            .or_else(|| canonical_cook_recovery_run_id(&recipe.cook_id))
+            .ok_or_else(|| {
+                Error::validation_invalid_argument(
+                    "run_or_cook_id",
+                    "durable Cook has no canonical promotable candidate",
+                    Some(run_or_cook_id.to_string()),
+                    None,
+                )
+            })?
+    };
+    // An exact form-only attempt is not a new publication authority when
+    // the selected producer already has a form (or the operator supplies it).
+    let run_id = if persisted_promotion_for_attempt(&run_id)?.is_some_and(|promotion| {
+        promotion.provenance["cook_follow_up"]["kind"] == "review_form_only"
+    }) {
+        let selected = canonical_cook_candidate(&recipe.cook_id)
+            .and_then(|candidate| candidate["run_id"].as_str().map(str::to_string));
+        selected
+            .filter(|producer| {
+                review_form.is_some()
+                    || canonical_cook_recovery_run_id(&recipe.cook_id).as_ref() == Some(producer)
+            })
+            .unwrap_or(run_id)
+    } else {
+        run_id
     };
     // A verified empty remediation is evidence about the already-applied
     // candidate, not a replacement candidate. Recover the source promotion so
@@ -4114,6 +4147,23 @@ pub(crate) fn canonical_cook_recovery_run_id_with_stores(
     let source_run_id = candidate["run_id"].as_str()?.to_string();
     if source_run_id.is_empty() {
         return None;
+    }
+    // Publication belongs to the selected producer once its form is complete.
+    // A later form-only execution cannot invalidate that candidate or replace
+    // the runtime identity used to disclose its implementation.
+    let aggregate = stores
+        .map(|(_, lifecycle)| lifecycle.read_aggregate(&source_run_id))
+        .unwrap_or_else(|| agent_task_lifecycle::read_attempt_aggregate(&source_run_id));
+    if aggregate
+        .ok()
+        .and_then(|aggregate| {
+            super::cook::review_form_from_aggregate(&aggregate)
+                .ok()
+                .flatten()
+        })
+        .is_some_and(|form| form.validate().is_ok())
+    {
+        return Some(source_run_id);
     }
     let recipe = stores
         .map(|(store, _)| store.load_recipe(cook_id))
@@ -7061,6 +7111,7 @@ struct DeliveredCandidateFacts {
     /// Applied candidate whose gates failed or never completed, without
     /// replacement proof.
     applied_gate_failure: bool,
+    regate_ready: bool,
     /// Verified, unpublished candidate; its review form is publication input.
     verified_unpublished: bool,
     /// The verified candidate has no publishable review form: neither the
@@ -7166,12 +7217,23 @@ fn delivered_candidate_facts(
             .as_ref()
             .is_some_and(|candidate| !candidate.tree_sha.is_empty())
         && !delivery.is_some_and(super::CookDelivery::published);
-    let review_form_missing =
-        verified_unpublished && review_form_missing_in_store(lifecycle_store, record);
+    let review_form_missing = review_form_missing_in_store(lifecycle_store, record);
+    let regate_ready = applied_gate_failure
+        && !review_form_missing
+        && agent_incomplete_reason(lifecycle_store, &record.run_id).is_none()
+        && promotion.finalization_blocking_gates().all(|gate| {
+            matches!(
+                gate.status,
+                crate::agent_task_gate::AgentTaskGateStatus::Deferred
+                    | crate::agent_task_gate::AgentTaskGateStatus::Unavailable
+                    | crate::agent_task_gate::AgentTaskGateStatus::Skipped
+            )
+        });
     DeliveredCandidateFacts {
         applied_gate_failure,
+        regate_ready,
         verified_unpublished,
-        review_form_missing,
+        review_form_missing: verified_unpublished && review_form_missing,
     }
 }
 
@@ -7290,6 +7352,7 @@ fn cook_recovery_actions_with_prefix(
             agent_incomplete_reason,
             adoptable_candidate_ref,
             applied_gate_failure: delivered_candidate.applied_gate_failure,
+            regate_ready: delivered_candidate.regate_ready,
             verified_unpublished: delivered_candidate.verified_unpublished,
             review_form_missing: delivered_candidate.review_form_missing,
         });

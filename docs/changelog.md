@@ -4,6 +4,82 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.452.0] - 2026-11-09
+
+### Added
+- add candidate checkout and accept listed ids in runs artifact get
+
+### Fixed
+- enforce Cook destination ownership and snapshot staged candidates before reset
+
+## [0.451.0] - 2026-11-09
+
+### Added
+- re-gate an existing candidate without provider work
+
+### Changed
+- assert the current --repo inference help line
+
+### Fixed
+- validate and derive --to-worktree before admission
+- consume operator feedback at the shared provider dispatch boundary
+- stage a refreshed build until the daemon can restart onto it
+- serve /health from a cached freshness snapshot and give controller health probes a load-tolerant budget
+
+## [0.450.0] - 2026-11-08
+
+### Added
+- resolve cook --repo from owner/repo, a checkout path, or issue URLs
+- record workflow step spans and split provider time into model, tool and gate phases
+
+### Changed
+- keep Cook preview CLI tests offline with a stub gh
+
+## [0.449.6] - 2026-11-08
+
+### Changed
+- verify workflow Cooks survive daemon stop and restart
+
+## [0.449.5] - 2026-11-08
+
+### Fixed
+- keep timed-out edits as a recoverable candidate and heartbeat on progress
+- enforce conventional titles on every Cook PR title source
+- compare operator gate failures against the verified base
+- publish the completed producer despite later review-form-only attempts
+- authenticate GitHub API checks via gh and show rate-limit reset as RFC 3339
+- classify unexecuted gates as gate_environment_unavailable with the first error line
+
+## [0.449.4] - 2026-11-08
+
+### Changed
+- initialize observation stores once per process and slow idle polling loops
+
+## [0.449.3] - 2026-11-08
+
+### Changed
+- resolve an issue URL to its open PR or a fresh branch
+
+### Fixed
+- accept zero-success foreach joins
+
+## [0.449.2] - 2026-11-08
+
+### Changed
+- Cook gates: declare required host tools and secrets
+- Agent tasks: record the cancelling process on the run record
+
+## [0.449.1] - 2026-11-08
+
+### Changed
+- git pr merge-when-green: merge an exact reviewed head once checks are green
+- re-measure supersession when the dry run fails
+- Add native bounded workflow next passes
+
+### Fixed
+- keep a stale busy daemon serving, report it, and make drain opt-in
+- publish gated Cook candidates when review forms are unavailable
+
 ## [0.449.0] - 2026-11-08
 
 ### Added

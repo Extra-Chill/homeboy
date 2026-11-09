@@ -3,7 +3,55 @@ use homeboy_core::error::{Error, ErrorCode, Result};
 use reqwest::blocking::{Client, Response};
 use reqwest::header::{HeaderValue, AUTHORIZATION};
 use reqwest::StatusCode;
+use std::process::Command;
+use std::sync::OnceLock;
 use std::time::Duration;
+
+struct Authentication {
+    token: Option<String>,
+    source: &'static str,
+}
+
+fn resolve_token(
+    env: impl Fn(&str) -> Option<String>,
+    command: impl FnOnce(&mut Command, Duration) -> Option<String>,
+) -> Authentication {
+    for name in ["GH_TOKEN", "GITHUB_TOKEN"] {
+        if let Some(token) = env(name).filter(|value| !value.trim().is_empty()) {
+            return Authentication {
+                token: Some(token),
+                source: "env",
+            };
+        }
+    }
+    let token = command(
+        Command::new("gh").args(["auth", "token", "--hostname", "github.com"]),
+        Duration::from_secs(5),
+    )
+    .map(|value| value.trim().to_owned())
+    .filter(|value| !value.is_empty());
+    let source = if token.is_some() { "gh_cli" } else { "none" };
+    Authentication { token, source }
+}
+
+fn authentication() -> &'static Authentication {
+    static AUTH: OnceLock<Authentication> = OnceLock::new();
+    AUTH.get_or_init(|| {
+        resolve_token(
+            |name| std::env::var(name).ok(),
+            |command, timeout| {
+                super::execution::command_output_with_timeout(command, timeout, "read GitHub token")
+                    .ok()
+                    .filter(|output| output.status.success())
+                    .and_then(|output| String::from_utf8(output.stdout).ok())
+            },
+        )
+    })
+}
+
+pub(super) fn token_source() -> String {
+    authentication().source.to_owned()
+}
 
 use super::constants::VERSION;
 
@@ -14,11 +62,13 @@ pub(super) fn fetch(url: &str, timeout: Duration) -> Result<Response> {
         .build()
         .map_err(|e| Error::internal_io(e.to_string(), Some("create HTTP client".into())))?;
     let mut request = client.get(url);
-    let token = ["GH_TOKEN", "GITHUB_TOKEN"]
-        .into_iter()
-        .filter_map(|name| std::env::var(name).ok())
-        .find(|value| !value.trim().is_empty());
-    if let Some(token) = token {
+    // Never send credentials to release asset hosts or caller-supplied endpoints.
+    let github_api = reqwest::Url::parse(url)
+        .is_ok_and(|url| url.scheme() == "https" && url.host_str() == Some("api.github.com"));
+    if let Some(token) = github_api
+        .then(authentication)
+        .and_then(|auth| auth.token.as_ref())
+    {
         let mut header = HeaderValue::from_str(&format!("Bearer {token}")).map_err(|_| {
             Error::internal_io(
                 "Invalid GitHub authentication header",
@@ -47,11 +97,13 @@ pub(super) fn fetch(url: &str, timeout: Duration) -> Result<Response> {
             .get("x-ratelimit-reset")
             .and_then(|value| value.to_str().ok());
         let reset_message = reset
-            .map(|value| format!("reset time: {value} (Unix seconds)"))
+            .and_then(|value| value.parse::<i64>().ok())
+            .and_then(homeboy_engine_primitives::timestamp::unix_seconds_rfc3339)
+            .map(|time| format!("reset time: {time}"))
             .unwrap_or_else(|| "reset time unavailable".into());
         return Err(Error::new(
             ErrorCode::GithubRateLimited,
-            format!("GitHub API rate limited ({status}) at {url}; {reset_message}; set GH_TOKEN or GITHUB_TOKEN"),
+            format!("GitHub API rate limited ({status}) at {url}; {reset_message}; run `gh auth login` or set GH_TOKEN"),
             serde_json::json!({"url": url, "status": status.as_u16(), "reset": reset}),
         ));
     }
@@ -68,67 +120,55 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
     use std::net::TcpListener;
-    use std::process::Command;
+
+    #[test]
+    fn token_resolution_table() {
+        for (gh, github, cli, expected, source) in [
+            (
+                Some("first"),
+                Some("second"),
+                Some("cli"),
+                Some("first"),
+                "env",
+            ),
+            (None, Some("second"), Some("cli"), Some("second"), "env"),
+            (Some(""), Some("second"), Some("cli"), Some("second"), "env"),
+            (None, None, Some("cli\n"), Some("cli"), "gh_cli"),
+            (Some(""), Some("  "), Some("cli"), Some("cli"), "gh_cli"),
+            (None, None, None, None, "none"), // missing, failing or timed-out command
+            (None, None, Some("\n"), None, "none"),
+        ] {
+            let auth = resolve_token(
+                |name| {
+                    match name {
+                        "GH_TOKEN" => gh,
+                        _ => github,
+                    }
+                    .map(str::to_owned)
+                },
+                |command, timeout| {
+                    assert_ne!(source, "env", "environment must bypass gh");
+                    assert_eq!(command.get_program(), "gh");
+                    assert_eq!(
+                        command.get_args().collect::<Vec<_>>(),
+                        ["auth", "token", "--hostname", "github.com"]
+                    );
+                    assert_eq!(timeout, Duration::from_secs(5));
+                    cli.map(str::to_owned)
+                },
+            );
+            assert_eq!(auth.token.as_deref(), expected);
+            assert_eq!(auth.source, source);
+        }
+    }
 
     #[test]
     fn github_request_contract() {
-        const URL_ENV: &str = "HOMEBOY_TEST_GITHUB_REQUEST_URL";
-        // Isolate real environment-variable lookup from concurrent upgrade tests.
-        if let Ok(url) = std::env::var(URL_ENV) {
-            let result = fetch(&url, Duration::from_secs(5));
-            match std::env::var("HOMEBOY_TEST_GITHUB_STATUS")
-                .unwrap()
-                .as_str()
-            {
-                "403" | "429" => {
-                    let error = result.unwrap_err();
-                    assert_eq!(error.code, ErrorCode::GithubRateLimited);
-                    assert!(error.message.contains("1700000000"));
-                    assert!(error.message.contains("GH_TOKEN or GITHUB_TOKEN"));
-                    assert_eq!(error.details["reset"], "1700000000");
-                    assert!(!format!("{error:?}").contains("test-secret"));
-                }
-                "404" => {
-                    let error = result.unwrap_err();
-                    assert_ne!(error.code, ErrorCode::GithubRateLimited);
-                    assert!(error.message.contains("404"));
-                    assert!(error.message.contains(&url));
-                }
-                _ => assert!(result.is_ok()),
-            }
-            return;
-        }
-
-        for (gh_token, github_token, expected, status) in [
-            (None, None, None, "200 OK"),
-            (Some(""), Some(""), None, "200 OK"),
-            (
-                Some("test-secret-gh"),
-                None,
-                Some("test-secret-gh"),
-                "200 OK",
-            ),
-            (
-                None,
-                Some("test-secret-github"),
-                Some("test-secret-github"),
-                "200 OK",
-            ),
-            (
-                Some(""),
-                Some("test-secret-fallback"),
-                Some("test-secret-fallback"),
-                "200 OK",
-            ),
-            (
-                Some("test-secret-first"),
-                Some("test-secret-second"),
-                Some("test-secret-first"),
-                "200 OK",
-            ),
-            (None, None, None, "403 Forbidden"),
-            (None, None, None, "429 Too Many Requests"),
-            (None, None, None, "404 Not Found"),
+        for status in [
+            "200 OK",
+            "403 Forbidden",
+            "429 Too Many Requests",
+            "404 Not Found",
         ] {
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             let url = format!("http://{}/releases", listener.local_addr().unwrap());
@@ -145,46 +185,32 @@ mod tests {
                     request.extend_from_slice(&buffer[..count]);
                 }
                 let request = String::from_utf8(request).unwrap();
-                let authorization = request.lines().find_map(|line| {
-                    let (name, value) = line.split_once(':')?;
-                    name.eq_ignore_ascii_case("authorization")
-                        .then(|| value.trim())
-                });
-                let matches = authorization.map(str::to_owned)
-                    == expected.map(|token| format!("Bearer {token}"));
-                // Invalid JSON ensures status errors are diagnosed before parsing.
+                assert!(!request.to_ascii_lowercase().contains("authorization:"));
+                // Invalid JSON ensures HTTP errors are diagnosed before parsing.
                 let response = format!(
                     "HTTP/1.1 {status}\r\nx-ratelimit-remaining: 0\r\nx-ratelimit-reset: 1700000000\r\nContent-Length: 8\r\nConnection: close\r\n\r\nnot-json"
                 );
                 stream.write_all(response.as_bytes()).unwrap();
-                matches
             });
-            let mut child = Command::new(std::env::current_exe().unwrap());
-            child
-                .args([
-                    "--exact",
-                    "upgrade::github_api::tests::github_request_contract",
-                ])
-                .env_remove("GH_TOKEN")
-                .env_remove("GITHUB_TOKEN")
-                .env(URL_ENV, url)
-                .env("HOMEBOY_TEST_GITHUB_STATUS", &status[..3]);
-            if let Some(token) = gh_token {
-                child.env("GH_TOKEN", token);
+            let result = fetch(&url, Duration::from_secs(5));
+            server.join().unwrap();
+            match &status[..3] {
+                "403" | "429" => {
+                    let error = result.unwrap_err();
+                    assert_eq!(error.code, ErrorCode::GithubRateLimited);
+                    assert!(error.message.contains("2023-11-14T22:13:20+00:00"));
+                    assert!(error.message.contains("gh auth login"));
+                    assert!(error.message.contains("set GH_TOKEN"));
+                    assert_eq!(error.details["reset"], "1700000000");
+                }
+                "404" => {
+                    let error = result.unwrap_err();
+                    assert_ne!(error.code, ErrorCode::GithubRateLimited);
+                    assert!(error.message.contains("404"));
+                    assert!(error.message.contains(&url));
+                }
+                _ => assert!(result.is_ok()),
             }
-            if let Some(token) = github_token {
-                child.env("GITHUB_TOKEN", token);
-            }
-            let output = child.output().unwrap();
-            assert!(
-                server.join().unwrap(),
-                "authorization header contract failed"
-            );
-            assert!(
-                output.status.success(),
-                "{}",
-                String::from_utf8_lossy(&output.stdout)
-            );
         }
     }
 }
