@@ -41,6 +41,22 @@ const ACTIVE_TASK_SCOPE_QUERY: &str = r#"
     LIMIT 33
 "#;
 
+/// Whether any live agent-task record holds an unmaterialized Cook admission.
+///
+/// `INDEXED BY` is load-bearing. Without statistics the planner prefers the
+/// `kind = 'agent-task'` equality search, which decodes the metadata of every
+/// historical agent-task row; the daemon lifetime monitor runs this every
+/// second, so that walk re-read the whole run history continuously (#17673).
+/// The partial index holds only live rows, so the cost tracks active work.
+const PENDING_UNMATERIALIZED_COOK_ADMISSION_QUERY: &str = r#"
+    SELECT EXISTS (
+        SELECT 1 FROM runs INDEXED BY idx_agent_task_active_scope
+        WHERE kind = 'agent-task'
+          AND json_extract(metadata_json, '$.agent_task_run.state') IN ('queued', 'running')
+          AND json_type(metadata_json, '$.agent_task_run.metadata.unmaterialized_cook_admission') = 'object'
+    )
+"#;
+
 /// Turn a probe read of `limit + 1` rows into a page plus its resume position.
 ///
 /// The extra row is the whole mechanism: it is the difference between "the
@@ -1578,18 +1594,21 @@ impl ObservationStore {
     /// neither materialized nor terminal. The local controller daemon schedules
     /// those admissions from this same store, so it must stay up while one is
     /// pending (#17506). Materialization terminates the parent record, so the
-    /// live-state filter alone excludes it. Reads the active-scope partial
-    /// index's rows only.
+    /// live-state filter alone excludes it.
+    ///
+    /// The daemon lifetime monitor asks this every second, so it must read the
+    /// active-scope partial index's rows only (#17673); see
+    /// [`PENDING_UNMATERIALIZED_COOK_ADMISSION_QUERY`].
     pub fn has_pending_unmaterialized_cook_admission(&self) -> Result<bool> {
+        // A read-only open of a missing store is an in-memory placeholder that
+        // has no runs and none of the store's indexes.
+        if self.connection.path().is_none_or(str::is_empty) {
+            return Ok(false);
+        }
         self.connection
-            .query_row(
-                "SELECT EXISTS (SELECT 1 FROM runs
-                 WHERE kind = 'agent-task'
-                   AND json_extract(metadata_json, '$.agent_task_run.state') IN ('queued', 'running')
-                   AND json_type(metadata_json, '$.agent_task_run.metadata.unmaterialized_cook_admission') = 'object')",
-                [],
-                |row| row.get(0),
-            )
+            .query_row(PENDING_UNMATERIALIZED_COOK_ADMISSION_QUERY, [], |row| {
+                row.get(0)
+            })
             .map_err(sqlite_error("read pending unmaterialized Cook admissions"))
     }
 
@@ -2589,6 +2608,78 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .is_empty());
+        });
+    }
+
+    /// VM steps one pending-admission probe takes against the current store.
+    fn pending_admission_probe_steps(store: &ObservationStore) -> (bool, i32) {
+        let mut statement = store
+            .connection
+            .prepare(PENDING_UNMATERIALIZED_COOK_ADMISSION_QUERY)
+            .unwrap();
+        let pending = statement.query_row([], |row| row.get(0)).unwrap();
+        (
+            pending,
+            statement.get_status(rusqlite::StatementStatus::VmStep),
+        )
+    }
+
+    fn record_terminal_history(store: &ObservationStore, from: usize, to: usize) {
+        for number in from..to {
+            let mut run = scoped_run(
+                &format!("history-{number}"),
+                "caller",
+                "succeeded",
+                Some("old"),
+            );
+            run.metadata_json["agent_task_run"]["metadata"]["unmaterialized_cook_admission"] =
+                serde_json::json!({ "binding": {} });
+            store.upsert_imported_run(&run).unwrap();
+        }
+    }
+
+    /// The daemon lifetime monitor asks this every second (#17673). Its cost
+    /// must track live admissions, not the terminal agent-task history.
+    #[test]
+    fn pending_admission_probe_cost_does_not_grow_with_history() {
+        with_isolated_home(|_| {
+            let store = ObservationStore::open_initialized().unwrap();
+            let mut live = scoped_run("task-live", "caller", "running", Some("repo"));
+            store.upsert_imported_run(&live).unwrap();
+
+            record_terminal_history(&store, 0, 100);
+            let (pending, small) = pending_admission_probe_steps(&store);
+            assert!(!pending, "terminal admissions are not pending");
+            record_terminal_history(&store, 100, 1000);
+            let (pending, large) = pending_admission_probe_steps(&store);
+            assert!(!pending);
+            assert_eq!(
+                small, large,
+                "10x terminal history must not change the probe's VM steps"
+            );
+
+            let mut explain = store
+                .connection
+                .prepare(&format!(
+                    "EXPLAIN QUERY PLAN {PENDING_UNMATERIALIZED_COOK_ADMISSION_QUERY}"
+                ))
+                .unwrap();
+            let details = explain
+                .query_map([], |row| row.get::<_, String>(3))
+                .unwrap()
+                .map(|row| row.unwrap())
+                .collect::<Vec<_>>();
+            assert!(
+                details
+                    .iter()
+                    .any(|detail| detail.contains("idx_agent_task_active_scope")),
+                "{details:?}"
+            );
+
+            live.metadata_json["agent_task_run"]["metadata"]["unmaterialized_cook_admission"] =
+                serde_json::json!({ "binding": {} });
+            store.upsert_imported_run(&live).unwrap();
+            assert!(store.has_pending_unmaterialized_cook_admission().unwrap());
         });
     }
 
