@@ -20726,6 +20726,7 @@ fn verify_replacement_gates_recovers_pending_verification_and_replays_completed_
             crate::agent_task_service::cook_promotion::persisted_promotion_source_in_store(
                 &test_lifecycle_store(),
                 &replacement,
+                "run-verify-replacement",
             )
             .expect("green candidate source survives empty retry");
         let bound: Value = serde_json::from_str(&raw).expect("bound source");

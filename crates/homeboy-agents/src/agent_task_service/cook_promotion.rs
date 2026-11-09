@@ -1064,7 +1064,7 @@ pub(crate) fn promote_or_load_attempt_in_store(
                 )
             })?;
             let (source, source_path) =
-                persisted_promotion_source_in_store(lifecycle_store, &promotion)?;
+                persisted_promotion_source_in_store(lifecycle_store, &promotion, run_id)?;
             let observation_store = lifecycle_store.open_observation_initialized()?;
             let mut resumed = crate::agent_task_promotion::with_gate_supervision(
                 cook_gate_supervision(lifecycle_store, options, run_id),
@@ -1902,7 +1902,8 @@ fn verify_replacement_gates_owned(
         .or_else(|| original.provenance.pointer("/resume_inputs"));
     // The persisted candidate, not the mutable Cook selection, owns this
     // replay. A later retry may have an empty aggregate (or a different task).
-    let (source, source_path) = persisted_promotion_source_in_store(lifecycle_store, &original)?;
+    let (source, source_path) =
+        persisted_promotion_source_in_store(lifecycle_store, &original, &run_id)?;
     let observation_store = lifecycle_store.open_observation_initialized()?;
     let replacement_gate_workspace = replacement_component_workspace(&original, &target_path)?;
     let original_value = serde_json::to_value(&original)
@@ -2003,15 +2004,15 @@ fn verify_replacement_gates_owned(
 pub(crate) fn persisted_promotion_source_in_store(
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     promotion: &AgentTaskPromotionReport,
+    fallback_run_id: &str,
 ) -> Result<(String, Option<PathBuf>)> {
-    let owner = promotion.source.run_id.as_deref().ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "promotion.source.run_id",
-            "replacement gates require the persisted promotion's owning attempt",
-            None,
-            None,
-        )
-    })?;
+    // Promotions persisted before the owning attempt was recorded have no
+    // source run; they can only belong to the run being resumed.
+    let owner = promotion
+        .source
+        .run_id
+        .as_deref()
+        .unwrap_or(fallback_run_id);
     let (source, path) = promotion_source_in_store(lifecycle_store, owner)?;
     Ok((bind_persisted_promotion_artifact(source, promotion)?, path))
 }
