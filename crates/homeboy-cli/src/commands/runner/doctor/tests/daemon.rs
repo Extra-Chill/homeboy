@@ -628,6 +628,8 @@ fn disconnected_incompatible_daemon_with_unavailable_ownership_is_terminal() {
         daemon_lease_verdict: Default::default(),
         daemon_compatible: false,
         accepting_jobs: false,
+        accepts_jobs: None,
+        reasons: Vec::new(),
         active_job_count: Some(0),
         live_daemon_job_count: Some(0),
         stale_job_count: 0,
