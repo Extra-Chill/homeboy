@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.453.0] - 2026-11-09
+
+### Added
+- load-aware Lab admission with FIFO step slots and owned child reaping
+
+### Fixed
+- Lab gate infrastructure failures are gate_environment_unavailable, never gate_failed
+- replace a live-but-unresponsive runner daemon instead of looping on established_then_health_failed
+
 ## [0.452.0] - 2026-11-09
 
 ### Added
