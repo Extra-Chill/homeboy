@@ -63,3 +63,18 @@ the first-class recursive manifest surface:
 ```sh
 homeboy contract manifest
 ```
+
+## Removed commands
+
+Commands removed on purpose are listed in one registry,
+`crates/homeboy-cli/src/removed_commands.rs` (`REMOVED_COMMANDS`). Each entry
+records the command path (for example `rig sync`), its replacement or no
+replacement, a one-line migration hint, and the Homeboy version that removed it.
+
+Invoking a registered path exits with code `2` and a typed `command.removed`
+error instead of clap's bare `unrecognized subcommand`. Stderr names the removed
+path, removal version, replacement, and hint; stdout carries the
+`homeboy/command-result/v3` envelope whose `diagnostics.details` holds
+`removed_path`, `replacement` (`null` when nothing replaces it), `hint`, and
+`removed_in`. Unknown commands that are not in the registry keep the normal clap
+error. When a release removes a command, add its path to the registry.
