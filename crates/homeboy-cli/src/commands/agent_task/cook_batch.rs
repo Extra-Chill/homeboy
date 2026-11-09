@@ -13,6 +13,9 @@
 //!
 //! Status, per-child progress, and cancellation are the workflow's own
 //! (`homeboy runs show <instance>` / `homeboy workflow cancel <instance>`).
+//! `homeboy agent-task status|diagnose <instance>` rolls every declared child
+//! up from those same records: its run and verdict, or `never_started` with
+//! the reason it never got a run record.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -34,6 +37,7 @@ use super::default_branch::{resolve_default_branch, DefaultBranchRequest};
 
 pub const COOK_BATCH_SCHEMA: &str = "homeboy/agent-task-cook-batch/v1";
 pub const BATCH_PREPARE_SCHEMA: &str = "homeboy/agent-task-batch-prepare/v1";
+pub const COOK_BATCH_STATUS_SCHEMA: &str = "homeboy/agent-task-cook-batch-status/v1";
 const COOK_BATCH_WORKFLOW_ID: &str = "cook-batch";
 
 pub(super) fn fanout(args: AgentTaskFanoutArgs) -> CmdResult<Value> {
@@ -484,6 +488,168 @@ fn git(path: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+/// Whether an `agent-task status`/`diagnose` id names a workflow instance.
+pub(super) fn is_workflow_instance(id: &str) -> bool {
+    id.starts_with("wf-")
+}
+
+/// `agent-task status|diagnose <wf-id>`: read the instance from the daemon
+/// and roll its children up.
+pub(super) fn batch_rollup_from_daemon(instance: &str, operation: &str) -> CmdResult<Value> {
+    let client = homeboy::core::daemon::LocalControllerJobClient::connect()?;
+    batch_rollup(instance, operation, |id| client.workflow(id))
+}
+
+/// The per-child rollup of a cook-batch instance, built only from the
+/// workflow's durable item records and each child's lifecycle record. Every
+/// declared child is listed; a child with no run record is `never_started`
+/// with the reason.
+pub(super) fn batch_rollup(
+    instance: &str,
+    operation: &str,
+    read_workflow: impl FnOnce(&str) -> Result<Value>,
+) -> CmdResult<Value> {
+    let view = read_workflow(instance)?;
+    if view["workflow"] != COOK_BATCH_WORKFLOW_ID {
+        return Err(Error::validation_invalid_argument(
+            "run_id",
+            format!(
+                "`{instance}` is a `{}` workflow, not a cook-batch; read it with `homeboy runs show {instance}`",
+                view["workflow"].as_str().unwrap_or("unknown")
+            ),
+            Some(instance.to_string()),
+            None,
+        ));
+    }
+    let status = view["status"].as_str().unwrap_or("unknown");
+    let terminal = !matches!(status, "running" | "queued");
+    let batch_reason = view["reason"].as_str().unwrap_or(status);
+    let cook = &view["steps"]["cook"];
+    let children = cook["items"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+        .iter()
+        .map(|item| batch_child(instance, item, status, batch_reason))
+        .collect::<Vec<_>>();
+    let never_started = children
+        .iter()
+        .filter(|child| child["state"] == homeboy::core::workflow::advance::NEVER_STARTED)
+        .count();
+    let mut rollup = json!({
+        "schema": COOK_BATCH_STATUS_SCHEMA,
+        "operation": operation,
+        "instance": instance,
+        "status": status,
+        "reason": view["reason"],
+        "children_total": children.len(),
+        "never_started": never_started,
+        "children": children,
+        "workflow_command": format!("homeboy runs show {instance}"),
+    });
+    if cook["items"].as_array().map_or(true, Vec::is_empty) {
+        rollup["children_reason"] = json!(if terminal {
+            format!("the batch ended before it declared its children: {batch_reason}")
+        } else {
+            "the batch has not declared its children yet".to_string()
+        });
+    }
+    Ok((rollup, 0))
+}
+
+fn batch_child(instance: &str, item: &Value, status: &str, batch_reason: &str) -> Value {
+    let terminal = !matches!(status, "running" | "queued");
+    let index = item["index"].as_u64().unwrap_or_default();
+    let cook_id = item["run_id"].as_str();
+    let mut child = json!({
+        "index": index,
+        "child_id": cook_id
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("{instance}/cook/item-{index}")),
+        "task_url": item["item"]["issue_url"],
+        "issue_ref": item["item"]["issue_ref"],
+        "run_id": Value::Null,
+        "verdict": Value::Null,
+        "candidate": Value::Null,
+        "pr_url": Value::Null,
+    });
+    if let Some(run) = cook_id.and_then(child_run) {
+        for (key, value) in run {
+            child[key] = value;
+        }
+        return child;
+    }
+    let outcome = item["outcome"].as_str();
+    let error = item["error"]
+        .as_str()
+        .filter(|error| !error.trim().is_empty());
+    let settled = item["phase"] == "done";
+    if !terminal && !settled {
+        // Still waiting for a slot or for its Cook to write its first record.
+        child["state"] = json!(if cook_id.is_some() {
+            "admitting"
+        } else {
+            "pending"
+        });
+        child["next_action"] = json!(format!("homeboy runs watch {instance}"));
+        return child;
+    }
+    let reason = match (outcome, error) {
+        (Some(homeboy::core::workflow::advance::NEVER_STARTED), Some(error)) => error.to_string(),
+        (_, Some(error)) => format!("admission refused: {error}"),
+        (Some("cancelled"), None) | (None, None) if status == "cancelled" => {
+            format!("cancelled before admission: {batch_reason}")
+        }
+        (Some(outcome), None) if cook_id.is_some() => format!(
+            "admission refused: the child's Cook ended `{outcome}` before it wrote a run record"
+        ),
+        _ => format!("batch failed first: {batch_reason}"),
+    };
+    child["state"] = json!(homeboy::core::workflow::advance::NEVER_STARTED);
+    child["reason"] = json!(reason);
+    child["next_action"] = json!(match child["task_url"].as_str() {
+        Some(url) => format!("re-run this child: homeboy agent-task fanout cook-batch {url} ..."),
+        None => format!("homeboy runs show {instance}"),
+    });
+    child
+}
+
+/// The durable run behind a child's Cook id, or `None` when it never wrote
+/// one.
+fn child_run(cook_id: &str) -> Option<Vec<(&'static str, Value)>> {
+    use homeboy::agents::agent_tasks::lifecycle;
+    let store = lifecycle::AgentTaskLifecycleStore::from_environment().ok()?;
+    let target =
+        homeboy::agents::agent_task_lifecycle::resolve_cook_reader_target_in_store(&store, cook_id)
+            .ok()?;
+    let record = homeboy::agents::agent_task_lifecycle::exact_record_bounded_in_store(
+        &store,
+        &target.run_id,
+    )
+    .ok()?;
+    let run = homeboy::agents::agent_tasks::service::control_plane_run(&record.run_id).ok()?;
+    let verdict = crate::commands::cook_verdict::cook_verdict(&run);
+    let pr_url =
+        homeboy::agents::agent_task_service::CookDelivery::from_run_metadata(&record.metadata)
+            .as_ref()
+            .and_then(|delivery| delivery.pr_url().map(str::to_string));
+    let candidate = record
+        .candidate
+        .as_ref()
+        .map(|candidate| json!(candidate))
+        .or_else(|| verdict.candidate.as_ref().map(|state| json!(state)))
+        .unwrap_or(Value::Null);
+    Some(vec![
+        ("run_id", json!(record.run_id)),
+        ("state", json!(verdict.state)),
+        ("verdict", json!(verdict.state)),
+        ("reason", json!(verdict.reason)),
+        ("candidate", candidate),
+        ("pr_url", json!(pr_url)),
+        ("next_action", json!(verdict.next_action)),
+    ])
+}
+
 fn slugify(value: &str) -> String {
     let slug = value
         .chars()
@@ -767,6 +933,100 @@ mod tests {
         visible.snapshot_file_inputs().unwrap();
         homeboy::agents::agent_task_service::validate_reviewer_visible_gates(&visible.verify, None)
             .expect("a private gate is never published to reviewers");
+    }
+
+    /// #17708: a cancelled cook-batch lists every declared child. The child
+    /// that wrote a run record reports its verdict; the one admitted without a
+    /// record and the one never submitted are `never_started` with a reason.
+    #[test]
+    fn cook_batch_status_rolls_up_every_child_including_never_started() {
+        use homeboy::core::workflow::advance::{advance, Event, InstanceState, StepResult};
+        crate::test_support::with_isolated_home(|_| {
+            let instance = "wf-cook-batch-rollup";
+            let definition = WorkflowDefinition::from_value(json!({
+                "schema": WORKFLOW_SCHEMA,
+                "id": COOK_BATCH_WORKFLOW_ID,
+                "steps": [
+                    {"id": "prepare", "homeboy": ["agent-task", "batch-prepare"]},
+                    {"id": "cook", "needs": ["prepare"],
+                     "foreach": "{{steps.prepare.output/children}}", "max_parallel": 2,
+                     "cook": {"repo": "scratch", "task-url": "{{item.issue_url}}"}}
+                ]
+            }))
+            .unwrap();
+            let initial = InstanceState::new(&definition, instance, BTreeMap::new());
+            let (state, _) = advance(&definition, &initial, &Event::Start, 0);
+            let prepare_key = state.steps["prepare"].key.clone().unwrap();
+            let children = ISSUES
+                .iter()
+                .map(|url| json!({"issue_url": url}))
+                .collect::<Vec<_>>();
+            let (state, _) = advance(
+                &definition,
+                &state,
+                &Event::StepFinished(StepResult {
+                    key: prepare_key,
+                    error: None,
+                    status: homeboy::core::workflow::advance::FinishedStatus::Succeeded,
+                    outcome: None,
+                    output: Some(json!({ "children": children })),
+                    run_id: None,
+                }),
+                1,
+            );
+            let (state, _) = advance(
+                &definition,
+                &state,
+                &Event::Cancel {
+                    reason: Some("operator stop".to_string()),
+                },
+                2,
+            );
+            let first = state.steps["cook"].items[0].run_id.clone().unwrap();
+            let plan =
+                homeboy::agents::agent_tasks::scheduler::AgentTaskPlan::new("child-0", Vec::new());
+            homeboy::agents::agent_tasks::lifecycle::submit_plan(&plan, Some(&first))
+                .expect("persist first child run");
+            let mut view = homeboy::core::daemon::workflow_job::projection(&state, None);
+            view["workflow"] = json!(COOK_BATCH_WORKFLOW_ID);
+
+            let (rollup, code) = batch_rollup(instance, "status", |id| {
+                assert_eq!(id, instance);
+                Ok(view)
+            })
+            .expect("rollup");
+            assert_eq!(code, 0);
+            assert_eq!(rollup["schema"], COOK_BATCH_STATUS_SCHEMA);
+            assert_eq!(rollup["status"], "cancelled");
+            assert_eq!(rollup["children_total"], 3);
+            assert_eq!(rollup["never_started"], 2);
+            let children = rollup["children"].as_array().unwrap();
+            for (child, url) in children.iter().zip(ISSUES) {
+                assert_eq!(child["task_url"], url);
+                assert!(child["next_action"].is_string(), "{child}");
+            }
+            assert_eq!(children[0]["run_id"], first);
+            assert_ne!(children[0]["state"], "never_started");
+            assert!(children[0]["verdict"].is_string());
+            for child in &children[1..] {
+                assert_eq!(child["state"], "never_started", "{child}");
+                assert!(child["run_id"].is_null());
+                assert_eq!(
+                    child["reason"], "cancelled before admission: operator stop",
+                    "{child}"
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn cook_batch_status_refuses_other_workflows() {
+        let error = batch_rollup("wf-other-1", "status", |_| {
+            Ok(json!({"workflow": "other", "status": "running"}))
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("not a cook-batch"), "{error}");
     }
 
     #[test]
