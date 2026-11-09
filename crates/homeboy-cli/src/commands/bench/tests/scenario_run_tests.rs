@@ -240,6 +240,53 @@ fn selected_scenario_workload_failure_preserves_runner_error() {
 }
 
 #[test]
+fn runtime_failure_surfaces_envelope_error_chain_and_envelope_artifact() {
+    with_isolated_home(|home| {
+        write_failing_envelope_bench_extension(home);
+        let component_dir = tempfile::TempDir::new().expect("component dir");
+        write_registered_component(home, "studio", component_dir.path());
+
+        let (output, exit_code) = run(run_args(Some("studio"), Vec::new(), Vec::new()))
+            .expect("runtime failure should return structured bench output");
+
+        assert_eq!(exit_code, 1);
+        let BenchOutput::Single(result) = output else {
+            panic!("expected single output");
+        };
+        let failure = result.failure.expect("runner failure metadata");
+        let chain = failure
+            .error_chain
+            .expect("error chain from output envelope");
+        assert_eq!(
+            chain.message,
+            "Runtime creation failed before recipe workflow execution."
+        );
+        assert_eq!(chain.code.as_deref(), Some("recipe-runtime-create-failed"));
+        assert_eq!(chain.causes.len(), 1);
+        assert_eq!(chain.causes[0].name.as_deref(), Some("SyntaxError"));
+        assert_eq!(chain.causes[0].message, "Unexpected identifier 'source'");
+        assert!(chain.causes[0]
+            .stack_head
+            .as_deref()
+            .is_some_and(|stack| stack.contains("compileSourceTextModule")));
+
+        let run_id = result.persisted_run.expect("persisted run").run_id;
+        let artifacts = homeboy::core::observation::ObservationStore::open_initialized()
+            .expect("store")
+            .list_artifacts(&run_id)
+            .expect("artifacts");
+        let envelope = artifacts
+            .iter()
+            .find(|artifact| artifact.kind == "bench_output_envelope")
+            .expect("listed output envelope artifact");
+        let persisted: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&envelope.path).expect("read envelope"))
+                .expect("parse envelope");
+        assert_eq!(persisted["error"]["cause"]["name"], "SyntaxError");
+    });
+}
+
+#[test]
 fn run_selects_multiple_scenarios() {
     with_isolated_home(|home| {
         write_bench_extension(home);

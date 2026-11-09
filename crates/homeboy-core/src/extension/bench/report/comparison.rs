@@ -340,6 +340,7 @@ pub fn aggregate_comparison_with_axes(
                     scenario_id: failure.scenario_id.clone(),
                     exit_code: failure.exit_code,
                     stderr_tail: failure.stderr_tail.clone(),
+                    error_chain: failure.error_chain.clone(),
                     diagnostics: failure.diagnostics.clone(),
                 })
         })
@@ -502,14 +503,30 @@ fn format_failure_hint(failure: &BenchComparisonFailure) -> String {
         .unwrap_or_default();
 
     format!(
-        "Rig failed before producing parseable bench results:\n- rig: {}\n- component: {}{}\n- exit: {}{}\n- stderr: {}",
+        "Rig failed before producing parseable bench results:\n- rig: {}\n- component: {}{}\n- exit: {}{}\n- stderr: {}{}",
         failure.rig_id,
         component,
         scenario,
         failure.exit_code,
         format_diagnostic_hint_suffix(&failure.diagnostics),
-        failure.stderr_tail
+        failure.stderr_tail,
+        format_root_cause_suffix(failure)
     )
+}
+
+fn format_root_cause_suffix(failure: &BenchComparisonFailure) -> String {
+    let Some(chain) = failure.error_chain.as_ref() else {
+        return String::new();
+    };
+    let (name, message) = chain
+        .causes
+        .last()
+        .map(|cause| (cause.name.as_deref(), cause.message.as_str()))
+        .unwrap_or((chain.name.as_deref(), chain.message.as_str()));
+    match name {
+        Some(name) => format!("\n- root cause: {}: {}", name, message),
+        None => format!("\n- root cause: {}", message),
+    }
 }
 
 fn format_diagnostic_hint_suffix(diagnostics: &[BenchDiagnostic]) -> String {

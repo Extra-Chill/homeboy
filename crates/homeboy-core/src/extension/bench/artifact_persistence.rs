@@ -11,6 +11,9 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
+use crate::extension::bench::error_chain::{
+    is_output_envelope_path, OUTPUT_ENVELOPE_ARTIFACT_KIND,
+};
 use crate::extension::bench::{
     BenchArtifact, BenchDiagnostic, BenchDiagnosticSource, BenchResults, BenchRunWorkflowResult,
 };
@@ -49,6 +52,7 @@ pub fn record_bench_observation_artifacts(
         run_dir.step_file(run_dir::files::RESOURCE_SUMMARY),
     );
     record_memory_timeline_artifacts(observation, run_dir);
+    record_output_envelope_artifacts(observation, run_dir);
     record_failure_artifacts(observation, workflow, run_dir);
 
     let Some(results) = workflow.results.as_ref() else {
@@ -168,6 +172,33 @@ pub fn record_memory_timeline_artifacts(observation: &ActiveObservation, run_dir
         {
             observation.record_artifact_if_file("bench_memory_timeline", &path);
         }
+    }
+}
+
+/// Record the runner output envelopes declared through
+/// `$HOMEBOY_BENCH_OUTPUT_ENVELOPE_FILE` (single and per-instance) so
+/// `homeboy runs artifact get` can return them after tmp cleanup.
+fn record_output_envelope_artifacts(observation: &ActiveObservation, run_dir: &RunDir) {
+    let Ok(entries) = fs::read_dir(run_dir.path()) else {
+        return;
+    };
+    let mut paths = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file() && is_output_envelope_path(path))
+        .collect::<Vec<_>>();
+    paths.sort();
+    for path in paths {
+        let _ = observation.store().record_artifact_with_metadata(
+            observation.run_id(),
+            OUTPUT_ENVELOPE_ARTIFACT_KIND,
+            &path,
+            serde_json::json!({
+                "failure_diagnostic": true,
+                "failure_diagnostic_rank": 0,
+                "source": "bench_runner_output_envelope",
+            }),
+        );
     }
 }
 

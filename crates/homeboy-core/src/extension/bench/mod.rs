@@ -15,6 +15,9 @@
 //! - `$HOMEBOY_BENCH_LIST_ONLY` — when `1`, emit scenario inventory only.
 //! - `$HOMEBOY_BENCH_SCENARIOS` — comma-separated exact scenario ids selected by `--scenario`.
 //! - `$HOMEBOY_BENCH_RIG_PACKAGE_ROOT` — canonical owning package root for rig workloads.
+//! - `$HOMEBOY_BENCH_OUTPUT_ENVELOPE_FILE` — where a runner writes its runtime
+//!   output envelope; on failure its `error`/`cause` chain becomes the result's
+//!   bounded `error_chain` and the file is kept as a run artifact.
 //! - `$HOMEBOY_RUN_DIR` — the per-run directory (same as test/lint/build).
 //! - Passthrough args after `--` forwarded verbatim to the script.
 //!
@@ -27,6 +30,7 @@ pub(crate) mod artifact_validation;
 pub mod baseline;
 pub(crate) mod budget_findings;
 pub mod diagnostic;
+pub mod error_chain;
 pub use homeboy_extension_contract::bench_distribution as distribution;
 pub(crate) mod failure_diagnostic;
 pub(crate) mod gate;
@@ -55,6 +59,7 @@ pub use artifact_persistence::{
 pub use baseline::DEFAULT_REGRESSION_THRESHOLD_PERCENT;
 pub use diagnostic::{BenchDiagnostic, BenchDiagnosticSource};
 pub use distribution::BenchRunDistribution;
+pub use error_chain::{BenchErrorCause, BenchErrorChain};
 pub use gate::{evaluate_gates, normalized_gate_results, BenchGate, BenchGateOp, BenchGateResult};
 pub use homeboy_extension_contract::bench_artifact::BenchArtifact;
 pub use homeboy_extension_contract::bench_stage::{

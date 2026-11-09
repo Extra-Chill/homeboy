@@ -96,6 +96,7 @@ pub(in crate::commands::bench) fn finish_success(
             scenario_id: None,
             exit_code: 1,
             stderr_tail: "declared reviewer-facing artifacts were not durably promoted".to_string(),
+            error_chain: None,
             failure_classification: None,
             responsiveness: None,
             memory_sample: None,

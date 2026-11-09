@@ -171,6 +171,7 @@ fn default_baseline_failure_summary_marks_implicit_baseline() {
                 scenario_id: None,
                 exit_code: 7,
                 stderr_tail: "baseline setup failed".to_string(),
+                error_chain: None,
                 failure_classification: None,
                 responsiveness: None,
                 memory_sample: None,

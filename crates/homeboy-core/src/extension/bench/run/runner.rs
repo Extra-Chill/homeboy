@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::thread;
 
 use crate::extension::bench::aggregate_runs;
+use crate::extension::bench::error_chain::{output_envelope_path, OUTPUT_ENVELOPE_ENV};
 use crate::extension::bench::failure_diagnostic::bench_failure_stderr_tail;
 use crate::extension::bench::parsing::{self, BenchResults, BenchScenario};
 use crate::extension::bench::responsiveness::{memory_sample, BenchFailureMemorySample};
@@ -186,6 +187,10 @@ pub(crate) fn build_runner(
     .env(
         "HOMEBOY_BENCH_RESPONSIVENESS_MISSED_MS",
         &crate::extension::bench::responsiveness::missed_ping_window_ms().to_string(),
+    )
+    .env(
+        OUTPUT_ENVELOPE_ENV,
+        &output_envelope_path(run_dir, instance.map(|(id, _)| id)).to_string_lossy(),
     )
     .env("HOMEBOY_BENCH_PROGRESS", bench_progress_env_value())
     .env("HOMEBOY_BENCH_PROGRESS_STREAM", "stderr")

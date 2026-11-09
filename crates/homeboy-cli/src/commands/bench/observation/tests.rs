@@ -541,6 +541,7 @@ fn bench_observation_persists_nested_failure_diagnostics_before_cleanup() {
                 scenario_id: None,
                 exit_code: 1,
                 stderr_tail: "recipe-run failed with exit 1".to_string(),
+                error_chain: None,
                 failure_classification: None,
                 responsiveness: None,
                 memory_sample: None,
