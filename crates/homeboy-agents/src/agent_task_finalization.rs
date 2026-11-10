@@ -280,55 +280,10 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
         )
     })?;
     let base = backend.resolve_verified_base(&options.path, verified_base_sha)?;
-    let mut candidate = backend.candidate_state(&options.path, &base, &head)?;
+    let candidate = backend.candidate_state(&options.path, &base, &head)?;
     let binds_promoted_candidate =
         !options.manual_finalization || options.inherited_gate_evidence.is_some();
-    let mut lagging_promoted_parent = None;
-    if let AgentTaskPrCandidateState::BehindBase { behind, .. } = &candidate {
-        let behind = *behind;
-        // A manually verified candidate asserts an immutable commit identity, and
-        // merging would move HEAD out from under that proof. Those runs keep the
-        // pre-#13695 refusal and stay a human decision.
-        if options.verified_candidate_sha.is_none() {
-            // An uncommitted candidate sits on the parent its gates ran on, which
-            // the promotion fingerprint recorded. The base may have moved since,
-            // and a PR branch carries its own commits ahead of it. Converging the
-            // base here would merge into the dirty tree: git refuses whenever
-            // base and candidate touch the same files (#15017), and a clean
-            // fast-forward would move HEAD beneath the candidate, which the
-            // fingerprint check then rejects as drift (#15473). Commit the
-            // candidate on its recorded parent instead, so the PR carries only
-            // the candidate and the branch's existing commits. Being behind the
-            // base is a normal published state; mergeability is the forge's call.
-            let uncommitted = backend.changed_files(&options.path)?;
-            if !uncommitted.is_empty() {
-                lagging_promoted_parent = Some(behind);
-                candidate = AgentTaskPrCandidateState::Dirty {
-                    changed_files: uncommitted,
-                };
-            } else if let AgentTaskPrBaseConvergence::Converged =
-                backend.converge_base(&options.path, &base)?
-            {
-                candidate = backend.candidate_state(&options.path, &base, &head)?;
-            }
-        }
-    }
     let (mut changed_files, commit_required, push_required) = match candidate {
-        AgentTaskPrCandidateState::BehindBase {
-            behind,
-            base_ref,
-            base_sha,
-            ..
-        } => {
-            return Err(Error::validation_invalid_argument(
-                "base",
-                &format!(
-                    "HEAD is behind or diverged from resolved base `{base_ref}` at `{base_sha}` ({behind} base-only commit(s)) and could not be merged automatically; resolve the conflict in the worktree before finalizing"
-                ),
-                None,
-                None,
-            ));
-        }
         AgentTaskPrCandidateState::Dirty { changed_files } => (changed_files, true, true),
         AgentTaskPrCandidateState::Committed {
             changed_files,
@@ -401,17 +356,6 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
             publication_sha: None,
         },
     );
-    if let Some(behind) = lagging_promoted_parent {
-        options.review_dossier.evidence.push(
-            crate::agent_task_review_dossier::AgentTaskReviewEvidence {
-                summary: format!(
-                    "Candidate committed on its gate-verified promoted parent, {behind} commit(s) behind verified {} at {}; finalization did not advance the destination beneath it.",
-                    options.base, base.sha
-                ),
-                url: None,
-            },
-        );
-    }
     options.review_dossier.evidence.sort_by(|left, right| {
         left.summary
             .cmp(&right.summary)

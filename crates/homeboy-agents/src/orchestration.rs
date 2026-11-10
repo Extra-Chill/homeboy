@@ -10067,7 +10067,6 @@ mod tests {
             crate::agent_task_service::CookDeliveryBlockerCode::BaseConflict,
             "origin/main moved and src/lib.rs no longer applies cleanly",
             Some("homeboy agent-task recover cook-1"),
-            1,
         );
         let before = record.clone();
 
@@ -10328,7 +10327,6 @@ mod tests {
             crate::agent_task_service::CookDeliveryBlockerCode::BaseConflict,
             "HEAD is behind or diverged from resolved base `main`",
             Some(&format!("homeboy agent-task recover {AGENT_TASK_RUN}")),
-            0,
         );
         crate::agent_task_service::set_cook_delivery_artifact_for_test(
             &mut published.metadata,

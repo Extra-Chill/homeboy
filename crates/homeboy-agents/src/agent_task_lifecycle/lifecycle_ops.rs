@@ -7953,14 +7953,13 @@ pub fn record_manual_finalization_failure(
 }
 
 /// Record why delivery stopped at a step that leaves no receipt of its own,
-/// e.g. a candidate that cannot catch up to its moved base (#16049). The
+/// e.g. a refused publication. The
 /// blocker binds to the candidate it blocked: a later promotion of a different
 /// candidate, or a publication, supersedes it.
 pub(crate) fn record_cook_delivery_blocker_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     run_id: &str,
     blocker: crate::agent_task_service::CookDeliveryBlocker,
-    base_movements: u32,
 ) -> Result<AgentTaskRunRecord> {
     record_cook_delivery(lifecycle_store, run_id, |_, draft| {
         let mut delivery = crate::agent_task_service::CookDelivery::project(
@@ -7969,7 +7968,6 @@ pub(crate) fn record_cook_delivery_blocker_in_store(
         )?;
         delivery.state = crate::agent_task_service::CookDeliveryState::Blocked;
         delivery.blocker = Some(blocker.clone());
-        delivery.base_movements = base_movements;
         draft.recorded = Some(delivery);
         Some(CookDeliveryCommit::FollowDelivery)
     })

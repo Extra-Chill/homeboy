@@ -3822,7 +3822,6 @@ fn moving_base_blocker_is_the_reported_reason_without_a_finalization() {
                 homeboy_agents::agent_task_service::CookDeliveryBlockerCode::BaseConflict,
                 "origin/main moved and src/lib.rs no longer applies cleanly",
                 Some("homeboy agent-task recover run-cli-moving-base-blocker"),
-                1,
             );
         })
         .expect("persist moving-base blocker");

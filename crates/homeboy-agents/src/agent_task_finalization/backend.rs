@@ -1,8 +1,7 @@
 use super::{
-    AgentTaskPrBaseConvergence, AgentTaskPrCandidateState, AgentTaskPrDurableGateProof,
-    AgentTaskPrFinalizationBackend, AgentTaskPrFinalizationOptions,
-    AgentTaskPrQuarantineCapability, AgentTaskPrRef, AgentTaskPrResolvedBase,
-    AgentTaskPublicationBinding, AgentTaskPublicationGitTracking,
+    AgentTaskPrCandidateState, AgentTaskPrDurableGateProof, AgentTaskPrFinalizationBackend,
+    AgentTaskPrFinalizationOptions, AgentTaskPrQuarantineCapability, AgentTaskPrRef,
+    AgentTaskPrResolvedBase, AgentTaskPublicationBinding, AgentTaskPublicationGitTracking,
 };
 use crate::agent_task_promotion::AgentTaskPromotionCandidate;
 use homeboy_core::error::{Error, Result};
@@ -383,11 +382,12 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
                 &format!("{}...HEAD", base_ref),
             ],
         )?;
-        let Some((behind, ahead)) = counts
+        // The candidate is published on its gated base: a base that moved
+        // since is the forge's mergeability question, not a refusal (#17675).
+        let Some(ahead) = counts
             .split_whitespace()
-            .collect::<Vec<_>>()
-            .get(..2)
-            .and_then(|parts| Some((parts[0].parse::<u64>().ok()?, parts[1].parse::<u64>().ok()?)))
+            .nth(1)
+            .and_then(|ahead| ahead.parse::<u64>().ok())
         else {
             return Ok(AgentTaskPrCandidateState::Invalid {
                 diagnostic: format!(
@@ -396,13 +396,6 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
                 ),
             });
         };
-        if behind != 0 {
-            return Ok(AgentTaskPrCandidateState::BehindBase {
-                behind,
-                base_ref: base_ref.clone(),
-                base_sha: base.sha.clone(),
-            });
-        }
         let dirty = self.changed_files(path)?;
         if !dirty.is_empty() {
             return Ok(AgentTaskPrCandidateState::Dirty {
@@ -457,38 +450,6 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
         expected: Option<&homeboy_core::git::GitIdentityProof>,
     ) -> Result<homeboy_core::git::GitIdentityProof> {
         homeboy_core::git::validate_committed_publication_identity(path, expected)
-    }
-
-    fn converge_base(
-        &mut self,
-        path: &str,
-        base: &AgentTaskPrResolvedBase,
-    ) -> Result<AgentTaskPrBaseConvergence> {
-        let merge = std::process::Command::new("git")
-            .args(["merge", "--no-edit", &base.reference])
-            .current_dir(path)
-            .output()
-            .map_err(|error| Error::git_command_failed(error.to_string()))?;
-        if merge.status.success() {
-            return Ok(AgentTaskPrBaseConvergence::Converged);
-        }
-        // Leave the worktree exactly as the run left it. A conflicted merge that
-        // stays in the index would masquerade as candidate dirt on the next pass.
-        let paths = git_output(path, &["diff", "--name-only", "--diff-filter=U"])
-            .map(|output| {
-                output
-                    .lines()
-                    .map(str::trim)
-                    .filter(|line| !line.is_empty())
-                    .map(str::to_string)
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        let _ = std::process::Command::new("git")
-            .args(["merge", "--abort"])
-            .current_dir(path)
-            .output();
-        Ok(AgentTaskPrBaseConvergence::Conflicted { paths })
     }
 
     fn commit_all(&mut self, path: &str, message: &str) -> Result<()> {
@@ -2355,7 +2316,7 @@ mod remote_base_tests {
     }
 
     #[test]
-    fn captured_base_survives_remote_advance_while_newer_snapshot_rejects_stale_candidate() {
+    fn a_candidate_behind_its_base_publishes_only_its_own_changes() {
         let repo = repo();
         let remote = tempfile::tempdir().unwrap();
         git(remote.path(), &["init", "--bare"]);
@@ -2403,92 +2364,12 @@ mod remote_base_tests {
                 "feature",
             )
             .expect("newer snapshot compares candidate");
-        // The classifier reports the lineage gap rather than a verdict: an
-        // advanced base is a convergence question, and only a failed merge is
-        // terminal (#13695).
-        let AgentTaskPrCandidateState::BehindBase { behind, .. } = stale else {
-            panic!("newer snapshot reports the candidate as behind its base, got {stale:?}");
+        // A base that moved past the gated one is the forge's mergeability
+        // question: the candidate publishes as it stands, carrying only its
+        // own change and none of the base's (#17675).
+        let AgentTaskPrCandidateState::Committed { changed_files, .. } = stale else {
+            panic!("a candidate behind its base publishes as committed, got {stale:?}");
         };
-        assert!(behind > 0, "advanced base contributes base-only commits");
-    }
-
-    #[test]
-    fn finalization_converges_a_base_that_advanced_during_the_run() {
-        // `publication_repo` leaves the repo on `feature`, one commit ahead of
-        // `main`, which is a run that has already produced its candidate.
-        let (repo, _origin) = publication_repo();
-        let path = repo.path().to_str().unwrap();
-
-        // main then gains a commit in a file the candidate never touches, which
-        // is the shape of every stoppage in #13695.
-        git(repo.path(), &["checkout", "main"]);
-        std::fs::write(repo.path().join("base-only.txt"), "from main\n")
-            .expect("write base-only.txt");
-        git(repo.path(), &["add", "."]);
-        git(repo.path(), &["commit", "-m", "advance main"]);
-        let advanced = git_output(path, &["rev-parse", "HEAD"]).expect("advanced base sha");
-        git(repo.path(), &["checkout", "feature"]);
-
-        let resolved = base("main", &advanced);
-        let before = RealAgentTaskPrFinalizationBackend
-            .candidate_state(path, &resolved, "feature")
-            .expect("classifies the stale candidate");
-        assert!(
-            matches!(before, AgentTaskPrCandidateState::BehindBase { .. }),
-            "candidate starts behind its base, got {before:?}"
-        );
-
-        let convergence = RealAgentTaskPrFinalizationBackend
-            .converge_base(path, &resolved)
-            .expect("merges the advanced base");
-        assert_eq!(convergence, AgentTaskPrBaseConvergence::Converged);
-
-        let after = RealAgentTaskPrFinalizationBackend
-            .candidate_state(path, &resolved, "feature")
-            .expect("reclassifies after convergence");
-        assert!(
-            matches!(after, AgentTaskPrCandidateState::Committed { .. }),
-            "converged candidate is publishable, got {after:?}"
-        );
-        // The agent's work and the base commit both survive the merge.
-        assert!(repo.path().join("feature.txt").exists());
-        assert!(repo.path().join("base-only.txt").exists());
-    }
-
-    #[test]
-    fn finalization_hands_back_a_real_conflict_and_leaves_the_worktree_clean() {
-        let repo = repo();
-        let path = repo.path().to_str().unwrap();
-
-        // Both sides edit the same file, which is the case that genuinely needs
-        // a human and must keep refusing.
-        std::fs::write(repo.path().join("shared.txt"), "from main\n").expect("write shared.txt");
-        git(repo.path(), &["add", "."]);
-        git(repo.path(), &["commit", "-m", "advance main"]);
-        let advanced = git_output(path, &["rev-parse", "HEAD"]).expect("advanced base sha");
-
-        git(repo.path(), &["checkout", "-b", "feature", "HEAD~1"]);
-        std::fs::write(repo.path().join("shared.txt"), "from the agent\n")
-            .expect("write shared.txt");
-        git(repo.path(), &["add", "."]);
-        git(repo.path(), &["commit", "-m", "candidate work"]);
-
-        let resolved = base("main", &advanced);
-        let convergence = RealAgentTaskPrFinalizationBackend
-            .converge_base(path, &resolved)
-            .expect("attempts the merge");
-        let AgentTaskPrBaseConvergence::Conflicted { paths } = convergence else {
-            panic!("a same-file conflict is handed back, got {convergence:?}");
-        };
-        assert_eq!(paths, vec!["shared.txt".to_string()]);
-
-        // An aborted merge leaves no conflict markers and no staged state, so the
-        // next pass sees the candidate the run produced rather than merge debris.
-        let status = git_output(path, &["status", "--porcelain"]).expect("worktree status");
-        assert_eq!(status, "", "aborted merge leaves the worktree clean");
-        assert_eq!(
-            std::fs::read_to_string(repo.path().join("shared.txt")).expect("candidate content"),
-            "from the agent\n"
-        );
+        assert_eq!(changed_files, vec!["feature.txt".to_string()]);
     }
 }

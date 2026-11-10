@@ -43,7 +43,6 @@ pub fn record_cook_delivery_blocker_for_test(
     code: CookDeliveryBlockerCode,
     message: &str,
     next_action: Option<&str>,
-    base_movements: u32,
 ) {
     let artifacts = CookDeliveryArtifacts::from_run_metadata(metadata);
     let recorded = CookDelivery::from_run_metadata(metadata);
@@ -55,7 +54,6 @@ pub fn record_cook_delivery_blocker_for_test(
             destination: None,
             gates: Vec::new(),
             publication: None,
-            base_movements: 0,
             blocker: None,
         });
     delivery.state = CookDeliveryState::Blocked;
@@ -68,7 +66,6 @@ pub fn record_cook_delivery_blocker_for_test(
         evidence: RECORDED_BLOCKER_EVIDENCE.to_string(),
         output: None,
     });
-    delivery.base_movements = base_movements;
     metadata[COOK_DELIVERY_KEY] = CookDelivery::to_record(Some(&delivery), &artifacts);
 }
 

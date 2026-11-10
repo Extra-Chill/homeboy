@@ -654,14 +654,8 @@ impl AgentTaskLifecycleStore {
         &self,
         run_id: &str,
         blocker: crate::agent_task_service::CookDeliveryBlocker,
-        base_movements: u32,
     ) -> Result<AgentTaskRunRecord> {
-        super::lifecycle_ops::record_cook_delivery_blocker_in_store(
-            self,
-            run_id,
-            blocker,
-            base_movements,
-        )
+        super::lifecycle_ops::record_cook_delivery_blocker_in_store(self, run_id, blocker)
     }
 
     pub fn read_controller_plan(&self, run_id: &str) -> Result<AgentTaskPlan> {

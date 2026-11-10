@@ -103,10 +103,9 @@ struct MockBackend {
     quarantine_calls: u8,
     candidate_validation_calls: u8,
     component_ids: Vec<Option<String>>,
-    /// Classify and converge the candidate against the real worktree, so a
+    /// Classify the candidate against the real worktree, so a
     /// test observes exactly what finalization would do to the destination.
     real_git: bool,
-    converge_calls: u8,
 }
 
 impl MockBackend {
@@ -240,18 +239,6 @@ impl AgentTaskPrFinalizationBackend for MockBackend {
                 reference: verified_base_sha.to_string(),
                 sha: verified_base_sha.to_string(),
             }))
-    }
-
-    fn converge_base(
-        &mut self,
-        path: &str,
-        base: &AgentTaskPrResolvedBase,
-    ) -> Result<AgentTaskPrBaseConvergence> {
-        self.converge_calls += 1;
-        if self.real_git {
-            return RealAgentTaskPrFinalizationBackend.converge_base(path, base);
-        }
-        Ok(AgentTaskPrBaseConvergence::Conflicted { paths: Vec::new() })
     }
 
     fn publication_base_sha(&mut self, _path: &str, _base: &str) -> Result<Option<String>> {
@@ -3073,9 +3060,6 @@ fn uncommitted_candidate_on_lagging_parent_finalizes_without_advancing_destinati
     assert!(backend.committed);
     assert!(backend.pushed);
     assert!(backend.created);
-    assert!(backend.last_body.contains(&format!(
-        "Candidate committed on its gate-verified promoted parent, 1 commit(s) behind verified main at {advanced_base}"
-    )));
 }
 
 /// #15017: a Cook delivering into an existing PR branch holds its candidate
@@ -3120,7 +3104,6 @@ fn uncommitted_candidate_on_diverged_pr_branch_commits_without_merging_base() {
     let report = finalize_pr_with_backend(options, &mut backend)
         .expect("finalization commits the candidate on its verified parent");
 
-    assert_eq!(backend.converge_calls, 0, "no merge into the dirty tree");
     assert_eq!(git(&["rev-parse", "HEAD"]), pr_head);
     assert!(!repo.path().join(".git/MERGE_HEAD").exists());
     assert_eq!(
