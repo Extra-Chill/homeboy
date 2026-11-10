@@ -175,8 +175,12 @@ pub enum WorkflowRunOutcome {
     /// The Cook has not settled: its run, or the terminal continuation that
     /// promotes and finalizes it, is still in progress.
     Pending,
-    /// The Cook settled with this run state.
-    Settled(String),
+    /// The Cook settled with this run state, and the terminal reason its run
+    /// recorded when it did not succeed.
+    Settled {
+        outcome: String,
+        reason: Option<String>,
+    },
 }
 
 /// Resolves a Cook step's durable outcome from its run record. Registered by
@@ -738,6 +742,8 @@ fn step_result(
         }
     });
     let output_path = output_path(&request.instance, key).ok();
+    // A settled Cook's own terminal reason, which outranks its waiter's exit.
+    let mut cook_reason = None;
     let (outcome, output) = match kind {
         Some(crate::workflow::definition::StepKind::Cook(_)) => {
             let resolved = run_id.as_deref().and_then(|run_id| {
@@ -747,6 +753,12 @@ fn step_result(
                     .as_ref()
                     .map(|resolve| resolve(run_id))
             });
+            if let (Some(WorkflowRunOutcome::Settled { outcome, reason }), Some(cook_id)) =
+                (&resolved, run_id.as_deref())
+            {
+                cook_reason = (outcome != "succeeded")
+                    .then(|| cook_terminal_error(cook_id, outcome, reason.as_deref()));
+            }
             let outcome = cook_step_outcome(resolved, status)?;
             (
                 outcome,
@@ -761,6 +773,8 @@ fn step_result(
     };
     let error = if outcome.as_deref() == Some("succeeded") {
         None
+    } else if cook_reason.is_some() {
+        cook_reason
     } else if status == FinishedStatus::Failed {
         self::output_path(&request.instance, key)
             .ok()
@@ -812,11 +826,20 @@ fn cook_step_outcome(
 ) -> Option<Option<String>> {
     match resolved {
         Some(WorkflowRunOutcome::Pending) => None,
-        Some(WorkflowRunOutcome::Settled(outcome)) => Some(Some(outcome)),
+        Some(WorkflowRunOutcome::Settled { outcome, .. }) => Some(Some(outcome)),
         Some(WorkflowRunOutcome::Unknown) if status == FinishedStatus::Succeeded => {
             Some(Some("failed".to_string()))
         }
         Some(WorkflowRunOutcome::Unknown) | None => Some(None),
+    }
+}
+
+/// A settled, unsuccessful Cook's item error: the reason its run recorded, or
+/// its terminal state, naming the Cook id that `agent-task diagnose` reads.
+fn cook_terminal_error(cook_id: &str, outcome: &str, reason: Option<&str>) -> String {
+    match reason.map(str::trim).filter(|reason| !reason.is_empty()) {
+        Some(reason) => format!("Cook `{cook_id}` ended `{outcome}`: {reason}"),
+        None => format!("Cook `{cook_id}` ended `{outcome}`"),
     }
 }
 
