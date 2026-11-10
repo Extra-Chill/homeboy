@@ -453,7 +453,7 @@ fn run_instance(
             return Ok(cancelled(request, &state, job_id, store));
         }
         if state.status.is_terminal() {
-            return finish(request, &state, store);
+            return finish(request, &state, job_id, store);
         }
         super::workflow_notify::awaiting_approvals(request, &state);
         let now_ms = now_ms();
@@ -530,17 +530,37 @@ fn cancelled(
     projection(&next, Some(store))
 }
 
-fn finish(request: &WorkflowJobRequest, state: &InstanceState, store: &JobStore) -> Result<Value> {
+fn finish(
+    request: &WorkflowJobRequest,
+    state: &InstanceState,
+    job_id: Uuid,
+    store: &JobStore,
+) -> Result<Value> {
+    let mut state = state.clone();
     if state.status == InstanceStatus::Succeeded {
-        if let Some(child) = next_pass(request, state)? {
-            let envelope = serde_json::from_value(child.submission()?)
-                .map_err(|error| invalid(format!("invalid next pass: {error}")))?;
-            let admission =
-                super::with_daemon_job_admission(|| super::admit_controller_job(envelope, store))?;
-            super::start_controller_job(admission.job.id, store)?;
+        let admission = (|| -> Result<()> {
+            if let Some(child) = next_pass(request, &state)? {
+                let envelope = serde_json::from_value(child.submission()?)
+                    .map_err(|error| invalid(format!("invalid next pass: {error}")))?;
+                let admission = super::with_daemon_job_admission(|| {
+                    super::admit_controller_job(envelope, store)
+                })?;
+                super::start_controller_job(admission.job.id, store)?;
+            }
+            Ok(())
+        })();
+        if let Err(error) = admission {
+            state.status = InstanceStatus::Failed;
+            state.reason = Some(format!("next_pass not admitted: {error}"));
+            // Persist the failure before returning it: status views and replay
+            // must not retain the successful step-completion checkpoint.
+            store.record_controller_prepared(job_id, to_value(&state)?)?;
+            if let Err(error) = project_timing(&state) {
+                crate::log_status!("observe", "workflow timing persistence failed: {}", error);
+            }
         }
     }
-    let result = projection(state, Some(store));
+    let result = projection(&state, Some(store));
     match state.status {
         InstanceStatus::Succeeded => Ok(result),
         status => {
@@ -568,7 +588,9 @@ fn next_pass(
     if let Some(path) = &request.definition_source {
         let text = std::fs::read_to_string(path)
             .map_err(|e| invalid(format!("cannot read next-pass definition {path}: {e}")))?;
-        if WorkflowDefinition::parse(&text)?.digest() != request.definition_digest {
+        let definition = WorkflowDefinition::parse(&text)?;
+        definition.validate(&|_| true)?;
+        if definition.digest() != request.definition_digest {
             return Err(invalid(format!("definition changed between passes: {path}; restart the workflow to use the new definition")));
         }
     }

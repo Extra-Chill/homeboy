@@ -1184,6 +1184,44 @@ fn a_step_that_readmits_the_definition_chains_child_instances() {
 }
 
 #[test]
+fn next_pass_validation_failure_records_terminal_reason() {
+    with_isolated_home(|home| {
+        let store = JobStore::open_without_reconciliation(
+            home.path().join(crate::paths::OBSERVATION_DB_FILENAME),
+        )
+        .unwrap()
+        .with_daemon_lease("workflow-next-pass-validation-test".into());
+        let definition = json!({
+            "schema": "homeboy/workflow/v1", "id": "invalid-next-pass",
+            "next_pass": {"max_iterations": 2},
+            "steps": [{"id": "work", "exec": sh(
+                "printf '%s' '{\"schema\":\"homeboy/workflow/v1\",\"id\":\"invalid-next-pass\",\"steps\":[]}' > loop.json"
+            )}]
+        });
+        let source = home.path().join("loop.json");
+        std::fs::write(&source, serde_json::to_string(&definition).unwrap()).unwrap();
+        let mut original = request(definition, home.path());
+        original.definition_source = Some(source.display().to_string());
+        let job = admit(&store, &original);
+        crate::daemon::start_controller_job(job, &store).unwrap();
+        assert_eq!(wait_terminal(&store, job, 30).status, JobStatus::Failed);
+
+        let view = workflow_status(&store, &original.instance).unwrap();
+        assert_eq!(view["status"], "failed");
+        let invalid = WorkflowDefinition::parse(&std::fs::read_to_string(source).unwrap())
+            .unwrap()
+            .validate(&|_| true)
+            .unwrap_err();
+        let reason = format!("next_pass not admitted: {invalid}");
+        assert_eq!(view["reason"], reason);
+        assert_eq!(view["children"], json!([]));
+        let checkpoint = store.controller_job_state(job).unwrap().checkpoint.unwrap();
+        assert_eq!(checkpoint["status"], "failed");
+        assert_eq!(checkpoint["reason"], reason);
+    });
+}
+
+#[test]
 fn native_next_pass_forwards_inputs_and_stops_a_stable_chain() {
     with_isolated_home(|home| {
         let store = JobStore::open_without_reconciliation(
