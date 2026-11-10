@@ -1748,6 +1748,11 @@ fn load_recipe_for_attempt_from(
         let raw = fs::read_to_string(&path).map_err(|error| {
             Error::internal_io(error.to_string(), Some(path.display().to_string()))
         })?;
+        // Only the recipes that declare this run are decoded strictly. One
+        // unrelated recipe from an older schema must not block every lookup.
+        if !recipe_declares_attempt(&raw, run_id) {
+            continue;
+        }
         let mut recipe: AgentTaskCookRecipe = serde_json::from_str(&raw).map_err(|error| {
             Error::validation_invalid_argument(
                 "cook_recipe",
@@ -1758,13 +1763,7 @@ fn load_recipe_for_attempt_from(
         })?;
         normalize_sensitive_mapping_projection(&mut recipe)?;
         validate_recipe(&recipe)?;
-        if recipe
-            .attempts
-            .iter()
-            .any(|attempt| attempt.run_id == run_id)
-        {
-            matches.push(recipe);
-        }
+        matches.push(recipe);
     }
 
     match matches.len() {
@@ -1777,6 +1776,19 @@ fn load_recipe_for_attempt_from(
             None,
         )),
     }
+}
+
+/// Whether a raw recipe lists `run_id` among its attempts. Unparseable JSON
+/// declares nothing.
+fn recipe_declares_attempt(raw: &str, run_id: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(raw)
+        .ok()
+        .and_then(|value| value.get("attempts")?.as_array().cloned())
+        .is_some_and(|attempts| {
+            attempts
+                .iter()
+                .any(|attempt| attempt.get("run_id").and_then(|id| id.as_str()) == Some(run_id))
+        })
 }
 
 /// Prove that a lifecycle record is the exact attempt frozen by a Cook recipe.
@@ -4202,6 +4214,31 @@ mod tests {
                 .sensitive_mappings,
             loaded.sensitive_mappings
         );
+    }
+
+    /// An unrelated recipe written by an older schema must not stop the
+    /// attempt scan from finding the recipe that declares the run.
+    #[test]
+    fn attempt_scan_skips_unrelated_recipes_it_cannot_decode() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = CookRecipeStore::from_data_root(temp.path().to_path_buf());
+        let mut wanted = recipe();
+        wanted.cook_id = "wanted".into();
+        store.persist_recipe(&wanted).expect("wanted recipe");
+        let legacy = store.recipe_path("legacy");
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        std::fs::write(
+            &legacy,
+            r#"{"cook_id":"legacy","attempts":[{"run_id":"other","lineage":{"kind":"review_form"}}]}"#,
+        )
+        .unwrap();
+
+        let run_id = &wanted.attempts[0].run_id;
+        let found = load_recipe_for_attempt_from(&store.recipe_root(), run_id)
+            .expect("scan")
+            .expect("found");
+        assert_eq!(found.cook_id, "wanted");
+        assert!(load_recipe_for_attempt_from(&store.recipe_root(), "other").is_err());
     }
 
     #[test]
