@@ -163,6 +163,32 @@ pub struct AgentTaskRunRecord {
     /// The latest Homeboy-harvested candidate commit of this run (#16303).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub candidate: Option<crate::agent_task::AgentTaskCandidate>,
+    /// The stored record this copy was read from, so a commit that loses its
+    /// revision race can rebase the caller's own changes onto the fresh
+    /// record instead of failing (#17777). Never serialized.
+    #[serde(skip)]
+    pub(crate) read_base: RecordReadBase,
+}
+
+/// The as-read snapshot behind [`AgentTaskRunRecord::read_base`]. It is
+/// bookkeeping, not record content, so it never affects equality.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct RecordReadBase(pub(crate) Option<std::sync::Arc<AgentTaskRunRecord>>);
+
+impl PartialEq for RecordReadBase {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+
+impl AgentTaskRunRecord {
+    /// This record, carrying itself as the base later commits rebase from.
+    pub(crate) fn with_read_base(mut self) -> Self {
+        let mut base = self.clone();
+        base.read_base = RecordReadBase::default();
+        self.read_base = RecordReadBase(Some(std::sync::Arc::new(base)));
+        self
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -539,6 +565,7 @@ impl AgentTaskRunRecord {
             workspace_claim: None,
             metadata: Value::Null,
             candidate: None,
+            read_base: RecordReadBase::default(),
         }
     }
 

@@ -54,6 +54,7 @@ mod lifecycle_transport_proxy;
 mod logs_projection;
 mod operation_claims;
 mod private_attachment;
+mod record_rebase;
 mod records;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod run_processes;

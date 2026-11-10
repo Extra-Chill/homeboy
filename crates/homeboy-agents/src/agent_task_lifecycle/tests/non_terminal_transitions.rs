@@ -170,46 +170,46 @@ fn planned_proxy(store: &AgentTaskLifecycleStore) {
     .expect("controller proxy planned");
 }
 
-/// A snapshot committed after another writer moved the run is refused and
-/// writes nothing; the copy read at the current revision commits.
+/// A copy committed after another writer moved the run is rebased onto it
+/// when their changes do not overlap, so a long-running writer (Lab staging,
+/// recovery, gate finalization) does not lose its run to a concurrent
+/// heartbeat (#17777). Changes to the same field still conflict and write
+/// nothing.
 #[test]
-fn a_stale_annotation_is_refused_and_writes_nothing() {
+fn a_stale_annotation_rebases_unless_it_overlaps_the_concurrent_write() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
     let store = AgentTaskLifecycleStore::new(context.path_roots());
     planned_proxy(&store);
     let mut stale = store.read_record(RUN_ID).expect("first reader");
+    let mut overlapping = stale.clone();
     store
         .mutate_record(RUN_ID, |record| {
             record.metadata["concurrent_progress"] = serde_json::json!("kept");
             true
         })
         .expect("concurrent writer commits");
-    let concurrent = store
-        .read_record(RUN_ID)
-        .expect("after the concurrent write");
 
     stale.metadata["stale_annotation"] = serde_json::json!(true);
-    let error = store
+    store
         .commit_record(&mut stale)
-        .expect_err("a stale annotation conflicts");
+        .expect("a non-overlapping stale annotation rebases");
+    let stored = store.read_record(RUN_ID).expect("stored");
+    assert_eq!(stored.metadata["concurrent_progress"], "kept");
+    assert_eq!(stored.metadata["stale_annotation"], true);
+    assert_eq!(stale, stored, "the caller's copy is the committed record");
+
+    overlapping.metadata["concurrent_progress"] = serde_json::json!("clobbered");
+    let error = store
+        .commit_record(&mut overlapping)
+        .expect_err("an overlapping stale annotation conflicts");
     assert_eq!(
         error.details["reason_code"],
         serde_json::json!(AGENT_TASK_TRANSITION_CONFLICT)
     );
-    let stored = store.read_record(RUN_ID).expect("stored");
-    assert_eq!(stored, concurrent, "a refused commit writes nothing");
-
-    let mut fresh = stored;
-    fresh.metadata["fresh_annotation"] = serde_json::json!(true);
-    store
-        .commit_record(&mut fresh)
-        .expect("a current annotation commits");
-    let stored = store.read_record(RUN_ID).expect("stored");
-    assert_eq!(stored.metadata["concurrent_progress"], "kept");
-    assert_eq!(stored.metadata["fresh_annotation"], true);
     assert_eq!(
-        stored.revision, fresh.revision,
-        "the caller's copy is synced"
+        store.read_record(RUN_ID).expect("stored"),
+        stored,
+        "a refused commit writes nothing"
     );
 }
 

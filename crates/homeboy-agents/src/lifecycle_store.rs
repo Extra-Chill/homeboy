@@ -1003,7 +1003,7 @@ impl AgentTaskLifecycleStore {
                 None,
             ));
         }
-        snapshot_from_run(&resolve_run_payloads(&store, run)?)
+        Ok(snapshot_from_run(&resolve_run_payloads(&store, run)?)?.with_read_base())
     }
 
     /// List every durable agent-task record from this store's own observation
@@ -1401,7 +1401,9 @@ impl AgentTaskLifecycleStore {
         let committed =
             self.with_store_lock(|| self.commit_prepared_locked(&prepared, kind, emit_events))?;
         self.project_terminal_record_after_unlock(&committed.run_id)?;
-        record.revision = committed.revision;
+        // The committed record may carry another writer's rebased changes;
+        // the caller keeps using it as the base of its next commit.
+        *record = committed.with_read_base();
         Ok(())
     }
 
@@ -1452,9 +1454,38 @@ impl AgentTaskLifecycleStore {
                 prepared: Box::new(prepared.clone()),
             },
         };
-        self.transition_locked_with_events(
+        let conflict = match self.transition_locked_with_events(
             &prepared.run_id,
             prepared.revision,
+            transition.clone(),
+            emit_events,
+        )? {
+            Ok(committed) => return Ok(committed),
+            Err(conflict) => conflict,
+        };
+        // A writer committed since `prepared` was read. Under this lock the
+        // stored record is current, so a live run takes the caller's changes
+        // rebased onto it; the typed transition is validated against it as
+        // usual. Overlapping changes or a terminal run keep the conflict.
+        let stored = self.read_record(&prepared.run_id)?;
+        let rebased = (!stored.state().is_terminal())
+            .then(|| super::record_rebase::rebase_onto(prepared, &stored))
+            .flatten();
+        let Some(rebased) = rebased else {
+            return Err(AgentTaskTransitionError::Conflict(conflict).into());
+        };
+        let transition = match kind {
+            Some(kind) => AgentTaskTransition::Advance {
+                kind,
+                prepared: Box::new(rebased.clone()),
+            },
+            None => AgentTaskTransition::Annotate {
+                prepared: Box::new(rebased.clone()),
+            },
+        };
+        self.transition_locked_with_events(
+            &rebased.run_id,
+            stored.revision,
             transition,
             emit_events,
         )?
