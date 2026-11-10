@@ -260,10 +260,30 @@ fn validate_adoption_parent_lineage(
         ));
     }
     if let Some(historical) = historical_task_base.filter(|historical| *historical != candidate) {
-        if !is_ancestor(cwd, historical, parent)? {
+        // Either direction is linear provenance. In particular, the recorded
+        // task base may have advanced after this candidate was created (its
+        // parent is behind task base). Adoption's normal gates re-verify the
+        // candidate tree; freshness is not an ancestry admission requirement.
+        if !is_ancestor(cwd, historical, parent)? && !is_ancestor(cwd, parent, historical)? {
+            let merge_base = Command::new("git")
+                .args(["merge-base", historical, parent])
+                .current_dir(cwd)
+                .output()
+                .map_err(|error| Error::git_command_failed(error.to_string()))?;
+            let relationship = match merge_base.status.code() {
+                Some(0) => "diverged",
+                Some(1) => "unrelated",
+                _ => {
+                    return Err(Error::git_command_failed(
+                        String::from_utf8_lossy(&merge_base.stderr).to_string(),
+                    ));
+                }
+            };
             return Err(Error::validation_invalid_argument(
                 "task_base_sha",
-                "recorded task base is unrelated to the adopted candidate parent; refusing ambiguous adoption provenance",
+                format!(
+                    "adopted candidate parent and recorded task base are {relationship}; refusing ambiguous adoption provenance; rebase the candidate onto the task base: git rebase --onto {historical} {parent} {candidate}"
+                ),
                 Some(historical.to_string()),
                 None,
             ));
