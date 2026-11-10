@@ -148,7 +148,10 @@ mod tests {
                 true,
             ),
             (
-                refusal(ErrorCode::RuntimePromotionWaitTimeout, serde_json::json!({})),
+                refusal(
+                    ErrorCode::RuntimePromotionWaitTimeout,
+                    serde_json::json!({}),
+                ),
                 true,
             ),
             (

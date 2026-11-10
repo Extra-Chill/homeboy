@@ -3346,41 +3346,41 @@ impl crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher
                 || false,
                 |_, _| {},
                 || {
-                let outcome = lab_routing::dispatch_lab_offload(
-                    LabRoutingRequest {
-                        placement_decision: placement_decision.clone(),
-                        command: lab_offload_command(&provider_cli.command)?,
-                        normalized_args: &provider_args,
-                        explicit_runner: Some(&self.runner_id),
-                        placement: homeboy::cli_surface::Placement::Lab,
-                        allow_local_fallback: self.allow_local_fallback,
-                        allow_dirty_lab_workspace: self.allow_dirty_lab_workspace,
-                        skip_deps_hydration: self.skip_deps_hydration,
-                        delete_workspace_on_failure: false,
-                        capture_patch: false,
-                        mutation_flag: None,
-                        timeout: None,
-                        placement_outcome_target: Some(
-                            ExecutionPlacementOutcomeTarget::AgentTaskLifecycle { run_id },
-                        ),
-                        detach_after_handoff: self.detach_after_handoff,
-                        output_file_requested: false,
-                        read_only_polling: false,
-                        require_controller_git_bundle: false,
-                        local_output_file: None,
-                        durable_agent_task_plan: Some(&durable_agent_task_plan),
-                        durable_run_id: None,
-                        // A retry's baseline is controller-owned capability, not plan
-                        // data. Stage that exact clean checkout; never substitute the
-                        // controller's original workspace during nested Lab dispatch.
-                        source_path: source_path.as_deref(),
-                        expected_source_snapshot_identity: None,
-                        verified_cook_baseline: verified_cook_baseline.as_ref(),
-                        job_overrides: self.job_overrides.clone(),
-                    },
-                    Some(&self.runner_id),
-                    Box::new(NoopLabDispatchObserver),
-                );
+                    let outcome = lab_routing::dispatch_lab_offload(
+                        LabRoutingRequest {
+                            placement_decision: placement_decision.clone(),
+                            command: lab_offload_command(&provider_cli.command)?,
+                            normalized_args: &provider_args,
+                            explicit_runner: Some(&self.runner_id),
+                            placement: homeboy::cli_surface::Placement::Lab,
+                            allow_local_fallback: self.allow_local_fallback,
+                            allow_dirty_lab_workspace: self.allow_dirty_lab_workspace,
+                            skip_deps_hydration: self.skip_deps_hydration,
+                            delete_workspace_on_failure: false,
+                            capture_patch: false,
+                            mutation_flag: None,
+                            timeout: None,
+                            placement_outcome_target: Some(
+                                ExecutionPlacementOutcomeTarget::AgentTaskLifecycle { run_id },
+                            ),
+                            detach_after_handoff: self.detach_after_handoff,
+                            output_file_requested: false,
+                            read_only_polling: false,
+                            require_controller_git_bundle: false,
+                            local_output_file: None,
+                            durable_agent_task_plan: Some(&durable_agent_task_plan),
+                            durable_run_id: None,
+                            // A retry's baseline is controller-owned capability, not plan
+                            // data. Stage that exact clean checkout; never substitute the
+                            // controller's original workspace during nested Lab dispatch.
+                            source_path: source_path.as_deref(),
+                            expected_source_snapshot_identity: None,
+                            verified_cook_baseline: verified_cook_baseline.as_ref(),
+                            job_overrides: self.job_overrides.clone(),
+                        },
+                        Some(&self.runner_id),
+                        Box::new(NoopLabDispatchObserver),
+                    );
                     match outcome {
                         Err(error) if agent_task_lifecycle::preacceptance_retry_safe(run_id)? => {
                             Err(error)
