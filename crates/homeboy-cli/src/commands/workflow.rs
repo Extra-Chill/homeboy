@@ -240,9 +240,15 @@ fn admit_with_resume(
     source: &str,
     resumed_from: Option<&str>,
 ) -> CmdResult<Value> {
-    let inputs = definition.resolve_inputs(provided)?;
-    let instance = definition.instance_id_with_resume(&inputs, instance_name, resumed_from);
+    let mut inputs = definition.resolve_inputs(provided)?;
     let client = LocalControllerJobClient::connect_current_build()?;
+    if let Some(source) = resumed_from {
+        let view = client.workflow(source)?;
+        if let Ok(source_inputs) = serde_json::from_value(view["inputs"].clone()) {
+            definition.carry_resumed_pass(&mut inputs, &source_inputs);
+        }
+    }
+    let instance = definition.instance_id_with_resume(&inputs, instance_name, resumed_from);
     // The same definition and inputs name the same instance: report it.
     let disposition = match client.workflow(&instance) {
         Ok(_) => "reused",

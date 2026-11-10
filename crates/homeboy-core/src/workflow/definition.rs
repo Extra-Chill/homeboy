@@ -747,6 +747,23 @@ impl WorkflowDefinition {
         Ok(resolved)
     }
 
+    /// A resumed next-pass instance continues the source's pass: carry its
+    /// `iteration` and `previous` so iteration-dependent step keys still match.
+    pub fn carry_resumed_pass(
+        &self,
+        inputs: &mut BTreeMap<String, Value>,
+        source: &BTreeMap<String, Value>,
+    ) {
+        if self.next_pass.is_none() {
+            return;
+        }
+        for name in ["iteration", "previous"] {
+            if let Some(value) = source.get(name) {
+                inputs.insert(name.into(), value.clone());
+            }
+        }
+    }
+
     /// `wf-<id>-<sha256(definition digest, inputs, instance name)[..12]>`.
     /// The same definition and inputs name the same instance.
     pub fn instance_id(&self, inputs: &BTreeMap<String, Value>, name: Option<&str>) -> String {
