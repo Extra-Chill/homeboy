@@ -939,6 +939,26 @@ impl JobStore {
         Ok(store)
     }
 
+    /// A read-only, in-memory snapshot of the durable jobs, for inspection.
+    ///
+    /// Status and diagnosis read the ledger; they never persist it. Opening it
+    /// through [`Self::open_without_reconciliation`] committed a write
+    /// transaction, so every status read queued for the writer slot, failed
+    /// with `database is locked` under contention, and self-deadlocked when
+    /// read inside an action admission's own write transaction (#17381).
+    pub fn read_only_snapshot(path: impl Into<PathBuf>) -> Result<Self> {
+        let store = Self::default();
+        if let Some(durable) = sql_store::read_durable_store_readonly(&path.into())? {
+            let mut inner = store.inner.lock().expect("job store mutex poisoned");
+            inner.jobs = durable
+                .jobs
+                .into_iter()
+                .map(|stored| (stored.job.id, stored))
+                .collect();
+        }
+        Ok(store)
+    }
+
     /// Open durable jobs without treating active records as an implicit daemon
     /// restart. Daemon lifecycle recovery must select ownership explicitly.
     pub fn open_without_reconciliation(path: impl Into<PathBuf>) -> Result<Self> {
