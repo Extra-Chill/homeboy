@@ -27891,3 +27891,25 @@ fn cook_without_repro_records_repro_none_in_review_evidence() {
         assert!(body.contains("do not prove the issue"), "{body}");
     });
 }
+
+/// #17726: the machine-local path rejection recommends a gate env form every
+/// admission path accepts, and that recommended form is itself reviewer-safe.
+#[test]
+fn reviewer_gate_rejection_recommends_gate_env_reference() {
+    let error = validate_reviewer_visible_gates(
+        &["bash /tmp/import-loop/accept-gate.sh".to_string()],
+        Some("cook-gate-env"),
+    )
+    .expect_err("machine-local path is not reviewer-safe");
+    assert!(
+        error.message.contains("--gate-env NAME=<path>") && error.message.contains("\"$NAME\""),
+        "{error:?}"
+    );
+    validate_reviewer_visible_gates(&[r#"bash "$ACCEPT_GATE""#.to_string()], None)
+        .expect("gate env reference is reviewer-safe");
+    validate_reviewer_visible_gates(
+        &[r#"ACCEPT_GATE=/tmp/import-loop/accept-gate.sh && bash "$ACCEPT_GATE""#.to_string()],
+        None,
+    )
+    .expect("inline assignment is reviewer-safe");
+}

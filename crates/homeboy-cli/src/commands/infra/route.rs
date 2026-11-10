@@ -1527,7 +1527,7 @@ fn require_admission_value<'a>(
 fn unsafe_inline_admission_flag(flag: &str) -> bool {
     matches!(
         flag.split('=').next().unwrap_or(flag),
-        "--runner-env" | "--lab-env-json" | "--gate-env" | "--resolved-provider-policy" | "--tasks"
+        "--runner-env" | "--lab-env-json" | "--resolved-provider-policy" | "--tasks"
     )
 }
 
@@ -1574,6 +1574,7 @@ fn admission_text_value_flag(flag: &str) -> bool {
             | "--gate-package-artifact"
             | "--gate-extension-input"
             | "--gate-input"
+            | "--gate-env"
             | "--provider-evidence"
             | "--provider-argv"
     )
