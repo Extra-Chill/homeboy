@@ -2168,16 +2168,59 @@ mod tests {
         }
     }
 
-    /// #17286: a configured but unverified, disconnected, or stale Lab must
-    /// never turn `--placement auto` Cook into controller execution. Preview
-    /// and real admission reach the same typed refusal through one resolver.
+    /// #17705: a busy, momentarily ineligible, or unobserved Lab queues an
+    /// auto Cook with Lab placement in both preview and dispatch; neither
+    /// resolves to controller-local execution.
     #[test]
-    fn auto_cook_fails_closed_with_lab_unavailable_in_preview_and_admission() {
+    fn auto_cook_queues_with_lab_placement_while_lab_is_busy_or_flapping() {
+        use crate::commands::infra::route::{
+            cook_admission_decision, cook_requires_unmaterialized_admission_for_placement,
+            CookAdmissionDecision,
+        };
         for (state, reasons) in [
+            ("capacity_blocked", &["pressure"][..]),
+            ("capacity_blocked", &["capacity_reached"][..]),
             (
                 "connected_ineligible",
                 &["daemon_freshness_unavailable", "daemon_unverified"][..],
             ),
+            ("readiness_unobserved", &["status_probe_timeout"][..]),
+        ] {
+            let decisions = [true, false].map(|preview| {
+                crate::cli_runtime::resolve_preflight_for_test(
+                    &cook_cli("auto", preview),
+                    Some(configured_lab(state, reasons)),
+                )
+                .unwrap_or_else(|error| panic!("{state} must queue: {error:?}"))
+            });
+            for result in &decisions {
+                assert!(result.queued_for_lab_admission(), "{state}");
+                assert_eq!(
+                    result.placement.selected,
+                    homeboy_lab_contract::EffectiveExecutionPlacement::Lab,
+                    "{state}"
+                );
+                assert!(cook_requires_unmaterialized_admission_for_placement(
+                    crate::cli_surface::Placement::Auto,
+                    result,
+                ));
+                let CookAdmissionDecision::Indeterminate { reason, .. } =
+                    cook_admission_decision(result)
+                else {
+                    panic!("{state} must report queued Lab admission");
+                };
+                assert!(reason.starts_with("queued for Lab admission"), "{reason}");
+            }
+            assert_eq!(decisions[0].placement, decisions[1].placement);
+        }
+    }
+
+    /// #17286: a configured but disconnected or stale Lab must never turn
+    /// `--placement auto` Cook into controller execution. Preview and real
+    /// admission reach the same typed refusal through one resolver.
+    #[test]
+    fn auto_cook_fails_closed_with_lab_unavailable_in_preview_and_admission() {
+        for (state, reasons) in [
             ("disconnected", &["runner_disconnected"][..]),
             ("stale", &["stale_daemon"][..]),
         ] {

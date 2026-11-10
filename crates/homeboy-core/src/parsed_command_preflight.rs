@@ -290,12 +290,13 @@ pub fn resolve_parsed_command_preflight(
         && !matches!(input.lab_route, LabRouteIntent::ReadPolling);
     // Split-placement Cook keeps its durable admission on the controller but
     // requires an admitted Lab runner for the provider attempt whenever a Lab
-    // runner is configured. Auto never substitutes the controller for an
-    // unavailable, unverified, or stale Lab: preview and admission both fail
+    // runner is configured. Auto never substitutes the controller for a
+    // disconnected or stale Lab: preview and admission both fail
     // with `lab_unavailable` here. Explicit `local` / `lab-or-local` remain the
     // operator-approved local routes, and a host with no configured runner
-    // still resolves Auto locally. A capacity-blocked Lab is busy, not
-    // unavailable, and keeps its queued admission semantics.
+    // still resolves Auto locally. A busy or unobserved Lab is not a license
+    // to probe providers on the controller either: it queues for Lab admission
+    // (see `auto_split_awaits_lab_admission`).
     let auto_split_placement_requires_lab = matches!(
         (
             &input.controller_execution,
@@ -308,9 +309,20 @@ pub fn resolve_parsed_command_preflight(
             &LabRouteIntent::Supported { automatic: true }
         )
     ) && matches!(input.runner, RunnerIntent::Default)
-        && policy.lab_readiness.as_ref().is_some_and(|readiness| {
-            !matches!(readiness.state.as_str(), "absent" | "capacity_blocked")
-        });
+        && policy
+            .lab_readiness
+            .as_ref()
+            .is_some_and(|readiness| readiness.state != "absent");
+    // A busy, ineligible-for-now, or unobserved Lab is a wait, not a reason to
+    // run on the controller or to refuse: the Cook keeps Lab placement and is
+    // queued in pending resource admission until a runner admits it (#17705).
+    // Hard substrate failures (disconnected, stale) still refuse below.
+    let auto_split_awaits_lab_admission = auto_split_placement_requires_lab
+        && !selected_runner_admitted
+        && policy
+            .lab_readiness
+            .as_ref()
+            .is_some_and(lab_readiness_awaits_admission);
     let required = if matches!(input.placement, PlacementIntent::Lab)
         || matches!(
             input.runner,
@@ -333,7 +345,7 @@ pub fn resolve_parsed_command_preflight(
         )
         && matches!(input.runner, RunnerIntent::Default)
         && !auto_split_placement_requires_lab;
-    if preferred_runner_inadmissible && !auto_route_fallback {
+    if preferred_runner_inadmissible && !auto_route_fallback && !auto_split_awaits_lab_admission {
         if auto_split_placement_requires_lab {
             return Err(lab_unavailable_error(
                 policy
@@ -385,12 +397,13 @@ pub fn resolve_parsed_command_preflight(
         } else {
             policy.selected_runner_id.clone()
         };
-    let selected =
-        if matches!(input.placement, PlacementIntent::Local) || selected_runner_id.is_none() {
-            EffectiveExecutionPlacement::Local
-        } else {
-            EffectiveExecutionPlacement::Lab
-        };
+    let selected = if auto_split_awaits_lab_admission {
+        EffectiveExecutionPlacement::Lab
+    } else if matches!(input.placement, PlacementIntent::Local) || selected_runner_id.is_none() {
+        EffectiveExecutionPlacement::Local
+    } else {
+        EffectiveExecutionPlacement::Lab
+    };
     // Controller admission covers controller-owned work only. Once the
     // resolved route is Lab and its selected runner passed readiness checks,
     // controller load cannot block the provider attempt. Local and fallback
@@ -449,7 +462,10 @@ pub fn resolve_parsed_command_preflight(
         }
         DeferredWorkloadPolicy::Eligible => DeferredWorkloadDecision::NotApplicable,
     };
-    if auto_split_placement_requires_lab && selected_runner_id.is_none() {
+    if auto_split_placement_requires_lab
+        && selected_runner_id.is_none()
+        && !auto_split_awaits_lab_admission
+    {
         return Err(lab_unavailable_error(
             policy
                 .lab_readiness
@@ -582,6 +598,18 @@ fn lab_readiness_fallback_reason(readiness: &LabReadinessSnapshot) -> Option<Str
         }
     };
     Some(described.to_string())
+}
+
+/// Lab readiness states that queue an auto split-placement Cook for Lab
+/// admission instead of refusing it: the runner is connected but busy
+/// (`capacity_blocked`), momentarily ineligible (`connected_ineligible`), or
+/// its readiness is not observed yet. Each flaps with Lab load, so they share
+/// one queued path.
+fn lab_readiness_awaits_admission(readiness: &LabReadinessSnapshot) -> bool {
+    matches!(
+        readiness.state.as_str(),
+        "capacity_blocked" | "connected_ineligible" | READINESS_UNOBSERVED
+    )
 }
 
 /// Readiness state of a connected runner whose readiness evidence is missing,
@@ -789,6 +817,21 @@ impl ParsedCommandPreflightResult {
             placement,
             selected_runner_id,
         }
+    }
+
+    /// Whether this auto split-placement Cook resolved to Lab placement while
+    /// its Lab is busy or unobserved, so it waits in pending resource admission
+    /// rather than running on the controller. Preview and dispatch read this
+    /// same resolved decision.
+    pub fn queued_for_lab_admission(&self) -> bool {
+        self.input.controller_execution == ControllerExecution::SplitPlacementCoordinator
+            && self.placement.requested == Placement::Auto
+            && self.placement.required == ExecutionPlacementRequirement::Lab
+            && self.placement.selected == EffectiveExecutionPlacement::Lab
+            && self
+                .lab_readiness
+                .as_ref()
+                .is_some_and(lab_readiness_awaits_admission)
     }
 }
 
@@ -1319,7 +1362,7 @@ mod tests {
     }
 
     #[test]
-    fn split_cook_auto_reports_lab_blocker_without_considering_local() {
+    fn split_cook_auto_queues_ineligible_lab_without_considering_local() {
         // Cook's split route is Lab-required under Auto, so local admission is
         // never evaluated as an implicit placement transition.
         let mut input = split_cook_input();
@@ -1327,7 +1370,7 @@ mod tests {
             label: "agent-task cook local resource reserve".into(),
             engages_at: ResourceHeat::Warm,
         };
-        let mut policy = auto_route_policy(
+        let policy = auto_route_policy(
             Some("homeboy-lab"),
             "connected_ineligible",
             Vec::new(),
@@ -1337,18 +1380,14 @@ mod tests {
                 pressure: ResourceHeat::None,
             },
         );
-        policy.lab_readiness.as_mut().unwrap().remediation_commands =
-            vec!["homeboy runner connect homeboy-lab".into()];
-        let error = resolve_parsed_command_preflight(vec!["homeboy".into()], input, policy)
-            .expect_err("Cook must expose the Lab blocker before local workspace creation");
+        let result = resolve_parsed_command_preflight(vec!["homeboy".into()], input, policy)
+            .expect("an ineligible Lab queues the Cook for Lab admission");
 
-        assert_eq!(error.code, crate::ErrorCode::RunnerLabUnavailable);
-        assert!(error.message.contains("runner secret route is unavailable"));
-        assert_eq!(
-            error.details["next_action"],
-            "homeboy runner connect homeboy-lab"
-        );
-        assert!(!error.message.contains("local fallback"));
+        assert!(result.queued_for_lab_admission());
+        assert_eq!(result.placement.selected, EffectiveExecutionPlacement::Lab);
+        assert_eq!(result.selected_runner_id.as_deref(), Some("homeboy-lab"));
+        assert_eq!(result.fallback, FallbackDirective::None);
+        assert!(!result.placement.fallback.local_allowed);
     }
 
     #[test]
@@ -1686,6 +1725,99 @@ mod tests {
         assert!(evidence.contains("de88dcd"));
         assert!(evidence.contains("20f3a44"));
         assert!(evidence.contains("homeboy runner refresh lab-b"));
+    }
+
+    /// #17705: Lab pressure, capacity, and the readiness-flap states
+    /// (`connected_ineligible`, `status_probe_timeout`) all queue an auto Cook
+    /// with Lab placement. None resolves to controller-local execution or to a
+    /// hard refusal, and preview and dispatch make the same decision.
+    #[test]
+    fn auto_cook_queues_for_lab_admission_under_pressure_and_readiness_flaps() {
+        for (state, reason) in [
+            ("capacity_blocked", "pressure"),
+            ("capacity_blocked", "capacity_reached"),
+            ("connected_ineligible", "daemon_unverified"),
+            (READINESS_UNOBSERVED, "status_probe_timeout"),
+        ] {
+            for runner in [None, Some("lab-b")] {
+                let decisions = [false, true].map(|preview| {
+                    let mut policy = auto_route_policy(
+                        runner,
+                        state,
+                        Vec::new(),
+                        vec![reason.into()],
+                        false,
+                        ResourceAdmissionEvidence::Observed {
+                            pressure: ResourceHeat::Hot,
+                        },
+                    );
+                    // The local-capacity fallback signal never authorizes
+                    // controller execution for an auto Cook.
+                    policy.auto_local_capacity_fallback = true;
+                    let mut args = vec!["agent-task".into(), "cook".into()];
+                    if preview {
+                        args.push("--preview".into());
+                    }
+                    resolve_parsed_command_preflight(args, split_cook_input(), policy)
+                        .unwrap_or_else(|error| panic!("{state}/{reason} must queue: {error:?}"))
+                });
+                for result in &decisions {
+                    assert!(result.queued_for_lab_admission(), "{state}/{reason}");
+                    assert_eq!(
+                        result.placement.required,
+                        ExecutionPlacementRequirement::Lab
+                    );
+                    assert_eq!(result.placement.selected, EffectiveExecutionPlacement::Lab);
+                    assert_eq!(result.selected_runner_id.as_deref(), runner);
+                    assert_eq!(result.fallback, FallbackDirective::None);
+                    assert!(!result.placement.fallback.local_allowed);
+                }
+                assert_eq!(decisions[0].placement, decisions[1].placement);
+            }
+        }
+    }
+
+    #[test]
+    fn auto_cook_hard_lab_failures_keep_lab_unavailable_refusal() {
+        for (state, reason) in [
+            ("disconnected", "runner_disconnected"),
+            ("stale", "stale_daemon"),
+        ] {
+            let policy = auto_route_policy(
+                Some("lab-b"),
+                state,
+                Vec::new(),
+                vec![reason.into()],
+                false,
+                ResourceAdmissionEvidence::Unavailable,
+            );
+            let error = resolve_parsed_command_preflight(Vec::new(), split_cook_input(), policy)
+                .expect_err("a hard Lab failure must refuse");
+            assert_eq!(error.code, crate::ErrorCode::RunnerLabUnavailable);
+            assert_eq!(error.details["reason"], "lab_unavailable");
+            assert_eq!(error.details["readiness_state"], state);
+        }
+    }
+
+    #[test]
+    fn local_cook_ignores_lab_capacity_refusal() {
+        let mut input = split_cook_input();
+        input.placement = PlacementIntent::Local;
+        let policy = auto_route_policy(
+            None,
+            "capacity_blocked",
+            Vec::new(),
+            vec!["pressure".into()],
+            false,
+            ResourceAdmissionEvidence::Observed {
+                pressure: ResourceHeat::None,
+            },
+        );
+        let result = resolve_parsed_command_preflight(Vec::new(), input, policy).unwrap();
+        assert_eq!(
+            result.placement.selected,
+            EffectiveExecutionPlacement::Local
+        );
     }
 
     fn explicit_runner_policy(
