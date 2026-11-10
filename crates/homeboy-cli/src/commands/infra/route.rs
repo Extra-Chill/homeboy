@@ -830,6 +830,10 @@ pub(crate) fn cook_requires_unmaterialized_admission_for_placement(
         && (placement == homeboy::cli_surface::Placement::Lab
             || preflight.selected_runner_id.is_some()
             || matches!(preflight.input.runner, homeboy::core::parsed_command_preflight::RunnerIntent::Explicit(_))))
+        // A busy or unobserved Lab queues an auto Cook with Lab placement even
+        // when no runner is selectable yet (#17705).
+        || (matches!(placement, homeboy::cli_surface::Placement::Auto)
+            && preflight.queued_for_lab_admission())
         || (matches!(placement, homeboy::cli_surface::Placement::Auto)
             && preflight.selected_runner_id.is_none()
             && matches!(
@@ -875,6 +879,25 @@ pub(crate) fn cook_admission_decision(
     let requested = preflight.placement.requested;
     if requested == Placement::Local {
         return CookAdmissionDecision::Admitted;
+    }
+    if preflight.queued_for_lab_admission() {
+        let readiness = preflight
+            .lab_readiness
+            .as_ref()
+            .expect("queued Lab admission carries readiness evidence");
+        let reasons = if readiness.reasons.is_empty() {
+            readiness.state.clone()
+        } else {
+            format!("{}: {}", readiness.state, readiness.reasons.join("; "))
+        };
+        return CookAdmissionDecision::Indeterminate {
+            reason: format!("queued for Lab admission ({reasons})"),
+            next_action: readiness
+                .remediation_commands
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "homeboy runner status".to_string()),
+        };
     }
     if preflight.placement.selected == EffectiveExecutionPlacement::Local {
         if let ResourceAdmissionDecision::Rejected {
@@ -1527,7 +1550,7 @@ fn require_admission_value<'a>(
 fn unsafe_inline_admission_flag(flag: &str) -> bool {
     matches!(
         flag.split('=').next().unwrap_or(flag),
-        "--runner-env" | "--lab-env-json" | "--gate-env" | "--resolved-provider-policy" | "--tasks"
+        "--runner-env" | "--lab-env-json" | "--resolved-provider-policy" | "--tasks"
     )
 }
 
@@ -1574,6 +1597,7 @@ fn admission_text_value_flag(flag: &str) -> bool {
             | "--gate-package-artifact"
             | "--gate-extension-input"
             | "--gate-input"
+            | "--gate-env"
             | "--provider-evidence"
             | "--provider-argv"
     )
@@ -3336,41 +3360,59 @@ impl crate::agents::agent_task_service::AgentTaskCookAttemptDispatcher
                     );
                 }
             });
-            let outcome = lab_routing::dispatch_lab_offload(
-                LabRoutingRequest {
-                    placement_decision: placement_decision.clone(),
-                    command: lab_offload_command(&provider_cli.command)?,
-                    normalized_args: &provider_args,
-                    explicit_runner: Some(&self.runner_id),
-                    placement: homeboy::cli_surface::Placement::Lab,
-                    allow_local_fallback: self.allow_local_fallback,
-                    allow_dirty_lab_workspace: self.allow_dirty_lab_workspace,
-                    skip_deps_hydration: self.skip_deps_hydration,
-                    delete_workspace_on_failure: false,
-                    capture_patch: false,
-                    mutation_flag: None,
-                    timeout: None,
-                    placement_outcome_target: Some(
-                        ExecutionPlacementOutcomeTarget::AgentTaskLifecycle { run_id },
-                    ),
-                    detach_after_handoff: self.detach_after_handoff,
-                    output_file_requested: false,
-                    read_only_polling: false,
-                    require_controller_git_bundle: false,
-                    local_output_file: None,
-                    durable_agent_task_plan: Some(&durable_agent_task_plan),
-                    durable_run_id: None,
-                    // A retry's baseline is controller-owned capability, not plan
-                    // data. Stage that exact clean checkout; never substitute the
-                    // controller's original workspace during nested Lab dispatch.
-                    source_path: source_path.as_deref(),
-                    expected_source_snapshot_identity: None,
-                    verified_cook_baseline: verified_cook_baseline.as_ref(),
-                    job_overrides: self.job_overrides.clone(),
+            // A queued attempt waits through transient substrate refusals
+            // (pressure, readiness, runtime promotion, runner connect) instead
+            // of terminalizing, while no runner has accepted its job (#17765).
+            let outcome = homeboy::core::substrate_wait::wait_through(
+                "Lab handoff",
+                homeboy::core::substrate_wait::SUBSTRATE_WAIT_DEADLINE,
+                || false,
+                |_, _| {},
+                || {
+                    let outcome = lab_routing::dispatch_lab_offload(
+                        LabRoutingRequest {
+                            placement_decision: placement_decision.clone(),
+                            command: lab_offload_command(&provider_cli.command)?,
+                            normalized_args: &provider_args,
+                            explicit_runner: Some(&self.runner_id),
+                            placement: homeboy::cli_surface::Placement::Lab,
+                            allow_local_fallback: self.allow_local_fallback,
+                            allow_dirty_lab_workspace: self.allow_dirty_lab_workspace,
+                            skip_deps_hydration: self.skip_deps_hydration,
+                            delete_workspace_on_failure: false,
+                            capture_patch: false,
+                            mutation_flag: None,
+                            timeout: None,
+                            placement_outcome_target: Some(
+                                ExecutionPlacementOutcomeTarget::AgentTaskLifecycle { run_id },
+                            ),
+                            detach_after_handoff: self.detach_after_handoff,
+                            output_file_requested: false,
+                            read_only_polling: false,
+                            require_controller_git_bundle: false,
+                            local_output_file: None,
+                            durable_agent_task_plan: Some(&durable_agent_task_plan),
+                            durable_run_id: None,
+                            // A retry's baseline is controller-owned capability, not plan
+                            // data. Stage that exact clean checkout; never substitute the
+                            // controller's original workspace during nested Lab dispatch.
+                            source_path: source_path.as_deref(),
+                            expected_source_snapshot_identity: None,
+                            verified_cook_baseline: verified_cook_baseline.as_ref(),
+                            job_overrides: self.job_overrides.clone(),
+                        },
+                        Some(&self.runner_id),
+                        Box::new(NoopLabDispatchObserver),
+                    );
+                    match outcome {
+                        Err(error) if agent_task_lifecycle::preacceptance_retry_safe(run_id)? => {
+                            Err(error)
+                        }
+                        outcome => Ok(outcome),
+                    }
                 },
-                Some(&self.runner_id),
-                Box::new(NoopLabDispatchObserver),
-            );
+            )
+            .and_then(|outcome| outcome);
             let _ = heartbeat_stop.send(());
             outcome
         });

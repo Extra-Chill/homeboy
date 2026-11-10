@@ -817,8 +817,11 @@ fn refresh_outcome(
         dry_run: false,
     })
     .map_err(|error| error.message)
-    .and_then(|(_, exit_code)| match exit_code {
-        0 => Ok(()),
+    .and_then(|(output, exit_code)| match exit_code {
+        0 if output.reconnect_deferred.is_none() => Ok(()),
+        0 => Err(
+            "runner refresh-homeboy staged the binary; selection waits for active jobs".to_string(),
+        ),
         code => Err(format!("runner refresh-homeboy exited with code {code}")),
     })
 }

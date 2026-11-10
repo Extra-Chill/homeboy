@@ -82,6 +82,8 @@ pub(super) enum RunsCommand {
     /// exclusive self time (with inclusive p50/p95 and version comparison),
     /// `--coverage` reports unattributed gaps; otherwise ranks fuzz artifacts
     Hotspots(RunsHotspotsArgs),
+    /// Rank CLI refusals, retries, interventions and stranded green Cooks.
+    Friction(super::friction::RunsFrictionArgs),
     /// Reconcile running observation records. `--dry-run` previews the bounded
     /// observation-record scope; without it, only reported orphaned records are
     /// marked stale. Runner sessions and durable agent-task records have
@@ -281,6 +283,7 @@ pub enum RunsOutput {
     BenchCompare(BenchCompareOutput),
     FuzzCompare(FuzzCompareOutput),
     Hotspots(RunsHotspotsOutput),
+    Friction(serde_json::Value),
     Reconcile(RunsReconcileOutput),
     Watch(RunsWatchOutput),
     Cancel(RunsCancelOutput),

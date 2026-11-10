@@ -3022,10 +3022,11 @@ fn workflow_cook_outcome_uses_terminal_observation_after_failed_lifecycle_write(
             store.read_record(cook_id).unwrap().state(),
             AgentTaskRunState::Running
         );
-        assert_eq!(
+        assert!(matches!(
             super::cook_step::workflow_cook_outcome(cook_id),
-            homeboy_core::daemon::workflow_job::WorkflowRunOutcome::Settled("failed".into())
-        );
+            homeboy_core::daemon::workflow_job::WorkflowRunOutcome::Settled { outcome, .. }
+                if outcome == "failed"
+        ));
     });
 }
 

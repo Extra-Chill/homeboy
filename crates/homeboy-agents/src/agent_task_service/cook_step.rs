@@ -301,9 +301,33 @@ pub(super) fn workflow_cook_outcome(cook_id: &str) -> WorkflowRunOutcome {
         .ok()
         .and_then(|state| state.as_str().map(str::to_string))
     {
-        Some(state) => WorkflowRunOutcome::Settled(state),
+        Some(outcome) => WorkflowRunOutcome::Settled {
+            reason: (outcome != "succeeded")
+                .then(|| cook_terminal_reason(&run))
+                .flatten(),
+            outcome,
+        },
         None => WorkflowRunOutcome::Unknown,
     }
+}
+
+/// The terminal reason a Cook's run recorded: its blocker, as `agent-task
+/// status` reads it.
+fn cook_terminal_reason(run: &homeboy_control_plane_contract::ControlPlaneRun) -> Option<String> {
+    let blocker = run.blocker.as_ref()?;
+    let message = blocker
+        .reason
+        .as_deref()
+        .map(str::trim)
+        .filter(|reason| !reason.is_empty())
+        .unwrap_or(blocker.message.trim());
+    if message.is_empty() {
+        return None;
+    }
+    Some(match blocker.code.as_deref() {
+        Some(code) => format!("{code}: {message}"),
+        None => message.to_string(),
+    })
 }
 
 /// The live state and phase of a Cook's latest attempt, `None` before its

@@ -22,6 +22,8 @@ mod deploy_phase_timings;
 mod extension_action_payload;
 #[path = "cli_binary/fake_pi.rs"]
 mod fake_pi;
+#[path = "cli_binary/friction.rs"]
+mod friction;
 #[path = "cli_binary/help_fast_path.rs"]
 mod help_fast_path;
 #[path = "cli_binary/notification_route_admission.rs"]

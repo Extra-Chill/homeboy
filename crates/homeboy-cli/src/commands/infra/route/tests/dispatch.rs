@@ -4126,6 +4126,60 @@ fn admission_inputs_rejects_inline_secret_bearing_inputs() {
     });
 }
 
+#[test]
+fn admission_inputs_snapshot_reviewer_safe_gate_env_path() {
+    homeboy::core::test_support::with_isolated_home(|_| {
+        let gate_path = "/tmp/homeboy-import-loop/accept-gate.sh";
+        let verify = r#"bash "$ACCEPT_GATE""#;
+        let args = [
+            "homeboy",
+            "agent-task",
+            "cook",
+            "--run-id",
+            "gate-env-replay",
+            "--gate-env",
+            &format!("ACCEPT_GATE={gate_path}"),
+            "--verify",
+            verify,
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+        let intent = build_cook_admission_inputs(&args, "gate-env-replay", None)
+            .expect("reviewer-safe gate env is admitted");
+
+        let serialized = serde_json::to_string(&intent).expect("serialize intent");
+        assert!(!serialized.contains(gate_path), "{serialized}");
+        let gate_env = intent
+            .input_refs
+            .iter()
+            .find(|reference| reference.kind == "gate-env")
+            .expect("gate env snapshotted as an admission input");
+        assert_eq!(
+            std::fs::read_to_string(&gate_env.path).expect("gate env snapshot"),
+            format!("ACCEPT_GATE={gate_path}")
+        );
+        let token = gate_env.argv_token.as_deref().expect("gate env token");
+        assert!(intent
+            .argv
+            .windows(2)
+            .any(|pair| pair[0] == "--gate-env" && pair[1] == token));
+
+        let recorded_verify = intent
+            .input_refs
+            .iter()
+            .find(|reference| reference.kind == "verify")
+            .map(|reference| std::fs::read_to_string(&reference.path).expect("verify snapshot"))
+            .expect("verify snapshotted");
+        assert_eq!(recorded_verify, verify);
+        homeboy::agents::agent_task_service::validate_reviewer_visible_gates(
+            &[recorded_verify],
+            Some("gate-env-replay"),
+        )
+        .expect("recorded gate is reviewer-safe");
+    });
+}
+
 /// The failure an operator actually hits is "no ready Lab runner", not
 /// "`--placement lab` is unavailable for this local-only command". Reporting the
 /// portability contract there contradicts the documented wave guidance (#9373).

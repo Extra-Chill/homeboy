@@ -169,7 +169,7 @@ pub mod lifecycle {
         complete_cook_operation_in_store, cook_attempt_run_id, cook_index_exists_in_store,
         fail_claimed_detached_cook_handoff_parent_in_store, fail_cook_operation_in_store,
         fail_detached_cook_handoff_parent_in_store, has_accepted_runner_handoff,
-        is_unmaterialized_cook_admission, load_plan_in_store,
+        is_unmaterialized_cook_admission, load_plan_in_store, preacceptance_retry_safe,
         precheck_unmaterialized_cook_admission, prepare_unmaterialized_cook_admission,
         quarantine_queued_run_exact_in_store, rearm_quarantined_run_in_store,
         reconcile_scope_run_ids_in_store, reconcile_status, reconcile_status_in_store,

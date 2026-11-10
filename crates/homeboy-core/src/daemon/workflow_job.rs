@@ -175,8 +175,12 @@ pub enum WorkflowRunOutcome {
     /// The Cook has not settled: its run, or the terminal continuation that
     /// promotes and finalizes it, is still in progress.
     Pending,
-    /// The Cook settled with this run state.
-    Settled(String),
+    /// The Cook settled with this run state, and the terminal reason its run
+    /// recorded when it did not succeed.
+    Settled {
+        outcome: String,
+        reason: Option<String>,
+    },
 }
 
 /// Resolves a Cook step's durable outcome from its run record. Registered by
@@ -453,7 +457,7 @@ fn run_instance(
             return Ok(cancelled(request, &state, job_id, store));
         }
         if state.status.is_terminal() {
-            return finish(request, &state, store);
+            return finish(request, &state, job_id, store);
         }
         super::workflow_notify::awaiting_approvals(request, &state);
         let now_ms = now_ms();
@@ -530,17 +534,37 @@ fn cancelled(
     projection(&next, Some(store))
 }
 
-fn finish(request: &WorkflowJobRequest, state: &InstanceState, store: &JobStore) -> Result<Value> {
+fn finish(
+    request: &WorkflowJobRequest,
+    state: &InstanceState,
+    job_id: Uuid,
+    store: &JobStore,
+) -> Result<Value> {
+    let mut state = state.clone();
     if state.status == InstanceStatus::Succeeded {
-        if let Some(child) = next_pass(request, state)? {
-            let envelope = serde_json::from_value(child.submission()?)
-                .map_err(|error| invalid(format!("invalid next pass: {error}")))?;
-            let admission =
-                super::with_daemon_job_admission(|| super::admit_controller_job(envelope, store))?;
-            super::start_controller_job(admission.job.id, store)?;
+        let admission = (|| -> Result<()> {
+            if let Some(child) = next_pass(request, &state)? {
+                let envelope = serde_json::from_value(child.submission()?)
+                    .map_err(|error| invalid(format!("invalid next pass: {error}")))?;
+                let admission = super::with_daemon_job_admission(|| {
+                    super::admit_controller_job(envelope, store)
+                })?;
+                super::start_controller_job(admission.job.id, store)?;
+            }
+            Ok(())
+        })();
+        if let Err(error) = admission {
+            state.status = InstanceStatus::Failed;
+            state.reason = Some(format!("next_pass not admitted: {error}"));
+            // Persist the failure before returning it: status views and replay
+            // must not retain the successful step-completion checkpoint.
+            store.record_controller_prepared(job_id, to_value(&state)?)?;
+            if let Err(error) = project_timing(&state) {
+                crate::log_status!("observe", "workflow timing persistence failed: {}", error);
+            }
         }
     }
-    let result = projection(state, Some(store));
+    let result = projection(&state, Some(store));
     match state.status {
         InstanceStatus::Succeeded => Ok(result),
         status => {
@@ -568,7 +592,9 @@ fn next_pass(
     if let Some(path) = &request.definition_source {
         let text = std::fs::read_to_string(path)
             .map_err(|e| invalid(format!("cannot read next-pass definition {path}: {e}")))?;
-        if WorkflowDefinition::parse(&text)?.digest() != request.definition_digest {
+        let definition = WorkflowDefinition::parse(&text)?;
+        definition.validate(&|_| true)?;
+        if definition.digest() != request.definition_digest {
             return Err(invalid(format!("definition changed between passes: {path}; restart the workflow to use the new definition")));
         }
     }
@@ -738,6 +764,8 @@ fn step_result(
         }
     });
     let output_path = output_path(&request.instance, key).ok();
+    // A settled Cook's own terminal reason, which outranks its waiter's exit.
+    let mut cook_reason = None;
     let (outcome, output) = match kind {
         Some(crate::workflow::definition::StepKind::Cook(_)) => {
             let resolved = run_id.as_deref().and_then(|run_id| {
@@ -747,6 +775,12 @@ fn step_result(
                     .as_ref()
                     .map(|resolve| resolve(run_id))
             });
+            if let (Some(WorkflowRunOutcome::Settled { outcome, reason }), Some(cook_id)) =
+                (&resolved, run_id.as_deref())
+            {
+                cook_reason = (outcome != "succeeded")
+                    .then(|| cook_terminal_error(cook_id, outcome, reason.as_deref()));
+            }
             let outcome = cook_step_outcome(resolved, status)?;
             (
                 outcome,
@@ -761,6 +795,8 @@ fn step_result(
     };
     let error = if outcome.as_deref() == Some("succeeded") {
         None
+    } else if cook_reason.is_some() {
+        cook_reason
     } else if status == FinishedStatus::Failed {
         self::output_path(&request.instance, key)
             .ok()
@@ -812,11 +848,20 @@ fn cook_step_outcome(
 ) -> Option<Option<String>> {
     match resolved {
         Some(WorkflowRunOutcome::Pending) => None,
-        Some(WorkflowRunOutcome::Settled(outcome)) => Some(Some(outcome)),
+        Some(WorkflowRunOutcome::Settled { outcome, .. }) => Some(Some(outcome)),
         Some(WorkflowRunOutcome::Unknown) if status == FinishedStatus::Succeeded => {
             Some(Some("failed".to_string()))
         }
         Some(WorkflowRunOutcome::Unknown) | None => Some(None),
+    }
+}
+
+/// A settled, unsuccessful Cook's item error: the reason its run recorded, or
+/// its terminal state, naming the Cook id that `agent-task diagnose` reads.
+fn cook_terminal_error(cook_id: &str, outcome: &str, reason: Option<&str>) -> String {
+    match reason.map(str::trim).filter(|reason| !reason.is_empty()) {
+        Some(reason) => format!("Cook `{cook_id}` ended `{outcome}`: {reason}"),
+        None => format!("Cook `{cook_id}` ended `{outcome}`"),
     }
 }
 

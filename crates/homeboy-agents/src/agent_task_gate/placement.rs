@@ -266,7 +266,10 @@ impl LabGateRequest {
         }))
     }
 
+    /// Controller/runner build skew is checked first: a skewed runner cannot
+    /// bind a receipt, and the cause is the skew, not the binding (#17761).
     pub fn verify_receipt(&self, receipt: &LabGateReceipt) -> Result<()> {
+        verify_runner_build(&self.runner_id)?;
         if receipt.schema != LAB_GATE_RECEIPT_SCHEMA
             || receipt.request_sha256 != self.identity()?
             || receipt.candidate != self.candidate
@@ -294,6 +297,45 @@ impl LabGateRequest {
     }
 }
 
+/// Controller and runner Homeboy versions that differ.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunnerBuildSkew {
+    pub controller: String,
+    pub runner: String,
+}
+
+impl RunnerBuildSkew {
+    /// The typed `runner.version_skew` error naming both versions and the
+    /// command that converges them.
+    pub fn error(&self, runner_id: &str) -> Error {
+        let refresh = format!("homeboy runner refresh-homeboy {runner_id}");
+        Error::new(
+            homeboy_core::ErrorCode::RunnerVersionSkew,
+            format!(
+                "controller Homeboy {} differs from runner `{runner_id}` Homeboy {}; converge them with `{refresh}` (runner behind) or `homeboy upgrade` (controller behind)",
+                self.controller, self.runner
+            ),
+            serde_json::json!({
+                "gate_disposition": "unavailable",
+                "runner_id": runner_id,
+                "controller_version": self.controller,
+                "runner_version": self.runner,
+                "convergence_commands": [refresh, "homeboy upgrade"],
+            }),
+        )
+    }
+}
+
+/// Refuse with `runner.version_skew` when the transport observes that the
+/// runner runs another Homeboy version than this controller. An unavailable
+/// observation is not skew; later stages report their own cause.
+fn verify_runner_build(runner_id: &str) -> Result<()> {
+    match active_transport().build_skew(runner_id) {
+        Ok(Some(skew)) => Err(skew.error(runner_id)),
+        _ => Ok(()),
+    }
+}
+
 /// Freshness of the runner daemon observation behind one gate admission.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LabGateFreshness {
@@ -313,18 +355,6 @@ impl LabGateFreshness {
         }
     }
 }
-
-/// Reasons waiting can clear: capacity, pressure and a freshness that is not
-/// yet observed. Any other `RunnerAvailability` reason defers at once.
-const TRANSIENT_ADMISSION_REASONS: &[&str] = &[
-    "capacity_reached",
-    "capacity_unknown",
-    "pressure",
-    "daemon_freshness_unavailable",
-    "daemon_unverified",
-    "active_jobs_unavailable",
-    "active_jobs_not_queried",
-];
 
 /// One observation of a runner's Lab admission, carrying the same
 /// `RunnerAvailability` reasons `runner status` reports.
@@ -352,10 +382,9 @@ impl LabGateAdmission {
         !self.accepts_jobs
             && !self.reasons.is_empty()
             && !matches!(self.freshness, LabGateFreshness::Refused(_))
-            && self
-                .reasons
-                .iter()
-                .all(|reason| TRANSIENT_ADMISSION_REASONS.contains(&reason.as_str()))
+            && homeboy_core::substrate_wait::reasons_are_transient(
+                self.reasons.iter().map(String::as_str),
+            )
     }
 
     /// The typed admission refusal, naming the reasons and freshness state.
@@ -486,6 +515,11 @@ pub trait LabGateTransport: Send + Sync {
     /// Transports without a runner admission owner admit at once.
     fn admission(&self, _runner_id: &str) -> Result<LabGateAdmission> {
         Ok(LabGateAdmission::accepting())
+    }
+    /// Observe whether the runner runs another Homeboy version than this
+    /// controller. Transports without a runner observation report none.
+    fn build_skew(&self, _runner_id: &str) -> Result<Option<RunnerBuildSkew>> {
+        Ok(None)
     }
     fn execute(
         &self,
@@ -895,6 +929,9 @@ pub(super) fn preflight(
     packages: &[AgentTaskGatePackageArtifactRequirement],
     timeout: Duration,
 ) -> Result<()> {
+    // Cook preview and admission name the skew up front instead of failing
+    // later in receipt verification (#17761).
+    verify_runner_build(runner_id)?;
     let request = LabGateRequest {
         schema: LabGateRequestSchema::V2,
         preflight_only: true,
@@ -906,7 +943,7 @@ pub(super) fn preflight(
         label: String::new(),
         visibility: AgentTaskGateVisibility::Visible,
         reveal_policy: AgentTaskGateRevealPolicy::FullEvidence,
-        environment: environment.clone(),
+        environment: super::with_controller_extension_sources(environment, cwd),
         package_artifacts: packages.to_vec(),
         declared_plan: None,
         timeout_seconds: timeout.as_secs().max(1),
@@ -2522,6 +2559,89 @@ mod tests {
             "reservation",
         )
         .unwrap()
+    }
+
+    /// A transport whose `skew-runner` runs another Homeboy version and that
+    /// must never be asked to execute a gate.
+    struct SkewedRunnerTransport {
+        previous: Arc<dyn LabGateTransport>,
+    }
+    impl LabGateTransport for SkewedRunnerTransport {
+        fn build_skew(&self, runner_id: &str) -> Result<Option<RunnerBuildSkew>> {
+            if runner_id != "skew-runner" {
+                return self.previous.build_skew(runner_id);
+            }
+            Ok(Some(RunnerBuildSkew {
+                controller: "0.458.0".to_string(),
+                runner: "0.457.2".to_string(),
+            }))
+        }
+        fn execute(
+            &self,
+            cwd: &Path,
+            request: &LabGateRequest,
+            supervision: Option<&GateSupervision>,
+        ) -> Result<LabGateReceipt> {
+            assert_ne!(request.runner_id, "skew-runner", "skew refuses up front");
+            self.previous.execute(cwd, request, supervision)
+        }
+    }
+
+    fn assert_version_skew(error: &Error) {
+        assert_eq!(error.code, homeboy_core::ErrorCode::RunnerVersionSkew);
+        assert_eq!(error.code.as_str(), "runner.version_skew");
+        for expected in [
+            "0.458.0",
+            "0.457.2",
+            "homeboy runner refresh-homeboy skew-runner",
+            "homeboy upgrade",
+        ] {
+            assert!(error.message.contains(expected), "{}", error.message);
+        }
+    }
+
+    /// #17761: receipt verification names controller/runner skew before the
+    /// binding check, instead of `gate.receipt ... not bound`.
+    #[test]
+    fn skewed_runner_receipt_verification_fails_with_version_skew() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let temp = tempfile::tempdir().unwrap();
+            repository(temp.path());
+            let mut request = request(temp.path());
+            request.runner_id = "skew-runner".to_string();
+            request.argv = vec!["true".to_string()];
+            let receipt =
+                execute_with_context(request.clone(), temp.path(), &runner_context("skew-runner"))
+                    .unwrap();
+            let previous = active_transport();
+            register_lab_gate_transport(Arc::new(SkewedRunnerTransport { previous }));
+
+            assert_version_skew(&request.verify_receipt(&receipt).unwrap_err());
+        });
+    }
+
+    /// #17761: Cook preview/admission readiness refuses a skewed runner up
+    /// front with the same typed error, without running the runner probe.
+    #[test]
+    fn skewed_runner_preview_fails_with_version_skew() {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let temp = tempfile::tempdir().unwrap();
+            repository(temp.path());
+            let previous = active_transport();
+            register_lab_gate_transport(Arc::new(SkewedRunnerTransport { previous }));
+
+            let error = preflight(
+                temp.path(),
+                "skew-runner",
+                &AgentTaskGateEnvironmentPolicy::default(),
+                &[],
+                &[],
+                Duration::from_secs(5),
+            )
+            .unwrap_err();
+
+            assert_version_skew(&error);
+        });
     }
 
     /// #16920: a gate that exits 0 but rewrites a tracked file still returns

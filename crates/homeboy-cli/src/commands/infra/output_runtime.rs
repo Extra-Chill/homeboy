@@ -475,6 +475,9 @@ impl<'a> OutputService<'a> {
     }
 
     pub(crate) fn emit_run(&self, run: CommandRun, mode: CommandOutputFileMode) -> i32 {
+        if let Err(error) = &run.stdout_result {
+            crate::invocation::error(error);
+        }
         let output_file_written = self.write_output_file(&run, mode);
         let exit_code = if output_file_written || run.exit_code != 0 {
             run.exit_code

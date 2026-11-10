@@ -230,6 +230,62 @@ fn resume_reuses_only_unchanged_succeeded_dependency_chains() {
 }
 
 #[test]
+fn resume_from_a_next_pass_instance_keeps_its_iteration_and_previous() {
+    with_isolated_home(|home| {
+        let store = JobStore::open_without_reconciliation(
+            home.path().join(crate::paths::OBSERVATION_DB_FILENAME),
+        )
+        .unwrap()
+        .with_daemon_lease("workflow-resume-pass-test".into());
+        let definition = json!({
+            "schema": "homeboy/workflow/v1", "id": "resume-pass",
+            "next_pass": {"max_iterations": 3},
+            "steps": [
+                {"id": "import", "exec": sh("touch import-{{inputs.iteration}}")},
+                {"id": "evaluate", "needs": ["import"], "exec": sh("touch evaluate")},
+                {"id": "finish", "needs": ["evaluate"], "exec": sh("exit 7")}
+            ]
+        });
+        let mut original = request(definition.clone(), home.path());
+        let previous =
+            json!({"outputs": {"evaluate": {"verdict": "retry"}}, "unchanged_passes": 1});
+        original.inputs.insert("iteration".into(), json!(3));
+        original.inputs.insert("previous".into(), previous.clone());
+        original.instance = original.definition.instance_id(&original.inputs, None);
+        let job = admit(&store, &original);
+        crate::daemon::start_controller_job(job, &store).unwrap();
+        assert_eq!(wait_terminal(&store, job, 30).status, JobStatus::Failed);
+        std::fs::remove_file(home.path().join("import-3")).unwrap();
+        std::fs::remove_file(home.path().join("evaluate")).unwrap();
+
+        let mut fixed = definition;
+        fixed["steps"][2]["exec"] = sh("touch finish");
+        let mut resumed = request(fixed, home.path());
+        assert_eq!(resumed.inputs["iteration"], 1);
+        resumed
+            .definition
+            .carry_resumed_pass(&mut resumed.inputs, &original.inputs);
+        resumed.resumed_from = Some(original.instance.clone());
+        resumed.instance = resumed.definition.instance_id_with_resume(
+            &resumed.inputs,
+            None,
+            resumed.resumed_from.as_deref(),
+        );
+        let job = admit(&store, &resumed);
+        crate::daemon::start_controller_job(job, &store).unwrap();
+        assert_eq!(wait_terminal(&store, job, 30).status, JobStatus::Succeeded);
+        let view = workflow_status(&store, &resumed.instance).unwrap();
+        assert_eq!(view["inputs"]["iteration"], 3);
+        assert_eq!(view["inputs"]["previous"], previous);
+        assert_eq!(view["steps"]["import"]["reused"], true);
+        assert_eq!(view["steps"]["evaluate"]["reused"], true);
+        assert!(!home.path().join("import-3").exists());
+        assert!(!home.path().join("evaluate").exists());
+        assert!(home.path().join("finish").exists());
+    });
+}
+
+#[test]
 fn workflow_history_survives_unrelated_terminal_byte_budget_churn() {
     with_isolated_home(|home| {
         let path = home.path().join(crate::paths::OBSERVATION_DB_FILENAME);
@@ -982,11 +1038,67 @@ fn a_cook_step_that_exits_without_recording_its_run_fails() {
     );
     assert_eq!(
         cook_step_outcome(
-            Some(WorkflowRunOutcome::Settled("succeeded".to_string())),
+            Some(WorkflowRunOutcome::Settled {
+                outcome: "succeeded".to_string(),
+                reason: None,
+            }),
             FinishedStatus::Succeeded
         ),
         Some(Some("succeeded".to_string()))
     );
+}
+
+/// #17758: a failed cook foreach item reports its Cook's terminal reason and
+/// the Cook id it launched, not the exit JSON of the process that waited on it.
+#[test]
+fn a_failed_cook_item_error_carries_the_cooks_terminal_reason() {
+    with_isolated_home(|home| {
+        let store = JobStore::open_without_reconciliation(
+            home.path().join(crate::paths::OBSERVATION_DB_FILENAME),
+        )
+        .unwrap()
+        .with_daemon_lease("workflow-cook-reason-test".to_string());
+        let request = request(
+            json!({
+                "schema": "homeboy/workflow/v1",
+                "id": "cook-reason",
+                "steps": [
+                    {"id": "prepare", "exec": sh(
+                        "printf '{\"children\":[{\"n\":1}]}' > \"$HOMEBOY_STEP_OUTPUT\"")},
+                    {"id": "cook", "needs": ["prepare"],
+                     "foreach": "{{steps.prepare.output/children}}",
+                     "cook": {"prompt": "fix {{item.n}}"}}
+                ]
+            }),
+            home.path(),
+        );
+        let instance = request.instance.clone();
+        let prefix = instance.clone();
+        register_workflow_run_outcome_resolver(Arc::new(move |cook_id: &str| {
+            if cook_id.starts_with(&prefix) {
+                WorkflowRunOutcome::Settled {
+                    outcome: "failed".to_string(),
+                    reason: Some("gate `cargo-test` failed".to_string()),
+                }
+            } else {
+                WorkflowRunOutcome::Unknown
+            }
+        }));
+        let job_id = admit(&store, &request);
+        crate::daemon::start_controller_job(job_id, &store).unwrap();
+        assert_eq!(wait_terminal(&store, job_id, 30).status, JobStatus::Failed);
+
+        let status = workflow_status(&store, &instance).unwrap();
+        let item = &status["steps"]["cook"]["items"][0];
+        let cook_id = format!("{instance}-cook-i1-n0-a1");
+        assert_eq!(item["run_id"], cook_id.as_str(), "{status}");
+        assert_eq!(item["outcome"], "failed", "{status}");
+        assert_eq!(
+            item["error"],
+            format!("Cook `{cook_id}` ended `failed`: gate `cargo-test` failed"),
+            "{status}"
+        );
+    });
 }
 
 /// A self-admitting chain: the `again` step runs `workflow run <same
@@ -1124,6 +1236,44 @@ fn a_step_that_readmits_the_definition_chains_child_instances() {
         }
         assert_eq!(watched["instance"], json!(grandchild.instance));
         assert_eq!(watched["status"], "succeeded");
+    });
+}
+
+#[test]
+fn next_pass_validation_failure_records_terminal_reason() {
+    with_isolated_home(|home| {
+        let store = JobStore::open_without_reconciliation(
+            home.path().join(crate::paths::OBSERVATION_DB_FILENAME),
+        )
+        .unwrap()
+        .with_daemon_lease("workflow-next-pass-validation-test".into());
+        let definition = json!({
+            "schema": "homeboy/workflow/v1", "id": "invalid-next-pass",
+            "next_pass": {"max_iterations": 2},
+            "steps": [{"id": "work", "exec": sh(
+                "printf '%s' '{\"schema\":\"homeboy/workflow/v1\",\"id\":\"invalid-next-pass\",\"steps\":[]}' > loop.json"
+            )}]
+        });
+        let source = home.path().join("loop.json");
+        std::fs::write(&source, serde_json::to_string(&definition).unwrap()).unwrap();
+        let mut original = request(definition, home.path());
+        original.definition_source = Some(source.display().to_string());
+        let job = admit(&store, &original);
+        crate::daemon::start_controller_job(job, &store).unwrap();
+        assert_eq!(wait_terminal(&store, job, 30).status, JobStatus::Failed);
+
+        let view = workflow_status(&store, &original.instance).unwrap();
+        assert_eq!(view["status"], "failed");
+        let invalid = WorkflowDefinition::parse(&std::fs::read_to_string(source).unwrap())
+            .unwrap()
+            .validate(&|_| true)
+            .unwrap_err();
+        let reason = format!("next_pass not admitted: {invalid}");
+        assert_eq!(view["reason"], reason);
+        assert_eq!(view["children"], json!([]));
+        let checkpoint = store.controller_job_state(job).unwrap().checkpoint.unwrap();
+        assert_eq!(checkpoint["status"], "failed");
+        assert_eq!(checkpoint["reason"], reason);
     });
 }
 

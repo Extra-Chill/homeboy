@@ -1040,6 +1040,7 @@ mod tests {
                 selected_binary_path: "/runner/homeboy".to_string(),
                 reconnect_required: true,
                 followup_commands: Vec::new(),
+                status: None,
                 readiness: Some(runner::HomeboyRefreshReadiness {
                     state: runner::HomeboyRefreshReadinessState::Failed,
                     accepting_jobs: false,
@@ -1140,6 +1141,7 @@ mod tests {
                 selected_binary_path: "/runner/homeboy".to_string(),
                 reconnect_required: false,
                 followup_commands: Vec::new(),
+                status: None,
                 readiness: None,
                 reconnect_deferred: None,
                 failure: None,

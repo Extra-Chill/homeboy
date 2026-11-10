@@ -2,6 +2,28 @@
 
 Inspect and maintain persisted observation-store runs and artifacts.
 
+## Friction
+
+`homeboy runs friction --last 7d` ranks refusal codes, immediate same-command
+reruns within caller sessions, highest-intervention Cooks, and gate-green but
+unpublished candidates. `--last N` selects recent invocations (maximum 1000);
+duration windows are also capped at 1000 and report `truncated` when bounded.
+`--component` selects invocations targeting Cooks in that component.
+
+The best-effort ledger stores terminal `cli-invocation` rows in the existing run
+store, with normal terminal-run retention. It records subcommand names, exit and
+structured error codes/fields, elapsed milliseconds, build version, bounded caller
+session identity, and an explicitly named run/Cook id—not argv or error messages.
+Internal recovery children and store-free startup probes/help fast paths are
+excluded. Recording failures do not affect command output or exit status.
+
+Cook intervention counts cover commands after submission within the selected
+ledger window. Submission-to-PR timing uses the existing successful `publish`
+span and is null when that evidence is unavailable. Delivery facts, rather than
+inferred command success, determine stranded green candidates. Version-comparison
+notifications remain on `runs hotspots`; friction leaves that comparator/outbox
+integration separate rather than duplicating notification behavior.
+
 ## Synopsis
 
 ```bash
@@ -11,6 +33,7 @@ homeboy runs latest-run [--kind bench|rig|trace|agent-task] [--component <id>] [
 homeboy runs compare [--kind bench] [--component <id>] [--rig <id>] [--scenario <id>] [--metric <name>] [--limit 20] [--format table|json]
 homeboy runs compare --kind bench --from-run <run-id> --to-run <run-id> [--metric <name>]
 homeboy runs compare --kind fuzz --from-run <run-id> --to-run <run-id> [--hotspot-policy <advisory|blocking|off>]
+homeboy runs friction [--last <duration|N>] [--component <id>]
 homeboy runs hotspots <run-id>... [--limit <count>]
 homeboy runs hotspots --coverage <run-id>... [--limit <count>]
 homeboy runs hotspots --baseline-run <run-id> --candidate-run <run-id> [--limit <count>]

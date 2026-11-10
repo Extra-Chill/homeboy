@@ -241,10 +241,45 @@ pub struct AgentTaskGateEnvironmentPolicy {
     /// never receive a writable path to the controller-owned source.
     #[serde(default)]
     pub extension_inputs: Vec<AgentTaskGateExtensionInput>,
+    /// Controller install sources for the gated components' declared
+    /// extensions. A gate host missing one installs it from the same source
+    /// and revision through the ordinary extension install path (#17769).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extension_sources: Vec<AgentTaskGateExtensionSource>,
     #[serde(default)]
     pub data_inputs: Vec<data_inputs::GateInput>,
     #[serde(default)]
     pub requirements: AgentTaskGateRequirements,
+}
+
+/// Where the controller installed a declared extension from, and at which
+/// revision.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentTaskGateExtensionSource {
+    pub id: String,
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
+}
+
+impl AgentTaskGateExtensionSource {
+    /// The command that provisions this extension on a gate host.
+    fn provision_command(id: &str, source: Option<&Self>) -> String {
+        match source {
+            Some(source) => {
+                let revision = source
+                    .revision
+                    .as_deref()
+                    .map(|revision| format!(" --revision {revision}"))
+                    .unwrap_or_default();
+                format!(
+                    "homeboy extension install {} --id {id}{revision}",
+                    source.source
+                )
+            }
+            None => format!("homeboy extension install <source> --id {id}"),
+        }
+    }
 }
 
 /// Explicit host inputs. Tool mappings belong to installed extensions.
@@ -326,6 +361,7 @@ impl Default for AgentTaskGateEnvironmentPolicy {
             shared_cargo_target: None,
             admitted_component_id: None,
             extension_inputs: Vec::new(),
+            extension_sources: Vec::new(),
             data_inputs: Vec::new(),
             requirements: AgentTaskGateRequirements::default(),
         }
@@ -1081,6 +1117,7 @@ impl AgentTaskGateEnvironment {
                     identity: Some(input.identity.clone()),
                 })
                 .collect(),
+            extension_sources: Vec::new(),
         }
     }
 }
@@ -2654,7 +2691,7 @@ fn run_gate_argv(
             label: command.to_string(),
             visibility,
             reveal_policy,
-            environment: gate_environment.clone(),
+            environment: with_controller_extension_sources(gate_environment, cwd),
             package_artifacts: package_artifacts.to_vec(),
             declared_plan: declared_plan.cloned(),
             timeout_seconds: execution
@@ -3100,6 +3137,93 @@ pub(crate) fn run_declared_test_with_timeout(
     })
 }
 
+/// Extensions declared by the admitted component and by every portable
+/// `homeboy.json` in the executing checkout (#15383, #17569).
+fn declared_component_extension_ids(
+    admitted_component_id: Option<&str>,
+    cwd: &Path,
+) -> std::collections::BTreeSet<String> {
+    let mut components = Vec::new();
+    if let Ok(component) = homeboy_core::component::resolve_effective(
+        admitted_component_id,
+        Some(&cwd.to_string_lossy()),
+        None,
+    ) {
+        components.push(component);
+    }
+    // Resolve portable sibling contracts from the executing checkout, not
+    // controller registry paths. Git excludes ignored dependency trees.
+    if let Some((root, files)) = homeboy_core::git::repo_root(cwd).and_then(|root| {
+        homeboy_core::git::output_optional(
+            &root,
+            &[
+                "ls-files",
+                "--cached",
+                "--others",
+                "--exclude-standard",
+                "-z",
+            ],
+        )
+        .map(|files| (root, files))
+    }) {
+        for file in files.split('\0') {
+            let path = Path::new(file);
+            if !path.file_name().is_some_and(|name| name == "homeboy.json") {
+                continue;
+            }
+            let manifest = root.join(path);
+            if let Some(component) =
+                homeboy_core::component::discover_from_portable(manifest.parent().unwrap_or(&root))
+            {
+                components.push(component);
+            }
+        }
+    }
+    components
+        .into_iter()
+        .filter_map(|component| component.extensions)
+        .flat_map(|linked| linked.into_keys())
+        .collect()
+}
+
+/// Record the controller's install source and revision for each declared
+/// extension it has installed, so a Lab gate host can provision the same
+/// extension (#17769). Explicit inputs and recorded sources are kept.
+fn with_controller_extension_sources(
+    policy: &AgentTaskGateEnvironmentPolicy,
+    cwd: &Path,
+) -> AgentTaskGateEnvironmentPolicy {
+    let mut policy = policy.clone();
+    if !policy.isolate_home {
+        return policy;
+    }
+    for id in declared_component_extension_ids(policy.admitted_component_id.as_deref(), cwd) {
+        if policy.extension_inputs.iter().any(|input| input.id == id)
+            || policy
+                .extension_sources
+                .iter()
+                .any(|source| source.id == id)
+        {
+            continue;
+        }
+        let Ok(dir) = homeboy_core::paths::extension(&id) else {
+            continue;
+        };
+        if let Some(source) = homeboy_core::extension::lifecycle::read_source_url(&dir) {
+            let revision = homeboy_core::extension::lifecycle::read_source_revision_at(&dir);
+            policy.extension_sources.push(AgentTaskGateExtensionSource {
+                id,
+                source,
+                revision,
+            });
+        }
+    }
+    policy
+}
+
+/// Prefix of the probe-failure sentence naming unprovisioned extensions.
+const MISSING_GATE_EXTENSIONS: &str = "the gate environment is missing declared extension";
+
 struct SelectedGateEnvironment {
     report: AgentTaskGateEnvironment,
     values: BTreeMap<String, String>,
@@ -3108,6 +3232,10 @@ struct SelectedGateEnvironment {
     admitted_component_id: Option<String>,
     /// Isolated HOME, when the policy isolates it.
     isolated_home: Option<PathBuf>,
+    extension_sources: Vec<AgentTaskGateExtensionSource>,
+    /// Declared extensions neither installed nor installable on this host,
+    /// with the command that provisions each.
+    unprovisioned_extensions: Vec<(String, String)>,
     _cargo_target: Option<homeboy_core::cleanup::ManagedCargoTarget>,
     _scratch: Option<tempfile::TempDir>,
     _rust_overlay: Option<tempfile::TempDir>,
@@ -3176,51 +3304,52 @@ impl SelectedGateEnvironment {
         }
     }
 
+    /// Install declared extensions this gate host lacks from the controller's
+    /// recorded source and revision, through the ordinary extension install
+    /// path. Ids that cannot be provisioned are remembered so a failed probe
+    /// names them with the command that provisions them (#17769).
+    fn provision_missing_extensions(
+        &mut self,
+        host_extensions: &Path,
+        ids: &std::collections::BTreeSet<String>,
+        explicit: &std::collections::BTreeSet<String>,
+    ) {
+        for id in ids {
+            if explicit.contains(id)
+                || id.is_empty()
+                || id.contains(['/', '\\'])
+                || id == "."
+                || id == ".."
+                || host_extensions.join(id).is_dir()
+            {
+                continue;
+            }
+            let source = self
+                .extension_sources
+                .iter()
+                .find(|source| &source.id == id);
+            let installed = source.is_some_and(|source| {
+                homeboy_core::extension::lifecycle::install_with_revision(
+                    &source.source,
+                    Some(id),
+                    source.revision.as_deref(),
+                )
+                .is_ok()
+            });
+            if !installed {
+                self.unprovisioned_extensions.push((
+                    id.clone(),
+                    AgentTaskGateExtensionSource::provision_command(id, source),
+                ));
+            }
+        }
+    }
+
     fn configure_linked_extensions(&mut self, cwd: &Path) -> Result<()> {
         let Some(home) = self.isolated_home.clone() else {
             return Ok(());
         };
-        let mut components = Vec::new();
-        if let Ok(component) = homeboy_core::component::resolve_effective(
-            self.admitted_component_id.as_deref(),
-            Some(&cwd.to_string_lossy()),
-            None,
-        ) {
-            components.push(component);
-        }
-        // Resolve portable sibling contracts from the executing checkout, not
-        // controller registry paths. Git excludes ignored dependency trees.
-        if let Some((root, files)) = homeboy_core::git::repo_root(cwd).and_then(|root| {
-            homeboy_core::git::output_optional(
-                &root,
-                &[
-                    "ls-files",
-                    "--cached",
-                    "--others",
-                    "--exclude-standard",
-                    "-z",
-                ],
-            )
-            .map(|files| (root, files))
-        }) {
-            for file in files.split('\0') {
-                let path = Path::new(file);
-                if !path.file_name().is_some_and(|name| name == "homeboy.json") {
-                    continue;
-                }
-                let manifest = root.join(path);
-                if let Some(component) = homeboy_core::component::discover_from_portable(
-                    manifest.parent().unwrap_or(&root),
-                ) {
-                    components.push(component);
-                }
-            }
-        }
-        let ids = components
-            .into_iter()
-            .filter_map(|component| component.extensions)
-            .flat_map(|linked| linked.into_keys())
-            .collect();
+        let ids = declared_component_extension_ids(self.admitted_component_id.as_deref(), cwd);
         let Ok(host_extensions) = homeboy_core::paths::extensions() else {
             return Ok(());
         };
@@ -3230,6 +3359,7 @@ impl SelectedGateEnvironment {
             .iter()
             .map(|input| input.id.clone())
             .collect();
+        self.provision_missing_extensions(&host_extensions, &ids, &explicit);
         let destination_root = home.join(".config/homeboy/extensions");
         let report = link_runner_extensions(&host_extensions, &destination_root, &ids, &explicit)?;
         let host_home = std::env::var_os("HOME").map(PathBuf::from);
@@ -4542,6 +4672,8 @@ fn selected_gate_environment(
         isolate_download_cache: policy.isolate_home || policy.isolate_xdg,
         admitted_component_id: policy.admitted_component_id.clone(),
         isolated_home,
+        extension_sources: policy.extension_sources.clone(),
+        unprovisioned_extensions: Vec::new(),
         _rust_overlay: None,
         _cargo_target: None,
         _scratch: scratch,
@@ -5094,7 +5226,11 @@ fn gate_target_preflight_error(
     probe: &AgentTaskGateToolchainRequirement,
     cause: Error,
 ) -> Error {
-    let remediation = "Declare a gate that runs from the repository itself (for example its own test script), or give the component a portable homeboy.json that provides the test capability, then retry Cook.";
+    let missing = cause
+        .message
+        .find(MISSING_GATE_EXTENSIONS)
+        .map(|start| format!("{}, then retry Cook.", &cause.message[start..]));
+    let remediation = missing.as_deref().unwrap_or("Declare a gate that runs from the repository itself (for example its own test script), or give the component a portable homeboy.json that provides the test capability, then retry Cook.");
     let mut error = Error::validation_invalid_argument(
         "gate declaration",
         format!(
@@ -5199,6 +5335,17 @@ fn preflight_gate_toolchains_local(
                     output.status.code().unwrap_or(1),
                     probe_failure_text(&stderr, &String::from_utf8_lossy(&output.stdout)),
                 )
+            };
+            let reason = match selected_environment.unprovisioned_extensions.as_slice() {
+                [] => reason,
+                missing => format!(
+                    "{reason}; {MISSING_GATE_EXTENSIONS}(s) {}",
+                    missing
+                        .iter()
+                        .map(|(id, command)| format!("`{id}` (provision with `{command}`)"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
             };
             return Err(toolchain_preflight_error(
                 requirement,
@@ -10551,6 +10698,7 @@ mod tests {
             shared_cargo_target: Some(false),
             admitted_component_id: None,
             extension_inputs: Vec::new(),
+            extension_sources: Vec::new(),
             data_inputs: Vec::new(),
             requirements: AgentTaskGateRequirements::default(),
         };
@@ -11645,12 +11793,96 @@ exit 2
         assert!(
             error.details["cause"]["message"]
                 .as_str()
-                .is_some_and(|message| message.ends_with(
+                .is_some_and(|message| message.contains(
                     "the probe exited 2: no linked extensions provide test support: probe-ext"
                 )),
             "{}",
             error.details["cause"]
         );
+        assert!(
+            error.message.contains(
+                "missing declared extension(s) `probe-ext` (provision with `homeboy extension install <source> --id probe-ext`)"
+            ),
+            "{}",
+            error.message
+        );
+    }
+
+    /// #17769: a declared `homeboy review test` gate for a component whose
+    /// declared extension is not installed on the gate host resolves preflight
+    /// ready in an isolated HOME/XDG: the gate environment provisions it from
+    /// the controller's recorded source through the extension install path.
+    #[cfg(unix)]
+    #[test]
+    fn gate_env_provisions_declared_extension_so_review_test_preflight_is_ready() {
+        let _guard = env_mutex();
+        if !rerun_alone_to_replace_path(
+            "gate_env_provisions_declared_extension_so_review_test_preflight_is_ready",
+        ) {
+            return;
+        }
+        // This runs alone in a child process, so it owns HOME and PATH.
+        let host_home = tempfile::tempdir().expect("host home");
+        for name in homeboy_core::paths::HOMEBOY_ROOT_ENV_VARS {
+            std::env::remove_var(name);
+        }
+        std::env::set_var("HOME", host_home.path());
+        let controller_source = tempfile::tempdir().expect("controller extension source");
+        let source = controller_source.path().join("probe-ext");
+        fs::create_dir_all(&source).expect("extension source");
+        fs::write(
+            source.join("probe-ext.json"),
+            r#"{"id":"probe-ext","name":"Probe","version":"1.0.0"}"#,
+        )
+        .expect("extension manifest");
+
+        let workspace = tempfile::tempdir().expect("workspace");
+        assert!(Command::new("git")
+            .arg("init")
+            .current_dir(workspace.path())
+            .status()
+            .expect("git init")
+            .success());
+        fs::write(
+            workspace.path().join("homeboy.json"),
+            r#"{"id":"probe-component","extensions":{"probe-ext":{}}}"#,
+        )
+        .expect("portable component");
+        let bin = tempfile::tempdir().expect("bin");
+        homeboy_test_support::write_executable(
+            bin.path().join("homeboy"),
+            r#"#!/bin/sh
+manifest="${HOMEBOY_CONFIG_ROOT:-$HOME/.config/homeboy}/extensions/probe-ext/probe-ext.json"
+[ -f "$manifest" ] && { echo '{"success":true,"data":{"preflight":"ready"}}'; exit 0; }
+echo '{"success":false,"summary":"No extension provider configured for component probe-component"}'
+exit 2
+"#,
+            0o755,
+        )
+        .expect("homeboy");
+        std::env::set_var("PATH", format!("{}:/usr/bin:/bin", bin.path().display()));
+
+        let gates = VerifyGateOptions {
+            verify: vec!["homeboy review test probe-component".to_string()],
+            gate_environment: AgentTaskGateEnvironmentPolicy {
+                isolate_home: true,
+                isolate_xdg: true,
+                admitted_component_id: Some("probe-component".to_string()),
+                extension_sources: vec![AgentTaskGateExtensionSource {
+                    id: "probe-ext".to_string(),
+                    source: source.display().to_string(),
+                    revision: None,
+                }],
+                ..AgentTaskGateEnvironmentPolicy::default()
+            },
+            ..VerifyGateOptions::default()
+        };
+        preflight_verify_gate_options(workspace.path(), &gates)
+            .expect("the gate environment provisions the declared extension");
+        assert!(host_home
+            .path()
+            .join(".config/homeboy/extensions/probe-ext/probe-ext.json")
+            .is_file());
     }
 
     #[cfg(unix)]
