@@ -4429,7 +4429,6 @@ fn selected_gate_environment(
         ..AgentTaskGateEnvironment::default()
     };
     let mut values = policy.variables.clone();
-    let input_store = data_inputs::store_root()?;
     report.data_inputs = policy.data_inputs.clone();
     for (name, value) in &policy.variables {
         report.inherited.push(AgentTaskGateEnvironmentVariable {
@@ -4526,8 +4525,13 @@ fn selected_gate_environment(
             set_isolated_environment_variable(&mut report, &mut values, name, path);
         }
     }
+    let input_store = if policy.data_inputs.is_empty() {
+        None
+    } else {
+        Some(data_inputs::store_root()?)
+    };
     for input in &policy.data_inputs {
-        let path = input.path_in(&input_store)?;
+        let path = input.path_in(input_store.as_deref().expect("declared inputs"))?;
         input.verify(&path)?;
         values.insert(input.env.clone(), path.display().to_string());
     }

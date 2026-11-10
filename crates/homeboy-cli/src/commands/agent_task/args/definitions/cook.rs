@@ -515,15 +515,17 @@ impl VerifyGateArgs {
     /// Resolve file inputs while the controller invocation directory still owns
     /// relative-path semantics, before Cook can provision or dispatch anything.
     pub(crate) fn snapshot_file_inputs(&mut self) -> homeboy::core::Result<()> {
-        let mut policy = AgentTaskGateEnvironmentPolicy {
-            data_inputs: self.gate_inputs.clone(),
-            variables: self.gate_environment.iter().cloned().collect(),
-            preserve: self.gate_environment_preserve.iter().cloned().collect(),
-            ..Default::default()
-        };
-        let root = homeboy::agents::agent_tasks::gate::data_inputs::store_root()?;
-        homeboy::agents::agent_tasks::gate::data_inputs::admit(&mut policy, &root)?;
-        self.gate_inputs = policy.data_inputs;
+        if !self.gate_inputs.is_empty() {
+            let mut policy = AgentTaskGateEnvironmentPolicy {
+                data_inputs: self.gate_inputs.clone(),
+                variables: self.gate_environment.iter().cloned().collect(),
+                preserve: self.gate_environment_preserve.iter().cloned().collect(),
+                ..Default::default()
+            };
+            let root = homeboy::agents::agent_tasks::gate::data_inputs::store_root()?;
+            homeboy::agents::agent_tasks::gate::data_inputs::admit(&mut policy, &root)?;
+            self.gate_inputs = policy.data_inputs;
+        }
         if !self.input_sources.is_empty() {
             if !self.verify_file.is_empty() || !self.private_verify_file.is_empty() {
                 return Err(homeboy::core::Error::validation_invalid_argument(
