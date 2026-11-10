@@ -5775,7 +5775,7 @@ pub fn validate_reviewer_visible_gates(verify: &[String], cook_id: Option<&str>)
     Err(Error::validation_invalid_argument(
         "verification",
         format!(
-            "Cook has no visible gate that can produce a reviewer-safe command; {rejected}. Move static machine-local values into gate environment configuration (--gate-env), or move checks that need runtime-computed local values into --private-verify, before provider work"
+            "Cook has no visible gate that can produce a reviewer-safe command; {rejected}. Pass machine-local values as `--gate-env NAME=<path>` and reference \"$NAME\" in --verify, or assign them inline in the gate (`NAME=<path> && bash \"$NAME\"`); move checks that need runtime-computed local values into --private-verify, before provider work"
         ),
         cook_id.map(str::to_string),
         None,

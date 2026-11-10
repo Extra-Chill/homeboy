@@ -956,6 +956,26 @@ homeboy review test --path .
 
 Other shell gates remain unvalidated during admission. Declare a `--gate-toolchain`
 when Homeboy must probe an external executable before provider dispatch.
+
+### Machine-local gate values
+
+Visible `--verify` gates must yield a reviewer-safe command, so a literal
+machine-local path such as `bash /tmp/run/accept-gate.sh` is rejected. Give the
+gate the path through the gate environment and reference the variable:
+
+```sh
+homeboy agent-task cook --prompt @task.md \
+  --gate-env ACCEPT_GATE=/tmp/run/accept-gate.sh \
+  --verify 'bash "$ACCEPT_GATE"'
+```
+
+Every admission path accepts this form, including detached unmaterialized
+admission: it snapshots the `--gate-env` value into the recorded admission
+inputs the way it snapshots `--verify`, after the same redaction check. Values
+that look like secrets (for example `API_TOKEN=...`) are still refused; use
+`--secret-env`/`--runner-secret-env` names or `--gate-env-from` for those. The
+inline assignment form `ACCEPT_GATE=/tmp/run/accept-gate.sh && bash "$ACCEPT_GATE"`
+is also accepted and is shown to reviewers as `ACCEPT_GATE="${ACCEPT_GATE}"`.
 ## Headless Fleet-Cooking Review
 
 The authoritative non-chat workflow is the durable `agent-task` lifecycle. Chat
