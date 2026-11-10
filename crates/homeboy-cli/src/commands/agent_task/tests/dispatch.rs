@@ -3682,7 +3682,7 @@ fn issue_resolution_routes() {
             })).collect();
             homeboy_test_support::write_executable(&bin.join("gh"), &format!(
                 "#!/bin/sh\ncase \"$*\" in api*) printf '%s' '{}' ;; 'pr view'*) printf '%s' '{{\"baseRefName\":\"main\",\"headRefName\":\"custom/pr-head\"}}' ;; *) printf '[]' ;; esac\n",
-                json!([events])
+                json!(events)
             ), 0o755).unwrap();
             let mut input = cook_args_from_cli(
                 [
