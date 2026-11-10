@@ -198,6 +198,10 @@ fn shared_asset_roots_from_manifest(manifest: &Path) -> Vec<std::ffi::OsString> 
 
 fn discover_extension_entry(path: PathBuf) -> Option<DiscoveredExtension> {
     let id = path.file_name()?.to_string_lossy().to_string();
+    // Dot-prefixed entries are metadata or updater scratch dirs, never extensions.
+    if id.starts_with('.') {
+        return None;
+    }
     let metadata = std::fs::symlink_metadata(&path).ok()?;
     if metadata.file_type().is_symlink() && !path.exists() {
         let target = std::fs::read_link(&path).ok();
@@ -457,6 +461,28 @@ mod tests {
     fn test_load_all_extensions() {
         crate::test_support::with_isolated_home(|_| {
             assert!(load_all_extensions().unwrap().is_empty());
+        });
+    }
+
+    #[test]
+    fn discovery_skips_dot_prefixed_update_scratch_dirs() {
+        crate::test_support::with_isolated_home(|_| {
+            let extensions = paths::extensions().unwrap();
+            let valid_dir = extensions.join("valid");
+            std::fs::create_dir_all(&valid_dir).unwrap();
+            std::fs::write(
+                valid_dir.join("valid.json"),
+                r#"{"name":"Valid","version":"1.0.0"}"#,
+            )
+            .unwrap();
+            std::fs::create_dir_all(extensions.join(".update-clone-tmp-valid")).unwrap();
+
+            let discovered = discover_extensions();
+            assert_eq!(discovered.len(), 1);
+            let DiscoveredExtension::Valid(manifest) = &discovered[0] else {
+                panic!("only the valid extension must be discovered");
+            };
+            assert_eq!(manifest.id, "valid");
         });
     }
 
