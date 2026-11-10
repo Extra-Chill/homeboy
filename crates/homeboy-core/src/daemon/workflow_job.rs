@@ -559,6 +559,14 @@ fn finish(
     if state.status == InstanceStatus::Succeeded {
         let admission = (|| -> Result<()> {
             if let Some(child) = next_pass(request, &state)? {
+                let child = match child {
+                    NextPass::Admit(child) => child,
+                    NextPass::Stop(reason) => {
+                        state.reason = Some(format!("chain ended: {reason}"));
+                        store.record_controller_prepared(job_id, to_value(&state)?)?;
+                        return Ok(());
+                    }
+                };
                 let envelope = serde_json::from_value(child.submission()?)
                     .map_err(|error| invalid(format!("invalid next pass: {error}")))?;
                 let admission = super::with_daemon_job_admission(|| {
@@ -596,11 +604,15 @@ fn finish(
     }
 }
 
+/// A configured chain either admits its next pass or ends for a recorded
+/// reason, so a finished chain is distinguishable from a stalled one.
+enum NextPass {
+    Admit(Box<WorkflowJobRequest>),
+    Stop(String),
+}
+
 /// Build a replay-stable child from the admitted (pinned) definition.
-fn next_pass(
-    request: &WorkflowJobRequest,
-    state: &InstanceState,
-) -> Result<Option<WorkflowJobRequest>> {
+fn next_pass(request: &WorkflowJobRequest, state: &InstanceState) -> Result<Option<NextPass>> {
     let Some(next) = &request.definition.next_pass else {
         return Ok(None);
     };
@@ -619,10 +631,16 @@ fn next_pass(
         .and_then(Value::as_u64)
         .filter(|n| *n >= 1 && *n <= u64::from(u32::MAX))
         .ok_or_else(|| invalid("next_pass requires a positive integer iteration"))?;
-    if iteration >= u64::from(next.max_iterations)
-        || next.when.as_ref().is_some_and(|gate| !gate.evaluate(state))
-    {
-        return Ok(None);
+    if iteration >= u64::from(next.max_iterations) {
+        return Ok(Some(NextPass::Stop(format!(
+            "max_iterations {} reached",
+            next.max_iterations
+        ))));
+    }
+    if next.when.as_ref().is_some_and(|gate| !gate.evaluate(state)) {
+        return Ok(Some(NextPass::Stop(
+            "next_pass.when gate did not pass".into(),
+        )));
     }
     let mut streak = 1;
     if let Some(stop) = &next.stop_unchanged {
@@ -645,7 +663,10 @@ fn next_pass(
                 + 1;
         }
         if streak >= u64::from(stop.passes) {
-            return Ok(None);
+            return Ok(Some(NextPass::Stop(format!(
+                "step `{}` output `{}` unchanged for {streak} passes",
+                stop.step, stop.output
+            ))));
         }
     }
     fn render(value: &Value, state: &InstanceState) -> Result<Value> {
@@ -689,7 +710,7 @@ fn next_pass(
     child.instance = child
         .definition
         .instance_id(&child.inputs, child.instance_name.as_deref());
-    Ok(Some(child))
+    Ok(Some(NextPass::Admit(Box::new(child))))
 }
 
 /// Every event the ledger holds for this state, in a deterministic order.
