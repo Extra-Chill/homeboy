@@ -253,16 +253,14 @@ fn ensure_running_times_out_when_lifecycle_lock_remains_held() {
         let _lock = super::super::acquire_daemon_operation_lock().expect("hold lifecycle lock");
 
         let err = ensure_running_with_operations(
-            Duration::from_millis(10),
-            super::super::acquire_daemon_operation_lock_for_ensure,
+            || super::super::acquire_daemon_operation_lock_with_wait(Duration::from_millis(10)),
             || unreachable!("lock acquisition should time out first"),
             |_| unreachable!("lock acquisition should time out first"),
             || unreachable!("lock acquisition should time out first"),
         )
         .expect_err("ensure should time out behind held lock");
 
-        assert!(err.message.contains("timed out"));
-        assert!(err.message.contains("ensure-running lifecycle lock"));
+        assert!(err.message.contains("held by live PID"));
     });
 }
 
@@ -278,8 +276,7 @@ fn ensure_running_returns_stale_live_daemon_without_starting_duplicate() {
         let start_state = Arc::clone(&state);
 
         let attached = ensure_running_with_operations(
-            Duration::from_millis(50),
-            super::super::acquire_daemon_operation_lock_for_ensure,
+            || super::super::acquire_daemon_operation_lock_with_wait(Duration::from_millis(50)),
             move || {
                 Ok(fake_status(
                     read_state.lock().expect("state").daemon.clone(),
@@ -352,8 +349,7 @@ fn ensure_running_concurrent_callers_wait_for_slow_startup() {
 fn ensure_running_returns_the_startup_failure() {
     with_isolated_home(|_| {
         let err = ensure_running_with_operations(
-            Duration::from_millis(50),
-            super::super::acquire_daemon_operation_lock_for_ensure,
+            || super::super::acquire_daemon_operation_lock_with_wait(Duration::from_millis(50)),
             || Ok(fake_status(None, false)),
             |_| false,
             || Err(crate::error::Error::internal_unexpected("startup failed")),
@@ -720,8 +716,7 @@ fn ensure_with_fake_operations(
         let start_state = Arc::clone(&state);
         let daemon_pid = daemon.pid;
         ensure_running_with_operations(
-            Duration::from_secs(1),
-            super::super::acquire_daemon_operation_lock_for_ensure,
+            || super::super::acquire_daemon_operation_lock_with_wait(Duration::from_secs(1)),
             move || {
                 Ok(fake_status(
                     read_state.lock().expect("state").daemon.clone(),
@@ -750,8 +745,7 @@ fn ensure_with_slow_fake_operations(
         let start_state = Arc::clone(&state);
         let daemon_pid = daemon.pid;
         ensure_running_with_operations(
-            Duration::from_secs(1),
-            super::super::acquire_daemon_operation_lock_for_ensure,
+            || super::super::acquire_daemon_operation_lock_with_wait(Duration::from_secs(1)),
             move || {
                 Ok(fake_status(
                     read_state.lock().expect("state").daemon.clone(),
@@ -781,8 +775,7 @@ fn locked_start_with_fake_operations(
         let start_state = Arc::clone(&state);
         let daemon_pid = daemon.pid;
         super::ensure_running_with_operations(
-            Duration::from_secs(1),
-            super::super::acquire_daemon_operation_lock_for_ensure,
+            || super::super::acquire_daemon_operation_lock_with_wait(Duration::from_secs(1)),
             move || {
                 Ok(fake_status(
                     read_state.lock().expect("state").daemon.clone(),
