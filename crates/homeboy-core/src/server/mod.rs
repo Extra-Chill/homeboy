@@ -77,7 +77,7 @@ pub struct RunnerSettings {
     pub service_managed: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub concurrency_limit: Option<usize>,
-    /// Sustained PSI avg300 percentage limits (CPU some, IO/memory full).
+    /// PSI avg60 percentage limits (CPU some, IO/memory full).
     #[serde(default)]
     pub pressure_thresholds: crate::runner_pressure::PressureThresholds,
     /// Maximum seconds the controller waits for an accepted runner job. Unset

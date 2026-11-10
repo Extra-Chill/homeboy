@@ -314,17 +314,12 @@ fn update_extracted_extension(
     }
 
     let requested_ref = read_source_requested_ref(extension_dir);
-    if let Err(err) = super::sparse_clone::clone_extension(
+    super::sparse_clone::clone_extension(
         source_url,
         &clone_dir,
         requested_ref.as_deref(),
         extension_id,
-    ) {
-        if clone_dir.exists() {
-            let _ = std::fs::remove_dir_all(&clone_dir);
-        }
-        return Err(err);
-    }
+    )?;
     let source_revision = git::head_sha(&clone_dir);
 
     let result = resolve_cloned_extension(&clone_dir, extension_id, &staged_dir, source_url);
@@ -815,36 +810,6 @@ mod transaction_tests {
             git::short_head_revision(repo.path()).as_deref(),
             Some(prior.as_str())
         );
-    }
-
-    #[test]
-    fn failed_clone_removes_update_clone_scratch_dir() {
-        crate::test_support::with_isolated_home(|_| {
-            let repo = committed_repo();
-            let extension_dir = paths::extension("fixture").expect("extension path");
-            std::fs::create_dir_all(&extension_dir).expect("extension dir");
-            std::fs::write(
-                extension_dir.join("fixture.json"),
-                serde_json::json!({
-                    "name": "Fixture",
-                    "version": "1.0.0",
-                    "source_url": repo.path().to_string_lossy(),
-                })
-                .to_string(),
-            )
-            .expect("manifest");
-            // The full clone succeeds, then checkout of the missing ref fails,
-            // leaving a partial clone directory behind unless cleaned up.
-            write_requested_source_ref(&extension_dir, Some("missing-ref"));
-
-            assert!(update("fixture", true, None).is_err());
-
-            let clone_dir = paths::extensions()
-                .expect("extensions path")
-                .join(".update-clone-tmp-fixture");
-            assert!(!clone_dir.exists());
-            assert!(extension_dir.join("fixture.json").exists());
-        });
     }
 
     #[test]

@@ -27765,6 +27765,51 @@ fn repro_cook_fixture(
     (repository, options, dispatches)
 }
 
+/// #17737: the gate baseline checkout lives on the artifact volume, not in the
+/// process temp dir (often a small tmpfs), and is removed afterwards.
+#[test]
+fn gate_baseline_checkout_lives_under_the_artifact_root() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let (repository, _options, _dispatches) =
+            repro_cook_fixture("cook-gate-baseline-root", "true");
+        let source = repository.path().join("source");
+        let base_sha = String::from_utf8(
+            Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&source)
+                .output()
+                .expect("rev-parse")
+                .stdout,
+        )
+        .expect("utf8");
+        let workspace = crate::agent_task_service::cook_baseline::with_detached_base_checkout(
+            &source,
+            &source,
+            base_sha.trim(),
+            None,
+            |workspace| {
+                assert!(workspace.join("tracked.txt").is_file());
+                Ok(workspace.to_path_buf())
+            },
+        )
+        .expect("gate baseline checkout");
+
+        let parent = homeboy_core::artifacts::root()
+            .expect("artifact root")
+            .join("cook-baseline")
+            .canonicalize()
+            .expect("cook-baseline exists");
+        assert!(
+            workspace.starts_with(&parent),
+            "{workspace:?} not under {parent:?}"
+        );
+        assert!(
+            !workspace.exists(),
+            "gate baseline checkout was not removed"
+        );
+    });
+}
+
 /// #17653: a repro that already passes on the base does not reproduce the
 /// issue, so Cook stops before dispatch with `repro_passes_on_base`.
 #[test]
