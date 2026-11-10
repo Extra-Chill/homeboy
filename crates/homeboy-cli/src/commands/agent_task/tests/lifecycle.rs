@@ -5268,7 +5268,7 @@ fn diagnose_interrupted_local_owner_names_budget_and_duplication_instead_of_gene
         owner.wait().expect("reap cook observer");
 
         let record = lifecycle_status(run_id).expect("reconcile interrupted owner");
-        assert_eq!(record.state(), AgentTaskRunState::Cancelled);
+        assert_eq!(record.state(), AgentTaskRunState::Failed);
         assert_eq!(
             record.metadata["stop_reason"],
             "local Cook observer was interrupted during provider execution"
