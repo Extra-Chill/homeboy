@@ -845,8 +845,9 @@ pub(super) fn remote_daemon_recovery_freshness_from_status(
         daemon_version: daemon.and_then(|daemon| daemon.version.clone()),
         daemon_build_identity: daemon.and_then(|daemon| daemon.build_identity.clone()),
         runtime_paths: status.runtime_paths.clone().map(|mut paths| {
-            if let Ok(runner) = crate::load(runner_id) {
-                paths.apply_pressure_thresholds(runner.settings.pressure_thresholds);
+            if let (Some(pressure), Ok(runner)) = (paths.pressure.as_mut(), crate::load(runner_id))
+            {
+                pressure.apply_thresholds(&runner.settings.pressure_thresholds);
             }
             paths
         }),
