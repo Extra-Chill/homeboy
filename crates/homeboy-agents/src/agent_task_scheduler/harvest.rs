@@ -1353,6 +1353,84 @@ mod committed_harvest_tests {
     }
 
     #[test]
+    fn existing_pr_attempt_ignores_divergent_local_head_and_harvests_agent_commit() {
+        let temp = tempfile::tempdir().unwrap();
+        let (source, base) = candidate_attempt_repo(temp.path());
+        let remote = temp.path().join("remote.git");
+        git(
+            &source,
+            &[
+                "clone",
+                "--bare",
+                source.to_str().unwrap(),
+                remote.to_str().unwrap(),
+            ],
+        );
+        // Make the remote PR head a sibling of the unpublished local commit.
+        git(
+            &source,
+            &["commit", "--allow-empty", "-m", "remote PR work"],
+        );
+        let remote_head = git(&source, &["rev-parse", "HEAD"]);
+        git(
+            &source,
+            &["push", remote.to_str().unwrap(), "HEAD:refs/pull/42/head"],
+        );
+        git(&source, &["reset", "--hard", &base]);
+        let base = remote_head;
+        git(
+            &source,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        std::fs::write(source.join("file.txt"), "unpublished local change\n").unwrap();
+        git(&source, &["commit", "-am", "local branch work"]);
+        let local = git(&source, &["rev-parse", "HEAD"]);
+        let mut running =
+            committed_harvest_running_task(temp.path(), &source, Some(&source), local.clone());
+        running.request.workspace.task_url = Some("https://github.com/example/repo/pull/42".into());
+        running.request.metadata = serde_json::json!({"cook_hydrate_dependencies": false});
+        let scratch = temp.path().join("pr-attempt");
+        std::fs::create_dir(&scratch).unwrap();
+        let attempt = super::super::attempt_workspace::prepare_attempt_workspace(
+            &mut running.request,
+            Some(&local),
+            None,
+            &scratch,
+        )
+        .unwrap()
+        .unwrap();
+        let workspace = PathBuf::from(running.request.workspace.root.as_ref().unwrap());
+        assert_eq!(git(&workspace, &["rev-parse", "HEAD"]), base);
+        assert_eq!(
+            running.request.workspace.attempt.as_ref().unwrap().base_ref,
+            base
+        );
+        assert_eq!(
+            running.request.metadata["cook_pr_head_resolution"]["local_head"],
+            local
+        );
+        std::fs::write(workspace.join("file.txt"), "agent change\n").unwrap();
+        git(&workspace, &["commit", "-am", "agent change"]);
+        let head = git(&workspace, &["rev-parse", "HEAD"]);
+        running.task_base_sha = Some(base.clone());
+        running._attempt_workspace = Some(attempt);
+        let mut outcome = committed_harvest_preflight_outcome(running.task_id.clone());
+        harvest_candidate_commit(&mut outcome, &running).unwrap();
+        let candidate = outcome.candidate.unwrap();
+        assert_eq!(candidate.base_sha, base);
+        assert_eq!(
+            git(
+                &workspace,
+                &[
+                    "rev-parse",
+                    &format!("{}^{{tree}}", candidate.candidate_sha)
+                ]
+            ),
+            git(&workspace, &["rev-parse", &format!("{head}^{{tree}}")])
+        );
+    }
+
+    #[test]
     fn committed_candidate_is_harvested_when_declared_output_is_invalid() {
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace = temp.path().join("attempt-workspace");

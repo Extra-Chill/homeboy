@@ -755,6 +755,36 @@ pub(super) fn prepare_attempt_workspace_in_root(
     let Some(base) = base else {
         return Ok(None);
     };
+    // Existing PRs are remote work, not unpublished work on a durable local
+    // branch. Fetch the PR ref even when that branch already exists locally.
+    let remote_base = if let Some(number) = request
+        .workspace
+        .task_url
+        .as_deref()
+        .and_then(|url| url.split("/pull/").nth(1))
+        .and_then(|tail| tail.split(['/', '?', '#']).next())
+        .filter(|number| !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()))
+    {
+        git_output(
+            &root,
+            &[
+                "fetch",
+                "--no-tags",
+                "origin",
+                &format!("refs/pull/{number}/head"),
+            ],
+        )?;
+        let remote = git_output(&root, &["rev-parse", "FETCH_HEAD^{commit}"])?;
+        let local = git_output(&root, &["rev-parse", "HEAD"])?;
+        request.metadata["cook_pr_head_resolution"] = serde_json::json!({
+            "source": "fetched_remote_pr_head", "remote_head": remote,
+            "local_head": local, "local_head_ignored": local != remote,
+        });
+        Some(remote)
+    } else {
+        None
+    };
+    let base = remote_base.as_deref().unwrap_or(base);
     let identity = format!("attempt-{}", uuid::Uuid::new_v4());
     // The attempt checkout is a child of the scheduler's durably registered
     // scratch lease, never an untracked system-temporary worktree.
