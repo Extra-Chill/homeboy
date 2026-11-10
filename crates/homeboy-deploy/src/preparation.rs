@@ -542,7 +542,15 @@ fn prepare_payload(
         tag: exact_ref
             .as_ref()
             .map(|identity| identity.requested_ref.clone())
-            .unwrap_or_else(|| format!("v{version}")),
+            .or_else(|| {
+                release_artifact
+                    .as_ref()
+                    .map(|artifact| artifact.tag.clone())
+            })
+            .map(Ok)
+            .unwrap_or_else(|| {
+                crate::orchestration_tag_checkout::deploy_tag_for_version(&component, &version)
+            })?,
         source_commit,
     };
     artifact.validate(&component.id, request.config.expected_version.as_deref())?;

@@ -123,7 +123,7 @@ pub(super) fn resolve_deploy_tags(
         let path = &component.local_path;
 
         let tag = match expected_version {
-            Some(version) => deploy_tag_for_version(component, version),
+            Some(version) => deploy_tag_for_version(component, version)?,
             None => match release::latest_component_tag(component) {
                 Ok(Some(t)) => t,
                 Ok(None) => {
@@ -313,11 +313,27 @@ pub(super) fn checkout_deploy_tags(
     checkout_resolved_deploy_tags(resolve_deploy_tags(components, expected_version)?)
 }
 
-pub(super) fn deploy_tag_for_version(component: &Component, version: &str) -> String {
-    release::component_tag_name(component, version).unwrap_or_else(|_| {
-        let version = version.trim_start_matches('v');
-        format!("v{}", version)
-    })
+pub(super) fn deploy_tag_for_version(component: &Component, version: &str) -> Result<String> {
+    if !component.has_local_checkout() {
+        if let Some(github) = component
+            .remote_url
+            .as_deref()
+            .and_then(homeboy_core::git::release_download::parse_github_url)
+        {
+            return homeboy_core::git::release_download::release_tag_for_component_version(
+                &github,
+                &component.github,
+                &component.id,
+                version,
+            );
+        }
+    }
+    Ok(
+        release::component_tag_name(component, version).unwrap_or_else(|_| {
+            let version = version.trim_start_matches('v');
+            format!("v{}", version)
+        }),
+    )
 }
 
 /// The tag a default (no `--version`, no `--ref`) deploy would select for

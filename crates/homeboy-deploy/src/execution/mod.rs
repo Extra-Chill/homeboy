@@ -490,6 +490,49 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn explicit_checkout_less_version_agrees_with_release_artifact_plan() {
+        let _lock = homeboy_core::test_support::env_lock();
+        let bin = tempfile::tempdir().unwrap();
+        write_fake_binary(&bin.path().join("gh"), "#!/bin/sh\necho fake-token\n");
+        write_fake_binary(&bin.path().join("curl"),
+            "#!/bin/sh\ncat > /dev/null 2>&1\nfor arg in \"$@\"; do last=\"$arg\"; done\ncase \"$last\" in\n *releases/tags/data-machine-events-v0.84.1) printf '{\"tag_name\":\"data-machine-events-v0.84.1\"}\\n200' ;;\n *) printf '\\n404' ;;\nesac\n");
+        let mut path = bin.path().as_os_str().to_os_string();
+        path.push(":");
+        path.push(std::env::var_os("PATH").unwrap_or_default());
+        let _path = homeboy_core::test_support::EnvVarGuard::set("PATH", path);
+        for (id, expected) in [
+            ("data-machine-events", "data-machine-events-v0.84.1"),
+            ("root", "v0.84.1"),
+        ] {
+            let component = Component {
+                id: id.into(),
+                remote_url: Some("https://github.com/Extra-Chill/data-machine".into()),
+                build_artifact: Some(format!("{id}.zip")),
+                ..Component::default()
+            };
+            assert!(!component.has_local_checkout());
+            let config = DeployConfig {
+                expected_version: Some("0.84.1".into()),
+                ..DeployConfig::default()
+            };
+            let deployed_ref =
+                crate::orchestration_tag_checkout::deploy_tag_for_version(&component, "0.84.1")
+                    .unwrap();
+            assert_eq!(deployed_ref, expected);
+            match release_artifact_plan(&component, &config, false, false) {
+                ReleaseArtifactPlan::Reuse { tag, url } => {
+                    assert_eq!(tag, deployed_ref);
+                    assert_eq!(url, format!(
+                        "https://github.com/Extra-Chill/data-machine/releases/download/{expected}/{id}.zip"
+                    ));
+                }
+                ReleaseArtifactPlan::LocalBuild { reason } => panic!("{reason}"),
+            }
+        }
+    }
+
     #[test]
     fn artifact_inputs_still_try_release_artifact_download() {
         let component = Component {

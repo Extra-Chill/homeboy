@@ -1571,8 +1571,14 @@ mod tests {
     fn deploy_tag_for_version_formats_regular_release_tag() {
         let component = make_component("sample-plugin", "/tmp/not-a-git-repo");
 
-        assert_eq!(deploy_tag_for_version(&component, "0.139.18"), "v0.139.18");
-        assert_eq!(deploy_tag_for_version(&component, "v0.139.18"), "v0.139.18");
+        assert_eq!(
+            deploy_tag_for_version(&component, "0.139.18").unwrap(),
+            "v0.139.18"
+        );
+        assert_eq!(
+            deploy_tag_for_version(&component, "v0.139.18").unwrap(),
+            "v0.139.18"
+        );
     }
 
     #[test]
@@ -1583,7 +1589,10 @@ mod tests {
         std::fs::create_dir_all(&component_dir).expect("component dir");
         let component = make_component("plugin", &component_dir.to_string_lossy());
 
-        assert_eq!(deploy_tag_for_version(&component, "1.2.3"), "plugin-v1.2.3");
+        assert_eq!(
+            deploy_tag_for_version(&component, "1.2.3").unwrap(),
+            "plugin-v1.2.3"
+        );
     }
 
     #[test]
