@@ -1,3 +1,4 @@
+pub mod data_inputs;
 pub mod failure_excerpt;
 pub mod placement;
 pub mod verdict;
@@ -241,6 +242,8 @@ pub struct AgentTaskGateEnvironmentPolicy {
     #[serde(default)]
     pub extension_inputs: Vec<AgentTaskGateExtensionInput>,
     #[serde(default)]
+    pub data_inputs: Vec<data_inputs::GateInput>,
+    #[serde(default)]
     pub requirements: AgentTaskGateRequirements,
 }
 
@@ -323,6 +326,7 @@ impl Default for AgentTaskGateEnvironmentPolicy {
             shared_cargo_target: None,
             admitted_component_id: None,
             extension_inputs: Vec::new(),
+            data_inputs: Vec::new(),
             requirements: AgentTaskGateRequirements::default(),
         }
     }
@@ -885,6 +889,8 @@ pub struct AgentTaskGateEnvironment {
     pub package_artifacts: Vec<AgentTaskGatePackageArtifactProvenance>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extension_inputs: Vec<AgentTaskGateExtensionInputProvenance>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub data_inputs: Vec<data_inputs::GateInput>,
     /// The admitted component's linked extensions, resolved on the host that
     /// runs the gate and exposed read-only (symlinked) under the isolated HOME
     /// (#15383). Explicit `extension_inputs` take precedence by id.
@@ -1033,6 +1039,7 @@ impl AgentTaskGateEnvironment {
             && self.sanitized.is_empty()
             && self.package_artifacts.is_empty()
             && self.extension_inputs.is_empty()
+            && self.data_inputs.is_empty()
             && self.rust_cache.is_none()
             && self.cargo_target.is_none()
     }
@@ -1064,6 +1071,7 @@ impl AgentTaskGateEnvironment {
             hydrate_dependencies: true,
             shared_cargo_target: self.cargo_target.as_ref().map(|_| true),
             admitted_component_id: None,
+            data_inputs: self.data_inputs.clone(),
             extension_inputs: self
                 .extension_inputs
                 .iter()
@@ -4421,6 +4429,7 @@ fn selected_gate_environment(
         ..AgentTaskGateEnvironment::default()
     };
     let mut values = policy.variables.clone();
+    report.data_inputs = policy.data_inputs.clone();
     for (name, value) in &policy.variables {
         report.inherited.push(AgentTaskGateEnvironmentVariable {
             name: name.clone(),
@@ -4515,6 +4524,16 @@ fn selected_gate_environment(
             })?;
             set_isolated_environment_variable(&mut report, &mut values, name, path);
         }
+    }
+    let input_store = if policy.data_inputs.is_empty() {
+        None
+    } else {
+        Some(data_inputs::store_root()?)
+    };
+    for input in &policy.data_inputs {
+        let path = input.path_in(input_store.as_deref().expect("declared inputs"))?;
+        input.verify(&path)?;
+        values.insert(input.env.clone(), path.display().to_string());
     }
     Ok(SelectedGateEnvironment {
         report,
@@ -5023,6 +5042,7 @@ pub(crate) fn preflight_verify_gate_options(cwd: &Path, gates: &VerifyGateOption
         && gates.gate_target_probes().is_empty()
         && gates.gate_package_artifacts.is_empty()
         && gates.gate_environment.extension_inputs.is_empty()
+        && gates.gate_environment.data_inputs.is_empty()
         && gates.gate_environment.requirements == AgentTaskGateRequirements::default()
     {
         return Ok(());
@@ -10531,6 +10551,7 @@ mod tests {
             shared_cargo_target: Some(false),
             admitted_component_id: None,
             extension_inputs: Vec::new(),
+            data_inputs: Vec::new(),
             requirements: AgentTaskGateRequirements::default(),
         };
         let report = run_gate_command_with_policy_and_runtime_tmpdir_and_environment(

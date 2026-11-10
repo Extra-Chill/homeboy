@@ -925,6 +925,8 @@ pub(crate) fn preview_cook(
         capacity.as_ref(),
         args.repository_identity.as_ref(),
     );
+    resolved["gate_inputs"] = serde_json::to_value(&args.gates.gate_inputs)
+        .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))?;
     resolved["gate_contract_validation"] =
         preview_gate_contract_disclosure(&gate_contract_validation, &args.gates.verify);
     resolved["provider"] = executor;

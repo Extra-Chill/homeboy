@@ -211,6 +211,28 @@ impl CookOptions {
         &self,
     ) -> homeboy::core::Result<serde_json::Map<String, serde_json::Value>> {
         let mut flags = self.explicit.clone();
+        if flags.contains_key("gate-input") {
+            let mut policy = AgentTaskGateEnvironmentPolicy {
+                data_inputs: self.gates.gate_inputs.clone(),
+                variables: self.gates.gate_environment.iter().cloned().collect(),
+                preserve: self
+                    .gates
+                    .gate_environment_preserve
+                    .iter()
+                    .cloned()
+                    .collect(),
+                ..Default::default()
+            };
+            let root = homeboy::agents::agent_tasks::gate::data_inputs::store_root()?;
+            homeboy::agents::agent_tasks::gate::data_inputs::admit(&mut policy, &root)?;
+            let values = policy
+                .data_inputs
+                .iter()
+                .map(|input| serde_json::to_string(input).map(serde_json::Value::String))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| homeboy::core::Error::internal_json(e.to_string(), None))?;
+            flags.insert("gate-input".into(), serde_json::Value::Array(values));
+        }
         // File-backed gate programs are interpreted at the operator's invocation
         // directory, not at a later workflow worker's working directory.
         let command = CookOptionValues::augment_args(clap::Command::new("cook-options"));
@@ -419,6 +441,10 @@ pub struct VerifyGateArgs {
     /// `source`. Only selected inputs are copied into isolated HOME.
     #[arg(long = "gate-extension-input", value_name = "JSON", value_parser = parse_gate_extension_input)]
     pub gate_extension_inputs: Vec<AgentTaskGateExtensionInput>,
+
+    /// Snapshot caller-local data for every gate, on local or Lab placement. Repeat for multiple files or directories (up to 1 GiB each); gates read the immutable snapshot through the declared env variable. Example: --gate-input '{"id":"capture","source":"/abs/site","env":"IMPORT_CAPTURE"}'. Preview validates and reports digest, size and env; recovery replays the recorded digest.
+    #[arg(long = "gate-input", value_name = "JSON", value_parser = parse_gate_data_input)]
+    pub gate_inputs: Vec<homeboy::agents::agent_tasks::gate::data_inputs::GateInput>,
     /// Run gates with an isolated `$HOME` so gate side effects do not touch the
     /// operator's home directory (default true).
     #[arg(
@@ -489,6 +515,17 @@ impl VerifyGateArgs {
     /// Resolve file inputs while the controller invocation directory still owns
     /// relative-path semantics, before Cook can provision or dispatch anything.
     pub(crate) fn snapshot_file_inputs(&mut self) -> homeboy::core::Result<()> {
+        if !self.gate_inputs.is_empty() {
+            let mut policy = AgentTaskGateEnvironmentPolicy {
+                data_inputs: self.gate_inputs.clone(),
+                variables: self.gate_environment.iter().cloned().collect(),
+                preserve: self.gate_environment_preserve.iter().cloned().collect(),
+                ..Default::default()
+            };
+            let root = homeboy::agents::agent_tasks::gate::data_inputs::store_root()?;
+            homeboy::agents::agent_tasks::gate::data_inputs::admit(&mut policy, &root)?;
+            self.gate_inputs = policy.data_inputs;
+        }
         if !self.input_sources.is_empty() {
             if !self.verify_file.is_empty() || !self.private_verify_file.is_empty() {
                 return Err(homeboy::core::Error::validation_invalid_argument(
@@ -716,6 +753,7 @@ impl From<VerifyGateArgs> for VerifyGateOptions {
                     .or_else(|| args.no_gate_shared_cargo_target.then_some(false)),
                 admitted_component_id: None,
                 extension_inputs: args.gate_extension_inputs,
+                data_inputs: args.gate_inputs,
             },
             gate_toolchains: args
                 .gate_toolchains
@@ -756,6 +794,12 @@ fn parse_gate_toolchain_requirement(
         .map_err(|error| format!("invalid gate toolchain requirement: {error}"))
 }
 
+fn parse_gate_data_input(
+    value: &str,
+) -> Result<homeboy::agents::agent_tasks::gate::data_inputs::GateInput, String> {
+    serde_json::from_str(value).map_err(|error| format!("invalid gate input: {error}"))
+}
+
 fn parse_gate_extension_input(value: &str) -> Result<AgentTaskGateExtensionInput, String> {
     serde_json::from_str(value)
         .map_err(|error| format!("invalid gate extension input declaration: {error}"))
@@ -787,6 +831,45 @@ mod tests {
     struct TestCli {
         #[command(flatten)]
         gates: VerifyGateArgs,
+    }
+
+    #[test]
+    fn gate_input_preview_rejects_collisions() {
+        let _lock = homeboy::core::test_support::env_lock();
+        let source = tempfile::NamedTempFile::new().unwrap();
+        let declaration = |id: &str, env: &str| {
+            serde_json::json!({"id":id,"env":env,"source":source.path()}).to_string()
+        };
+        for (first, second, extra) in [
+            (
+                declaration("same", "FIRST"),
+                declaration("same", "SECOND"),
+                false,
+            ),
+            (
+                declaration("first", "SAME"),
+                declaration("second", "SAME"),
+                false,
+            ),
+            (
+                declaration("first", "COLLISION"),
+                declaration("second", "SECOND"),
+                true,
+            ),
+        ] {
+            let mut argv = vec![
+                "cook".to_string(),
+                "--gate-input".into(),
+                first,
+                "--gate-input".into(),
+                second,
+            ];
+            if extra {
+                argv.extend(["--gate-env".into(), "COLLISION=value".into()]);
+            }
+            let mut args = TestCli::try_parse_from(argv).unwrap();
+            assert!(args.gates.snapshot_file_inputs().is_err());
+        }
     }
 
     #[test]
@@ -939,6 +1022,7 @@ mod tests {
             *batch
         }
         let gate_file = serde_json::json!({"id":"shared-gate", "env":"SHARED_GATE", "source":std::env::current_dir().unwrap().join("Cargo.toml")}).to_string();
+        let gate_input = serde_json::json!({"id":"capture", "env":"CAPTURE", "source":std::env::current_dir().unwrap().join("Cargo.toml")}).to_string();
         let options = [
             ("gate-file", gate_file.as_str()),
             ("backend", "fixture"), ("selector", "provider"), ("model", "model"),
@@ -960,6 +1044,7 @@ mod tests {
             ("gate-toolchain-spec", r#"{"command":"custom","probe_arguments":["probe"]}"#),
             ("gate-package-artifact", r#"{"id":"pkg","environment":{"name":"PKG"},"remediation":{}}"#),
             ("gate-extension-input", r#"{"id":"extension","source":"/extension"}"#),
+            ("gate-input", gate_input.as_str()),
             ("isolate-gate-home", "false"), ("isolate-gate-xdg", "false"),
         ].into_iter().collect::<BTreeMap<_, _>>();
         let command = CookOptionValues::augment_args(clap::Command::new("shared"));
@@ -1012,7 +1097,18 @@ mod tests {
             let AgentTaskCommand::Cook(cook) = task.command else {
                 panic!("Cook")
             };
-            assert_eq!(cook.dispatch.cook.values, args.cook.values);
+            let mut expected = args.cook.values.clone();
+            let mut input_policy = AgentTaskGateEnvironmentPolicy {
+                data_inputs: expected.gates.gate_inputs.clone(),
+                ..Default::default()
+            };
+            homeboy::agents::agent_tasks::gate::data_inputs::admit(
+                &mut input_policy,
+                &homeboy::agents::agent_tasks::gate::data_inputs::store_root().unwrap(),
+            )
+            .unwrap();
+            expected.gates.gate_inputs = input_policy.data_inputs;
+            assert_eq!(cook.dispatch.cook.values, expected);
             assert_eq!(
                 cook.dispatch.cook.child_flags().unwrap(),
                 args.cook.child_flags().unwrap()

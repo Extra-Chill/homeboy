@@ -191,6 +191,49 @@ impl RunnerFileTransfer {
         )
     }
 
+    /// Upload gate data using its independent data-sized cap, retaining evidence limits.
+    pub(crate) fn upload_gate_input(
+        &self,
+        local: &str,
+        remote: &str,
+        digest: &str,
+        size: u64,
+    ) -> Result<()> {
+        if size > 1024 * 1024 * 1024 {
+            return Err(Error::invalid_argument("gate_input", "input exceeds 1 GiB"));
+        }
+        let snapshot = private_bounded_snapshot(local, digest, size)?;
+        self.publish_private_snapshot(
+            snapshot.path(),
+            remote,
+            digest,
+            size,
+            "gate input upload",
+            "gate input publish",
+        )
+    }
+
+    pub(crate) fn gate_input_store_hit(&self, remote: &str) -> bool {
+        self.client
+            .execute(&format!(
+                "test -f {}",
+                shell::quote_arg(&format!("{remote}.complete"))
+            ))
+            .success
+    }
+
+    pub(crate) fn finish_gate_input(&self, remote: &str) -> Result<()> {
+        let result = self.client.execute(&format!(
+            "chmod -R a-w {} && touch {}",
+            shell::quote_arg(remote),
+            shell::quote_arg(&format!("{remote}.complete"))
+        ));
+        if !result.success {
+            return Err(self.operation_error("seal gate input", remote, result.stderr));
+        }
+        Ok(())
+    }
+
     fn publish_private_snapshot(
         &self,
         snapshot: &std::path::Path,
@@ -308,6 +351,14 @@ fn private_evidence_snapshot(
             None,
         ));
     }
+    private_bounded_snapshot(local_path, expected_sha256, expected_size)
+}
+
+fn private_bounded_snapshot(
+    local_path: &str,
+    expected_sha256: &str,
+    expected_size: u64,
+) -> Result<tempfile::NamedTempFile> {
     let mut options = fs::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]

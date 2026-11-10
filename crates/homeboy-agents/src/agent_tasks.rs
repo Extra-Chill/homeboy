@@ -140,13 +140,13 @@ pub mod review_dossier {
 
 /// Gate report contracts, visibility, and reveal policies.
 pub mod gate {
-    pub use super::super::agent_task_gate::placement;
     pub use super::super::agent_task_gate::{
         component_lint_base, legacy_gate_argv, preflight_gate_toolchains,
         run_declared_test_with_supervision, run_gate_command_with_supervision,
         AgentTaskGateLiveStatus, AgentTaskGateReport, AgentTaskGateStatus,
         AgentTaskGateTermination, GateSupervision, NO_REPRO_GATE_WARNING,
     };
+    pub use super::super::agent_task_gate::{data_inputs, placement};
     pub use super::super::agent_task_gate::{
         AgentTaskGateEnvironmentMode, AgentTaskGateEnvironmentPolicy, AgentTaskGateExecutionPolicy,
         AgentTaskGateExtensionInput, AgentTaskGateInputSource,

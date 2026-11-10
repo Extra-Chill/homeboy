@@ -53,6 +53,42 @@ fn gate(
 }
 
 #[test]
+fn gate_input_transfer_reuses_recorded_digest() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let source = tempfile::NamedTempFile::new().unwrap();
+        fs::write(source.path(), "snapshot").unwrap();
+        let runner_root = tempfile::tempdir().unwrap();
+        let runner: crate::Runner = serde_json::from_value(serde_json::json!({
+            "id":"gate-input-store", "kind":"local", "workspace_root":runner_root.path()
+        }))
+        .unwrap();
+        let mut policy = AgentTaskGateEnvironmentPolicy {
+            data_inputs: vec![serde_json::from_value(
+                serde_json::json!({"id":"data", "env":"DATA", "source":source.path()}),
+            )
+            .unwrap()],
+            ..Default::default()
+        };
+        homeboy_agents::agent_tasks::gate::data_inputs::admit(
+            &mut policy,
+            &homeboy_agents::agent_tasks::gate::data_inputs::store_root().unwrap(),
+        )
+        .unwrap();
+        let (_, first) = materialize_gate_inputs(&runner, &policy.data_inputs)
+            .unwrap()
+            .unwrap();
+        assert_eq!(first[0]["store_hit"], false);
+        fs::write(source.path(), "mutated").unwrap();
+        let (root, second) = materialize_gate_inputs(&runner, &policy.data_inputs)
+            .unwrap()
+            .unwrap();
+        assert_eq!(second[0]["store_hit"], true);
+        let path = policy.data_inputs[0].path_in(Path::new(&root)).unwrap();
+        assert_eq!(fs::read_to_string(path).unwrap(), "snapshot");
+    });
+}
+
+#[test]
 #[ignore = "requires the native verifier's owned SSH runner and candidate daemon"]
 fn full_native_transport() {
     let fixture = std::path::PathBuf::from(

@@ -299,6 +299,78 @@ fn observe_gate_admission(
     Ok((admission, snapshot))
 }
 
+/// Stage admitted data once per digest, independently of candidate workspaces.
+pub(crate) fn materialize_gate_inputs(
+    runner: &crate::Runner,
+    inputs: &[homeboy_agents::agent_tasks::gate::data_inputs::GateInput],
+) -> Result<Option<(String, Vec<serde_json::Value>)>> {
+    if inputs.is_empty() {
+        return Ok(None);
+    }
+    let root = format!(
+        "{}/_homeboy_gate_inputs",
+        runner
+            .workspace_root
+            .as_deref()
+            .ok_or_else(|| Error::invalid_argument("gate_input", "runner needs workspace_root"))?
+            .trim_end_matches('/')
+    );
+    let local_root = homeboy_agents::agent_tasks::gate::data_inputs::store_root()?;
+    if runner.kind == crate::RunnerKind::Local {
+        let mut evidence = Vec::new();
+        for input in inputs {
+            let local = input.path_in(&local_root)?;
+            input.verify(&local)?;
+            let hit = input.materialize(&local, Path::new(&root))?;
+            evidence.push(serde_json::json!({"id":input.id,"digest":input.digest,"size_bytes":input.size_bytes,"store_hit":hit}));
+        }
+        return Ok(Some((root, evidence)));
+    }
+    let transfer = crate::transport::RunnerFileTransfer::for_runner(runner)?;
+    fn upload(
+        transfer: &crate::transport::RunnerFileTransfer,
+        local: &Path,
+        remote: &Path,
+    ) -> Result<()> {
+        let meta = std::fs::symlink_metadata(local)
+            .map_err(|e| Error::internal_io(e.to_string(), None))?;
+        if meta.is_dir() {
+            transfer.ensure_directory(&remote.display().to_string())?;
+            for entry in
+                std::fs::read_dir(local).map_err(|e| Error::internal_io(e.to_string(), None))?
+            {
+                let entry = entry.map_err(|e| Error::internal_io(e.to_string(), None))?;
+                upload(transfer, &entry.path(), &remote.join(entry.file_name()))?;
+            }
+        } else {
+            let digest = homeboy_engine_primitives::content_hash::sha256_file(local)?;
+            transfer.upload_gate_input(
+                &local.display().to_string(),
+                &remote.display().to_string(),
+                &digest,
+                meta.len(),
+            )?;
+        }
+        Ok(())
+    }
+    let mut evidence = Vec::new();
+    for input in inputs {
+        let local = input.path_in(&local_root)?;
+        input.verify(&local)?;
+        let remote = input.path_in(Path::new(&root))?;
+        let store_hit = transfer.gate_input_store_hit(&remote.display().to_string());
+        evidence.push(serde_json::json!({"id":input.id,"digest":input.digest,"size_bytes":input.size_bytes,"store_hit":store_hit}));
+        if store_hit {
+            eprintln!("gate input {}: store hit ({})", input.id, input.digest);
+            continue;
+        }
+        transfer.ensure_private_directory(&remote.parent().unwrap().display().to_string())?;
+        upload(&transfer, &local, &remote)?;
+        transfer.finish_gate_input(&remote.display().to_string())?;
+    }
+    Ok(Some((root, evidence)))
+}
+
 fn execute_owned(
     cwd: &Path,
     request: &LabGateRequest,
@@ -326,6 +398,7 @@ fn execute_owned(
     }
     let status = &snapshot.status;
     let runner = crate::load(&request.runner_id)?;
+    let input_store = materialize_gate_inputs(&runner, &request.environment.data_inputs)?;
     let resource_run = homeboy_core::engine::run_dir::RunDir::create()?;
     let resource_invocation = homeboy_core::engine::invocation::InvocationGuard::acquire(
         &resource_run,
@@ -431,7 +504,12 @@ fn execute_owned(
         request.environment.admitted_component_id.as_deref(),
         cwd,
     );
-    let options = lab_gate_exec_options(command, run_id, secret_env_names);
+    let mut options = lab_gate_exec_options(command, run_id, secret_env_names);
+    if let Some((root, _)) = &input_store {
+        options
+            .env
+            .insert("HOMEBOY_GATE_INPUT_STORE".to_string(), root.clone());
+    }
     let mut execution = crate::RunnerExecRequest::new(&request.runner_id, options);
     execution.workspace_ref = Some(candidate.workspace_ref);
     let daemon_generation = status
@@ -730,6 +808,7 @@ fn execute_owned(
     }
     receipt.materialization = Some(
         serde_json::json!({"runner_extension_sources":actual_sources,
+            "gate_inputs": input_store.map(|(_, evidence)| evidence).unwrap_or_default(),
             "candidate_snapshot":candidate.snapshot_identity, "resource_snapshot":snapshot.snapshot_identity,
             "private_input_sha256":at_files.iter().map(|spec| &spec.content_sha256).collect::<Vec<_>>()}),
     );
