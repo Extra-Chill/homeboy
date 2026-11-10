@@ -4,6 +4,17 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.458.3] - 2026-11-10
+
+### Changed
+- CLI invocation ledger and homeboy runs friction
+
+### Fixed
+- type controller/runner version skew and report staged refresh as staged
+- accept redaction-clean --gate-env on detached admission and recommend it
+- carry iteration and previous through --resume-from
+- skip dot-prefixed update scratch dirs in discovery and clean failed clones
+
 ## [0.458.2] - 2026-11-10
 
 ### Changed
