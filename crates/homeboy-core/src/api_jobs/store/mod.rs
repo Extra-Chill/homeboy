@@ -554,6 +554,11 @@ impl JobStore {
         if let Some(persistence) = persistence {
             persistence.record_synced_state(state);
         }
+        self.install_durable_snapshot(inner, durable);
+        Ok(())
+    }
+
+    fn install_durable_snapshot(&self, inner: &mut JobStoreInner, durable: DurableJobStore) {
         let next_sequence = durable
             .jobs
             .iter()
@@ -572,7 +577,6 @@ impl JobStore {
         inner.compaction = durable.compaction;
         self.next_event_sequence
             .fetch_max(next_sequence, Ordering::SeqCst);
-        Ok(())
     }
 
     /// Apply one mutation to the current durable snapshot and commit it before
@@ -939,26 +943,6 @@ impl JobStore {
         Ok(store)
     }
 
-    /// A read-only, in-memory snapshot of the durable jobs, for inspection.
-    ///
-    /// Status and diagnosis read the ledger; they never persist it. Opening it
-    /// through [`Self::open_without_reconciliation`] committed a write
-    /// transaction, so every status read queued for the writer slot, failed
-    /// with `database is locked` under contention, and self-deadlocked when
-    /// read inside an action admission's own write transaction (#17381).
-    pub fn read_only_snapshot(path: impl Into<PathBuf>) -> Result<Self> {
-        let store = Self::default();
-        if let Some(durable) = sql_store::read_durable_store_readonly(&path.into())? {
-            let mut inner = store.inner.lock().expect("job store mutex poisoned");
-            inner.jobs = durable
-                .jobs
-                .into_iter()
-                .map(|stored| (stored.job.id, stored))
-                .collect();
-        }
-        Ok(store)
-    }
-
     /// Open durable jobs without treating active records as an implicit daemon
     /// restart. Daemon lifecycle recovery must select ownership explicitly.
     pub fn open_without_reconciliation(path: impl Into<PathBuf>) -> Result<Self> {
@@ -1014,7 +998,15 @@ impl JobStore {
             daemon_freshness_snapshot: Arc::default(),
             health_revision: Arc::default(),
         };
-        store.durable_transaction(|_| Ok(()))?;
+        // Load without the writer slot: readers (status, diagnose, action
+        // admission) must not queue behind writers or commit, and a reader
+        // inside another connection's write transaction must not deadlock
+        // (#17381). Every mutation reloads under the transaction lock.
+        let path = &store.persistence.as_ref().expect("persistent store").path;
+        if let Some(durable) = sql_store::read_durable_store_readonly(path)? {
+            let mut inner = store.inner.lock().expect("job store mutex poisoned");
+            store.install_durable_snapshot(&mut inner, durable);
+        }
         Ok(store)
     }
 

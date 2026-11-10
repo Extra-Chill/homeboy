@@ -1643,7 +1643,7 @@ pub fn read_status_at_paths(path: PathBuf, jobs_path: PathBuf) -> Result<DaemonS
     // Unstamped records have no proven owner and stay counted. A state dir
     // with no lease cannot own a job another daemon stamped with its lease,
     // even when that daemon predates scope stamps.
-    let job_store = JobStore::read_only_snapshot(&jobs_path)?
+    let job_store = JobStore::open_without_reconciliation(&jobs_path)?
         .with_daemon_scope(daemon_scope_for_state_path(&path));
     let job_store = match validation.state.as_ref() {
         Some(state) => job_store.with_daemon_lease(state.lease_id.clone()),
