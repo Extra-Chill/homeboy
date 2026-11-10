@@ -178,6 +178,7 @@ pub mod runner_inventory;
 pub mod runner_job_environment;
 pub mod runner_job_execution_context;
 pub mod runner_pressure;
+pub mod substrate_wait;
 pub mod runtime_promotion;
 pub mod scope;
 pub use homeboy_lab_contract::secret_env_plan;

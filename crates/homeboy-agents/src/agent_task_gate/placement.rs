@@ -356,18 +356,6 @@ impl LabGateFreshness {
     }
 }
 
-/// Reasons waiting can clear: capacity, pressure and a freshness that is not
-/// yet observed. Any other `RunnerAvailability` reason defers at once.
-const TRANSIENT_ADMISSION_REASONS: &[&str] = &[
-    "capacity_reached",
-    "capacity_unknown",
-    "pressure",
-    "daemon_freshness_unavailable",
-    "daemon_unverified",
-    "active_jobs_unavailable",
-    "active_jobs_not_queried",
-];
-
 /// One observation of a runner's Lab admission, carrying the same
 /// `RunnerAvailability` reasons `runner status` reports.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -394,10 +382,9 @@ impl LabGateAdmission {
         !self.accepts_jobs
             && !self.reasons.is_empty()
             && !matches!(self.freshness, LabGateFreshness::Refused(_))
-            && self
-                .reasons
-                .iter()
-                .all(|reason| TRANSIENT_ADMISSION_REASONS.contains(&reason.as_str()))
+            && homeboy_core::substrate_wait::reasons_are_transient(
+                self.reasons.iter().map(String::as_str),
+            )
     }
 
     /// The typed admission refusal, naming the reasons and freshness state.

@@ -94,6 +94,17 @@ pub fn has_accepted_runner_handoff(run_id: &str) -> Result<bool> {
     Ok(is_accepted_runner_handoff(&record))
 }
 
+/// Whether a failed Lab handoff may be dispatched again in place: the run is
+/// still live, no runner accepted a job, and no provider progress exists.
+/// Queued work waits through transient substrate refusals only while this
+/// holds (#17765).
+pub fn preacceptance_retry_safe(run_id: &str) -> Result<bool> {
+    let record = store::read_record(&sanitize_run_id(run_id))?;
+    Ok(!record.state().is_terminal()
+        && !is_accepted_runner_handoff(&record)
+        && !record.has_recorded_provider_progress())
+}
+
 /// Whether a run already carries durable provider-execution progress, so a
 /// later transport/handoff error must preserve its candidate instead of
 /// terminalizing it as a pre-execution failure (#9377). Returns `false` when no
