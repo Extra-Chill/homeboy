@@ -16,7 +16,7 @@ use homeboy::agents::agent_task_service::{
 
 use super::super::CmdResult;
 use super::run::CookContinueArgs;
-use super::{RecoverArgs, RetryArgs};
+use super::RecoverArgs;
 
 pub(super) fn recover(args: RecoverArgs) -> CmdResult<Value> {
     let performer = CliCookRecoveryPerformer { full: args.full };
@@ -179,14 +179,9 @@ impl CookRecoveryPerformer for CliCookRecoveryPerformer {
         ))
     }
 
+    /// Return once the successor is admitted; never wait on the retry (#17768).
     fn retry(&self, run_id: &str) -> homeboy::core::Result<(Value, i32)> {
-        super::run::retry_exact(RetryArgs {
-            run_id: run_id.to_string(),
-            new_run_id: None,
-            run: true,
-            force: false,
-            idempotency_key: None,
-        })
+        super::run::admit_retry_for_recovery(run_id)
     }
 
     fn reconcile(&self, run_id: &str) -> homeboy::core::Result<(Value, i32)> {
@@ -223,6 +218,68 @@ mod tests {
 
     use crate::cli_surface::{Cli, Commands};
     use crate::commands::agent_task::AgentTaskCommand;
+
+    /// #17768: recover returns once the retry is admitted, with the new run
+    /// id, its state and follow-up commands, instead of waiting on the run.
+    #[test]
+    fn recover_returns_after_retry_admission_with_the_new_run_id() {
+        use homeboy::agents::agent_task_lifecycle;
+        crate::test_support::with_isolated_home(|_| {
+            let cook_id = "cook-recover-admission";
+            let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment().unwrap();
+            agent_task_lifecycle::record_unmaterialized_cook_admission_in_store(
+                &store,
+                cook_id,
+                serde_json::json!({
+                    "schema": "homeboy/unmaterialized-cook-binding/v1",
+                    "request_ref": "sha256:request",
+                    "worktree_ref": "repo@branch",
+                    "admission_inputs": { "cook_id": cook_id, "argv": ["cook"] },
+                }),
+                "blocked_runner_unavailable",
+                "selected runner requires admitted connected readiness evidence",
+            )
+            .unwrap();
+            store
+                .mutate_record(cook_id, |record| {
+                    record.metadata["detached_cook_handoff"]["state"] =
+                        serde_json::json!("exited_before_handoff");
+                    record.set_state_for_test(agent_task_lifecycle::AgentTaskRunState::Failed);
+                    true
+                })
+                .unwrap();
+
+            let cli = Cli::try_parse_from(["homeboy", "agent-task", "recover", cook_id]).unwrap();
+            let Commands::AgentTask(task) = cli.command else {
+                panic!("agent-task")
+            };
+            let AgentTaskCommand::Recover(args) = task.command else {
+                panic!("recover")
+            };
+            let (report, exit_code) =
+                homeboy::agents::agent_task_service::with_scheduling_daemon_start(
+                    || Ok(()),
+                    || super::recover(args),
+                )
+                .expect("recover");
+
+            assert_eq!(exit_code, 0, "{report}");
+            let run_id = report["run_id"].as_str().unwrap();
+            assert_ne!(run_id, cook_id);
+            let admitted = store.read_record(run_id).unwrap();
+            assert!(!admitted.state().is_terminal());
+            assert_eq!(report["result"]["admitted"], true);
+            assert_eq!(report["result"]["state"], report["status"]);
+            assert_eq!(
+                report["result"]["status_command"],
+                format!("homeboy agent-task status {run_id}")
+            );
+            assert_eq!(
+                report["result"]["diagnose_command"],
+                format!("homeboy agent-task diagnose {run_id}")
+            );
+        });
+    }
 
     #[test]
     fn recover_regate_reaches_the_service_request_with_or_without_preflight() {
