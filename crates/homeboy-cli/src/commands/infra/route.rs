@@ -830,6 +830,10 @@ pub(crate) fn cook_requires_unmaterialized_admission_for_placement(
         && (placement == homeboy::cli_surface::Placement::Lab
             || preflight.selected_runner_id.is_some()
             || matches!(preflight.input.runner, homeboy::core::parsed_command_preflight::RunnerIntent::Explicit(_))))
+        // A busy or unobserved Lab queues an auto Cook with Lab placement even
+        // when no runner is selectable yet (#17705).
+        || (matches!(placement, homeboy::cli_surface::Placement::Auto)
+            && preflight.queued_for_lab_admission())
         || (matches!(placement, homeboy::cli_surface::Placement::Auto)
             && preflight.selected_runner_id.is_none()
             && matches!(
@@ -875,6 +879,25 @@ pub(crate) fn cook_admission_decision(
     let requested = preflight.placement.requested;
     if requested == Placement::Local {
         return CookAdmissionDecision::Admitted;
+    }
+    if preflight.queued_for_lab_admission() {
+        let readiness = preflight
+            .lab_readiness
+            .as_ref()
+            .expect("queued Lab admission carries readiness evidence");
+        let reasons = if readiness.reasons.is_empty() {
+            readiness.state.clone()
+        } else {
+            format!("{}: {}", readiness.state, readiness.reasons.join("; "))
+        };
+        return CookAdmissionDecision::Indeterminate {
+            reason: format!("queued for Lab admission ({reasons})"),
+            next_action: readiness
+                .remediation_commands
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "homeboy runner status".to_string()),
+        };
     }
     if preflight.placement.selected == EffectiveExecutionPlacement::Local {
         if let ResourceAdmissionDecision::Rejected {
