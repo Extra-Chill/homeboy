@@ -25,6 +25,7 @@ mod distribution;
 mod dossier;
 mod evidence;
 mod findings;
+mod friction;
 mod gh_actions;
 mod gh_actions_cache;
 mod handlers;

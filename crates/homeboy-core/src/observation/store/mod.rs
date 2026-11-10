@@ -11,6 +11,8 @@ mod control_plane_events;
 pub mod coordination;
 mod findings;
 mod helpers;
+mod invocations;
+pub use invocations::Invocation;
 pub mod metadata_payloads;
 mod runs;
 mod schema;
