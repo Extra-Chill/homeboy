@@ -8577,10 +8577,13 @@ fn write_lease(path: &Path, state: &DaemonState) -> Result<()> {
 }
 
 /// How long a lifecycle command waits for a lock held by a live owner before
-/// it inspects the holder. Hermetic fixtures shrink this through
-/// [`DAEMON_OPERATION_LOCK_WAIT_MS_ENV`]; the default matches the bounded
-/// admission-fence wait so an in-flight stop/start never times out recovery.
-const DAEMON_OPERATION_LOCK_DEFAULT_WAIT: Duration = Duration::from_secs(5);
+/// it inspects the holder. `flock` dies with its holder, so a stranded lock
+/// never blocks the wait; only a live peer can. A live peer is a legitimate
+/// lifecycle operation, such as `ensure-running` or a service-managed restart
+/// (up to 90s), so the bound covers a whole operation and a queued Cook's
+/// reclaim waits for it instead of failing (#17811). Hermetic fixtures shrink
+/// it through [`DAEMON_OPERATION_LOCK_WAIT_MS_ENV`].
+const DAEMON_OPERATION_LOCK_DEFAULT_WAIT: Duration = Duration::from_secs(120);
 pub(crate) const DAEMON_OPERATION_LOCK_WAIT_MS_ENV: &str = "HOMEBOY_DAEMON_OPERATION_LOCK_WAIT_MS";
 
 fn daemon_operation_lock_wait() -> Duration {
@@ -9472,40 +9475,6 @@ impl Drop for DaemonAdmissionGuard {
             );
         }
         release_daemon_admission_shared();
-    }
-}
-
-/// `ensure-running` is idempotent, so a concurrent caller can wait briefly for
-/// the first caller to publish its daemon lease instead of failing spuriously.
-/// Destructive lifecycle operations continue using the fail-fast acquisition.
-pub(super) fn acquire_daemon_operation_lock_for_ensure(
-    wait: Duration,
-) -> Result<DaemonOperationLock> {
-    const RETRY: Duration = Duration::from_millis(50);
-    let deadline = Instant::now() + wait;
-    loop {
-        match acquire_daemon_operation_lock_with_wait(wait) {
-            Ok(lock) => return Ok(lock),
-            Err(err)
-                if err
-                    .message
-                    .contains("daemon lifecycle operation is held by live PID")
-                    && Instant::now() < deadline =>
-            {
-                std::thread::sleep(RETRY);
-            }
-            Err(err)
-                if err
-                    .message
-                    .contains("daemon lifecycle operation is held by live PID") =>
-            {
-                return Err(Error::internal_unexpected(format!(
-                    "timed out after {}s waiting for daemon ensure-running lifecycle lock; another caller may still be starting the daemon",
-                    wait.as_secs()
-                )));
-            }
-            Err(err) => return Err(err),
-        }
     }
 }
 

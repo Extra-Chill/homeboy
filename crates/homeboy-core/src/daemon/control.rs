@@ -22,9 +22,9 @@ use serde::Serialize;
 
 use super::acquire_daemon_job_admission_fence;
 use super::{
-    acquire_daemon_operation_lock, acquire_daemon_operation_lock_for_ensure, parse_bind_addr,
-    read_status, stop_unlocked, try_acquire_daemon_owner_lock, DaemonStaleReasonCode,
-    DaemonStartResult, DAEMON_STARTUP_TOKEN_ENV,
+    acquire_daemon_operation_lock, parse_bind_addr, read_status, stop_unlocked,
+    try_acquire_daemon_owner_lock, DaemonStaleReasonCode, DaemonStartResult,
+    DAEMON_STARTUP_TOKEN_ENV,
 };
 
 const TEST_KEEP_DAEMON_IN_PROCESS_GROUP_ENV: &str = "HOMEBOY_TEST_KEEP_DAEMON_IN_PROCESS_GROUP";
@@ -33,7 +33,6 @@ const TEST_KEEP_DAEMON_IN_LAUNCHER_GROUP: &str = "launcher";
 // up the first attempt before returning. Followers must wait through that
 // bounded startup lifecycle, then re-read the durable lease rather than timing
 // out halfway through the winning launch.
-const ENSURE_RUNNING_STARTUP_WAIT: Duration = Duration::from_secs(15);
 
 #[cfg(all(test, unix))]
 #[test]
@@ -200,7 +199,7 @@ pub fn ensure_running(addr: &str) -> Result<DaemonStartResult> {
         Some(StaleDaemonAction::RestartInPlace(lease_id)) => restart_in_place(lease_id)?,
         None => {}
     }
-    ensure_running_with_wait(addr, ENSURE_RUNNING_STARTUP_WAIT)
+    ensure_running_locked(addr)
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -395,7 +394,7 @@ pub fn ensure_running_with_replacement_operation(
         return ensure_running(addr);
     };
     parse_bind_addr(addr)?;
-    let _lock = acquire_daemon_operation_lock_for_ensure(ENSURE_RUNNING_STARTUP_WAIT)?;
+    let _lock = acquire_daemon_operation_lock()?;
     let status = read_status()?;
     if let Some(state) = status
         .state
@@ -498,11 +497,10 @@ fn attest_refused(reason: &str) -> Error {
     Error::validation_invalid_argument("attest_absent", reason.to_string(), None, None)
 }
 
-fn ensure_running_with_wait(addr: &str, wait: Duration) -> Result<DaemonStartResult> {
+fn ensure_running_locked(addr: &str) -> Result<DaemonStartResult> {
     parse_bind_addr(addr)?;
     ensure_running_with_operations(
-        wait,
-        acquire_daemon_operation_lock_for_ensure,
+        acquire_daemon_operation_lock,
         read_status,
         pid_is_running,
         || start_or_return_live_unlocked(addr),
@@ -510,19 +508,18 @@ fn ensure_running_with_wait(addr: &str, wait: Duration) -> Result<DaemonStartRes
 }
 
 fn ensure_running_with_operations<Lock, AcquireLock, ReadStatus, PidIsRunning, Start>(
-    wait: Duration,
     acquire_lock: AcquireLock,
     read_status: ReadStatus,
     pid_is_running: PidIsRunning,
     start: Start,
 ) -> Result<DaemonStartResult>
 where
-    AcquireLock: FnOnce(Duration) -> Result<Lock>,
+    AcquireLock: FnOnce() -> Result<Lock>,
     ReadStatus: FnOnce() -> Result<super::DaemonStatus>,
     PidIsRunning: FnOnce(u32) -> bool,
     Start: FnOnce() -> Result<DaemonStartResult>,
 {
-    let _lock = acquire_lock(wait)?;
+    let _lock = acquire_lock()?;
     let status = read_status()?;
     if let Some(state) = status.state {
         if pid_is_running(state.pid) {
