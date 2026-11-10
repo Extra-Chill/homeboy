@@ -180,6 +180,7 @@ pub mod runner_job_execution_context;
 pub mod runner_pressure;
 pub mod runtime_promotion;
 pub mod scope;
+pub mod substrate_wait;
 pub use homeboy_lab_contract::secret_env_plan;
 pub mod secret_env;
 

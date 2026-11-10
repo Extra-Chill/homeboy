@@ -2698,6 +2698,53 @@ fn sleep_unless_cancelled(
     })
 }
 
+/// Bounded wait through transient substrate refusals inside one staging
+/// phase. It restarts whenever a phase completes.
+#[derive(Default)]
+struct SubstrateWait {
+    started: Option<std::time::Instant>,
+    backoff: Option<Duration>,
+}
+
+impl SubstrateWait {
+    /// Sleep and return true when `error` is a transient substrate refusal
+    /// still inside the wait deadline; false means the caller fails.
+    fn defer(&mut self, error: &Error, cancellation: &LabStagingCancellationToken) -> bool {
+        use homeboy_core::substrate_wait::{is_transient_error, SUBSTRATE_WAIT_DEADLINE};
+        let started = *self.started.get_or_insert_with(std::time::Instant::now);
+        let remaining = SUBSTRATE_WAIT_DEADLINE.saturating_sub(started.elapsed());
+        if cancellation.is_cancelled() || remaining.is_zero() || !is_transient_error(error) {
+            return false;
+        }
+        let backoff = self
+            .backoff
+            .unwrap_or(LAB_STAGING_SUBSTRATE_INITIAL_BACKOFF)
+            .min(remaining);
+        homeboy_core::log_status!(
+            "wait",
+            "Lab staging: {} — retrying in {}s (waited {}s)",
+            error.message,
+            backoff.as_secs(),
+            started.elapsed().as_secs()
+        );
+        let wake = std::time::Instant::now() + backoff;
+        while std::time::Instant::now() < wake && !cancellation.is_cancelled() {
+            std::thread::sleep(
+                wake.saturating_duration_since(std::time::Instant::now())
+                    .min(Duration::from_millis(250)),
+            );
+        }
+        self.backoff = Some(backoff.saturating_mul(2).min(Duration::from_secs(30)));
+        !cancellation.is_cancelled()
+    }
+}
+
+const LAB_STAGING_SUBSTRATE_INITIAL_BACKOFF: Duration = if cfg!(test) {
+    Duration::from_millis(5)
+} else {
+    Duration::from_secs(2)
+};
+
 fn next_staging_poll_backoff(current: Duration) -> Duration {
     current.saturating_mul(2).min(LAB_STAGING_POLL_MAX_BACKOFF)
 }
@@ -4276,6 +4323,7 @@ impl StageExecutionAdapter {
         // Controller generation pins therefore do not protect this handoff.
         self.operations
             .validate_recorded_identities(request, &checkpoint)?;
+        let mut substrate_wait = SubstrateWait::default();
         loop {
             if cancellation.is_cancelled() {
                 checkpoint.finish_phase_timing("cancelled");
@@ -4301,10 +4349,20 @@ impl StageExecutionAdapter {
                 checkpoint.start_phase_timing();
                 persist(&checkpoint)?;
             }
-            let recovered = recovering
+            let recovered = match recovering
                 .then(|| self.operations.recover_stage(request, &checkpoint, &intent))
-                .transpose()?
-                .flatten();
+                .transpose()
+            {
+                Ok(recovered) => recovered.flatten(),
+                Err(error) => {
+                    if substrate_wait.defer(&error, cancellation) {
+                        checkpoint.finish_phase_timing("deferred");
+                        persist(&checkpoint)?;
+                        continue;
+                    }
+                    return Err(error);
+                }
+            };
             if recovered.is_none() {
                 if let Some(failure) = &checkpoint.workspace_construction_failure {
                     let error = Error::new(
@@ -4377,6 +4435,14 @@ impl StageExecutionAdapter {
             let effect = match effect {
                 Ok(effect) => effect,
                 Err(error) => {
+                    // A busy, promoting or momentarily unreachable runner is a
+                    // wait (#17765). The stage intent stays recorded, so the
+                    // next pass reconciles this phase through `recover_stage`.
+                    if substrate_wait.defer(&error, cancellation) {
+                        checkpoint.finish_phase_timing("deferred");
+                        persist(&checkpoint)?;
+                        continue;
+                    }
                     if checkpoint.phase == LabStagingPhase::AcceptedMaterializeWorkspace {
                         checkpoint.workspace_construction_failure =
                             Some(LabWorkspaceConstructionFailure {
@@ -4408,6 +4474,7 @@ impl StageExecutionAdapter {
                 persist(&checkpoint)?;
                 return Err(Self::cancellation_error());
             }
+            substrate_wait = SubstrateWait::default();
             checkpoint.finish_phase_timing("succeeded");
             checkpoint = match effect {
                 LabStagingStageEffect::Workspace(source_snapshot_id, workspace_id) => {

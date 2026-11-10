@@ -1289,7 +1289,7 @@ pub(super) fn prepare_lab_runner_for_offload_with(
             )
             .map_err(|error| {
                 if retryable {
-                    error.with_retryable(true)
+                    transient_connect_refusal(error)
                 } else {
                     error
                 }
@@ -1344,6 +1344,17 @@ pub(super) fn prepare_lab_runner_for_offload_with(
         ),
         None,
     )
+    .map_err(transient_connect_refusal)
+}
+
+/// A runner that is configured but momentarily unreachable or unobserved is a
+/// substrate wait for queued work, not a terminal refusal (#17765).
+fn transient_connect_refusal(mut error: Error) -> Error {
+    if !error.details.is_object() {
+        error.details = serde_json::json!({});
+    }
+    error.details["substrate_wait"] = serde_json::json!("runner_connect");
+    error.with_retryable(true)
 }
 
 fn handoff_connect_lock(runner_id: &str) -> Result<Arc<Mutex<()>>> {
