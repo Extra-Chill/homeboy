@@ -489,6 +489,7 @@ fn exit_code_for_error(code: ErrorCode) -> i32 {
         | ErrorCode::RunnerLabTransportFailure
         | ErrorCode::RunnerControllerDisconnected
         | ErrorCode::RunnerLabUnavailable
+        | ErrorCode::RunnerVersionSkew
         | ErrorCode::RuntimePromotionContended
         | ErrorCode::RuntimePromotionWaitTimeout
         | ErrorCode::DependencyStepFailed

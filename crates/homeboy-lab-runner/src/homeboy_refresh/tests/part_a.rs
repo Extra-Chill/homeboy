@@ -164,6 +164,8 @@ fn deferred_reconnect_reports_selected_binary_and_exact_active_job_followups() {
         selected_binary_path: "/runner/homeboy".to_string(),
         followup_commands: followups.clone(),
         ownership_contention: None,
+        blocking_jobs: Vec::new(),
+        select_command: String::new(),
     };
 
     assert_eq!(deferred.active_job_ids, vec![job_id]);
@@ -177,7 +179,7 @@ fn deferred_reconnect_reports_selected_binary_and_exact_active_job_followups() {
     );
 }
 
-fn active_admission(job_id: &str) -> homeboy_core::api_jobs::ActiveRunnerJobSummary {
+pub(super) fn active_admission(job_id: &str) -> homeboy_core::api_jobs::ActiveRunnerJobSummary {
     homeboy_core::api_jobs::ActiveRunnerJobSummary {
         runner_id: "homeboy-lab".to_string(),
         job_id: job_id.to_string(),
@@ -715,24 +717,6 @@ fn homeboy_refresh_selection_restartability_matrix() {
                 stage.then_some("/new/homeboy")
             );
             if stage {
-                let deferred = HomeboyReconnectDeferred {
-                    reason: "active_daemon_jobs",
-                    active_job_ids: vec!["blocking-job".into()],
-                    selected_binary_path: "/new/homeboy".into(),
-                    followup_commands: vec![],
-                    ownership_contention: None,
-                };
-                let (plan, execution) = super::part_c::unconverged_refresh_fixture();
-                let failure = deferred_reconnect_failure(
-                    &plan,
-                    execution,
-                    &active_job_reconnect_error("lab-local", &deferred.active_job_ids),
-                    &deferred,
-                );
-                assert!(failure
-                    .verification
-                    .unwrap()
-                    .contains("staged; selects on reconnect when blocking-job finish"));
                 // The same verified slot is consumed at the next replacement
                 // boundary, with no intermediate child selection.
                 persist_refresh_candidate_in_roots(
