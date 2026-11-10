@@ -465,11 +465,38 @@ pub(crate) fn sqlite_error_is_storage_exhausted(error: &rusqlite::Error) -> bool
 pub(crate) const SQLITE_WRITE_MAX_ATTEMPTS: u32 = 6;
 /// Base backoff between retries; doubles each attempt (25, 50, 100, 200, ...ms).
 pub(crate) const SQLITE_WRITE_BASE_BACKOFF_MS: u64 = 25;
-/// Shared bounded wait for connections that admit observation-store writes.
-/// This is installed when connections are opened, not mutated around an
-/// individual transaction, so a failed admission cannot leak timeout state.
+/// Shared wait for connections that admit observation-store writes.
+///
+/// A busy writer slot is contention, not failure: on a large store a competing
+/// writer can hold the slot for many seconds, and a fixed 10s budget turned
+/// that wait into terminal Cook failures (#17381). Writers queue for the
+/// shared substrate deadline instead. SQLite never invokes the busy handler
+/// where waiting could deadlock, so the wait ends when the slot frees.
+/// Installed when connections open, so a failed admission leaks no state.
 pub(crate) const SQLITE_CONTROL_PLANE_WRITE_TIMEOUT: std::time::Duration =
-    std::time::Duration::from_secs(10);
+    crate::substrate_wait::SUBSTRATE_WAIT_DEADLINE;
+
+#[cfg(test)]
+thread_local!(static WRITE_WAIT_OVERRIDE: std::cell::Cell<Option<std::time::Duration>> = const { std::cell::Cell::new(None) });
+
+/// Run `operation` with a shorter writer wait on this thread, so tests can
+/// exercise exhaustion without waiting out the production deadline.
+#[cfg(test)]
+pub(crate) fn with_write_wait<T>(budget: std::time::Duration, operation: impl FnOnce() -> T) -> T {
+    WRITE_WAIT_OVERRIDE.with(|cell| cell.set(Some(budget)));
+    let outcome = operation();
+    WRITE_WAIT_OVERRIDE.with(|cell| cell.set(None));
+    outcome
+}
+
+/// The writer wait in force on this thread.
+pub(crate) fn control_plane_write_wait() -> std::time::Duration {
+    #[cfg(test)]
+    if let Some(budget) = WRITE_WAIT_OVERRIDE.with(std::cell::Cell::get) {
+        return budget;
+    }
+    SQLITE_CONTROL_PLANE_WRITE_TIMEOUT
+}
 
 /// Bounded wait for read-only inspection connections. Inspection must give up
 /// well before a writer would, so status stays responsive under contention.
@@ -490,7 +517,7 @@ pub(crate) fn install_control_plane_busy_wait(connection: &rusqlite::Connection)
 }
 
 fn control_plane_busy_wait(attempt: i32) -> bool {
-    wall_clock_busy_wait(attempt, SQLITE_CONTROL_PLANE_WRITE_TIMEOUT)
+    wall_clock_busy_wait(attempt, control_plane_write_wait())
 }
 
 /// [`SQLITE_READ_ONLY_TIMEOUT`] busy wait, measured in wall-clock time for the
@@ -545,7 +572,7 @@ pub(crate) fn begin_control_plane_write<'conn>(
                 sqlite_error(format!(
                     "{operation} (writer admission exhausted; elapsed {}ms of {}ms budget)",
                     started.elapsed().as_millis(),
-                    SQLITE_CONTROL_PLANE_WRITE_TIMEOUT.as_millis()
+                    control_plane_write_wait().as_millis()
                 ))(error)
             } else {
                 sqlite_error(operation)(error)
@@ -726,79 +753,82 @@ mod control_plane_admission_tests {
 
     #[test]
     fn admission_exhaustion_reports_the_bounded_wait() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("locked.sqlite");
-        let initialized = super::ObservationStore::open_initialized_at(&path).unwrap();
-        drop(initialized);
-        let blocker = rusqlite::Connection::open(&path).unwrap();
-        blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
-        let release = std::thread::spawn(move || {
-            std::thread::sleep(
-                SQLITE_CONTROL_PLANE_WRITE_TIMEOUT + std::time::Duration::from_secs(1),
+        const WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+        with_write_wait(WAIT, || {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("locked.sqlite");
+            let initialized = super::ObservationStore::open_initialized_at(&path).unwrap();
+            drop(initialized);
+            let blocker = rusqlite::Connection::open(&path).unwrap();
+            blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+            let release = std::thread::spawn(move || {
+                std::thread::sleep(WAIT + std::time::Duration::from_secs(1));
+                blocker.execute_batch("COMMIT").unwrap();
+            });
+            let connection = super::schema::open_bounded_writer_connection(&path).unwrap();
+            let started = std::time::Instant::now();
+            let error =
+                begin_control_plane_write(&connection, "begin control-plane test admission")
+                    .expect_err("held writer must exhaust the bounded wait");
+            let elapsed = started.elapsed();
+            println!(
+                "bounded admission elapsed_ms={} diagnostic={}",
+                elapsed.as_millis(),
+                error.message
             );
-            blocker.execute_batch("COMMIT").unwrap();
-        });
-        let connection = super::schema::open_bounded_writer_connection(&path).unwrap();
-        let started = std::time::Instant::now();
-        let error = begin_control_plane_write(&connection, "begin control-plane test admission")
-            .expect_err("held writer must exhaust the bounded wait");
-        let elapsed = started.elapsed();
-        println!(
-            "bounded admission elapsed_ms={} diagnostic={}",
-            elapsed.as_millis(),
-            error.message
-        );
-        release.join().unwrap();
-        assert!(elapsed >= SQLITE_CONTROL_PLANE_WRITE_TIMEOUT);
-        assert!(elapsed < SQLITE_CONTROL_PLANE_WRITE_TIMEOUT + std::time::Duration::from_secs(2));
-        assert!(error.message.contains("begin control-plane test admission"));
-        assert!(error.message.contains("writer admission exhausted"));
-        assert!(error.message.contains("10000ms budget"));
+            release.join().unwrap();
+            assert!(elapsed >= WAIT);
+            assert!(elapsed < WAIT + std::time::Duration::from_secs(2));
+            assert!(error.message.contains("begin control-plane test admission"));
+            assert!(error.message.contains("writer admission exhausted"));
+            assert!(error.message.contains("2000ms budget"));
+        })
     }
 
     #[test]
     fn retry_caller_uses_one_native_contention_budget_without_partial_write() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("retry-budget.sqlite");
-        let store = super::ObservationStore::open_initialized_at(&path).unwrap();
-        store
-            .connection
-            .execute_batch("CREATE TABLE retry_budget_effect (id INTEGER PRIMARY KEY)")
-            .unwrap();
-
-        let blocker = rusqlite::Connection::open(&path).unwrap();
-        blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
-        let release = std::thread::spawn(move || {
-            std::thread::sleep(
-                SQLITE_CONTROL_PLANE_WRITE_TIMEOUT + std::time::Duration::from_secs(1),
-            );
-            blocker.execute_batch("COMMIT").unwrap();
-        });
-
-        let started = std::time::Instant::now();
-        let error = execute_with_retry("insert retry-budget effect", || {
+        const WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+        with_write_wait(WAIT, || {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("retry-budget.sqlite");
+            let store = super::ObservationStore::open_initialized_at(&path).unwrap();
             store
                 .connection
-                .execute("INSERT INTO retry_budget_effect DEFAULT VALUES", [])
-        })
-        .expect_err("held writer must exhaust the single native busy timeout");
-        let elapsed = started.elapsed();
-        release.join().unwrap();
+                .execute_batch("CREATE TABLE retry_budget_effect (id INTEGER PRIMARY KEY)")
+                .unwrap();
 
-        println!(
-            "retry caller contention elapsed_ms={} diagnostic={}",
-            elapsed.as_millis(),
-            error.message
-        );
-        assert!(elapsed >= SQLITE_CONTROL_PLANE_WRITE_TIMEOUT);
-        assert!(elapsed < SQLITE_CONTROL_PLANE_WRITE_TIMEOUT + std::time::Duration::from_secs(2));
-        assert!(error.message.contains("writer contention budget exhausted"));
-        let effects: i64 = store
-            .connection
-            .query_row("SELECT COUNT(*) FROM retry_budget_effect", [], |row| {
-                row.get(0)
+            let blocker = rusqlite::Connection::open(&path).unwrap();
+            blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+            let release = std::thread::spawn(move || {
+                std::thread::sleep(WAIT + std::time::Duration::from_secs(1));
+                blocker.execute_batch("COMMIT").unwrap();
+            });
+
+            let started = std::time::Instant::now();
+            let error = execute_with_retry("insert retry-budget effect", || {
+                store
+                    .connection
+                    .execute("INSERT INTO retry_budget_effect DEFAULT VALUES", [])
             })
-            .unwrap();
-        assert_eq!(effects, 0, "exhaustion must not leave a partial effect");
+            .expect_err("held writer must exhaust the single native busy timeout");
+            let elapsed = started.elapsed();
+            release.join().unwrap();
+
+            println!(
+                "retry caller contention elapsed_ms={} diagnostic={}",
+                elapsed.as_millis(),
+                error.message
+            );
+            assert!(elapsed >= WAIT);
+            assert!(elapsed < WAIT + std::time::Duration::from_secs(2));
+            assert!(error.message.contains("writer contention budget exhausted"));
+            let effects: i64 = store
+                .connection
+                .query_row("SELECT COUNT(*) FROM retry_budget_effect", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(effects, 0, "exhaustion must not leave a partial effect");
+        })
     }
 }

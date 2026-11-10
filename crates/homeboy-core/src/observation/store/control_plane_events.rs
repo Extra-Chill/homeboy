@@ -612,7 +612,7 @@ mod tests {
     }
 
     #[test]
-    fn initialized_store_appends_after_a_writer_holds_past_five_seconds() {
+    fn initialized_store_appends_after_a_writer_holds_past_the_former_ten_second_budget() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("observations.sqlite");
         let store = ObservationStore::open_initialized_at(&path).unwrap();
@@ -621,7 +621,8 @@ mod tests {
         let blocker = Connection::open(&path).unwrap();
         blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
         let release = std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(5500));
+            // Longer than the former fixed 10s writer budget (#17381).
+            std::thread::sleep(std::time::Duration::from_millis(11_000));
             blocker.execute_batch("COMMIT").unwrap();
         });
         let run = RunId::new("run-1").unwrap();
@@ -637,7 +638,7 @@ mod tests {
         let elapsed = started.elapsed();
         release.join().unwrap();
         assert!(
-            elapsed >= std::time::Duration::from_millis(5300),
+            elapsed >= std::time::Duration::from_millis(10_800),
             "elapsed {elapsed:?}"
         );
         assert_eq!(event.sequence, 1);
@@ -645,60 +646,61 @@ mod tests {
 
     #[test]
     fn event_append_exhaustion_has_no_receipt_and_leaves_no_transaction_open() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("observations.sqlite");
-        let initialized = ObservationStore::open_initialized_at(&path).unwrap();
-        initialized.connection.execute("INSERT INTO runs(id, kind, started_at, status) VALUES ('run-1', 'test', 'now', 'running')", []).unwrap();
-        drop(initialized);
+        const WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+        with_write_wait(WAIT, || {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("observations.sqlite");
+            let initialized = ObservationStore::open_initialized_at(&path).unwrap();
+            initialized.connection.execute("INSERT INTO runs(id, kind, started_at, status) VALUES ('run-1', 'test', 'now', 'running')", []).unwrap();
+            drop(initialized);
 
-        let blocker = Connection::open(&path).unwrap();
-        blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
-        let release = std::thread::spawn(move || {
-            std::thread::sleep(
-                SQLITE_CONTROL_PLANE_WRITE_TIMEOUT + std::time::Duration::from_secs(1),
+            let blocker = Connection::open(&path).unwrap();
+            blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+            let release = std::thread::spawn(move || {
+                std::thread::sleep(WAIT + std::time::Duration::from_secs(1));
+                blocker.execute_batch("COMMIT").unwrap();
+            });
+            let connection = super::super::schema::open_bounded_writer_connection(&path).unwrap();
+            let store = ObservationStore {
+                connection,
+                path,
+                readonly: false,
+                roots: None,
+            };
+            let run = RunId::new("run-1").unwrap();
+            let started = std::time::Instant::now();
+            let error = store
+                .append_control_plane_event(
+                    &run,
+                    &request("exhausted", "state"),
+                    &"a".repeat(64),
+                    &"b".repeat(64),
+                )
+                .expect_err("held writer must exhaust event admission");
+            let elapsed = started.elapsed();
+            println!(
+                "event append exhaustion elapsed_ms={} diagnostic={}",
+                elapsed.as_millis(),
+                error.message
             );
-            blocker.execute_batch("COMMIT").unwrap();
-        });
-        let connection = super::super::schema::open_bounded_writer_connection(&path).unwrap();
-        let store = ObservationStore {
-            connection,
-            path,
-            readonly: false,
-            roots: None,
-        };
-        let run = RunId::new("run-1").unwrap();
-        let started = std::time::Instant::now();
-        let error = store
-            .append_control_plane_event(
-                &run,
-                &request("exhausted", "state"),
-                &"a".repeat(64),
-                &"b".repeat(64),
-            )
-            .expect_err("held writer must exhaust event admission");
-        let elapsed = started.elapsed();
-        println!(
-            "event append exhaustion elapsed_ms={} diagnostic={}",
-            elapsed.as_millis(),
-            error.message
-        );
-        release.join().unwrap();
-        assert!(elapsed >= SQLITE_CONTROL_PLANE_WRITE_TIMEOUT);
-        assert!(error.message.contains("begin control-plane event append"));
-        assert!(error.message.contains("10000ms budget"));
-        assert!(store.connection.is_autocommit());
-        assert!(!store
-            .control_plane_event_receipt_exists(&run, &"a".repeat(64))
-            .unwrap());
-        let count: i64 = store
-            .connection
-            .query_row(
-                "SELECT COUNT(*) FROM control_plane_event_appends WHERE run_id = 'run-1'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(count, 0);
+            release.join().unwrap();
+            assert!(elapsed >= WAIT);
+            assert!(error.message.contains("begin control-plane event append"));
+            assert!(error.message.contains("2000ms budget"));
+            assert!(store.connection.is_autocommit());
+            assert!(!store
+                .control_plane_event_receipt_exists(&run, &"a".repeat(64))
+                .unwrap());
+            let count: i64 = store
+                .connection
+                .query_row(
+                    "SELECT COUNT(*) FROM control_plane_event_appends WHERE run_id = 'run-1'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 0);
+        })
     }
 
     #[test]

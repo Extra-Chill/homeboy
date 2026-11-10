@@ -693,7 +693,7 @@ fn sql(error: rusqlite::Error, operation: &str) -> Error {
                 .map(|path| path.display().to_string())
                 .unwrap_or_default(),
             format!("{operation} workflow cadence store"),
-            crate::observation::store::SQLITE_CONTROL_PLANE_WRITE_TIMEOUT.as_millis() as u64,
+            crate::observation::store::control_plane_write_wait().as_millis() as u64,
         );
     }
     Error::internal_io(

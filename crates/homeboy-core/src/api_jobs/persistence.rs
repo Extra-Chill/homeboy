@@ -60,7 +60,7 @@ pub(super) fn tombstone_error(path: &Path, operation: &str, error: rusqlite::Err
         return Error::observation_store_busy(
             path.display().to_string(),
             operation,
-            crate::observation::store::SQLITE_CONTROL_PLANE_WRITE_TIMEOUT.as_millis() as u64,
+            crate::observation::store::control_plane_write_wait().as_millis() as u64,
         );
     }
     Error::internal_io(
