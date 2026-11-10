@@ -4,6 +4,19 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.458.11] - 2026-11-10
+
+### Changed
+- Daemon lifecycle callers wait for a live lock holder instead of failing
+- delete review-form-only follow-up machinery
+- Rebase stale lifecycle commits over concurrent progress instead of failing the run
+
+### Fixed
+- persist writer diagnostics and batch maintenance writes
+- align an existing-PR destination from its ignored stale local head to the verified PR head
+- a next_pass chain records why it ended
+- catch-up publishes a candidate verified on an existing PR head on its branch
+
 ## [0.458.10] - 2026-11-10
 
 ### Changed
