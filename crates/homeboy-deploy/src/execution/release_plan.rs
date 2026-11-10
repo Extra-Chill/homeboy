@@ -161,7 +161,7 @@ fn release_asset_download_error(
 
 fn deploy_release_tag(component: &Component, config: &DeployConfig) -> Option<String> {
     if let Some(version) = config.expected_version.as_deref() {
-        return Some(deploy_tag_for_version(component, version));
+        return deploy_tag_for_version(component, version).ok();
     }
 
     // Shared with `orchestration::modes::latest_deploy_tag` so "what tag

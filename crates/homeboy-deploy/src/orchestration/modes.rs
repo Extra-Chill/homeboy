@@ -382,7 +382,7 @@ fn planned_deploy_ref(component: &Component, config: &DeployConfig) -> Result<Op
 
 fn latest_deploy_tag(component: &Component, expected_version: Option<&str>) -> Result<String> {
     if let Some(version) = expected_version {
-        return Ok(deploy_tag_for_version(component, version));
+        return deploy_tag_for_version(component, version);
     }
 
     // Shared with `execution::release_plan::deploy_release_tag` (#14813): a

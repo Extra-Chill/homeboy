@@ -869,6 +869,28 @@ pub fn latest_release_tag_for_component(
     )
 }
 
+/// Resolve an explicit version using the same component release namespace as
+/// latest-release discovery. Only a missing scoped release permits the legacy
+/// bare-tag fallback; transport/authentication failures must not change identity.
+pub fn release_tag_for_component_version(
+    github: &GitHubRepo,
+    github_config: &GithubConfig,
+    component_id: &str,
+    version: &str,
+) -> Result<String> {
+    let version = version.trim_start_matches('v');
+    let scoped_tag = format!("{component_id}-v{version}");
+    let token = github_auth_token(github, github_config);
+    match fetch_raw_content(
+        &github.release_by_tag_api_url(&scoped_tag),
+        token.as_deref(),
+        github_command_env(github, github_config),
+    )? {
+        FetchOutcome::Found(_) => Ok(scoped_tag),
+        FetchOutcome::NotFound => Ok(format!("v{version}")),
+    }
+}
+
 fn component_release_tag(releases: &[Value], component_id: &str) -> Option<String> {
     let prefix = format!("{component_id}-v");
     releases
@@ -2513,6 +2535,57 @@ mod tests {
             fixture = fixture_zip.display(),
         );
         write_executable(&bin_dir.join("curl"), &script);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn explicit_component_version_prefers_scoped_release_and_falls_back_only_on_404() {
+        let _lock = crate::test_support::env_lock();
+        let bin = tempfile::tempdir().unwrap();
+        write_fake_gh_with_token(bin.path());
+        write_fake_curl_body_status(
+            bin.path(),
+            &[
+                (
+                    "releases/tags/events-v0.84.1",
+                    r#"{"tag_name":"events-v0.84.1"}"#,
+                    200,
+                ),
+                ("releases/tags/root-v0.84.1", "", 404),
+                ("releases/tags/broken-v0.84.1", "unavailable", 500),
+            ],
+        );
+        let _path = crate::test_support::EnvVarGuard::set("PATH", prefixed_path(bin.path()));
+        let github = parse_github_url("https://github.com/Extra-Chill/data-machine").unwrap();
+        for version in ["0.84.1", "v0.84.1"] {
+            assert_eq!(
+                release_tag_for_component_version(
+                    &github,
+                    &GithubConfig::default(),
+                    "events",
+                    version
+                )
+                .unwrap(),
+                "events-v0.84.1"
+            );
+            assert_eq!(
+                release_tag_for_component_version(
+                    &github,
+                    &GithubConfig::default(),
+                    "root",
+                    version
+                )
+                .unwrap(),
+                "v0.84.1"
+            );
+        }
+        assert!(release_tag_for_component_version(
+            &github,
+            &GithubConfig::default(),
+            "broken",
+            "0.84.1"
+        )
+        .is_err());
     }
 
     #[test]
