@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.458.0] - 2026-11-10
+
+### Added
+- --gate-input ships caller-local data to gates on any placement
+
+### Fixed
+- build shared workspace dependencies once per deploy
+- name the review-form blocker when publication is withheld
+
 ## [0.457.2] - 2026-11-09
 
 ### Fixed
