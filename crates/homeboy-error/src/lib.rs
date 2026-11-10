@@ -132,6 +132,8 @@ pub enum ErrorCode {
     /// A Lab runner is configured, but none is ready for a Lab-preferring
     /// `--placement auto` workload. Auto never substitutes the controller.
     RunnerLabUnavailable,
+    /// Controller and runner run different Homeboy builds.
+    RunnerVersionSkew,
     RuntimePromotionContended,
     RuntimePromotionWaitTimeout,
     DependencyStepFailed,
@@ -223,6 +225,7 @@ impl ErrorCode {
             ErrorCode::RunnerLabTransportFailure => "runner.lab_transport_failure",
             ErrorCode::RunnerControllerDisconnected => "runner.controller_disconnected",
             ErrorCode::RunnerLabUnavailable => "runner.lab_unavailable",
+            ErrorCode::RunnerVersionSkew => "runner.version_skew",
             ErrorCode::RuntimePromotionContended => "runtime_promotion.contended",
             ErrorCode::RuntimePromotionWaitTimeout => "runtime_promotion.wait_timeout",
             ErrorCode::DependencyStepFailed => "dependency_step_failed",
@@ -290,6 +293,7 @@ impl ErrorCode {
             "runner.lab_transport_failure" => Self::RunnerLabTransportFailure,
             "runner.controller_disconnected" => Self::RunnerControllerDisconnected,
             "runner.lab_unavailable" => Self::RunnerLabUnavailable,
+            "runner.version_skew" => Self::RunnerVersionSkew,
             "runtime_promotion.contended" => Self::RuntimePromotionContended,
             "runtime_promotion.wait_timeout" => Self::RuntimePromotionWaitTimeout,
             "dependency_step_failed" => Self::DependencyStepFailed,

@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use homeboy_agents::agent_tasks::gate::placement::{
     LabGateAdmission, LabGateFreshness, LabGateReceipt, LabGateRequest, LabGateTransport,
+    RunnerBuildSkew,
 };
 use homeboy_agents::agent_tasks::gate::GateSupervision;
 use homeboy_core::{Error, Result};
@@ -18,6 +19,11 @@ impl LabGateTransport for NativeLabGateTransport {
     }
     fn admission(&self, runner_id: &str) -> Result<LabGateAdmission> {
         observe_gate_admission(runner_id).map(|(admission, _)| admission)
+    }
+    fn build_skew(&self, runner_id: &str) -> Result<Option<RunnerBuildSkew>> {
+        let controller = crate::controller_identity::compatibility_controller_identity().version;
+        Ok(crate::connection::read_session(runner_id)?
+            .and_then(|session| runner_build_skew(&controller, &session.homeboy_version)))
     }
     fn execute(
         &self,
@@ -71,6 +77,18 @@ impl LabGateTransport for NativeLabGateTransport {
             }
         }
     }
+}
+
+/// Controller and runner release versions, when they differ. Build commits
+/// are not compared: one release is one gate protocol.
+fn runner_build_skew(controller: &str, runner: &str) -> Option<RunnerBuildSkew> {
+    let release = |identity: &str| {
+        let token = identity.split_whitespace().last().unwrap_or_default();
+        token.split('+').next().unwrap_or_default().to_string()
+    };
+    let (controller, runner) = (release(controller), release(runner));
+    (!controller.is_empty() && !runner.is_empty() && controller != runner)
+        .then_some(RunnerBuildSkew { controller, runner })
 }
 
 const LAB_GATE_PUBLIC_MESSAGE: &str =

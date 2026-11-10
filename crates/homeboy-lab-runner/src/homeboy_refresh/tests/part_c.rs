@@ -395,30 +395,41 @@ fn unconverged_readiness_message_names_state_owners_and_next_action() {
     );
 }
 
-/// #16089: a post-promotion active-job race defers the reconnect and exits 1
-/// with readiness `draining`. That exit must name the jobs that deferred it,
-/// not ship `failure: None` ("exited 1 without reporting a failure cause").
+/// #17761: a binary staged behind live daemon jobs is success. It reports
+/// status `staged`, exits 0 and names each blocking job (id, kind, owner,
+/// age) and the command that completes selection.
 #[test]
-fn deferred_reconnect_names_the_jobs_that_deferred_it() {
-    let (plan, execution) = unconverged_refresh_fixture();
-    let job_ids = vec!["job-raced-after-precheck".to_string()];
-    let cause = active_job_reconnect_error("homeboy-lab", &job_ids);
-    let deferred = HomeboyReconnectDeferred {
-        reason: "active_daemon_jobs",
-        active_job_ids: job_ids.clone(),
-        selected_binary_path: "/runner/homeboy".to_string(),
-        followup_commands: active_job_followups("homeboy-lab", &job_ids),
-        ownership_contention: Some("selector moved".to_string()),
-    };
+fn refresh_staged_selection_reports_staged_with_the_blocking_jobs() {
+    let (plan, _) = unconverged_refresh_fixture();
+    let mut blocking = super::part_a::active_admission("job-blocking");
+    blocking.kind = "controller.work".to_string();
+    blocking.durable_run_id = Some("session-run-1".to_string());
+    blocking.elapsed_ms = 90_000;
+    let mut readoptable = super::part_a::active_admission("job-readoptable");
+    readoptable.re_adoptable = true;
 
-    let failure = deferred_reconnect_failure(&plan, execution, &cause, &deferred);
-
-    assert_eq!(failure.exit_code, 1);
-    let message = failure.verification.expect("deferred cause is named");
-    assert!(
-        message.contains("staged; selects on reconnect when"),
-        "{message}"
+    let (output, exit_code) = report_staged_selection(
+        new_refresh_output(&plan, false),
+        &[blocking, readoptable],
+        "/runner/staged/homeboy".to_string(),
     );
-    assert!(message.contains("job-raced-after-precheck"), "{message}");
-    assert!(message.contains("selector moved"), "{message}");
+
+    assert_eq!(exit_code, 0);
+    assert_eq!(output.status.as_deref(), Some("staged"));
+    assert!(output.failure.is_none());
+    let deferred = output.reconnect_deferred.expect("selection is deferred");
+    assert_eq!(deferred.selected_binary_path, "/runner/staged/homeboy");
+    assert_eq!(
+        deferred.blocking_jobs,
+        vec![HomeboyRefreshBlockingJob {
+            id: "job-blocking".to_string(),
+            kind: "controller.work".to_string(),
+            owner: "session-run-1".to_string(),
+            age_ms: 90_000,
+        }]
+    );
+    assert_eq!(
+        deferred.select_command,
+        "homeboy runner refresh-homeboy homeboy-lab --reconnect"
+    );
 }

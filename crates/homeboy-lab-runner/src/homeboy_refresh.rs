@@ -172,6 +172,10 @@ pub struct HomeboyBinaryRefreshOutput {
     pub selected_binary_path: String,
     pub reconnect_required: bool,
     pub followup_commands: Vec<String>,
+    /// `staged` when the binary is verified and staged but selection waits
+    /// for blocking daemon jobs. Staging is success, not failure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
     /// The observed admission postcondition after a reconnect. A rotated daemon
     /// may be running yet still refuse admission, so daemon startup alone is
     /// not convergence.
@@ -280,6 +284,22 @@ pub struct HomeboyReconnectDeferred {
     pub followup_commands: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ownership_contention: Option<String>,
+    /// The daemon jobs that defer selecting the staged binary.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocking_jobs: Vec<HomeboyRefreshBlockingJob>,
+    /// The command that completes selection once the blocking jobs finish.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub select_command: String,
+}
+
+/// One daemon job that defers selecting a staged binary.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HomeboyRefreshBlockingJob {
+    pub id: String,
+    pub kind: String,
+    /// The controller run (session) that owns the job, or its source.
+    pub owner: String,
+    pub age_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -471,6 +491,35 @@ pub(crate) fn install_controller_release_with(
     ControllerReleaseInstall::Failed(detail)
 }
 
+fn new_refresh_output(
+    plan: &HomeboyBinaryRefreshPlan,
+    dry_run: bool,
+) -> HomeboyBinaryRefreshOutput {
+    HomeboyBinaryRefreshOutput {
+        variant: "refresh_homeboy",
+        command: "runner.refresh_homeboy",
+        runner_id: plan.runner_id.clone(),
+        dry_run,
+        identity: None,
+        updated_fields: Vec::new(),
+        phase_summary: Vec::new(),
+        daemon_refreshed: false,
+        interrupted_job_ids: Vec::new(),
+        selected_binary_path: plan.binary_path.clone(),
+        reconnect_required: !plan.reconnect,
+        followup_commands: plan.followup_commands.clone(),
+        status: None,
+        readiness: None,
+        reconnect_deferred: None,
+        failure: None,
+        bootstrap_provenance: None,
+        rollback: None,
+        build_transcript: None,
+        artifacts: None,
+        plan: plan.clone(),
+    }
+}
+
 fn refresh_homeboy_binary_inner_in_roots(
     roots: &homeboy_core::paths::PathRoots,
     options: HomeboyBinaryRefreshOptions,
@@ -518,28 +567,7 @@ fn refresh_homeboy_binary_inner_in_roots(
             }
         }
     };
-    let mut output = HomeboyBinaryRefreshOutput {
-        variant: "refresh_homeboy",
-        command: "runner.refresh_homeboy",
-        runner_id: plan.runner_id.clone(),
-        dry_run: options.dry_run,
-        identity: None,
-        updated_fields: Vec::new(),
-        phase_summary: Vec::new(),
-        daemon_refreshed: false,
-        interrupted_job_ids: Vec::new(),
-        selected_binary_path: plan.binary_path.clone(),
-        reconnect_required: !plan.reconnect,
-        followup_commands: plan.followup_commands.clone(),
-        readiness: None,
-        reconnect_deferred: None,
-        failure: None,
-        bootstrap_provenance: None,
-        rollback: None,
-        build_transcript: None,
-        artifacts: None,
-        plan: plan.clone(),
-    };
+    let mut output = new_refresh_output(&plan, options.dry_run);
     if options.dry_run {
         return Ok((
             HomeboyBinaryRefreshOutput {
@@ -760,38 +788,17 @@ fn refresh_homeboy_binary_inner_in_roots(
     output.selected_binary_path = selected_binary_path.clone();
 
     if stage {
-        let blocking = active_jobs
-            .iter()
-            .filter(|job| !job.re_adoptable)
-            .map(|job| job.job_id.clone())
-            .collect::<Vec<_>>();
-        let deferred = HomeboyReconnectDeferred {
-            reason: "active_daemon_jobs",
-            active_job_ids: blocking.clone(),
-            selected_binary_path: selected_binary_path.clone(),
-            followup_commands: active_job_followups(&plan.runner_id, &blocking),
-            ownership_contention: None,
-        };
-        let cause = active_job_reconnect_error(&plan.runner_id, &blocking);
-        let failure = deferred_reconnect_failure(&plan, exec_output.clone(), &cause, &deferred);
         output.selected_binary_path = previous_homeboy_path.unwrap_or_default();
         phase_summary.retain(|phase| {
             phase.name != "configuration_promotion" && phase.name != "bootstrap_promotion"
         });
         phase_summary.push(refresh_phase("staged", true, 0));
         output.phase_summary = phase_summary;
-        output.reconnect_required = true;
-        output.followup_commands = deferred.followup_commands.clone();
-        output.readiness = Some(HomeboyRefreshReadiness {
-            state: HomeboyRefreshReadinessState::Draining,
-            accepting_jobs: true,
-            daemon_fresh: false,
-            owners: blocking,
-            continuation: deferred.followup_commands.last().cloned(),
-        });
-        output.reconnect_deferred = Some(deferred);
-        output.failure = Some(failure);
-        return Ok((output, 1));
+        return Ok(report_staged_selection(
+            output,
+            &active_jobs,
+            selected_binary_path,
+        ));
     }
 
     // The status captured under the promotion lease is the reconnect authority:
@@ -2221,10 +2228,10 @@ pub fn runner_dev_sync(options: RunnerDevSyncOptions) -> Result<(RunnerDevSyncOu
             allow_downgrade: false,
             dry_run: false,
         })?;
-        if exit_code != 0 {
+        if exit_code != 0 || refreshed.reconnect_deferred.is_some() {
             return Ok((
                 dev_sync_failure_output(options, plan, None, Vec::new()),
-                exit_code,
+                exit_code.max(1),
             ));
         }
 
@@ -2734,7 +2741,7 @@ fn select_staged_build(runner_id: &str, idle_only: bool) -> Result<bool> {
     if (idle_only && !jobs.is_empty()) || plan_daemon_restart(runner_id, &jobs, false).is_err() {
         return Ok(false);
     }
-    let (_, code) = refresh_homeboy_binary(HomeboyBinaryRefreshOptions {
+    let (output, code) = refresh_homeboy_binary(HomeboyBinaryRefreshOptions {
         runner_id: runner_id.into(),
         mode: HomeboyBinaryRefreshMode::Select { binary_path: path },
         git_ref: None,
@@ -2743,35 +2750,57 @@ fn select_staged_build(runner_id: &str, idle_only: bool) -> Result<bool> {
         allow_downgrade: false,
         dry_run: false,
     })?;
-    Ok(code == 0)
+    Ok(code == 0 && output.reconnect_deferred.is_none())
 }
 
-/// A deferred reconnect exits 1 with readiness `draining`; it must name the
-/// live jobs that deferred it rather than leaving `failure: None`, which the
-/// CLI reports as "exited 1 without reporting a failure cause" (#16089).
-fn deferred_reconnect_failure(
-    plan: &HomeboyBinaryRefreshPlan,
-    execution: RunnerExecOutput,
-    _cause: &Error,
-    deferred: &HomeboyReconnectDeferred,
-) -> HomeboyBinaryRefreshFailure {
-    let contention = deferred
-        .ownership_contention
-        .as_deref()
-        .map(|contention| format!(" {contention}."))
-        .unwrap_or_default();
-    refresh_verification_failure(
-        plan,
-        execution,
-        format!(
-            "staged; selects on reconnect when {} finish{contention}",
-            if deferred.active_job_ids.is_empty() {
-                "current daemon jobs".to_string()
-            } else {
-                deferred.active_job_ids.join(", ")
-            }
-        ),
-    )
+/// A verified binary staged behind live daemon jobs is success (#17761): it
+/// exits 0 with status `staged`, names the blocking jobs and the command that
+/// completes selection once they finish.
+fn report_staged_selection(
+    mut output: HomeboyBinaryRefreshOutput,
+    active_jobs: &[homeboy_core::api_jobs::ActiveRunnerJobSummary],
+    staged_binary_path: String,
+) -> (HomeboyBinaryRefreshOutput, i32) {
+    let blocking_jobs = active_jobs
+        .iter()
+        .filter(|job| !job.re_adoptable)
+        .map(|job| HomeboyRefreshBlockingJob {
+            id: job.job_id.clone(),
+            kind: job.kind.clone(),
+            owner: job
+                .durable_run_id
+                .clone()
+                .unwrap_or_else(|| job.source.clone()),
+            age_ms: job.elapsed_ms,
+        })
+        .collect::<Vec<_>>();
+    let blocking = blocking_jobs
+        .iter()
+        .map(|job| job.id.clone())
+        .collect::<Vec<_>>();
+    let followup_commands = active_job_followups(&output.runner_id, &blocking);
+    let select_command = followup_commands.last().cloned().unwrap_or_default();
+    output.status = Some("staged".to_string());
+    output.reconnect_required = true;
+    output.followup_commands = followup_commands.clone();
+    output.readiness = Some(HomeboyRefreshReadiness {
+        state: HomeboyRefreshReadinessState::Draining,
+        accepting_jobs: true,
+        daemon_fresh: false,
+        owners: blocking.clone(),
+        continuation: Some(select_command.clone()),
+    });
+    output.reconnect_deferred = Some(HomeboyReconnectDeferred {
+        reason: "active_daemon_jobs",
+        active_job_ids: blocking,
+        selected_binary_path: staged_binary_path,
+        followup_commands,
+        ownership_contention: None,
+        blocking_jobs,
+        select_command,
+    });
+    output.failure = None;
+    (output, 0)
 }
 
 fn rollback_refresh_error_with<T, Restore>(mut primary_error: Error, restore: Restore) -> Result<T>
