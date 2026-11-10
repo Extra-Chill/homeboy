@@ -8384,7 +8384,15 @@ pub(super) fn publish_incomplete_draft<
     } else {
         options.finalization.title.clone()
     };
-    let note = if review_form_unavailable {
+    let record = lifecycle_store.read_record(run_id)?;
+    let base_conflict = super::cook_delivery::CookDelivery::from_run_metadata(&record.metadata)
+        .and_then(|delivery| delivery.blocker)
+        .filter(|blocker| {
+            blocker.code == super::cook_delivery::CookDeliveryBlockerCode::BaseConflict
+        });
+    let note = if base_conflict.is_some() {
+        "Deterministic gates passed; candidate published as a draft because its base conflicts."
+    } else if review_form_unavailable {
         "review: unavailable\n\nReview form unavailable: completion not assessed; deterministic gates passed"
     } else {
         "Incomplete candidate; deterministic verification failed."
@@ -8398,8 +8406,15 @@ pub(super) fn publish_incomplete_draft<
     body.push_str(&format!(
         "\nCandidate from attempt {attempt} (`{run_id}`).\n"
     ));
-    if review_form_unavailable {
-        let record = lifecycle_store.read_record(run_id)?;
+    if let Some(blocker) = &base_conflict {
+        body.push_str(&format!(
+            "\nbase_conflict: {}\n\nConflict paths:\n",
+            blocker.message
+        ));
+        for path in &blocker.paths {
+            body.push_str(&format!("- `{path}`\n"));
+        }
+    } else if review_form_unavailable {
         let reason = record.metadata["review_form_unavailable"]["message"]
             .as_str()
             .unwrap_or("missing review_form output");

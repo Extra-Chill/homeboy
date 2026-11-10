@@ -2962,6 +2962,27 @@ pub(crate) fn finalize_or_load_cook_pr_with_backend_with_stores<
             None,
         ));
     }
+    let record = lifecycle_store.read_record(successful_run_id)?;
+    let base_conflict = super::cook_delivery::CookDelivery::from_run_metadata(&record.metadata)
+        .is_some_and(|delivery| {
+            delivery.blocker_code()
+                == Some(super::cook_delivery::CookDeliveryBlockerCode::BaseConflict)
+        });
+    if base_conflict {
+        let value = super::cook::publish_incomplete_draft(
+            lifecycle_store,
+            options,
+            &promotion,
+            None,
+            0,
+            successful_run_id,
+            &[],
+            true,
+            backend,
+        )?;
+        lifecycle_store.record_cook_finalization(successful_run_id, value.clone())?;
+        return Ok(value);
+    }
     let aggregate = lifecycle_store.read_aggregate(successful_run_id)?;
     let review_failure = match super::cook::review_form_from_aggregate(&aggregate) {
         Ok(Some(form)) => form.validate().err().map(|error| error.to_string()),
