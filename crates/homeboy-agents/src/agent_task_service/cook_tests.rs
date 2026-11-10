@@ -3641,10 +3641,12 @@ fn exercise_real_git_base_advance(conflicting: bool, rewritten: bool) {
             Some(&serde_json::json!("pending")),
             "the terminal attempt queues its own continuation"
         );
-        let mut backend = CaptureBackend::default();
+        let finalized = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let finalized_seen = Arc::clone(&finalized);
         let report = run_cook(CookContext {
-            side_effects: Some(CookSideEffects::new(|_, options, run_id, promotion| {
-                finalize_or_load_cook_pr_with_backend(options, run_id, promotion, &mut backend)
+            side_effects: Some(CookSideEffects::new(move |_, _, _, promotion| {
+                finalized_seen.lock().unwrap().push(promotion.clone());
+                Ok(serde_json::json!({"status": "review_ready"}))
             })),
             ..CookContext::new(options.clone(), Arc::new(UnusedExecutor))
         })
@@ -3661,32 +3663,42 @@ fn exercise_real_git_base_advance(conflicting: bool, rewritten: bool) {
             0,
             "{case}: no remediation attempt"
         );
-        let delivery = delivery_of(run_id);
+        let finalized = finalized.lock().unwrap();
+        assert_eq!(finalized.len(), 1, "{case}: one publication, no retry loop");
+        let published = &finalized[0];
         assert_eq!(
-            delivery.state,
-            crate::agent_task_service::CookDeliveryState::Published,
+            published.status,
+            AgentTaskPromotionStatus::Applied,
             "{case}"
         );
-        assert!(delivery.blocker.is_none(), "{case}: {:?}", delivery.blocker);
-        let published = backend.pushed_sha.clone().expect("published commit");
         assert_eq!(
-            git_output(&destination, &["rev-parse", &format!("{published}^")]).unwrap(),
+            published.verified_base.as_ref().unwrap().sha,
             verified_base,
             "{case}: the candidate is published on its gated base"
         );
         assert_eq!(
-            git_output(
-                &destination,
-                &["diff", "--name-only", &verified_base, &published]
-            )
-            .unwrap(),
-            "src/lib.rs",
-            "{case}: the published commit carries only the candidate"
+            published.candidate.as_ref().unwrap().candidate_sha,
+            candidate_sha,
+            "{case}: the gated commit is published, not a rebased one"
+        );
+        assert!(
+            published.provenance.get("base_catch_up").is_none(),
+            "{case}"
+        );
+        assert!(
+            delivery_of(run_id).blocker.is_none(),
+            "{case}: {:?}",
+            delivery_of(run_id).blocker
         );
         assert_eq!(
-            git_output(&remote, &["rev-parse", "refs/heads/main"]).unwrap(),
-            advanced_base,
-            "{case}: publication leaves the advertised base alone"
+            git_output(&destination, &["rev-parse", "HEAD"]).unwrap(),
+            verified_base,
+            "{case}: the destination is not rebased"
+        );
+        assert_eq!(
+            std::fs::read_to_string(destination.join("src/lib.rs")).unwrap(),
+            "new\n",
+            "{case}"
         );
     });
 }
