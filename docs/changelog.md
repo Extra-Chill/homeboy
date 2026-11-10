@@ -4,6 +4,16 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.458.9] - 2026-11-10
+
+### Changed
+- Observation-store writers queue instead of failing after 10s
+
+### Fixed
+- accept candidates whose parent is behind the recorded task base
+- accept dispatch baseline rebinding and Lab placement as the same retry plan
+- tolerate newer step-row fields; drop gh --slurp dependency
+
 ## [0.458.8] - 2026-11-10
 
 ### Fixed
