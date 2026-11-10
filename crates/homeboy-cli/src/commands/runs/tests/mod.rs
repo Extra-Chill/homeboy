@@ -591,7 +591,6 @@ fn runs_reconcile_explicitly_reconciles_owned_dead_running_runs() {
             &test_store(),
             RunsReconcileArgs {
                 dry_run: false,
-                compact_metadata: false,
                 limit: 20,
             },
         )
@@ -655,7 +654,6 @@ fn runs_reconcile_immediately_terminalizes_dead_deploy_observation_owner() {
             &test_store(),
             RunsReconcileArgs {
                 dry_run: false,
-                compact_metadata: false,
                 limit: 20,
             },
         )

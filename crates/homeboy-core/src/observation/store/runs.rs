@@ -622,7 +622,7 @@ impl ObservationStore {
             self.serialize_run_metadata(&with_run_context_metadata(run.metadata_json, &context))?;
         let started_at = chrono::Utc::now().to_rfc3339();
         let now = chrono::Utc::now().timestamp_millis();
-        let rows = execute_with_retry("claim expiring singleton run", || {
+        let rows = execute_with_retry(&self.connection, "claim expiring singleton run", || {
             self.connection.execute(
                 r#"
                 INSERT INTO runs(id, kind, component_id, started_at, status, command, cwd, homeboy_version, git_sha, rig_id, metadata_json)
@@ -656,7 +656,7 @@ impl ObservationStore {
         owner_token: &str,
         lease_expires_at_ms: i64,
     ) -> Result<bool> {
-        let rows = execute_with_retry("renew running run lease", || {
+        let rows = execute_with_retry(&self.connection, "renew running run lease", || {
             self.connection.execute(
                 "UPDATE runs SET metadata_json = json_set(metadata_json, '$.lease_expires_at_ms', ?1) WHERE id = ?2 AND status = 'running' AND json_extract(metadata_json, '$.owner_token') = ?3",
                 params![lease_expires_at_ms, run_id, owner_token],
@@ -678,7 +678,7 @@ impl ObservationStore {
         let _payload_guard = self.metadata_payload_lock(false)?;
         let metadata_json = self.serialize_run_metadata(&metadata_json)?;
         let finished_at = chrono::Utc::now().to_rfc3339();
-        let rows = execute_with_retry("finish leased running run", || {
+        let rows = execute_with_retry(&self.connection, "finish leased running run", || {
             self.connection.execute(
                 "UPDATE runs SET finished_at = ?1, status = ?2, metadata_json = ?3 WHERE id = ?4 AND status = 'running' AND json_extract(metadata_json, '$.owner_token') = ?5",
                 params![
@@ -708,7 +708,7 @@ impl ObservationStore {
         let terminal_projection = self.serialize_run_metadata(&terminal_projection)?;
         let execution_record = self.serialize_run_metadata(&execution_record)?;
         let finished_at = chrono::Utc::now().to_rfc3339();
-        let rows = execute_with_retry("finish pre-handoff runner exec", || {
+        let rows = execute_with_retry(&self.connection, "finish pre-handoff runner exec", || {
             self.connection.execute(
                 "UPDATE runs SET finished_at = ?1, status = 'fail', metadata_json = json_set(metadata_json, '$.runner_pre_handoff_failure', json(?2), '$.runner_terminal_projection', json(?3), '$.runner_execution_record', json(?4)) WHERE id = ?5 AND status = 'running' AND json_extract(metadata_json, '$.kind') = 'runner_exec' AND COALESCE(json_extract(metadata_json, '$.runner_job_id'), json_extract(metadata_json, '$.agent_task_run.metadata.runner_job_id')) IS NULL",
                 params![finished_at, failure, terminal_projection, execution_record, run_id],
@@ -738,7 +738,7 @@ impl ObservationStore {
                 Some("serialize runner recovery source claim".to_string()),
             )
         })?;
-        let rows = execute_with_retry("claim runner recovery source", || {
+        let rows = execute_with_retry(&self.connection, "claim runner recovery source", || {
             self.connection.execute(
                 "UPDATE runs SET metadata_json = json_set(metadata_json, '$.runner_exec_source_lease', json(?1)) WHERE id = ?2 AND status = 'running' AND COALESCE(json_extract(metadata_json, '$.runner_job_id'), json_extract(metadata_json, '$.agent_task_run.metadata.runner_job_id')) = ?3 AND (json_extract(metadata_json, '$.runner_exec_source_lease.expires_at_ms') IS NULL OR CAST(json_extract(metadata_json, '$.runner_exec_source_lease.expires_at_ms') AS INTEGER) < ?4)",
                 params![claim, run_id, runner_job_id, chrono::Utc::now().timestamp_millis()],
@@ -770,8 +770,11 @@ impl ObservationStore {
                 Some("serialize runner exec source claim".to_string()),
             )
         })?;
-        let rows = execute_with_retry("bind and claim runner exec source", || {
-            self.connection.execute(
+        let rows = execute_with_retry(
+            &self.connection,
+            "bind and claim runner exec source",
+            || {
+                self.connection.execute(
                 "UPDATE runs SET metadata_json = json_set(metadata_json, '$.runner_job_id', ?1, '$.runner_exec_source_lease', json(?2)) WHERE id = ?3 AND status = 'running' AND json_extract(metadata_json, '$.kind') = 'runner_exec' AND (COALESCE(json_extract(metadata_json, '$.runner_job_id'), json_extract(metadata_json, '$.agent_task_run.metadata.runner_job_id')) IS NULL OR COALESCE(json_extract(metadata_json, '$.runner_job_id'), json_extract(metadata_json, '$.agent_task_run.metadata.runner_job_id')) = ?1) AND (json_extract(metadata_json, '$.runner_exec_source_lease.expires_at_ms') IS NULL OR CAST(json_extract(metadata_json, '$.runner_exec_source_lease.expires_at_ms') AS INTEGER) < ?4)",
                 params![
                     runner_job_id,
@@ -780,7 +783,8 @@ impl ObservationStore {
                     chrono::Utc::now().timestamp_millis()
                 ],
             )
-        })?;
+            },
+        )?;
         Ok(rows == 1)
     }
 
@@ -797,12 +801,16 @@ impl ObservationStore {
         let _payload_guard = self.metadata_payload_lock(false)?;
         let metadata_json = self.serialize_run_metadata(&metadata_json)?;
         let finished_at = chrono::Utc::now().to_rfc3339();
-        let rows = execute_with_retry("fail claimed runner recovery source", || {
-            self.connection.execute(
+        let rows = execute_with_retry(
+            &self.connection,
+            "fail claimed runner recovery source",
+            || {
+                self.connection.execute(
                 "UPDATE runs SET finished_at = ?1, status = 'fail', metadata_json = ?2 WHERE id = ?3 AND status = 'running' AND COALESCE(json_extract(metadata_json, '$.runner_job_id'), json_extract(metadata_json, '$.agent_task_run.metadata.runner_job_id')) = ?4 AND json_extract(metadata_json, '$.runner_exec_source_lease.source_token') = ?5",
                 params![finished_at, metadata_json, run_id, runner_job_id, child_token],
             )
-        })?;
+            },
+        )?;
         Ok(rows == 1)
     }
 
@@ -811,7 +819,7 @@ impl ObservationStore {
         run_id: &str,
         token: &str,
     ) -> Result<bool> {
-        let rows = execute_with_retry("renew runner exec source lease", || {
+        let rows = execute_with_retry(&self.connection, "renew runner exec source lease", || {
             self.connection.execute(
             "UPDATE runs SET metadata_json = json_set(metadata_json, '$.runner_exec_source_lease.expires_at_ms', ?1) WHERE id = ?2 AND status = 'running' AND json_extract(metadata_json, '$.runner_exec_source_lease.source_token') = ?3",
             params![chrono::Utc::now().timestamp_millis() + 30_000, run_id, token],
@@ -825,12 +833,16 @@ impl ObservationStore {
         run_id: &str,
         token: &str,
     ) -> Result<bool> {
-        let rows = execute_with_retry("release runner exec source lease", || {
-            self.connection.execute(
+        let rows = execute_with_retry(
+            &self.connection,
+            "release runner exec source lease",
+            || {
+                self.connection.execute(
             "UPDATE runs SET metadata_json = json_remove(metadata_json, '$.runner_exec_source_lease') WHERE id = ?1 AND status = 'running' AND json_extract(metadata_json, '$.runner_exec_source_lease.source_token') = ?2",
             params![run_id, token],
         )
-        })?;
+            },
+        )?;
         Ok(rows == 1)
     }
 
@@ -845,12 +857,16 @@ impl ObservationStore {
     ) -> Result<bool> {
         let _payload_guard = self.metadata_payload_lock(false)?;
         let metadata_json = self.serialize_run_metadata(&metadata_json)?;
-        let rows = execute_with_retry("defer claimed runner recovery source", || {
-            self.connection.execute(
+        let rows = execute_with_retry(
+            &self.connection,
+            "defer claimed runner recovery source",
+            || {
+                self.connection.execute(
                 "UPDATE runs SET metadata_json = ?1 WHERE id = ?2 AND status = 'running' AND json_extract(metadata_json, '$.runner_exec_source_lease.source_token') = ?3",
                 params![metadata_json, run_id, child_token],
             )
-        })?;
+            },
+        )?;
         Ok(rows == 1)
     }
 
@@ -915,11 +931,11 @@ impl ObservationStore {
         } else {
             ""
         };
-        let applied = execute_with_retry("insert run record", || {
+        let applied = execute_with_retry(&self.connection, "insert run record", || {
             let transaction = TimedWrite::observe(
                 self.connection.unchecked_transaction()?,
                 &self.connection,
-                "upsert run with canonical events",
+                "insert run record",
             );
             let rows = transaction.execute(
                 &format!(
@@ -1013,7 +1029,7 @@ impl ObservationStore {
                     }
                 }
                 let serialized = self.serialize_run_metadata(&metadata_json)?;
-                execute_with_retry("finish run record with metadata", || {
+                execute_with_retry(&self.connection, "finish run record with metadata", || {
                     self.connection.execute(
                         r#"
                         UPDATE runs
@@ -1024,7 +1040,7 @@ impl ObservationStore {
                     )
                 })?
             }
-            None => execute_with_retry("finish run record", || {
+            None => execute_with_retry(&self.connection, "finish run record", || {
                 self.connection.execute(
                     r#"
                     UPDATE runs
@@ -1065,7 +1081,7 @@ impl ObservationStore {
         validate_required("run_id", run_id)?;
         validate_required("expected_kind", expected_kind)?;
         let metadata_json = self.serialize_run_metadata(&metadata_json)?;
-        let rows = execute_with_retry("resume run record", || {
+        let rows = execute_with_retry(&self.connection, "resume run record", || {
             self.connection.execute(
                 "UPDATE runs SET finished_at = NULL, status = 'running', metadata_json = ?1 \
                  WHERE id = ?2 AND kind = ?3 AND status != 'running'",
@@ -1112,24 +1128,28 @@ impl ObservationStore {
                     }
                 }
                 let serialized = self.serialize_run_metadata(&metadata_json)?;
-                execute_with_retry("finish running run record with metadata", || {
-                    self.connection.execute(
-                        r#"
+                execute_with_retry(
+                    &self.connection,
+                    "finish running run record with metadata",
+                    || {
+                        self.connection.execute(
+                            r#"
                         UPDATE runs
                         SET finished_at = ?1, status = ?2, metadata_json = ?3
                         WHERE id = ?4 AND status = ?5
                         "#,
-                        params![
-                            finished_at,
-                            status.as_str(),
-                            serialized,
-                            run_id,
-                            RunStatus::Running.as_str(),
-                        ],
-                    )
-                })?
+                            params![
+                                finished_at,
+                                status.as_str(),
+                                serialized,
+                                run_id,
+                                RunStatus::Running.as_str(),
+                            ],
+                        )
+                    },
+                )?
             }
-            None => execute_with_retry("finish running run record", || {
+            None => execute_with_retry(&self.connection, "finish running run record", || {
                 self.connection.execute(
                     r#"
                     UPDATE runs
@@ -1175,23 +1195,27 @@ impl ObservationStore {
         let finished_at = chrono::Utc::now().to_rfc3339();
         let serialized = self.serialize_run_metadata(&metadata_json)?;
         let expected = self.serialize_run_metadata(expected_metadata_json)?;
-        let rows = execute_with_retry("finish running run record with metadata CAS", || {
-            self.connection.execute(
-                r#"
+        let rows = execute_with_retry(
+            &self.connection,
+            "finish running run record with metadata CAS",
+            || {
+                self.connection.execute(
+                    r#"
                 UPDATE runs
                 SET finished_at = ?1, status = ?2, metadata_json = ?3
                 WHERE id = ?4 AND status = ?5 AND metadata_json = ?6
                 "#,
-                params![
-                    finished_at,
-                    status.as_str(),
-                    serialized,
-                    run_id,
-                    RunStatus::Running.as_str(),
-                    expected,
-                ],
-            )
-        })?;
+                    params![
+                        finished_at,
+                        status.as_str(),
+                        serialized,
+                        run_id,
+                        RunStatus::Running.as_str(),
+                        expected,
+                    ],
+                )
+            },
+        )?;
         if rows == 0 {
             return Ok(None);
         }
@@ -1206,7 +1230,7 @@ impl ObservationStore {
         let _payload_guard = self.metadata_payload_lock(false)?;
         validate_required("run_id", run_id)?;
         let serialized = self.serialize_run_metadata(&metadata_json)?;
-        let rows = execute_with_retry("update run metadata", || {
+        let rows = execute_with_retry(&self.connection, "update run metadata", || {
             self.connection.execute(
                 r#"
                 UPDATE runs
@@ -1240,7 +1264,7 @@ impl ObservationStore {
     pub fn mirror_run_status(&self, target_id: &str, source_id: &str) -> Result<bool> {
         validate_required("run_id", target_id)?;
         validate_required("run_id", source_id)?;
-        let rows = execute_with_retry("mirror run status", || {
+        let rows = execute_with_retry(&self.connection, "mirror run status", || {
             self.connection.execute(
                 r#"
                 UPDATE runs
@@ -1266,7 +1290,7 @@ impl ObservationStore {
         let _payload_guard = self.metadata_payload_lock(false)?;
         validate_required("run_id", run_id)?;
         let serialized = self.serialize_run_metadata(&metadata_json)?;
-        let rows = execute_with_retry("update running run metadata", || {
+        let rows = execute_with_retry(&self.connection, "update running run metadata", || {
             self.connection.execute(
                 r#"
                 UPDATE runs
@@ -1358,7 +1382,7 @@ impl ObservationStore {
             "worker_pid": worker_pid,
             "deadline_unix_ms": deadline_at.timestamp_millis(),
         }))?;
-        let rows = execute_with_retry("begin running run handoff", || {
+        let rows = execute_with_retry(&self.connection, "begin running run handoff", || {
             self.connection.execute(
                 "UPDATE runs SET metadata_json = json_set(metadata_json, '$.homeboy_run_owner', json(?1), '$.homeboy_ownership_handoff', json(?2)) WHERE id = ?3 AND status = ?4",
                 params![owner, handoff, run_id, RunStatus::Running.as_str()],
@@ -1380,7 +1404,7 @@ impl ObservationStore {
         validate_required("run_id", run_id)?;
         let accepted_at = chrono::Utc::now().to_rfc3339();
         let now_unix_ms = chrono::Utc::now().timestamp_millis();
-        let rows = execute_with_retry("accept running run handoff", || {
+        let rows = execute_with_retry(&self.connection, "accept running run handoff", || {
             self.connection.execute(
                 "UPDATE runs SET metadata_json = json_set(metadata_json, '$.homeboy_ownership_handoff.state', 'accepted', '$.homeboy_ownership_handoff.accepted_at', ?1) WHERE id = ?2 AND status = ?3 AND json_extract(metadata_json, '$.homeboy_ownership_handoff.state') = 'transferring' AND json_extract(metadata_json, '$.homeboy_ownership_handoff.worker_pid') = ?4 AND CAST(json_extract(metadata_json, '$.homeboy_ownership_handoff.deadline_unix_ms') AS INTEGER) > ?5",
                 params![accepted_at, run_id, RunStatus::Running.as_str(), worker_pid, now_unix_ms],
@@ -1435,7 +1459,7 @@ impl ObservationStore {
         }
         let finished_at = chrono::Utc::now().to_rfc3339();
         let metadata = self.serialize_run_metadata(&metadata)?;
-        let rows = execute_with_retry("fail running run handoff", || {
+        let rows = execute_with_retry(&self.connection, "fail running run handoff", || {
             self.connection.execute(
                 "UPDATE runs SET finished_at = ?1, status = ?2, metadata_json = ?3 WHERE id = ?4 AND status = ?5 AND json_extract(metadata_json, '$.homeboy_ownership_handoff.state') = 'transferring' AND json_extract(metadata_json, '$.homeboy_ownership_handoff.worker_pid') = ?6",
                 params![
@@ -1513,7 +1537,7 @@ impl ObservationStore {
         let finished_at = chrono::Utc::now().to_rfc3339();
         let metadata = self.serialize_run_metadata(&metadata)?;
         let now_unix_ms = chrono::Utc::now().timestamp_millis();
-        let rows = execute_with_retry("expire running run handoff", || {
+        let rows = execute_with_retry(&self.connection, "expire running run handoff", || {
             self.connection.execute(
                 "UPDATE runs SET finished_at = ?1, status = ?2, metadata_json = ?3 WHERE id = ?4 AND status = ?5 AND json_extract(metadata_json, '$.homeboy_ownership_handoff.state') = 'transferring' AND json_extract(metadata_json, '$.homeboy_ownership_handoff.worker_pid') = ?6 AND CAST(json_extract(metadata_json, '$.homeboy_ownership_handoff.deadline_unix_ms') AS INTEGER) = ?7 AND ?7 <= ?8",
                 params![finished_at, RunStatus::Error.as_str(), metadata, run_id, RunStatus::Running.as_str(), worker_pid, deadline_unix_ms, now_unix_ms],
@@ -1965,28 +1989,41 @@ impl ObservationStore {
     /// Delete run-owned records explicitly so older databases that did not
     /// enable SQLite foreign keys retain referential integrity as well.
     pub fn delete_terminal_runs(&mut self, ids: &[String]) -> Result<()> {
-        let tx = self
-            .connection
-            .transaction()
-            .map_err(sqlite_error("begin terminal run retention"))?;
         for id in ids {
+            // One child per commit bounds both fanout and legacy blob bytes.
+            // A terminal predicate on every batch avoids damaging active runs.
             for table in RUN_OWNED_CHILD_TABLES {
-                tx.execute(&format!("DELETE FROM {table} WHERE run_id = ?1"), [id])
-                    .map_err(sqlite_error(format!("delete terminal run {table}")))?;
+                loop {
+                    let tx = begin_control_plane_write(
+                        &self.connection,
+                        "retain terminal run children",
+                    )?;
+                    let changed = tx.execute(&format!(
+                        "DELETE FROM {table} WHERE rowid IN (SELECT rowid FROM {table} WHERE run_id = ?1 LIMIT 1) AND EXISTS (SELECT 1 FROM runs WHERE id = ?1 AND status IN ('pass', 'fail', 'error', 'skipped', 'stale'))"
+                    ), [id]).map_err(sqlite_error("delete terminal run child batch"))?;
+                    tx.commit()
+                        .map_err(sqlite_error("commit terminal run child batch"))?;
+                    if changed == 0 {
+                        break;
+                    }
+                }
             }
+            let tx = begin_control_plane_write(&self.connection, "retain terminal run")?;
             tx.execute("DELETE FROM runs WHERE id = ?1 AND status IN ('pass', 'fail', 'error', 'skipped', 'stale')", [id])
                 .map_err(sqlite_error("delete terminal run"))?;
+            tx.commit()
+                .map_err(sqlite_error("commit terminal run retention"))?;
         }
-        tx.commit()
-            .map_err(sqlite_error("commit terminal run retention"))?;
-        // The store uses incremental auto-vacuum: hand the pages retention just
-        // freed back to the filesystem. The pragma yields one row per freed
-        // page and frees only as many pages as are stepped, so drain it. A
-        // store created without incremental auto-vacuum treats this as a no-op.
-        const RECLAIM: &str = "reclaim space freed by terminal run retention";
+        self.compact_run_metadata()?;
+        self.reclaim_retention_pages()
+    }
+
+    /// Reclaim only a small page budget, not the entire multi-GB freelist.
+    pub(crate) fn reclaim_retention_pages(&self) -> Result<()> {
+        const RECLAIM: &str = "reclaim retention page batch";
         let mut statement = self
             .connection
-            .prepare("PRAGMA incremental_vacuum")
+            .prepare("PRAGMA incremental_vacuum(32)")
             .map_err(sqlite_error(RECLAIM))?;
         let mut rows = statement.query([]).map_err(sqlite_error(RECLAIM))?;
         while rows.next().map_err(sqlite_error(RECLAIM))?.is_some() {}
@@ -2068,7 +2105,7 @@ impl ObservationStore {
                 Some("serialize notification marker".to_string()),
             )
         })?;
-        let rows = execute_with_retry("mark notification delivered", || {
+        let rows = execute_with_retry(&self.connection, "mark notification delivered", || {
             self.connection.execute(
                 r#"
                 UPDATE runs
@@ -2100,7 +2137,7 @@ impl ObservationStore {
             ));
         }
         let finished_at = chrono::Utc::now().to_rfc3339();
-        let rows = execute_with_retry("settle run record", || {
+        let rows = execute_with_retry(&self.connection, "settle run record", || {
             self.connection.execute(
                 r#"
                 UPDATE runs
@@ -2145,7 +2182,7 @@ impl ObservationStore {
         let _payload_guard = self.metadata_payload_lock(false)?;
         validate_required("run.id", &run.id)?;
         let metadata_json = self.serialize_run_metadata(&run.metadata_json)?;
-        let inserted = execute_with_retry("import run record", || {
+        let inserted = execute_with_retry(&self.connection, "import run record", || {
             self.connection.execute(
                 r#"
                 INSERT OR IGNORE INTO runs(
@@ -2206,7 +2243,7 @@ impl ObservationStore {
             ));
         }
         let metadata_json = self.serialize_run_metadata(&run.metadata_json)?;
-        execute_with_retry("import synthetic run record", || {
+        execute_with_retry(&self.connection, "import synthetic run record", || {
             self.connection.execute(
                 r#"
                 INSERT OR IGNORE INTO runs(
@@ -2390,35 +2427,50 @@ impl ObservationStore {
         };
         let mut captured = None;
         let mut applied = false;
-        execute_with_retry("upsert imported run with canonical events", || {
-            captured = None;
-            applied = false;
-            let transaction = TimedWrite::observe(
-                self.connection.unchecked_transaction()?,
-                &self.connection,
-                "upsert run with canonical events",
-            );
-            let run_applied = apply_imported_run_in_tx(
-                &transaction,
-                &run,
-                &metadata_json,
-                preserve_terminal,
-                mission_id,
-                resource_projection,
-                revision,
-            )?;
-            applied = run_applied;
-            if run_applied {
-                if let Some(bound_run) = bound_run.as_ref() {
-                    for prepared in events {
+        execute_with_retry(
+            &self.connection,
+            "upsert imported run with canonical events",
+            || {
+                captured = None;
+                applied = false;
+                let transaction = TimedWrite::observe(
+                    self.connection.unchecked_transaction()?,
+                    &self.connection,
+                    "upsert run with canonical events",
+                );
+                let run_applied = apply_imported_run_in_tx(
+                    &transaction,
+                    &run,
+                    &metadata_json,
+                    preserve_terminal,
+                    mission_id,
+                    resource_projection,
+                    revision,
+                )?;
+                applied = run_applied;
+                if run_applied {
+                    if let Some(bound_run) = bound_run.as_ref() {
+                        for prepared in events {
+                            if let Err(error) =
+                                super::control_plane_events::append_control_plane_event_on(
+                                    &transaction,
+                                    bound_run,
+                                    &prepared.request,
+                                    &prepared.idempotency_digest,
+                                    &prepared.request_digest,
+                                )
+                            {
+                                captured = Some(error);
+                                return match transaction.rollback() {
+                                    Ok(()) => Ok(()),
+                                    Err(rollback_error) => Err(rollback_error),
+                                };
+                            }
+                        }
+                    }
+                    for intent in intents {
                         if let Err(error) =
-                            super::control_plane_events::append_control_plane_event_on(
-                                &transaction,
-                                bound_run,
-                                &prepared.request,
-                                &prepared.idempotency_digest,
-                                &prepared.request_digest,
-                            )
+                            super::work_intents::append_work_intent_on(&transaction, intent)
                         {
                             captured = Some(error);
                             return match transaction.rollback() {
@@ -2428,20 +2480,9 @@ impl ObservationStore {
                         }
                     }
                 }
-                for intent in intents {
-                    if let Err(error) =
-                        super::work_intents::append_work_intent_on(&transaction, intent)
-                    {
-                        captured = Some(error);
-                        return match transaction.rollback() {
-                            Ok(()) => Ok(()),
-                            Err(rollback_error) => Err(rollback_error),
-                        };
-                    }
-                }
-            }
-            transaction.commit()
-        })?;
+                transaction.commit()
+            },
+        )?;
         match captured {
             Some(error) => Err(error),
             None => Ok(applied),
@@ -3388,7 +3429,7 @@ mod tests {
     }
 
     #[test]
-    fn retention_returns_freed_pages_to_the_filesystem() {
+    fn retention_reclaims_only_a_bounded_page_batch() {
         with_isolated_home(|_| {
             let mut store = ObservationStore::open_initialized().expect("store");
             let pragma = |store: &ObservationStore, name: &str| -> i64 {
@@ -3412,18 +3453,51 @@ mod tests {
                         ..Default::default()
                     })
                     .expect("seed run");
+                // Seed legacy inline bytes rather than today's external references.
+                store
+                    .connection
+                    .execute(
+                        "UPDATE runs SET metadata_json = ?1 WHERE id = ?2",
+                        params![serde_json::json!({"padding": padding}).to_string(), id],
+                    )
+                    .unwrap();
             }
             let before = pragma(&store, "page_count");
             store.delete_terminal_runs(&ids).expect("retention");
-            assert_eq!(
-                pragma(&store, "freelist_count"),
-                0,
-                "no free pages left behind"
+            let reclaimed = before - pragma(&store, "page_count");
+            assert!(
+                (1..=32).contains(&reclaimed),
+                "bounded incremental reclaim: {reclaimed}"
             );
             assert!(
-                pragma(&store, "page_count") < before / 2,
-                "the file shrinks after retention"
+                pragma(&store, "freelist_count") > 0,
+                "later passes reclaim the remainder"
             );
+        });
+    }
+
+    #[test]
+    fn retention_commits_batches_before_a_later_failure() {
+        with_isolated_home(|_| {
+            let mut store = ObservationStore::open_initialized().unwrap();
+            let ids: Vec<String> = (0..100).map(|i| format!("batch-{i}")).collect();
+            for id in &ids {
+                store
+                    .upsert_imported_run(&RunRecord {
+                        id: id.clone(),
+                        kind: "test".into(),
+                        status: "pass".into(),
+                        started_at: "2026-01-01T00:00:00Z".into(),
+                        ..Default::default()
+                    })
+                    .unwrap();
+            }
+            store.connection.execute_batch("CREATE TRIGGER fail_last_retention BEFORE DELETE ON runs WHEN OLD.id = 'batch-99' BEGIN SELECT RAISE(ABORT, 'injected failure'); END;").unwrap();
+            assert!(store.delete_terminal_runs(&ids).is_err());
+            let reader = ObservationStore::open_readonly_at(store.database_path()).unwrap();
+            assert!(reader.get_run(&ids[0]).unwrap().is_none());
+            assert!(reader.get_run(&ids[98]).unwrap().is_none());
+            assert!(reader.get_run(&ids[99]).unwrap().is_some());
         });
     }
 

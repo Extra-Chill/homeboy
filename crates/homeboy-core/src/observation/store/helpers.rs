@@ -569,6 +569,13 @@ pub(crate) fn begin_control_plane_write<'conn>(
     rusqlite::Transaction::new_unchecked(connection, rusqlite::TransactionBehavior::Immediate)
         .map_err(|error| {
             if is_transient_lock_error(&error) {
+                super::write_health::record(
+                    connection,
+                    serde_json::json!({
+                        "event": "observation.writer_contention", "operation": operation,
+                        "waited_ms": started.elapsed().as_millis(),
+                    }),
+                );
                 sqlite_error(format!(
                     "{operation} (writer admission exhausted; elapsed {}ms of {}ms budget)",
                     started.elapsed().as_millis(),
@@ -663,15 +670,15 @@ impl Drop for TimedWrite<'_> {
     fn drop(&mut self) {
         drop(self.transaction.take());
         if self.started.elapsed() >= std::time::Duration::from_secs(1) {
-            crate::log_status!(
-                "observation.slow_write",
-                "{}",
+            super::write_health::record(
+                self.connection,
                 serde_json::json!({
+                    "event": "observation.slow_write",
                     "operation": self.operation,
                     "duration_ms": self.started.elapsed().as_millis(),
                     "changed_rows": self.connection.total_changes().saturating_sub(self.initial_changes),
                     "bytes": cache_write_bytes(self.connection).saturating_sub(self.initial_bytes),
-                })
+                }),
             );
         }
     }
@@ -697,14 +704,23 @@ pub(crate) fn is_transient_lock_error(error: &rusqlite::Error) -> bool {
 /// handler would multiply the end-to-end contention budget. Maintenance paths
 /// with zero-timeout connections use `execute_with_retry_inner` explicitly.
 pub(crate) fn execute_with_retry<T>(
+    connection: &rusqlite::Connection,
     context: impl Into<String>,
     op: impl FnOnce() -> rusqlite::Result<T>,
 ) -> Result<T> {
     let context = context.into();
+    let started = std::time::Instant::now();
     match op() {
         Ok(value) => Ok(value),
         Err(error) => {
             let detail = if is_transient_lock_error(&error) {
+                super::write_health::record(
+                    connection,
+                    serde_json::json!({
+                        "event": "observation.writer_contention", "operation": context,
+                        "waited_ms": started.elapsed().as_millis(),
+                    }),
+                );
                 format!("{context} (writer contention budget exhausted)")
             } else {
                 context
@@ -805,7 +821,7 @@ mod control_plane_admission_tests {
             });
 
             let started = std::time::Instant::now();
-            let error = execute_with_retry("insert retry-budget effect", || {
+            let error = execute_with_retry(&store.connection, "insert retry-budget effect", || {
                 store
                     .connection
                     .execute("INSERT INTO retry_budget_effect DEFAULT VALUES", [])

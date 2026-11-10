@@ -228,16 +228,19 @@ impl ObservationStore {
         Ok(serialized)
     }
 
-    /// Explicit offline maintenance; never invoked by run retention.
+    /// Retire up to 32 oversized terminal legacy rows per retention pass.
+    /// Payload IO and serialization happen outside the writer; each CAS update
+    /// commits independently. Freed pages are reclaimed incrementally, never
+    /// with a whole-store VACUUM while lifecycle writers are live.
     pub fn compact_run_metadata(&self) -> Result<()> {
         let _guard = self.metadata_payload_lock(false)?;
         let mut after = String::new();
-        loop {
+        for _ in 0..32 {
             let row: Option<(String, String)> = self
                 .connection
                 .query_row(
-                    "SELECT id, metadata_json FROM runs WHERE id > ?1 ORDER BY id LIMIT 1",
-                    [&after],
+                    "SELECT id, metadata_json FROM runs WHERE id > ?1 AND length(CAST(metadata_json AS BLOB)) > ?2 AND status IN ('pass', 'fail', 'error', 'skipped', 'stale') ORDER BY id LIMIT 1",
+                    rusqlite::params![after, RUN_METADATA_CAP as i64],
                     |row| Ok((row.get(0)?, row.get(1)?)),
                 )
                 .optional()
@@ -249,16 +252,18 @@ impl ObservationStore {
             let value = serde_json::from_str(&raw)
                 .map_err(|e| Error::internal_json(e.to_string(), None))?;
             let serialized = self.serialize_run_metadata(&value)?;
-            self.connection
-                .execute(
-                    "UPDATE runs SET metadata_json = ?1 WHERE id = ?2 AND metadata_json = ?3",
+            let transaction =
+                super::begin_control_plane_write(&self.connection, "compact legacy run metadata")?;
+            transaction.execute(
+                    "UPDATE runs SET metadata_json = ?1 WHERE id = ?2 AND metadata_json = ?3 AND status IN ('pass', 'fail', 'error', 'skipped', 'stale')",
                     rusqlite::params![serialized, id, raw],
                 )
                 .map_err(sqlite_error("compact run metadata"))?;
+            transaction
+                .commit()
+                .map_err(sqlite_error("commit compacted metadata"))?;
         }
-        self.connection
-            .execute_batch("VACUUM")
-            .map_err(sqlite_error("vacuum compacted run metadata"))
+        Ok(())
     }
 
     /// Mark all surviving rows, including references nested in canonical reports.
@@ -337,6 +342,61 @@ impl ObservationStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retention_compacts_legacy_terminal_rows_in_bounded_passes() {
+        crate::test_support::with_isolated_home(|_| {
+            let mut store = ObservationStore::open_initialized().unwrap();
+            let legacy =
+                serde_json::json!({"legacy": "x".repeat(RUN_METADATA_CAP + 1)}).to_string();
+            for index in 0..35 {
+                let run = store
+                    .start_run(NewRunRecord::builder("legacy").build())
+                    .unwrap();
+                if index != 34 {
+                    store.finish_run(&run.id, RunStatus::Pass, None).unwrap();
+                }
+                // Simulate a pre-externalization database, bypassing today's cap.
+                store
+                    .connection
+                    .execute(
+                        "UPDATE runs SET metadata_json = ?1 WHERE id = ?2",
+                        rusqlite::params![legacy, run.id],
+                    )
+                    .unwrap();
+            }
+            let oversized = || {
+                store
+                    .connection
+                    .query_row(
+                        "SELECT COUNT(*) FROM runs WHERE length(metadata_json) > ?1",
+                        [RUN_METADATA_CAP as i64],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .unwrap()
+            };
+            assert_eq!(oversized(), 35);
+            store.delete_terminal_runs(&[]).unwrap();
+            let count: i64 = store
+                .connection
+                .query_row(
+                    "SELECT COUNT(*) FROM runs WHERE length(metadata_json) > ?1",
+                    [RUN_METADATA_CAP as i64],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 3);
+            store.delete_terminal_runs(&[]).unwrap();
+            let runs = store.list_runs_all(RunListFilter::default()).unwrap();
+            assert_eq!(
+                runs.iter()
+                    .filter(|r| r.metadata_json.to_string().len() > RUN_METADATA_CAP)
+                    .count(),
+                1,
+                "active legacy rows remain untouched"
+            );
+        });
+    }
 
     #[test]
     fn payload_lock_never_opens_the_database_inode() {

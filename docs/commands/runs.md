@@ -62,6 +62,23 @@ homeboy runs report failure-digest --output-dir <dir> --results <json>
 
 `homeboy runs` is the inspection and maintenance surface for Homeboy's local observation store. Producers such as `bench`, `rig`, and `trace` write run and artifact records; this command lets humans and agents inspect that evidence without opening SQLite directly, export/import portable bundles, render typed report projections, and run explicit cleanup or reconciliation tasks.
 
+### Writer contention diagnostics
+
+`runs hotspots` includes `store_write_health`: the latest 256 slow writers
+(holding a transaction for at least one second) and exhausted writer admissions.
+Records name the operation and PID, completion time, duration or waited
+milliseconds, and, for holders, changed rows and SQLite flushed bytes. They are
+store-wide, not filtered by the selected run cohort. The bounded SQLite sidecar
+`<store>.write-health` is separate from the observation writer lock, so a losing
+writer can persist its diagnostic even while that lock is held. Recording is
+best-effort and never changes the outcome of the original write.
+
+Terminal retention commits child deletions individually and reclaims at most 32
+free pages per pass. It also externalizes up to 32 oversized terminal legacy
+metadata rows per pass, with payload IO outside the writer transaction. Active
+rows are untouched. `runs reconcile --compact-metadata` has been removed;
+routine retention replaces it without a whole-store `VACUUM`.
+
 ### Durable logs
 
 `homeboy runs logs <run-id> [--cursor <cursor>]` reads the canonical durable `ControlPlaneEventPage` through the agent-task service, not the observation store. Run and Cook IDs resolve exactly as in other durable lifecycle reads. Resume with the opaque cursor returned by the page. The command preserves the compact human log summary and the canonical JSON payload; no task filter or limit flag is exposed.

@@ -600,7 +600,7 @@ impl ObservationStore {
         let viewer_links_json = serialize_metadata(&serde_json::json!(artifact.viewer_links))?;
         let index =
             ArtifactIndexColumns::of(&artifact.run_id, &artifact.id, &artifact.metadata_json);
-        execute_with_retry("import artifact record", || {
+        execute_with_retry(&self.connection, "import artifact record", || {
             self.connection.execute(
                 r#"
                 INSERT INTO artifacts(id, run_id, kind, artifact_type, path, url, public_url, viewer_url, viewer_links_json, sha256, size_bytes, mime, metadata_json, created_at, artifact_handle, failure_diagnostic, failure_diagnostic_rank)
@@ -972,7 +972,7 @@ impl ObservationStore {
         let metadata_json_str = serialize_metadata(&artifact.metadata_json)?;
         let viewer_links_json = serialize_metadata(&serde_json::json!(artifact.viewer_links))?;
         let index = ArtifactIndexColumns::of(run_id, &id, &artifact.metadata_json);
-        if let Err(error) = execute_with_retry("insert artifact record", || {
+        if let Err(error) = execute_with_retry(&self.connection, "insert artifact record", || {
             self.connection.execute(
                 r#"
                 INSERT INTO artifacts(id, run_id, kind, artifact_type, path, url, public_url, viewer_url, viewer_links_json, sha256, size_bytes, mime, metadata_json, created_at, artifact_handle, failure_diagnostic, failure_diagnostic_rank)
@@ -1140,8 +1140,11 @@ impl ObservationStore {
         let metadata_json_str = serialize_metadata(&metadata_json)?;
         let viewer_links_json = serialize_metadata(&serde_json::json!([]))?;
         let index = ArtifactIndexColumns::of(run_id, &id, &metadata_json);
-        if let Err(error) = execute_with_retry("insert directory artifact record", || {
-            self.connection.execute(
+        if let Err(error) = execute_with_retry(
+            &self.connection,
+            "insert directory artifact record",
+            || {
+                self.connection.execute(
                 r#"
                 INSERT INTO artifacts(id, run_id, kind, artifact_type, path, url, public_url, viewer_url, viewer_links_json, sha256, size_bytes, mime, metadata_json, created_at, artifact_handle, failure_diagnostic, failure_diagnostic_rank)
                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
@@ -1166,7 +1169,8 @@ impl ObservationStore {
                     index.rank,
                 ],
             )
-        }) {
+            },
+        ) {
             fs::remove_dir_all(&stored_path).ok();
             return Err(error);
         }
@@ -1212,7 +1216,7 @@ impl ObservationStore {
         let metadata_json_str = serialize_metadata(&metadata_json)?;
         let viewer_links_json = serialize_metadata(&serde_json::json!([]))?;
         let index = ArtifactIndexColumns::of(run_id, &id, &metadata_json);
-        execute_with_retry("insert URL artifact record", || {
+        execute_with_retry(&self.connection, "insert URL artifact record", || {
             self.connection.execute(
                 r#"
                 INSERT INTO artifacts(id, run_id, kind, artifact_type, path, url, public_url, viewer_url, viewer_links_json, sha256, size_bytes, mime, metadata_json, created_at, artifact_handle, failure_diagnostic, failure_diagnostic_rank)
@@ -1532,7 +1536,7 @@ impl ObservationStore {
         // change in the same statement. The handle derives from immutable
         // identity and is left untouched.
         let (diagnostic, rank) = failure_diagnostic_columns(&metadata_json);
-        let rows = execute_with_retry("update artifact metadata", || {
+        let rows = execute_with_retry(&self.connection, "update artifact metadata", || {
             self.connection.execute(
                 r#"
                 UPDATE artifacts
@@ -1778,7 +1782,7 @@ impl ObservationStore {
 
     pub fn delete_artifact_record(&self, artifact_id: &str) -> Result<bool> {
         validate_required("artifact_id", artifact_id)?;
-        let rows = execute_with_retry("delete artifact record", || {
+        let rows = execute_with_retry(&self.connection, "delete artifact record", || {
             self.connection
                 .execute("DELETE FROM artifacts WHERE id = ?1", [artifact_id])
         })?;
@@ -1801,7 +1805,7 @@ impl ObservationStore {
         }
         let metadata_json = serialize_metadata(&record.metadata_json)?;
 
-        execute_with_retry("insert trace run record", || {
+        execute_with_retry(&self.connection, "insert trace run record", || {
             self.connection.execute(
                 r#"
                 INSERT INTO trace_runs(
@@ -1874,7 +1878,7 @@ impl ObservationStore {
         let id = Uuid::new_v4().to_string();
         let metadata_json = serialize_metadata(&record.metadata_json)?;
 
-        execute_with_retry("insert trace span record", || {
+        execute_with_retry(&self.connection, "insert trace span record", || {
             self.connection.execute(
                 r#"
                 INSERT INTO trace_spans(
@@ -1963,7 +1967,7 @@ impl ObservationStore {
             return ensure_identical("trace_span", &span.id, &existing, span);
         }
         let metadata_json = serialize_metadata(&span.metadata_json)?;
-        execute_with_retry("import trace span record", || {
+        execute_with_retry(&self.connection, "import trace span record", || {
             self.connection.execute(
                 r#"
                 INSERT INTO trace_spans(
