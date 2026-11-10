@@ -2954,6 +2954,14 @@ pub(crate) fn finalize_or_load_cook_pr_with_backend_with_stores<
             ]),
         ));
     }
+    if crate::agent_task_review_dossier::verified_commands_from_promotion(&promotion).is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "verification",
+            "Cook cannot publish a test command without matching successful visible durable gate evidence bound to the promoted candidate",
+            None,
+            None,
+        ));
+    }
     let aggregate = lifecycle_store.read_aggregate(successful_run_id)?;
     let review_failure = match super::cook::review_form_from_aggregate(&aggregate) {
         Ok(Some(form)) => form.validate().err().map(|error| error.to_string()),
@@ -2974,7 +2982,8 @@ pub(crate) fn finalize_or_load_cook_pr_with_backend_with_stores<
             "review_form_unavailable",
             serde_json::json!({"phase": "review_form", "message": reason}),
         )?;
-        let value = super::cook::publish_incomplete_draft(
+        let mut value = super::cook::publish_incomplete_draft(
+            lifecycle_store,
             options,
             &promotion,
             None,
@@ -2984,6 +2993,11 @@ pub(crate) fn finalize_or_load_cook_pr_with_backend_with_stores<
             true,
             backend,
         )?;
+        let out_of_scope =
+            remediation_out_of_scope_changes(lifecycle_store, successful_run_id, &promotion);
+        if !out_of_scope.is_empty() {
+            value["review_dossier"]["out_of_scope_changes"] = serde_json::json!(out_of_scope);
+        }
         lifecycle_store.record_cook_finalization(successful_run_id, value.clone())?;
         return Ok(value);
     }
@@ -5116,7 +5130,7 @@ fn cook_review_dossier_with_stores_and_review_form(
 /// dispatched `remediation_scope`: the original candidate's files plus the
 /// conflict or gate-failure paths it was asked to fix (#17651). A first
 /// attempt carries no scope and has nothing out of scope.
-fn remediation_out_of_scope_changes(
+pub(super) fn remediation_out_of_scope_changes(
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     candidate_run_id: &str,
     promotion: &AgentTaskPromotionReport,

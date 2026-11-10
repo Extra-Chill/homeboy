@@ -7512,11 +7512,16 @@ fn run_cook_spine(
         } else {
             adopted_attempt_is_ready_for_cook_continuation(lifecycle_store, &record)?
         };
-        let review_form_unavailable = persisted_promotion_for_attempt_in_store(
-            lifecycle_store,
-            &run_id,
-        )?
-        .is_some_and(|promotion| promotion.applied_with_passing_verdict())
+        // A verification-pending marker is not a promotion report: its
+        // operation owner must finish before Cook inspects candidate proof.
+        let verification_pending = record
+            .metadata
+            .pointer("/cook_delivery/artifacts/promotion/status")
+            .and_then(Value::as_str)
+            == Some("verification_pending");
+        let review_form_unavailable = !verification_pending
+            && persisted_promotion_for_attempt_in_store(lifecycle_store, &run_id)?
+                .is_some_and(|promotion| promotion.applied_with_passing_verdict())
             && !matches!(review_form_from_aggregate(&aggregate), Ok(Some(form)) if form.validate().is_ok());
         if review_form_unavailable {
             lifecycle_store.record_metadata_value(
@@ -8313,6 +8318,7 @@ fn publish_latest_incomplete_draft(
                 let aggregate = lifecycle_store.read_aggregate(&attempt.run_id)?;
                 let form = review_form_from_aggregate(&aggregate)?;
                 return publish_incomplete_draft(
+                    lifecycle_store,
                     options,
                     &promotion,
                     form.as_ref(),
@@ -8338,6 +8344,7 @@ fn publish_latest_incomplete_draft(
 pub(super) fn publish_incomplete_draft<
     B: crate::agent_task_finalization::AgentTaskPrFinalizationBackend,
 >(
+    lifecycle_store: &AgentTaskLifecycleStore,
     options: &CookRequest,
     promotion: &AgentTaskPromotionReport,
     form: Option<&crate::agent_task_review_dossier::AiFilledReviewForm>,
@@ -8392,8 +8399,7 @@ pub(super) fn publish_incomplete_draft<
         "\nCandidate from attempt {attempt} (`{run_id}`).\n"
     ));
     if review_form_unavailable {
-        let lifecycle = AgentTaskLifecycleStore::from_environment()?;
-        let record = lifecycle.read_record(run_id)?;
+        let record = lifecycle_store.read_record(run_id)?;
         let reason = record.metadata["review_form_unavailable"]["message"]
             .as_str()
             .unwrap_or("missing review_form output");
@@ -8401,6 +8407,14 @@ pub(super) fn publish_incomplete_draft<
             "\nReview form failed: {}\n",
             reason.replace(['\n', '\r'], " ")
         ));
+    }
+    let out_of_scope =
+        super::cook_promotion::remediation_out_of_scope_changes(lifecycle_store, run_id, promotion);
+    if !out_of_scope.is_empty() {
+        body.push_str("\n## Out-of-scope changes\n");
+        for file in out_of_scope {
+            body.push_str(&format!("- `{file}`\n"));
+        }
     }
     if !later.is_empty() {
         body.push_str(&format!("\nLater attempts:\n{}\n", later.join("\n")));
