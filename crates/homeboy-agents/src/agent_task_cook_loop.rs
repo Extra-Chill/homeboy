@@ -584,65 +584,6 @@ fn build_follow_up_request(
     request
 }
 
-/// A gate-green candidate that no longer applies to its moved base (#17651).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct AgentTaskCookLoopBaseConflict {
-    /// The declared base branch the candidate must converge onto.
-    pub base_ref: String,
-    /// The base the candidate's gates verified it on.
-    pub verified_base: String,
-    /// The moved base the candidate does not apply to.
-    pub resolved_base: String,
-    /// Candidate files the base also changed.
-    pub paths: Vec<String>,
-    /// The base's own change to `paths`, bounded.
-    pub base_change: String,
-}
-
-/// Turn a base conflict into the next remediation attempt (#17651). It is a
-/// candidate continuation like gate feedback, so it keeps that kind and its
-/// immutable candidate baseline; the conflict travels as
-/// `inputs.cook_loop.base_conflict` and a prompt section naming the paths and
-/// the base change the candidate must stop colliding with.
-pub fn build_base_conflict_follow_up_request(
-    options: &AgentTaskCookLoopOptions,
-    conflict: &AgentTaskCookLoopBaseConflict,
-) -> AgentTaskRequest {
-    let progression = failure_progression(options, &[]);
-    let mut request = build_follow_up_request(options, &[], &progression);
-    request.task_id = format!(
-        "{}-base-conflict-{}",
-        options.source_request.task_id,
-        options.attempt.saturating_add(1)
-    );
-    request.inputs["cook_loop"]["base_conflict"] = json!(conflict);
-    request.inputs["cook_loop"]["remediation_scope"] =
-        json!(remediation_scope(options, conflict.paths.clone()));
-    request.metadata["cook_loop"]["remediation"] = json!("base_conflict");
-    request.instructions = format!(
-        "{}\n\n{}",
-        request.instructions.trim_end(),
-        base_conflict_prompt_section(conflict)
-    );
-    request
-}
-
-fn base_conflict_prompt_section(conflict: &AgentTaskCookLoopBaseConflict) -> String {
-    let paths = conflict
-        .paths
-        .iter()
-        .map(|path| format!("- `{path}`"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    format!(
-        "{GATE_FAILURE_PROMPT_HEADING_PREFIX}base conflict\n\nThe previous attempt's candidate passed every deterministic gate, but it no longer applies to `{}` at {} (verified on {}). Homeboy replays your change onto that base, so rework it in these conflicting paths so it no longer overlaps the base change below, keeping the base's lines intact:\n\n{paths}\n\nBase change to the conflicting paths:\n\n```diff\n{}\n```",
-        conflict.base_ref,
-        conflict.resolved_base,
-        conflict.verified_base,
-        conflict.base_change.trim_end()
-    )
-}
-
 /// Files a remediation attempt may change: the original candidate's files
 /// (carried forward from earlier remediations) plus the paths this
 /// remediation is about. Anything else it changes is out of scope (#17651).

@@ -61,10 +61,9 @@ use super::cook_pre_execution::{
     CookExecutionPreparation,
 };
 use super::cook_promotion::{
-    attempt_needs_execution_with_store, catch_up_cook_candidate_to_base_in_store,
-    finalize_or_load_cook_pr_with_stores, persisted_promotion_for_attempt_in_store,
-    pre_provider_diagnostic_cause, promote_or_load_attempt_in_store, BaseCatchUp, CookReportInput,
-    CookStores,
+    attempt_needs_execution_with_store, finalize_or_load_cook_pr_with_stores,
+    persisted_promotion_for_attempt_in_store, pre_provider_diagnostic_cause,
+    promote_or_load_attempt_in_store, CookReportInput, CookStores,
 };
 use super::cook_recipe::{CookRecipeStore, InitialRecipeMaterialization};
 use super::cook_recovery::CookRecoveryStep;
@@ -1404,25 +1403,13 @@ type TestCookPromoteFn<'a> = Box<
         + 'a,
 >;
 
-#[cfg(test)]
-type TestCookCatchUpFn<'a> = Box<
-    dyn FnMut(
-            &AgentTaskLifecycleStore,
-            &CookRequest,
-            &AgentTaskPromotionReport,
-        ) -> Result<BaseCatchUp>
-        + 'a,
->;
-
-/// Concrete production side effects. Promotion and base catch-up have one
-/// native implementation; only finalization varies because callers bind
+/// Concrete production side effects. Promotion has one native
+/// implementation; only finalization varies because callers bind
 /// different durable recipe stores and backends.
 pub(crate) struct CookSideEffects<'a> {
     finalize: CookFinalizeFn<'a>,
     #[cfg(test)]
     test_promote: Option<TestCookPromoteFn<'a>>,
-    #[cfg(test)]
-    test_catch_up: Option<TestCookCatchUpFn<'a>>,
 }
 
 impl<'a> CookSideEffects<'a> {
@@ -1440,21 +1427,13 @@ impl<'a> CookSideEffects<'a> {
             finalize: Box::new(finalize),
             #[cfg(test)]
             test_promote: None,
-            #[cfg(test)]
-            test_catch_up: None,
         }
     }
 
     #[cfg(test)]
-    pub(crate) fn for_test<P, C, F>(promote: P, catch_up: C, finalize: F) -> Self
+    pub(crate) fn for_test<P, F>(promote: P, finalize: F) -> Self
     where
         P: FnMut(&AgentTaskLifecycleStore, &CookRequest, &str) -> Result<AgentTaskPromotionReport>
-            + 'a,
-        C: FnMut(
-                &AgentTaskLifecycleStore,
-                &CookRequest,
-                &AgentTaskPromotionReport,
-            ) -> Result<BaseCatchUp>
             + 'a,
         F: FnMut(
                 &AgentTaskLifecycleStore,
@@ -1467,7 +1446,6 @@ impl<'a> CookSideEffects<'a> {
         Self {
             finalize: Box::new(finalize),
             test_promote: Some(Box::new(promote)),
-            test_catch_up: Some(Box::new(catch_up)),
         }
     }
 
@@ -1482,21 +1460,6 @@ impl<'a> CookSideEffects<'a> {
             return promote(lifecycle_store, options, run_id);
         }
         promote_with_operation_claim_in_store(lifecycle_store, options, run_id)
-    }
-
-    /// Catch a Cook-owned candidate up to its moved resolved base.
-    pub(super) fn catch_up_base(
-        &mut self,
-        lifecycle_store: &AgentTaskLifecycleStore,
-        options: &CookRequest,
-        run_id: &str,
-        promotion: &AgentTaskPromotionReport,
-    ) -> Result<BaseCatchUp> {
-        #[cfg(test)]
-        if let Some(catch_up) = self.test_catch_up.as_mut() {
-            return catch_up(lifecycle_store, options, promotion);
-        }
-        catch_up_cook_candidate_to_base_in_store(lifecycle_store, options, run_id, promotion)
     }
 
     pub(super) fn finalize(
@@ -3593,21 +3556,15 @@ pub(crate) fn dispatch_cook_follow_up(
             }
         }
     } else {
-        // A base-conflict remediation reworks the same gate-authenticated
-        // candidate, exactly like gate remediation (#17651).
-        let base_conflict_remediation =
-            follow_up_request.inputs["cook_loop"]["base_conflict"].is_object();
-        (known_same_executor || base_conflict_remediation)
-            .then_some(true)
-            .or_else(|| {
-                cook_remediation_same_provider(
-                    promotion,
-                    aggregate,
-                    plan,
-                    durable_provider_executions.as_ref(),
-                    &follow_up_request.executor,
-                )
-            })
+        known_same_executor.then_some(true).or_else(|| {
+            cook_remediation_same_provider(
+                promotion,
+                aggregate,
+                plan,
+                durable_provider_executions.as_ref(),
+                &follow_up_request.executor,
+            )
+        })
     };
     let Some(same_provider) = same_provider else {
         return Ok(CookFollowUpDispatch::PolicyFailure {
@@ -7559,86 +7516,16 @@ fn run_cook_spine(
                 return Ok(report);
             }
             AgentTaskCookLoopStatus::GreenCompleted => {
-                let publication =
+                let mut report =
                     super::cook_delivery::ensure_published(&mut delivery, promotion.clone())?;
-                let conflict = match publication {
-                    super::cook_delivery::CookPublication::Ended(mut report) => {
-                        if review_form_unavailable {
-                            report.value.terminal_phase = Some("review_form".to_string());
-                            report.value.stop_reason = Some(
-                                "review form unavailable; published the gated candidate as a draft"
-                                    .to_string(),
-                            );
-                        }
-                        return Ok(report);
-                    }
-                    super::cook_delivery::CookPublication::BaseConflict(conflict) => conflict,
-                };
-                // A base conflict is remediation input (#17651): the next
-                // attempt reworks the candidate against the base change. Only
-                // an exhausted remediation budget ends the Cook on it.
-                if attempt >= attempt_limit {
-                    return super::cook_delivery::block_base_conflict(
-                        &mut delivery,
-                        conflict,
-                        "remediation budget exhausted",
+                if review_form_unavailable {
+                    report.value.terminal_phase = Some("review_form".to_string());
+                    report.value.stop_reason = Some(
+                        "review form unavailable; published the gated candidate as a draft"
+                            .to_string(),
                     );
                 }
-                let follow_up_request =
-                    crate::agent_task_cook_loop::build_base_conflict_follow_up_request(
-                        &AgentTaskCookLoopOptions {
-                            source_request: source_request.clone(),
-                            promotion_report: promotion.clone(),
-                            attempt,
-                            max_attempts: attempt_limit,
-                            source_run_id: Some(run_id.clone()),
-                            current_diff: gate_feedback_current_diff(&promotion),
-                            review_form: None,
-                            metadata: Value::Null,
-                        },
-                        &conflict.conflict,
-                    );
-                let budget_limit = budget_limit
-                    .as_ref()
-                    .expect("budget is initialized from the loaded attempt plan");
-                match dispatch_cook_follow_up(
-                    (store, lifecycle_store),
-                    &options,
-                    executor.clone(),
-                    &cook_id,
-                    attempt,
-                    &run_id,
-                    &plan,
-                    &aggregate,
-                    &promotion,
-                    follow_up_request,
-                    false,
-                    CookFollowUpBudgetScope::Cook,
-                    budget_limit,
-                    budget_used,
-                    &mut remediation_category_usage,
-                )? {
-                    CookFollowUpDispatch::Dispatched {
-                        run_id: next_run_id,
-                    } => {
-                        run_id = next_run_id;
-                        attempt = attempt.saturating_add(1);
-                    }
-                    CookFollowUpDispatch::BudgetExhausted { reason } => {
-                        return super::cook_delivery::block_base_conflict(
-                            &mut delivery,
-                            conflict,
-                            &format!("remediation budget exhausted ({reason})"),
-                        );
-                    }
-                    CookFollowUpDispatch::PolicyFailure { reason } => {
-                        return super::cook_delivery::block_base_conflict(
-                            &mut delivery,
-                            conflict,
-                            &format!("remediation could not be dispatched: {reason}"),
-                        );
-                    }
-                }
+                return Ok(report);
             }
             AgentTaskCookLoopStatus::BaselineRed => {
                 if promotion.finalization_eligible() {
@@ -7704,7 +7591,6 @@ fn run_cook_spine(
                         evidence: "/cook_delivery/blocker".to_string(),
                         output: None,
                     },
-                    0,
                 )?;
                 return Ok(stores.report(CookReportInput {
                     cook_id,
@@ -7987,14 +7873,7 @@ pub(super) fn publish_incomplete_draft<
         options.finalization.title.clone()
     };
     let record = lifecycle_store.read_record(run_id)?;
-    let base_conflict = super::cook_delivery::CookDelivery::from_run_metadata(&record.metadata)
-        .and_then(|delivery| delivery.blocker)
-        .filter(|blocker| {
-            blocker.code == super::cook_delivery::CookDeliveryBlockerCode::BaseConflict
-        });
-    let note = if base_conflict.is_some() {
-        "Deterministic gates passed; candidate published as a draft because its base conflicts."
-    } else if review_form_unavailable {
+    let note = if review_form_unavailable {
         "review: unavailable\n\nReview form unavailable: completion not assessed; deterministic gates passed"
     } else {
         "Incomplete candidate; deterministic verification failed."
@@ -8008,15 +7887,7 @@ pub(super) fn publish_incomplete_draft<
     body.push_str(&format!(
         "\nCandidate from attempt {attempt} (`{run_id}`).\n"
     ));
-    if let Some(blocker) = &base_conflict {
-        body.push_str(&format!(
-            "\nbase_conflict: {}\n\nConflict paths:\n",
-            blocker.message
-        ));
-        for path in &blocker.paths {
-            body.push_str(&format!("- `{path}`\n"));
-        }
-    } else if review_form_unavailable {
+    if review_form_unavailable {
         let reason = record.metadata["review_form_unavailable"]["message"]
             .as_str()
             .unwrap_or("missing review_form output");
