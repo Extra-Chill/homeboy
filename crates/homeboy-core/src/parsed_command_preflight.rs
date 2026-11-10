@@ -294,8 +294,9 @@ pub fn resolve_parsed_command_preflight(
     // unavailable, unverified, or stale Lab: preview and admission both fail
     // with `lab_unavailable` here. Explicit `local` / `lab-or-local` remain the
     // operator-approved local routes, and a host with no configured runner
-    // still resolves Auto locally. A capacity-blocked Lab is busy, not
-    // unavailable, and keeps its queued admission semantics.
+    // still resolves Auto locally. A capacity-blocked Lab is busy, not a
+    // license to probe providers on the controller: refuse with retry advice
+    // before provider readiness or durable admission runs.
     let auto_split_placement_requires_lab = matches!(
         (
             &input.controller_execution,
@@ -308,9 +309,10 @@ pub fn resolve_parsed_command_preflight(
             &LabRouteIntent::Supported { automatic: true }
         )
     ) && matches!(input.runner, RunnerIntent::Default)
-        && policy.lab_readiness.as_ref().is_some_and(|readiness| {
-            !matches!(readiness.state.as_str(), "absent" | "capacity_blocked")
-        });
+        && policy
+            .lab_readiness
+            .as_ref()
+            .is_some_and(|readiness| readiness.state != "absent");
     let required = if matches!(input.placement, PlacementIntent::Lab)
         || matches!(
             input.runner,
@@ -649,6 +651,32 @@ fn selected_runner_readiness_error(
 /// the runner reconnect as the next action; it never offers the controller,
 /// because local placement requires an explicit operator choice.
 fn lab_unavailable_error(readiness: &LabReadinessSnapshot) -> crate::Error {
+    if readiness.state == "capacity_blocked" {
+        // Readiness snapshots do not carry a runner-supplied retry interval.
+        // Use the same bounded retry advice as CLI pressure admission.
+        let retry_after_seconds = 60;
+        let reason = if readiness.reasons.is_empty() {
+            "capacity".to_string()
+        } else {
+            readiness.reasons.join("; ")
+        };
+        return attach_readiness_evidence(
+            crate::Error::new(
+                crate::ErrorCode::RunnerLabUnavailable,
+                format!(
+                    "capacity_blocked: {reason}; Lab admission is temporarily blocked. Retry after {retry_after_seconds} seconds; `--placement auto` does not run this workload on the controller."
+                ),
+                serde_json::json!({
+                    "field": "placement",
+                    "reason": "capacity_blocked",
+                    "retry_after_seconds": retry_after_seconds,
+                    "run_created": false,
+                }),
+            )
+            .with_retryable(true),
+            Some(readiness),
+        );
+    }
     let reason = if readiness.reasons.is_empty() {
         lab_readiness_fallback_reason(readiness).unwrap_or_else(|| readiness.state.clone())
     } else {
@@ -1686,6 +1714,67 @@ mod tests {
         assert!(evidence.contains("de88dcd"));
         assert!(evidence.contains("20f3a44"));
         assert!(evidence.contains("homeboy runner refresh lab-b"));
+    }
+
+    #[test]
+    fn auto_cook_capacity_refusal_precedes_controller_provider_readiness() {
+        for reason in ["pressure", "capacity_reached"] {
+            for runner in [None, Some("lab-b")] {
+                for preview in [false, true] {
+                    let policy = auto_route_policy(
+                        runner,
+                        "capacity_blocked",
+                        Vec::new(),
+                        vec![reason.into()],
+                        false,
+                        ResourceAdmissionEvidence::Observed {
+                            pressure: ResourceHeat::None,
+                        },
+                    );
+                    let mut args = vec!["agent-task".into(), "cook".into()];
+                    if preview {
+                        args.push("--preview".into());
+                    }
+                    let error = resolve_parsed_command_preflight(args, split_cook_input(), policy)
+                        .expect_err("busy Lab must not resolve to controller provider readiness");
+                    assert_eq!(error.code, crate::ErrorCode::RunnerLabUnavailable);
+                    assert_eq!(error.details["reason"], "capacity_blocked");
+                    assert_eq!(error.details["readiness_state"], "capacity_blocked");
+                    assert_eq!(
+                        error.details["readiness_reasons"],
+                        serde_json::json!([reason])
+                    );
+                    assert_eq!(error.details["retry_after_seconds"], 60);
+                    assert_eq!(error.details["run_created"], false);
+                    assert_eq!(error.retryable, Some(true));
+                    assert!(error
+                        .message
+                        .contains(&format!("capacity_blocked: {reason}")));
+                    assert!(!format!("{error:?}").contains("provider_dispatchability"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn local_cook_ignores_lab_capacity_refusal() {
+        let mut input = split_cook_input();
+        input.placement = PlacementIntent::Local;
+        let policy = auto_route_policy(
+            None,
+            "capacity_blocked",
+            Vec::new(),
+            vec!["pressure".into()],
+            false,
+            ResourceAdmissionEvidence::Observed {
+                pressure: ResourceHeat::None,
+            },
+        );
+        let result = resolve_parsed_command_preflight(Vec::new(), input, policy).unwrap();
+        assert_eq!(
+            result.placement.selected,
+            EffectiveExecutionPlacement::Local
+        );
     }
 
     fn explicit_runner_policy(
