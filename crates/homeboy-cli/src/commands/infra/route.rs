@@ -1573,6 +1573,7 @@ fn admission_text_value_flag(flag: &str) -> bool {
             | "--gate-toolchain"
             | "--gate-package-artifact"
             | "--gate-extension-input"
+            | "--gate-input"
             | "--provider-evidence"
             | "--provider-argv"
     )

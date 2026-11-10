@@ -265,6 +265,7 @@ fn prepare_lab_offload_workspace_stage_inner(
         inject_agent_task_default_provider_config_in_args(&changed_since_preflight.args)?;
     let offload_args = inject_agent_task_resolved_provider_policy_in_args(&offload_args)?;
     let runner = load(runner_id)?;
+    let offload_args = stage_gate_input_args(&runner, &offload_args)?;
     preflight_agent_task_secret_env_before_workspace_stage(
         contract,
         runner_id,
@@ -829,6 +830,51 @@ fn preflight_before_workspace_sync<T>(
 /// Explicitly transfer controller-projected provider evidence into the primary
 /// runner workspace. Git-based Lab materialization deliberately excludes
 /// untracked files, so evidence must travel outside the snapshot contract.
+fn stage_gate_input_args(runner: &crate::Runner, args: &[String]) -> Result<Vec<String>> {
+    use homeboy_agents::agent_tasks::gate::{data_inputs, AgentTaskGateEnvironmentPolicy};
+    let mut policy = AgentTaskGateEnvironmentPolicy::default();
+    let mut positions = Vec::new();
+    for (index, arg) in args.iter().enumerate() {
+        let value = if arg == "--gate-input" {
+            args.get(index + 1).map(String::as_str)
+        } else {
+            arg.strip_prefix("--gate-input=")
+        };
+        if let Some(value) = value {
+            policy.data_inputs.push(
+                serde_json::from_str(value)
+                    .map_err(|e| Error::internal_json(e.to_string(), None))?,
+            );
+            positions.push((
+                if arg == "--gate-input" {
+                    index + 1
+                } else {
+                    index
+                },
+                arg != "--gate-input",
+            ));
+        }
+    }
+    if positions.is_empty() {
+        return Ok(args.to_vec());
+    }
+    data_inputs::admit(&mut policy, &data_inputs::store_root()?)?;
+    let (root, _) = crate::gate_transport::materialize_gate_inputs(runner, &policy.data_inputs)?
+        .expect("declared inputs");
+    let mut result = args.to_vec();
+    for ((index, equals), mut input) in positions.into_iter().zip(policy.data_inputs) {
+        input.source = input.path_in(Path::new(&root))?.display().to_string();
+        let json =
+            serde_json::to_string(&input).map_err(|e| Error::internal_json(e.to_string(), None))?;
+        result[index] = if equals {
+            format!("--gate-input={json}")
+        } else {
+            json
+        };
+    }
+    Ok(result)
+}
+
 fn materialize_agent_task_evidence_inputs_on_runner(
     runner_id: &str,
     args: &[String],

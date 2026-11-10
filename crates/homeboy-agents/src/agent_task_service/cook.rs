@@ -5820,6 +5820,10 @@ fn run_cook_spine(
             None,
         ));
     }
+    crate::agent_task_gate::data_inputs::admit(
+        &mut options.gates.gate_environment,
+        &crate::agent_task_gate::data_inputs::store_root()?,
+    )?;
     project_controller_owned_gate_contract(&mut options);
     project_initial_finalizing_review_form_contract(&mut options);
     project_attempt_prompt_template(&mut options);
@@ -6417,6 +6421,7 @@ fn run_cook_spine(
         && options.gates.gate_target_probes().is_empty()
         && options.gates.gate_package_artifacts.is_empty()
         && options.gates.gate_environment.extension_inputs.is_empty()
+        && options.gates.gate_environment.data_inputs.is_empty()
     {
         Ok(())
     } else {
