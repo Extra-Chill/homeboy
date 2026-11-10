@@ -205,7 +205,7 @@ fn accepted(record: &AgentTaskRunRecord) -> Option<&AgentTaskLabHandoff> {
 }
 
 /// Why `prepared` changes something only a typed transition may change.
-fn ownership_change(
+pub(super) fn ownership_change(
     stored: &AgentTaskRunRecord,
     prepared: &AgentTaskRunRecord,
 ) -> Option<&'static str> {

@@ -1464,13 +1464,11 @@ impl AgentTaskLifecycleStore {
             Err(conflict) => conflict,
         };
         // A writer committed since `prepared` was read. Under this lock the
-        // stored record is current, so a live run takes the caller's changes
-        // rebased onto it; the typed transition is validated against it as
-        // usual. Overlapping changes or a terminal run keep the conflict.
+        // stored record is current: when that writer only recorded progress,
+        // the caller's changes are rebased onto it and the typed transition is
+        // validated against it as usual (#17777).
         let stored = self.read_record(&prepared.run_id)?;
-        let rebased = (!stored.state().is_terminal())
-            .then(|| super::record_rebase::rebase_onto(prepared, &stored))
-            .flatten();
+        let rebased = super::record_rebase::rebase_onto(prepared, &stored);
         let Some(rebased) = rebased else {
             return Err(AgentTaskTransitionError::Conflict(conflict).into());
         };

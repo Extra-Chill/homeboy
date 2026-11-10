@@ -12,18 +12,26 @@
 //! Each side's changes are kept. When both writers changed the same leaf to
 //! different values, the merge refuses, except for `*_at` timestamps, which
 //! take the later value.
+//!
+//! Only progress is rebased over. When the concurrent writer changed the run
+//! state, the Lab handoff, or workspace ownership, the caller decided from a
+//! run that no longer exists and its commit keeps the conflict.
 
 use serde_json::{Map, Value};
 
 use super::AgentTaskRunRecord;
 
 /// `prepared` rebased onto `stored`, or `None` when `prepared` carries no
-/// read base or both writers changed the same field differently.
+/// read base, the concurrent writer moved state or ownership, or both writers
+/// changed the same field differently.
 pub(crate) fn rebase_onto(
     prepared: &AgentTaskRunRecord,
     stored: &AgentTaskRunRecord,
 ) -> Option<AgentTaskRunRecord> {
     let base = prepared.read_base.0.as_deref()?;
+    if super::terminal_transition::ownership_change(base, stored).is_some() {
+        return None;
+    }
     let value = |record: &AgentTaskRunRecord| {
         let mut record = record.clone();
         record.revision = stored.revision;
