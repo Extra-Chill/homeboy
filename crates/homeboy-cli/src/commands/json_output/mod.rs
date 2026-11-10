@@ -689,10 +689,24 @@ fn bounded_refresh_projection(payload: &Value, exit_code: i32, output_file: Opti
         "output": output_file,
         "command": "rerun with --full for the complete result; --output writes the lossless envelope",
     }));
+    // A staged binary waiting on daemon jobs is not a completed refresh: the
+    // runner still serves the previous build. Say so at the top level (#17800).
+    let deferred = payload
+        .get("reconnect_deferred")
+        .filter(|value| !value.is_null());
     let projection = serde_json::json!({
         "schema": "homeboy/runner-refresh-homeboy-bounded-output/v1",
         "command": "runner.refresh_homeboy",
         "exit_code": exit_code,
+        "status": deferred.map(|_| "queued"),
+        "outcome": deferred.map(|_| "deferred"),
+        "reconnect_deferred": deferred.map(|deferred| serde_json::json!({
+            "reason": deferred.get("reason").and_then(Value::as_str).map(bounded_refresh_text),
+            "staged_binary_path": deferred.get("selected_binary_path").and_then(Value::as_str).map(bounded_refresh_text),
+            "active_job_ids": deferred.get("active_job_ids").and_then(Value::as_array).into_iter().flatten()
+                .filter_map(Value::as_str).take(8).map(bounded_refresh_text).collect::<Vec<_>>(),
+            "select_command": deferred.get("select_command").and_then(Value::as_str).map(bounded_refresh_text),
+        })),
         "runner_id": payload.get("runner_id").and_then(Value::as_str).map(bounded_refresh_text),
         "dry_run": payload.get("dry_run").and_then(Value::as_bool),
         "selected_binary_path": payload.get("selected_binary_path").and_then(Value::as_str).map(bounded_refresh_text),
@@ -1332,6 +1346,39 @@ mod tests {
             full["metadata"]["provider_launch_environment"]["OPENAI_API_KEY"],
             "[REDACTED]"
         );
+    }
+
+    /// #17800: a staged binary whose selection waits on daemon jobs reports
+    /// a deferred, queued refresh, never `succeeded`.
+    #[test]
+    fn refresh_homeboy_deferred_swap_is_not_reported_as_succeeded() {
+        let payload = serde_json::json!({
+            "runner_id": "lab",
+            "status": "staged",
+            "selected_binary_path": "/runner/homeboy-0.458.2",
+            "reconnect_deferred": {
+                "reason": "active_daemon_jobs",
+                "selected_binary_path": "/runner/homeboy-0.458.5",
+                "active_job_ids": ["job-1"],
+                "select_command": "homeboy runner refresh-homeboy lab --select",
+            },
+        });
+        let projection = bounded_refresh_projection(&payload, 0, None);
+        let response = crate::commands::utils::response::cli_response_for_json_result_for_command(
+            &Ok(projection),
+            0,
+            "runner",
+            None,
+        );
+        let value = serde_json::to_value(response).unwrap();
+        assert_eq!(value["status"], "queued", "{value}");
+        let data = &value["data"];
+        assert_eq!(data["outcome"], "deferred", "{value}");
+        assert_eq!(
+            data["reconnect_deferred"]["staged_binary_path"],
+            "/runner/homeboy-0.458.5"
+        );
+        assert_eq!(data["reconnect_deferred"]["active_job_ids"][0], "job-1");
     }
 
     #[test]
