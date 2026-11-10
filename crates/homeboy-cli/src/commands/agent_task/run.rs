@@ -11678,9 +11678,18 @@ pub(super) fn retry(args: RetryArgs) -> CmdResult<Value> {
 
 fn retry_cook_or_run(args: RetryArgs) -> CmdResult<Value> {
     match agent_task_service_direct::cook_recovery_delegation(&args.run_id) {
-        Some(plan) => retry_cook_alias(args, &plan),
-        None => retry_exact(args),
+        // An unmaterialized Cook's ID is also its exact attempt: an explicit
+        // retry of it is the plain retry the refusal below would name (#17812).
+        Some(plan) if plan.run_id != args.run_id || !explicit_retry(&args) => {
+            retry_cook_alias(args, &plan)
+        }
+        _ => retry_exact(args),
     }
+}
+
+/// Retry inputs beyond a plain `--run`: only an exact attempt accepts them.
+fn explicit_retry(args: &RetryArgs) -> bool {
+    !args.run || args.new_run_id.is_some() || args.force || args.idempotency_key.is_some()
 }
 
 /// A Cook ID names the Cook, whose one planner is `agent-task recover`
@@ -11690,9 +11699,7 @@ fn retry_cook_alias(
     args: RetryArgs,
     plan: &agent_task_service_direct::CookRecoveryPlan,
 ) -> CmdResult<Value> {
-    let plain_run =
-        args.run && args.new_run_id.is_none() && !args.force && args.idempotency_key.is_none();
-    if plain_run {
+    if !explicit_retry(&args) {
         return super::recover::recover(super::RecoverArgs {
             id: args.run_id,
             ..Default::default()
