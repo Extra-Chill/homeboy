@@ -144,7 +144,7 @@ impl LabTransportAttemptReceipt {
             receipt_id: format!("{run_id}:dispatch_cook_attempt"),
             phase: "lab_handoff_preacceptance".to_string(),
             operation,
-            transport_attempt: u8::from(run_id.ends_with("-transport-retry")),
+            transport_attempt: u8::from(run_id.contains("-transport-retry")),
             transport_retry_limit: LAB_TRANSPORT_RETRY_LIMIT,
             selected_runner: bounded_redacted(selected_runner, LAB_TRANSPORT_CAUSE_MESSAGE_LIMIT),
             outcome: "failed".to_string(),
