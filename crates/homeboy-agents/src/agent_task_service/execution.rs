@@ -2900,7 +2900,21 @@ pub(super) fn cook_retry_plans_match(expected: &AgentTaskPlan, observed: &AgentT
         }
         _ => {}
     }
+    // Lab routing stamps where the attempt was placed onto the durable plan
+    // after the recipe froze it. Placement is execution evidence, not work
+    // (homeboy#17676).
+    if let Some(metadata) = normalized.metadata.as_object_mut() {
+        for key in PLACEMENT_EVIDENCE_METADATA {
+            if expected.metadata.get(key).is_none() {
+                metadata.remove(key);
+            }
+        }
+        if metadata.is_empty() && expected.metadata.is_null() {
+            normalized.metadata = Value::Null;
+        }
+    }
     for (expected_task, observed_task) in expected.tasks.iter().zip(&mut normalized.tasks) {
+        normalize_dispatch_workspace_rebinding(expected_task, observed_task);
         let expected_identity = expected_task.metadata.get("cook_workspace_identity");
         if observed_task.metadata.get("cook_workspace_identity") == expected_identity {
             continue;
@@ -2928,6 +2942,67 @@ pub(super) fn cook_retry_plans_match(expected: &AgentTaskPlan, observed: &AgentT
         .ok()
         .zip(serde_json::to_value(expected).ok())
         .is_some_and(|(observed, expected)| observed == expected)
+}
+
+/// Plan metadata Lab routing records after a Cook recipe froze the attempt.
+const PLACEMENT_EVIDENCE_METADATA: [&str; 2] = [
+    "execution_placement_decision",
+    "execution_placement_invalidated",
+];
+
+/// Task metadata a dispatch adds when it moves an attempt into a
+/// controller-owned baseline workspace.
+const DISPATCH_WORKSPACE_EVIDENCE_METADATA: [&str; 3] = [
+    "cook_continuation_workspace",
+    "cook_initial_candidate_baseline",
+    "cook_workspace_base_snapshot",
+];
+
+/// Undo the workspace rebinding a dispatch performs after the recipe froze
+/// the attempt: the task root moves into a controller-owned baseline and the
+/// dispatch attests that exact root (`bind_dispatch_workspace_attestations`).
+/// The recipe keeps the pre-dispatch root, so without this every queued
+/// follow-up looked like different work and retry admission refused it with
+/// "pending Cook retry run does not match its durable plan" (homeboy#17676).
+/// Only an attestation of the observed root itself is accepted as rebinding
+/// evidence; every other workspace and task field must still match.
+fn normalize_dispatch_workspace_rebinding(
+    expected: &AgentTaskRequest,
+    observed: &mut AgentTaskRequest,
+) {
+    if expected.metadata.get("cook_workspace_identity").is_some() {
+        return;
+    }
+    let attests_observed_root = observed
+        .metadata
+        .pointer("/cook_workspace_identity/canonical_path")
+        .and_then(Value::as_str)
+        .is_some_and(|path| Some(path) == observed.workspace.root.as_deref());
+    if !attests_observed_root {
+        return;
+    }
+    if let Some(continuation) = observed.metadata.get("cook_continuation_workspace") {
+        if continuation
+            .pointer("/task_workspace/root")
+            .and_then(Value::as_str)
+            != expected.workspace.root.as_deref()
+        {
+            return;
+        }
+    }
+    observed.workspace.root = expected.workspace.root.clone();
+    let Some(metadata) = observed.metadata.as_object_mut() else {
+        return;
+    };
+    metadata.remove("cook_workspace_identity");
+    for key in DISPATCH_WORKSPACE_EVIDENCE_METADATA {
+        if expected.metadata.get(key).is_none() {
+            metadata.remove(key);
+        }
+    }
+    if metadata.is_empty() && expected.metadata.is_null() {
+        observed.metadata = Value::Null;
+    }
 }
 
 struct CookRetryAttempt {
@@ -3030,18 +3105,22 @@ fn retry_admission_in_store(
         let cook_id = source.metadata["cook_id"]
             .as_str()
             .expect("recipe-backed Cook ownership has a cook id");
-        if recipe_store
+        let latest = recipe_store
             .load_recipe(cook_id)?
             .attempts
             .last()
-            .map(|attempt| attempt.run_id.as_str())
-            != Some(source.run_id.as_str())
-        {
+            .map(|attempt| attempt.run_id.clone());
+        if latest.as_deref() != Some(source.run_id.as_str()) {
+            let latest = latest.unwrap_or_else(|| "<none>".to_string());
             return Err(Error::validation_invalid_argument(
                 "cook_recipe.attempts",
-                "only the latest durable Cook attempt can be retried",
+                format!(
+                    "only the latest durable Cook attempt can be retried; the latest attempt is `{latest}`"
+                ),
                 Some(source.run_id.clone()),
-                None,
+                Some(vec![format!(
+                    "Retry or recover the latest attempt instead: homeboy agent-task recover {latest}"
+                )]),
             ));
         }
     }
@@ -4292,6 +4371,60 @@ mod tests {
         different_work.workspace_identity =
             Some(homeboy_runner_contract::WorkspaceIdentity::new("test", "other").unwrap());
         assert!(!cook_retry_plans_match(&overridden, &different_work));
+    }
+
+    /// homeboy#17676: a queued gate-fix follow-up is dispatched from its recipe
+    /// plan into an attested controller baseline, and Lab routing then stamps
+    /// its placement decision. Neither is different work, so retry admission
+    /// must still recognize the durable plan as the recipe attempt.
+    #[test]
+    fn retry_identity_ignores_dispatch_baseline_rebinding_and_lab_placement() {
+        let workspace = tempfile::tempdir().unwrap();
+        let baseline = tempfile::tempdir().unwrap();
+        let recipe_plan = one_task_plan("dispatched-follow-up", workspace.path());
+        let baseline_root = baseline.path().display().to_string();
+        let mut dispatched = recipe_plan.clone();
+        dispatched.tasks[0].workspace.root = Some(baseline_root.clone());
+        dispatched.tasks[0].metadata["cook_workspace_identity"] = json!({
+            "canonical_path": baseline_root,
+            "git_representation": "file",
+        });
+        if !dispatched.metadata.is_object() {
+            dispatched.metadata = json!({});
+        }
+        dispatched.metadata["execution_placement_decision"] =
+            json!({ "decision_id": "epd-1", "fallback": { "local_allowed": false } });
+        dispatched.metadata["execution_placement_invalidated"] =
+            json!({ "lifecycle_transition": "pre_staging_replacement" });
+        assert!(cook_retry_plans_match(&recipe_plan, &dispatched));
+
+        // A first-attempt style dispatch also records where it came from.
+        let mut first_attempt_style = dispatched.clone();
+        first_attempt_style.tasks[0].metadata["cook_continuation_workspace"] = json!({
+            "task_workspace": { "root": recipe_plan.tasks[0].workspace.root },
+        });
+        first_attempt_style.tasks[0].metadata["cook_initial_candidate_baseline"] =
+            json!({ "commit": "abc" });
+        assert!(cook_retry_plans_match(&recipe_plan, &first_attempt_style));
+
+        // A root move without an attestation of that exact root is still
+        // different work.
+        let mut unattested = dispatched.clone();
+        unattested.tasks[0].metadata["cook_workspace_identity"]["canonical_path"] =
+            json!("/somewhere/else");
+        assert!(!cook_retry_plans_match(&recipe_plan, &unattested));
+        let mut continued_elsewhere = first_attempt_style.clone();
+        continued_elsewhere.tasks[0].metadata["cook_continuation_workspace"]["task_workspace"]
+            ["root"] = json!("/another/source");
+        assert!(!cook_retry_plans_match(&recipe_plan, &continued_elsewhere));
+
+        // Real work changes are still detected underneath the evidence.
+        let mut different_work = dispatched.clone();
+        different_work.tasks[0].instructions.push_str("other work");
+        assert!(!cook_retry_plans_match(&recipe_plan, &different_work));
+        let mut different_branch = dispatched;
+        different_branch.tasks[0].workspace.branch = Some("other-branch".to_string());
+        assert!(!cook_retry_plans_match(&recipe_plan, &different_branch));
     }
 
     /// Submission stamps the submitting caller's `client_context` from the
