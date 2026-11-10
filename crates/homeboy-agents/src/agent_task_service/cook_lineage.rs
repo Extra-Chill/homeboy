@@ -24,9 +24,6 @@ pub enum CookLineageKind {
     /// A remediation built from the source's promoted candidate to make
     /// failed gates pass.
     GateFix,
-    /// A follow-up that only fills in the review form for the source's
-    /// candidate.
-    ReviewForm,
     /// A replacement execution or pre-provider correction of the source.
     Replacement,
 }
@@ -99,11 +96,7 @@ pub(crate) fn plan_lineage(plan: &AgentTaskPlan) -> Option<CookAttemptLineage> {
         .filter(|source| !source.is_empty())?;
     Some(CookAttemptLineage {
         source_run_id: source.to_string(),
-        kind: if cook_loop["review_form_required"] == true {
-            CookLineageKind::ReviewForm
-        } else {
-            CookLineageKind::GateFix
-        },
+        kind: CookLineageKind::GateFix,
         source_patch_sha256: provenance["source_candidate_tree_sha"]
             .as_str()
             .map(str::to_string),
@@ -146,7 +139,6 @@ mod tests {
 
     fn gate_fix_plan(source: &str, sha: &str) -> AgentTaskPlan {
         plan_with(json!({
-            "review_form_required": false,
             "artifact_provenance": {
                 "source_run_id": source,
                 "source_candidate_tree_sha": sha,
@@ -174,18 +166,6 @@ mod tests {
         assert_eq!(lineage.source_run_id, "run-0");
         assert_eq!(lineage.kind, CookLineageKind::Retry);
         assert_eq!(lineage.source_patch_sha256, None);
-    }
-
-    #[test]
-    fn review_form_follow_ups_are_marked() {
-        let plan = plan_with(json!({
-            "review_form_required": true,
-            "artifact_provenance": { "source_run_id": "run-1" },
-        }));
-        assert_eq!(
-            plan_lineage(&plan).unwrap().kind,
-            CookLineageKind::ReviewForm
-        );
     }
 
     fn recipe_attempt(

@@ -213,16 +213,7 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
     } else {
         let lifecycle = backend.hydrate_run_in_store(lifecycle_store, &options.run_id)?;
         let gate_proof = backend.hydrate_gate_proof_in_store(lifecycle_store, &options.run_id)?;
-        let review_form_only_follow_up =
-            is_review_form_only_follow_up(&gate_proof.promotion, &gate_proof.run_id);
-        let authenticated_follow_up = review_form_only_follow_up
-            && gate_proof
-                .promotion
-                .provenance
-                .pointer("/cook_follow_up/source_run_id")
-                .and_then(serde_json::Value::as_str)
-                == Some(options.run_id.as_str());
-        if gate_proof.run_id != options.run_id && !authenticated_follow_up {
+        if gate_proof.run_id != options.run_id {
             return Err(Error::validation_invalid_argument(
                 "run_id",
                 "durable gate proof belongs to a different run",
@@ -256,7 +247,6 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
             ));
         }
         if eligibility == DurablePublicationEligibility::ProviderRun
-            && !review_form_only_follow_up
             && !options.composed_ai_model_disclosure
         {
             options.review_dossier.ai_assistance.model =
@@ -1158,22 +1148,6 @@ fn inherit_promotion_gates(
         gate_command_sha256,
     });
     Ok(())
-}
-
-/// A form-only continuation has two authenticated provider executions to
-/// disclose. Its terminal promotion is the durable boundary that preserves the
-/// composed model attribution rather than replacing it with the form provider.
-fn is_review_form_only_follow_up(promotion: &AgentTaskPromotionReport, run_id: &str) -> bool {
-    promotion
-        .provenance
-        .pointer("/cook_follow_up/kind")
-        .and_then(serde_json::Value::as_str)
-        == Some("review_form_only")
-        && promotion
-            .provenance
-            .pointer("/cook_follow_up/source_run_id")
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|source_run_id| !source_run_id.is_empty() && source_run_id != run_id)
 }
 
 fn validate_finalization_gates(gates: &[HomeboyGateResult]) -> Result<()> {

@@ -15,15 +15,10 @@ use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 use crate::agent_task_cook_loop::{
-    evaluate_cook_loop, request_is_review_form_only, AgentTaskCookLoopOptions,
-    AgentTaskCookLoopReport, AgentTaskCookLoopStatus, AgentTaskIntentionalNoChange,
-    AgentTaskIntentionalNoChangeVerdict,
+    evaluate_cook_loop, AgentTaskCookLoopOptions, AgentTaskCookLoopReport, AgentTaskCookLoopStatus,
+    AgentTaskIntentionalNoChange, AgentTaskIntentionalNoChangeVerdict,
 };
 
-pub use crate::agent_task_cook_loop::{
-    request_is_review_form_only as cook_request_is_review_form_only, review_form_timeout_ms,
-    DEFAULT_REVIEW_FORM_TIMEOUT_MS, MAX_REVIEW_FORM_TIMEOUT_MS,
-};
 use crate::agent_task_dispatch_plan::validate_single_cook_prompt_source;
 use crate::agent_task_dispatch_service::{self, AgentTaskDispatchCommand};
 use crate::agent_task_gate::VerifyGateOptions;
@@ -68,8 +63,8 @@ use super::cook_pre_execution::{
 use super::cook_promotion::{
     attempt_needs_execution_with_store, catch_up_cook_candidate_to_base_in_store,
     finalize_or_load_cook_pr_with_stores, persisted_promotion_for_attempt_in_store,
-    pre_provider_diagnostic_cause, promote_or_load_attempt_in_store,
-    retryable_provider_discovery_failure_with_store, BaseCatchUp, CookReportInput, CookStores,
+    pre_provider_diagnostic_cause, promote_or_load_attempt_in_store, BaseCatchUp, CookReportInput,
+    CookStores,
 };
 use super::cook_recipe::{CookRecipeStore, InitialRecipeMaterialization};
 use super::cook_recovery::CookRecoveryStep;
@@ -1504,15 +1499,6 @@ fn project_initial_finalizing_review_form_contract(options: &mut CookRequest) {
         request
             .output_declarations
             .push(crate::agent_task_review_dossier::review_form_output_declaration());
-        let form_timeout_ms = review_form_timeout_ms(request);
-        if !request.metadata.is_object() {
-            request.metadata = serde_json::json!({});
-        }
-        if !request.metadata["cook_loop"].is_object() {
-            request.metadata["cook_loop"] = serde_json::json!({});
-        }
-        request.metadata["cook_loop"]["review_form_timeout_ms"] =
-            serde_json::json!(form_timeout_ms);
         crate::agent_task_prompt_template::merge_homeboy_facts(
             request,
             serde_json::json!({ "publication": { "owner": "controller" } }),
@@ -2231,63 +2217,6 @@ pub(crate) fn canonical_candidate_finalization_with_stores(
             return Some(finalization.clone());
         }
     }
-    let recipe = stores
-        .map(|(store, _)| store.load_recipe(cook_id))
-        .unwrap_or_else(|| super::cook_recipe::load_recipe(cook_id))
-        .ok()?;
-    for attempt in recipe.attempts.iter().rev() {
-        if attempt.run_id == run_id {
-            continue;
-        }
-        let record = stores
-            .map(|(_, lifecycle)| lifecycle.read_record(&attempt.run_id))
-            .unwrap_or_else(|| agent_task_lifecycle::exact_record(&attempt.run_id));
-        let Ok(record) = record else {
-            continue;
-        };
-        if record.metadata["cook_id"].as_str() != Some(cook_id)
-            || !stores
-                .map(|(_, lifecycle)| {
-                    review_form_attempt_is_ready_for_cook_continuation_in_store(
-                        lifecycle,
-                        &attempt.plan,
-                        &record,
-                    )
-                })
-                .unwrap_or_else(|| {
-                    review_form_attempt_is_ready_for_cook_continuation(&attempt.plan, &record)
-                })
-                .ok()?
-        {
-            continue;
-        }
-        let Some(promotion) = stores
-            .map(|(_, lifecycle)| {
-                super::cook_promotion::persisted_promotion_for_attempt_in_store(
-                    lifecycle,
-                    &attempt.run_id,
-                )
-            })
-            .unwrap_or_else(|| {
-                super::cook_promotion::persisted_promotion_for_attempt(&attempt.run_id)
-            })
-            .ok()
-            .flatten()
-        else {
-            continue;
-        };
-        if promotion
-            .provenance
-            .pointer("/cook_follow_up/source_run_id")
-            .and_then(Value::as_str)
-            != Some(run_id)
-        {
-            continue;
-        }
-        if let Some(finalization) = super::recorded_finalization_receipt(&record.metadata) {
-            return Some(finalization.clone());
-        }
-    }
     None
 }
 
@@ -2363,49 +2292,6 @@ pub struct AgentTaskCookFailureContext {
     /// mutating entries of `legal_actions` are derived from it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub recovery_step: Option<CookRecoveryStep>,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-struct ContinuationAdmissionTrace {
-    schema: &'static str,
-    predicates: Vec<ContinuationAdmissionPredicate>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    first_authoritative_denial: Option<&'static str>,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-struct ContinuationAdmissionPredicate {
-    name: &'static str,
-    outcome: &'static str,
-}
-
-impl ContinuationAdmissionTrace {
-    fn new() -> Self {
-        Self {
-            schema: "homeboy/cook-continuation-admission/v1",
-            predicates: Vec::new(),
-            first_authoritative_denial: None,
-        }
-    }
-
-    fn pass(&mut self, name: &'static str) {
-        self.predicates.push(ContinuationAdmissionPredicate {
-            name,
-            outcome: "pass",
-        });
-    }
-
-    fn deny(&mut self, name: &'static str, outcome: &'static str) {
-        self.predicates
-            .push(ContinuationAdmissionPredicate { name, outcome });
-        if self.first_authoritative_denial.is_none() {
-            self.first_authoritative_denial = Some(name);
-        }
-    }
-
-    fn value(&self) -> Value {
-        serde_json::to_value(self).expect("continuation admission trace serializes")
-    }
 }
 
 /// An exact command that is legal for the durable Cook state.
@@ -3112,7 +2998,6 @@ pub(crate) enum CookFollowUpDispatch {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CookFollowUpBudgetScope {
     Cook,
-    FreshCookReview,
     CandidateAdoptionReview,
 }
 
@@ -3248,25 +3133,9 @@ fn no_change_remediation(
             .is_some_and(crate::agent_task::AgentTaskOutcome::is_verified_unchanged_attempt)
 }
 
-fn follow_up_budget_scope(
-    source_request: &crate::agent_task::AgentTaskRequest,
-    follow_up_request: &crate::agent_task::AgentTaskRequest,
-) -> CookFollowUpBudgetScope {
-    if follow_up_request.inputs["cook_loop"]["review_form_required"] != true {
-        return CookFollowUpBudgetScope::Cook;
-    }
-    match source_request.inputs["cook_loop"]["execution_budget_authority"]["kind"].as_str() {
-        Some("fresh_cook_review") => CookFollowUpBudgetScope::FreshCookReview,
-        Some("candidate_adoption_review") => CookFollowUpBudgetScope::CandidateAdoptionReview,
-        Some(_) => CookFollowUpBudgetScope::Cook,
-        None => CookFollowUpBudgetScope::FreshCookReview,
-    }
-}
-
 fn budget_authority_matches_scope(authority: &Value, scope: CookFollowUpBudgetScope) -> bool {
     authority["kind"].as_str()
         == Some(match scope {
-            CookFollowUpBudgetScope::FreshCookReview => "fresh_cook_review",
             CookFollowUpBudgetScope::CandidateAdoptionReview => "candidate_adoption_review",
             CookFollowUpBudgetScope::Cook => return false,
         })
@@ -3280,8 +3149,7 @@ fn scoped_follow_up_budget(
 ) -> (AgentTaskExecutionBudget, ExecutionBudgetUsage) {
     match scope {
         CookFollowUpBudgetScope::Cook => (cook_budget.clone(), cook_usage),
-        CookFollowUpBudgetScope::FreshCookReview
-        | CookFollowUpBudgetScope::CandidateAdoptionReview => {
+        CookFollowUpBudgetScope::CandidateAdoptionReview => {
             let authority = persisted_authority.unwrap_or(&Value::Null);
             // Review-only remediation has a fixed upper bound, but a durable
             // authority may intentionally narrow it. Never mint a broader
@@ -3316,7 +3184,6 @@ fn review_budget_authority(
         persisted_authority,
     );
     let kind = match scope {
-        CookFollowUpBudgetScope::FreshCookReview => "fresh_cook_review",
         CookFollowUpBudgetScope::CandidateAdoptionReview => "candidate_adoption_review",
         CookFollowUpBudgetScope::Cook => unreachable!(),
     };
@@ -3340,10 +3207,7 @@ fn child_execution_budget(
 ) -> AgentTaskExecutionBudget {
     match scope {
         CookFollowUpBudgetScope::Cook => budget_limit.clone(),
-        CookFollowUpBudgetScope::FreshCookReview
-        | CookFollowUpBudgetScope::CandidateAdoptionReview => {
-            AgentTaskExecutionBudget::new(1, 0, 0)
-        }
+        CookFollowUpBudgetScope::CandidateAdoptionReview => AgentTaskExecutionBudget::new(1, 0, 0),
     }
 }
 
@@ -3423,18 +3287,13 @@ pub(crate) fn dispatch_cook_follow_up(
     let recipe = recipe_store.load_recipe(cook_id)?;
     let requested_edge = super::cook_lineage::CookAttemptLineage {
         source_run_id: source_run_id.to_string(),
-        kind: if follow_up_request.inputs["cook_loop"]["review_form_required"] == true {
-            super::cook_lineage::CookLineageKind::ReviewForm
-        } else {
-            super::cook_lineage::CookLineageKind::GateFix
-        },
+        kind: super::cook_lineage::CookLineageKind::GateFix,
         source_patch_sha256: promotion
             .candidate
             .as_ref()
             .map(|candidate| candidate.tree_sha.clone()),
     };
-    if requested_edge.kind == super::cook_lineage::CookLineageKind::GateFix
-        && !no_change_remediation(promotion, aggregate)
+    if !no_change_remediation(promotion, aggregate)
         && requested_edge
             .source_patch_sha256
             .as_deref()
@@ -3459,7 +3318,6 @@ pub(crate) fn dispatch_cook_follow_up(
     // unrotated request and falls back to the same-provider behaviour.
     let unrotated_follow_up_request = follow_up_request.clone();
     let no_change_rotation = (!known_same_executor
-        && follow_up_request.inputs["cook_loop"]["review_form_required"] != true
         && no_change_remediation(promotion, aggregate)
         && request_requires_substantive_candidate(&follow_up_request))
     .then(|| {
@@ -3505,7 +3363,6 @@ pub(crate) fn dispatch_cook_follow_up(
             follow_up_request.metadata["provider_readiness_routing"]["skipped"] = skipped;
         }
     }
-    let mut execution_recovery = None;
     if let Some(bound) = recipe.attempts.iter().rev().find(|bound| {
         bound.attempt > attempt
             && super::cook_lineage::execution_lineage(bound, &recipe.attempts).as_ref()
@@ -3553,15 +3410,9 @@ pub(crate) fn dispatch_cook_follow_up(
             lifecycle_store,
             &bound.run_id,
         )? {
-            if requested_edge.kind == super::cook_lineage::CookLineageKind::ReviewForm
-                && retryable_provider_discovery_failure_with_store(lifecycle_store, &bound.run_id)
-            {
-                execution_recovery = Some(bound.clone());
-            } else {
-                return Ok(CookFollowUpDispatch::Dispatched {
-                    run_id: bound.run_id.clone(),
-                });
-            }
+            return Ok(CookFollowUpDispatch::Dispatched {
+                run_id: bound.run_id.clone(),
+            });
         } else {
             return dispatch_bound_cook_follow_up(
                 recipe_store,
@@ -3649,8 +3500,6 @@ pub(crate) fn dispatch_cook_follow_up(
                 .as_array()
                 .is_some_and(|executions| !executions.is_empty())
         });
-    let review_form_only_follow_up =
-        follow_up_request.inputs["cook_loop"]["review_form_required"] == true;
     let mut reserved_no_change_rotation = None;
     let same_provider = if no_change_rotation.is_some() {
         // When the rotation budget is spent, restore the unrotated request and
@@ -3678,7 +3527,7 @@ pub(crate) fn dispatch_cook_follow_up(
         // candidate, exactly like gate remediation (#17651).
         let base_conflict_remediation =
             follow_up_request.inputs["cook_loop"]["base_conflict"].is_object();
-        (known_same_executor || review_form_only_follow_up || base_conflict_remediation)
+        (known_same_executor || base_conflict_remediation)
             .then_some(true)
             .or_else(|| {
                 cook_remediation_same_provider(
@@ -3696,9 +3545,7 @@ pub(crate) fn dispatch_cook_follow_up(
                 .to_string(),
         });
     };
-    let reservation = if execution_recovery.is_some() {
-        ExecutionBudgetUsage::default()
-    } else if let Some(reservation) = reserved_no_change_rotation {
+    let reservation = if let Some(reservation) = reserved_no_change_rotation {
         // The reroute was applied before the durable replay comparison; this
         // only commits the already-reserved rotation budget.
         reservation
@@ -3722,68 +3569,47 @@ pub(crate) fn dispatch_cook_follow_up(
         follow_up_request.inputs["cook_loop"]["execution_budget_authority"] =
             review_budget_authority(budget_scope, persisted_budget_authority.as_ref());
     }
-    let (next_attempt, next_run_id, follow_up_plan, replaced_run_id) =
-        if let Some(previous) = execution_recovery {
-            (
-                previous.attempt,
-                agent_task_lifecycle::cook_attempt_run_id(cook_id, previous.attempt),
-                previous.plan.clone(),
-                Some(previous.run_id),
+    let next_attempt = recipe
+        .attempts
+        .iter()
+        .map(|recipe_attempt| recipe_attempt.attempt)
+        .max()
+        .unwrap_or(attempt)
+        .max(attempt)
+        .checked_add(1)
+        .ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "cook_recipe.attempts",
+                "durable cook attempt sequence is exhausted",
+                Some(cook_id.to_string()),
+                None,
             )
-        } else {
-            let next_attempt = recipe
-                .attempts
-                .iter()
-                .map(|recipe_attempt| recipe_attempt.attempt)
-                .max()
-                .unwrap_or(attempt)
-                .max(attempt)
-                .checked_add(1)
-                .ok_or_else(|| {
-                    Error::validation_invalid_argument(
-                        "cook_recipe.attempts",
-                        "durable cook attempt sequence is exhausted",
-                        Some(cook_id.to_string()),
-                        None,
-                    )
-                })?;
-            let next_run_id = agent_task_lifecycle::cook_attempt_run_id(cook_id, next_attempt);
-            let mut follow_up_plan = AgentTaskPlan::new(
-                format!("{cook_id}-cook-attempt-{next_attempt}"),
-                vec![follow_up_request],
-            );
-            follow_up_plan.options = plan.options.clone();
-            crate::caller_context::inherit_ownership(&mut follow_up_plan.metadata, &plan.metadata);
-            crate::caller_context::inherit_ownership(
-                &mut follow_up_plan.metadata,
-                &options.identity.initial_plan.metadata,
-            );
-            // Gate-feedback is a child execution, not a fresh one-shot policy.
-            // Review-only continuations retain their separately bounded plan.
-            follow_up_plan.options.execution_budget =
-                child_execution_budget(budget_scope, &budget_limit);
-            if budget_scope != CookFollowUpBudgetScope::Cook {
-                follow_up_plan.options.retry.max_attempts = 1;
-            }
-            (next_attempt, next_run_id, follow_up_plan, None)
-        };
-    if let Some(previous) = replaced_run_id {
-        recipe_store.record_recipe_attempt_replacement_with_plan(
-            cook_id,
-            &previous,
-            &next_run_id,
-            &follow_up_plan,
-        )?;
-    } else {
-        super::cook_recipe::record_recipe_attempt_with_lineage_in_store(
-            recipe_store,
-            cook_id,
-            next_attempt,
-            &next_run_id,
-            &follow_up_plan,
-            Some(requested_edge),
-        )?;
+        })?;
+    let next_run_id = agent_task_lifecycle::cook_attempt_run_id(cook_id, next_attempt);
+    let mut follow_up_plan = AgentTaskPlan::new(
+        format!("{cook_id}-cook-attempt-{next_attempt}"),
+        vec![follow_up_request],
+    );
+    follow_up_plan.options = plan.options.clone();
+    crate::caller_context::inherit_ownership(&mut follow_up_plan.metadata, &plan.metadata);
+    crate::caller_context::inherit_ownership(
+        &mut follow_up_plan.metadata,
+        &options.identity.initial_plan.metadata,
+    );
+    // Gate-feedback is a child execution, not a fresh one-shot policy.
+    // Adoption remediation retains its separately bounded plan.
+    follow_up_plan.options.execution_budget = child_execution_budget(budget_scope, &budget_limit);
+    if budget_scope != CookFollowUpBudgetScope::Cook {
+        follow_up_plan.options.retry.max_attempts = 1;
     }
+    super::cook_recipe::record_recipe_attempt_with_lineage_in_store(
+        recipe_store,
+        cook_id,
+        next_attempt,
+        &next_run_id,
+        &follow_up_plan,
+        Some(requested_edge),
+    )?;
     let bound = recipe_store
         .load_recipe(cook_id)?
         .attempts
@@ -3840,18 +3666,14 @@ fn dispatch_bound_cook_follow_up(
             None,
         ));
     }
-    let review_form_only = match lineage.kind {
-        super::cook_lineage::CookLineageKind::GateFix => false,
-        super::cook_lineage::CookLineageKind::ReviewForm => true,
-        _ => {
-            return Err(Error::validation_invalid_argument(
-                "cook_recipe.attempts.lineage",
-                "bound attempt is not a remediation",
-                Some(bound.run_id),
-                None,
-            ))
-        }
-    };
+    if lineage.kind != super::cook_lineage::CookLineageKind::GateFix {
+        return Err(Error::validation_invalid_argument(
+            "cook_recipe.attempts.lineage",
+            "bound attempt is not a remediation",
+            Some(bound.run_id),
+            None,
+        ));
+    }
     let next_attempt = bound.attempt;
     let next_run_id = bound.run_id;
     let mut follow_up_plan = bound.plan;
@@ -3873,9 +3695,8 @@ fn dispatch_bound_cook_follow_up(
         lifecycle_store.submit_plan_with_current_runtime(&follow_up_plan, &next_run_id)?;
         lifecycle_store.record_cook_attempt(cook_id, next_attempt, &next_run_id)?;
         if budget_scope == CookFollowUpBudgetScope::CandidateAdoptionReview {
-            let adoption_run_id = candidate_adoption_owner_run_id(lifecycle_store, source_run_id)?;
             lifecycle_store
-                .checkpoint_candidate_adoption_remediation(&adoption_run_id, &next_run_id)?;
+                .checkpoint_candidate_adoption_remediation(source_run_id, &next_run_id)?;
         }
         if let Some(dispatcher) = &options.provider_transport.attempt_dispatcher {
             // A detached dispatcher may return before any executor-side
@@ -3989,22 +3810,6 @@ fn dispatch_bound_cook_follow_up(
     if !attempt_needs_execution_with_store(lifecycle_store, &next_run_id) {
         lifecycle_store.record_cook_attempt(cook_id, next_attempt, &next_run_id)?;
     }
-    if review_form_only {
-        // A form-only retry deliberately makes no code changes. Carry the
-        // already-authenticated candidate forward so its finalization path can
-        // consume the new form without selecting or applying a patch again.
-        let mut carried_promotion = promotion.clone();
-        carried_promotion.source.run_id = Some(next_run_id.clone());
-        carried_promotion.provenance["cook_follow_up"] = serde_json::json!({
-            "kind": "review_form_only",
-            "source_run_id": source_run_id,
-        });
-        lifecycle_store.record_promotion(
-            &next_run_id,
-            serde_json::to_value(carried_promotion)
-                .map_err(|error| Error::internal_json(error.to_string(), None))?,
-        )?;
-    }
     remediation_category_usage.add(reservation);
     Ok(CookFollowUpDispatch::Dispatched {
         run_id: next_run_id,
@@ -4032,37 +3837,6 @@ pub(crate) fn ensure_cook_attempt_admitted(
     })
 }
 
-/// The adoption claim lives on the adopted attempt, not on the review-form
-/// continuations that carry its candidate forward. A repeated review-form
-/// remediation therefore checkpoints the adopted attempt reached through the
-/// carried `cook_follow_up` lineage (#14970).
-fn candidate_adoption_owner_run_id(
-    lifecycle_store: &AgentTaskLifecycleStore,
-    source_run_id: &str,
-) -> Result<String> {
-    let mut run_id = source_run_id.to_string();
-    for _ in 0..8 {
-        if lifecycle_store
-            .read_record(&run_id)
-            .is_ok_and(|record| record.candidate_adoption.is_some())
-        {
-            return Ok(run_id);
-        }
-        let Some(promotion) = persisted_promotion_for_attempt_in_store(lifecycle_store, &run_id)?
-        else {
-            break;
-        };
-        if promotion.provenance["cook_follow_up"]["kind"] != "review_form_only" {
-            break;
-        }
-        let Some(parent) = promotion.provenance["cook_follow_up"]["source_run_id"].as_str() else {
-            break;
-        };
-        run_id = parent.to_string();
-    }
-    Ok(source_run_id.to_string())
-}
-
 fn adopted_attempt_is_ready_for_cook_continuation(
     lifecycle_store: &AgentTaskLifecycleStore,
     record: &agent_task_lifecycle::AgentTaskRunRecord,
@@ -4072,15 +3846,7 @@ fn adopted_attempt_is_ready_for_cook_continuation(
     else {
         return Ok(None);
     };
-    let source_record = promotion.provenance["cook_follow_up"]["source_run_id"]
-        .as_str()
-        .map(|run_id| rooted_status(lifecycle_store, run_id))
-        .transpose()?;
-    let adoption = record
-        .candidate_adoption
-        .as_ref()
-        .or_else(|| source_record.as_ref()?.candidate_adoption.as_ref());
-    let Some(adoption) = adoption else {
+    let Some(adoption) = record.candidate_adoption.as_ref() else {
         return Ok(None);
     };
     if adoption.state != "completed" {
@@ -4095,98 +3861,14 @@ fn adopted_attempt_is_ready_for_cook_continuation(
     Ok(None)
 }
 
-pub(crate) fn review_form_attempt_is_ready_for_cook_continuation(
-    plan: &AgentTaskPlan,
-    record: &agent_task_lifecycle::AgentTaskRunRecord,
-) -> Result<bool> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_environment()?;
-    review_form_attempt_is_ready_for_cook_continuation_in_store(&lifecycle_store, plan, record)
-}
-
-pub(super) fn review_form_attempt_is_ready_for_cook_continuation_in_store(
-    lifecycle_store: &AgentTaskLifecycleStore,
-    plan: &AgentTaskPlan,
-    record: &agent_task_lifecycle::AgentTaskRunRecord,
-) -> Result<bool> {
-    let Some(task) = plan.tasks.first() else {
-        return Ok(false);
-    };
-    if task.inputs["cook_loop"]["review_form_required"] != true
-        || !budget_authority_matches_scope(
-            &task.inputs["cook_loop"]["execution_budget_authority"],
-            follow_up_budget_scope(task, task),
-        )
-    {
-        return Ok(false);
-    }
-    let Some(promotion) =
-        persisted_promotion_for_attempt_in_store(lifecycle_store, &record.run_id)?
-    else {
-        return Ok(false);
-    };
-    let Some(source_run_id) = promotion.provenance["cook_follow_up"]["source_run_id"].as_str()
-    else {
-        return Ok(false);
-    };
-    if promotion.provenance["cook_follow_up"]["kind"] != "review_form_only" {
-        return Ok(false);
-    }
-    let Some(source) = persisted_promotion_for_attempt_in_store(lifecycle_store, source_run_id)?
-    else {
-        return Ok(false);
-    };
-    Ok(promotion.status == source.status
-        && promotion.target == source.target
-        && promotion.to_worktree == source.to_worktree
-        && promotion.candidate == source.candidate
-        && promotion.changed_files == source.changed_files
-        && promotion.verified_base == source.verified_base
-        && promotion.deterministic_gates == source.deterministic_gates
-        && promotion.command_evidence == source.command_evidence
-        && promotion.provenance.get("candidate") == source.provenance.get("candidate")
-        && promotion.provenance.get("gate_feedback_baseline")
-            == source.provenance.get("gate_feedback_baseline"))
-}
-
-fn retryable_review_form_terminal_failure(
-    record: &agent_task_lifecycle::AgentTaskRunRecord,
-    aggregate: &crate::agent_task_schedule::AgentTaskAggregate,
-) -> bool {
-    let lifecycle_store = match AgentTaskLifecycleStore::from_environment() {
-        Ok(store) => store,
-        Err(_) => return false,
-    };
-    retryable_review_form_terminal_failure_in_store(&lifecycle_store, record, aggregate)
-}
-
-fn retryable_review_form_terminal_failure_in_store(
-    lifecycle_store: &AgentTaskLifecycleStore,
-    record: &agent_task_lifecycle::AgentTaskRunRecord,
-    aggregate: &crate::agent_task_schedule::AgentTaskAggregate,
-) -> bool {
-    retryable_pre_execution_failure(record)
-        || retryable_provider_discovery_failure_with_store(lifecycle_store, &record.run_id)
-        || aggregate.outcomes.iter().any(|outcome| {
-            outcome.status == crate::agent_task::AgentTaskOutcomeStatus::Timeout
-                || outcome.diagnostics.iter().any(|diagnostic| {
-                    diagnostic.class == "agent_task.provider_timeout"
-                        || diagnostic.class == "agent_task.review_form_timeout"
-                })
-        })
-}
-
-pub(crate) fn plan_is_review_form_only(plan: &AgentTaskPlan) -> bool {
-    plan.tasks.iter().any(request_is_review_form_only)
-}
-
 fn outcome_is_timeout(outcome: &crate::agent_task::AgentTaskOutcome) -> bool {
     outcome.status == crate::agent_task::AgentTaskOutcomeStatus::Timeout
         || outcome.failure_classification
             == Some(crate::agent_task::AgentTaskFailureClassification::Timeout)
-        || outcome.diagnostics.iter().any(|diagnostic| {
-            diagnostic.class == "agent_task.provider_timeout"
-                || diagnostic.class == "agent_task.review_form_timeout"
-        })
+        || outcome
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.class == "agent_task.provider_timeout")
 }
 
 fn provider_timeout_ms(
@@ -4536,69 +4218,9 @@ fn make_provider_rotation_actionable(
     }
 }
 
-/// Whether a terminal review-form attempt may re-enter Cook's historical
-/// continuation path. This is intentionally narrower than terminality: only
-/// authenticated form-only continuations with a review-form timeout, a
-/// provider timeout, or an existing retryable provider/pre-execution signal
-/// may execute again.
-pub fn terminal_review_form_continuation_is_eligible(
-    plan: &AgentTaskPlan,
-    record: &agent_task_lifecycle::AgentTaskRunRecord,
-) -> Result<bool> {
-    let lifecycle_store = AgentTaskLifecycleStore::from_environment()?;
-    terminal_review_form_continuation_is_eligible_in_store(&lifecycle_store, plan, record)
-}
-
-fn terminal_review_form_continuation_is_eligible_in_store(
-    lifecycle_store: &AgentTaskLifecycleStore,
-    plan: &AgentTaskPlan,
-    record: &agent_task_lifecycle::AgentTaskRunRecord,
-) -> Result<bool> {
-    if !matches!(
-        record.state(),
-        agent_task_lifecycle::AgentTaskRunState::Failed
-            | agent_task_lifecycle::AgentTaskRunState::PartialFailure
-    ) || !review_form_attempt_is_ready_for_cook_continuation_in_store(
-        lifecycle_store,
-        plan,
-        record,
-    )? {
-        return Ok(false);
-    }
-    let aggregate = match lifecycle_store.read_aggregate(&record.run_id) {
-        Ok(aggregate) => aggregate,
-        Err(_) => return Ok(false),
-    };
-    Ok(retryable_review_form_terminal_failure_in_store(
-        lifecycle_store,
-        record,
-        &aggregate,
-    ))
-}
-
-pub fn terminal_review_form_continuation_is_eligible_for_observation_readonly(
-    plan: &AgentTaskPlan,
-    record: &agent_task_lifecycle::AgentTaskRunRecord,
-    aggregate: Option<&AgentTaskAggregate>,
-) -> Result<bool> {
-    if !matches!(
-        record.state(),
-        agent_task_lifecycle::AgentTaskRunState::Failed
-            | agent_task_lifecycle::AgentTaskRunState::PartialFailure
-    ) || !review_form_attempt_is_ready_for_cook_continuation(plan, record)?
-    {
-        return Ok(false);
-    }
-    Ok(
-        aggregate
-            .is_some_and(|aggregate| retryable_review_form_terminal_failure(record, aggregate)),
-    )
-}
-
 pub fn preflight_cook_continuation_admission_for_observation(
     options: &CookRequest,
     record: &agent_task_lifecycle::AgentTaskRunRecord,
-    aggregate: Option<&AgentTaskAggregate>,
 ) -> Result<Vec<&'static str>> {
     if let Some(error) = cook_continuation_owner_denial(record, &options.identity.cook_id)? {
         return Err(error);
@@ -4608,37 +4230,12 @@ pub fn preflight_cook_continuation_admission_for_observation(
     let verification_pending_continuation =
         super::CookDelivery::from_run_metadata(&record.metadata)
             .is_some_and(|delivery| delivery.awaits_verification());
-    let review_form_continuation = {
-        review_form_attempt_is_ready_for_cook_continuation(&options.identity.initial_plan, record)
-            .unwrap_or(false)
-    };
-    if review_form_continuation
-        && !terminal_review_form_continuation_is_eligible_for_observation_readonly(
-            &options.identity.initial_plan,
-            record,
-            aggregate,
-        )?
-    {
-        let mut error = Error::validation_invalid_argument(
-            "cook_continuation",
-            "terminal review-form continuation is not eligible for execution",
-            Some(options.identity.initial_run_id.clone()),
-            None,
-        );
-        error.details["continuation_admission"] = serde_json::json!({
-            "first_authoritative_denial": "terminal_review_form_eligibility",
-            "predicates": [{ "name": "terminal_review_form_eligibility", "outcome": "fail" }],
-        });
-        return Err(error);
-    }
     // Attempts that can bypass provider execution need durable model evidence
     // before they can reach promotion or finalization. A retryable
     // pre-execution failure has no executed model yet by definition.
     validate_cook_candidate_group(&options.identity.initial_plan)?;
     let mut execution_only = Vec::new();
-    if review_form_continuation {
-        execution_only.push("historical_workspace_authentication");
-    } else if !verification_pending_continuation
+    if !verification_pending_continuation
         && !cook_workspace_lookup_pending(&options.identity.initial_plan)
         && options.provider_transport.attempt_dispatcher.is_none()
     {
@@ -4842,12 +4439,6 @@ pub enum CookMode {
     Adopt,
     ContinueTerminal,
     RecoverPreExecution,
-}
-
-impl CookMode {
-    fn allows_historical_terminal(self) -> bool {
-        matches!(self, Self::ContinueTerminal)
-    }
 }
 
 /// Process-local dependencies for one Cook invocation. Production callers must
@@ -5205,15 +4796,9 @@ pub(crate) fn exhausted_budget_guidance(
     max_attempts: u32,
     budget: &AgentTaskExecutionBudget,
     reason: &str,
-    review_form_only: bool,
 ) -> String {
-    let remediation = if review_form_only {
-        "review-form remediation"
-    } else {
-        "gate or provider remediation"
-    };
     format!(
-        "Cook stopped during {remediation} because {reason} was exhausted. Configured budget: --max-attempts {}, --max-provider-executions {}, --max-same-provider-retries {}, provider rotations {}. Start a new Cook with `--max-attempts {} --max-provider-executions {} --max-same-provider-retries {}`; rotations cannot fund same-provider gate or review-form retries.",
+        "Cook stopped during gate or provider remediation because {reason} was exhausted. Configured budget: --max-attempts {}, --max-provider-executions {}, --max-same-provider-retries {}, provider rotations {}. Start a new Cook with `--max-attempts {} --max-provider-executions {} --max-same-provider-retries {}`; rotations cannot fund same-provider gate retries.",
         max_attempts,
         budget.max_provider_executions,
         budget.max_same_provider_retries,
@@ -5673,12 +5258,6 @@ fn run_cook_spine(
             super::CookDelivery::from_run_metadata(&record.metadata)
                 .is_some_and(|delivery| delivery.has_publication_receipt())
         });
-    let authenticated_historical_review_continuation =
-        if mode.allows_historical_terminal() && !persisted_finalization {
-            authenticated_historical_review_form_workspace(lifecycle_store, &options)?
-        } else {
-            false
-        };
     // The durable reconstruction boundary must exist before an external provider
     // can accept the first attempt.
     let adopted_model = if persisted_finalization || verification_pending_continuation {
@@ -5855,7 +5434,6 @@ fn run_cook_spine(
     if !existing_recipe
         && !persisted_finalization
         && !verification_pending_continuation
-        && !authenticated_historical_review_continuation
         && !cook_workspace_lookup_pending(&options.identity.initial_plan)
         && options.provider_transport.attempt_dispatcher.is_none()
         && options.workspace.source_worktree_path.is_none()
@@ -5880,7 +5458,6 @@ fn run_cook_spine(
     // before it shares the destination.
     if !persisted_finalization
         && !verification_pending_continuation
-        && !authenticated_historical_review_continuation
         && cook_attempt_needs_execution_with_store(
             lifecycle_store,
             &options.identity.initial_run_id,
@@ -5903,7 +5480,6 @@ fn run_cook_spine(
     // workspace validation, adoption, or Lab snapshot observes it (#15775).
     if !persisted_finalization
         && !verification_pending_continuation
-        && !authenticated_historical_review_continuation
         && cook_attempt_needs_execution_with_store(
             lifecycle_store,
             &options.identity.initial_run_id,
@@ -6506,29 +6082,7 @@ fn run_cook_spine(
         .find(|attempt| attempt.run_id == run_id)
         .map(|attempt| attempt.attempt)
         .unwrap_or(1);
-    let continuation_attempt_limit = recipe
-        .attempts
-        .iter()
-        .find(|attempt| attempt.run_id == run_id)
-        .and_then(|attempt| attempt.plan.tasks.first())
-        .filter(|task| {
-            task.inputs["cook_loop"]["review_form_required"] == true
-                && matches!(
-                    task.inputs["cook_loop"]["execution_budget_authority"]["kind"].as_str(),
-                    Some("fresh_cook_review" | "candidate_adoption_review")
-                )
-        })
-        .and_then(|task| {
-            task.inputs["cook_loop"]["execution_budget_authority"]["max_same_provider_retries"]
-                .as_u64()
-        })
-        .and_then(|retries| u32::try_from(retries).ok())
-        .unwrap_or(0);
-    let mut attempt_limit = if continuation_attempt_limit > 0 {
-        first_attempt.saturating_add(continuation_attempt_limit)
-    } else {
-        max_attempts
-    };
+    let attempt_limit = max_attempts;
     let mut attempt = first_attempt;
     while attempt <= attempt_limit {
         // Attempt boundary. Checked before any provider work is dispatched, so
@@ -7282,7 +6836,6 @@ fn run_cook_spine(
                         max_attempts: attempt_limit,
                         source_run_id: Some(run_id.clone()),
                         current_diff: gate_feedback_current_diff(&promotion),
-                        require_review_form: !options.finalization.no_finalize,
                         review_form: None,
                         metadata: serde_json::json!({
                             "previous_failure_set": Value::Null,
@@ -7534,18 +7087,6 @@ fn run_cook_spine(
                 }),
             )?;
         }
-        let review_form_continuation = review_form_unavailable
-            || mode.allows_historical_terminal()
-                && review_form_attempt_is_ready_for_cook_continuation_in_store(
-                    lifecycle_store,
-                    &plan,
-                    &record,
-                )?
-                && retryable_review_form_terminal_failure_in_store(
-                    lifecycle_store,
-                    &record,
-                    &aggregate,
-                );
         let persisted_terminal_status = record.metadata["cook_progress"]["terminal_status"]
             .as_str()
             .map(str::to_string);
@@ -7598,7 +7139,7 @@ fn run_cook_spine(
             agent_task_lifecycle::AgentTaskRunState::Succeeded
                 | agent_task_lifecycle::AgentTaskRunState::CandidateRecoverable
         ) && (adopted_continuation.is_none() || record.candidate_adoption.is_none())
-            && !review_form_continuation
+            && !review_form_unavailable
         {
             attempts.push(AgentTaskCookAttemptReport {
                 attempt,
@@ -7729,13 +7270,7 @@ fn run_cook_spine(
             return Ok(report);
         }
 
-        // A review-form follow-up carries an already-gated candidate forward; a
-        // no-change verdict from it declines the review rather than deciding
-        // the candidate. It continues to the carried promotion, where the Cook
-        // loop classifies it as a review-form gap (#14970).
-        if let Some(declaration) = intentional_no_change_from_aggregate(&aggregate)
-            .filter(|_| !plan_is_review_form_only(&plan))
-        {
+        if let Some(declaration) = intentional_no_change_from_aggregate(&aggregate) {
             let review_form = review_form_from_aggregate(&aggregate)?;
             let requires_candidate =
                 no_change_requires_substantive_candidate(&declaration, &source_request);
@@ -7841,23 +7376,7 @@ fn run_cook_spine(
             .and_then(|request| request.inputs.pointer("/cook_loop/failure_set"))
             .cloned()
             .unwrap_or(Value::Null);
-        let feedback_promotion =
-            if review_form_continuation && promotion.status == AgentTaskPromotionStatus::Applied {
-                // Historical terminal review-form continuations can carry the
-                // source attempt's failed gate entries even though their copied,
-                // authenticated promotion is already applied. The applied status
-                // is the durable gate authority for this form-only retry.
-                let mut feedback_promotion = promotion.clone();
-                feedback_promotion.deterministic_gates.retain(|gate| {
-                    gate.status != crate::agent_task_gate::AgentTaskGateStatus::Failed
-                });
-                feedback_promotion
-                    .gate_results
-                    .retain(|gate| gate.status != homeboy_core::gate::HomeboyGateStatus::Failed);
-                feedback_promotion
-            } else {
-                promotion.clone()
-            };
+        let feedback_promotion = promotion.clone();
         let feedback = evaluate_cook_loop(AgentTaskCookLoopOptions {
             source_request: source_request.clone(),
             promotion_report: feedback_promotion,
@@ -7867,7 +7386,6 @@ fn run_cook_spine(
             current_diff: gate_feedback_current_diff(&promotion),
             // The form is publication evidence. A no-finalize Cook preserves
             // the verified patch for review without entering finalization.
-            require_review_form: !options.finalization.no_finalize && !review_form_unavailable,
             review_form: review_form.clone(),
             metadata: serde_json::json!({
                 "previous_failure_set": previous_failure_set,
@@ -7964,7 +7482,6 @@ fn run_cook_spine(
                             max_attempts: attempt_limit,
                             source_run_id: Some(run_id.clone()),
                             current_diff: gate_feedback_current_diff(&promotion),
-                            require_review_form: false,
                             review_form: None,
                             metadata: Value::Null,
                         },
@@ -8178,21 +7695,6 @@ fn run_cook_spine(
                 let budget_limit = budget_limit
                     .as_ref()
                     .expect("budget is initialized from the loaded attempt plan");
-                let budget_scope = follow_up_budget_scope(&source_request, &follow_up_request);
-                let persisted_authority = plan
-                    .tasks
-                    .first()
-                    .map(|task| &task.inputs["cook_loop"]["execution_budget_authority"])
-                    .filter(|authority| budget_authority_matches_scope(authority, budget_scope));
-                let scoped_budget_limit = scoped_follow_up_budget(
-                    budget_scope,
-                    budget_limit,
-                    budget_used,
-                    persisted_authority,
-                )
-                .0;
-                let review_form_only =
-                    follow_up_request.inputs["cook_loop"]["review_form_required"] == true;
                 match dispatch_cook_follow_up(
                     (store, lifecycle_store),
                     &options,
@@ -8205,7 +7707,7 @@ fn run_cook_spine(
                     &promotion,
                     follow_up_request,
                     false,
-                    budget_scope,
+                    CookFollowUpBudgetScope::Cook,
                     budget_limit,
                     budget_used,
                     &mut remediation_category_usage,
@@ -8215,16 +7717,6 @@ fn run_cook_spine(
                     } => {
                         run_id = next_run_id;
                         attempt = attempt.saturating_add(1);
-                        // A review-form nudge runs under its own review budget,
-                        // not the code-attempt budget, so a change that turns
-                        // green on its final attempt still executes the nudge.
-                        // This mirrors the review-form continuation limit above.
-                        if review_form_only {
-                            attempt_limit = attempt_limit.max(
-                                attempt
-                                    .saturating_add(scoped_budget_limit.max_same_provider_retries),
-                            );
-                        }
                     }
                     CookFollowUpDispatch::BudgetExhausted { reason } => {
                         return Ok(stores.report(CookReportInput {
@@ -8235,9 +7727,8 @@ fn run_cook_spine(
                             finalization: None,
                             stop_reason: Some(exhausted_budget_guidance(
                                 attempt_limit,
-                                &scoped_budget_limit,
+                                budget_limit,
                                 &reason,
-                                review_form_only,
                             )),
                             exit_code: 1,
                             invocation_latest_run_id: Some(&run_id),
@@ -10061,130 +9552,6 @@ fn validate_pending_cook_repository_identity(_plan: &AgentTaskPlan, _target: &Pa
     Ok(())
 }
 
-/// The normal configured-provider preflight rejects every dirty destination. A
-/// terminal review-form retry can retain its candidate only after its copied
-/// promotion lineage and the resolved destination prove an exact match.
-fn authenticated_historical_review_form_workspace(
-    lifecycle_store: &AgentTaskLifecycleStore,
-    options: &CookRequest,
-) -> Result<bool> {
-    authenticated_historical_review_form_workspace_with_trace(lifecycle_store, options, true)
-}
-
-fn authenticated_historical_review_form_workspace_with_trace(
-    lifecycle_store: &AgentTaskLifecycleStore,
-    options: &CookRequest,
-    persist_trace: bool,
-) -> Result<bool> {
-    let mut trace = ContinuationAdmissionTrace::new();
-    let record_trace = |trace: &ContinuationAdmissionTrace| {
-        if persist_trace {
-            record_continuation_admission_trace(
-                lifecycle_store,
-                &options.identity.initial_run_id,
-                trace,
-            )
-        } else {
-            Ok(())
-        }
-    };
-    if !lifecycle_store.record_exists(&options.identity.initial_run_id)? {
-        trace.deny("run_record", "unavailable");
-        return Ok(false);
-    }
-    trace.pass("run_record");
-    let record = rooted_status(lifecycle_store, &options.identity.initial_run_id)?;
-    match terminal_review_form_continuation_is_eligible_in_store(
-        lifecycle_store,
-        &options.identity.initial_plan,
-        &record,
-    ) {
-        Ok(true) => trace.pass("terminal_review_form_eligibility"),
-        Ok(false) => {
-            trace.deny("terminal_review_form_eligibility", "fail");
-            record_trace(&trace)?;
-            return Ok(false);
-        }
-        Err(_) => {
-            trace.deny("terminal_review_form_eligibility", "unavailable");
-            record_trace(&trace)?;
-            return Ok(false);
-        }
-    }
-    let Some(promotion) =
-        persisted_promotion_for_attempt_in_store(lifecycle_store, &options.identity.initial_run_id)
-            .unwrap_or(None)
-    else {
-        trace.deny("applied_promotion", "unavailable");
-        record_trace(&trace)?;
-        return Ok(false);
-    };
-    if promotion.status != AgentTaskPromotionStatus::Applied {
-        trace.deny("applied_promotion", "fail");
-        record_trace(&trace)?;
-        return Ok(false);
-    }
-    trace.pass("applied_promotion");
-    let continuation = match tracked_promotion_continuation_in_store(lifecycle_store, options) {
-        Ok(Some(continuation)) => continuation,
-        Ok(None) => {
-            trace.deny("continuation_evidence", "unavailable");
-            record_trace(&trace)?;
-            return Ok(false);
-        }
-        Err(_) => {
-            trace.deny("continuation_evidence", "fail");
-            record_trace(&trace)?;
-            return Ok(false);
-        }
-    };
-    trace.pass("continuation_evidence");
-    let target = match homeboy_core::worktree_provider::resolve_native_worktree_mutation_target(
-        &options.workspace.to_worktree,
-    ) {
-        Ok(target) => target,
-        Err(_error) => {
-            trace.deny("provider_resolution", "fail");
-            record_trace(&trace)?;
-            return Ok(false);
-        }
-    };
-    let Some(target) = target else {
-        trace.deny("provider_resolution", "fail");
-        record_trace(&trace)?;
-        return Ok(false);
-    };
-    trace.pass("provider_resolution");
-    trace.pass("provider_baseline_verification");
-    if target.handle != options.workspace.to_worktree {
-        trace.deny("worktree_root", "fail");
-        record_trace(&trace)?;
-        return Ok(false);
-    }
-    trace.pass("worktree_root");
-    let Ok(target) = std::fs::canonicalize(&target.path) else {
-        trace.deny("candidate_fingerprint", "unavailable");
-        record_trace(&trace)?;
-        return Ok(false);
-    };
-    if authenticate_tracked_promotion_continuation(&target, &continuation).is_err() {
-        trace.deny("candidate_fingerprint", "fail");
-        record_trace(&trace)?;
-        return Ok(false);
-    }
-    trace.pass("candidate_fingerprint");
-    record_trace(&trace)?;
-    Ok(true)
-}
-
-fn record_continuation_admission_trace(
-    lifecycle_store: &AgentTaskLifecycleStore,
-    run_id: &str,
-    trace: &ContinuationAdmissionTrace,
-) -> Result<()> {
-    lifecycle_store.record_metadata_value(run_id, "cook_continuation_admission", trace.value())
-}
-
 struct TrackedPromotionContinuation {
     path: PathBuf,
     branch: String,
@@ -10316,21 +9683,10 @@ fn tracked_promotion_continuation_in_store(
     let has_post_apply_checkpoint = ["/post_apply", "/resumed_post_apply_promotion"]
         .into_iter()
         .any(|pointer| promotion.provenance.pointer(pointer) == Some(&Value::Bool(true)));
-    let authenticated_legacy_review =
-        if promotion.status == AgentTaskPromotionStatus::Applied && !has_post_apply_checkpoint {
-            let record = rooted_status(lifecycle_store, &options.identity.initial_run_id)?;
-            terminal_review_form_continuation_is_eligible_in_store(
-                lifecycle_store,
-                &options.identity.initial_plan,
-                &record,
-            )?
-        } else {
-            false
-        };
     let normal_continuation = matches!(
         promotion.status,
         AgentTaskPromotionStatus::VerificationPending | AgentTaskPromotionStatus::Applied
-    ) && (has_post_apply_checkpoint || authenticated_legacy_review);
+    ) && has_post_apply_checkpoint;
     // A gate-failed candidate remains eligible only when its immutable recipe,
     // indexed attempt, and run record all identify this Cook. This survives a
     // failed controller process without treating caller-controlled route or

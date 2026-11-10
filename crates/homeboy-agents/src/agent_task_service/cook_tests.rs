@@ -429,45 +429,6 @@ fn remediation_policy_rejects_denied_workspace_read_before_dispatch() {
 }
 
 #[test]
-fn terminal_review_form_continuation_rejects_generic_failed_and_cancelled_runs() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let options = batch_cook_options(
-            "generic-terminal-review-form",
-            Arc::new(AcceptedDetachedAttemptDispatcher),
-        );
-        for (run_id, cancelled) in [
-            ("generic-terminal-review-form-failed", false),
-            ("generic-terminal-review-form-cancelled", true),
-        ] {
-            agent_task_lifecycle::submit_plan(&options.identity.initial_plan, Some(run_id))
-                .unwrap();
-            if cancelled {
-                agent_task_lifecycle::cancel_run(run_id, Some("policy cancelled")).unwrap();
-            } else {
-                agent_task_lifecycle::record_pre_execution_failure(
-                    run_id,
-                    &options.identity.initial_plan,
-                    "fixture",
-                    &Error::validation_invalid_argument(
-                        "fixture",
-                        "generic policy failure",
-                        None,
-                        None,
-                    ),
-                )
-                .unwrap();
-            }
-            let record = agent_task_lifecycle::reconcile_status(run_id).unwrap();
-            assert!(!terminal_review_form_continuation_is_eligible(
-                &options.identity.initial_plan,
-                &record,
-            )
-            .unwrap());
-        }
-    });
-}
-
-#[test]
 fn run_next_skips_persisted_test_detached_recipe_and_executes_eligible_work() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let options = batch_cook_options(
@@ -2627,109 +2588,6 @@ fn cook_service_retry_uses_the_same_passed_context_after_ambient_mutation() {
 }
 
 #[test]
-fn fresh_cook_review_form_has_bounded_budget_independent_of_code_execution() {
-    let mut follow_up_request = batch_cook_options(
-        "fresh-review-budget",
-        Arc::new(AcceptedDetachedAttemptDispatcher),
-    )
-    .identity
-    .initial_plan
-    .tasks
-    .remove(0);
-    follow_up_request.inputs["cook_loop"]["review_form_required"] = serde_json::json!(true);
-    let mut source_request = follow_up_request.clone();
-    source_request.inputs = Value::Null;
-    let scope = follow_up_budget_scope(&source_request, &follow_up_request);
-    assert_eq!(scope, CookFollowUpBudgetScope::FreshCookReview);
-
-    let code_budget = crate::agent_task_scheduler::AgentTaskExecutionBudget::new(1, 0, 0);
-    let consumed_code_budget = ExecutionBudgetUsage {
-        executions: 1,
-        ..Default::default()
-    };
-    assert!(budget_remaining(&code_budget, consumed_code_budget).is_none());
-
-    let (review_budget, review_usage) =
-        scoped_follow_up_budget(scope, &code_budget, consumed_code_budget, None);
-    assert_eq!(
-        review_budget,
-        crate::agent_task_scheduler::AgentTaskExecutionBudget::new(2, 1, 0)
-    );
-    assert_eq!(review_usage.executions, 0);
-    assert_eq!(
-        budget_remaining(&review_budget, review_usage),
-        Some(crate::agent_task_scheduler::AgentTaskExecutionBudget::new(
-            2, 1, 0
-        ))
-    );
-
-    source_request.inputs["cook_loop"]["execution_budget_authority"] = serde_json::json!({
-        "kind": "fresh_cook_review",
-        "max_provider_executions": 2,
-        "max_same_provider_retries": 1,
-        "max_provider_rotations": 0,
-        "review_plan_provider_executions": 1,
-    });
-    let persisted_authority =
-        source_request.inputs["cook_loop"]["execution_budget_authority"].clone();
-    let (narrowed_budget, _) = scoped_follow_up_budget(
-        scope,
-        &code_budget,
-        consumed_code_budget,
-        Some(&persisted_authority),
-    );
-    assert_eq!(
-        narrowed_budget,
-        crate::agent_task_scheduler::AgentTaskExecutionBudget::new(2, 1, 0),
-        "the canonical review authority remains bounded"
-    );
-    assert_eq!(
-        follow_up_budget_scope(&source_request, &follow_up_request),
-        CookFollowUpBudgetScope::FreshCookReview,
-        "a review-only retry reuses its persisted review allowance"
-    );
-    follow_up_request.inputs["cook_loop"]["execution_budget_authority"] =
-        persisted_authority.clone();
-    assert_eq!(
-        follow_up_request.inputs["cook_loop"]["execution_budget_authority"], persisted_authority,
-        "Cook continuation carries the exact authority instead of minting one"
-    );
-
-    let timed_out_usage = ExecutionBudgetUsage {
-        executions: 1,
-        ..Default::default()
-    };
-    let remaining_after_timeout = budget_remaining(&review_budget, timed_out_usage).unwrap();
-    assert_eq!(
-        remaining_after_timeout,
-        crate::agent_task_scheduler::AgentTaskExecutionBudget::new(1, 1, 0),
-        "the timed-out review execution leaves exactly one same-provider retry"
-    );
-    assert_eq!(
-        reserve_remediation_budget(&remaining_after_timeout, true).unwrap(),
-        ExecutionBudgetUsage {
-            same_provider_retries: 1,
-            ..Default::default()
-        }
-    );
-    assert!(budget_remaining(
-        &review_budget,
-        ExecutionBudgetUsage {
-            executions: 2,
-            same_provider_retries: 1,
-            provider_rotations: 0,
-        }
-    )
-    .is_none());
-
-    follow_up_request.inputs["cook_loop"]["review_form_required"] = serde_json::json!(false);
-    assert_eq!(
-        follow_up_budget_scope(&source_request, &follow_up_request),
-        CookFollowUpBudgetScope::Cook
-    );
-}
-
-#[test]
 fn cook_materialization_capacity_reserves_lifecycle_scratch_space() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let left_context = homeboy_core::test_support::HermeticTestContext::new();
@@ -2755,10 +2613,10 @@ fn gate_feedback_child_budget_preserves_declared_retry_and_rotation_capacity() {
 
 #[test]
 fn persisted_review_budget_authority_preserves_lower_bounds_and_caps_larger_values() {
-    let scope = CookFollowUpBudgetScope::FreshCookReview;
+    let scope = CookFollowUpBudgetScope::CandidateAdoptionReview;
     let cook_budget = crate::agent_task_scheduler::AgentTaskExecutionBudget::new(9, 9, 9);
     let lower = serde_json::json!({
-        "kind": "fresh_cook_review",
+        "kind": "candidate_adoption_review",
         "max_provider_executions": 1,
         "max_same_provider_retries": 0,
         "max_provider_rotations": 0,
@@ -2777,7 +2635,7 @@ fn persisted_review_budget_authority_preserves_lower_bounds_and_caps_larger_valu
     assert_eq!(review_budget_authority(scope, Some(&lower)), lower);
 
     let larger = serde_json::json!({
-        "kind": "fresh_cook_review",
+        "kind": "candidate_adoption_review",
         "max_provider_executions": 99,
         "max_same_provider_retries": 99,
         "max_provider_rotations": 99,
@@ -2786,7 +2644,7 @@ fn persisted_review_budget_authority_preserves_lower_bounds_and_caps_larger_valu
     assert_eq!(
         review_budget_authority(scope, Some(&larger)),
         serde_json::json!({
-            "kind": "fresh_cook_review",
+            "kind": "candidate_adoption_review",
             "max_provider_executions": 2,
             "max_same_provider_retries": 1,
             "max_provider_rotations": 0,
@@ -20030,12 +19888,11 @@ fn persist_deferred_fixture(run_id: &str) {
 fn recover_selects_regate_only_for_unjudged_complete_candidates() {
     use crate::agent_task_gate::AgentTaskGateStatus as Gate;
     use crate::agent_task_service::{CookRecoveryRequest, CookRecoveryStep};
-    for (status, missing_form, expected) in [
-        (Gate::Unavailable, false, CookRecoveryStep::Regate),
-        (Gate::Deferred, false, CookRecoveryStep::Regate),
-        (Gate::Skipped, false, CookRecoveryStep::Regate),
-        (Gate::Failed, false, CookRecoveryStep::Continue),
-        (Gate::Unavailable, true, CookRecoveryStep::Continue),
+    for (status, expected) in [
+        (Gate::Unavailable, CookRecoveryStep::Regate),
+        (Gate::Deferred, CookRecoveryStep::Regate),
+        (Gate::Skipped, CookRecoveryStep::Regate),
+        (Gate::Failed, CookRecoveryStep::Continue),
     ] {
         with_corrected_gate_failure(false, |options, _| {
             let run = &options.identity.initial_run_id;
@@ -20046,15 +19903,8 @@ fn recover_selects_regate_only_for_unjudged_complete_candidates() {
             store
                 .record_promotion(run, serde_json::to_value(promotion).unwrap())
                 .unwrap();
-            if missing_form {
-                let mut aggregate = store.read_aggregate(run).unwrap();
-                aggregate.outcomes[0].outputs = Value::Null;
-                store
-                    .record_run_aggregate(run, &options.identity.initial_plan, &aggregate)
-                    .unwrap();
-            }
             let plan = crate::agent_task_service::plan_cook_recovery(run).unwrap();
-            assert_eq!(plan.step, expected, "{status:?}, missing={missing_form}");
+            assert_eq!(plan.step, expected, "{status:?}");
             let context = crate::agent_task_service::cook_failure_context(
                 &options.identity.cook_id,
                 Some(run),
@@ -24400,127 +24250,6 @@ fn recovery_publishes_historical_inherited_failure_without_running_gates() {
 }
 
 #[test]
-fn publication_uses_completed_producer_despite_later_review_form_attempts() {
-    use crate::agent_task::AgentTaskOutcomeStatus;
-
-    for (later_status, gates_passed) in [
-        (AgentTaskOutcomeStatus::Timeout, true),
-        (AgentTaskOutcomeStatus::Succeeded, true),
-        (AgentTaskOutcomeStatus::Failed, true),
-        (AgentTaskOutcomeStatus::Timeout, false),
-    ] {
-        homeboy_core::test_support::with_isolated_home(|_| {
-            let cook_id = "cook-producer-publication";
-            let producer = "cook-producer-publication-attempt-1";
-            let continuation = "cook-producer-publication-attempt-2";
-            let target = tempfile::tempdir().unwrap();
-            let mut options =
-                batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
-            options.identity.initial_run_id = producer.to_string();
-            options.identity.initial_plan.tasks[0].executor.model = Some("producer-model".into());
-            persist_initial_recipe(&options).unwrap();
-            agent_task_lifecycle::submit_plan(&options.identity.initial_plan, Some(producer))
-                .unwrap();
-            agent_task_lifecycle::record_cook_attempt_in_store(
-                &test_lifecycle_store(),
-                cook_id,
-                1,
-                producer,
-            )
-            .unwrap();
-            seed_substantive_candidate_aggregate(
-                producer, &options.identity.initial_plan, &target.path().join("candidate.patch"),
-                "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n",
-            );
-            let mut aggregate = agent_task_lifecycle::read_attempt_aggregate(producer).unwrap();
-            aggregate.outcomes[0].outputs = test_review_form_outputs();
-            agent_task_lifecycle::record_run_aggregate(
-                producer,
-                &options.identity.initial_plan,
-                &aggregate,
-            )
-            .unwrap();
-            let mut promotion = promotion_with_existing_path(producer, target.path());
-            if !gates_passed {
-                promotion.status = AgentTaskPromotionStatus::GateFailed;
-                promotion.deterministic_gates[0].status =
-                    crate::agent_task_gate::AgentTaskGateStatus::Failed;
-            }
-            agent_task_lifecycle::record_promotion(
-                producer,
-                serde_json::to_value(&promotion).unwrap(),
-            )
-            .unwrap();
-
-            let mut plan = options.identity.initial_plan.clone();
-            plan.tasks[0].executor.model = None;
-            plan.tasks[0].inputs["cook_loop"]["review_form_required"] = serde_json::json!(true);
-            plan.tasks[0].inputs["cook_loop"]["execution_budget_authority"] =
-                serde_json::json!({ "kind": "fresh_cook_review" });
-            super::super::record_recipe_attempt(cook_id, 2, continuation, &plan).unwrap();
-            agent_task_lifecycle::submit_plan(&plan, Some(continuation)).unwrap();
-            agent_task_lifecycle::record_cook_attempt_in_store(
-                &test_lifecycle_store(),
-                cook_id,
-                2,
-                continuation,
-            )
-            .unwrap();
-            let mut later = review_form_aggregate(&plan);
-            later.outcomes[0].status = later_status;
-            later.outcomes[0].outputs = Value::Null;
-            agent_task_lifecycle::record_run_aggregate(continuation, &plan, &later).unwrap();
-            let mut carried = promotion.clone();
-            carried.source.run_id = Some(continuation.to_string());
-            carried.provenance["cook_follow_up"] = serde_json::json!({
-                "kind": "review_form_only", "source_run_id": producer,
-            });
-            agent_task_lifecycle::record_promotion(
-                continuation,
-                serde_json::to_value(carried).unwrap(),
-            )
-            .unwrap();
-
-            for (recovery_id, supplied) in [
-                (cook_id, None),
-                (continuation, None),
-                (cook_id, Some(supplied_test_review_form())),
-                (continuation, Some(supplied_test_review_form())),
-            ] {
-                let result = recover_cook_pr_with_backend_and_review_form(
-                    recovery_id,
-                    supplied,
-                    None,
-                    Vec::new(),
-                    true,
-                    &mut CaptureBackend {
-                        synthetic_gate_proof: Some(promotion.clone()),
-                        ..Default::default()
-                    },
-                );
-                if gates_passed {
-                    let report = result.expect("later form execution cannot veto the producer");
-                    assert_eq!(report["status"], "validated");
-                    assert_eq!(
-                        report["review_dossier"]["ai_assistance"]["model"],
-                        "tier producer-model; served model not recorded"
-                    );
-                    assert_eq!(
-                        report["review_dossier"]["ai_assistance"]["tool"],
-                        "Homeboy (fixture)"
-                    );
-                } else {
-                    assert!(
-                        result.is_err(),
-                        "producer gate failure must still block publication"
-                    );
-                }
-            }
-        });
-    }
-}
-
-#[test]
 fn recovery_supplies_missing_historical_review_form_without_provider_dispatch() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let cook_id = "cook-9866";
@@ -24834,17 +24563,13 @@ fn malformed_agent_review_form_recovers_by_publishing_a_supplied_form() {
             created: std::cell::Cell::new(false),
         };
 
-        // Without an operator form, publication would refuse; recovery
-        // requests the form through the Cook's bounded review-only follow-up,
-        // which replaces the unusable form (#17494, #16292).
+        // An unusable agent form never dispatches a review-only follow-up:
+        // recovery publishes, as a draft without an operator form (#17671).
         assert_eq!(
             crate::agent_task_service::plan_cook_recovery(cook_id)
                 .expect("plan the verified candidate")
                 .step,
-            crate::agent_task_service::CookRecoveryStep::RequestReviewForm {
-                missing: crate::agent_task_service::REVIEW_FORM_MISSING.into(),
-                rearm: false,
-            }
+            crate::agent_task_service::CookRecoveryStep::Publish
         );
 
         let (published, exit_code) = crate::agent_task_service::recover_cook(

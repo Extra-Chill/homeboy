@@ -6196,34 +6196,6 @@ fn retry_replay_action(record: &AgentTaskRunRecord) -> RetryReplayAction {
             );
         }
     };
-    match cook_continuation_action(record) {
-        Ok(true) => {
-            return RetryReplayAction {
-                owner: local_owner,
-                readiness: "unavailable",
-                reason: Some(
-                    "the authenticated review-form continuation must resume through Cook"
-                        .to_string(),
-                ),
-                admission: json!({
-                    "admitted": false,
-                    "reason": "the authenticated review-form continuation must resume through Cook",
-                }),
-                action: None,
-                continuation: Some(cook_continuation_command(&record.run_id)),
-            };
-        }
-        Ok(false) => {}
-        Err(error) => {
-            return RetryReplayAction::unavailable(
-                local_owner,
-                format!(
-                    "cannot validate whether this run requires Cook continuation: {}",
-                    error.message
-                ),
-            );
-        }
-    }
     let has_generic_lab_replay = plan.metadata.get("generic_lab_command_replay").is_some();
     // Cook-owned retries stay on the controller lifecycle. Lab routing makes
     // the same Cook-first decision before it considers generic replay.
@@ -6302,32 +6274,6 @@ fn lab_replay_retry_action(run_id: &str, owner: Value) -> CommandNextAction {
             "materialization_identity": true,
         })),
     )
-}
-
-/// A promoted review-form follow-up retains the candidate through Cook's
-/// authenticated continuation route. Generic retry replays its obsolete clean
-/// workspace attestation and is therefore not a legal recovery action.
-fn cook_continuation_action(record: &AgentTaskRunRecord) -> homeboy::core::Result<bool> {
-    let Some(recipe) = agent_task_service_direct::load_recipe_for_attempt(&record.run_id)? else {
-        return Ok(false);
-    };
-    agent_task_service_direct::validate_recipe_attempt_record(&recipe, &record.run_id, record)?;
-    let Some(attempt) = recipe
-        .attempts
-        .iter()
-        .find(|attempt| attempt.run_id == record.run_id)
-    else {
-        return Ok(false);
-    };
-    agent_task_service_direct::terminal_review_form_continuation_is_eligible(&attempt.plan, record)
-}
-
-fn cook_continuation_command(run_id: &str) -> CommandNextAction {
-    CommandNextAction::new(
-        "recover the authenticated Cook",
-        agent_task_service_direct::cook_recover_command(None, run_id),
-    )
-    .with_kind(CommandNextActionKind::Repair)
 }
 
 fn owner_bound_retry_action(
@@ -7044,7 +6990,7 @@ mod tests {
     fn cook_continuation_replaces_generic_retry_in_diagnose_commands() {
         let record: AgentTaskRunRecord = serde_json::from_value(json!({
             "schema": "homeboy/agent-task-run/v1",
-            "run_id": "review-form-timeout",
+            "run_id": "cook-attempt-timeout",
             "plan_id": "plan",
             "state": "partial_failure",
             "submitted_at": "2026-08-08T00:00:00Z",
@@ -7063,7 +7009,7 @@ mod tests {
             continuation: Some(
                 CommandNextAction::new(
                     "recover the authenticated Cook",
-                    "homeboy agent-task recover review-form-timeout",
+                    "homeboy agent-task recover cook-attempt-timeout",
                 )
                 .with_kind(CommandNextActionKind::Repair),
             ),
@@ -7079,7 +7025,7 @@ mod tests {
 
         assert_eq!(retry.projection()["readiness"], "unavailable");
         assert!(retry.projection()["action"].is_null());
-        assert!(commands.contains(&"homeboy agent-task recover review-form-timeout".to_string()));
+        assert!(commands.contains(&"homeboy agent-task recover cook-attempt-timeout".to_string()));
         assert!(commands
             .iter()
             .all(|command| !command.contains("agent-task retry")));

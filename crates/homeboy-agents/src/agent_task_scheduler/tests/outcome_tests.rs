@@ -667,7 +667,7 @@ fn other_missing_outputs_stay_provider_failures() {
 
 /// #15880's #15440 half: the empty-change refusal must not hijack the ordinary
 /// deferral. A candidate with a real patch whose only missing required output is
-/// the `review_form` still defers to the cook loop's form-only follow-up.
+/// the `review_form` still defers so the gated candidate publishes as a draft.
 #[test]
 fn non_empty_candidate_missing_only_review_form_is_still_deferred() {
     let mut form_request = request("form-task");

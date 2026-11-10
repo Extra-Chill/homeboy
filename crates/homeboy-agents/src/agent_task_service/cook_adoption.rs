@@ -423,7 +423,6 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
             max_attempts: options.retry_policy.max_attempts,
             source_run_id: Some(record.run_id.clone()),
             current_diff: String::new(),
-            require_review_form: true,
             review_form: adopted_review_form(
                 lifecycle_store,
                 &record.run_id,
@@ -683,7 +682,6 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
         max_attempts: options.retry_policy.max_attempts,
         source_run_id: Some(record.run_id.clone()),
         current_diff: gate_feedback_current_diff(&promotion),
-        require_review_form: true,
         review_form: adopted_review_form(
             lifecycle_store,
             &record.run_id,
@@ -836,7 +834,6 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
                         options.retry_policy.max_attempts,
                         &budget,
                         &reason,
-                        true,
                     )),
                     exit_code: 1,
                     invocation_latest_run_id: Some(record.run_id.as_str()),

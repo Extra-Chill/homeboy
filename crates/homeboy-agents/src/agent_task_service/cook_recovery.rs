@@ -25,10 +25,6 @@ use crate::agent_task_lifecycle;
 /// Schema of the report [`recover_cook`] returns.
 pub const COOK_RECOVERY_SCHEMA: &str = "homeboy/agent-task-cook-recovery/v1";
 
-/// The missing publication input of a gate-green candidate without a usable
-/// review form; `status` and `diagnose` name it with the planned step.
-pub const REVIEW_FORM_MISSING: &str = "review_form_missing";
-
 /// The single correct next recovery step for a stopped Cook.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -57,13 +53,6 @@ pub enum CookRecoveryStep {
     /// The verified candidate is unpublished; publish it from the durable Cook
     /// record or validated manual-finalization intent.
     Publish,
-    /// The applied candidate passed every declared gate and only its review
-    /// form is missing (#16292). Run the Cook's review-only provider step
-    /// against the existing candidate diff (no code changes) to produce the
-    /// form, then publish. Never a new code attempt. `missing` names the
-    /// absent publication input; `rearm` reopens a failed terminal
-    /// continuation first.
-    RequestReviewForm { missing: String, rearm: bool },
     /// The Cook produced no candidate patch, but the destination worktree's
     /// branch holds commits ahead of its recorded base: the operator's verified
     /// work is the candidate. Adopt that exact revision into the Cook
@@ -91,7 +80,6 @@ impl CookRecoveryStep {
             Self::Reconcile => "reconcile",
             Self::ReplaceGates => "replace_gates",
             Self::Publish => "publish",
-            Self::RequestReviewForm { .. } => "request_review_form",
             Self::Adopt { .. } => "adopt",
             Self::Blocked { .. } | Self::None { .. } => return None,
         })
@@ -105,14 +93,6 @@ impl CookRecoveryStep {
     pub(crate) fn none(reason: impl Into<String>) -> Self {
         Self::None {
             reason: reason.into(),
-        }
-    }
-
-    /// The publication input this step exists to supply, when it names one.
-    pub fn missing(&self) -> Option<&str> {
-        match self {
-            Self::RequestReviewForm { missing, .. } => Some(missing),
-            _ => None,
         }
     }
 
@@ -181,11 +161,6 @@ pub(crate) struct CookRecoveryInputs<'a> {
     /// Applied, verified candidate with no publication receipt. Gates are
     /// never replayed for it (#16441).
     pub verified_unpublished: bool,
-    /// The attempt's selected outcome records no usable AI-authored review
-    /// form. Publication refuses without one, so a verified candidate in this
-    /// state continues the Cook, whose bounded review-form follow-up records
-    /// it (#17494). An operator form (`--review-form`) still selects publish.
-    pub review_form_missing: bool,
     /// HEAD of the destination worktree when its branch holds commits ahead
     /// of the recorded base (#16181). A terminal `no_changes` attempt in that
     /// state is adoptable: the operator's committed work is the candidate the
@@ -271,16 +246,9 @@ format!(
             ));
         }
     }
+    // A gate-green candidate publishes; without a usable review form it
+    // publishes as a draft (#17671).
     if publishable {
-        // A gate-green candidate missing only its review form asks the
-        // review-only step for the form; it never replays provider code work
-        // on a destination that already holds the candidate (#16292).
-        if inputs.review_form_missing {
-            return CookRecoveryStep::RequestReviewForm {
-                missing: REVIEW_FORM_MISSING.to_string(),
-                rearm: inputs.continuation_rearm_required,
-            };
-        }
         return CookRecoveryStep::Publish;
     }
     if inputs.regate_ready && !status_is_settled(&status) {
@@ -408,9 +376,6 @@ pub struct CookRecoveryOverrides {
     /// Larger provider timeout for the successor attempt.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
-    /// Larger review-form deadline for a timed-out review-form attempt.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub review_form_timeout_ms: Option<u64>,
     /// Provider route for the successor attempt.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub backend: Option<String>,
@@ -424,9 +389,7 @@ pub struct CookRecoveryOverrides {
 
 impl CookRecoveryOverrides {
     pub fn is_empty(&self) -> bool {
-        self.timeout_ms.is_none()
-            && self.review_form_timeout_ms.is_none()
-            && !self.has_route_override()
+        self.timeout_ms.is_none() && !self.has_route_override()
     }
 
     /// A provider route override is a rearm of the terminal attempt.
@@ -581,23 +544,6 @@ pub trait CookRecoveryPerformer {
             ));
         }
         self.publish(run_id, &CookPublishRequest::default(), false)
-    }
-    /// Request only the review form for the gate-green candidate of
-    /// `run_id`. This reuses the Cook continuation's bounded review-form
-    /// follow-up: a review-only provider step (write and apply `none`) against
-    /// the existing candidate diff, followed by the continuation's normal
-    /// publication. It never reserves a new code attempt.
-    fn request_review_form(
-        &self,
-        cook_id: &str,
-        run_id: &str,
-        rearm: bool,
-    ) -> Result<(Value, i32)> {
-        if !rearm {
-            super::CookRecipeStore::from_current_data_root()?
-                .schedule_recovery_continuation(cook_id, run_id)?;
-        }
-        self.continue_cook(run_id, rearm, &CookRecoveryOverrides::default())
     }
     /// Publish (or with `preflight`, validate publication of) the verified
     /// candidate of `run_id`.
@@ -1112,7 +1058,6 @@ fn recover_cook_once(
         let continuation = match &report.step {
             CookRecoveryStep::Continue => Some(false),
             CookRecoveryStep::Rearm => Some(true),
-            CookRecoveryStep::RequestReviewForm { rearm, .. } => Some(*rearm),
             _ => None,
         };
         // A recipe-only attempt has no lifecycle record to admit yet: the
@@ -1153,9 +1098,6 @@ fn recover_cook_once(
                     run_id,
                 )?;
                 performer.retry(run_id)?
-            }
-            CookRecoveryStep::RequestReviewForm { rearm, .. } => {
-                performer.request_review_form(&report.cook_id, run_id, *rearm)?
             }
             CookRecoveryStep::Reconcile => performer.reconcile(run_id)?,
             CookRecoveryStep::Adopt { candidate_ref } => performer.adopt(run_id, candidate_ref)?,
@@ -1366,7 +1308,6 @@ fn validate_step_inputs(
         CookRecoveryStep::Continue
         | CookRecoveryStep::Rearm
         | CookRecoveryStep::Regate
-        | CookRecoveryStep::RequestReviewForm { .. }
         | CookRecoveryStep::Blocked { .. }
         | CookRecoveryStep::None { .. } => {
             plan.step = selected;
@@ -1784,10 +1725,9 @@ mod tests {
     }
 
     #[test]
-    fn recovery_gate_green_candidate_without_review_form_requests_the_form_not_a_retry() {
-        // #16292: attempt 1's candidate is applied and every gate passed, but
-        // the provider never emitted a review form. Recovery asks only for the
-        // form against that candidate, never a fresh provider attempt.
+    fn recovery_publishes_gate_green_candidate_whether_or_not_its_review_form_exists() {
+        // #17671: a missing review form publishes a draft rather than running
+        // a review-only provider step; it never replays provider work.
         for status in [
             "candidate_recoverable",
             "durable_failure",
@@ -1795,41 +1735,11 @@ mod tests {
         ] {
             let decided = step(status, |inputs| {
                 inputs.verified_unpublished = true;
-                inputs.review_form_missing = true;
                 inputs.retry_admitted = true;
                 inputs.exact_checkpoint_candidate_mismatch = true;
             });
-            assert_eq!(
-                decided,
-                CookRecoveryStep::RequestReviewForm {
-                    missing: REVIEW_FORM_MISSING.to_string(),
-                    rearm: false,
-                },
-                "{status}"
-            );
-            assert_eq!(decided.action_name(), Some("request_review_form"));
-            assert_eq!(decided.missing(), Some("review_form_missing"));
+            assert_eq!(decided, CookRecoveryStep::Publish, "{status}");
         }
-        assert_eq!(
-            step("candidate_recoverable", |inputs| {
-                inputs.verified_unpublished = true;
-                inputs.review_form_missing = true;
-                inputs.continuation_rearm_required = true;
-            }),
-            CookRecoveryStep::RequestReviewForm {
-                missing: REVIEW_FORM_MISSING.to_string(),
-                rearm: true,
-            }
-        );
-        // #17693 item 2: with the form available, publication was simply never
-        // attempted, so the gate-green candidate publishes directly.
-        assert_eq!(
-            step("candidate_recoverable", |inputs| {
-                inputs.verified_unpublished = true;
-                inputs.retry_admitted = true;
-            }),
-            CookRecoveryStep::Publish
-        );
     }
 
     #[test]
