@@ -769,20 +769,16 @@ mod tests {
     fn admission_reporting_and_opt_in_drain_table() {
         for (reason, jobs, state) in [
             (None, 2, "serving"),
-            (
-                Some(DaemonStaleReasonCode::VersionMismatch),
-                2,
-                "stale_serving",
-            ),
+            (Some(DaemonStaleReasonCode::VersionMismatch), 2, "draining"),
             (
                 Some(DaemonStaleReasonCode::BuildIdentityMismatch),
                 2,
-                "stale_serving",
+                "draining",
             ),
             (
                 Some(DaemonStaleReasonCode::ExecutableReplaced),
                 2,
-                "stale_serving",
+                "draining",
             ),
             (
                 Some(DaemonStaleReasonCode::VersionMismatch),
@@ -795,16 +791,13 @@ mod tests {
             assert_eq!(admission["state"], state);
             assert_eq!(admission["active_jobs"], jobs);
             assert_eq!(admission["daemon_version"], "0.326.1");
-            if state == "stale_serving" {
+            if state == "draining" {
                 assert!(!report.admits_work());
                 assert_eq!(admission["waiting_for"], "daemon_replacement");
                 assert!(matches!(
                     plan_recovery(&report).lifecycle,
-                    Plan::Wait { .. }
+                    Plan::Draining { .. }
                 ));
-                let drain = plan_recovery_with_drain(&report, true);
-                assert_eq!(drain.steps[0].code, DRAIN_THEN_REPLACE);
-                assert!(drain.executable);
             }
         }
     }
@@ -834,13 +827,7 @@ mod tests {
         assert_eq!(plan.steps[0].code, DAEMON_DIAGNOSE);
         assert!(!plan.executable);
         assert!(plan.required_confirmations.is_empty());
-        assert!(matches!(
-            plan.lifecycle,
-            Plan::Wait {
-                cause: WaitCause::BusyStaleDaemon,
-                ..
-            }
-        ));
+        assert!(matches!(plan.lifecycle, Plan::Draining { .. }));
     }
 
     /// Replacement may proceed without any attestation when every active job

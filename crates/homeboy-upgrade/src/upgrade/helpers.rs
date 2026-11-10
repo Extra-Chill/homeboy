@@ -2063,14 +2063,24 @@ fn converge_resident_daemon_after_controller_reconciliation(
         && daemon_identity != Some(installed_identity)
         && status.freshness.active_jobs > 0
     {
+        let lease_id = status.freshness.lease_id.as_deref().ok_or_else(|| {
+            upgrade_daemon_start_required("the stale daemon has no exact lease identity to drain")
+        })?;
+        homeboy_core::daemon::drain_then_replace(lease_id)?;
+        let protected_job_ids = status
+            .active_job_recovery_evidence
+            .iter()
+            .filter(|job| job.disposition.blocks_daemon_replacement())
+            .map(|job| job.job_id.to_string())
+            .collect::<Vec<_>>();
         return Ok(Some(DaemonPendingRestart {
-            reason: status
-                .replacement_blocked_reason
-                .clone()
-                .unwrap_or_else(|| "protected jobs hold the resident daemon".to_string()),
+            reason: format!(
+                "daemon draining for replacement; protected jobs: {}",
+                protected_job_ids.join(", ")
+            ),
             recovery_command: homeboy_core::daemon::recovery_actions::ensure_running()
                 .render_command(),
-            protected_job_count: Some(status.freshness.active_jobs),
+            protected_job_count: Some(protected_job_ids.len()),
         }));
     }
     match promoted_daemon_start(

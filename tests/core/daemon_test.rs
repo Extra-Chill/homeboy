@@ -1632,7 +1632,7 @@ fn daemon_status_live_but_stale_daemon_reports_liveness_true_and_freshness_false
         Some("1 active durable job(s) are protected from implicit replacement")
     );
     assert!(
-        status.summary.contains("stale_serving: daemon v"),
+        status.summary.contains("daemon draining:"),
         "{}",
         status.summary
     );

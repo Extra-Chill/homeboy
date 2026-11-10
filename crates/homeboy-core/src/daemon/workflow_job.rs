@@ -459,9 +459,20 @@ fn run_instance(
         if state.status.is_terminal() {
             return finish(request, &state, job_id, store);
         }
+        // Leave the checkpoint and child ledger untouched for driver recovery.
+        // Protected children finish independently; advancing here would keep a
+        // continuous workflow's old daemon alive indefinitely after an upgrade.
+        if super::intake_draining() {
+            job.yield_for_recovery(to_value(&state)?)?;
+            return Ok(Value::Null);
+        }
         super::workflow_notify::awaiting_approvals(request, &state);
         let now_ms = now_ms();
         for event in observe(request, &state, job_id, store) {
+            if super::intake_draining() {
+                job.yield_for_recovery(to_value(&state)?)?;
+                return Ok(Value::Null);
+            }
             let (next, commands) = advance(&request.definition, &state, &event, now_ms);
             if next == state && commands.is_empty() {
                 continue;
@@ -479,6 +490,10 @@ fn run_instance(
             if state.status.is_terminal() {
                 break;
             }
+        }
+        if super::intake_draining() {
+            job.yield_for_recovery(to_value(&state)?)?;
+            return Ok(Value::Null);
         }
         // A commit that lands before a crash leaves its step jobs queued;
         // start any awaited job that is not yet running.
