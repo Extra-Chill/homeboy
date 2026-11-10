@@ -1038,11 +1038,67 @@ fn a_cook_step_that_exits_without_recording_its_run_fails() {
     );
     assert_eq!(
         cook_step_outcome(
-            Some(WorkflowRunOutcome::Settled("succeeded".to_string())),
+            Some(WorkflowRunOutcome::Settled {
+                outcome: "succeeded".to_string(),
+                reason: None,
+            }),
             FinishedStatus::Succeeded
         ),
         Some(Some("succeeded".to_string()))
     );
+}
+
+/// #17758: a failed cook foreach item reports its Cook's terminal reason and
+/// the Cook id it launched, not the exit JSON of the process that waited on it.
+#[test]
+fn a_failed_cook_item_error_carries_the_cooks_terminal_reason() {
+    with_isolated_home(|home| {
+        let store = JobStore::open_without_reconciliation(
+            home.path().join(crate::paths::OBSERVATION_DB_FILENAME),
+        )
+        .unwrap()
+        .with_daemon_lease("workflow-cook-reason-test".to_string());
+        let request = request(
+            json!({
+                "schema": "homeboy/workflow/v1",
+                "id": "cook-reason",
+                "steps": [
+                    {"id": "prepare", "exec": sh(
+                        "printf '{\"children\":[{\"n\":1}]}' > \"$HOMEBOY_STEP_OUTPUT\"")},
+                    {"id": "cook", "needs": ["prepare"],
+                     "foreach": "{{steps.prepare.output/children}}",
+                     "cook": {"prompt": "fix {{item.n}}"}}
+                ]
+            }),
+            home.path(),
+        );
+        let instance = request.instance.clone();
+        let prefix = instance.clone();
+        register_workflow_run_outcome_resolver(Arc::new(move |cook_id: &str| {
+            if cook_id.starts_with(&prefix) {
+                WorkflowRunOutcome::Settled {
+                    outcome: "failed".to_string(),
+                    reason: Some("gate `cargo-test` failed".to_string()),
+                }
+            } else {
+                WorkflowRunOutcome::Unknown
+            }
+        }));
+        let job_id = admit(&store, &request);
+        crate::daemon::start_controller_job(job_id, &store).unwrap();
+        assert_eq!(wait_terminal(&store, job_id, 30).status, JobStatus::Failed);
+
+        let status = workflow_status(&store, &instance).unwrap();
+        let item = &status["steps"]["cook"]["items"][0];
+        let cook_id = format!("{instance}-cook-i1-n0-a1");
+        assert_eq!(item["run_id"], cook_id.as_str(), "{status}");
+        assert_eq!(item["outcome"], "failed", "{status}");
+        assert_eq!(
+            item["error"],
+            format!("Cook `{cook_id}` ended `failed`: gate `cargo-test` failed"),
+            "{status}"
+        );
+    });
 }
 
 /// A self-admitting chain: the `again` step runs `workflow run <same

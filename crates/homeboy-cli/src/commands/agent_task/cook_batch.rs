@@ -487,8 +487,18 @@ fn git(path: &Path, args: &[&str]) -> Result<String> {
 }
 
 /// Whether an `agent-task status`/`diagnose` id names a workflow instance.
+/// A workflow cook item's run id (`wf-…-cook-i1-n3-a1`) is the Cook id it
+/// launched: once that Cook has a durable run record it reads as the Cook,
+/// whether or not the workflow instance is still live (#17758).
 pub(super) fn is_workflow_instance(id: &str) -> bool {
-    id.starts_with("wf-")
+    id.starts_with("wf-") && !names_durable_cook(id)
+}
+
+fn names_durable_cook(id: &str) -> bool {
+    use homeboy::agents::agent_task_lifecycle;
+    agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
+        .and_then(|store| agent_task_lifecycle::run_record_exists_resolved_in_store(&store, id))
+        .unwrap_or(false)
 }
 
 /// `agent-task status|diagnose <wf-id>`: read the instance from the daemon

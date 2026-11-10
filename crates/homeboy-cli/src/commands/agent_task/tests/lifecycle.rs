@@ -186,6 +186,47 @@ fn diagnose_projects_causal_pre_execution_provider_evidence() {
     });
 }
 
+/// #17758: a finished workflow's cook item run id is the Cook id it launched,
+/// so it diagnoses that Cook from its durable record instead of asking the
+/// daemon for a workflow instance of that name.
+#[test]
+fn diagnose_reads_a_finished_workflow_cook_item_as_its_cook() {
+    with_temp_home(|| {
+        let run_id = "wf-import-findings-loop-264a174f0248-cook-i1-n3-a1";
+        agent_task_lifecycle::submit_plan(&test_plan(), Some(run_id)).expect("submit plan");
+        agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
+            record.metadata["cook_id"] = json!(run_id);
+            record.metadata["pre_execution_failure"] = json!({
+                "phase": "worktree_provider_lookup",
+                "error_code": "validation.invalid_argument",
+                "message": "worktree provider `fixture` ensure command failed with exit code 1",
+                "details": {
+                    "worktree_provider_operation": "ensure",
+                    "command_evidence": {
+                        "command": "fixture-provider ensure fixture@task",
+                        "exit_code": 1,
+                        "stderr": "Error: Primary checkout does not exist.",
+                    },
+                },
+            });
+        })
+        .expect("record Cook failure");
+
+        let (diagnosis, exit_code) = diagnose(DiagnoseArgs {
+            run_id: run_id.to_string(),
+            full: false,
+        })
+        .expect("diagnose the cook item's Cook");
+
+        assert_eq!(exit_code, 0);
+        assert_ne!(
+            diagnosis["schema"],
+            super::super::cook_batch::COOK_BATCH_STATUS_SCHEMA
+        );
+        assert_eq!(diagnosis["root_cause"]["source"], "pre_execution_failure");
+    });
+}
+
 #[test]
 fn cancelled_lab_json_failure_is_compactly_visible_in_status_and_diagnose() {
     with_temp_home(|| {
