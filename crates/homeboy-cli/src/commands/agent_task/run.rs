@@ -11775,6 +11775,60 @@ pub(super) fn retry_with(args: RetryArgs, _executor: SharedAgentTaskExecutor) ->
     ))
 }
 
+/// `recover`'s retry step: reserve the successor and return once it is
+/// admitted, without waiting for the new run to finish (#17768). While
+/// admission itself waits, progress goes to stderr so stdout stays JSON.
+pub(super) fn admit_retry_for_recovery(run_id: &str) -> CmdResult<Value> {
+    if let Some(error) = explicit_local_retry_admission_refusal(
+        homeboy::core::parsed_command_preflight::captured_result().as_ref(),
+    ) {
+        return Err(error);
+    }
+    eprintln!("[recover] admitting retry of {run_id}...");
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+    let started = std::time::Instant::now();
+    let reserved = std::thread::scope(|scope| {
+        scope.spawn(move || {
+            while let Err(std::sync::mpsc::RecvTimeoutError::Timeout) =
+                done_rx.recv_timeout(std::time::Duration::from_secs(10))
+            {
+                eprintln!(
+                    "[recover] still waiting for retry admission of {run_id} ({}s)",
+                    started.elapsed().as_secs()
+                );
+            }
+        });
+        let reserved = reserve_retry_through_action(
+            run_id,
+            None,
+            false,
+            &Default::default(),
+            None,
+            uuid::Uuid::new_v4().to_string(),
+        );
+        let _ = done_tx.send(());
+        reserved
+    });
+    let (_, retry) = reserved?;
+    Ok((admitted_retry_report(&retry.record), 0))
+}
+
+fn admitted_retry_report(record: &agent_task_lifecycle::AgentTaskRunRecord) -> Value {
+    let run_id = &record.run_id;
+    let state = serde_json::to_value(record.state())
+        .ok()
+        .and_then(|state| state.as_str().map(str::to_string))
+        .unwrap_or_else(|| format!("{:?}", record.state()));
+    eprintln!("[recover] retry admitted: {run_id} ({state})");
+    serde_json::json!({
+        "run_id": run_id,
+        "state": state,
+        "admitted": true,
+        "status_command": format!("homeboy agent-task status {run_id}"),
+        "diagnose_command": format!("homeboy agent-task diagnose {run_id}"),
+    })
+}
+
 fn explicit_local_retry_admission_refusal(
     preflight: Option<&homeboy::core::parsed_command_preflight::ParsedCommandPreflightResult>,
 ) -> Option<Error> {
