@@ -765,22 +765,28 @@ pub(super) fn prepare_attempt_workspace_in_root(
         .and_then(|tail| tail.split(['/', '?', '#']).next())
         .filter(|number| !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()))
     {
-        git_output(
-            &root,
-            &[
-                "fetch",
-                "--no-tags",
-                "origin",
-                &format!("refs/pull/{number}/head"),
-            ],
-        )?;
-        let remote = git_output(&root, &["rev-parse", "FETCH_HEAD^{commit}"])?;
+        let pr_ref = format!("refs/pull/{number}/head");
+        let fetched = git_output(&root, &["fetch", "--no-tags", "origin", &pr_ref])
+            .and_then(|_| git_output(&root, &["rev-parse", "FETCH_HEAD^{commit}"]));
         let local = git_output(&root, &["rev-parse", "HEAD"])?;
-        request.metadata["cook_pr_head_resolution"] = serde_json::json!({
-            "source": "fetched_remote_pr_head", "remote_head": remote,
-            "local_head": local, "local_head_ignored": local != remote,
-        });
-        Some(remote)
+        match fetched {
+            Ok(remote) => {
+                request.metadata["cook_pr_head_resolution"] = serde_json::json!({
+                    "source": "fetched_remote_pr_head", "remote_head": remote,
+                    "local_head": local, "local_head_ignored": local != remote,
+                });
+                Some(remote)
+            }
+            // A fork-first checkout's origin may not carry the PR ref: keep the
+            // resolved base and record why the remote head was not used.
+            Err(error) => {
+                request.metadata["cook_pr_head_resolution"] = serde_json::json!({
+                    "source": "local_base", "local_head": local,
+                    "fetch_error": format!("{error:?}"),
+                });
+                None
+            }
+        }
     } else {
         None
     };
