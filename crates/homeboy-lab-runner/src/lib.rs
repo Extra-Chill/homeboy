@@ -2341,6 +2341,7 @@ mod tests {
             skewed_runner_status(homeboy_product_identity::product_version().to_string());
         status.daemon_freshness.as_mut().unwrap().runtime_paths =
             Some(homeboy_core::daemon::DaemonRuntimeSnapshot {
+                pressure_thresholds: Default::default(),
                 pressure: Some(homeboy_core::runner_pressure::RunnerPressure {
                     cpu: Some(10_900),
                     load_fallback: true,
