@@ -1383,24 +1383,8 @@ pub(super) struct DaemonOwnerLock {
 pub struct DaemonRuntimeSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pressure: Option<crate::runner_pressure::RunnerPressure>,
-    /// Active admission limits in whole percent, alongside the hundredths sample.
-    #[serde(default)]
-    pub pressure_thresholds: crate::runner_pressure::PressureThresholds,
     pub loaded_at: String,
     pub paths: Vec<DaemonRuntimePathSnapshot>,
-}
-
-impl DaemonRuntimeSnapshot {
-    /// Keep the displayed limits and admission verdict on the same policy.
-    pub fn apply_pressure_thresholds(
-        &mut self,
-        thresholds: crate::runner_pressure::PressureThresholds,
-    ) {
-        if let Some(pressure) = self.pressure.as_mut() {
-            pressure.apply_thresholds(&thresholds);
-        }
-        self.pressure_thresholds = thresholds;
-    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -2360,6 +2344,9 @@ fn spawn_orchestration_reconciler(
 /// Each periodic pass owns a small run ledger, rather than appending forever
 /// to the daemon lifetime run. Existing run retention owns their cleanup.
 fn observed_daemon_pass(name: &str, body: impl FnOnce() -> Result<()>) {
+    if !maintenance_allowed() {
+        return;
+    }
     let Ok(store) = crate::observation::ObservationStore::open_initialized() else {
         let _ = body();
         return;
@@ -2407,7 +2394,7 @@ fn orchestration_tick_loop(
         // Observation runs (`runs` table) are reconciled here — one rule,
         // one cadence — not as a side effect of reads. HTTP GETs on runs
         // only read; stale-running settlement belongs to this pass.
-        isolated_tick(|| {
+        maintenance_tick(|| {
             let Ok(store) = crate::observation::ObservationStore::open_initialized() else {
                 return;
             };
@@ -2487,10 +2474,12 @@ fn spawn_local_child_reservation_reconciler(
     shutdown: mpsc::Receiver<()>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || loop {
-        let _ = job_store.reconcile_expired_local_child_reservations();
-        let _ = job_store.reconcile_expired_admissions();
-        reconcile_pending_workspace_owner_releases();
-        reconcile_terminal_workspace_owner_leases(&job_store);
+        maintenance_tick(|| {
+            let _ = job_store.reconcile_expired_local_child_reservations();
+            let _ = job_store.reconcile_expired_admissions();
+            reconcile_pending_workspace_owner_releases();
+            reconcile_terminal_workspace_owner_leases(&job_store);
+        });
         if shutdown.recv_timeout(std::time::Duration::from_secs(
             LOCAL_CHILD_RESERVATION_RECONCILE_INTERVAL_SECS,
         )) != Err(mpsc::RecvTimeoutError::Timeout)
@@ -2515,6 +2504,37 @@ fn spawn_completion_notifier(shutdown: mpsc::Receiver<()>) -> std::thread::JoinH
     std::thread::spawn(move || {
         completion_notify_loop(std::time::Duration::from_secs(interval), shutdown)
     })
+}
+
+/// A draining or replaced process must not mutate shared maintenance state.
+/// Check at each pass, rather than just when the worker starts: an installer
+/// can replace the executable while the worker sleeps between ticks.
+fn maintenance_allowed() -> bool {
+    !intake_draining()
+}
+
+#[cfg(test)]
+#[test]
+fn draining_daemon_runs_no_maintenance_pass() {
+    crate::test_support::with_isolated_home(|_| {
+        let state = write_state("127.0.0.1:31001".parse().unwrap(), None).unwrap();
+        let calls = std::cell::Cell::new(0);
+        maintenance_tick(|| calls.set(calls.get() + 1));
+        assert_eq!(calls.get(), 1);
+        drain_then_replace(&state.lease_id).unwrap();
+        maintenance_tick(|| calls.set(calls.get() + 1));
+        observed_daemon_pass("must_not_run", || {
+            calls.set(calls.get() + 1);
+            Ok(())
+        });
+        assert_eq!(calls.get(), 1);
+    });
+}
+
+fn maintenance_tick(body: impl FnOnce()) {
+    if maintenance_allowed() {
+        isolated_tick(body);
+    }
 }
 
 /// Run one tick body with every failure contained, including a panic.
@@ -2829,8 +2849,10 @@ where
             artifact: None,
         };
     }
-    if let Err(error) = job_store.reconcile_expired_local_child_reservations() {
-        return error_response(500, error);
+    if maintenance_allowed() {
+        if let Err(error) = job_store.reconcile_expired_local_child_reservations() {
+            return error_response(500, error);
+        }
     }
     match (method, path.split('?').next().unwrap_or(path)) {
         ("GET", homeboy_runner_contract::RUNNER_API_DESCRIBE_PATH) => match describe_runner(job_store) {
@@ -8234,7 +8256,6 @@ fn capture_daemon_runtime_snapshot() -> DaemonRuntimeSnapshot {
 
     DaemonRuntimeSnapshot {
         pressure: None,
-        pressure_thresholds: Default::default(),
         loaded_at: chrono::Utc::now().to_rfc3339(),
         paths,
     }

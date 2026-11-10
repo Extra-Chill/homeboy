@@ -886,7 +886,6 @@ fn fake_daemon_state(daemon: super::DaemonStartResult) -> DaemonState {
         },
         runtime_paths: DaemonRuntimeSnapshot {
             pressure: None,
-            pressure_thresholds: Default::default(),
             loaded_at: "2026-01-01T00:00:00Z".to_string(),
             paths: Vec::new(),
         },

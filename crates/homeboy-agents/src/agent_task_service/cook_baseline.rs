@@ -617,25 +617,12 @@ pub(crate) fn with_detached_base_checkout<T>(
             Some("canonicalize Cook gate workspace".to_string()),
         )
     })?;
-    // A gate baseline is a full checkout plus hydrated dependencies. It
-    // belongs on the artifact volume beside the candidate baseline, not in the
-    // process temp dir, which is often a small tmpfs (#11128, #17737).
-    let baseline_parent = homeboy_core::artifacts::root()?.join("cook-baseline");
-    std::fs::create_dir_all(&baseline_parent).map_err(|error| {
+    let baseline_root = tempfile::tempdir().map_err(|error| {
         Error::internal_io(
             error.to_string(),
-            Some("create Cook gate baseline directory".to_string()),
+            Some("create Cook gate baseline".to_string()),
         )
     })?;
-    let baseline_root = tempfile::Builder::new()
-        .prefix("gate-baseline-")
-        .tempdir_in(&baseline_parent)
-        .map_err(|error| {
-            Error::internal_io(
-                error.to_string(),
-                Some("create Cook gate baseline".to_string()),
-            )
-        })?;
     let baseline_path = baseline_root.path().join("base");
     let gate_workspace_relative = gate_workspace.strip_prefix(&repository_root).map_err(|_| {
         Error::validation_invalid_argument(
