@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.458.12] - 2026-11-10
+
+### Changed
+- Resolve registry-only components inside an isolated gate HOME
+- Publish a green Cook candidate on its gated base (#17675 S4)
+
 ## [0.458.11] - 2026-11-10
 
 ### Changed
