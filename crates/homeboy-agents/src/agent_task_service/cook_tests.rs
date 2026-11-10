@@ -4477,9 +4477,13 @@ fn moved_base_catch_up_preserves_history_below_the_verified_pr_head() {
             &applied,
         )
         .unwrap();
+        // An existing PR's head shares history with the moved base without
+        // being on it: the branch is published as it stands, and the forge
+        // decides mergeability (#17784). Only a base with no common history
+        // was rewritten and stops publication.
         assert!(
-            matches!(&catch_up, BaseCatchUp::Conflict { .. }),
-            "non-ancestor base must stop publication: {catch_up:?}"
+            matches!(&catch_up, BaseCatchUp::NotOwned(_)),
+            "a verified PR head is published on its branch: {catch_up:?}"
         );
         assert_eq!(git(&["rev-parse", "HEAD"]), prior_base);
         assert_eq!(

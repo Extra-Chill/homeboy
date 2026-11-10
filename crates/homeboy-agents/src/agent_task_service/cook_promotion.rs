@@ -2270,6 +2270,16 @@ pub(crate) fn catch_up_cook_candidate_to_base_in_store(
         path,
         &["merge-base", "--is-ancestor", &prior_base, &fresh_base],
     )? {
+        // A prior base that shares history with the base but is not on it is a
+        // branch built on the base, such as an existing PR's head. Like any
+        // branch with commits Cook did not create (#16244), it is published as
+        // it stands and the forge decides mergeability. Only a base with no
+        // common history was rewritten.
+        if git_status(path, &["merge-base", &prior_base, &fresh_base])? {
+            return not_owned(
+                "the recorded base is a branch off the base, not on it; the candidate is published on its branch as it stands",
+            );
+        }
         return Ok(BaseCatchUp::Conflict {
             base: fresh_base,
             paths: Vec::new(),
