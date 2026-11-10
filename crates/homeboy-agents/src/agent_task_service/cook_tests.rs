@@ -5068,6 +5068,44 @@ impl AgentTaskCookAttemptDispatcher for BaselineCapturingDetachedDispatcher {
     }
 }
 
+/// Fails dispatch with each queued error in turn, then accepts the attempt.
+#[derive(Debug)]
+struct TransientThenAcceptedDispatcher {
+    failures: Mutex<Vec<Error>>,
+    dispatched_run_ids: Mutex<Vec<String>>,
+}
+
+impl AgentTaskCookAttemptDispatcher for TransientThenAcceptedDispatcher {
+    fn durable_recipe(&self) -> Result<Value> {
+        Ok(serde_json::json!({ "kind": "test-transient-then-accepted" }))
+    }
+
+    fn dispatch_attempt(
+        &self,
+        plan: AgentTaskPlan,
+        run_id: &str,
+        _derived_cook_baseline: Option<&DerivedCookBaselineCapability>,
+    ) -> Result<()> {
+        self.dispatched_run_ids
+            .lock()
+            .expect("run ids")
+            .push(run_id.to_string());
+        let mut failures = self.failures.lock().expect("failures");
+        if !failures.is_empty() {
+            return Err(failures.remove(0));
+        }
+        agent_task_lifecycle::submit_plan(&plan, Some(run_id))?;
+        agent_task_lifecycle::record_detached_lab_run(agent_task_lifecycle::DetachedLabRunRecord {
+            run_id,
+            runner_id: "fixture-lab",
+            runner_job_id: "accepted-daemon-job",
+            remote_workspace: "/runner/workspace",
+            remote_command: &["homeboy".to_string(), "agent-task".to_string()],
+        })
+        .map(|_| ())
+    }
+}
+
 #[derive(Debug)]
 struct FlakyPreparationDispatcher {
     failures_remaining: AtomicUsize,
@@ -14826,6 +14864,95 @@ fn cook_ignores_untrusted_or_malformed_lab_runtime_recovery_metadata() {
                 .all(|action| action.action != "refresh_lab_runtime"));
         }
     });
+}
+
+/// #17801: store locks and transient substrate refusals before provider start
+/// wait and replace the run without consuming the transport or provider budget;
+/// a non-transient failure still gets exactly one replacement.
+#[test]
+fn transient_pre_provider_failures_do_not_consume_the_retry_budget() {
+    let busy = || {
+        Error::new(
+            homeboy_core::ErrorCode::ObservationStoreBusy,
+            "busy",
+            Value::Null,
+        )
+    };
+    let locked = || {
+        Error::internal_io(
+            "writer contention budget exhausted: database is locked",
+            None,
+        )
+    };
+    let substrate = || {
+        Error::new(
+            homeboy_core::ErrorCode::ValidationInvalidArgument,
+            "runner pressure",
+            serde_json::json!({ "readiness_reasons": ["pressure"] }),
+        )
+    };
+    let hard = || {
+        Error::validation_invalid_argument("runner", "runner rejected the job", None, None)
+            .with_retryable(true)
+    };
+    let cases: Vec<(&str, Vec<Error>, &str, usize)> = vec![
+        (
+            "cook-transient-infra",
+            vec![busy(), locked(), substrate()],
+            "in_flight",
+            4,
+        ),
+        (
+            "cook-hard-transport",
+            vec![hard(), hard()],
+            "pre_execution_failure",
+            2,
+        ),
+    ];
+    for (cook_id, failures, status, dispatches) in cases {
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let dispatcher = Arc::new(TransientThenAcceptedDispatcher {
+                failures: Mutex::new(failures),
+                dispatched_run_ids: Mutex::default(),
+            });
+            let mut options = batch_cook_options(cook_id, dispatcher.clone());
+            options.provider_transport.provider_invocation =
+                Some(homeboy_core::command_invocation::CommandInvocation {
+                    argv: vec!["fixture-provider".to_string()],
+                    ..Default::default()
+                });
+            options.identity.initial_run_id = format!("{cook_id}-attempt-1");
+            options.retry_policy.max_attempts = 1;
+
+            let report = run_cook(CookContext::new(options, Arc::new(UnusedExecutor)))
+                .expect("cook reports");
+
+            assert_eq!(
+                report.value.status, status,
+                "{cook_id}: {:#?}",
+                report.value
+            );
+            let run_ids = dispatcher
+                .dispatched_run_ids
+                .lock()
+                .expect("run ids")
+                .clone();
+            assert_eq!(run_ids.len(), dispatches, "{cook_id}: {run_ids:?}");
+            let base = format!("{cook_id}-attempt-1");
+            let expected = std::iter::once(base.clone())
+                .chain((1..dispatches).map(|n| match n {
+                    1 => format!("{base}-transport-retry"),
+                    n => format!("{base}-transport-retry-{n}"),
+                }))
+                .collect::<Vec<_>>();
+            assert_eq!(run_ids, expected);
+            assert!(report
+                .value
+                .attempts
+                .iter()
+                .all(|attempt| attempt.attempt == 1));
+        });
+    }
 }
 
 #[test]

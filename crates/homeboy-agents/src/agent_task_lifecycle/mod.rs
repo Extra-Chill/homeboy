@@ -76,7 +76,8 @@ pub(crate) use aggregate_transition::*;
 pub use cancellation::*;
 pub use control_plane_identities::{
     canonical_control_plane_identities, canonical_control_plane_identities_for_run,
-    canonical_fanout_mission, canonical_mission, CanonicalControlPlaneIdentities,
+    canonical_fanout_mission, canonical_mission, split_transport_retry_suffix,
+    CanonicalControlPlaneIdentities,
 };
 pub use durable_progress::{record_promotion_progress, record_promotion_progress_in_store};
 #[cfg(any(test, feature = "test-support"))]

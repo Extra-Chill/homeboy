@@ -271,14 +271,84 @@ const PRE_ARTIFACT_INTERRUPTION_CLAIM_LEASE: std::time::Duration =
 /// persistent infrastructure defect remains visible for repair.
 const MAX_TRANSPORT_RETRIES_PER_ATTEMPT: usize = 1;
 
-fn transport_retry_available(store: &CookRecipeStore, cook_id: &str, attempt: u32) -> Result<bool> {
+/// `exempt` replacements were spent on transient substrate contention and do
+/// not count against the transport budget (#17801).
+fn transport_retry_available(
+    store: &CookRecipeStore,
+    cook_id: &str,
+    attempt: u32,
+    exempt: usize,
+) -> Result<bool> {
     Ok(store
         .load_recipe(cook_id)?
         .attempts
         .iter()
         .filter(|recorded| recorded.attempt == attempt)
         .count()
-        <= MAX_TRANSPORT_RETRIES_PER_ATTEMPT)
+        <= MAX_TRANSPORT_RETRIES_PER_ATTEMPT + exempt)
+}
+
+/// Store locks, runner pressure, build skew and other transient substrate
+/// refusals are the shared host's state, not this Cook's: they wait instead
+/// of consuming the retry budget (#17801).
+fn transient_infrastructure_failure(error: &Error) -> bool {
+    homeboy_core::substrate_wait::is_transient_error(error) || super::is_store_contention(error)
+}
+
+/// `{base}-transport-retry`, then `{base}-transport-retry-2`, `-3`, ...: one
+/// bounded suffix however many replacements an attempt needs.
+fn next_transport_retry_run_id(run_id: &str) -> String {
+    let (base, replacements) = agent_task_lifecycle::split_transport_retry_suffix(run_id);
+    match replacements {
+        0 => format!("{base}-transport-retry"),
+        n => format!("{base}-transport-retry-{}", n + 1),
+    }
+}
+
+/// Sleep one backoff step toward a transient-failure deadline. Returns false
+/// when the deadline passed or the Cook was cancelled.
+fn wait_out_transient_failure(
+    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
+    cook_id: &str,
+    started: std::time::Instant,
+    replacements: usize,
+    error: &Error,
+) -> bool {
+    use homeboy_core::substrate_wait::SUBSTRATE_WAIT_DEADLINE;
+    let cancelled = || {
+        lifecycle_store
+            .read_cook_index(cook_id)
+            .ok()
+            .is_some_and(|index| index.cancellation_fence.is_some())
+    };
+    let unit = if cfg!(test) {
+        std::time::Duration::from_millis(5)
+    } else {
+        std::time::Duration::from_secs(2)
+    };
+    let backoff = (unit * (1u32 << replacements.min(4))).min(std::time::Duration::from_secs(30));
+    let remaining = SUBSTRATE_WAIT_DEADLINE.saturating_sub(started.elapsed());
+    if remaining.is_zero() || cancelled() {
+        return false;
+    }
+    homeboy_core::log_status!(
+        "wait",
+        "Cook {cook_id}: {} — replacing the run in {}s (waited {}s)",
+        error.message,
+        backoff.min(remaining).as_secs(),
+        started.elapsed().as_secs()
+    );
+    let wake = std::time::Instant::now() + backoff.min(remaining);
+    while std::time::Instant::now() < wake {
+        if cancelled() {
+            return false;
+        }
+        std::thread::sleep(
+            wake.saturating_duration_since(std::time::Instant::now())
+                .min(std::time::Duration::from_secs(1)),
+        );
+    }
+    true
 }
 
 /// An authorized placement transition gets one new transport admission after a
@@ -6499,6 +6569,9 @@ fn run_cook_spine(
     let mut budget_limit = None;
     let mut observed_budget_used = ExecutionBudgetUsage::default();
     let mut remediation_category_usage = ExecutionBudgetUsage::default();
+    // Transient substrate failures of the current semantic attempt: when the
+    // first was observed, and how many replacements they took (#17801).
+    let mut transient_failures: Option<(u32, std::time::Instant, usize)> = None;
 
     let first_attempt = recipe
         .attempts
@@ -7095,7 +7168,8 @@ fn run_cook_spine(
                     promotion: None,
                     feedback: None,
                 });
-                if !pre_execution_failure.retryable {
+                let transient = transient_infrastructure_failure(&error);
+                if !pre_execution_failure.retryable && !transient {
                     return Ok(pre_execution_failure_report(
                         stores,
                         cook_id,
@@ -7105,7 +7179,37 @@ fn run_cook_spine(
                         Some(&run_id),
                     ));
                 }
-                if !transport_retry_available(store, &cook_id, attempt)?
+                let (started, exempt) = match transient_failures {
+                    Some((recorded, started, exempt)) if recorded == attempt => (started, exempt),
+                    _ => (std::time::Instant::now(), 0),
+                };
+                if transient {
+                    if !wait_out_transient_failure(
+                        lifecycle_store,
+                        &cook_id,
+                        started,
+                        exempt,
+                        &error,
+                    ) {
+                        return Ok(pre_execution_failure_report(stores,
+                            cook_id.clone(),
+                            attempts,
+                            pre_execution_failure,
+                            Error::validation_invalid_argument(
+                                "transport_retry",
+                                format!(
+                                    "semantic Cook attempt {attempt} waited {}s through transient infrastructure failures before provider start ({}); run `homeboy agent-task recover {cook_id}` once the substrate recovers",
+                                    started.elapsed().as_secs(),
+                                    error.message,
+                                ),
+                                Some(run_id.clone()),
+                                None,
+                            ),
+                            Some(&run_id),
+                        ));
+                    }
+                    transient_failures = Some((attempt, started, exempt + 1));
+                } else if !transport_retry_available(store, &cook_id, attempt, exempt)?
                     && !transport_admission_reset_available(record.as_ref())
                 {
                     return Ok(pre_execution_failure_report(stores,
@@ -7123,7 +7227,7 @@ fn run_cook_spine(
                         Some(&run_id),
                     ));
                 }
-                let next_run_id = format!("{run_id}-transport-retry");
+                let next_run_id = next_transport_retry_run_id(&run_id);
                 store.record_recipe_attempt_replacement(&cook_id, &run_id, &next_run_id)?;
                 materialize_cook_attempt_with_stores(
                     store,
@@ -7412,7 +7516,14 @@ fn run_cook_spine(
                     ));
                 }
                 if replace_semantic_attempt
-                    && !transport_retry_available(store, &cook_id, attempt)?
+                    && !transport_retry_available(
+                        store,
+                        &cook_id,
+                        attempt,
+                        transient_failures
+                            .filter(|(recorded, _, _)| *recorded == attempt)
+                            .map_or(0, |(_, _, exempt)| exempt),
+                    )?
                     && !transport_admission_reset_available(Some(&record))
                 {
                     return Ok(pre_artifact_interruption_report(stores,

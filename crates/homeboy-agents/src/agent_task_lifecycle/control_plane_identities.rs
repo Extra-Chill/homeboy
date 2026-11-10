@@ -79,9 +79,7 @@ pub fn canonical_control_plane_identities_for_run(
     else {
         return Ok(None);
     };
-    let retry_qualified = run_id
-        .trim_end_matches("-transport-retry")
-        .ends_with("-retry");
+    let retry_qualified = split_transport_retry_suffix(run_id).0.ends_with("-retry");
     let cook_attempt_number = match recorded_attempt {
         Some(recorded) if recorded > cook_attempt_number && retry_qualified => recorded,
         Some(recorded) if recorded != cook_attempt_number => {
@@ -206,5 +204,29 @@ mod tests {
             canonical_control_plane_identities_for_run(AGENT_TASK_COOK, None).expect("omit"),
             None
         );
+    }
+}
+
+/// Split `{base}-transport-retry` (one replacement) or
+/// `{base}-transport-retry-{n}` (n replacements) into the base run id and the
+/// replacement count. Legacy ids stacked the suffix; every copy counts.
+pub fn split_transport_retry_suffix(run_id: &str) -> (&str, usize) {
+    const SUFFIX: &str = "-transport-retry";
+    let mut base = run_id;
+    let mut count = 0;
+    loop {
+        if let Some(stripped) = base.strip_suffix(SUFFIX) {
+            base = stripped;
+            count += 1;
+            continue;
+        }
+        if let Some((stripped, n)) = base.rsplit_once(&format!("{SUFFIX}-")[..]) {
+            if let Some(n) = n.parse::<usize>().ok().filter(|n| *n >= 2) {
+                base = stripped;
+                count += n;
+                continue;
+            }
+        }
+        return (base, count);
     }
 }
