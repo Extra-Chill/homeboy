@@ -753,6 +753,7 @@ impl From<VerifyGateArgs> for VerifyGateOptions {
                     .or_else(|| args.no_gate_shared_cargo_target.then_some(false)),
                 admitted_component_id: None,
                 extension_inputs: args.gate_extension_inputs,
+                extension_sources: Vec::new(),
                 data_inputs: args.gate_inputs,
             },
             gate_toolchains: args

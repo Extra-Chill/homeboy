@@ -906,7 +906,7 @@ pub(super) fn preflight(
         label: String::new(),
         visibility: AgentTaskGateVisibility::Visible,
         reveal_policy: AgentTaskGateRevealPolicy::FullEvidence,
-        environment: environment.clone(),
+        environment: super::with_controller_extension_sources(environment, cwd),
         package_artifacts: packages.to_vec(),
         declared_plan: None,
         timeout_seconds: timeout.as_secs().max(1),
