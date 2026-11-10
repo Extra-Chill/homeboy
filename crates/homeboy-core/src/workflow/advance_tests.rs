@@ -804,3 +804,38 @@ fn recorded_transcripts_reach_workflow_hotspots_idempotently() {
         }
     }
 }
+
+#[test]
+fn cook_flag_repeats_for_literal_and_templated_arrays() {
+    let definition = parse_definition(&json!({
+        "schema": "homeboy/workflow/v1",
+        "id": "gates",
+        "inputs": {"gates": {"required": true}},
+        "steps": [{"id": "fix", "cook": {
+            "repo": "scratch",
+            "verify": ["true"],
+            "task-url": "{{inputs.gates}}"
+        }}]
+    }));
+    let state = InstanceState::new(
+        &definition,
+        INSTANCE,
+        BTreeMap::from([("gates".to_string(), json!(["a=1", "b=2"]))]),
+    );
+    let SubmissionKind::Cook { args, .. } = compile(&definition.steps[0], &state).unwrap() else {
+        panic!("cook step compiles to a cook submission");
+    };
+    assert_eq!(
+        args,
+        [
+            "--repo",
+            "scratch",
+            "--task-url",
+            "a=1",
+            "--task-url",
+            "b=2",
+            "--verify",
+            "true"
+        ]
+    );
+}
