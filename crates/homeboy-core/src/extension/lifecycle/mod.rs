@@ -2152,6 +2152,78 @@ exec '{}' "$@"
     }
 
     #[test]
+    fn conflicting_source_cannot_clobber_shared_runtime_assets() {
+        with_isolated_home(|home| {
+            let mut remotes = Vec::new();
+            for (name, id) in [("A", "nodejs"), ("B", "cloudflare-workers")] {
+                let repo = home.path().join(name);
+                let root = repo.join("extensions");
+                fs::create_dir_all(root.join("scripts/lib")).unwrap();
+                write_extension_fixture(&root, id);
+                fs::write(
+                    root.join("homeboy-extension-root.json"),
+                    r#"{"shared_assets":["scripts/lib"]}"#,
+                )
+                .unwrap();
+                fs::write(root.join("scripts/lib/common.sh"), name).unwrap();
+                if id == "nodejs" {
+                    fs::write(
+                        root.join("scripts/lib/local-workspace-install.sh"),
+                        "install_workspace() { return 0; }\n",
+                    )
+                    .unwrap();
+                    fs::create_dir_all(root.join("nodejs/scripts/deps")).unwrap();
+                    fs::write(
+                        root.join("nodejs/scripts/deps/deps-runner.sh"),
+                        "#!/usr/bin/env bash\nset -euo pipefail\nsource \"$(dirname \"${BASH_SOURCE[0]}\")/../../../scripts/lib/local-workspace-install.sh\"\ncase \"${1:-}\" in install) install_workspace ;; *) exit 1 ;; esac\n",
+                    )
+                    .unwrap();
+                }
+                remotes.push(prepare_git_repo(&repo).expect("local git fixture"));
+            }
+            let source_a = format!(
+                "file://{}",
+                remotes[0].path().join("extension.git").display()
+            );
+            let source_b = format!(
+                "file://{}",
+                remotes[1].path().join("extension.git").display()
+            );
+            let installed = install(&source_a, Some("nodejs")).expect("install nodejs from A");
+            update("nodejs", true, None).expect("same-source refresh");
+            let shared = installed.path.parent().unwrap().join("scripts/lib");
+            let snapshot = || {
+                let mut files = fs::read_dir(&shared)
+                    .unwrap()
+                    .map(|entry| {
+                        let entry = entry.unwrap();
+                        (entry.file_name(), fs::read(entry.path()).unwrap())
+                    })
+                    .collect::<Vec<_>>();
+                files.sort();
+                files
+            };
+            let before = snapshot();
+            let error = install(&source_b, Some("cloudflare-workers")).unwrap_err();
+            let message = error.to_string();
+            for expected in ["scripts/lib", "nodejs", &source_a, &source_b] {
+                assert!(message.contains(expected), "{message}");
+            }
+            assert_eq!(
+                snapshot(),
+                before,
+                "conflict must leave shared assets untouched"
+            );
+            assert!(Command::new("bash")
+                .arg(installed.path.join("scripts/deps/deps-runner.sh"))
+                .arg("install")
+                .status()
+                .unwrap()
+                .success());
+        });
+    }
+
+    #[test]
     fn nested_root_install_and_redirected_update() {
         with_isolated_home(|home| {
             let home = home.path();

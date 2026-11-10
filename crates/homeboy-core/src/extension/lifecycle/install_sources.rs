@@ -192,7 +192,7 @@ pub(crate) fn resolve_cloned_extension(
     temp_dir: &Path,
     extension_id: &str,
     extension_dir: &Path,
-    _url: &str,
+    url: &str,
 ) -> Result<String> {
     let manifest_at_root = temp_dir.join(format!("{}.json", extension_id));
 
@@ -219,7 +219,12 @@ pub(crate) fn resolve_cloned_extension(
 
         // Cloned installs copy: the clone temp dir is discarded after install,
         // so the shared trees must be materialized as standalone copies.
-        install_shared_assets_from_root(&source_root, extension_dir, SharedAssetMode::Copy)?;
+        install_shared_assets_from_root(
+            &source_root,
+            extension_dir,
+            SharedAssetMode::Copy,
+            Some((extension_id, url)),
+        )?;
 
         // Move just the subdirectory to the final extension location.
         rename_dir(&subdir, extension_dir)?;
@@ -289,8 +294,18 @@ fn install_shared_assets_from_root(
     source_root: &Path,
     extension_dir: &Path,
     mode: SharedAssetMode,
+    owner: Option<(&str, &str)>,
 ) -> Result<()> {
     let shared_assets = shared_assets_for_root(source_root);
+    // Preflight all declarations before touching any existing shared tree.
+    if let Some((extension_id, url)) = owner {
+        for shared_dir in &shared_assets {
+            if source_root.join(shared_dir).is_dir() {
+                let target = installed_shared_asset_target(extension_dir, shared_dir)?;
+                validate_shared_asset_owner(&target, shared_dir, extension_id, url)?;
+            }
+        }
+    }
     for shared_dir in shared_assets {
         let source = source_root.join(&shared_dir);
         if !source.is_dir() {
@@ -309,12 +324,79 @@ fn install_shared_assets_from_root(
         remove_existing_target(&target, &shared_dir)?;
 
         match mode {
-            SharedAssetMode::Copy => copy_dir_recursive(&source, &target)?,
+            SharedAssetMode::Copy => {
+                copy_dir_recursive(&source, &target)?;
+                if let Some((_, url)) = owner {
+                    // Reuse generated provenance metadata, excluded from source content.
+                    std::fs::write(target.join(".source-url"), url).map_err(|error| {
+                        Error::internal_io(
+                            error.to_string(),
+                            Some("record shared asset owner".into()),
+                        )
+                    })?;
+                }
+            }
             SharedAssetMode::Symlink => symlink_shared_asset(&source, &target, &shared_dir)?,
         }
     }
 
     Ok(())
+}
+
+/// Refuse to displace a source still used by another installed consumer.
+fn validate_shared_asset_owner(
+    target: &Path,
+    shared_dir: &str,
+    extension_id: &str,
+    url: &str,
+) -> Result<()> {
+    let Ok(recorded) = std::fs::read_to_string(target.join(".source-url")) else {
+        return Ok(());
+    };
+    if recorded == url {
+        return Ok(());
+    }
+
+    let mut conflicts = Vec::new();
+    for entry in std::fs::read_dir(paths::extensions()?).map_err(|error| {
+        Error::internal_io(
+            error.to_string(),
+            Some("check shared asset consumers".into()),
+        )
+    })? {
+        let entry = entry.map_err(|error| {
+            Error::internal_io(error.to_string(), Some("read shared asset consumer".into()))
+        })?;
+        let id = entry.file_name().to_string_lossy().into_owned();
+        if id == extension_id || id.starts_with('.') {
+            continue;
+        }
+        if shared_assets_for_extension_source(&entry.path())
+            .iter()
+            .any(|(asset, _)| asset == shared_dir)
+            && super::source_metadata::resolve_source_url_read_only(&id)
+                .is_ok_and(|source| source == recorded)
+        {
+            conflicts.push(id);
+        }
+    }
+    if conflicts.is_empty() {
+        return Ok(());
+    }
+    conflicts.sort();
+    Err(Error::validation_invalid_argument(
+        "shared_assets",
+        format!(
+            "Shared asset '{shared_dir}' is owned by source '{recorded}' and still used by extension(s) {}; cannot replace it from source '{url}'",
+            conflicts.join(", ")
+        ),
+        Some(shared_dir.to_string()),
+        None,
+    )
+    .with_hint(format!(
+        "Move conflicting extensions to the same source: {}",
+        conflicts.iter().map(|id| format!("homeboy extension install {url} --id {id} --replace")).collect::<Vec<_>>().join("; ")
+    )))
 }
 
 fn persist_installed_root_manifest(source_root: &Path, extension_dir: &Path) -> Result<()> {
@@ -429,11 +511,12 @@ pub(crate) fn install_linked_shared_assets(
             source_root,
             extension_dir,
             SharedAssetMode::Symlink,
+            None,
         );
     }
 
     if let Some(parent) = source.parent() {
-        install_shared_assets_from_root(parent, extension_dir, SharedAssetMode::Symlink)?;
+        install_shared_assets_from_root(parent, extension_dir, SharedAssetMode::Symlink, None)?;
     }
     Ok(())
 }
