@@ -4,6 +4,16 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.458.1] - 2026-11-10
+
+### Changed
+- a cook key templated to an array repeats the flag
+
+### Fixed
+- create gate baseline checkouts under the artifact root
+- gate pressure admission on avg60 and expose limits
+- refuse auto placement when Lab capacity is blocked
+
 ## [0.458.0] - 2026-11-10
 
 ### Added
