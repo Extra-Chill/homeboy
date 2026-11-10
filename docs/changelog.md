@@ -4,6 +4,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.458.10] - 2026-11-10
+
+### Changed
+- refresh-homeboy reports a deferred daemon swap as queued/deferred, not succeeded
+- retry of an unmaterialized Cook's own attempt id is not refused toward itself
+- Transient infrastructure failures before provider start wait instead of consuming the Cook retry budget
+
 ## [0.458.9] - 2026-11-10
 
 ### Changed
