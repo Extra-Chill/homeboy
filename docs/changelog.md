@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.458.2] - 2026-11-10
+
+### Changed
+- publish gated candidates as drafts when the review form fails
+- a draining or replaced daemon runs no maintenance passes
+
+### Fixed
+- resolve component-scoped tag for --version on checkout-less components
+
 ## [0.458.1] - 2026-11-10
 
 ### Changed
