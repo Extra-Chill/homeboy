@@ -957,6 +957,20 @@ impl DaemonStatus {
     }
 
     fn draining(&self) -> bool {
+        if self.running
+            && !self.fresh
+            && self.freshness.active_jobs > 0
+            && matches!(
+                self.freshness.stale_reason_code,
+                Some(
+                    DaemonStaleReasonCode::VersionMismatch
+                        | DaemonStaleReasonCode::BuildIdentityMismatch
+                        | DaemonStaleReasonCode::ExecutableReplaced
+                )
+            )
+        {
+            return true;
+        }
         self.freshness.lease_id.as_deref().is_some_and(|lease| {
             drain_path()
                 .ok()
@@ -1997,7 +2011,7 @@ where
     let mut accepted = 0;
     let mut serve_result = Ok(());
     loop {
-        if daemon_draining()
+        if intake_draining()
             && daemon_freshness_report(&job_store).is_ok_and(|report| report.active_jobs == 0)
         {
             break;
@@ -2057,7 +2071,7 @@ where
 
     let replacing = intake_draining();
     drop(connection_tx);
-    let shutdown_requested = daemon_draining()
+    let shutdown_requested = replacing
         || shutdown
             .as_ref()
             .is_some_and(|flag| flag.load(Ordering::Acquire));
@@ -2155,6 +2169,10 @@ where
     let replace = replacing
         && service_manager.is_none()
         && (job_store.has_pending_admissions()
+            || job_store
+                .active_controller_jobs()
+                .iter()
+                .any(|(_, state)| state.job_type == workflow_job::WORKFLOW_JOB_TYPE)
             || crate::observation::ObservationStore::open_readonly_at(paths::observation_db()?)
                 .and_then(|store| store.has_pending_unmaterialized_cook_admission())
                 .unwrap_or(false));
@@ -5319,6 +5337,7 @@ fn dispatch_claimed_controller_job(
             let execute_driver = Arc::clone(&driver);
             let driver_job =
                 controller_job_driver::ControllerJobHandle::new(job.clone(), Arc::clone(&driver));
+            let recovery_handle = driver_job.clone();
             let execute_prepared = prepared.clone();
             let (sender, receiver) = std::sync::mpsc::sync_channel(1);
             let execute =
@@ -5362,6 +5381,11 @@ fn dispatch_claimed_controller_job(
                     return;
                 }
                 match receiver.recv_timeout(Duration::from_millis(10)) {
+                    Ok(Ok(_)) if recovery_handle.recovery_yielded() => {
+                        // The driver stopped and persisted its checkpoint. Leave
+                        // the job nonterminal for the next lease's recovery.
+                        let _ = execute.join();
+                    }
                     Ok(Ok(private)) => match driver.public_result(&private) {
                         Ok(public) => {
                             // The driver has already produced this result. Retry only

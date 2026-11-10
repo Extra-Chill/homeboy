@@ -179,6 +179,9 @@ pub fn ensure_running(addr: &str) -> Result<DaemonStartResult> {
     // read/cancel clients must still reach its per-request admission gate.
     if status.running && status.reachable && status.draining() {
         if let Some(state) = status.state {
+            if !status.fresh {
+                super::drain_then_replace(&state.lease_id)?;
+            }
             return Ok(DaemonStartResult {
                 pid: state.pid,
                 address: state.address,

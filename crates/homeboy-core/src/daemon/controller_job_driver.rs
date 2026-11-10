@@ -173,11 +173,30 @@ pub trait ControllerJobDriver: Send + Sync {
 pub struct ControllerJobHandle {
     job: JobHandle,
     driver: Arc<dyn ControllerJobDriver>,
+    recovery_yielded: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl ControllerJobHandle {
     pub(crate) fn new(job: JobHandle, driver: Arc<dyn ControllerJobDriver>) -> Self {
-        Self { job, driver }
+        Self {
+            job,
+            driver,
+            recovery_yielded: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
+    }
+
+    /// Persist a step-boundary checkpoint and release this executor without
+    /// terminalizing the durable job. Startup driver recovery resumes it.
+    pub(crate) fn yield_for_recovery(&self, checkpoint: Value) -> Result<()> {
+        self.checkpoint(checkpoint)?;
+        self.recovery_yielded
+            .store(true, std::sync::atomic::Ordering::Release);
+        Ok(())
+    }
+
+    pub(crate) fn recovery_yielded(&self) -> bool {
+        self.recovery_yielded
+            .load(std::sync::atomic::Ordering::Acquire)
     }
 
     pub fn is_cancelled(&self) -> bool {

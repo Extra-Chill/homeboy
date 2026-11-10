@@ -493,6 +493,153 @@ fn when_gates_launch_the_next_step_and_skip_the_rest() {
     });
 }
 
+/// Exercise the serving loop, live step supervision, and startup recovery
+/// together. The service-manager fixture owns replacement, just as systemd
+/// does in production; no alternate workflow adoption path is involved.
+#[test]
+fn stale_daemon_hands_live_workflow_to_replacement_at_step_boundary() {
+    use crate::daemon::*;
+    use crate::paths;
+    use std::net::TcpListener;
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+    with_isolated_home(|home| {
+        let wait = |condition: &dyn Fn() -> bool| {
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while !condition() {
+                assert!(Instant::now() < deadline, "handoff timed out");
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        };
+        let store = JobStore::open_without_reconciliation(paths::observation_db().unwrap())
+            .unwrap()
+            .with_daemon_scope(daemon_scope_for_state_path(&state_path().unwrap()));
+        let started = home.path().join("started");
+        let release = home.path().join("release");
+        let next = home.path().join("next");
+        let request = request(
+            json!({
+                "schema": "homeboy/workflow/v1", "id": "stale-handoff",
+                "steps": [
+                    {"id": "a", "exec": sh(&format!(
+                        "touch {}; while [ ! -f {} ]; do sleep 0.05; done",
+                        started.display(), release.display()))},
+                    {"id": "b", "needs": ["a"], "exec": sh(&format!("touch {}", next.display()))}
+                ]
+            }),
+            home.path(),
+        );
+        let job_id = admit(&store, &request);
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let owner = acquire_daemon_owner_lock().unwrap();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let flag = shutdown.clone();
+        let server = std::thread::spawn(move || {
+            serve_listener_with_analysis_runner_locked(
+                listener,
+                UnsupportedAnalysisJobRunner,
+                owner,
+                None,
+                Some(flag),
+                Some(DaemonServiceManager::Systemd),
+            )
+        });
+        wait(&|| started.exists());
+        let lease: DaemonState =
+            serde_json::from_slice(&std::fs::read(state_path().unwrap()).unwrap()).unwrap();
+        let snapshot = || {
+            JobStore::open_without_reconciliation(paths::observation_db().unwrap())
+                .unwrap()
+                .with_daemon_scope(daemon_scope_for_state_path(&state_path().unwrap()))
+                .with_daemon_lease(lease.lease_id.clone())
+        };
+        let store = snapshot();
+        // Installation made the serving lease stale. Upgrade schedules its
+        // existing exact-lease drain rather than killing the protected child.
+        let mut stale = lease.clone();
+        stale.build_identity.version = "0.0.0".to_string();
+        std::fs::write(state_path().unwrap(), serde_json::to_vec(&stale).unwrap()).unwrap();
+        drain_then_replace(&lease.lease_id).unwrap();
+        let runtime = controller_job_runtime_key(&store, job_id);
+        wait(&|| {
+            !controller_job_runtimes()
+                .lock()
+                .unwrap()
+                .contains_key(&runtime)
+        });
+        let store = snapshot();
+        let child = store
+            .controller_job_for_key(&format!("{}/a/1/1", request.instance))
+            .unwrap();
+        let evidence =
+            store.active_daemon_job_recovery_evidence(Some(&lease.lease_id), pid_is_running);
+        assert_eq!(
+            evidence
+                .iter()
+                .find(|e| e.job_id == job_id)
+                .unwrap()
+                .disposition,
+            crate::api_jobs::DaemonActiveJobRecoveryDisposition::DriverRecovery
+        );
+        assert!(evidence
+            .iter()
+            .find(|e| e.job_id == child.id)
+            .unwrap()
+            .disposition
+            .blocks_daemon_replacement());
+        assert!(
+            !server.is_finished(),
+            "protected step still holds the old daemon"
+        );
+        assert!(!maintenance_allowed());
+        assert!(!next.exists());
+        assert!(store
+            .controller_job_for_key(&format!("{}/b/1/1", request.instance))
+            .is_none());
+        std::fs::write(&release, "go").unwrap();
+        wait(&|| server.is_finished());
+        server.join().unwrap().unwrap();
+        let store = snapshot();
+        assert_eq!(store.get(child.id).unwrap().status, JobStatus::Succeeded);
+        assert!(!next.exists(), "old daemon must not schedule the next step");
+        assert!(!store.get(job_id).unwrap().status.is_terminal());
+        assert!(store
+            .controller_job_state(job_id)
+            .unwrap()
+            .checkpoint
+            .is_some());
+
+        // A service manager starts the replacement. Its normal startup calls
+        // recover_controller_jobs and adopts the checkpoint under its new lease.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let owner = acquire_daemon_owner_lock().unwrap();
+        let flag = shutdown.clone();
+        let replacement = std::thread::spawn(move || {
+            serve_listener_with_analysis_runner_locked(
+                listener,
+                UnsupportedAnalysisJobRunner,
+                owner,
+                None,
+                Some(flag),
+                Some(DaemonServiceManager::Systemd),
+            )
+        });
+        wait(&|| next.exists());
+        wait(&|| snapshot().get(job_id).unwrap().status.is_terminal());
+        let adopted = snapshot().get(job_id).unwrap();
+        assert_eq!(adopted.status, JobStatus::Succeeded);
+        assert_ne!(
+            adopted.daemon_lease_id.as_deref(),
+            Some(lease.lease_id.as_str())
+        );
+        shutdown.store(true, Ordering::Release);
+        wait(&|| replacement.is_finished());
+        replacement.join().unwrap().unwrap();
+    });
+}
+
 /// The daemon committed a decision (checkpoint + queued step job) and died
 /// before starting the step. Recovery resumes the instance from its
 /// checkpoint, starts the admitted step once, and finishes.
