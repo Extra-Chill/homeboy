@@ -368,6 +368,7 @@ fn resume_promoted_patch_internal<'a>(
             "candidate_checkout": gates.candidate_checkout,
             "candidate": candidate,
             "resumed_post_apply_promotion": true,
+            "destination_head_alignment": previous.pointer("/provenance/destination_head_alignment"),
             "resume_contract": previous.pointer("/provenance/resume_contract"),
         }),
         operator_notification,
@@ -868,7 +869,10 @@ fn promote_candidate(
     })?;
     super::destination::check_run(&path, options.source_run_id.as_deref())?;
     let feedback = outcome.metadata.get("gate_feedback_baseline");
-    super::candidate_bundle::validate_destination(&path, commit, feedback)?;
+    let destination_head_alignment = align_ignored_pr_head(&path, options, outcome, commit)?;
+    if !options.dry_run || destination_head_alignment.is_none() {
+        super::candidate_bundle::validate_destination(&path, commit, feedback)?;
+    }
     let base_tree = git_output(
         &path,
         &["rev-parse", &format!("{}^{{tree}}", commit.base_sha)],
@@ -913,7 +917,7 @@ fn promote_candidate(
             target.clone(),
             worktree_path,
             &outcome.schema,
-            json!({"candidate_commit": commit, "safety_baseline": {"head": commit.base_sha, "tree": base_tree}}),
+            json!({"candidate_commit": commit, "safety_baseline": {"head": commit.base_sha, "tree": base_tree}, "destination_head_alignment": destination_head_alignment}),
             pre_apply_verified_base.clone(),
         )?;
         checkpoint(&report)?;
@@ -987,6 +991,7 @@ fn promote_candidate(
             "source_schema": outcome.schema,
             "candidate_commit": commit,
             "safety_baseline": {"head": commit.base_sha, "tree": base_tree},
+            "destination_head_alignment": destination_head_alignment,
             "worktree_path": applied_worktree_path,
             "dependencies_materialized": gates.dependencies_materialized,
             "candidate_checkout_setup": gates.candidate_setup,
@@ -998,6 +1003,50 @@ fn promote_candidate(
         }),
         operator_notification,
     })
+}
+
+/// Supersede only the exact local head explicitly ignored by PR resolution.
+fn align_ignored_pr_head(
+    path: &Path,
+    options: &AgentTaskPromotionRequest,
+    outcome: &AgentTaskOutcome,
+    candidate: &crate::agent_task::AgentTaskCandidate,
+) -> Result<Option<Value>> {
+    let head = git_output(path, &["rev-parse", "HEAD"])?;
+    let resolution = &outcome.metadata["source_provenance"]["cook_pr_head_resolution"];
+    if head == candidate.base_sha
+        || resolution["local_head_ignored"].as_bool() != Some(true)
+        || resolution["remote_head"].as_str() != Some(candidate.base_sha.as_str())
+        || resolution["local_head"].as_str() != Some(head.as_str())
+    {
+        return Ok(None);
+    }
+    validate_candidate_commit(path, candidate)?;
+    // Never discard edits or a previously applied feedback candidate.
+    if !git_output(path, &["status", "--porcelain", "--untracked-files=all"])?.is_empty() {
+        return Err(Error::validation_invalid_argument(
+            "to_worktree",
+            "candidate destination must be clean",
+            None,
+            None,
+        ));
+    }
+    let run_id = options.source_run_id.as_deref().unwrap_or(&outcome.task_id);
+    let reference = format!(
+        "refs/homeboy/superseded/{}",
+        homeboy_core::paths::sanitize_path_segment(run_id)
+    );
+    if options.dry_run {
+        return Ok(Some(
+            json!({"from": head, "to": candidate.base_sha, "ref": reference, "dry_run": true}),
+        ));
+    }
+    // Create-only: never overwrite an earlier saved head.
+    git_output(path, &["update-ref", &reference, &head, ""])?;
+    git_output(path, &["reset", "--keep", &candidate.base_sha])?;
+    Ok(Some(
+        json!({"from": head, "to": candidate.base_sha, "ref": reference}),
+    ))
 }
 
 fn valid_git_object_id(value: &str) -> bool {
@@ -4283,6 +4332,7 @@ fn post_apply_report(
         repository_integrity_evidence: options.repository_integrity_evidence.clone(),
         provenance: json!({
             "source_schema": source_schema,
+            "destination_head_alignment": artifact_metadata.get("destination_head_alignment"),
             "artifact_metadata": artifact_metadata,
             "worktree_path": worktree_path,
             "dependencies_materialized": false,

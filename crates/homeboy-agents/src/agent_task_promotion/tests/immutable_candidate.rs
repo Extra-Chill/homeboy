@@ -5,7 +5,7 @@ use super::super::promote::{
 };
 use super::*;
 use crate::agent_task::{AgentTaskCandidate, AgentTaskOutcome, AgentTaskOutcomeStatus};
-use serde_json::json;
+use serde_json::{json, Value};
 
 fn fixture(
     test: impl FnOnce(&Path, AgentTaskCandidate, &homeboy_core::observation::ObservationStore),
@@ -162,6 +162,82 @@ fn fresh_candidate_without_patch_promotes_provider_commits_and_dirty_state_as_on
         assert_eq!(
             report.provenance["candidate_checkout"]["commit"],
             candidate.candidate_sha
+        );
+    });
+}
+
+#[test]
+fn ignored_local_pr_head_is_preserved_and_aligned_but_unrelated_movement_is_refused() {
+    fixture(|repo, candidate, store| {
+        // Make the remote PR head and unpublished local head diverge.
+        git(repo, &["checkout", "-b", "local", &candidate.base_sha]);
+        std::fs::write(repo.join("local-only"), "unpublished\n").unwrap();
+        git(repo, &["add", "."]);
+        git(repo, &["commit", "-m", "unpublished local"]);
+        let local = git_head(repo, "HEAD");
+        let remote = git_head(repo, &format!("{}^", candidate.candidate_sha));
+        let mut candidate = candidate;
+        candidate.base_sha = remote.clone();
+        let mut options = request(repo, Some(candidate.clone()));
+        options.source_run_id = Some("pr-head-test".into());
+        let mut source: Value = serde_json::from_str(&options.source).unwrap();
+        source["metadata"]["source_provenance"]["cook_pr_head_resolution"] = json!({
+            "remote_head": remote, "local_head": local, "local_head_ignored": true,
+        });
+        options.source = source.to_string();
+        let mut provider = FakePromotionWorkspaceProvider {
+            workspace_path: Some(repo.into()),
+            ..Default::default()
+        };
+
+        git(
+            repo,
+            &["commit", "--allow-empty", "-m", "unrelated movement"],
+        );
+        let unrelated = git_head(repo, "HEAD");
+        let error = promote_with_provider_and_checkpoint_in_observation_store(
+            options.clone(),
+            &mut provider,
+            &mut |_| panic!("must not checkpoint"),
+            store,
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("candidate destination HEAD moved"));
+        assert_eq!(git_head(repo, "HEAD"), unrelated);
+        assert!(!repo.join("dirty").exists());
+
+        git(repo, &["reset", "--hard", &local]);
+        let expected =
+            json!({"from": local, "to": remote, "ref": "refs/homeboy/superseded/pr-head-test"});
+        let mut checkpointed = false;
+        let report = promote_with_provider_and_checkpoint_in_observation_store(
+            options,
+            &mut provider,
+            &mut |report| {
+                assert_eq!(report.provenance["destination_head_alignment"], expected);
+                checkpointed = true;
+                Ok(())
+            },
+            store,
+        )
+        .unwrap();
+        assert!(checkpointed);
+        assert_eq!(
+            report.status,
+            super::super::AgentTaskPromotionStatus::Applied
+        );
+        assert_eq!(report.provenance["destination_head_alignment"], expected);
+        assert_eq!(git_head(repo, "HEAD"), remote);
+        assert_eq!(
+            git_head(repo, "refs/homeboy/superseded/pr-head-test"),
+            local
+        );
+        assert!(!repo.join("local-only").exists());
+        assert_eq!(
+            std::fs::read_to_string(repo.join("dirty")).unwrap(),
+            "uncommitted\n"
         );
     });
 }
