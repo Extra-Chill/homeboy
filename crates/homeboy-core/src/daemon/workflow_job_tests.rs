@@ -1432,7 +1432,16 @@ fn native_next_pass_forwards_inputs_and_stops_a_stable_chain() {
         )
         .unwrap()
         .with_daemon_lease("workflow-next-pass-test".into());
-        for (id, cap, stable, expected) in [("stable", 8, 3, 3), ("capped", 2, 8, 2)] {
+        for (id, cap, stable, expected, ended) in [
+            (
+                "stable",
+                8,
+                3,
+                3,
+                "chain ended: step `sample` output `/value` unchanged for 3 passes",
+            ),
+            ("capped", 2, 8, 2, "chain ended: max_iterations 2 reached"),
+        ] {
             let original = request(
                 json!({
                     "schema": "homeboy/workflow/v1", "id": id,
@@ -1484,6 +1493,7 @@ fn native_next_pass_forwards_inputs_and_stops_a_stable_chain() {
                 let children = child_instances(&store, &current.instance);
                 if iteration == expected {
                     assert!(children.is_empty());
+                    assert_eq!(status["reason"], ended);
                 } else {
                     assert_eq!(children.len(), 1);
                     let (_, child) = instance_job(&store, &children[0]).unwrap();

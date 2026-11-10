@@ -156,7 +156,7 @@ A step runs with `env_clear()` plus its admitted environment:
 
 ### Native next passes (`next_pass`)
 
-`next_pass` starts another instance only after the current pass succeeds and its optional `when` gate passes. It forwards every input, replacing only `next_pass.inputs` (typed JSON values and templates). No self-admitting `again`/`retry` commands or caller-maintained stall counters are needed.
+`next_pass` starts another instance only after the current pass succeeds and its optional `when` gate passes. It forwards every input, replacing only `next_pass.inputs` (typed JSON values and templates). No self-admitting `again`/`retry` commands or caller-maintained stall counters are needed. A chain that ends records why in the last instance's `reason` (for example "chain ended: step `evaluate` output `/blocker_signatures` unchanged for 3 passes"), so `runs show` distinguishes a finished chain from a stalled one.
 
 ```json
 {
