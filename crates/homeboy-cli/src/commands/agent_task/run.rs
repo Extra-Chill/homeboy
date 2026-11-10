@@ -470,21 +470,6 @@ fn cook_provider_timeout_disclosure(plan: &AgentTaskPlan) -> String {
     )
 }
 
-/// Operator-facing statement of the distinct, bounded deadline for the optional
-/// read-only review form. It is not the provider execution timeout.
-fn cook_review_form_timeout_disclosure(plan: &AgentTaskPlan) -> String {
-    let timeout_ms = plan
-        .tasks
-        .first()
-        .map(homeboy::agents::agent_task_service::review_form_timeout_ms)
-        .unwrap_or(homeboy::agents::agent_task_service::DEFAULT_REVIEW_FORM_TIMEOUT_MS);
-    format!(
-        "cook: review-form timeout: {}s for the optional read-only review form (cap {}s; uses the bounded fresh-review provider budget)",
-        timeout_ms / 1_000,
-        homeboy::agents::agent_task_service::MAX_REVIEW_FORM_TIMEOUT_MS / 1_000
-    )
-}
-
 /// Serialize a completed run aggregate and, when the run did not fully succeed,
 /// surface a prominent top-level `failure_reasons` summary so the operator sees
 /// the root cause (recipe validation, PHP fatal, provider registration, missing
@@ -4484,8 +4469,6 @@ pub(crate) struct CookContinueArgs {
 
     /// Explicit provider timeout increase for a new retry attempt.
     pub timeout_ms: Option<u64>,
-    /// Explicit review-form deadline increase for a new retry attempt.
-    pub review_form_timeout_ms: Option<u64>,
     /// Provider route for a rearmed retry.
     pub backend: Option<String>,
     pub selector: Option<String>,
@@ -4658,52 +4641,15 @@ where
         let recipe = agent_task_service::load_recipe(&recipe.cook_id)?;
         return Ok((cook_continuation_status(&recipe.cook_id, &retry.record), 0));
     }
-    let review_form_only = recipe
-        .attempts
-        .iter()
-        .find(|attempt| attempt.run_id == run_id)
-        .is_some_and(|attempt| {
-            attempt
-                .plan
-                .tasks
-                .iter()
-                .any(homeboy::agents::agent_task_service::cook_request_is_review_form_only)
-        });
-    if (args.timeout_ms.is_some() || args.review_form_timeout_ms.is_some())
-        && !record.state().is_terminal()
-    {
-        return Err(homeboy::core::Error::validation_invalid_argument(
-            if args.review_form_timeout_ms.is_some() {
-                "review-form-timeout-ms"
-            } else {
-                "timeout-ms"
-            },
-            if review_form_only {
-                "Cook review-form timeout override requires a terminal review-form timeout"
-            } else {
-                "Cook timeout override requires a terminal provider timeout"
-            },
-            Some(run_id),
-            None,
-        ));
-    }
-    if args.timeout_ms.is_some() && review_form_only {
+    if args.timeout_ms.is_some() && !record.state().is_terminal() {
         return Err(homeboy::core::Error::validation_invalid_argument(
             "timeout-ms",
-            "a timed-out review form retries with --review-form-timeout-ms, not --timeout-ms",
+            "Cook timeout override requires a terminal provider timeout",
             Some(run_id),
             None,
         ));
     }
-    if args.review_form_timeout_ms.is_some() && !review_form_only {
-        return Err(homeboy::core::Error::validation_invalid_argument(
-            "review-form-timeout-ms",
-            "Cook review-form timeout override requires a review-form attempt",
-            Some(run_id),
-            None,
-        ));
-    }
-    if let Some(timeout_ms) = args.review_form_timeout_ms.or(args.timeout_ms) {
+    if let Some(timeout_ms) = args.timeout_ms {
         let (_, retry) = reserve_retry_through_action(
             &run_id,
             None,
@@ -4841,9 +4787,7 @@ where
                 None,
             )
         })?;
-    let terminal_review_form_continuation =
-        agent_task_service::terminal_review_form_continuation_is_eligible(&attempt.plan, &record)?;
-    let mut options = if local_override.is_some() && !terminal_review_form_continuation {
+    let mut options = if local_override.is_some() {
         agent_task_service::reconstruct_options_without_dispatcher(&recipe)?
     } else {
         agent_task_service::reconstruct_options_with_dispatcher(&recipe, dispatcher)?
@@ -4854,19 +4798,11 @@ where
         apply_explicit_local_continuation(&run_id, &mut options)?;
     }
     agent_task_service::authorize_cook_continue_route(&options)?;
-    let result = if terminal_review_form_continuation {
-        run_cook_explicit(
-            options,
-            executor,
-            agent_task_service::CookMode::ContinueTerminal,
-        )?
-    } else {
-        run_cook_explicit(
-            options,
-            executor,
-            agent_task_service::CookMode::RecoverPreExecution,
-        )?
-    };
+    let result = run_cook_explicit(
+        options,
+        executor,
+        agent_task_service::CookMode::RecoverPreExecution,
+    )?;
     let value =
         cook_report_with_continuation(serde_json::to_value(result.value).unwrap_or(Value::Null));
     Ok((
@@ -5226,28 +5162,7 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
         .iter()
         .find(|attempt| attempt.run_id == run_id)
         .expect("continuation selection is recipe-bound");
-    let terminal_review =
-        match agent_task_service::terminal_review_form_continuation_is_eligible_for_observation_readonly(
-            &attempt.plan,
-            &record,
-            aggregate.as_ref(),
-        ) {
-            Ok(eligible) => eligible,
-            Err(error) => {
-                return Ok((
-                    cook_continuation_preflight_report(
-                        selected_run_id,
-                        Some(continuation_command()),
-                        candidate_fingerprint,
-                        phases,
-                        "candidate_admission",
-                        &error,
-                    ),
-                    1,
-                ))
-            }
-        };
-    let mut options = match if local_override.is_some() && !terminal_review {
+    let mut options = match if local_override.is_some() {
         agent_task_service::reconstruct_options_without_dispatcher(&recipe)
     } else {
         agent_task_service::reconstruct_options_with_dispatcher(&recipe, dispatcher)
@@ -5305,9 +5220,7 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
     }
     let mut execution_only_checks =
         match agent_task_service::preflight_cook_continuation_admission_for_observation(
-            &options,
-            &record,
-            aggregate.as_ref(),
+            &options, &record,
         ) {
             Ok(checks) => checks.into_iter().map(str::to_string).collect::<Vec<_>>(),
             Err(error) => {
@@ -5404,11 +5317,7 @@ pub(crate) fn preflight_continue_cook(args: CookContinueArgs) -> CmdResult<Value
                 "ref": format!("homeboy://agent-task/run/{run_id}/evidence"),
             }],
             "continuation": {
-                "path": if terminal_review {
-                    "terminal_review_form"
-                } else {
-                    "resume"
-                },
+                "path": "resume",
                 "provider_replay": provider_replay,
                 "provider_behavior": if provider_replay { "replay" } else { "not_replayed" }
             },
@@ -8316,7 +8225,6 @@ fn run_preflight_cook_execution(
         );
         eprintln!("{}", cook_rotation_disclosure(&initial_plan));
         eprintln!("{}", cook_provider_timeout_disclosure(&initial_plan));
-        eprintln!("{}", cook_review_form_timeout_disclosure(&initial_plan));
         if !args.repro.is_declared() {
             eprintln!(
                 "cook: warning: {}",
@@ -8607,14 +8515,6 @@ fn resolve_cook_execution_budget(
                 plan.tasks.first().and_then(|task| task.limits.timeout_ms).or(plan.options.timeout_ms),
                 plan.tasks.first().and_then(|task| task.limits.max_runtime_ms),
             ),
-            "review_form_timeout_ms": plan
-                .tasks
-                .first()
-                .map(homeboy::agents::agent_task_service::review_form_timeout_ms)
-                .unwrap_or(homeboy::agents::agent_task_service::DEFAULT_REVIEW_FORM_TIMEOUT_MS),
-            "review_form_timeout_cap_ms": homeboy::agents::agent_task_service::MAX_REVIEW_FORM_TIMEOUT_MS,
-            "review_form_provider_budget_scope": "fresh_cook_review",
-            "review_form_provider_budget_is_distinct": true,
         },
     });
     Ok(())
@@ -11896,9 +11796,9 @@ mod tests {
     use super::{
         apply_preview_worktree_capacity, component_lint_gate, cook_continuation_status,
         cook_preview_result, cook_provider_timeout_disclosure, cook_report_with_continuation,
-        cook_resolved_policy_disclosure, cook_review_form_timeout_disclosure,
-        detached_cook_route_less_warning, durable_cook_identity_lines, preflight_continue_cook,
-        preview_gate_contract_disclosure, project_preview_dirty_admission, PreviewReplayArgv,
+        cook_resolved_policy_disclosure, detached_cook_route_less_warning,
+        durable_cook_identity_lines, preflight_continue_cook, preview_gate_contract_disclosure,
+        project_preview_dirty_admission, PreviewReplayArgv,
     };
     use crate::cli_surface::{Cli, Commands};
     use crate::commands::agent_task::AgentTaskCommand;
@@ -12799,20 +12699,6 @@ mod tests {
         assert_eq!(
             cook_provider_timeout_disclosure(&plan),
             "cook: provider timeout: 2700s per provider execution (override with --timeout-ms)"
-        );
-    }
-
-    #[test]
-    fn review_form_timeout_disclosure_reports_the_bounded_deadline() {
-        let plan = homeboy::agents::agent_task_scheduler::AgentTaskPlan::new("plan", vec![]);
-
-        assert_eq!(
-            cook_review_form_timeout_disclosure(&plan),
-            format!(
-                "cook: review-form timeout: {}s for the optional read-only review form (cap {}s; uses the bounded fresh-review provider budget)",
-                homeboy::agents::agent_task_service::DEFAULT_REVIEW_FORM_TIMEOUT_MS / 1_000,
-                homeboy::agents::agent_task_service::MAX_REVIEW_FORM_TIMEOUT_MS / 1_000
-            )
         );
     }
 

@@ -510,26 +510,17 @@ pub struct RecoverArgs {
         conflicts_with_all = ["preflight"]
     )]
     pub timeout_ms: Option<u64>,
-    /// Explicitly increase the optional review-form deadline for a new retry
-    /// attempt of a timed-out review form. Distinct from `--timeout-ms`;
-    /// capped at 600000ms.
-    #[arg(
-        long = "review-form-timeout-ms",
-        value_name = "MS",
-        conflicts_with_all = ["preflight", "timeout_ms"]
-    )]
-    pub review_form_timeout_ms: Option<u64>,
     /// Backend for a rearmed retry of a terminal attempt. The original Cook
     /// recipe remains authoritative for prompt, gates, worktree, notification
     /// and disclosure.
-    #[arg(long, value_name = "BACKEND", conflicts_with_all = ["preflight", "timeout_ms", "review_form_timeout_ms"])]
+    #[arg(long, value_name = "BACKEND", conflicts_with_all = ["preflight", "timeout_ms"])]
     pub backend: Option<String>,
     /// Provider-specific selector for a rearmed retry of a terminal attempt.
-    #[arg(long, value_name = "SELECTOR", conflicts_with_all = ["preflight", "timeout_ms", "review_form_timeout_ms"])]
+    #[arg(long, value_name = "SELECTOR", conflicts_with_all = ["preflight", "timeout_ms"])]
     pub selector: Option<String>,
     /// Model for a rearmed retry of a terminal attempt. Confirm the pinned
     /// route with --acknowledge-model-override.
-    #[arg(long, value_name = "MODEL", conflicts_with_all = ["preflight", "timeout_ms", "review_form_timeout_ms"])]
+    #[arg(long, value_name = "MODEL", conflicts_with_all = ["preflight", "timeout_ms"])]
     pub model: Option<String>,
     /// Confirm an explicit model override that pins this retry.
     #[arg(long, requires = "model")]
@@ -590,7 +581,6 @@ impl RecoverArgs {
     pub fn overrides(&self) -> homeboy::agents::agent_task_service::CookRecoveryOverrides {
         homeboy::agents::agent_task_service::CookRecoveryOverrides {
             timeout_ms: self.timeout_ms,
-            review_form_timeout_ms: self.review_form_timeout_ms,
             backend: self.backend.clone(),
             selector: self.selector.clone(),
             model: self.model.clone(),

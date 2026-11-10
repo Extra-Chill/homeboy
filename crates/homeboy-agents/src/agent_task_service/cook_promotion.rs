@@ -43,8 +43,7 @@ use homeboy_core::{config, Error, Result};
 
 use super::cook::{
     canonical_candidate_finalization, canonical_cook_candidate, canonical_cook_candidate_in_store,
-    cook_finalization_is_pr_receipt, review_form_attempt_is_ready_for_cook_continuation,
-    AgentTaskCookAttemptReport, AgentTaskCookReport, CookRequest,
+    cook_finalization_is_pr_receipt, AgentTaskCookAttemptReport, AgentTaskCookReport, CookRequest,
 };
 use super::cook_delivery_artifacts::*;
 use super::AgentTaskRunResult;
@@ -2174,26 +2173,6 @@ fn run_record_needs_execution(record: &agent_task_lifecycle::AgentTaskRunRecord)
     )
 }
 
-pub(crate) fn retryable_provider_discovery_failure_with_store(
-    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
-    run_id: &str,
-) -> bool {
-    lifecycle_store
-        .read_record(run_id)
-        .is_ok_and(|record| record.state() == agent_task_lifecycle::AgentTaskRunState::Failed)
-        && lifecycle_store
-            .read_aggregate(run_id)
-            .is_ok_and(|aggregate| {
-                !aggregate.outcomes.is_empty()
-                    && aggregate.outcomes.iter().all(|outcome| {
-                        outcome
-                            .diagnostics
-                            .iter()
-                            .any(|diagnostic| diagnostic.class == "agent_task.provider_missing")
-                    })
-            })
-}
-
 pub(crate) fn is_moving_base_finalization_error(error: &Error) -> bool {
     error.code == homeboy_core::ErrorCode::ValidationInvalidArgument
         && (error
@@ -3827,22 +3806,6 @@ pub(crate) fn recover_cook_pr_with_backend_and_review_form<B: AgentTaskPrFinaliz
                 )
             })?
     };
-    // An exact form-only attempt is not a new publication authority when
-    // the selected producer already has a form (or the operator supplies it).
-    let run_id = if persisted_promotion_for_attempt(&run_id)?.is_some_and(|promotion| {
-        promotion.provenance["cook_follow_up"]["kind"] == "review_form_only"
-    }) {
-        let selected = canonical_cook_candidate(&recipe.cook_id)
-            .and_then(|candidate| candidate["run_id"].as_str().map(str::to_string));
-        selected
-            .filter(|producer| {
-                review_form.is_some()
-                    || canonical_cook_recovery_run_id(&recipe.cook_id).as_ref() == Some(producer)
-            })
-            .unwrap_or(run_id)
-    } else {
-        run_id
-    };
     // A verified empty remediation is evidence about the already-applied
     // candidate, not a replacement candidate. Recover the source promotion so
     // an exact `--recover <remediation>` cannot hide that applied promotion.
@@ -4228,67 +4191,6 @@ pub(crate) fn canonical_cook_recovery_run_id_with_stores(
     let source_run_id = candidate["run_id"].as_str()?.to_string();
     if source_run_id.is_empty() {
         return None;
-    }
-    // Publication belongs to the selected producer once its form is complete.
-    // A later form-only execution cannot invalidate that candidate or replace
-    // the runtime identity used to disclose its implementation.
-    let aggregate = stores
-        .map(|(_, lifecycle)| lifecycle.read_aggregate(&source_run_id))
-        .unwrap_or_else(|| agent_task_lifecycle::read_attempt_aggregate(&source_run_id));
-    if aggregate
-        .ok()
-        .and_then(|aggregate| {
-            super::cook::review_form_from_aggregate(&aggregate)
-                .ok()
-                .flatten()
-        })
-        .is_some_and(|form| form.validate().is_ok())
-    {
-        return Some(source_run_id);
-    }
-    let recipe = stores
-        .map(|(store, _)| store.load_recipe(cook_id))
-        .unwrap_or_else(|| super::cook_recipe::load_recipe(cook_id));
-    if let Ok(recipe) = recipe {
-        for attempt in recipe.attempts.iter().rev() {
-            let record = stores
-                .map(|(_, lifecycle)| lifecycle.read_record(&attempt.run_id))
-                .unwrap_or_else(|| agent_task_lifecycle::exact_record(&attempt.run_id));
-            let Ok(record) = record else {
-                continue;
-            };
-            let review_form_ready = stores
-                .map(|(_, lifecycle)| {
-                    super::cook::review_form_attempt_is_ready_for_cook_continuation_in_store(
-                        lifecycle,
-                        &attempt.plan,
-                        &record,
-                    )
-                })
-                .unwrap_or_else(|| {
-                    review_form_attempt_is_ready_for_cook_continuation(&attempt.plan, &record)
-                })
-                .ok()?;
-            if review_form_ready
-                && stores
-                    .map(|(_, lifecycle)| {
-                        persisted_promotion_for_attempt_in_store(lifecycle, &attempt.run_id)
-                    })
-                    .unwrap_or_else(|| persisted_promotion_for_attempt(&attempt.run_id))
-                    .ok()
-                    .flatten()
-                    .is_some_and(|promotion| {
-                        promotion
-                            .provenance
-                            .pointer("/cook_follow_up/source_run_id")
-                            .and_then(Value::as_str)
-                            == Some(source_run_id.as_str())
-                            && !is_empty_verified_remediation(&promotion)
-                    })
-            {
-                return Some(attempt.run_id.clone());
-            }
-        }
     }
     Some(source_run_id)
 }
@@ -5058,7 +4960,6 @@ fn cook_review_dossier_with_stores_and_review_form(
         store,
         lifecycle_store,
         options,
-        terminal_promotion,
         successful_run_id,
         &terminal_form,
     )?;
@@ -5200,11 +5101,8 @@ struct CookAiLineage {
 }
 
 struct CookAttemptExecution {
-    task_summary: String,
-    form: Option<crate::agent_task_review_dossier::AiFilledReviewForm>,
     tool: String,
     model: Option<String>,
-    review_form_only: bool,
 }
 
 struct CookContribution {
@@ -5531,53 +5429,25 @@ fn cook_attempt_execution_in_store(
             ));
         }
         return Ok(CookAttemptExecution {
-            task_summary: task
-                .instructions
-                .lines()
-                .map(str::trim)
-                .find(|line| !line.is_empty())
-                .unwrap_or("Delivered the authenticated Cook candidate.")
-                .to_string(),
-            form: None,
             tool: task.executor.backend.clone(),
             model: None,
-            review_form_only: false,
         });
     }
     let outcome = selected_outcome_for_attempt_in_store(lifecycle_store, run_id)?;
-    let task = plan
+    if !plan
         .tasks
         .iter()
-        .find(|task| task.task_id == outcome.task_id)
-        .ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "cook_recipe.attempts",
-                "Cook lineage outcome does not match a task in its durable execution plan",
-                Some(run_id.to_string()),
-                None,
-            )
-        })?;
+        .any(|task| task.task_id == outcome.task_id)
+    {
+        return Err(Error::validation_invalid_argument(
+            "cook_recipe.attempts",
+            "Cook lineage outcome does not match a task in its durable execution plan",
+            Some(run_id.to_string()),
+            None,
+        ));
+    }
     let (tool, model) = authoritative_execution_identity(&plan, &record, &outcome, run_id)?;
-    Ok(CookAttemptExecution {
-        task_summary: task
-            .instructions
-            .lines()
-            .map(str::trim)
-            .find(|line| !line.is_empty())
-            .unwrap_or("Delivered the authenticated Cook candidate.")
-            .to_string(),
-        // Lineage prose falls back to the task summary when the attempt's
-        // form is unusable; a malformed form never fails publication.
-        form: crate::agent_task_review_dossier::AiFilledReviewForm::from_outcome_outputs(
-            &outcome.outputs,
-        )
-        .ok()
-        .flatten()
-        .filter(|form| form.validate().is_ok()),
-        tool,
-        model,
-        review_form_only: crate::agent_task_cook_loop::request_is_review_form_only(task),
-    })
+    Ok(CookAttemptExecution { tool, model })
 }
 
 fn cook_contribution_source(
@@ -5699,14 +5569,6 @@ fn substantive_contribution_chain(
                 })?;
         if current_contributes {
             let execution = cook_attempt_execution_in_store(lifecycle_store, &current_run_id)?;
-            if execution.review_form_only {
-                return Err(Error::validation_invalid_argument(
-                    "cook_recipe.attempts",
-                    "metadata-only review-form attempts cannot contribute implementation patches",
-                    Some(current_run_id),
-                    None,
-                ));
-            }
             contributions.push(CookContribution {
                 run_id: current_run_id.clone(),
                 execution,
@@ -5888,7 +5750,6 @@ fn cook_ai_lineage_with_stores(
     store: &super::cook_recipe::CookRecipeStore,
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
     options: &CookRequest,
-    promotion: &AgentTaskPromotionReport,
     successful_run_id: &str,
     terminal_form: &crate::agent_task_review_dossier::AiFilledReviewForm,
 ) -> Result<CookAiLineage> {
@@ -5926,81 +5787,10 @@ fn cook_ai_lineage_with_stores(
         }
     };
     attempts.truncate(terminal_index + 1);
-    let terminal = cook_attempt_execution_in_store(lifecycle_store, successful_run_id)?;
-    if !terminal.review_form_only {
-        return substantive_lineage(
-            substantive_contribution_chain(lifecycle_store, &attempts, successful_run_id)?,
-            terminal_form,
-        );
-    }
-    let terminal_model = required_execution_model(&terminal, successful_run_id)?;
-    let source_run_id = promotion
-        .provenance
-        .pointer("/cook_follow_up/source_run_id")
-        .and_then(Value::as_str)
-        .filter(|source_run_id| *source_run_id != successful_run_id)
-        .ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "promotion.provenance.cook_follow_up.source_run_id",
-                "multi-attempt Cook finalization requires an authenticated form-only source run",
-                Some(successful_run_id.to_string()),
-                None,
-            )
-        })?;
-    let implementation = attempts
-        .iter()
-        .find(|attempt| attempt.run_id == source_run_id)
-        .ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "cook_recipe.attempts",
-                "form-only follow-up source run is absent from the finalized Cook lineage",
-                Some(source_run_id.to_string()),
-                None,
-            )
-        })?;
-    if implementation.attempt == attempts[terminal_index].attempt {
-        return Err(Error::validation_invalid_argument(
-            "cook_recipe.attempts",
-            "form-only follow-up cannot attribute its own run as the implementation attempt",
-            Some(source_run_id.to_string()),
-            None,
-        ));
-    }
-    let implementation = cook_attempt_execution_in_store(lifecycle_store, &implementation.run_id)?;
-    let changed = promotion
-        .changed_files
-        .iter()
-        .map(|path| format!("Updated `{path}` in the delivered candidate."))
-        .collect::<Vec<_>>();
-    let (summary, what_changed) = implementation
-        .form
-        .map(|form| (form.summary, form.what_changed))
-        .unwrap_or_else(|| (implementation.task_summary.clone(), changed));
-    let (tool, model) = implementation.model.map_or_else(
-        || {
-            (
-                crate::agent_task_review_dossier::homeboy_tool_disclosure(&terminal.tool),
-                terminal_model.clone(),
-            )
-        },
-        |implementation_model| {
-            let implementation_tool =
-                crate::agent_task_review_dossier::homeboy_tool_disclosure(&implementation.tool);
-            let terminal_tool =
-                crate::agent_task_review_dossier::homeboy_tool_disclosure(&terminal.tool);
-            (
-                format!("Implementation: {implementation_tool}; review form: {terminal_tool}"),
-                format!("Implementation: {implementation_model}; review form: {terminal_model}"),
-            )
-        },
-    );
-    Ok(CookAiLineage {
-        summary,
-        what_changed,
-        tool,
-        model,
-        composed_model_disclosure: true,
-    })
+    substantive_lineage(
+        substantive_contribution_chain(lifecycle_store, &attempts, successful_run_id)?,
+        terminal_form,
+    )
 }
 
 fn retry_descends_from_recipe(
@@ -7292,11 +7082,8 @@ struct DeliveredCandidateFacts {
     /// replacement proof.
     applied_gate_failure: bool,
     regate_ready: bool,
-    /// Verified, unpublished candidate; its review form is publication input.
+    /// Verified, unpublished candidate.
     verified_unpublished: bool,
-    /// The verified candidate has no publishable review form: neither the
-    /// agent's nor a recorded operator recovery form (#17494).
-    review_form_missing: bool,
 }
 
 /// HEAD of the Cook's destination worktree when the worktree's branch holds
@@ -7383,9 +7170,7 @@ fn delivered_candidate_facts(
             .as_ref()
             .is_some_and(|candidate| !candidate.tree_sha.is_empty())
         && !delivery.is_some_and(super::CookDelivery::published);
-    let review_form_missing = review_form_missing_in_store(lifecycle_store, record);
     let regate_ready = applied_gate_failure
-        && !review_form_missing
         && agent_incomplete_reason(lifecycle_store, &record.run_id).is_none()
         && promotion.finalization_blocking_gates().all(|gate| {
             matches!(
@@ -7399,31 +7184,7 @@ fn delivered_candidate_facts(
         applied_gate_failure,
         regate_ready,
         verified_unpublished,
-        review_form_missing: verified_unpublished && review_form_missing,
     }
-}
-
-/// Whether publication of `record` would refuse for want of a review form:
-/// neither a recorded operator recovery form nor a usable agent form exists.
-fn review_form_missing_in_store(
-    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
-    record: &agent_task_lifecycle::AgentTaskRunRecord,
-) -> bool {
-    record.metadata.get("recovery_review_form").is_none()
-        && review_form_for_finalization_in_store(lifecycle_store, &record.run_id).is_err()
-}
-
-/// A verified, unpublished candidate whose publication waits only on its
-/// review form. Its completed terminal continuation predates that verdict
-/// (replacement gates made it green afterwards), so recovery reopens it to
-/// run the bounded review-form follow-up (#17494).
-pub(crate) fn verified_candidate_awaits_review_form_in_store(
-    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
-    record: &agent_task_lifecycle::AgentTaskRunRecord,
-) -> bool {
-    let delivery = super::CookDelivery::from_run_metadata(&record.metadata);
-    let facts = delivered_candidate_facts(lifecycle_store, Some(record), delivery.as_ref());
-    facts.review_form_missing && agent_incomplete_reason(lifecycle_store, &record.run_id).is_none()
 }
 
 /// Whether the attempt's applied candidate still has no passing verdict: its
@@ -7524,7 +7285,6 @@ fn cook_recovery_actions_with_prefix(
             applied_gate_failure: delivered_candidate.applied_gate_failure,
             regate_ready: delivered_candidate.regate_ready,
             verified_unpublished: delivered_candidate.verified_unpublished,
-            review_form_missing: delivered_candidate.review_form_missing,
             manual_publication_pending,
             no_progress,
         });
@@ -7566,12 +7326,7 @@ fn cook_recovery_actions_with_prefix(
         .map(|action| action.action.as_str())
         .collect::<Vec<_>>()
         .join(", ");
-    let mut reason = format!("Legal recovery actions for this Cook state: {names}.");
-    if let (Some(missing), Some(action)) = (step.missing(), step.action_name()) {
-        reason.push_str(&format!(
-            " Missing: {missing}; planned step: {action} (a review-only provider step against the existing candidate, then publication)."
-        ));
-    }
+    let reason = format!("Legal recovery actions for this Cook state: {names}.");
     CookRecoveryActions {
         reason,
         legal_actions: actions,

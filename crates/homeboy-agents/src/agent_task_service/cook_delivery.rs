@@ -1350,7 +1350,7 @@ pub(super) fn ensure_published(
     ctx: &mut CookDeliveryContext<'_, '_>,
     promotion: AgentTaskPromotionReport,
 ) -> Result<CookPublication> {
-    let (store, lifecycle_store, options) = (ctx.store, ctx.lifecycle_store, ctx.options);
+    let (lifecycle_store, options) = (ctx.lifecycle_store, ctx.options);
     let run_id = ctx.run_id;
     if options.finalization.no_finalize {
         return Ok(CookPublication::Ended(ctx.report(
@@ -1419,18 +1419,6 @@ pub(super) fn ensure_published(
         }
     };
     let (final_status, published) = publication_status(&finalization);
-    if published {
-        let absorbed_source_run_id = promotion
-            .provenance
-            .pointer("/cook_follow_up/source_run_id")
-            .and_then(Value::as_str)
-            .unwrap_or(run_id);
-        super::cook_recipe::complete_absorbed_review_form_follow_ups(
-            store,
-            lifecycle_store,
-            absorbed_source_run_id,
-        )?;
-    }
     let stop_reason = (final_status == "no_changes").then_some(
         "cook completed provider execution and gates, but finalization found no changed files; task likely still requires review or retry",
     );

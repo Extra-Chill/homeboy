@@ -854,10 +854,10 @@ impl AgentTaskScheduleSupport {
     }
 
     /// A provider that finished its work but omitted only the reviewer-facing
-    /// `review_form` did not fail: the cook loop owns that gap and recovers it
-    /// with a bounded form-only follow-up once the candidate's deterministic
-    /// gates are green. Classifying it as a provider failure instead retained
-    /// the patch as `CandidateRecoverable`, which the loop never revisits, so
+    /// `review_form` did not fail: once the candidate's deterministic gates are
+    /// green it publishes as a draft with a deterministic title and body
+    /// (#17671). Classifying it as a provider failure instead retained the
+    /// patch as `CandidateRecoverable`, which the loop never revisits, so
     /// the cook stalled with passing gates and `resume` had nothing to resume
     /// (#15440). Any other missing output keeps its failure classification.
     ///
@@ -924,12 +924,12 @@ impl AgentTaskScheduleSupport {
         outcome.status = AgentTaskOutcomeStatus::Succeeded;
         outcome.failure_classification = None;
         outcome.summary = Some(
-            "provider completed its work without the review_form; the cook loop requests it after deterministic gates"
+            "provider completed its work without the review_form; a gated candidate publishes as a draft"
                 .to_string(),
         );
         outcome.diagnostics.push(AgentTaskDiagnostic {
             class: "agent_task.review_form_deferred_to_cook_loop".to_string(),
-            message: "the only missing required output was review_form; deferring it to the cook loop's form-only follow-up"
+            message: "the only missing required output was review_form; the gated candidate publishes as a draft"
                 .to_string(),
             data: serde_json::json!({ "missing_required_outputs": missing }),
         });

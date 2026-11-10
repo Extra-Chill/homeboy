@@ -26,10 +26,6 @@ const MAX_FAILURE_DIAGNOSTICS: usize = 8;
 const MAX_FAILURE_DELTA_IDENTITIES: usize = 8;
 const MAX_DIAGNOSTIC_FIELD_BYTES: usize = 512;
 const MAX_DIAGNOSTIC_ACTIONS: usize = 4;
-/// A review form is metadata, not a coding attempt. Callers may lower this via
-/// `metadata.cook_loop.review_form_timeout_ms`; the cap keeps it bounded.
-pub const DEFAULT_REVIEW_FORM_TIMEOUT_MS: u64 = 300_000;
-pub const MAX_REVIEW_FORM_TIMEOUT_MS: u64 = 600_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AgentTaskCookLoopOptions {
@@ -41,16 +37,9 @@ pub struct AgentTaskCookLoopOptions {
     pub source_run_id: Option<String>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub current_diff: String,
-    /// Whether the AI-authored review form is a required gate for this
-    /// evaluation. Cook finalization enables it (a green change is not "done"
-    /// until a valid form exists); standalone/diagnostic evaluations leave it
-    /// off so they never demand a form the caller isn't producing.
-    #[serde(default)]
-    pub require_review_form: bool,
     /// The AI-authored review form parsed off the terminal attempt outcome, if
-    /// the agent emitted one. A green cook is not "done" until this is present
-    /// and valid — a missing/invalid form nudges another attempt exactly like a
-    /// red deterministic gate.
+    /// the agent emitted one. A valid form that reports the task incomplete
+    /// withholds publication (#16051); a missing form publishes as a draft.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_form: Option<AiFilledReviewForm>,
     #[serde(default, skip_serializing_if = "Value::is_null")]
@@ -288,7 +277,6 @@ pub fn evaluate_cook_loop(options: AgentTaskCookLoopOptions) -> AgentTaskCookLoo
                 | AgentTaskPromotionStatus::NoChangesGateFailed
                 | AgentTaskPromotionStatus::NoChanges
         )
-        && !request_is_review_form_only(&options.source_request)
         && request_requires_substantive_candidate(&options.source_request);
     let mut quality = classify_cook_loop_quality(
         &options.promotion_report,
@@ -347,40 +335,16 @@ pub fn evaluate_cook_loop(options: AgentTaskCookLoopOptions) -> AgentTaskCookLoo
                 | AgentTaskGateFailureClassification::ZeroTestsSelected
         )
     });
-    // Deterministic gates take precedence: a red gate must be fixed before the
-    // review form is even worth requesting. Only once the change itself is green
-    // (and actually produced changes) does the AI-authored form become the last
-    // outstanding "gate".
     let gates_green_with_changes = failed_gates.is_empty()
         && options.promotion_report.status == AgentTaskPromotionStatus::Applied;
-    // A review-form follow-up exists only to attach a review to an already
-    // gated candidate. A no-change verdict from it declines that review; it is
-    // a review-form gap, never a verdict on the candidate (#14970).
-    let declined_review = request_is_review_form_only(&options.source_request)
-        .then(|| {
-            options
-                .metadata
-                .get("intentional_no_change")
-                .cloned()
-                .and_then(|value| {
-                    serde_json::from_value::<AgentTaskIntentionalNoChange>(value).ok()
-                })
-        })
-        .flatten();
-    let review_form_gap =
-        (options.require_review_form && gates_green_with_changes).then(|| match &declined_review {
-            Some(declaration) => Some(declined_review_form_gap(declaration)),
-            None => review_form_requirement_gap(&options.review_form),
-        });
-
     // A valid form that declares the task incomplete is the agent's verdict
     // on its own candidate. Gates prove only that the repository still
     // passes, so a green gate cannot overrule it (#16051).
-    let agent_reported_incomplete = matches!(review_form_gap, Some(None))
+    let agent_reported_incomplete = gates_green_with_changes
         && options
             .review_form
             .as_ref()
-            .is_some_and(|form| form.incomplete_reason().is_some());
+            .is_some_and(|form| form.validate().is_ok() && form.incomplete_reason().is_some());
 
     let follow_up_request = if should_retry {
         Some(build_follow_up_request(
@@ -832,40 +796,6 @@ pub(crate) fn request_requires_substantive_candidate(
     request.policy.write == "patch"
 }
 
-/// Returns `Some(feedback)` describing why the AI review form is not yet
-/// acceptable (absent or failing validation), or `None` when the form is valid.
-fn review_form_requirement_gap(form: &Option<AiFilledReviewForm>) -> Option<String> {
-    match form {
-        None => Some(format!(
-            "no review_form output was emitted. {}",
-            AiFilledReviewForm::requirement_feedback()
-        )),
-        Some(form) => form.validate().err().map(|error| error.message),
-    }
-}
-
-fn declined_review_form_gap(declaration: &AgentTaskIntentionalNoChange) -> String {
-    format!(
-        "the review-form follow-up returned a `{}` no-change verdict at revision {} instead of a review_form for the gated candidate; a review-form follow-up has no no-change outcome. {}",
-        declaration.verdict,
-        declaration.inspected_revision,
-        AiFilledReviewForm::requirement_feedback()
-    )
-}
-
-pub fn review_form_timeout_ms(source_request: &AgentTaskRequest) -> u64 {
-    source_request.metadata["cook_loop"]["review_form_timeout_ms"]
-        .as_u64()
-        .filter(|timeout_ms| *timeout_ms > 0)
-        .map(|timeout_ms| timeout_ms.min(MAX_REVIEW_FORM_TIMEOUT_MS))
-        .unwrap_or(DEFAULT_REVIEW_FORM_TIMEOUT_MS)
-}
-
-pub fn request_is_review_form_only(request: &AgentTaskRequest) -> bool {
-    request.metadata["cook_loop"]["kind"] == "review_form_only"
-        || request.inputs["cook_loop"]["review_form_required"] == true
-}
-
 fn gate_failure(
     gate: &AgentTaskGateReport,
     source_run_id: Option<&str>,
@@ -1235,7 +1165,6 @@ mod tests {
             max_attempts: 3,
             source_run_id: Some("run-16218".to_string()),
             current_diff: String::new(),
-            require_review_form: false,
             review_form: None,
             metadata: Value::Null,
         };
@@ -1277,7 +1206,6 @@ mod tests {
             max_attempts: 3,
             source_run_id: Some("run-3676".to_string()),
             current_diff: "diff --git a/src/lib.rs b/src/lib.rs".to_string(),
-            require_review_form: false,
             review_form: None,
             metadata: Value::Null,
         });
@@ -1323,7 +1251,6 @@ mod tests {
             max_attempts: 3,
             source_run_id: Some("run-declaration".to_string()),
             current_diff: String::new(),
-            require_review_form: false,
             review_form: None,
             metadata: Value::Null,
         });
@@ -1395,7 +1322,6 @@ mod tests {
                     max_attempts: 3,
                     source_run_id: None,
                     current_diff: String::new(),
-                    require_review_form: false,
                     review_form: None,
                     metadata: Value::Null,
                 });
@@ -1441,7 +1367,6 @@ mod tests {
             max_attempts: 3,
             source_run_id: Some("run-provisional".to_string()),
             current_diff: String::new(),
-            require_review_form: false,
             review_form: None,
             metadata: Value::Null,
         });
@@ -1500,7 +1425,6 @@ mod tests {
             max_attempts: 3,
             source_run_id: Some("run-inconclusive".to_string()),
             current_diff: String::new(),
-            require_review_form: false,
             review_form: None,
             metadata: Value::Null,
         });
@@ -1540,7 +1464,6 @@ mod tests {
             max_attempts: 3,
             source_run_id: Some("run-ordered-fail-fast".to_string()),
             current_diff: String::new(),
-            require_review_form: false,
             review_form: None,
             metadata: Value::Null,
         });
@@ -1572,7 +1495,6 @@ mod tests {
             max_attempts: 3,
             source_run_id: Some("run-provider-policy".to_string()),
             current_diff: "diff --git a/src/lib.rs b/src/lib.rs".to_string(),
-            require_review_form: false,
             review_form: None,
             metadata: Value::Null,
         });
@@ -1608,7 +1530,6 @@ mod tests {
             max_attempts: 3,
             source_run_id: Some("run-first-failure".to_string()),
             current_diff: String::new(),
-            require_review_form: false,
             review_form: None,
             metadata: Value::Null,
         });
@@ -1640,7 +1561,6 @@ mod tests {
             max_attempts: 2,
             source_run_id: Some("run-3676".to_string()),
             current_diff: String::new(),
-            require_review_form: false,
             review_form: None,
             metadata: Value::Null,
         });
@@ -1663,7 +1583,6 @@ mod tests {
             max_attempts: 3,
             source_run_id: None,
             current_diff: String::new(),
-            require_review_form: false,
             review_form: None,
             metadata: Value::Null,
         });
@@ -1709,7 +1628,6 @@ mod tests {
             max_attempts: 3,
             source_run_id: Some("run-shell-rejected".to_string()),
             current_diff: String::new(),
-            require_review_form: false,
             review_form: None,
             metadata: Value::Null,
         });
@@ -1743,7 +1661,6 @@ mod tests {
             max_attempts: 3,
             source_run_id: Some("run-inherited".to_string()),
             current_diff: String::new(),
-            require_review_form: false,
             review_form: None,
             metadata: Value::Null,
         });
@@ -1765,7 +1682,6 @@ mod tests {
             max_attempts: 3,
             source_run_id: Some("run-regression".to_string()),
             current_diff: String::new(),
-            require_review_form: false,
             review_form: None,
             metadata: Value::Null,
         });
@@ -1785,7 +1701,6 @@ mod tests {
             max_attempts: 3,
             source_run_id: Some("run-baseline-only".to_string()),
             current_diff: String::new(),
-            require_review_form: false,
             review_form: None,
             metadata: Value::Null,
         });
@@ -1804,7 +1719,6 @@ mod tests {
             max_attempts: 3,
             source_run_id: Some("run-true-pass".to_string()),
             current_diff: String::new(),
-            require_review_form: false,
             review_form: None,
             metadata: Value::Null,
         });
@@ -1824,7 +1738,6 @@ mod tests {
             max_attempts: 3,
             source_run_id: Some("run-4324".to_string()),
             current_diff: String::new(),
-            require_review_form: false,
             review_form: None,
             metadata: Value::Null,
         });
@@ -1851,7 +1764,6 @@ mod tests {
             max_attempts: 3,
             source_run_id: Some("run-intentional-no-change".to_string()),
             current_diff: String::new(),
-            require_review_form: false,
             review_form: None,
             metadata: json!({
                 "intentional_no_change": {
@@ -1901,7 +1813,6 @@ mod tests {
             max_attempts: 1,
             source_run_id: Some("run-verified-no-op".to_string()),
             current_diff: String::new(),
-            require_review_form: true,
             review_form: None,
             metadata: Value::Null,
         });
@@ -1923,7 +1834,6 @@ mod tests {
             max_attempts: 1,
             source_run_id: Some("run-failed-no-op".to_string()),
             current_diff: String::new(),
-            require_review_form: false,
             review_form: None,
             metadata: Value::Null,
         });
@@ -1942,7 +1852,6 @@ mod tests {
             max_attempts: 3,
             source_run_id: Some(run),
             current_diff: String::new(),
-            require_review_form: true,
             review_form: None,
             metadata: Value::Null,
         };
@@ -2001,7 +1910,6 @@ mod tests {
             max_attempts: 3,
             source_run_id: Some("run-template-base".to_string()),
             current_diff: String::new(),
-            require_review_form: true,
             review_form: None,
             metadata: Value::Null,
         };
@@ -2056,7 +1964,6 @@ mod tests {
             max_attempts: 3,
             source_run_id: Some(format!("run-unchanged-{attempt}")),
             current_diff: String::new(),
-            require_review_form: true,
             review_form: None,
             metadata: Value::Null,
         };
@@ -2092,7 +1999,6 @@ mod tests {
             max_attempts: 3,
             source_run_id: Some("run-review".to_string()),
             current_diff: String::new(),
-            require_review_form: false,
             review_form: None,
             metadata: Value::Null,
         });
@@ -2111,7 +2017,6 @@ mod tests {
             max_attempts: 3,
             source_run_id: Some("run-reviewed".to_string()),
             current_diff: String::new(),
-            require_review_form: false,
             review_form: None,
             metadata: Value::Null,
         });
@@ -2137,7 +2042,6 @@ mod tests {
             max_attempts: 3,
             source_run_id: Some("run-4327".to_string()),
             current_diff: String::new(),
-            require_review_form: false,
             review_form: None,
             metadata: Value::Null,
         });
@@ -2165,7 +2069,6 @@ mod tests {
             max_attempts: 3,
             source_run_id: Some("run-3688".to_string()),
             current_diff: String::new(),
-            require_review_form: false,
             review_form: None,
             metadata: Value::Null,
         });
@@ -2290,7 +2193,6 @@ mod tests {
             max_attempts: 3,
             source_run_id: None,
             current_diff: String::new(),
-            require_review_form: false,
             review_form: None,
             metadata: json!({"previous_failure_set": previous_failure_set}),
         };
@@ -2331,7 +2233,6 @@ mod tests {
             max_attempts: 3,
             source_run_id: Some("run-regression".to_string()),
             current_diff: String::new(),
-            require_review_form: false,
             review_form: None,
             metadata: json!({"previous_failure_set": ["gate-previous"]}),
         });
@@ -2403,7 +2304,6 @@ mod tests {
             max_attempts: 3,
             source_run_id: Some("run-3688".to_string()),
             current_diff: String::new(),
-            require_review_form: false,
             review_form: None,
             metadata: Value::Null,
         });
@@ -2438,7 +2338,6 @@ mod tests {
             max_attempts: 3,
             source_run_id: Some("run-3688".to_string()),
             current_diff: String::new(),
-            require_review_form: false,
             review_form: None,
             metadata: Value::Null,
         });
@@ -2462,20 +2361,6 @@ mod tests {
     }
 
     #[test]
-    fn review_form_timeout_is_configurable_but_capped() {
-        assert_eq!(review_form_timeout_ms(&source_request()), 300_000);
-
-        let mut request = source_request();
-        request.metadata = json!({
-            "cook_loop": { "review_form_timeout_ms": MAX_REVIEW_FORM_TIMEOUT_MS + 1 }
-        });
-        assert_eq!(review_form_timeout_ms(&request), 600_000);
-
-        request.metadata["cook_loop"]["review_form_timeout_ms"] = json!(5_000);
-        assert_eq!(review_form_timeout_ms(&request), 5_000);
-    }
-
-    #[test]
     fn green_change_with_valid_review_form_completes() {
         let report = evaluate_cook_loop(AgentTaskCookLoopOptions {
             source_request: source_request(),
@@ -2487,7 +2372,6 @@ mod tests {
             max_attempts: 3,
             source_run_id: Some("run-form-2".to_string()),
             current_diff: String::new(),
-            require_review_form: true,
             review_form: Some(valid_review_form()),
             metadata: Value::Null,
         });
@@ -2513,7 +2397,6 @@ mod tests {
             max_attempts: 3,
             source_run_id: Some("run-form-incomplete".to_string()),
             current_diff: String::new(),
-            require_review_form: true,
             review_form: Some(form),
             metadata: Value::Null,
         });
@@ -2537,7 +2420,6 @@ mod tests {
             max_attempts: 3,
             source_run_id: Some("run-form-gate".to_string()),
             current_diff: String::new(),
-            require_review_form: true,
             review_form: None,
             metadata: Value::Null,
         });
@@ -2547,28 +2429,6 @@ mod tests {
             request.metadata["cook_loop"]["kind"],
             "deterministic-gate-feedback"
         );
-        assert!(request.inputs["cook_loop"]["review_form_required"].is_null());
-    }
-
-    #[test]
-    fn review_form_not_required_completes_green_without_a_form() {
-        let report = evaluate_cook_loop(AgentTaskCookLoopOptions {
-            source_request: source_request(),
-            promotion_report: promotion_report(
-                AgentTaskPromotionStatus::Applied,
-                vec![green_gate()],
-            ),
-            attempt: 1,
-            max_attempts: 3,
-            source_run_id: Some("run-form-5".to_string()),
-            current_diff: String::new(),
-            require_review_form: false,
-            review_form: None,
-            metadata: Value::Null,
-        });
-
-        assert_eq!(report.status, AgentTaskCookLoopStatus::GreenCompleted);
-        assert!(report.follow_up_request.is_none());
     }
 
     /// #14731: a deferred gate is control-plane evidence, not a candidate
@@ -2589,7 +2449,6 @@ mod tests {
             max_attempts: 3,
             source_run_id: Some("run-deferred-1".to_string()),
             current_diff: String::new(),
-            require_review_form: false,
             review_form: None,
             metadata: Value::Null,
         });
@@ -2638,7 +2497,6 @@ mod tests {
                 max_attempts,
                 source_run_id: Some("run-lab-transport".to_string()),
                 current_diff: String::new(),
-                require_review_form: false,
                 review_form: None,
                 metadata: Value::Null,
             });

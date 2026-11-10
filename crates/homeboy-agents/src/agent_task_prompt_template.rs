@@ -29,8 +29,6 @@ pub(crate) enum PromptPurpose {
     FollowUp,
     /// A retry after an attempt that changed no files.
     NoChange,
-    /// An attempt whose remaining work is the review form.
-    ReviewForm,
 }
 
 impl PromptPurpose {
@@ -39,7 +37,6 @@ impl PromptPurpose {
             Self::Attempt => "attempt",
             Self::FollowUp => "follow_up",
             Self::NoChange => "no_change",
-            Self::ReviewForm => "review_form",
         }
     }
 }

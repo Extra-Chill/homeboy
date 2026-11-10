@@ -142,7 +142,6 @@ pub(super) fn continuation_args(
         cook_or_attempt_id: run_id.to_string(),
         rearm,
         timeout_ms: overrides.timeout_ms,
-        review_form_timeout_ms: overrides.review_form_timeout_ms,
         backend: overrides.backend.clone(),
         selector: overrides.selector.clone(),
         model: overrides.model.clone(),
@@ -363,7 +362,6 @@ mod tests {
         for rejected in [
             vec!["--preflight", "--timeout-ms", "1000"],
             vec!["--artifact-id", "patch-a", "--timeout-ms", "1000"],
-            vec!["--timeout-ms", "1000", "--review-form-timeout-ms", "1000"],
             vec!["--preflight", "--model", "m"],
             vec!["--acknowledge-model-override"],
         ] {

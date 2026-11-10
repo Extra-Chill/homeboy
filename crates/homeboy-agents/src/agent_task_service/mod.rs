@@ -79,7 +79,7 @@ pub use cook_recovery::{
     with_store_contention_backoff, CookPublishRequest, CookRecoveryOverrides,
     CookRecoveryPerformer, CookRecoveryPlan, CookRecoveryReport, CookRecoveryRequest,
     CookRecoveryStep, CookReplaceGatesRequest, CookReplacementProof, COOK_RECOVERY_SCHEMA,
-    REVIEW_FORM_MISSING, STORE_BUSY_CODE,
+    STORE_BUSY_CODE,
 };
 pub(crate) use cook_recovery::{cook_recovery_status, incomplete_review_recovery_command};
 

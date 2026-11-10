@@ -33,11 +33,7 @@ impl ExecutionBudgetUsage {
 
 /// The provider-backed portion of a Cook's retry policy. Cook attempts are
 /// orchestration slots; every remediation that reaches a provider also needs a
-/// total execution slot and, for gate and review-form fixes, a same-provider
-/// retry slot. Provider rotation is not a substitute for a form-only retry.
-/// Read-only review-form executions still invoke a provider. Fresh reviews use
-/// the distinct, bounded `FreshCookReview` scope below rather than consuming
-/// the coding/remediation pool or inheriting its timeout.
+/// total execution slot and, for gate fixes, a same-provider retry slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EffectiveCookBudget {
     pub requested_attempts: u32,

@@ -171,11 +171,7 @@
           }
         },
         "timeouts": {
-          "provider_timeout_ms": 1200000,
-          "review_form_provider_budget_is_distinct": true,
-          "review_form_provider_budget_scope": "fresh_cook_review",
-          "review_form_timeout_cap_ms": 600000,
-          "review_form_timeout_ms": 300000
+          "provider_timeout_ms": 1200000
         },
         "truncated": {
           "max_provider_rotations": 0
