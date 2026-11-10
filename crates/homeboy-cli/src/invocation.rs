@@ -60,8 +60,16 @@ pub(crate) fn finish(exit: std::process::ExitCode) {
         row.exit_code = (0..=255)
             .find(|code| exit == std::process::ExitCode::from(*code as u8))
             .unwrap_or(1);
+        // Telemetry appends to an existing run store and never creates Homeboy
+        // state: a preview or rejected command on a fresh home stays read-only.
+        let Ok(path) = homeboy::core::observation::store::database_path() else {
+            return;
+        };
+        if !path.exists() {
+            return;
+        }
         if let Ok(store) =
-            homeboy::core::observation::ObservationStore::open_initialized_for_lifecycle()
+            homeboy::core::observation::ObservationStore::open_initialized_for_lifecycle_at(path)
         {
             let _ = store.record_invocation(
                 &row,
