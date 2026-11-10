@@ -545,13 +545,21 @@ pub(super) fn read_durable_store_readonly(path: &Path) -> Result<Option<DurableJ
     Ok(Some(load_sql_store(&connection, path)?.0))
 }
 
+/// Non-terminal job bodies through the `active` index. The daemon lifetime
+/// monitor reads this every second.
+pub(crate) const ACTIVE_JOBS_QUERY: &str = "SELECT body FROM daemon_jobs WHERE active = 1";
+
+/// Undelivered step terminals of one daemon scope, through the pending-only
+/// partial index. The daemon lifetime monitor reads this every second.
+pub(crate) const PENDING_STEP_DELIVERY_COUNT_QUERY: &str = "SELECT COUNT(*) FROM step_terminal_deliveries WHERE receipt IS NULL AND (CASE WHEN json_valid(payload) THEN json_extract(payload, '$.daemon_scope') END) IS ?1";
+
 /// Non-terminal jobs, read without events and without initializing the store.
 pub(super) fn read_active_jobs_readonly(path: &Path) -> Result<Option<Vec<StoredJob>>> {
     let Some(connection) = open_sql_store_readonly(path)? else {
         return Ok(None);
     };
     let mut statement = connection
-        .prepare("SELECT body FROM daemon_jobs WHERE active = 1")
+        .prepare(ACTIVE_JOBS_QUERY)
         .map_err(|error| store_error(path, "read active daemon jobs", error))?;
     let rows = statement
         .query_map([], |row| row.get::<_, String>(0))
@@ -614,7 +622,7 @@ pub(super) fn pending_step_delivery_count_readonly(
     };
     connection
         .query_row(
-            "SELECT COUNT(*) FROM step_terminal_deliveries WHERE receipt IS NULL AND (CASE WHEN json_valid(payload) THEN json_extract(payload, '$.daemon_scope') END) IS ?1",
+            PENDING_STEP_DELIVERY_COUNT_QUERY,
             [daemon_scope.map(DaemonScope::as_str)],
             |row| row.get(0),
         )

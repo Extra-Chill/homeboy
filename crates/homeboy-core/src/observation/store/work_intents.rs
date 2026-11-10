@@ -9,6 +9,9 @@ use serde_json::Value;
 use super::{sqlite_error, ObservationStore};
 use crate::{Error, Result};
 
+/// The oldest due pending intent, through the pending-only partial index.
+pub(super) const NEXT_PENDING_WORK_INTENT_QUERY: &str = "SELECT id, run_id, kind, version, payload_json FROM control_plane_work_intents WHERE state = 'pending' AND next_attempt_ms <= ?1 ORDER BY created_at, id LIMIT 1";
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkIntent {
     pub id: String,
@@ -111,11 +114,15 @@ impl ObservationStore {
     pub fn next_pending_work_intent(&self, now_ms: u64) -> Result<Option<WorkIntent>> {
         let row: Option<(String, String, String, u32, String)> = self
             .connection
-            .query_row(
-                "SELECT id, run_id, kind, version, payload_json FROM control_plane_work_intents WHERE state = 'pending' AND next_attempt_ms <= ?1 ORDER BY created_at, id LIMIT 1",
-                [now_ms as i64],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
-            )
+            .query_row(NEXT_PENDING_WORK_INTENT_QUERY, [now_ms as i64], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            })
             .optional()
             .map_err(|error| self.read_error("read pending work intent", error))?;
         row.map(|(id, run_id, kind, version, payload)| {

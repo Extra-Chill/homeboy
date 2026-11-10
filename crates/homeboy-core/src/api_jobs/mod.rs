@@ -3,6 +3,8 @@ pub(crate) mod persistence;
 mod remote_runner;
 mod runner_job_preparation;
 mod sql_store;
+#[cfg(test)]
+pub(crate) use sql_store::{ACTIVE_JOBS_QUERY, PENDING_STEP_DELIVERY_COUNT_QUERY};
 mod store;
 mod summary;
 mod types;
