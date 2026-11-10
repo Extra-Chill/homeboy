@@ -84,6 +84,55 @@ fn validate_plan_reports_invalid_input_without_creating_a_lifecycle_record() {
     });
 }
 
+/// #17812: an unmaterialized Cook's ID is its own exact attempt, so an
+/// explicit `retry --force` of it retries that attempt instead of refusing
+/// with "pass the exact attempt `<the same id>`".
+#[test]
+fn explicit_retry_of_an_unmaterialized_cook_is_not_refused_toward_itself() {
+    with_isolated_home(|_| {
+        let cook_id = "cook-cli-unmaterialized-force-retry";
+        let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment().unwrap();
+        agent_task_lifecycle::record_unmaterialized_cook_admission_in_store(
+            &store,
+            cook_id,
+            json!({ "admission_inputs": { "argv": ["homeboy", "agent-task", "cook"] } }),
+            "queued",
+            "eligible",
+        )
+        .expect("admission");
+        store
+            .transition(
+                cook_id,
+                store.read_record(cook_id).unwrap().revision,
+                homeboy::agents::agent_task_lifecycle::AgentTaskTransition::Terminate {
+                    outcome:
+                        homeboy::agents::agent_task_lifecycle::AgentTaskTerminalOutcome::Failed,
+                    metadata: serde_json::Map::new(),
+                },
+            )
+            .unwrap();
+        let plan = homeboy::agents::agent_task_service::cook_recovery_delegation(cook_id)
+            .expect("the failed admission is delegated to recover");
+        assert_eq!(plan.run_id, cook_id);
+
+        let outcome = super::super::run::retry(super::super::RetryArgs {
+            run_id: cook_id.to_string(),
+            new_run_id: None,
+            run: false,
+            force: true,
+            idempotency_key: None,
+        });
+
+        if let Err(error) = outcome {
+            assert!(
+                !error.message.contains("pass the exact attempt"),
+                "retry --force refused toward its own id: {}",
+                error.message
+            );
+        }
+    });
+}
+
 #[test]
 fn admission_failure_is_visible_in_status_and_diagnose_without_provider_evidence() {
     with_isolated_home(|_| {
