@@ -69,7 +69,7 @@ pub struct CookDelivery {
     pub publication: Option<CookDeliveryPublication>,
     #[serde(default)]
     pub base_movements: u32,
-    /// Present exactly when `state` is [`CookDeliveryState::Blocked`].
+    /// Why delivery stopped, retained when a blocked candidate is published as a draft.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocker: Option<CookDeliveryBlocker>,
 }
@@ -391,7 +391,10 @@ impl CookDelivery {
 
         let blocked = |blocker: CookDeliveryBlocker| (CookDeliveryState::Blocked, Some(blocker));
         let (state, blocker) = if publication.as_ref().is_some_and(|p| p.published) {
-            (CookDeliveryState::Published, None)
+            (
+                CookDeliveryState::Published,
+                recorded.and_then(|delivery| delivery.blocker.clone()),
+            )
         } else if finalization.is_some_and(is_no_change_receipt) {
             (CookDeliveryState::NoChange, None)
         } else if matches!(
@@ -898,6 +901,30 @@ impl<'a> CookDeliveryContext<'a, '_> {
             blocker,
             base_movements,
         )?;
+        if code == CookDeliveryBlockerCode::BaseConflict && !self.options.finalization.no_finalize {
+            let record = self.lifecycle_store.read_record(self.run_id)?;
+            if let Some(promotion) = super::recorded_promotion_report(&record.metadata)? {
+                let promotion: AgentTaskPromotionReport = serde_json::from_value(promotion)
+                    .map_err(|error| Error::internal_json(error.to_string(), None))?;
+                if promotion.status == AgentTaskPromotionStatus::Applied {
+                    let finalization = self.side_effects.finalize(
+                        self.lifecycle_store,
+                        self.options,
+                        self.run_id,
+                        &promotion,
+                    )?;
+                    let (status, published) = publication_status(&finalization);
+                    if published {
+                        return Ok(ControlFlow::Break(self.report(
+                            &status,
+                            Some(finalization),
+                            Some(&stop_reason),
+                            0,
+                        )));
+                    }
+                }
+            }
+        }
         let status = CookStatus::Blocked;
         Ok(ControlFlow::Break(self.report(
             status.as_str(),

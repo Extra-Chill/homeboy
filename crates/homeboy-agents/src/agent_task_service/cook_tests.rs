@@ -3440,14 +3440,18 @@ fn moved_base_rebase_conflict_blocks_with_paths_and_no_continuation() {
                         paths: vec!["src/lib.rs".to_string()],
                     })
                 },
-                |_, _: &_, _: &_, _: &_| panic!("a conflicting candidate must not finalize"),
+                |store, _: &_, run_id, _: &_| {
+                    let value = serde_json::json!({"status":"draft_published", "pr_number":1});
+                    store.record_cook_finalization(run_id, value.clone())?;
+                    Ok(value)
+                },
             )),
             ..CookContext::new(options, Arc::new(UnusedExecutor))
         })
         .unwrap();
 
-        assert_eq!(report.value.status, "blocked");
-        assert_eq!(report.exit_code, 1);
+        assert_eq!(report.value.status, "draft_published");
+        assert_eq!(report.exit_code, 0);
         assert!(report
             .value
             .stop_reason
@@ -3537,17 +3541,21 @@ fn moved_base_budget_exhaustion_blocks_with_base_conflict() {
                         promotion: rebased_onto(promotion, "moved-base"),
                     })
                 },
-                move |_, _: &_, _: &_, _: &_| {
-                    finalizations_seen.fetch_add(1, Ordering::SeqCst);
-                    Err(behind_base_error())
+                move |store, _: &_, run_id, _: &_| {
+                    if finalizations_seen.fetch_add(1, Ordering::SeqCst) < 3 {
+                        return Err(behind_base_error());
+                    }
+                    let value = serde_json::json!({"status":"draft_published", "pr_number":1});
+                    store.record_cook_finalization(run_id, value.clone())?;
+                    Ok(value)
                 },
             )),
             ..CookContext::new(options, Arc::new(UnusedExecutor))
         })
         .unwrap();
 
-        assert_eq!(report.value.status, "blocked");
-        assert_eq!(finalizations.load(Ordering::SeqCst), 3);
+        assert_eq!(report.value.status, "draft_published");
+        assert_eq!(finalizations.load(Ordering::SeqCst), 4);
         assert_eq!(
             report.value.stop_reason.as_deref(),
             Some(
@@ -3812,10 +3820,9 @@ fn moved_base_catch_up_rebases_real_owned_candidate_and_refuses_divergence() {
     exercise_real_git_base_advance(false, false, false);
 }
 
-/// With no remediation budget left, a base conflict still ends the Cook as a
-/// typed `base_conflict` blocker without publication.
+/// Exhausted remediation publishes the gated commit while retaining conflict paths.
 #[test]
-fn moved_base_conflict_stops_real_git_cook_without_publication() {
+fn moved_base_conflict_publishes_real_git_candidate_as_draft() {
     exercise_real_git_base_advance(true, false, false);
 }
 
@@ -3828,7 +3835,7 @@ fn cook_delivery_base_conflict_dispatches_remediation_with_paths_and_base_change
 }
 
 #[test]
-fn rewritten_base_stops_real_git_cook_without_publication() {
+fn rewritten_base_publishes_real_git_candidate_as_draft() {
     exercise_real_git_base_advance(false, true, false);
 }
 
@@ -4032,6 +4039,21 @@ fn exercise_real_git_base_advance(conflicting: bool, rewritten: bool, remediate:
             }))
             .unwrap();
         let mut applied = applied;
+        applied.candidate_ref = Some(candidate_sha.clone());
+        let checkout = serde_json::json!({
+            "schema": "homeboy/agent-task-gate-candidate-checkout/v2",
+            "commit": candidate_sha,
+            "tree": candidate_tree,
+        });
+        applied.deterministic_gates[0].candidate_checkout =
+            Some(serde_json::from_value(checkout).unwrap());
+        applied.provenance["candidate_checkout"] = serde_json::to_value(
+            applied.deterministic_gates[0]
+                .candidate_checkout
+                .as_ref()
+                .unwrap(),
+        )
+        .unwrap();
         if remediate {
             // A remediation starts from the immutable candidate commit.
             applied.target.head = Some(verified_base.clone());
@@ -4111,14 +4133,40 @@ fn exercise_real_git_base_advance(conflicting: bool, rewritten: bool, remediate:
             return;
         }
         if conflicting || rewritten {
+            let mut backend = CaptureBackend::default();
             let report = run_cook(CookContext {
-                side_effects: Some(CookSideEffects::new(|_, _, _, _| {
-                    panic!("conflicting candidate must never be published")
+                side_effects: Some(CookSideEffects::new(|_, options, run_id, promotion| {
+                    finalize_or_load_cook_pr_with_backend(options, run_id, promotion, &mut backend)
                 })),
                 ..CookContext::new(options.clone(), Arc::new(UnusedExecutor))
             })
             .unwrap();
-            assert_eq!(report.value.status, "blocked");
+            assert_eq!(
+                report.value.status, "draft_published",
+                "{:#?}",
+                report.value
+            );
+            assert_eq!(backend.pushed_sha.as_deref(), Some(candidate_sha.as_str()));
+            assert!(backend.draft);
+            assert!(!backend.committed);
+            let delivery = delivery_of(run_id);
+            assert_eq!(
+                delivery.state,
+                crate::agent_task_service::CookDeliveryState::Published
+            );
+            let blocker = delivery.blocker.expect("retained base conflict");
+            assert_eq!(
+                blocker.code,
+                crate::agent_task_service::CookDeliveryBlockerCode::BaseConflict
+            );
+            assert_eq!(
+                blocker.paths,
+                if conflicting {
+                    vec!["src/lib.rs".to_string()]
+                } else {
+                    vec![]
+                }
+            );
             assert!(report
                 .value
                 .stop_reason
