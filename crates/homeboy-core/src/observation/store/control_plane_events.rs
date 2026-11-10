@@ -26,6 +26,10 @@ pub const DURABLE_CONTROL_PLANE_EVENT_KINDS: [&str; 3] =
 /// its gate, publish and terminal owners, which must still fit (#16443).
 pub const PHASE_REPORT_RETENTION_LIMIT: u64 = 1024;
 
+/// The next event sequence of one run, read from that run's own index range.
+pub(super) const NEXT_EVENT_SEQUENCE_QUERY: &str =
+    "SELECT COALESCE(MAX(sequence), 0) + 1 FROM control_plane_event_appends WHERE run_id = ?1";
+
 pub fn is_durable_control_plane_event_kind(kind: &str) -> bool {
     DURABLE_CONTROL_PLANE_EVENT_KINDS.contains(&kind)
 }
@@ -281,7 +285,9 @@ pub(crate) fn append_control_plane_event_on(
         validate_stored_event(run, &event_id, sequence, &event)?;
         return Ok(event);
     }
-    let sequence: u64 = connection.query_row("SELECT COALESCE(MAX(sequence), 0) + 1 FROM control_plane_event_appends WHERE run_id = ?1", [run.as_str()], |row| row.get(0)).map_err(sqlite_error("allocate control-plane event sequence"))?;
+    let sequence: u64 = connection
+        .query_row(NEXT_EVENT_SEQUENCE_QUERY, [run.as_str()], |row| row.get(0))
+        .map_err(sqlite_error("allocate control-plane event sequence"))?;
     let event = ControlPlaneEvent {
         schema: CONTROL_PLANE_EVENT_SCHEMA.to_string(),
         event: EventId::new(format!("{}:event:{sequence}", run.as_str())).map_err(|error| {

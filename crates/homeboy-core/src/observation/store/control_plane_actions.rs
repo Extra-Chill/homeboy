@@ -51,6 +51,21 @@ pub enum ControlPlaneEffectAdmission {
     Duplicate(ControlPlaneEffectStatus),
 }
 
+/// Resolve a resource by alias first, then by canonical id.
+///
+/// A movable alias and a canonical id can name the same string: a detached
+/// Cook publishes its handoff parent under the Cook id and aliases that id onto
+/// the latest attempt. The alias is the Cook contract, so it wins. Both steps
+/// are primary-key lookups. The former `LEFT JOIN ... (id = ? OR alias = ?)`
+/// walked every resource of the type, one per historical run, on each durable
+/// record read (#17760).
+pub(super) const RESOURCE_PROJECTION_QUERY: &str = "SELECT r.resource_id, r.version, r.state, r.eligibility_json, r.provenance_json FROM control_plane_resources r WHERE r.resource_type = ?1 AND r.resource_id = COALESCE((SELECT a.resource_id FROM control_plane_resource_aliases a WHERE a.resource_type = ?1 AND a.alias = ?2), ?2)";
+
+/// The aliases of one canonical resource. `INDEXED BY` is load-bearing: to
+/// satisfy `ORDER BY alias` the planner otherwise walks the primary key over
+/// every alias of the resource type (#17760).
+pub(super) const RESOURCE_ALIASES_QUERY: &str = "SELECT alias FROM control_plane_resource_aliases INDEXED BY idx_control_plane_resource_aliases_target WHERE resource_type = ?1 AND resource_id = ?2 ORDER BY alias";
+
 impl ObservationStore {
     /// Repair the pre-release migration state where an already-recorded schema
     /// version omitted the resource authority tables. Normal initialization
@@ -210,9 +225,12 @@ impl ObservationStore {
         let Some((version, state, eligibility, provenance)) = row else {
             return Ok(None);
         };
-        let mut statement = self.connection.prepare(
-            "SELECT alias FROM control_plane_resource_aliases WHERE resource_type = ?1 AND resource_id = ?2 ORDER BY alias",
-        ).map_err(|error| self.read_error("prepare exact control-plane resource aliases", error))?;
+        let mut statement = self
+            .connection
+            .prepare(RESOURCE_ALIASES_QUERY)
+            .map_err(|error| {
+                self.read_error("prepare exact control-plane resource aliases", error)
+            })?;
         let aliases: Vec<String> = statement
             .query_map(params![resource_type, resource_id], |row| row.get(0))
             .map_err(|error| self.read_error("read exact control-plane resource aliases", error))?
@@ -242,23 +260,30 @@ impl ObservationStore {
         if !self.control_plane_resource_authority_readable()? {
             return Ok(None);
         }
-        let row: Option<(String, String, String, String, String)> = self.connection.query_row(
-            // A movable alias and a canonical id can name the same string: a
-            // detached Cook publishes its handoff parent under the Cook id and
-            // aliases that id onto the latest attempt. The alias is the Cook
-            // contract, so resolve it first and keep the answer deterministic
-            // instead of returning whichever row the scan reached first.
-            "SELECT r.resource_id, r.version, r.state, r.eligibility_json, r.provenance_json FROM control_plane_resources r LEFT JOIN control_plane_resource_aliases a ON a.resource_type = r.resource_type AND a.resource_id = r.resource_id WHERE r.resource_type = ?1 AND (r.resource_id = ?2 OR a.alias = ?2) ORDER BY CASE WHEN a.alias = ?2 THEN 0 ELSE 1 END, r.resource_id LIMIT 1",
-            params![resource_type, id_or_alias],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
-        ).optional().map_err(|error| self.read_error("read control-plane resource projection", error))?;
+        let row: Option<(String, String, String, String, String)> = self
+            .connection
+            .query_row(
+                RESOURCE_PROJECTION_QUERY,
+                params![resource_type, id_or_alias],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|error| self.read_error("read control-plane resource projection", error))?;
         row.map(|(resource_id, version, state, eligibility, provenance)| {
             Ok(ControlPlaneResourceProjection {
                 resource_type: resource_type.to_string(),
+                aliases: self.resource_aliases(resource_type, &resource_id)?,
                 resource_id,
                 version,
                 state,
-                aliases: self.resource_aliases(resource_type, id_or_alias)?,
                 eligibility: serde_json::from_str(&eligibility)
                     .map_err(|e| Error::internal_json(e.to_string(), None))?,
                 provenance: serde_json::from_str(&provenance)
@@ -268,12 +293,13 @@ impl ObservationStore {
         .transpose()
     }
 
-    fn resource_aliases(&self, resource_type: &str, id_or_alias: &str) -> Result<Vec<String>> {
-        let mut statement = self.connection.prepare(
-            "SELECT a.alias FROM control_plane_resource_aliases a JOIN control_plane_resources r ON r.resource_type = a.resource_type AND r.resource_id = a.resource_id WHERE a.resource_type = ?1 AND r.resource_id = COALESCE((SELECT resource_id FROM control_plane_resource_aliases WHERE resource_type = ?1 AND alias = ?2), ?2) ORDER BY a.alias"
-        ).map_err(|error| self.read_error("prepare control-plane resource aliases", error))?;
+    fn resource_aliases(&self, resource_type: &str, resource_id: &str) -> Result<Vec<String>> {
+        let mut statement = self
+            .connection
+            .prepare(RESOURCE_ALIASES_QUERY)
+            .map_err(|error| self.read_error("prepare control-plane resource aliases", error))?;
         let aliases = statement
-            .query_map(params![resource_type, id_or_alias], |row| row.get(0))
+            .query_map(params![resource_type, resource_id], |row| row.get(0))
             .map_err(|error| self.read_error("read control-plane resource aliases", error))?
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(|error| self.read_error("decode control-plane resource aliases", error))?;

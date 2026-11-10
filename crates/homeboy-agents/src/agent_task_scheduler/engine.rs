@@ -1,7 +1,6 @@
 use homeboy_engine_primitives::content_hash;
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -10,6 +9,9 @@ use crate::agent_task_service::DerivedCookBaselineCapability;
 
 use super::scheduling::UsageCapSkip;
 use super::*;
+
+/// How often a running plan re-reads its own durable record for cancellation.
+const DURABLE_CANCELLATION_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Authoritative execution adapter consumed by the agent-task scheduler.
 ///
@@ -254,33 +256,39 @@ impl AgentTaskScheduler {
             cancellation,
             derived_cook_baseline,
         );
-        if let Some((stopped, watcher)) = watcher {
-            stopped.store(true, Ordering::SeqCst);
+        if let Some((stop, watcher)) = watcher {
+            drop(stop);
             let _ = watcher.join();
         }
         aggregate
     }
 
+    /// Bridge a durable cancellation into the in-process token. The watcher
+    /// reads only this run's own record, once per
+    /// [`DURABLE_CANCELLATION_POLL_INTERVAL`]: it runs for the provider's whole
+    /// lifetime, and a 25 ms poll made every idle run-plan re-read the store
+    /// continuously (#17760). Dropping the returned sender stops it at once.
     fn durable_cancellation_watcher(
         &self,
         cancellation: &AgentTaskCancellationToken,
-    ) -> Option<(Arc<AtomicBool>, thread::JoinHandle<()>)> {
+    ) -> Option<(mpsc::Sender<()>, thread::JoinHandle<()>)> {
         let run_id = self.run_id.clone()?;
         let store = self.durable_lifecycle_store().ok()?.clone();
-        let stopped = Arc::new(AtomicBool::new(false));
-        let watcher_stopped = Arc::clone(&stopped);
+        let (stop, stopped) = mpsc::channel::<()>();
         let watcher_cancellation = cancellation.clone();
         Some((
-            stopped,
-            thread::spawn(move || {
-                while !watcher_stopped.load(Ordering::SeqCst) {
-                    if store.read_record(&run_id).is_ok_and(|record| {
-                        record.state() == crate::agent_task_lifecycle::AgentTaskRunState::Cancelled
-                    }) {
-                        watcher_cancellation.cancel();
-                        return;
-                    }
-                    thread::sleep(Duration::from_millis(25));
+            stop,
+            thread::spawn(move || loop {
+                if store.read_record(&run_id).is_ok_and(|record| {
+                    record.state() == crate::agent_task_lifecycle::AgentTaskRunState::Cancelled
+                }) {
+                    watcher_cancellation.cancel();
+                    return;
+                }
+                if stopped.recv_timeout(DURABLE_CANCELLATION_POLL_INTERVAL)
+                    != Err(mpsc::RecvTimeoutError::Timeout)
+                {
+                    return;
                 }
             }),
         ))

@@ -57,6 +57,24 @@ const PENDING_UNMATERIALIZED_COOK_ADMISSION_QUERY: &str = r#"
     )
 "#;
 
+/// One run by its primary key.
+const GET_RUN_QUERY: &str = r#"
+    SELECT id, kind, component_id, started_at, finished_at, status, command, cwd,
+           homeboy_version, git_sha, rig_id, metadata_json
+    FROM runs
+    WHERE id = ?1
+"#;
+
+/// Running runs, newest first, through the status index.
+const ACTIVE_RUNS_QUERY: &str = r#"
+    SELECT id, kind, component_id, started_at, finished_at, status, command, cwd,
+           homeboy_version, git_sha, rig_id, metadata_json
+    FROM runs
+    WHERE status = ?1
+    ORDER BY started_at DESC, id DESC
+    LIMIT ?2
+"#;
+
 /// Turn a probe read of `limit + 1` rows into a page plus its resume position.
 ///
 /// The extra row is the whole mechanism: it is the difference between "the
@@ -1510,16 +1528,7 @@ impl ObservationStore {
     pub fn get_run(&self, run_id: &str) -> Result<Option<RunRecord>> {
         validate_required("run_id", run_id)?;
         self.connection
-            .query_row(
-                r#"
-                SELECT id, kind, component_id, started_at, finished_at, status, command, cwd,
-                       homeboy_version, git_sha, rig_id, metadata_json
-                FROM runs
-                WHERE id = ?1
-                "#,
-                [run_id],
-                row_to_run_record,
-            )
+            .query_row(GET_RUN_QUERY, [run_id], row_to_run_record)
             .optional()
             .map_err(|error| self.read_error("read run record", error))
     }
@@ -1918,16 +1927,7 @@ impl ObservationStore {
     pub fn list_active_runs_bounded(&self, limit: i64) -> Result<Vec<RunRecord>> {
         let mut statement = self
             .connection
-            .prepare(
-                r#"
-                SELECT id, kind, component_id, started_at, finished_at, status, command, cwd,
-                       homeboy_version, git_sha, rig_id, metadata_json
-                FROM runs
-                WHERE status = ?1
-                ORDER BY started_at DESC, id DESC
-                LIMIT ?2
-                "#,
-            )
+            .prepare(ACTIVE_RUNS_QUERY)
             .map_err(sqlite_error("prepare list active run records"))?;
         let rows = statement
             .query_map(
@@ -2680,6 +2680,181 @@ mod tests {
                 serde_json::json!({ "binding": {} });
             store.upsert_imported_run(&live).unwrap();
             assert!(store.has_pending_unmaterialized_cook_admission().unwrap());
+        });
+    }
+
+    /// Statements run on a periodic or supervision hot path (#17760): the
+    /// daemon lifetime monitor, work-intent delivery and reconciliation passes,
+    /// and the per-run durable reads run-plan and Cook supervision poll.
+    /// `(name, sql, parameters, live index the plan must use)`.
+    fn hot_path_statements() -> Vec<(
+        &'static str,
+        &'static str,
+        Vec<rusqlite::types::Value>,
+        &'static str,
+    )> {
+        use super::super::{control_plane_actions, control_plane_events, work_intents};
+        use rusqlite::types::Value::{Integer, Null, Text};
+        let text = |value: &str| Text(value.to_string());
+        vec![
+            (
+                "pending Cook admission",
+                PENDING_UNMATERIALIZED_COOK_ADMISSION_QUERY,
+                vec![],
+                "idx_agent_task_active_scope",
+            ),
+            (
+                "running runs",
+                ACTIVE_RUNS_QUERY,
+                vec![text("running"), Integer(1000)],
+                "idx_runs_status_started_at_desc",
+            ),
+            (
+                "run by id",
+                GET_RUN_QUERY,
+                vec![text("task-live")],
+                "sqlite_autoindex_runs_1",
+            ),
+            (
+                "resource by alias",
+                control_plane_actions::RESOURCE_PROJECTION_QUERY,
+                vec![text("agent_task_run"), text("cook-live")],
+                "sqlite_autoindex_control_plane_resources_1",
+            ),
+            (
+                "resource by id",
+                control_plane_actions::RESOURCE_PROJECTION_QUERY,
+                vec![text("agent_task_run"), text("task-live")],
+                "sqlite_autoindex_control_plane_resources_1",
+            ),
+            (
+                "resource aliases",
+                control_plane_actions::RESOURCE_ALIASES_QUERY,
+                vec![text("agent_task_run"), text("task-live")],
+                "idx_control_plane_resource_aliases_target",
+            ),
+            (
+                "next event sequence",
+                control_plane_events::NEXT_EVENT_SEQUENCE_QUERY,
+                vec![text("task-live")],
+                "idx_control_plane_event_appends_run_sequence",
+            ),
+            (
+                "next work intent",
+                work_intents::NEXT_PENDING_WORK_INTENT_QUERY,
+                vec![Integer(i64::MAX)],
+                "idx_control_plane_work_intents_pending",
+            ),
+            (
+                "active daemon jobs",
+                crate::api_jobs::ACTIVE_JOBS_QUERY,
+                vec![],
+                "daemon_jobs_active",
+            ),
+            (
+                "pending step deliveries",
+                crate::api_jobs::PENDING_STEP_DELIVERY_COUNT_QUERY,
+                vec![Null],
+                "step_terminal_deliveries_pending",
+            ),
+        ]
+    }
+
+    /// Terminal history in every table a hot-path statement reads: finished
+    /// agent-task runs with their resource, alias and events, submitted work
+    /// intents, terminal daemon jobs and delivered step terminals.
+    fn seed_hot_path_history(store: &ObservationStore, from: usize, to: usize) {
+        record_terminal_history(store, from, to);
+        for number in from..to {
+            let id = format!("history-{number}");
+            store
+                .connection
+                .execute_batch(&format!(
+                    "INSERT INTO control_plane_resources(resource_type, resource_id, version, state) VALUES ('agent_task_run', '{id}', '1', 'succeeded');
+                     INSERT INTO control_plane_resource_aliases(resource_type, alias, resource_id) VALUES ('agent_task_run', 'cook-{id}', '{id}');
+                     INSERT INTO control_plane_event_appends(run_id, idempotency_digest, request_digest, event_id, sequence, created_at) VALUES ('{id}', printf('%064d', 1), printf('%064d', 1), '{id}:1', 1, 'old');
+                     INSERT INTO control_plane_work_intents(id, run_id, kind, version, payload_json, state, created_at) VALUES ('intent-{id}', '{id}', 'test', 1, '{{}}', 'submitted', 'old');
+                     INSERT INTO daemon_jobs(job_id, status, active, created_at_ms, updated_at_ms, body) VALUES ('{id}', 'succeeded', 0, 0, 0, '{{}}');
+                     INSERT INTO step_terminal_deliveries(job_id, payload, receipt) VALUES ('{id}', '{{}}', '{{}}');"
+                ))
+                .unwrap();
+        }
+    }
+
+    /// Every hot-path statement reads cost proportional to live work: its plan
+    /// uses a live-row or per-run index with no full scan, and 10x terminal
+    /// history leaves its VM steps unchanged (#17760, #17673).
+    #[test]
+    fn hot_path_statement_cost_does_not_grow_with_history() {
+        with_isolated_home(|_| {
+            let store = ObservationStore::open_initialized().unwrap();
+            store
+                .upsert_imported_run(&scoped_run("task-live", "caller", "running", Some("repo")))
+                .unwrap();
+            store
+                .connection
+                .execute_batch(
+                    "INSERT INTO control_plane_resources(resource_type, resource_id, version, state) VALUES ('agent_task_run', 'task-live', '1', 'running');
+                     INSERT INTO control_plane_resource_aliases(resource_type, alias, resource_id) VALUES ('agent_task_run', 'cook-live', 'task-live');
+                     INSERT INTO control_plane_event_appends(run_id, idempotency_digest, request_digest, event_id, sequence, created_at) VALUES ('task-live', printf('%064d', 1), printf('%064d', 1), 'task-live:1', 1, 'now');
+                     INSERT INTO control_plane_work_intents(id, run_id, kind, version, payload_json, created_at) VALUES ('intent-live', 'task-live', 'test', 1, '{}', 'now');
+                     INSERT INTO daemon_jobs(job_id, status, active, created_at_ms, updated_at_ms, body) VALUES ('job-live', 'running', 1, 0, 0, '{}');
+                     INSERT INTO step_terminal_deliveries(job_id, payload) VALUES ('job-live', '{}');",
+                )
+                .unwrap();
+            let measure = |store: &ObservationStore| {
+                hot_path_statements()
+                    .into_iter()
+                    .map(|(name, sql, parameters, _)| {
+                        let mut statement = store.connection.prepare(sql).unwrap();
+                        let rows = statement
+                            .query_map(rusqlite::params_from_iter(parameters), |_| Ok(()))
+                            .unwrap()
+                            .count();
+                        assert!(rows > 0, "{name} must find the live row");
+                        (
+                            name,
+                            statement.get_status(rusqlite::StatementStatus::VmStep),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            };
+
+            seed_hot_path_history(&store, 0, 100);
+            let small = measure(&store);
+            seed_hot_path_history(&store, 100, 1000);
+            let large = measure(&store);
+            assert_eq!(
+                small, large,
+                "10x terminal history must not change any hot-path statement's VM steps"
+            );
+
+            for (name, sql, parameters, index) in hot_path_statements() {
+                let plan = store
+                    .connection
+                    .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+                    .unwrap()
+                    .query_map(rusqlite::params_from_iter(parameters), |row| {
+                        row.get::<_, String>(3)
+                    })
+                    .unwrap()
+                    .map(|row| row.unwrap())
+                    .collect::<Vec<_>>();
+                // Only a partial index of live rows may be walked whole.
+                let full_scan = |detail: &String| {
+                    detail.starts_with("SCAN ")
+                        && detail != "SCAN CONSTANT ROW"
+                        && !detail.contains(index)
+                };
+                assert!(
+                    !plan.iter().any(full_scan),
+                    "{name} must not scan a table: {plan:?}"
+                );
+                assert!(
+                    plan.iter().any(|detail| detail.contains(index)),
+                    "{name} must use {index}: {plan:?}"
+                );
+            }
         });
     }
 
