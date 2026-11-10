@@ -796,7 +796,7 @@ fn adoption_rejects_an_unrelated_historical_task_base() {
 
     assert!(error
         .message
-        .contains("unrelated to the adopted candidate parent"));
+        .contains("adopted candidate parent and recorded task base are unrelated"));
 }
 
 #[test]

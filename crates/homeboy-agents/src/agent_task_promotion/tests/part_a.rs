@@ -601,35 +601,83 @@ fn post_apply_checkpoint_resume_refuses_candidate_tree_mismatch_without_gating()
 }
 
 #[test]
-fn explicit_candidate_rejects_non_ancestor_base_and_dirty_source_before_apply() {
-    let (temp, repo, base, candidate) = adopted_commit_repo();
-    git(&repo, &["checkout", "-b", "unrelated", &base]);
-    std::fs::write(repo.join("other.rs"), "other\n").expect("write unrelated");
-    git(&repo, &["add", "other.rs"]);
-    git(&repo, &["commit", "-m", "unrelated"]);
-    let unrelated = git_head(&repo, "HEAD");
-    git(&repo, &["checkout", "main"]);
-    let mut provider = FakePromotionWorkspaceProvider::default();
-    let error = promote_with_provider(
-        adopted_commit_options(
+fn explicit_candidate_parent_lineage_relationships() {
+    use super::super::committed_changes::adopted_commit;
+
+    for (relationship, refusal) in [
+        ("equal", None),
+        ("parent-behind-base", None),
+        ("base-behind-parent", None),
+        ("diverged", Some("diverged")),
+        ("unrelated", Some("unrelated")),
+    ] {
+        let (temp, repo, root, original_candidate) = adopted_commit_repo();
+        let (base, parent, candidate) = match relationship {
+            "equal" => (root.clone(), root, original_candidate),
+            "parent-behind-base" => {
+                // The recorded base advanced on main after the candidate was
+                // created from root. The candidate's tree and parent stay put.
+                git(&repo, &["checkout", "-b", "advanced-base", &root]);
+                git(&repo, &["commit", "--allow-empty", "-m", "advance base"]);
+                let base = git_head(&repo, "HEAD");
+                (base, root, original_candidate)
+            }
+            "base-behind-parent" => {
+                std::fs::write(repo.join("lib.rs"), "later candidate\n").expect("write candidate");
+                git(&repo, &["commit", "-am", "later candidate"]);
+                let candidate = git_head(&repo, "HEAD");
+                (root, original_candidate, candidate)
+            }
+            "diverged" => {
+                // Two children of root share history but neither is an ancestor
+                // of the other. Give the candidate a parent on its own side.
+                git(&repo, &["commit", "--allow-empty", "-m", "later candidate"]);
+                let candidate = git_head(&repo, "HEAD");
+                git(&repo, &["checkout", "-b", "diverged-base", &root]);
+                git(&repo, &["commit", "--allow-empty", "-m", "diverged base"]);
+                (git_head(&repo, "HEAD"), original_candidate, candidate)
+            }
+            "unrelated" => {
+                git(&repo, &["checkout", "--orphan", "unrelated-base"]);
+                git(&repo, &["commit", "-m", "unrelated root"]);
+                (git_head(&repo, "HEAD"), root, original_candidate)
+            }
+            _ => unreachable!(),
+        };
+        git(&repo, &["checkout", "--detach", &candidate]);
+        let result = adopted_commit(&adopted_commit_options(
             &temp,
             &repo,
-            unrelated,
+            base.clone(),
             candidate.clone(),
             VerifyGateOptions::default(),
-        ),
-        &mut provider,
-    )
-    .expect_err("non-ancestor base");
-    assert!(
-        error
-            .message
-            .contains("recorded task base is unrelated to the adopted candidate parent"),
-        "{}",
-        error.message
-    );
-    assert!(provider.apply_calls.is_empty());
+        ));
+        if let Some(refusal) = refusal {
+            let error = result.err().expect(relationship);
+            assert!(error.message.contains(refusal), "{relationship}: {error}");
+            assert!(
+                error
+                    .message
+                    .contains(&format!("git rebase --onto {base} {parent} {candidate}")),
+                "{relationship}: {error}"
+            );
+        } else {
+            let admission = result.expect(relationship).expect("candidate delta");
+            assert_eq!(admission.base_ref, parent, "{relationship}");
+            assert_eq!(
+                admission.historical_task_base.as_deref(),
+                Some(base.as_str())
+            );
+            assert_eq!(admission.candidate, candidate, "{relationship}");
+            assert_eq!(admission.tree_sha, git_head(&repo, "HEAD^{tree}"));
+        }
+    }
+}
 
+#[test]
+fn explicit_candidate_rejects_dirty_source_before_apply() {
+    let (temp, repo, base, candidate) = adopted_commit_repo();
+    let mut provider = FakePromotionWorkspaceProvider::default();
     std::fs::write(repo.join("dirty.txt"), "dirty\n").expect("dirty source");
     let error = promote_with_provider(
         adopted_commit_options(&temp, &repo, base, candidate, VerifyGateOptions::default()),
