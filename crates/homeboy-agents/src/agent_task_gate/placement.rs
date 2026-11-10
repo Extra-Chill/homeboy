@@ -439,23 +439,21 @@ fn lab_gate_cancelled_before_admission() -> Error {
     error
 }
 
-/// Wait for the runner to admit the gate while its refusal is transient,
-/// re-observing with bounded backoff inside the gate's timeout and
-/// no-progress budget. Supervision cancellation stops the wait.
+/// Wait for the runner to admit the gate while its refusal is transient.
+///
+/// Admission is queueing, not gate execution: a Lab under pressure is busy,
+/// not broken, so the wait runs to the shared substrate deadline instead of
+/// spending the gate's own timeout, and an admission probe that fails
+/// transiently (a status probe timing out under load) is re-observed too.
+/// Deferring after one gate-timeout left candidates stuck at
+/// `gates_deferred` while the Lab drained (#17381). Supervision cancellation
+/// stops the wait.
 fn await_lab_gate_admission(
     request: &LabGateRequest,
     supervision: Option<&GateSupervision>,
 ) -> Result<()> {
     let transport = active_transport();
-    let mut budget = Duration::from_secs(
-        request
-            .timeout_seconds
-            .min(request.no_progress_timeout_seconds)
-            .max(1),
-    );
-    if let Some(policy) = supervision {
-        budget = budget.min(policy.timeout).min(policy.no_progress_timeout);
-    }
+    let budget = homeboy_core::substrate_wait::SUBSTRATE_WAIT_DEADLINE;
     let cancelled = || supervision.is_some_and(|policy| (policy.is_cancelled)());
     let started = Instant::now();
     let mut backoff = LAB_GATE_ADMISSION_INITIAL_BACKOFF;
@@ -463,19 +461,31 @@ fn await_lab_gate_admission(
         if cancelled() {
             return Err(lab_gate_cancelled_before_admission());
         }
-        let admission = transport
-            .admission(&request.runner_id)
-            .map_err(|mut error| {
+        let remaining = budget.saturating_sub(started.elapsed());
+        let admission = match transport.admission(&request.runner_id) {
+            Ok(admission) => admission,
+            Err(error)
+                if homeboy_core::substrate_wait::is_transient_error(&error)
+                    && !remaining.is_zero() =>
+            {
+                LabGateAdmission {
+                    accepts_jobs: false,
+                    reasons: vec!["capacity_unknown".to_string()],
+                    freshness: LabGateFreshness::NotObserved,
+                    next_action: None,
+                }
+            }
+            Err(mut error) => {
                 if !error.details.is_object() {
                     error.details = serde_json::json!({});
                 }
                 error.details["stage"] = serde_json::json!("admission");
-                error
-            })?;
+                return Err(error);
+            }
+        };
         if admission.accepts_jobs {
             return Ok(());
         }
-        let remaining = budget.saturating_sub(started.elapsed());
         if !admission.is_transient() || remaining.is_zero() {
             let waited = (!started.elapsed().is_zero() && admission.is_transient())
                 .then(|| started.elapsed());
@@ -2422,14 +2432,15 @@ mod tests {
         });
     }
 
-    /// #17725: a transient admission refusal (pressure) waits and the gate
-    /// runs once the runner accepts; a disconnected runner defers at once and
-    /// names its reasons.
+    /// #17725, #17381: a transient admission refusal (pressure) or a transient
+    /// probe failure (status timeout under load) waits and the gate runs once
+    /// the runner accepts; a disconnected runner defers at once and names its
+    /// reasons. `None` is a probe that timed out.
     #[test]
     fn gate_admission_waits_out_pressure_and_defers_disconnected_runners() {
         struct AdmissionTransport {
             previous: Arc<dyn LabGateTransport>,
-            admissions: std::sync::Mutex<Vec<LabGateAdmission>>,
+            admissions: std::sync::Mutex<Vec<Option<LabGateAdmission>>>,
             observed: Arc<std::sync::atomic::AtomicUsize>,
             executed: Arc<std::sync::atomic::AtomicUsize>,
         }
@@ -2444,10 +2455,17 @@ mod tests {
                 self.observed
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 let mut admissions = self.admissions.lock().unwrap();
-                Ok(if admissions.len() > 1 {
+                let next = if admissions.len() > 1 {
                     admissions.remove(0)
                 } else {
                     admissions[0].clone()
+                };
+                next.ok_or_else(|| {
+                    homeboy_core::Error::new(
+                        homeboy_core::ErrorCode::RunnerLabTransportFailure,
+                        "runner status probe timed out",
+                        serde_json::json!({ "daemon_transport_error": { "kind": "timeout" } }),
+                    )
                 })
             }
             fn execute(
@@ -2474,17 +2492,17 @@ mod tests {
             let cases = [
                 (
                     vec![
-                        refused(&["pressure"], LabGateFreshness::Fresh),
-                        refused(&["pressure"], LabGateFreshness::Fresh),
-                        LabGateAdmission::accepting(),
+                        Some(refused(&["pressure"], LabGateFreshness::Fresh)),
+                        None,
+                        Some(LabGateAdmission::accepting()),
                     ],
                     true,
                 ),
                 (
-                    vec![refused(
+                    vec![Some(refused(
                         &["not_connected", "active_jobs_unavailable"],
                         LabGateFreshness::NotObserved,
-                    )],
+                    ))],
                     false,
                 ),
             ];
@@ -2513,7 +2531,10 @@ mod tests {
                 let observed = observed.load(std::sync::atomic::Ordering::SeqCst);
                 let executed = executed.load(std::sync::atomic::Ordering::SeqCst);
                 if runs {
-                    assert_eq!(observed, 3, "pressure is re-observed until accepting");
+                    assert_eq!(
+                        observed, 3,
+                        "pressure and probe timeouts are re-observed until accepting"
+                    );
                     assert_eq!(executed, 1);
                     assert_eq!(report.status, AgentTaskGateStatus::Succeeded, "{report:?}");
                     assert_eq!(report.stdout, "executed");
