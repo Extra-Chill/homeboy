@@ -284,6 +284,27 @@ pub fn build_component(component: &component::Component) -> (Option<i32>, Option
     }
 }
 
+/// Build a deploy's planned local components through one shared dependency graph.
+/// A graph failure blocks the planned set; retain its exit code and diagnostics
+/// for each component's deploy result.
+pub fn build_components(components: &[Component]) -> (Option<i32>, Option<String>) {
+    match run_components_with_changed_since(components, None) {
+        Ok((BuildResult::Single(output), code)) => (
+            Some(code),
+            Some(format_build_error(
+                &output.component_id,
+                &output.build_command,
+                "(planned build graph)",
+                code,
+                &output.output.stderr,
+                &output.output.stdout,
+            )),
+        ),
+        Ok((_, code)) => (Some(code), None),
+        Err(error) => (Some(1), Some(error.to_string())),
+    }
+}
+
 /// Execute a component-owned build and retain the structured execution evidence
 /// required by callers that publish build results, such as release packaging.
 pub fn build_component_with_output(component: &component::Component) -> Result<(BuildOutput, i32)> {

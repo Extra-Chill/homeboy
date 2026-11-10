@@ -64,7 +64,7 @@ fn disposable_overlapping_dependencies_build_once_and_reuse_content_cache() {
             // A second execution in the same tree fails: this catches duplicate
             // scheduling even when a dirty tree has disabled the cache.
             fs::write(dir.join("homeboy.json"), serde_json::json!({
-                "id":id,"build_artifact":"build/package.txt",
+                "id":id,"build_artifact": if matches!(id, "tokens" | "components") { None } else { Some("build/package.txt") },
                 "extensions":{"cache-fixture":{"workspace":deps}},
                 "scripts":{"build":["test ! -e build/count && mkdir -p build && echo run > build/count && echo artifact > build/package.txt"]}
             }).to_string()).unwrap();

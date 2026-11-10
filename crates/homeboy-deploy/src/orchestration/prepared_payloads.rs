@@ -58,6 +58,56 @@ pub(super) fn prepare_component_deployments_with_payloads(
         .as_ref()
         .map(|artifact| HashMap::from([(artifact.component_id.clone(), artifact.clone())]))
         .unwrap_or_default();
+    let effective_components: Vec<_> = components
+        .iter()
+        .map(|component| {
+            let mut effective =
+                homeboy_core::project::apply_component_overrides(component, project);
+            if config.requested_ref_for(&component.id).is_some() {
+                effective.local_path = component.local_path.clone();
+            }
+            effective
+        })
+        .collect();
+    let requests: Vec<_> = effective_components
+        .iter()
+        .filter(|component| {
+            !component.deploy_config().is_git_deploy()
+                && !component.is_file_component()
+                && !config.skip_build
+                && config.prepared_artifact.is_none()
+                && !release_artifacts.contains_key(&component.id)
+        })
+        .map(|component| {
+            let mut preparation_config = config.clone();
+            preparation_config.requested_ref = None;
+            preparation_config.requested_refs.clear();
+            let mut request =
+                ComponentPayloadPreparationRequest::new(component, &preparation_config);
+            request.config.exact_ref_materialized =
+                config.requested_ref_for(&component.id).is_some();
+            request
+        })
+        .collect();
+    if let Err(error) = artifacts
+        .payloads
+        .prepare_local_builds(&requests, &mut artifacts.release_artifacts)
+    {
+        return Err(requests
+            .iter()
+            .map(|request| {
+                let component = request.component();
+                ComponentDeployResult::failed(
+                    &component,
+                    base_path,
+                    local_versions.get(&component.id).cloned(),
+                    remote_versions.get(&component.id).cloned(),
+                    error.to_string(),
+                )
+                .with_build_exit_code(preparation_build_exit_code(&error))
+            })
+            .collect());
+    }
     for component in components {
         let source_path = component.local_path.clone();
         let mut component = homeboy_core::project::apply_component_overrides(component, project);
@@ -218,6 +268,7 @@ mod tests {
 
     #[test]
     fn two_projects_share_one_prepared_payload() {
+        let _home = homeboy_core::test_support::env_lock();
         let source = tempfile::tempdir().expect("source");
         let build_count = source.path().join("build-count");
         let mut component = Component::new(
@@ -293,6 +344,88 @@ mod tests {
         );
         assert_eq!(first_artifact.sha256, second_artifact.sha256);
         assert_eq!(first_artifact.durable_path, second_artifact.durable_path);
+    }
+
+    #[test]
+    fn planned_consumers_share_a_dirty_workspace_dependency() {
+        // HomeGuard changes process-wide paths. Run this fixture alone so its
+        // temporary home cannot capture (and delete) parallel tests' checkouts.
+        const CHILD: &str = "HOMEBOY_DEPLOY_SHARED_GRAPH_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            use homeboy_core::test_support::{HermeticTestContext, TestBinary};
+            let context = HermeticTestContext::new();
+            let output = context
+                .command(TestBinary::CurrentTest)
+                .args([
+                    "--exact",
+                    "orchestration::prepared_payloads::tests::planned_consumers_share_a_dirty_workspace_dependency",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .output()
+                .expect("run isolated deploy graph fixture");
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        homeboy_core::test_support::with_isolated_home(|_| {
+            let source = tempfile::tempdir().unwrap();
+            let extension = homeboy_core::paths::extension("deploy-fixture").unwrap();
+            std::fs::create_dir_all(&extension).unwrap();
+            std::fs::write(
+                extension.join("deploy-fixture.json"),
+                serde_json::json!({
+                    "name": "Deploy fixture", "version": "1.0.0",
+                    "build": {"cache": {"recipe": "fixture", "dependencies_setting": "workspace"}}
+                })
+                .to_string(),
+            )
+            .unwrap();
+            let mut components = Vec::new();
+            for id in ["shared", "first", "second"] {
+                let path = source.path().join(id);
+                std::fs::create_dir_all(&path).unwrap();
+                std::fs::write(path.join("homeboy.json"), serde_json::json!({
+                    "id": id,
+                    "build_artifact": if id == "shared" { None } else { Some("build/package.bin") },
+                    "remote_path": format!("plugins/{id}"),
+                    "extensions": {"deploy-fixture": {"workspace": if id == "shared" {
+                        serde_json::json!([])
+                    } else { serde_json::json!([{"path": "../shared"}]) }}},
+                    "scripts": {"build": ["test ! -e build/count && mkdir -p build && echo run > build/count && echo payload > build/package.bin"]}
+                }).to_string()).unwrap();
+                if id != "shared" {
+                    components.push(
+                        homeboy_core::component::try_discover_from_portable(&path)
+                            .unwrap()
+                            .unwrap(),
+                    );
+                }
+            }
+            // No git repository: no content key can mask duplicate scheduling.
+            let prepared = prepare_component_deployments(
+                &components,
+                &DeployConfig {
+                    head: true,
+                    ..Default::default()
+                },
+                &Project::default(),
+                "/srv/site",
+                &HashMap::new(),
+                &HashMap::new(),
+                &HashMap::new(),
+            )
+            .unwrap_or_else(|failures| panic!("{failures:?}"));
+            assert_eq!(prepared.len(), 2);
+            assert_eq!(
+                std::fs::read_to_string(source.path().join("shared/build/count")).unwrap(),
+                "run\n"
+            );
+        });
     }
 
     /// Mirrors what the preparation build-failure producer records, without

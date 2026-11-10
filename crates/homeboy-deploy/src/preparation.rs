@@ -96,7 +96,7 @@ impl ComponentPayloadPreparationRequest {
         canonical_json(evidence)
     }
 
-    fn component(&self) -> Component {
+    pub(crate) fn component(&self) -> Component {
         Component {
             id: self.component.id.clone(),
             local_path: self.component.local_path.clone(),
@@ -327,6 +327,40 @@ struct PreparedPayloadEntry {
 }
 
 impl PreparedPayloadCollection {
+    /// Prepare the planned local builds together so shared workspace nodes run once.
+    /// Requests here already point at the run's materialized source checkouts.
+    pub(crate) fn prepare_local_builds(
+        &mut self,
+        requests: &[ComponentPayloadPreparationRequest],
+        release_artifacts: &mut ReleaseArtifactStore,
+    ) -> Result<()> {
+        let requests: Vec<_> = requests
+            .iter()
+            .filter(|request| !self.entries.contains_key(&request.identity()))
+            .collect();
+        if requests.is_empty() {
+            return Ok(());
+        }
+        let components: Vec<_> = requests.iter().map(|request| request.component()).collect();
+        let mut cleanups = Vec::new();
+        for (request, component) in requests.iter().zip(&components) {
+            if request.config.exact_ref_materialized {
+                remove_exact_ref_artifacts(component)?;
+            }
+            cleanups.push(GeneratedSourceArtifactCleanup::new(component)?);
+        }
+        let result = homeboy_core::extension::build::build_components(&components);
+        for request in requests {
+            let payload = prepare_payload(request, release_artifacts, None, Some(&result))?;
+            self.entries
+                .insert(request.identity(), PreparedPayloadEntry { payload });
+        }
+        for cleanup in &mut cleanups {
+            cleanup.disarm();
+        }
+        Ok(())
+    }
+
     /// Prepare a component once and return its immutable artifact identity. This
     /// boundary intentionally has no project or remote target inputs.
     pub(crate) fn prepare(
@@ -336,7 +370,7 @@ impl PreparedPayloadCollection {
     ) -> Result<&PreparedComponentPayload> {
         let identity = request.identity();
         if !self.entries.contains_key(&identity) {
-            let payload = prepare_payload(&request, release_artifacts, None)?;
+            let payload = prepare_payload(&request, release_artifacts, None, None)?;
             self.entries
                 .insert(identity.clone(), PreparedPayloadEntry { payload });
         }
@@ -348,6 +382,7 @@ fn prepare_payload(
     request: &ComponentPayloadPreparationRequest,
     release_artifacts: &mut ReleaseArtifactStore,
     retained_release_artifact: Option<ReleaseArtifactLease>,
+    planned_build: Option<&(Option<i32>, Option<String>)>,
 ) -> Result<PreparedComponentPayload> {
     if let Some(artifact) = request.config.prepared_artifact.clone() {
         artifact.validate(
@@ -383,7 +418,7 @@ fn prepare_payload(
     // A successful extension build is not proof that it overwrote an artifact
     // already present in the selected source tree. Remove every local candidate
     // first: the build must produce exact-ref bytes, or preparation fails closed.
-    if exact_ref.is_some() || request.config.exact_ref_materialized {
+    if planned_build.is_none() && (exact_ref.is_some() || request.config.exact_ref_materialized) {
         remove_exact_ref_artifacts(&component)?;
     }
 
@@ -411,8 +446,9 @@ fn prepare_payload(
     let mut generated_source_artifact = None;
     if release_artifact.is_none() && !request.config.skip_build {
         let cleanup = GeneratedSourceArtifactCleanup::new(&component)?;
-        let (build_exit_code, build_error) =
-            homeboy_core::extension::build::build_component(&component);
+        let (build_exit_code, build_error) = planned_build
+            .cloned()
+            .unwrap_or_else(|| homeboy_core::extension::build::build_component(&component));
         if let Some(message) = build_error {
             let mut error = Error::validation_invalid_argument(
                 "build",
@@ -970,6 +1006,7 @@ mod tests {
 
     #[test]
     fn equal_preparation_request_builds_once_and_cleans_only_its_payload_copy() {
+        let _home = homeboy_core::test_support::env_lock();
         let temp = tempfile::tempdir().expect("temp dir");
         let source_artifact = temp.path().join("build/fixture.zip");
         let build_count = temp.path().join("build-count");
@@ -1023,6 +1060,7 @@ mod tests {
 
     #[test]
     fn failed_post_build_validation_removes_only_new_source_output() {
+        let _home = homeboy_core::test_support::env_lock();
         let temp = tempfile::tempdir().expect("temp dir");
         let artifact = temp.path().join("build/fixture.zip");
         let mut component = component();
@@ -1051,6 +1089,7 @@ mod tests {
 
     #[test]
     fn exact_ref_preparation_builds_detached_bytes_and_cleans_owned_resources() {
+        let _home = homeboy_core::test_support::env_lock();
         use homeboy_core::test_support::git_command_output as git;
 
         let repo = tempfile::tempdir().expect("repo");

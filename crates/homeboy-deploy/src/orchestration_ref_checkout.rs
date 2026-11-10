@@ -993,6 +993,7 @@ mod tests {
 
     #[test]
     fn materialized_ref_is_independent_of_stale_checkout_head_and_does_not_mutate_it() {
+        let _home = homeboy_core::test_support::env_lock();
         let repo = fixture_repo();
         let component = fixture_component(repo.path());
         let accepted_sha = git_output(repo.path(), &["rev-parse", "accepted"]);
@@ -1116,6 +1117,7 @@ mod tests {
 
     #[test]
     fn preflighted_sha_is_materialized_after_the_requested_branch_moves() {
+        let _home = homeboy_core::test_support::env_lock();
         let fixture = remote_fixture();
         let checkout = stale_clone(&fixture);
         let component = fixture_component(&checkout);
@@ -1171,6 +1173,7 @@ mod tests {
 
     #[test]
     fn materialized_ref_verification_rejects_a_different_checkout_head() {
+        let _home = homeboy_core::test_support::env_lock();
         let repo = fixture_repo();
         let component = fixture_component(repo.path());
         std::fs::write(repo.path().join("other.txt"), "other\n").expect("other payload");
@@ -1194,6 +1197,7 @@ mod tests {
 
     #[test]
     fn hydration_failure_is_actionable_and_removes_only_the_temporary_checkout() {
+        let _home = homeboy_core::test_support::env_lock();
         let repo = fixture_repo();
         std::fs::write(
             repo.path().join("homeboy.json"),
@@ -1228,6 +1232,7 @@ mod tests {
 
     #[test]
     fn hydration_opt_out_does_not_run_the_materialized_provider() {
+        let _home = homeboy_core::test_support::env_lock();
         let repo = fixture_repo();
         std::fs::write(
             repo.path().join("homeboy.json"),
@@ -1248,6 +1253,7 @@ mod tests {
 
     #[test]
     fn exact_ref_reconstructs_declared_package_artifact_before_build() {
+        let _home = homeboy_core::test_support::env_lock();
         let repo = fixture_repo();
         let mut component = fixture_component(repo.path());
         component.package_artifacts = vec![homeboy_core::component::PackageArtifact {
@@ -1275,6 +1281,7 @@ mod tests {
 
     #[test]
     fn exact_ref_missing_package_artifact_requires_reconstruction_command_before_build() {
+        let _home = homeboy_core::test_support::env_lock();
         let repo = fixture_repo();
         let mut component = fixture_component(repo.path());
         component.package_artifacts = vec![homeboy_core::component::PackageArtifact {
@@ -1396,6 +1403,7 @@ mod tests {
 
     #[test]
     fn head_ref_builds_in_place_only_when_the_checkout_is_provably_that_commit() {
+        let _home = homeboy_core::test_support::env_lock();
         type Mutation = fn(&Path);
         let cases: [(&str, Mutation, bool); 5] = [
             ("clean", |_| {}, true),
@@ -1484,6 +1492,7 @@ mod tests {
 
     #[test]
     fn older_ref_materializes_one_full_tree_shared_by_every_component() {
+        let _home = homeboy_core::test_support::env_lock();
         let (repo, old_sha) = monorepo_fixture();
         let components = monorepo_components(repo.path());
 
@@ -1570,6 +1579,9 @@ mod tests {
 
     #[test]
     fn dirty_local_dependencies_prevent_in_place_builds() {
+        // Materialization reads process-wide artifact paths; hold the same
+        // lock as HomeGuard until the checkout and its cleanup are dropped.
+        let _home = homeboy_core::test_support::env_lock();
         for path in [
             "packages/dep/package.json",
             "packages/shared/package.json",
