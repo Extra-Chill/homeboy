@@ -554,6 +554,11 @@ impl JobStore {
         if let Some(persistence) = persistence {
             persistence.record_synced_state(state);
         }
+        self.install_durable_snapshot(inner, durable);
+        Ok(())
+    }
+
+    fn install_durable_snapshot(&self, inner: &mut JobStoreInner, durable: DurableJobStore) {
         let next_sequence = durable
             .jobs
             .iter()
@@ -572,7 +577,6 @@ impl JobStore {
         inner.compaction = durable.compaction;
         self.next_event_sequence
             .fetch_max(next_sequence, Ordering::SeqCst);
-        Ok(())
     }
 
     /// Apply one mutation to the current durable snapshot and commit it before
@@ -994,7 +998,15 @@ impl JobStore {
             daemon_freshness_snapshot: Arc::default(),
             health_revision: Arc::default(),
         };
-        store.durable_transaction(|_| Ok(()))?;
+        // Load without the writer slot: readers (status, diagnose, action
+        // admission) must not queue behind writers or commit, and a reader
+        // inside another connection's write transaction must not deadlock
+        // (#17381). Every mutation reloads under the transaction lock.
+        let path = &store.persistence.as_ref().expect("persistent store").path;
+        if let Some(durable) = sql_store::read_durable_store_readonly(path)? {
+            let mut inner = store.inner.lock().expect("job store mutex poisoned");
+            store.install_durable_snapshot(&mut inner, durable);
+        }
         Ok(store)
     }
 

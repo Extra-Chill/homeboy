@@ -1102,8 +1102,12 @@ fn terminal_job_retention_compacts_existing_store_without_losing_active_recovery
         })
         .expect("seed store persists");
 
+    // Opening is read-only (#17381); retention applies on the next write.
     let compacted = JobStore::open_without_reconciliation_with_retention(&path, 3, 2)
-        .expect("existing store compacts on open");
+        .expect("existing store opens");
+    compacted
+        .durable_transaction(|_| Ok(()))
+        .expect("existing store compacts on write");
     assert!(compacted.get(queued.id).is_ok());
     assert_eq!(
         compacted.get(running.id).expect("running job").status,
@@ -1171,7 +1175,10 @@ fn terminal_payload_budget_bounds_high_event_history_before_child_reservation_pe
     let compacted = JobStore::open_without_reconciliation_with_retention_and_terminal_byte_limit(
         &path, 10, 8, 70_000,
     )
-    .expect("high-payload history compacts on open");
+    .expect("high-payload history opens");
+    compacted
+        .durable_transaction(|_| Ok(()))
+        .expect("high-payload history compacts on write");
     assert!(
         compacted.get(queued.id).is_ok(),
         "queued work survives compaction"
