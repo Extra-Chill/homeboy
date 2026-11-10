@@ -230,6 +230,62 @@ fn resume_reuses_only_unchanged_succeeded_dependency_chains() {
 }
 
 #[test]
+fn resume_from_a_next_pass_instance_keeps_its_iteration_and_previous() {
+    with_isolated_home(|home| {
+        let store = JobStore::open_without_reconciliation(
+            home.path().join(crate::paths::OBSERVATION_DB_FILENAME),
+        )
+        .unwrap()
+        .with_daemon_lease("workflow-resume-pass-test".into());
+        let definition = json!({
+            "schema": "homeboy/workflow/v1", "id": "resume-pass",
+            "next_pass": {"max_iterations": 3},
+            "steps": [
+                {"id": "import", "exec": sh("touch import-{{inputs.iteration}}")},
+                {"id": "evaluate", "needs": ["import"], "exec": sh("touch evaluate")},
+                {"id": "finish", "needs": ["evaluate"], "exec": sh("exit 7")}
+            ]
+        });
+        let mut original = request(definition.clone(), home.path());
+        let previous =
+            json!({"outputs": {"evaluate": {"verdict": "retry"}}, "unchanged_passes": 1});
+        original.inputs.insert("iteration".into(), json!(3));
+        original.inputs.insert("previous".into(), previous.clone());
+        original.instance = original.definition.instance_id(&original.inputs, None);
+        let job = admit(&store, &original);
+        crate::daemon::start_controller_job(job, &store).unwrap();
+        assert_eq!(wait_terminal(&store, job, 30).status, JobStatus::Failed);
+        std::fs::remove_file(home.path().join("import-3")).unwrap();
+        std::fs::remove_file(home.path().join("evaluate")).unwrap();
+
+        let mut fixed = definition;
+        fixed["steps"][2]["exec"] = sh("touch finish");
+        let mut resumed = request(fixed, home.path());
+        assert_eq!(resumed.inputs["iteration"], 1);
+        resumed
+            .definition
+            .carry_resumed_pass(&mut resumed.inputs, &original.inputs);
+        resumed.resumed_from = Some(original.instance.clone());
+        resumed.instance = resumed.definition.instance_id_with_resume(
+            &resumed.inputs,
+            None,
+            resumed.resumed_from.as_deref(),
+        );
+        let job = admit(&store, &resumed);
+        crate::daemon::start_controller_job(job, &store).unwrap();
+        assert_eq!(wait_terminal(&store, job, 30).status, JobStatus::Succeeded);
+        let view = workflow_status(&store, &resumed.instance).unwrap();
+        assert_eq!(view["inputs"]["iteration"], 3);
+        assert_eq!(view["inputs"]["previous"], previous);
+        assert_eq!(view["steps"]["import"]["reused"], true);
+        assert_eq!(view["steps"]["evaluate"]["reused"], true);
+        assert!(!home.path().join("import-3").exists());
+        assert!(!home.path().join("evaluate").exists());
+        assert!(home.path().join("finish").exists());
+    });
+}
+
+#[test]
 fn workflow_history_survives_unrelated_terminal_byte_budget_churn() {
     with_isolated_home(|home| {
         let path = home.path().join(crate::paths::OBSERVATION_DB_FILENAME);
