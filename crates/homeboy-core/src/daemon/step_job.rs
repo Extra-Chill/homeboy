@@ -66,8 +66,11 @@ const SUPERVISE_POLL: Duration = Duration::from_millis(100);
 const CANCEL_STOP_DEADLINE: Duration = Duration::from_secs(15);
 
 /// Conditions that must hold before the child is spawned.
+///
+/// Persisted inside step rows that every daemon sharing a job store reads, so
+/// decoding tolerates fields added by newer Homeboy versions. Admission stays
+/// strict through [`StepJobRequest::parse_admission`] (homeboy#17735).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct StepWait {
     /// RFC 3339 instant before which the child must not start.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -84,8 +87,12 @@ impl StepWait {
 }
 
 /// The admitted, immutable request for one step.
+///
+/// Decoding is forward-compatible: a row written by a newer Homeboy (for
+/// example with `root_durable_run_id`) must not make an older daemon's job
+/// store unreadable. New submissions are still checked strictly by
+/// [`StepJobRequest::parse_admission`] (homeboy#17735).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct StepJobRequest {
     pub schema: String,
     pub terminal_consumer: String,
@@ -155,11 +162,22 @@ impl StepJobRequest {
         }))
     }
 
+    /// Forward-compatible decode for persisted rows (see the type docs).
     fn parse(value: &Value) -> Result<Self> {
         let request: Self = serde_json::from_value(value.clone())
             .map_err(|error| invalid(format!("invalid step request: {error}")))?;
         request.validate()?;
         Ok(request)
+    }
+
+    /// Strict decode for a new submission: unknown fields are rejected so a
+    /// misspelled or unsupported field never silently changes what runs.
+    fn parse_admission(value: &Value) -> Result<Self> {
+        reject_unknown_fields(value, STEP_JOB_REQUEST_FIELDS, "step request")?;
+        if let Some(wait) = value.get("wait") {
+            reject_unknown_fields(wait, STEP_WAIT_FIELDS, "step request wait")?;
+        }
+        Self::parse(value)
     }
 
     fn validate(&self) -> Result<()> {
@@ -264,14 +282,12 @@ enum StepPhase {
 
 /// One supervised child, identified by PID and kernel start identity.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct StepChild {
     pub pid: u32,
     pub start_identity: ProcessStartIdentity,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 struct StepJobCheckpoint {
     schema: String,
     request: StepJobRequest,
@@ -594,7 +610,7 @@ impl ControllerJobDriver for StepJobDriver {
     }
 
     fn validate_secret_references(&self, request: &Value) -> Result<()> {
-        StepJobRequest::parse(request).map(|_| ())
+        StepJobRequest::parse_admission(request).map(|_| ())
     }
 
     fn linked_durable_run_id(&self, request: &Value) -> Option<String> {
@@ -1173,6 +1189,140 @@ fn to_value<T: Serialize>(value: T) -> Result<Value> {
 
 fn invalid(message: impl Into<String>) -> Error {
     Error::validation_invalid_argument("step", message, None, None)
+}
+
+/// Every serialized `StepJobRequest` field. Kept in sync by
+/// `admission_field_lists_cover_every_serialized_field`.
+const STEP_JOB_REQUEST_FIELDS: &[&str] = &[
+    "schema",
+    "terminal_consumer",
+    "key",
+    "program",
+    "args",
+    "cwd",
+    "env",
+    "linked_durable_run_id",
+    "root_durable_run_id",
+    "wait",
+];
+
+/// Every serialized `StepWait` field.
+const STEP_WAIT_FIELDS: &[&str] = &["not_before", "runner_eligible"];
+
+fn reject_unknown_fields(value: &Value, known: &[&str], what: &str) -> Result<()> {
+    let Some(object) = value.as_object() else {
+        return Ok(());
+    };
+    let unknown = object
+        .keys()
+        .filter(|key| !known.contains(&key.as_str()))
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    if unknown.is_empty() {
+        return Ok(());
+    }
+    Err(invalid(format!(
+        "invalid {what}: unknown field(s) {}, expected one of {}",
+        unknown
+            .iter()
+            .map(|key| format!("`{key}`"))
+            .collect::<Vec<_>>()
+            .join(", "),
+        known
+            .iter()
+            .map(|key| format!("`{key}`"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )))
+}
+
+#[cfg(test)]
+mod forward_compat_tests {
+    use super::*;
+
+    fn request() -> StepJobRequest {
+        StepJobRequest::new(
+            "key",
+            "/bin/true",
+            vec!["arg".to_string()],
+            "/tmp",
+            EnvMaterializationPlan::default(),
+            STEP_RECEIPT_CONSUMER,
+        )
+    }
+
+    #[test]
+    fn persisted_rows_from_newer_versions_still_decode() {
+        // homeboy#17735: a newer controller's row must not brick an older
+        // daemon's shared job store.
+        let mut value = to_value(request()).unwrap();
+        value["field_from_a_newer_homeboy"] = json!("x");
+        value["wait"] = json!({ "runner_eligible": "lab", "newer_wait_field": 1 });
+        let parsed = StepJobRequest::parse(&value).expect("persisted decode");
+        assert_eq!(parsed.key, "key");
+        assert_eq!(parsed.wait.runner_eligible.as_deref(), Some("lab"));
+
+        let mut checkpoint = to_value(StepJobCheckpoint::waiting(parsed)).unwrap();
+        checkpoint["newer_checkpoint_field"] = json!(true);
+        checkpoint["request"]["field_from_a_newer_homeboy"] = json!("x");
+        StepJobCheckpoint::parse(&checkpoint).expect("persisted checkpoint decode");
+
+        let delivery = terminal_delivery(
+            "job",
+            &value,
+            Some(&checkpoint),
+            Some(crate::api_jobs::JobStatus::Succeeded),
+            None,
+            false,
+            None,
+        );
+        assert!(delivery.is_ok(), "{delivery:?}");
+    }
+
+    #[test]
+    fn admission_still_rejects_unknown_fields() {
+        let mut value = to_value(request()).unwrap();
+        value["programm"] = json!("/bin/false");
+        let error = StepJobDriver
+            .validate_secret_references(&value)
+            .expect_err("unknown top-level field");
+        assert!(error.message.contains("`programm`"), "{}", error.message);
+
+        let mut value = to_value(request()).unwrap();
+        value["wait"] = json!({ "not_befor": "2026-01-01T00:00:00Z" });
+        let error = StepJobDriver
+            .validate_secret_references(&value)
+            .expect_err("unknown wait field");
+        assert!(error.message.contains("`not_befor`"), "{}", error.message);
+
+        StepJobDriver
+            .validate_secret_references(&to_value(request()).unwrap())
+            .expect("known fields admit");
+    }
+
+    #[test]
+    fn admission_field_lists_cover_every_serialized_field() {
+        let mut full = request().with_linked_durable_run_id("linked");
+        full.root_durable_run_id = Some("root".to_string());
+        full.wait = StepWait {
+            not_before: Some("2026-01-01T00:00:00Z".to_string()),
+            runner_eligible: Some("lab".to_string()),
+        };
+        let value = to_value(&full).unwrap();
+        for key in value.as_object().unwrap().keys() {
+            assert!(
+                STEP_JOB_REQUEST_FIELDS.contains(&key.as_str()),
+                "add `{key}` to STEP_JOB_REQUEST_FIELDS"
+            );
+        }
+        for key in value["wait"].as_object().unwrap().keys() {
+            assert!(
+                STEP_WAIT_FIELDS.contains(&key.as_str()),
+                "add `{key}` to STEP_WAIT_FIELDS"
+            );
+        }
+        StepJobRequest::parse_admission(&value).expect("fully populated request admits");
+    }
 }
 
 #[cfg(all(test, unix))]

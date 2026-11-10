@@ -6200,12 +6200,9 @@ fn resolve_cook_issue(args: &mut AgentTaskCookArgs) -> homeboy::core::Result<()>
         )
     })?;
     let output = std::process::Command::new("gh")
-        .args([
-            "api",
-            "--paginate",
-            "--slurp",
-            &format!("repos/{path}/timeline"),
-        ])
+        // No `--slurp`: it needs gh >= 2.48, and Ubuntu 24.04 ships 2.45
+        // (homeboy#17735). `--paginate` alone emits one JSON array per page.
+        .args(["api", "--paginate", &format!("repos/{path}/timeline")])
         .output()
         .map_err(|error| {
             homeboy::core::Error::internal_io(
@@ -6224,8 +6221,7 @@ fn resolve_cook_issue(args: &mut AgentTaskCookArgs) -> homeboy::core::Result<()>
             None,
         ));
     }
-    let pages: Vec<Vec<Value>> = serde_json::from_slice(&output.stdout)
-        .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))?;
+    let pages = parse_gh_paginated_arrays(&output.stdout)?;
     let prs: std::collections::BTreeSet<String> = pages
         .into_iter()
         .flatten()
@@ -6255,6 +6251,43 @@ fn resolve_cook_issue(args: &mut AgentTaskCookArgs) -> homeboy::core::Result<()>
         args.issue_resolution = Some(json!({"route": "fresh_branch", "issue_url": url}));
     }
     Ok(())
+}
+
+/// Parse `gh api --paginate` output for an array endpoint: one JSON array per
+/// page, concatenated (optionally whitespace-separated).
+fn parse_gh_paginated_arrays(stdout: &[u8]) -> homeboy::core::Result<Vec<Vec<Value>>> {
+    serde_json::Deserializer::from_slice(stdout)
+        .into_iter::<Vec<Value>>()
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|error| homeboy::core::Error::internal_json(error.to_string(), None))
+}
+
+#[cfg(test)]
+mod gh_paginate_tests {
+    use super::parse_gh_paginated_arrays;
+
+    #[test]
+    fn concatenated_pages_parse_without_slurp() {
+        let pages = parse_gh_paginated_arrays(
+            b"[{\"event\":\"a\"}][{\"event\":\"b\"},{\"event\":\"c\"}]\n[]",
+        )
+        .unwrap();
+        assert_eq!(pages.len(), 3);
+        assert_eq!(pages.into_iter().flatten().count(), 3);
+        assert!(parse_gh_paginated_arrays(b"").unwrap().is_empty());
+        assert!(parse_gh_paginated_arrays(b"[{]").is_err());
+    }
+
+    #[test]
+    fn linked_pr_resolution_does_not_require_gh_slurp() {
+        let source = include_str!("run.rs");
+        let call = source
+            .split("fn resolve_cook_issue")
+            .nth(1)
+            .and_then(|body| body.split("fn parse_gh_paginated_arrays").next())
+            .unwrap();
+        assert!(!call.contains(concat!("\"--", "slurp\"")));
+    }
 }
 
 fn resolve_cook_pull_request(args: &mut AgentTaskCookArgs) -> homeboy::core::Result<()> {
@@ -6493,7 +6526,7 @@ mod cook_pull_request_ref_tests {
                 "origin",
                 "https://github.com/example/repo.git",
             ]);
-            std::fs::write(&gh, "#!/bin/sh\ncase \"$*\" in api*) printf '[[{\"event\":\"cross-referenced\",\"source\":{\"issue\":{\"state\":\"open\",\"html_url\":\"https://github.com/example/repo/pull/1895\",\"pull_request\":{}}}}]]';; *list*) printf '[{\"state\":\"OPEN\",\"url\":\"https://github.com/example/repo/pull/1895\"}]';; *) printf '{\"baseRefName\":\"release\",\"headRefName\":\"feature\"}';; esac\n").unwrap();
+            std::fs::write(&gh, "#!/bin/sh\ncase \"$*\" in api*) printf '[{\"event\":\"cross-referenced\",\"source\":{\"issue\":{\"state\":\"open\",\"html_url\":\"https://github.com/example/repo/pull/1895\",\"pull_request\":{}}}}]';; *list*) printf '[{\"state\":\"OPEN\",\"url\":\"https://github.com/example/repo/pull/1895\"}]';; *) printf '{\"baseRefName\":\"release\",\"headRefName\":\"feature\"}';; esac\n").unwrap();
             let mut issue = parse(&[]);
             issue.dispatch.task_url = Some("https://github.com/example/repo/issues/7".into());
             let resolved = {
