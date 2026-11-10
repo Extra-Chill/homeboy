@@ -1656,6 +1656,7 @@ mod daemon_repair_step_tests {
     fn availability_refusal_message_names_its_reasons_and_keeps_structure() {
         let mut freshness = freshness_with_plan(Vec::new());
         freshness.runtime_paths = Some(homeboy_core::daemon::DaemonRuntimeSnapshot {
+            pressure_thresholds: Default::default(),
             pressure: Some(homeboy_core::runner_pressure::RunnerPressure {
                 cpu: Some(10_900),
                 load_fallback: true,

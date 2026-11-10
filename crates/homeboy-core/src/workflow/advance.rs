@@ -1074,10 +1074,23 @@ fn compile(
                 match value {
                     Value::Bool(true) => args.push(flag),
                     Value::Bool(false) | Value::Null => {}
-                    Value::String(text) => {
-                        args.push(flag);
-                        args.push(render(text)?);
-                    }
+                    // A whole-value template that resolves to an array
+                    // repeats the flag, exactly like a literal array.
+                    Value::String(text) => match template::resolve_value(text, values)? {
+                        Value::Array(items) => {
+                            for item in items {
+                                args.push(flag.clone());
+                                args.push(match item {
+                                    Value::String(text) => text,
+                                    other => other.to_string(),
+                                });
+                            }
+                        }
+                        _ => {
+                            args.push(flag);
+                            args.push(render(text)?);
+                        }
+                    },
                     Value::Number(number) => {
                         args.push(flag);
                         args.push(number.to_string());

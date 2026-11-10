@@ -1383,8 +1383,24 @@ pub(super) struct DaemonOwnerLock {
 pub struct DaemonRuntimeSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pressure: Option<crate::runner_pressure::RunnerPressure>,
+    /// Active admission limits in whole percent, alongside the hundredths sample.
+    #[serde(default)]
+    pub pressure_thresholds: crate::runner_pressure::PressureThresholds,
     pub loaded_at: String,
     pub paths: Vec<DaemonRuntimePathSnapshot>,
+}
+
+impl DaemonRuntimeSnapshot {
+    /// Keep the displayed limits and admission verdict on the same policy.
+    pub fn apply_pressure_thresholds(
+        &mut self,
+        thresholds: crate::runner_pressure::PressureThresholds,
+    ) {
+        if let Some(pressure) = self.pressure.as_mut() {
+            pressure.apply_thresholds(&thresholds);
+        }
+        self.pressure_thresholds = thresholds;
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -8256,6 +8272,7 @@ fn capture_daemon_runtime_snapshot() -> DaemonRuntimeSnapshot {
 
     DaemonRuntimeSnapshot {
         pressure: None,
+        pressure_thresholds: Default::default(),
         loaded_at: chrono::Utc::now().to_rfc3339(),
         paths,
     }
