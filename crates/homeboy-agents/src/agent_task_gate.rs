@@ -3261,9 +3261,47 @@ impl SelectedGateEnvironment {
     /// so a nested `homeboy review test` resolves identically in each
     /// (Extra-Chill/homeboy#16268).
     fn configure_component_inputs(&mut self, cwd: &Path) -> Result<()> {
+        self.register_admitted_component(cwd)?;
         self.configure_linked_extensions(cwd)?;
         self.carry_declared_secret_env(cwd);
         Ok(())
+    }
+
+    /// Register the admitted component inside an isolated gate HOME, at the
+    /// checkout the gate runs in.
+    ///
+    /// HOME isolation hides the host's component registry, so the canonical
+    /// gate `homeboy review test <component>` could only resolve a component
+    /// whose repository ships a portable `homeboy.json`; a registry-only
+    /// component failed with `component.not_found`. The host's registration
+    /// (when it has one) is carried with `local_path` rebound to the gate
+    /// checkout, so no host path crosses the boundary.
+    fn register_admitted_component(&mut self, cwd: &Path) -> Result<()> {
+        let (Some(home), Some(id)) = (
+            self.isolated_home.as_deref(),
+            self.admitted_component_id.as_deref(),
+        ) else {
+            return Ok(());
+        };
+        let file = format!("{id}.json");
+        let mut registration = homeboy_core::paths::components()
+            .ok()
+            .and_then(|host| fs::read(host.join(&file)).ok())
+            .and_then(|raw| serde_json::from_slice::<serde_json::Value>(&raw).ok())
+            .filter(serde_json::Value::is_object)
+            .unwrap_or_else(|| json!({}));
+        registration["local_path"] = json!(cwd.to_string_lossy());
+        let components = homeboy_core::paths::components_in_root(&home.join(".config/homeboy"));
+        let io_error = |error: std::io::Error| {
+            Error::internal_io(
+                error.to_string(),
+                Some("register gate component".to_string()),
+            )
+        };
+        fs::create_dir_all(&components).map_err(io_error)?;
+        let bytes = serde_json::to_vec_pretty(&registration)
+            .map_err(|error| Error::internal_json(error.to_string(), None))?;
+        fs::write(components.join(file), bytes).map_err(io_error)
     }
 
     /// Carry the admitted component's declared test secrets into the gate.
@@ -11687,6 +11725,63 @@ exit 2
             "{}",
             error.message
         );
+    }
+
+    /// #15882: a registry-only component (no portable `homeboy.json`) resolves
+    /// inside the isolated gate HOME at the gate checkout, so the canonical
+    /// `homeboy review test <component>` gate passes preflight as it does in the
+    /// operator's shell.
+    #[cfg(unix)]
+    #[test]
+    fn gate_probe_resolves_a_registry_only_component_under_isolated_home() {
+        let _guard = env_mutex();
+        if !rerun_alone_to_replace_path(
+            "gate_probe_resolves_a_registry_only_component_under_isolated_home",
+        ) {
+            return;
+        }
+        let host_home = tempfile::tempdir().expect("host home");
+        for name in homeboy_core::paths::HOMEBOY_ROOT_ENV_VARS {
+            std::env::remove_var(name);
+        }
+        std::env::set_var("HOME", host_home.path());
+        let registry = host_home.path().join(".config/homeboy/components");
+        fs::create_dir_all(&registry).expect("host registry");
+        fs::write(
+            registry.join("registry-only.json"),
+            r#"{"local_path":"/host/checkout","remote_url":"https://example.test/registry-only.git"}"#,
+        )
+        .expect("host registration");
+        let workspace = tempfile::tempdir().expect("workspace");
+        let bin = tempfile::tempdir().expect("bin");
+        // Stands in for the real CLI: the component resolves only when it is
+        // registered, at the gate checkout, in the HOME the probe runs under.
+        homeboy_test_support::write_executable(
+            &bin.path().join("homeboy"),
+            r#"#!/bin/sh
+record="${HOMEBOY_CONFIG_ROOT:-$HOME/.config/homeboy}/components/$3.json"
+grep -q "\"local_path\": \"$PWD\"" "$record" 2>/dev/null \
+  && grep -q '"remote_url": "https://example.test/registry-only.git"' "$record" \
+  && { echo '{"success":true,"data":{"preflight":"ready"}}'; exit 0; }
+echo '{"success":false,"summary":"Component not found"}'
+exit 2
+"#,
+            0o755,
+        )
+        .expect("homeboy");
+        std::env::set_var("PATH", format!("{}:/usr/bin:/bin", bin.path().display()));
+
+        let gates = VerifyGateOptions {
+            verify: vec!["homeboy review test registry-only".to_string()],
+            gate_environment: AgentTaskGateEnvironmentPolicy {
+                isolate_home: true,
+                admitted_component_id: Some("registry-only".to_string()),
+                ..AgentTaskGateEnvironmentPolicy::default()
+            },
+            ..VerifyGateOptions::default()
+        };
+        preflight_verify_gate_options(workspace.path(), &gates)
+            .expect("the probe resolves the registered component at the gate checkout");
     }
 
     /// #16268, #17569: a nested gate probe runs with the same component inputs
