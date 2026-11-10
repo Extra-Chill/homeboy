@@ -229,6 +229,7 @@ pub fn run(args: RunsArgs) -> CmdResult<RunsOutput> {
         RunsCommand::LatestRun(args) => latest::latest_run(args),
         RunsCommand::Compare(args) => compare::compare_runs(&store, args),
         RunsCommand::Hotspots(args) => hotspots::runs_hotspots(&store, args),
+        RunsCommand::Friction(args) => super::friction::friction(&store, args),
         RunsCommand::Reconcile(args) => reconcile::reconcile_runs(&store, args),
         RunsCommand::Watch(args) => watch::watch_run(&store, args),
         RunsCommand::Cancel { run_id } => handlers::cancel_run(&store, &run_id),

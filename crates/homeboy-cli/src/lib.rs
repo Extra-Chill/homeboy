@@ -34,6 +34,7 @@ pub mod command_contract;
 #[doc(hidden)]
 pub mod commands;
 pub mod help_topics;
+mod invocation;
 pub(crate) mod removed_commands;
 
 // Test-only fixtures / hermetic process contexts live in homeboy-core (the whole

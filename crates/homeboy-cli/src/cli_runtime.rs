@@ -1095,6 +1095,10 @@ impl CliRuntime {
     }
 
     pub fn run_from_args(&self, args: Vec<String>) -> std::process::ExitCode {
+        crate::invocation::run(|| self.run_from_args_inner(args))
+    }
+
+    fn run_from_args_inner(&self, args: Vec<String>) -> std::process::ExitCode {
         match homeboy::core::daemon::step_job::await_step_child_start() {
             Ok(true) => {}
             Ok(false) => return std::process::ExitCode::SUCCESS,
@@ -1109,6 +1113,10 @@ impl CliRuntime {
         }
 
         let normalized = args::normalize(args);
+        // Identify store-light fast paths from clap's schema, never argv heuristics.
+        if let Ok(matches) = Cli::command_with_scoped_lab_args().try_get_matches_from(&normalized) {
+            crate::invocation::identify(&matches);
+        }
         if let Some(exit) = run_release_with_deadline(&normalized) {
             return exit;
         }
@@ -1191,6 +1199,7 @@ impl CliRuntime {
         // Parse before any background side effect: argv clap rejects is not a
         // command, so it must exit without spawning reconcilers or workers.
         let matches = self.parse_matches(normalized.clone());
+        crate::invocation::identify(&matches);
         // Global-arg conflicts are only enforced by clap when the flags follow
         // the subcommand, so this must be checked explicitly (#11826).
         if let Err(error) = crate::cli_surface::reject_conflicting_placement_selection(&matches) {
@@ -1262,6 +1271,7 @@ impl CliRuntime {
                         clap::error::ErrorKind::DisplayHelp
                             | clap::error::ErrorKind::DisplayVersion
                     ) {
+                        crate::invocation::parse_exit(true);
                         err.exit();
                     }
                     if let Some(removed) =
@@ -1281,6 +1291,7 @@ impl CliRuntime {
                         &self.extension_discovery().health,
                     ) {
                         eprintln!("{}", output);
+                        crate::invocation::parse_exit(false);
                         std::process::exit(2);
                     }
 
@@ -1290,9 +1301,11 @@ impl CliRuntime {
                         &self.extension_discovery().health,
                     ) {
                         eprintln!("{}", output);
+                        crate::invocation::parse_exit(false);
                         std::process::exit(2);
                     }
 
+                    crate::invocation::parse_exit(false);
                     err.exit();
                 }
             },
