@@ -9317,6 +9317,15 @@ fn adoption_blocks_inherited_failure_when_candidate_package_artifact_differs_fro
 
 #[test]
 fn continuation_finalizes_applied_green_candidate_despite_recoverable_artifact_diagnostic() {
+    green_candidate_review_verdict(false);
+}
+
+#[test]
+fn incomplete_review_persists_publication_withholding_reason_without_provider_retry() {
+    green_candidate_review_verdict(true);
+}
+
+fn green_candidate_review_verdict(incomplete: bool) {
     homeboy_core::test_support::with_isolated_home(|_| {
         use crate::agent_task::{AgentTaskArtifact, AgentTaskOutcome, AgentTaskOutcomeStatus};
         use crate::agent_task_scheduler::{AgentTaskAggregate, AgentTaskAggregateTotals};
@@ -9363,7 +9372,15 @@ fn continuation_finalizes_applied_green_candidate_despite_recoverable_artifact_d
                     typed_artifacts: Vec::new(),
                     evidence_refs: Vec::new(),
                     diagnostics: Vec::new(),
-                    outputs: test_review_form_outputs(),
+                    outputs: {
+                        let mut outputs = test_review_form_outputs();
+                        if incomplete {
+                            outputs["review_form"]["completion"] = serde_json::json!("incomplete");
+                            outputs["review_form"]["incomplete_reason"] =
+                                serde_json::json!("The second cell still needs work");
+                        }
+                        outputs
+                    },
                     workflow: None,
                     follow_up: None,
                     metadata: serde_json::json!({ "model": "fixture-model" }),
@@ -9399,8 +9416,20 @@ fn continuation_finalizes_applied_green_candidate_despite_recoverable_artifact_d
         })
         .expect("continue through finalization");
 
-        assert_eq!(result.value.status, "review_ready");
-        assert_eq!(finalizations.load(Ordering::SeqCst), 1);
+        assert_eq!(result.value.history_run_ids, vec![run_id]);
+        if incomplete {
+            assert_eq!(result.value.status, "candidate_recoverable");
+            assert_eq!(finalizations.load(Ordering::SeqCst), 0);
+            let record = agent_task_lifecycle::exact_record(run_id).expect("terminal record");
+            let projected = crate::orchestration::project_record(&record, None)
+                .expect("status without loading aggregate");
+            let blocker = projected.blocker.expect("status names withholding reason");
+            assert_eq!(blocker.code.as_deref(), Some("review_form.incomplete"));
+            assert!(blocker.message.contains("The second cell still needs work"));
+        } else {
+            assert_eq!(result.value.status, "review_ready");
+            assert_eq!(finalizations.load(Ordering::SeqCst), 1);
+        }
     });
 }
 

@@ -208,6 +208,8 @@ pub enum CookDeliveryBlockerCode {
     BaseConflict,
     ForeignCommits,
     PublishRefused,
+    #[serde(rename = "review_form.incomplete")]
+    ReviewFormIncomplete,
     Policy,
     Cancelled,
 }
@@ -220,6 +222,7 @@ impl CookDeliveryBlockerCode {
             Self::BaseConflict => "base_conflict",
             Self::ForeignCommits => "foreign_commits",
             Self::PublishRefused => "publish_refused",
+            Self::ReviewFormIncomplete => "review_form.incomplete",
             Self::Policy => "policy",
             Self::Cancelled => "cancelled",
         }
@@ -467,6 +470,9 @@ impl CookDelivery {
             ),
             (CookDeliveryState::Blocked, Some(Code::GatesDeferred)) => {
                 (recoverable, Some(CookStatus::GatesDeferred))
+            }
+            (CookDeliveryState::Blocked, Some(Code::ReviewFormIncomplete)) => {
+                (recoverable, Some(CookStatus::CandidateRecoverable))
             }
             (CookDeliveryState::Blocked, Some(Code::PublishRefused)) => (
                 None,
