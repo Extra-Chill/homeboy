@@ -22,10 +22,6 @@ pub struct RunsReconcileArgs {
     /// flag to mark only the reported orphaned records stale.
     #[arg(long)]
     pub dry_run: bool,
-    /// One-time run metadata compaction followed by VACUUM. Requires an idle
-    /// store; never performed by retention or routine artifact cleanup.
-    #[arg(long, conflicts_with = "dry_run")]
-    pub compact_metadata: bool,
     /// Maximum running records to inspect
     #[arg(long, default_value_t = 1000)]
     pub limit: i64,
@@ -49,9 +45,6 @@ pub(crate) fn reconcile_runs(
     store: &ObservationStore,
     args: RunsReconcileArgs,
 ) -> CmdResult<RunsOutput> {
-    if args.compact_metadata {
-        store.compact_run_metadata()?;
-    }
     let running = running_runs(&store, args.limit)?;
     let inspected = running.len();
     let reconciled =

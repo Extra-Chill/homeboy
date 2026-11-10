@@ -17,6 +17,7 @@ pub mod metadata_payloads;
 mod runs;
 mod schema;
 mod work_intents;
+mod write_health;
 
 use super::context::RunContext;
 pub use super::context::{

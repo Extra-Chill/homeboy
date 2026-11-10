@@ -106,6 +106,7 @@ impl Default for RunsHotspotsArgs {
 
 #[derive(Serialize, Debug, Clone, PartialEq)]
 pub struct RunsHotspotsOutput {
+    pub store_write_health: Vec<Value>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub coverage: Vec<homeboy::core::observation::PhaseCoverage>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -241,6 +242,7 @@ pub(crate) fn runs_hotspots(
         largest_gaps.truncate(limit);
         return Ok((
             RunsOutput::Hotspots(RunsHotspotsOutput {
+                store_write_health: store.write_health()?,
                 cohort_coverage: Some(CohortCoverage {
                     wall_ms,
                     unattributed_ms,
@@ -346,6 +348,7 @@ pub(crate) fn runs_hotspots(
         phases.phases.truncate(limit);
         return Ok((
             RunsOutput::Hotspots(RunsHotspotsOutput {
+                store_write_health: store.write_health()?,
                 command: "runs.hotspots",
                 cohort_coverage: None,
                 run_ids: phases.run_ids.clone(),
@@ -373,6 +376,7 @@ pub(crate) fn runs_hotspots(
 
     Ok((
         RunsOutput::Hotspots(RunsHotspotsOutput {
+            store_write_health: store.write_health()?,
             command: "runs.hotspots",
             cohort_coverage: None,
             run_ids: ranking_run_ids,
