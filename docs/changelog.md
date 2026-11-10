@@ -4,6 +4,17 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.458.6] - 2026-11-10
+
+### Changed
+- an existing-PR attempt starts from the remote PR head
+- an interrupted local Cook owner diagnoses as a recoverable failure
+- Hot-path store reads cost live work, not history
+- a stale daemon yields workflows at step boundaries and the replacement adopts them
+
+### Fixed
+- restore #17747, #17748, #17750 and #17757 reverted by #17763
+
 ## [0.458.5] - 2026-11-10
 
 ### Changed
