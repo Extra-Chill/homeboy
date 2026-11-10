@@ -863,12 +863,12 @@ impl AgentTaskScheduler {
                         continue;
                     }
                 };
-                let task_base_sha = scheduled
+                let mut task_base_sha = scheduled
                     .task_base_sha
                     .clone()
                     .or(harvest_preflight.base_sha.clone());
                 let source_workspace_root = request.workspace.root.clone();
-                let source_provenance = harvest_preflight.source_provenance;
+                let mut source_provenance = harvest_preflight.source_provenance;
                 let scratch = self.durable_lifecycle_store().and_then(|lifecycle_store| {
                     crate::controller_scratch::allocate_attempt_at(
                         &lifecycle_store.data_root(),
@@ -919,6 +919,14 @@ impl AgentTaskScheduler {
                         continue;
                     }
                 };
+                if let Some(remote_head) =
+                    request.metadata["cook_pr_head_resolution"]["remote_head"].as_str()
+                {
+                    task_base_sha = Some(remote_head.to_string());
+                    let provenance = source_provenance.get_or_insert_with(|| serde_json::json!({}));
+                    provenance["cook_pr_head_resolution"] =
+                        request.metadata["cook_pr_head_resolution"].clone();
+                }
                 // Bind the attempt's base and Git registration to this durable
                 // lease. Recorded here, at the producer, so a registration whose
                 // directory later disappears can still be pruned by identity

@@ -755,6 +755,42 @@ pub(super) fn prepare_attempt_workspace_in_root(
     let Some(base) = base else {
         return Ok(None);
     };
+    // Existing PRs are remote work, not unpublished work on a durable local
+    // branch. Fetch the PR ref even when that branch already exists locally.
+    let remote_base = if let Some(number) = request
+        .workspace
+        .task_url
+        .as_deref()
+        .and_then(|url| url.split("/pull/").nth(1))
+        .and_then(|tail| tail.split(['/', '?', '#']).next())
+        .filter(|number| !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()))
+    {
+        let pr_ref = format!("refs/pull/{number}/head");
+        let fetched = git_output(&root, &["fetch", "--no-tags", "origin", &pr_ref])
+            .and_then(|_| git_output(&root, &["rev-parse", "FETCH_HEAD^{commit}"]));
+        let local = git_output(&root, &["rev-parse", "HEAD"])?;
+        match fetched {
+            Ok(remote) => {
+                request.metadata["cook_pr_head_resolution"] = serde_json::json!({
+                    "source": "fetched_remote_pr_head", "remote_head": remote,
+                    "local_head": local, "local_head_ignored": local != remote,
+                });
+                Some(remote)
+            }
+            // A fork-first checkout's origin may not carry the PR ref: keep the
+            // resolved base and record why the remote head was not used.
+            Err(error) => {
+                request.metadata["cook_pr_head_resolution"] = serde_json::json!({
+                    "source": "local_base", "local_head": local,
+                    "fetch_error": format!("{error:?}"),
+                });
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let base = remote_base.as_deref().unwrap_or(base);
     let identity = format!("attempt-{}", uuid::Uuid::new_v4());
     // The attempt checkout is a child of the scheduler's durably registered
     // scratch lease, never an untracked system-temporary worktree.
