@@ -8477,7 +8477,6 @@ pub(super) fn publish_incomplete_draft<
             .trim()
             .to_string()
     };
-    body.push_str("\nImplemented by Homeboy Cook (Pi, openai/gpt-6.1-sol). Issue, prompt and review by Franklin (Claude Opus via Pi, Roadie).\n");
     backend.push_branch(path, sha.trim(), &head)?;
     let pr = match backend.find_open_pr(None, path, &options.finalization.base, &head)? {
         Some(pr) => {
