@@ -2915,11 +2915,8 @@ where
             artifact: None,
         };
     }
-    if maintenance_allowed() {
-        if let Err(error) = job_store.reconcile_expired_local_child_reservations() {
-            return error_response(500, error);
-        }
-    }
+    // Expired reservations are reclaimed by the background reconciler. A
+    // request worker never runs a durable store transaction just to route.
     match (method, path.split('?').next().unwrap_or(path)) {
         ("GET", homeboy_runner_contract::RUNNER_API_DESCRIBE_PATH) => match describe_runner(job_store) {
             Ok(body) => daemon_endpoint_response("runner.describe", body),
@@ -7303,6 +7300,24 @@ mod tests {
                 JobStatus::Failed
             );
             assert_owner_live(&lease, false);
+        });
+    }
+
+    #[test]
+    fn read_only_requests_never_write_the_durable_store() {
+        // Every request used to reload, clone and rewrite the whole shared
+        // ledger first; on a large store that serialized observation behind
+        // the durable lock and timed out status on an idle Lab (#17918).
+        with_isolated_home(|_| {
+            write_test_lease("lease-read-path");
+            let store =
+                JobStore::open_without_reconciliation(paths::observation_db().expect("jobs path"))
+                    .expect("durable store");
+            store.fail_next_durable_writes(1);
+            for path in ["/version", "/capabilities"] {
+                let response = route_with_job_store("GET", path, &store);
+                assert_eq!(response.status_code, 200, "{path}: {:?}", response.body);
+            }
         });
     }
 
