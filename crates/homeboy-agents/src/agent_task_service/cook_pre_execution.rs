@@ -874,8 +874,7 @@ mod tests {
     };
     use crate::agent_task_lifecycle::AgentTaskLifecycleStore;
     use crate::agent_task_service::cook::{
-        CookAiDisclosure, CookFinalization, CookIdentity, CookProviderTransport, CookRetryPolicy,
-        CookWorkspace,
+        CookFinalization, CookIdentity, CookProviderTransport, CookRetryPolicy, CookWorkspace,
     };
     use crate::agent_task_service::cook_recipe::{
         AgentTaskCookRecipe, AgentTaskCookRecipeAttempt, COOK_RECIPE_SCHEMA,
@@ -1145,10 +1144,6 @@ mod tests {
                 title: "Paired-store materialization".to_string(),
                 commit_message: "test".to_string(),
                 protected_branches: Vec::new(),
-            },
-            ai_disclosure: CookAiDisclosure {
-                ai_tool: "test".to_string(),
-                ai_model: None,
             },
             gates: crate::agent_task_gate::VerifyGateOptions::default(),
             harvest_context: Default::default(),

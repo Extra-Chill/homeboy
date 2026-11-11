@@ -1231,7 +1231,6 @@ fn cook_preview_resolved_request(args: &AgentTaskCookArgs, placement: Value) -> 
         "publication": {
             "finalize": !args.no_finalize,
             "draft": args.draft_pr,
-            "ai_tool": args.ai_tool,
         },
         "notification_resolution": homeboy::core::notification_route::current_resolution(),
     })
@@ -8323,16 +8322,6 @@ fn run_preflight_cook_execution(
     // finalization: a Cook PR has one commit, and GitHub squash-merges a
     // single-commit PR under that commit's subject (#16052).
     let commit_message = args.commit_message.clone().unwrap_or_default();
-    let selected_identity = initial_plan.tasks.first().map(|task| {
-        (
-            task.executor.backend.clone(),
-            task.executor.selector.clone(),
-            task.executor.model().map(str::to_string),
-        )
-    });
-    let selected_model = selected_identity
-        .as_ref()
-        .and_then(|(_, _, model)| model.clone());
     let durable_observer = |event: &agent_task_service::CookProgressEvent<'_>| {
         if no_progress && event.phase != "durable_identity" {
             return Ok(());
@@ -8414,15 +8403,6 @@ fn run_preflight_cook_execution(
                 title,
                 commit_message,
                 protected_branches: args.protected_branches,
-            },
-            ai_disclosure: homeboy::agents::agent_task_service::CookAiDisclosure {
-                ai_tool: args.dispatch.cook.values.ai_tool.clone(),
-            // Model identity comes only from explicit/config/rotation selection
-            // (`--model`, provider profile). Disclosure text like
-            // `Pi (GPT-5.5)` is presentation, not execution provenance, and
-            // must not be reverse-parsed into a model — an omitted model stays
-            // omitted so finalization records only real model identity (#9789).
-                ai_model: selected_model,
             },
             harvest_context:
                 homeboy::agents::agent_task_scheduler::HarvestExecutionContext::from_current_process(

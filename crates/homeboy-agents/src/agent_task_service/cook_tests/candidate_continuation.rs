@@ -164,7 +164,7 @@ fn multi_attempt_candidate_recoverable_recover_publishes_candidate_sha() {
         assert_eq!(report.result.unwrap()["status"], "review_ready");
         let backend = performer.0.lock().unwrap();
         assert!(backend.created);
-        assert!(backend.body.contains("gpt-6.1-sol"));
+        assert!(backend.body.contains("Pi"), "{}", backend.body);
     });
 }
 
@@ -250,7 +250,7 @@ fn multi_attempt_substantive_adopt_uses_terminal_execution_lineage() {
         assert_eq!(result.exit_code, 0, "{result:#?}");
         assert_eq!(result.value.status, "review_ready");
         assert!(backend.created);
-        assert!(backend.body.contains("gpt-6.1-sol"));
+        assert!(backend.body.contains("Pi"), "{}", backend.body);
         let stored = persisted_promotion_for_attempt(&options.identity.initial_run_id)
             .unwrap()
             .unwrap();
@@ -437,9 +437,10 @@ fn refused_publication_ends_the_terminal_continuation_without_regating() {
     with_own_green_gates(|options, _| {
         let (cook_id, run_id) = (&options.identity.cook_id, &options.identity.initial_run_id);
         let store = test_lifecycle_store();
-        // The producing runtime records no concrete model: publication refuses.
+        // A failed execution without candidate recovery proof cannot publish.
         agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
-            record.lifecycle.provider_runtime[0].metadata = serde_json::json!({});
+            record.lifecycle.execution.state =
+                homeboy_core::run_lifecycle_record::RunExecutionState::Failed;
         })
         .unwrap();
         let promotions = || {

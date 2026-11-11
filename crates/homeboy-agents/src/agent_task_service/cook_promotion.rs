@@ -838,12 +838,6 @@ pub fn preflight_cook_promotion_for_observation_in_store(
                 None,
             )
         })?;
-    validate_cook_attempt_model_provenance_for_observation_in_store(
-        lifecycle_store,
-        run_id,
-        record,
-        aggregate,
-    )?;
     if let Some(promotion) = persisted_promotion_from_record(run_id, record.clone())? {
         let behavior = if promotion.status == AgentTaskPromotionStatus::GateDeferred {
             "resume_deferred_gates"
@@ -1024,23 +1018,6 @@ pub(crate) fn promote_or_load_attempt_in_store(
             return Ok(promotion);
         }
     }
-    let aggregate = lifecycle_store.read_aggregate(run_id)?;
-    let outcome = aggregate
-        .selected_outcome()
-        .or_else(|| {
-            (aggregate.outcomes.len() == 1)
-                .then(|| aggregate.outcomes.first())
-                .flatten()
-        })
-        .ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "provider_model",
-                "Cook promotion has no selected provider outcome",
-                Some(run_id.to_string()),
-                None,
-            )
-        })?;
-    promotion_executed_model_in_store(lifecycle_store, run_id, outcome)?;
     if let Some(promotion) = persisted_promotion_for_attempt_in_store(lifecycle_store, run_id)? {
         if matches!(
             promotion.status,
@@ -2396,15 +2373,14 @@ pub(crate) fn cook_finalization_options_with_stores(
                 None,
             )
         })?;
-    let (mut review_dossier, composed_ai_model_disclosure) =
-        cook_review_dossier_with_stores_and_review_form(
-            store,
-            lifecycle_store,
-            options,
-            promotion,
-            successful_run_id,
-            review_form,
-        )?;
+    let mut review_dossier = cook_review_dossier_with_stores_and_review_form(
+        store,
+        lifecycle_store,
+        options,
+        promotion,
+        successful_run_id,
+        review_form,
+    )?;
     review_dossier.overrides = overrides;
     review_dossier.source_relationships =
         cook_task_issue_relationships(&options.workspace.source_refs, Path::new(&path));
@@ -2492,7 +2468,7 @@ pub(crate) fn cook_finalization_options_with_stores(
             source_refs,
             artifact_refs,
             attempt_summary,
-            ai_tool: options.ai_disclosure.ai_tool.clone(),
+            ai_tool: String::new(),
             // Runtime rotation can select a fallback after the immutable Cook
             // request was persisted. The dossier carries that terminal route.
             ai_model: Some(review_dossier.ai_assistance.model.clone()),
@@ -2513,7 +2489,6 @@ pub(crate) fn cook_finalization_options_with_stores(
                 .map(|record| record.lifecycle),
         },
         review_dossier,
-        composed_ai_model_disclosure,
         review_profile,
         manual_finalization: false,
         candidate: promotion.candidate.clone(),
@@ -3215,7 +3190,7 @@ fn cook_review_dossier_with_stores_and_review_form(
     promotion: &AgentTaskPromotionReport,
     successful_run_id: &str,
     review_form: Option<&AgentTaskSuppliedReviewForm>,
-) -> Result<(AgentTaskReviewDossier, bool)> {
+) -> Result<AgentTaskReviewDossier> {
     // A form-only run owns reviewer metadata but carries forward the durable
     // gate proof while its authenticated source owns candidate scope.
     let terminal_promotion = promotion;
@@ -3331,42 +3306,39 @@ fn cook_review_dossier_with_stores_and_review_form(
             },
         ]);
     }
-    Ok((
-        AgentTaskReviewDossier {
-            schema: "homeboy/agent-task-review-dossier/v1".to_string(),
-            summary: if review_form.is_some() {
-                terminal_form.summary.clone()
-            } else {
-                lineage.summary
-            },
-            what_changed: if review_form.is_some() {
-                terminal_form.what_changed.clone()
-            } else {
-                lineage.what_changed
-            },
-            how_to_test: Vec::new(),
-            // Deterministic evidence: orchestrator-owned. Each candidate-bound
-            // gate renders once from `verified_commands`; `evidence` carries only
-            // provenance that changes how a reviewer should read the result.
-            evidence,
-            verified_commands,
-            changed_public_contracts: Vec::new(),
-            public_contract_evidence: None,
-            verified_base: None,
-            ai_assistance: AgentTaskReviewAiAssistance {
-                // Deterministic: the orchestrator knows whether/what tool+model ran,
-                // and attributes Homeboy as the harness that drove the change.
-                used: true,
-                tool: lineage.tool,
-                model: lineage.model,
-            },
-            source_relationships: Vec::new(),
-            overrides: Vec::new(),
-            out_of_scope_changes,
-            repro: Some(repro),
+    Ok(AgentTaskReviewDossier {
+        schema: "homeboy/agent-task-review-dossier/v1".to_string(),
+        summary: if review_form.is_some() {
+            terminal_form.summary.clone()
+        } else {
+            lineage.summary
         },
-        lineage.composed_model_disclosure,
-    ))
+        what_changed: if review_form.is_some() {
+            terminal_form.what_changed.clone()
+        } else {
+            lineage.what_changed
+        },
+        how_to_test: Vec::new(),
+        // Deterministic evidence: orchestrator-owned. Each candidate-bound
+        // gate renders once from `verified_commands`; `evidence` carries only
+        // provenance that changes how a reviewer should read the result.
+        evidence,
+        verified_commands,
+        changed_public_contracts: Vec::new(),
+        public_contract_evidence: None,
+        verified_base: None,
+        ai_assistance: AgentTaskReviewAiAssistance {
+            // Deterministic: the orchestrator knows whether/what tool+model ran,
+            // and attributes Homeboy as the harness that drove the change.
+            used: true,
+            tool: lineage.tool,
+            model: lineage.model,
+        },
+        source_relationships: Vec::new(),
+        overrides: Vec::new(),
+        out_of_scope_changes,
+        repro: Some(repro),
+    })
 }
 
 /// Files the candidate-producing remediation attempt changed outside its
@@ -3408,16 +3380,14 @@ struct CookAiLineage {
     what_changed: Vec<String>,
     tool: String,
     model: String,
-    composed_model_disclosure: bool,
 }
 
 struct CookAttemptExecution {
     tool: String,
-    model: Option<String>,
+    model: String,
 }
 
 struct CookContribution {
-    run_id: String,
     execution: CookAttemptExecution,
 }
 
@@ -3434,184 +3404,10 @@ fn concrete_provider_model(value: Option<&str>) -> Option<String> {
         .filter(|model| {
             !matches!(
                 model.to_ascii_lowercase().as_str(),
-                "not recorded"
-                    | "unknown"
-                    | "ai-assisted"
-                    | "ai assisted"
-                    | "legacy caller did not record a model"
+                "not recorded" | "unknown" | "ai-assisted" | "ai assisted"
             )
         })
         .map(str::to_string)
-}
-
-/// Executed-model evidence the attempt itself retained when the normalized
-/// `metadata.model` never landed on the outcome (#15112). A Cook dispatched
-/// without `--model` lets the provider resolve its own default; local and Lab
-/// placements have both produced terminal outcomes whose `selected_model()` is
-/// empty while the provider's model identity or its generic run-result
-/// envelope still carries the concrete executed model.
-fn outcome_model_identity_evidence(
-    outcome: &crate::agent_task::AgentTaskOutcome,
-) -> Option<String> {
-    [
-        outcome
-            .metadata
-            .pointer("/model_identity/provider_reported"),
-        outcome.metadata.pointer("/model_identity/actual"),
-        outcome
-            .outputs
-            .pointer("/provider_run_result/metadata/model"),
-        outcome.outputs.pointer("/provider_run_result/model"),
-        outcome
-            .metadata
-            .pointer("/provider_run_result/metadata/model"),
-        outcome.metadata.pointer("/provider_run_result/model"),
-    ]
-    .into_iter()
-    .find_map(|value| concrete_provider_model(value.and_then(Value::as_str)))
-}
-
-/// The harvested candidate patch artifact records `metadata.provider_model`
-/// for the execution that produced it. When every other model authority is
-/// empty that binding is still execution evidence (#15112): it is written by
-/// the same scheduler pass that normalizes the outcome, and on the Lab path it
-/// travels with the harvested candidate. Distinct concrete models across the
-/// candidate artifacts are ambiguous and fail closed.
-fn candidate_artifact_model_evidence(
-    outcome: &crate::agent_task::AgentTaskOutcome,
-    run_id: &str,
-) -> Result<Option<String>> {
-    let mut models = outcome
-        .artifacts
-        .iter()
-        .filter(|artifact| artifact.kind == "patch" || artifact.role.as_deref() == Some("patch"))
-        .filter_map(|artifact| {
-            concrete_provider_model(artifact.metadata["provider_model"].as_str())
-        })
-        .collect::<Vec<_>>();
-    models.sort();
-    models.dedup();
-    match models.as_slice() {
-        [] => Ok(None),
-        [model] => Ok(Some(model.clone())),
-        _ => Err(Error::validation_invalid_argument(
-            "provider_model",
-            "Cook candidate patch artifacts record ambiguous concrete provider models",
-            Some(run_id.to_string()),
-            None,
-        )),
-    }
-}
-
-/// Resolve the concrete executed model for promotion from every durable model
-/// authority the attempt produced, in order of strength: the normalized
-/// outcome (`metadata.model`), the provider execution ledger
-/// (`record.metadata.provider_executions`), the outcome's own model identity /
-/// provider run-result evidence, and the harvested candidate patch artifact
-/// binding (`metadata.provider_model`).
-///
-/// A Cook with no `--model` override executes under the provider's resolved
-/// default; both local and Lab placements have produced attempts whose
-/// selected outcome lost `metadata.model` while that evidence chain still knew
-/// the executed model (#15112). Promotion only refuses when the model is
-/// truly unknown everywhere, and that refusal names where it looked and a
-/// recovery that re-dispatches with an explicit model.
-pub(crate) fn promotion_executed_model_in_store(
-    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
-    run_id: &str,
-    outcome: &crate::agent_task::AgentTaskOutcome,
-) -> Result<String> {
-    if let Some(model) = outcome_model_identity_evidence(outcome) {
-        return Ok(model);
-    }
-    if let Some(model) = concrete_provider_model(outcome.selected_model()) {
-        return Ok(model);
-    }
-    let record = lifecycle_store.read_record(run_id)?;
-    if let Some(model) = selected_execution_model(
-        record
-            .metadata
-            .get("provider_executions")
-            .unwrap_or(&Value::Null),
-        outcome,
-        None,
-        run_id,
-    )? {
-        return Ok(model);
-    }
-    if let Some(model) = outcome_model_identity_evidence(outcome) {
-        return Ok(model);
-    }
-    if let Some(model) = candidate_artifact_model_evidence(outcome, run_id)? {
-        return Ok(model);
-    }
-    Err(Error::validation_invalid_argument(
-        "provider_model",
-        "Cook promotion requires a concrete executed model, and none was recorded on \
-         the selected outcome (metadata.model), the provider execution ledger \
-         (run record metadata.provider_executions), the outcome's model identity or \
-         provider run-result evidence, or its candidate patch artifacts \
-         (metadata.provider_model). Re-dispatch the attempt with an explicit model: \
-         `homeboy agent-task recover <cook-or-attempt-id> --model <model>`.",
-        Some(run_id.to_string()),
-        None,
-    ))
-}
-
-/// Resolve the model from the terminal provider execution for the scheduler's
-/// selected candidate task. Older controllers did not persist the execution
-/// ledger, so their provider-reported outcome model remains a compatible
-/// fallback; a ledger, when present, is the stronger source of execution fact.
-fn selected_execution_model(
-    provider_executions: &Value,
-    outcome: &crate::agent_task::AgentTaskOutcome,
-    terminal_model: Option<&str>,
-    run_id: &str,
-) -> Result<Option<String>> {
-    let executions = provider_executions
-        .as_array()
-        .map(Vec::as_slice)
-        .unwrap_or(&[]);
-    let terminal_attempt = executions
-        .iter()
-        .filter(|execution| {
-            execution["task_id"] == outcome.task_id
-                && matches!(
-                    execution["state"].as_str(),
-                    Some("succeeded" | "candidate_recoverable")
-                )
-        })
-        .filter_map(|execution| execution["attempt"].as_u64())
-        .max();
-    let Some(terminal_attempt) = terminal_attempt else {
-        return Ok(concrete_provider_model(terminal_model)
-            .or_else(|| concrete_provider_model(outcome.selected_model())));
-    };
-    let mut models = executions
-        .iter()
-        .filter(|execution| {
-            execution["task_id"] == outcome.task_id
-                && execution["attempt"].as_u64() == Some(terminal_attempt)
-                && matches!(
-                    execution["state"].as_str(),
-                    Some("succeeded" | "candidate_recoverable")
-                )
-        })
-        .filter_map(|execution| concrete_provider_model(execution["model"].as_str()))
-        .collect::<Vec<_>>();
-    models.sort();
-    models.dedup();
-    match models.as_slice() {
-        [] => Ok(concrete_provider_model(terminal_model)
-            .or_else(|| concrete_provider_model(outcome.selected_model()))),
-        [model] => Ok(Some(model.clone())),
-        _ => Err(Error::validation_invalid_argument(
-            "provider_model",
-            "Cook lineage selected provider execution has ambiguous concrete models",
-            Some(run_id.to_string()),
-            None,
-        )),
-    }
 }
 
 fn selected_outcome_for_attempt_in_store(
@@ -3636,64 +3432,6 @@ fn selected_outcome_for_attempt_in_store(
                 None,
             )
         })
-}
-
-/// Read provider identity from the durable attempt record rather than the
-/// recipe or finalization flags. A pre-provider adopted source has task context
-/// but no executed model; any attempt used as an execution is validated by its
-/// caller before disclosure.
-fn authoritative_execution_identity(
-    plan: &crate::agent_task_schedule::AgentTaskPlan,
-    record: &agent_task_lifecycle::AgentTaskRunRecord,
-    outcome: &crate::agent_task::AgentTaskOutcome,
-    run_id: &str,
-) -> Result<(String, Option<String>)> {
-    let task = plan
-        .tasks
-        .iter()
-        .find(|task| task.task_id == outcome.task_id)
-        .ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "cook_recipe.attempts",
-                "Cook lineage outcome does not match a task in its durable execution plan",
-                Some(run_id.to_string()),
-                None,
-            )
-        })?;
-    if task.executor.backend.trim().is_empty() {
-        return Err(Error::validation_invalid_argument(
-            "provider_tool",
-            "Cook lineage attempt has no dispatched provider tool",
-            Some(run_id.to_string()),
-            None,
-        ));
-    }
-    let terminal = super::cook_pre_execution::terminal_executor_identity(
-        outcome,
-        plan,
-        record.metadata.get("provider_executions"),
-    );
-    // Routing identity is not response identity. In particular metadata.model
-    // and patch provider_model can both contain a Roadie pool alias.
-    let rotation = outcome.metadata["model_identity"]["requested"]
-        .as_str()
-        .or_else(|| task.executor.model())
-        .or_else(|| {
-            terminal
-                .as_ref()
-                .and_then(|identity| identity.model.as_deref())
-        })
-        .unwrap_or("not recorded");
-    let model = Some(crate::agent_task_review_dossier::served_model_disclosure(
-        &record.served_models,
-        rotation,
-    ));
-    Ok((
-        terminal
-            .map(|identity| identity.backend)
-            .unwrap_or_else(|| task.executor.backend.clone()),
-        model,
-    ))
 }
 
 fn cook_attempt_execution_in_store(
@@ -3739,9 +3477,15 @@ fn cook_attempt_execution_in_store(
                 None,
             ));
         }
-        return Ok(CookAttemptExecution {
+        // Never executed: disclose the dispatched route from the plan alone.
+        let provenance = crate::execution_provenance::ExecutionProvenance {
             tool: task.executor.backend.clone(),
-            model: None,
+            route: task.executor.model().unwrap_or_default().to_string(),
+            served_models: Vec::new(),
+        };
+        return Ok(CookAttemptExecution {
+            model: crate::execution_provenance::render_execution_provenance(&provenance),
+            tool: provenance.tool,
         });
     }
     let outcome = selected_outcome_for_attempt_in_store(lifecycle_store, run_id)?;
@@ -3757,8 +3501,11 @@ fn cook_attempt_execution_in_store(
             None,
         ));
     }
-    let (tool, model) = authoritative_execution_identity(&plan, &record, &outcome, run_id)?;
-    Ok(CookAttemptExecution { tool, model })
+    let provenance = crate::execution_provenance::execution_provenance(&record);
+    Ok(CookAttemptExecution {
+        model: crate::execution_provenance::render_execution_provenance(&provenance),
+        tool: provenance.tool,
+    })
 }
 
 fn cook_contribution_source(
@@ -3880,10 +3627,7 @@ fn substantive_contribution_chain(
                 })?;
         if current_contributes {
             let execution = cook_attempt_execution_in_store(lifecycle_store, &current_run_id)?;
-            contributions.push(CookContribution {
-                run_id: current_run_id.clone(),
-                execution,
-            });
+            contributions.push(CookContribution { execution });
         }
         let source = cook_contribution_source(lifecycle_store, &current_run_id)?;
         let Some(source) = source else {
@@ -3961,7 +3705,7 @@ fn substantive_lineage(
         ));
     };
     if contributions.len() == 1 {
-        let model = required_execution_model(&terminal.execution, &terminal.run_id)?;
+        let model = terminal.execution.model.clone();
         return Ok(CookAiLineage {
             summary: terminal_form.summary.clone(),
             what_changed: terminal_form.what_changed.clone(),
@@ -3969,9 +3713,6 @@ fn substantive_lineage(
                 &terminal.execution.tool,
             ),
             model,
-            // This already includes response identity; finalization must not
-            // replace it with legacy metadata.model.
-            composed_model_disclosure: true,
         });
     }
     let mut tools = Vec::new();
@@ -3980,7 +3721,7 @@ fn substantive_lineage(
         let role = format!("Implementation {}", index + 1);
         let tool =
             crate::agent_task_review_dossier::homeboy_tool_disclosure(&contribution.execution.tool);
-        let model = required_execution_model(&contribution.execution, &contribution.run_id)?;
+        let model = contribution.execution.model.clone();
         tools.push(format!("{role}: {tool}"));
         models.push(format!("{role}: {model}"));
     }
@@ -3989,71 +3730,6 @@ fn substantive_lineage(
         what_changed: terminal_form.what_changed.clone(),
         tool: tools.join("; "),
         model: models.join("; "),
-        composed_model_disclosure: true,
-    })
-}
-
-fn required_execution_model(execution: &CookAttemptExecution, run_id: &str) -> Result<String> {
-    execution.model.clone().ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "provider_model",
-            "Cook lineage attempt has no concrete executed model",
-            Some(run_id.to_string()),
-            None,
-        )
-    })
-}
-
-/// Shared continuation/finalization admission. Legacy attempts without durable
-/// model evidence are rejected before a continuation can claim or promote them.
-pub fn validate_cook_attempt_model_provenance(run_id: &str) -> Result<()> {
-    let lifecycle_store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()?;
-    required_execution_model(
-        &cook_attempt_execution_in_store(&lifecycle_store, run_id)?,
-        run_id,
-    )
-    .map(|_| ())
-}
-
-fn validate_cook_attempt_model_provenance_for_observation_in_store(
-    lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
-    run_id: &str,
-    record: &agent_task_lifecycle::AgentTaskRunRecord,
-    aggregate: &AgentTaskAggregate,
-) -> Result<()> {
-    let plan = lifecycle_store.read_controller_plan(run_id)?;
-    validate_cook_attempt_model_provenance_for_observation(&plan, record, aggregate, run_id)
-}
-
-fn validate_cook_attempt_model_provenance_for_observation(
-    plan: &crate::agent_task_scheduler::AgentTaskPlan,
-    record: &agent_task_lifecycle::AgentTaskRunRecord,
-    aggregate: &AgentTaskAggregate,
-    run_id: &str,
-) -> Result<()> {
-    let outcome = aggregate
-        .selected_outcome()
-        .or_else(|| {
-            (aggregate.outcomes.len() == 1)
-                .then(|| aggregate.outcomes.first())
-                .flatten()
-        })
-        .ok_or_else(|| {
-            Error::validation_invalid_argument(
-                "cook_recipe.attempts",
-                "Cook lineage attempt has no selected provider outcome",
-                Some(run_id.to_string()),
-                None,
-            )
-        })?;
-    let (_, model) = authoritative_execution_identity(plan, record, outcome, run_id)?;
-    model.map(|_| ()).ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "provider_model",
-            "Cook lineage attempt has no concrete executed model",
-            Some(run_id.to_string()),
-            None,
-        )
     })
 }
 
@@ -5225,7 +4901,7 @@ fn dirty_candidate_adoption_recovery_actions(
         ["workspace"]
         .as_str()?;
     let options = super::cook_recipe::reconstruct_options_without_dispatcher(recipe).ok()?;
-    let model = options.ai_disclosure.ai_model?;
+    let model = task.executor.model().unwrap_or("operator-finalized");
     let prefix = prefix.unwrap_or_else(|| super::cook_recovery_command_prefix(run_id));
     let actions = vec![
         super::AgentTaskCookRecoveryAction {
@@ -5923,214 +5599,6 @@ mod pre_provider_cause_tests {
         assert_eq!(class, "agent_task.committed_harvest_dirty_workspace");
         assert_eq!(value["message"], diagnostic.message);
         assert!(pre_provider_diagnostic_cause(1, std::iter::once(&diagnostic)).is_none());
-    }
-}
-
-#[cfg(test)]
-mod provider_model_tests {
-    use super::*;
-
-    fn selected_outcome(model: Option<&str>) -> crate::agent_task::AgentTaskOutcome {
-        crate::agent_task::AgentTaskOutcome {
-            task_id: "selected".to_string(),
-            metadata: model.map_or(Value::Null, |model| serde_json::json!({ "model": model })),
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn provider_model_uses_direct_successful_provider_execution() {
-        let model = selected_execution_model(
-            &serde_json::json!([{
-                "task_id": "selected", "attempt": 1, "state": "succeeded",
-                "model": "openai/gpt-5.6-terra"
-            }]),
-            &selected_outcome(None),
-            None,
-            "run",
-        )
-        .expect("direct execution model");
-
-        assert_eq!(model.as_deref(), Some("openai/gpt-5.6-terra"));
-    }
-
-    #[test]
-    fn provider_model_uses_terminal_gate_remediation_execution() {
-        let model = selected_execution_model(
-            &serde_json::json!([
-                {"task_id": "selected", "attempt": 1, "state": "succeeded", "model": "initial-model"},
-                {"task_id": "selected", "attempt": 2, "state": "succeeded", "model": "remediation-model"}
-            ]),
-            &selected_outcome(None),
-            None,
-            "run",
-        )
-        .expect("remediation execution model");
-
-        assert_eq!(model.as_deref(), Some("remediation-model"));
-    }
-
-    #[test]
-    fn provider_model_preserves_legacy_outcome_evidence_for_review_follow_up() {
-        let outcome = selected_outcome(Some("legacy-provider-model"));
-        let initial = selected_execution_model(&Value::Null, &outcome, None, "run")
-            .expect("legacy initial model");
-        let continuation = selected_execution_model(&Value::Null, &outcome, None, "run")
-            .expect("legacy continuation model");
-
-        assert_eq!(initial, continuation);
-        assert_eq!(initial.as_deref(), Some("legacy-provider-model"));
-    }
-
-    #[test]
-    fn provider_model_rejects_missing_ambiguous_and_unrelated_evidence() {
-        let missing = selected_execution_model(&Value::Null, &selected_outcome(None), None, "run")
-            .expect("missing evidence is unresolved");
-        assert!(missing.is_none());
-
-        let unrelated = selected_execution_model(
-            &serde_json::json!([{
-                "task_id": "other", "attempt": 1, "state": "succeeded", "model": "other-model"
-            }]),
-            &selected_outcome(None),
-            None,
-            "run",
-        )
-        .expect("unrelated evidence is ignored");
-        assert!(unrelated.is_none());
-
-        let error = selected_execution_model(
-            &serde_json::json!([
-                {"task_id": "selected", "attempt": 2, "state": "succeeded", "model": "model-a"},
-                {"task_id": "selected", "attempt": 2, "state": "succeeded", "model": "model-b"}
-            ]),
-            &selected_outcome(None),
-            None,
-            "run",
-        )
-        .expect_err("ambiguous selected execution models fail closed");
-        assert_eq!(error.details["field"], "provider_model");
-    }
-
-    #[test]
-    fn provider_model_continuation_resolves_same_model_as_initial_finalization() {
-        let executions = serde_json::json!([{
-            "task_id": "selected",
-            "attempt": 1,
-            "state": "succeeded",
-            "model": "openai/gpt-5.6-terra"
-        }]);
-        let outcome = selected_outcome(None);
-
-        let initial = selected_execution_model(&executions, &outcome, None, "run-1")
-            .expect("initial finalization model");
-        let continuation = selected_execution_model(&executions, &outcome, None, "run-1")
-            .expect("continuation finalization model");
-
-        assert_eq!(initial, continuation);
-        assert_eq!(initial.as_deref(), Some("openai/gpt-5.6-terra"));
-    }
-
-    #[test]
-    fn outcome_model_identity_evidence_reads_provider_report_and_run_result() {
-        let provider_reported = crate::agent_task::AgentTaskOutcome {
-            task_id: "selected".to_string(),
-            metadata: serde_json::json!({
-                "model": "cook-heavy",
-                "model_identity": { "provider_reported": "anthropic/claude-sonnet-5" }
-            }),
-            ..Default::default()
-        };
-        assert_eq!(
-            outcome_model_identity_evidence(&provider_reported).as_deref(),
-            Some("anthropic/claude-sonnet-5")
-        );
-
-        let run_result = crate::agent_task::AgentTaskOutcome {
-            task_id: "selected".to_string(),
-            outputs: serde_json::json!({
-                "provider_run_result": { "metadata": { "model": "anthropic/claude-sonnet-5" } }
-            }),
-            ..Default::default()
-        };
-        assert_eq!(
-            outcome_model_identity_evidence(&run_result).as_deref(),
-            Some("anthropic/claude-sonnet-5")
-        );
-
-        // Placeholder identities never satisfy the concrete-model requirement.
-        let placeholder = crate::agent_task::AgentTaskOutcome {
-            task_id: "selected".to_string(),
-            metadata: serde_json::json!({
-                "model_identity": { "provider_reported": "unknown" }
-            }),
-            ..Default::default()
-        };
-        assert!(outcome_model_identity_evidence(&placeholder).is_none());
-        assert!(outcome_model_identity_evidence(&selected_outcome(None)).is_none());
-    }
-
-    fn model_evidence_artifact(
-        id: &str,
-        model: Option<&str>,
-    ) -> crate::agent_task::AgentTaskArtifact {
-        crate::agent_task::AgentTaskArtifact {
-            id: id.to_string(),
-            kind: "patch".to_string(),
-            role: Some("patch".to_string()),
-            metadata: model.map_or(
-                Value::Null,
-                |model| serde_json::json!({ "provider_model": model }),
-            ),
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn candidate_artifact_model_evidence_resolves_one_model_and_fails_closed_on_ambiguity() {
-        let mut outcome = selected_outcome(None);
-        outcome.artifacts = vec![
-            model_evidence_artifact("uncommitted", Some("anthropic/claude-sonnet-5")),
-            model_evidence_artifact("committed", Some("anthropic/claude-sonnet-5")),
-            model_evidence_artifact("unbound", None),
-        ];
-        assert_eq!(
-            candidate_artifact_model_evidence(&outcome, "run")
-                .expect("harvested candidate binding resolves")
-                .as_deref(),
-            Some("anthropic/claude-sonnet-5")
-        );
-
-        outcome.artifacts = vec![
-            model_evidence_artifact("uncommitted", Some("model-a")),
-            model_evidence_artifact("committed", Some("model-b")),
-        ];
-        let error = candidate_artifact_model_evidence(&outcome, "run")
-            .expect_err("distinct artifact models fail closed");
-        assert_eq!(error.details["field"], "provider_model");
-
-        outcome.artifacts = vec![model_evidence_artifact("unbound", None)];
-        assert!(candidate_artifact_model_evidence(&outcome, "run")
-            .expect("absent binding is unresolved, not an error")
-            .is_none());
-    }
-
-    #[test]
-    fn provider_model_durable_execution_evidence_takes_precedence_over_stale_outcome() {
-        let executions = serde_json::json!([{
-            "task_id": "selected",
-            "attempt": 1,
-            "state": "succeeded",
-            "model": "openai/gpt-5.6-terra"
-        }]);
-        // A stale or rotation-normalized outcome model must not override the
-        // actual executed provider model recorded in the durable ledger.
-        let outcome = selected_outcome(Some("stale-normalized-model"));
-
-        let model = selected_execution_model(&executions, &outcome, None, "run")
-            .expect("durable execution model wins");
-
-        assert_eq!(model.as_deref(), Some("openai/gpt-5.6-terra"));
     }
 }
 

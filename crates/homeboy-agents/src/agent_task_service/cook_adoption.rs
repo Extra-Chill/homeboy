@@ -322,13 +322,7 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
     let (adoption_ai_model, ai_model_source) = match adoption.ai_model {
         Some(model) => (concrete_adoption_ai_model(&model)?, "candidate_input"),
         None => (
-            concrete_adoption_ai_model(
-                options
-                    .ai_disclosure
-                    .ai_model
-                    .as_deref()
-                    .unwrap_or_default(),
-            )?,
+            concrete_adoption_ai_model(source_request.executor.model().unwrap_or_default())?,
             "recipe_finalization",
         ),
     };
@@ -661,7 +655,6 @@ pub(crate) fn adopt_cook_candidate_with_dispatcher_and_backend_for_attempt_with_
     // The adopted candidate did not run through this cook's provider lifecycle.
     // Bind its declared model to the authenticated promotion instead of inferring
     // one from the immutable execution plan.
-    options.ai_disclosure.ai_model = Some(adoption_ai_model.clone());
     promotion.provenance["adoption"] = serde_json::json!({
         "source_run_id": record.run_id,
         "candidate_ref": candidate_sha,

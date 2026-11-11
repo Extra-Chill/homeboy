@@ -3363,6 +3363,7 @@ pub fn reserve_provider_execution_in_store(
                 "attempt": attempt,
                 "backend": task.executor.backend,
                 "model": task.executor.model(),
+                "route": task.metadata["model_selection"]["requested"].as_str().or_else(|| task.executor.model()),
                 "state": "running",
                 "started_at": started_at.clone(),
                 // This is the process that owns the synchronous local provider

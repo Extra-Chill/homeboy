@@ -1,6 +1,5 @@
 use serde_json::json;
 
-use crate::agent_task_model::normalize_concrete_model_identifier;
 use crate::agent_task_promotion::AgentTaskPromotionReport;
 use crate::agent_task_review_dossier::{
     enrich_dossier, render_review_dossier, AgentTaskReviewDossier, AgentTaskReviewProfile,
@@ -158,6 +157,8 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
     );
     let durable_acceptance;
     if options.manual_finalization {
+        options.review_dossier.ai_assistance.model =
+            crate::execution_provenance::render_execution_provenance(&Default::default());
         durable_acceptance = validate_manual_finalization_policy(lifecycle_store, &options.run_id)?;
         if options.inherited_gate_evidence.is_some()
             || (options.normalized_gate_results.is_empty()
@@ -201,8 +202,7 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
         validate_gate_proof_binding(&gate_proof, &options)?;
         durable_acceptance =
             validate_durable_acceptance(&options.run_id, &gate_proof.promotion, lifecycle_store)?;
-        let eligibility =
-            validate_durable_publication_eligibility(&lifecycle, &gate_proof.promotion)?;
+        validate_durable_publication_eligibility(&lifecycle, &gate_proof.promotion)?;
         let durable_changed_files = normalize_changed_files(&gate_proof.promotion.changed_files);
         if normalize_changed_files(&options.changed_files) != durable_changed_files {
             return Err(changed_files_mismatch_error(
@@ -232,9 +232,6 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
             ));
         }
         options.candidate = Some(gated);
-        // A partial or recoverable run names the model of the runtime that produced its candidate.
-        let recovered_model_task = (lifecycle.execution.state != RunExecutionState::Succeeded)
-            .then_some(gate_proof.promotion.source.task_id.as_str());
         options.normalized_gate_results = gate_proof.promotion.gate_results;
         if options.normalized_gate_results.is_empty() {
             return Err(Error::validation_invalid_argument(
@@ -243,12 +240,6 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
                 None,
                 None,
             ));
-        }
-        if eligibility == DurablePublicationEligibility::ProviderRun
-            && !options.composed_ai_model_disclosure
-        {
-            options.review_dossier.ai_assistance.model =
-                durable_model(&lifecycle, recovered_model_task)?;
         }
         options.evidence.lifecycle = Some(lifecycle);
     }
@@ -1165,13 +1156,6 @@ fn report(
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DurablePublicationEligibility {
-    ProviderRun,
-    PreProviderCandidateAdoptionRecovery,
-    AuthenticatedExternalCandidateAdoption,
-}
-
 pub(crate) fn authorized_replacement_gate_proof(promotion: &AgentTaskPromotionReport) -> bool {
     let proof = &promotion.provenance["replacement_gate_proof"];
     proof["schema"] == "homeboy/agent-task-replacement-gate-proof/v1"
@@ -1189,7 +1173,7 @@ pub(crate) fn authorized_replacement_gate_proof(promotion: &AgentTaskPromotionRe
 fn validate_durable_publication_eligibility(
     lifecycle: &RunLifecycleRecord,
     promotion: &AgentTaskPromotionReport,
-) -> Result<DurablePublicationEligibility> {
+) -> Result<()> {
     let producing_runtime = lifecycle
         .provider_runtime
         .iter()
@@ -1228,8 +1212,7 @@ fn validate_durable_publication_eligibility(
     ) || (lifecycle.execution.state
         == RunExecutionState::Succeeded
         && authorized_replacement_gate_proof(promotion)))
-        && producing_runtime
-            .is_some_and(|runtime| recorded_runtime_model(&runtime.metadata).is_some())
+        && producing_runtime.is_some()
         && match promotion.provenance.get("replacement_gate_proof") {
             None => green_fingerprinted_candidate,
             Some(_) => fingerprinted_candidate && authorized_replacement_gate_proof(promotion),
@@ -1239,7 +1222,7 @@ fn validate_durable_publication_eligibility(
             || (producing_runtime_succeeded && green_fingerprinted_candidate)))
         || verified_candidate_recovery
     {
-        return Ok(DurablePublicationEligibility::ProviderRun);
+        return Ok(());
     }
 
     let recovery = promotion.provenance.pointer("/adoption/recovery");
@@ -1248,7 +1231,6 @@ fn validate_durable_publication_eligibility(
         .provenance
         .pointer("/candidate/fingerprint/head")
         .and_then(serde_json::Value::as_str);
-    let adoption_model = promotion.provenance["adoption"]["ai_model"].as_str();
     let authenticated_adoption = matches!(
         lifecycle.execution.state,
         RunExecutionState::Cancelled | RunExecutionState::Failed
@@ -1257,13 +1239,12 @@ fn validate_durable_publication_eligibility(
             == promotion.source.run_id.clone().unwrap_or_default()
         && candidate_ref.is_some_and(is_git_commit_identity)
         && candidate_ref == candidate_head
-        && adoption_model.is_some_and(is_concrete_model)
         && recovery.is_some_and(|recovery| {
             crate::agent_task_lifecycle::candidate_adoption_recovery_eligibility(recovery).is_some()
         })
         && green_gates;
     if authenticated_adoption {
-        return Ok(DurablePublicationEligibility::PreProviderCandidateAdoptionRecovery);
+        return Ok(());
     }
 
     // An externally prepared commit has no successful provider runtime to
@@ -1293,10 +1274,9 @@ fn validate_durable_publication_eligibility(
         && promotion.provenance["adoption"]["source_run_id"]
             == promotion.source.run_id.clone().unwrap_or_default()
         && candidate_is_bound
-        && adoption_model.is_some_and(is_concrete_model)
         && committed_change_provenance;
     if authenticated_external_adoption {
-        return Ok(DurablePublicationEligibility::AuthenticatedExternalCandidateAdoption);
+        return Ok(());
     }
 
     let reason = if !green_gates {
@@ -1305,11 +1285,6 @@ fn validate_durable_publication_eligibility(
         "publication refused: candidate is not fingerprinted"
     } else if promotion.status != crate::agent_task_promotion::AgentTaskPromotionStatus::Applied {
         "publication refused: candidate is not applied"
-    } else if !adoption_model.is_some_and(is_concrete_model)
-        && !producing_runtime
-            .is_some_and(|runtime| recorded_runtime_model(&runtime.metadata).is_some())
-    {
-        "publication refused: concrete model missing from producing runtime or authenticated adoption"
     } else if !matches!(
         lifecycle.execution.state,
         RunExecutionState::Succeeded
@@ -1335,63 +1310,12 @@ fn no_real_provider_execution(lifecycle: &RunLifecycleRecord) -> bool {
         })
 }
 
-fn is_concrete_model(value: &str) -> bool {
-    normalize_concrete_model_identifier(value).is_some()
-}
-
 fn is_git_commit_identity(value: &str) -> bool {
     (7..=64).contains(&value.len()) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn is_full_git_commit_identity(value: &str) -> bool {
     matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
-}
-
-// Read the runtime's served_models receipt, which also feeds status, before
-// falling back to the requested model recorded by older runtimes.
-fn recorded_runtime_model(metadata: &serde_json::Value) -> Option<&str> {
-    metadata["served_models"]
-        .as_array()
-        .and_then(|models| {
-            models
-                .iter()
-                .rev()
-                .filter_map(serde_json::Value::as_str)
-                .find(|model| is_concrete_model(model))
-        })
-        .or_else(|| {
-            metadata["model"]
-                .as_str()
-                .filter(|model| is_concrete_model(model))
-        })
-}
-
-fn durable_model(lifecycle: &RunLifecycleRecord, recovered_task: Option<&str>) -> Result<String> {
-    let model = lifecycle
-        .provider_runtime
-        .iter()
-        .rev()
-        .filter(|runtime| match recovered_task {
-            Some(task_id) => runtime.task_id == task_id,
-            None => runtime.state == ProviderRuntimeState::Succeeded,
-        })
-        .find_map(|runtime| recorded_runtime_model(&runtime.metadata))
-        .unwrap_or_default()
-        .to_string();
-    if model.trim().is_empty()
-        || matches!(
-            model.trim().to_ascii_lowercase().as_str(),
-            "not recorded" | "unknown" | "ai-assisted" | "ai assisted"
-        )
-    {
-        return Err(Error::validation_invalid_argument(
-            "run_id",
-            "durable provider metadata must record a concrete model before publication",
-            None,
-            None,
-        ));
-    }
-    Ok(model)
 }
 
 #[expect(

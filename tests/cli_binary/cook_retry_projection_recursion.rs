@@ -1,7 +1,7 @@
 use homeboy::agents::agent_task_lifecycle::{AgentTaskLifecycleStore, AgentTaskRunState};
 use homeboy::agents::agent_task_service::{
-    CookAiDisclosure, CookFinalization, CookIdentity, CookProviderTransport, CookRecipeStore,
-    CookRequest, CookRetryPolicy, CookWorkspace,
+    CookFinalization, CookIdentity, CookProviderTransport, CookRecipeStore, CookRequest,
+    CookRetryPolicy, CookWorkspace,
 };
 use homeboy::agents::agent_tasks::scheduler::AgentTaskPlan;
 use homeboy::core::test_support::{HermeticTestContext, TestBinary};
@@ -52,10 +52,6 @@ fn missing_transport_child_projection_resolves_without_recursion_or_provider_dis
             title: "Retry projection fixture".to_string(),
             commit_message: "Retry projection fixture".to_string(),
             protected_branches: Vec::new(),
-        },
-        ai_disclosure: CookAiDisclosure {
-            ai_tool: "fixture".to_string(),
-            ai_model: None,
         },
         harvest_context: Default::default(),
     };
@@ -203,10 +199,6 @@ fn exercise_historical_runtime_retry(compatible_binary: &str, expected_identity_
             title: "Runtime-compatible retry".to_string(),
             commit_message: "Runtime-compatible retry".to_string(),
             protected_branches: Vec::new(),
-        },
-        ai_disclosure: CookAiDisclosure {
-            ai_tool: "fixture".to_string(),
-            ai_model: Some("fixture-model".to_string()),
         },
         harvest_context: Default::default(),
     };

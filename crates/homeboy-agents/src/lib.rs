@@ -48,3 +48,4 @@ pub mod agent_tasks;
 pub(crate) mod agent_tool_control_plane;
 pub mod api_jobs_terminal_recovery;
 pub mod controller_scratch;
+pub mod execution_provenance;

@@ -743,12 +743,6 @@ impl AgentTaskReviewDossier {
                 );
             }
         }
-        if self.ai_assistance.used && placeholder_model(&self.ai_assistance.model) {
-            missing(
-                "ai_assistance.model",
-                "AI disclosure requires a concrete model identifier",
-            );
-        }
         if !self.changed_public_contracts.is_empty() && self.public_contract_evidence.is_none() {
             missing(
                 "public_contract_evidence",
@@ -809,8 +803,6 @@ impl AgentTaskReviewDossier {
         for value in &self.what_changed {
             scalar("what_changed", value)?;
         }
-        scalar("ai_assistance.tool", &self.ai_assistance.tool)?;
-        scalar("ai_assistance.model", &self.ai_assistance.model)?;
         for step in &self.how_to_test {
             scalar("how_to_test.command", &step.command)?;
             scalar("how_to_test.expected", &step.expected)?;
@@ -911,12 +903,6 @@ impl AgentTaskReviewDossier {
         }
         if self.how_to_test.is_empty() && self.verified_commands.is_empty() {
             return invalid("how_to_test", VERIFICATION_REQUIRED);
-        }
-        if self.ai_assistance.used && placeholder_model(&self.ai_assistance.model) {
-            return invalid(
-                "ai_assistance.model",
-                "AI disclosure requires a concrete model identifier",
-            );
         }
         Ok(())
     }
@@ -1106,11 +1092,7 @@ fn strip_model_tiers(model: &str) -> String {
 
 /// The one AI disclosure in the body.
 fn render_ai_disclosure(ai: &AgentTaskReviewAiAssistance) -> String {
-    format!(
-        "Tool: {} · Model: {}",
-        prose(&ai.tool),
-        prose(&strip_model_tiers(&ai.model))
-    )
+    prose(&strip_model_tiers(&ai.model))
 }
 
 /// One visible entry per gate with its runnable command and result, followed
@@ -1655,26 +1637,6 @@ fn relationship_reference(value: &str) -> String {
         }
     }
     value.to_string()
-}
-/// Render response identity independently of the requested routing tier.
-/// Missing response metadata is explicit, including for legacy run records.
-pub(crate) fn served_model_disclosure(served_models: &[String], rotation: &str) -> String {
-    if served_models.is_empty() {
-        format!("tier {rotation}; served model not recorded")
-    } else {
-        served_models.join(", ")
-    }
-}
-
-fn placeholder_model(value: &str) -> bool {
-    matches!(
-        value.trim().to_ascii_lowercase().as_str(),
-        "" | "not recorded"
-            | "unknown"
-            | "ai-assisted"
-            | "ai assisted"
-            | "legacy caller did not record a model"
-    )
 }
 fn bullets(values: &[String]) -> String {
     values
@@ -2288,14 +2250,9 @@ mod tests {
         let error = value
             .validate_preflight_fields(&default_profile())
             .expect_err("all supplied dossier gaps are reported together");
-        assert!(error.message.contains("4 independent error(s)"));
+        assert!(error.message.contains("3 independent error(s)"));
         let diagnostics = error.details.to_string();
-        for field in [
-            "summary",
-            "what_changed",
-            "how_to_test",
-            "ai_assistance.model",
-        ] {
+        for field in ["summary", "what_changed", "how_to_test"] {
             assert!(
                 diagnostics.contains(field),
                 "missing {field}: {diagnostics}"
@@ -2711,8 +2668,7 @@ mod tests {
                 "cf5ddd5",
                 "6229120",
                 "Closes #16247",
-                "Tool:",
-                "Model:",
+                "anthropic-claude-opus-5-5",
                 "CI:",
                 "<details><summary>Cook run</summary>",
                 // #16316: the collapsed block labels the entry by position.
@@ -2785,21 +2741,19 @@ mod tests {
             serde_json::from_slice(&persisted).expect("durable run read");
         assert_eq!(record.served_models, ["gpt-6.1-sol"]);
         let mut value = dossier();
-        value.ai_assistance.model = served_model_disclosure(&record.served_models, "cook-heavy");
-        let body = render_review_dossier(&value, &default_profile());
-        assert!(body.contains("Model: gpt-6.1-sol"), "{body}");
-        assert!(!body.contains("claude-opus-5-5"), "{body}");
-
-        value.ai_assistance.model = served_model_disclosure(&[], "cook-heavy");
-        let body = render_review_dossier(&value, &default_profile());
-        assert!(body.contains("Model: tier cook-heavy; served model not recorded"));
-        assert_eq!(
-            served_model_disclosure(
-                &["gpt-6.1-sol".into(), "claude-opus-5-5".into()],
-                "cook-heavy"
-            ),
-            "gpt-6.1-sol, claude-opus-5-5"
+        value.ai_assistance.model = crate::execution_provenance::render_execution_provenance(
+            &crate::execution_provenance::ExecutionProvenance {
+                tool: "pi".into(),
+                route: "cook-heavy".into(),
+                served_models: record.served_models,
+            },
         );
+        let body = render_review_dossier(&value, &default_profile());
+        assert!(
+            body.contains("Pi · route cook-heavy · served gpt-6.1-sol"),
+            "{body}"
+        );
+        assert!(!body.contains("claude-opus-5-5"), "{body}");
     }
 
     #[test]
@@ -2841,11 +2795,7 @@ mod tests {
         let mut value = dossier();
         value.ai_assistance.model = "served-model (tier heavy)".into();
         let body = render_review_dossier(&value, &default_profile());
-        assert_eq!(body.matches("Tool:").count(), 1);
-        assert!(body.contains(&format!(
-            "Tool: {} · Model: served-model\n",
-            value.ai_assistance.tool
-        )));
+        assert_eq!(body.matches("served-model").count(), 1);
         assert!(!body.contains("## AI assistance"));
         assert!(!body.contains("Used for:"));
         assert!(!body.contains("(tier "));

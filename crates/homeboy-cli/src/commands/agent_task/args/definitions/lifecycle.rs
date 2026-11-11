@@ -192,37 +192,6 @@ mod tests {
     }
 
     #[test]
-    fn model_parses_canonically_for_manual_finalization() {
-        let cli = Cli::try_parse_from([
-            "homeboy",
-            "agent-task",
-            "finalize-pr",
-            "--manual-finalization",
-            "--run-id",
-            "manual-model",
-            "--path",
-            "/tmp/manual-model",
-            "--title",
-            "Manual model",
-            "--commit-message",
-            "record model",
-            "--model",
-            "openai/gpt-5.6-sol",
-        ])
-        .expect("manual finalization model parses");
-        let Commands::AgentTask(agent_task) = cli.command else {
-            panic!("expected agent-task command");
-        };
-        let AgentTaskCommand::FinalizePr(args) = agent_task.command else {
-            panic!("expected finalize-pr command");
-        };
-        assert_eq!(
-            args.evidence.ai_model.as_deref(),
-            Some("openai/gpt-5.6-sol")
-        );
-    }
-
-    #[test]
     fn finalize_pr_no_longer_recovers_a_durable_cook() {
         for argv in [
             vec!["finalize-pr", "--recover", "cook-a"],
