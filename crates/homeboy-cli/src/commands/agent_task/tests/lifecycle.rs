@@ -1061,7 +1061,7 @@ fn finalized_existing_candidate_status_reads_one_durable_scope() {
                 )
                 .expect("status renders");
                 for line in [
-                    "Status: succeeded\n".to_string(),
+                    "Agent task succeeded\n".to_string(),
                     "Candidate: verified_no_changes\n".to_string(),
                     "Gates: succeeded, succeeded\n".to_string(),
                     "Publication: review_ready\n".to_string(),
@@ -1363,7 +1363,7 @@ fn actual_status_command_renders_an_unpromoted_recoverable_candidate() {
         assert_eq!(value["candidate"]["state"], "patch_available");
         assert!(value.get("durable_candidate").is_none());
         assert!(
-            rendered.contains("Status: candidate_recoverable"),
+            rendered.contains("Agent task candidate_recoverable\n"),
             "{rendered}"
         );
         assert!(
