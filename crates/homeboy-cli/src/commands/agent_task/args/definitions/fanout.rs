@@ -26,7 +26,7 @@ pub enum AgentTaskFanoutCommand {
     /// --private-verify inputs. A child that cannot verify its work cannot
     /// promote it (#9838).
     #[command(
-        after_help = "Quick start:\n  homeboy agent-task fanout cook-batch --repo REPO --verify 'homeboy review test REPO' ISSUE_URL...\n\nOmit --repo to infer a registered component from issue URLs in one GitHub repository. Pass --repo explicitly to select a component.\n\nTwo phases: without --run-plan, cook-batch validates the batch and prints the compiled workflow. Add --run-plan to admit it; then follow it with `homeboy runs watch <instance>` and stop it with `homeboy workflow cancel <instance>`.\n\nVerification is required: every child needs a shared --verify/--private-verify gate.\n\nPlacement: run every child on Lab with:\n  homeboy --placement lab agent-task fanout cook-batch --repo REPO --verify 'homeboy review test REPO' ISSUE_URL... --run-plan\n\nJoin: `--join all` (default) needs every child to succeed; `--join any` one; `--join N` at least N.\n\nUse --help-full for provider, gate, and environment controls."
+        after_help = "Quick start:\n  homeboy agent-task fanout cook-batch --repo REPO --verify 'homeboy review test REPO' ISSUE_URL...\n\nOmit --repo to infer a registered component from issue URLs in one GitHub repository. Pass --repo explicitly to select a component.\n\nTwo phases: without --run-plan, cook-batch validates the batch and prints the compiled workflow. Add --run-plan to admit it; then follow it with `homeboy runs watch <instance>` and stop it with `homeboy workflow cancel <instance>`.\n\nVerification is required: every child needs a shared --verify/--private-verify gate.\n\nPrompts: each child's prompt is its issue URL, or --prompt-template. Give one child its own prompt with --issue-prompt-file ISSUE_URL=PATH (repeatable).\n\nPlacement: run every child on Lab with:\n  homeboy --placement lab agent-task fanout cook-batch --repo REPO --verify 'homeboy review test REPO' ISSUE_URL... --run-plan\n\nJoin: `--join all` (default) needs every child to succeed; `--join any` one; `--join N` at least N.\n\nUse --help-full for provider, gate, and environment controls."
     )]
     CookBatch(Box<AgentTaskFanoutCookBatchArgs>),
 }
@@ -67,6 +67,12 @@ pub struct AgentTaskFanoutCookBatchArgs {
     /// When omitted, each child's prompt is its issue URL.
     #[arg(long = "prompt-template", value_name = "TEXT")]
     pub prompt_template: Option<String>,
+    /// Prompt for one child, read from a file: `ISSUE_URL=PATH`. That child's
+    /// prompt is the file's text instead of the template or its issue URL.
+    /// Repeat for each child that needs its own context. Homeboy snapshots
+    /// the file at submission; relative paths use the invocation directory.
+    #[arg(long = "issue-prompt-file", value_name = "ISSUE_URL=PATH")]
+    pub issue_prompt_files: Vec<String>,
     #[command(flatten)]
     pub cook: CookOptions,
     /// Maximum number of child cooks to run at once. Defaults to the host's
@@ -138,6 +144,9 @@ pub struct AgentTaskBatchPrepareArgs {
     /// Prompt template rendered for every child; see `fanout cook-batch`.
     #[arg(long = "prompt-template", value_name = "TEXT")]
     pub prompt_template: Option<String>,
+    /// One child's own prompt, `ISSUE_URL=TEXT`; see `--issue-prompt-file`.
+    #[arg(long = "issue-prompt", value_name = "ISSUE_URL=TEXT")]
+    pub issue_prompts: Vec<String>,
     /// Lab runner the children run on. Its workspace bundle for the base
     /// commit is transferred once here and reused by every child.
     #[arg(long = "bundle-runner", value_name = "RUNNER_ID")]
