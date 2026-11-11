@@ -239,6 +239,52 @@ fn provider_validates_declared_outputs() {
         .iter()
         .any(|diagnostic| diagnostic.class == "pi.required_outputs_missing"));
 
+    // A present output that fails its semantic contract (studio#5880: a plain
+    // review-form title) resumes the same session with the exact rejection,
+    // and the corrected reply replaces it. A reply that is still invalid
+    // leaves the original untouched.
+    let form = |title: &str| {
+        json!({"outputs":{"review_form":{
+            "pr_title": title,
+            "summary": "Restores categories after a pull.",
+            "what_changed": ["Restore categories after a pull without backup."],
+            "completion": "complete"
+        }}})
+        .to_string()
+    };
+    let mut form_request = request.clone();
+    form_request.output_declarations =
+        vec![crate::agent_task_review_dossier::review_form_output_declaration()];
+    for (resumed_title, expected_title, corrected) in [
+        (
+            "fix(sync): restore categories after pull",
+            "fix(sync): restore categories after pull",
+            true,
+        ),
+        (
+            "Still a plain sentence",
+            "Restore categories after pull",
+            false,
+        ),
+    ] {
+        let corrected_pi = FakePi::new(&format!(
+            "case \"$*\" in\n*--no-tools*)\n{}\n;;\n*)\n{}\n;;\nesac",
+            FakePi::answer(&form(resumed_title)),
+            FakePi::answer(&form("Restore categories after pull")),
+        ));
+        form_request.executor.config = corrected_pi.config();
+        let outcome = run_provider_command_once(&form_request, &provider);
+        assert_eq!(outcome.status, AgentTaskOutcomeStatus::Succeeded);
+        assert_eq!(outcome.outputs["review_form"]["pr_title"], expected_title);
+        assert_eq!(
+            outcome
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.class == "pi.declared_outputs_corrected"),
+            corrected
+        );
+    }
+
     let malformed_pi = FakePi::new(&FakePi::answer(
         r#"{"outputs":{"inspection":{"verdict":42}}}"#,
     ));

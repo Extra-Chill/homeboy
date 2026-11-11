@@ -91,6 +91,23 @@ pub struct AgentTaskOutputDeclaration {
     pub evidence_relationship: Option<AgentTaskOutputEvidenceRelationship>,
 }
 
+impl AgentTaskOutputDeclaration {
+    /// Why a present value fails this output's semantic contract, beyond its
+    /// structural schema. A provider feeds this back to the session that
+    /// authored the value so it can correct it in place.
+    pub(crate) fn semantic_error(&self, value: &Value) -> Option<String> {
+        if self.schema != crate::agent_task_review_dossier::AI_REVIEW_FORM_OUTPUT_SCHEMA {
+            return None;
+        }
+        let outputs = serde_json::json!({ (self.name.as_str()): value });
+        match crate::agent_task_review_dossier::AiFilledReviewForm::from_outcome_outputs(&outputs) {
+            Ok(Some(form)) => form.validate().err().map(|error| error.message),
+            Ok(None) => None,
+            Err(error) => Some(error.message),
+        }
+    }
+}
+
 /// Describes how a declared output relates to durable evidence without imposing
 /// caller-specific evidence semantics.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
