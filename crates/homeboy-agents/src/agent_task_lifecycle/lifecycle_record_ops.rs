@@ -72,6 +72,7 @@ pub(crate) fn update_lifecycle_from_record(record: &mut AgentTaskRunRecord, plan
                     "model": task.model,
                 },
                 "model": task.model,
+                "route": task.model,
             }),
         });
     }
@@ -216,6 +217,7 @@ fn provider_executions_for_task(
                     "execution_key": execution["key"],
                     "attempt": execution["attempt"],
                     "model": execution["model"],
+                    "route": execution["route"],
                 }),
             })
         })

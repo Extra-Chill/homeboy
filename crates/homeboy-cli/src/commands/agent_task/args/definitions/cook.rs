@@ -48,9 +48,6 @@ pub struct CookOptionValues {
     /// (absolute file path), and env (gate environment variable name). Repeatable.
     #[arg(long = "gate-file", value_name = "JSON", value_parser = parse_gate_file)]
     pub gate_files: Vec<AgentTaskGateFile>,
-    /// AI tool disclosure recorded in the PR's assistance attribution.
-    #[arg(long, default_value = "AI-assisted", value_name = "TEXT")]
-    pub ai_tool: String,
     /// Maximum Cook attempts before giving up. Each attempt re-runs the agent
     /// and gates; a later attempt can recover from a transient failure. This
     /// derives provider execution and same-provider remediation budgets. An
@@ -1030,7 +1027,7 @@ mod tests {
             ("secret-env", "TOKEN"),
             ("provider-config", r#"{ "exact": true }"#),
             ("provider-evidence", r#"{"id":"evidence","source":"/evidence"}"#),
-            ("ai-tool", "Test tool"), ("max-attempts", "7"),
+            ("max-attempts", "7"),
             ("verify", "printf '%s' \"$VALUE\""), ("verify-file", "/public.sh"),
             ("private-verify", "private check"), ("private-verify-file", "/private.sh"),
             ("repro", "test -f FIXED"), ("repro-file", "/repro.sh"),

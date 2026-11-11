@@ -1589,7 +1589,6 @@ fn admission_text_value_flag(flag: &str) -> bool {
             | "--notification-route"
             | "--deny-command"
             | "--allow-command"
-            | "--ai-tool"
             | "--acceptance-authority"
             | "--acceptance-policy"
             | "--gate-toolchain-spec"

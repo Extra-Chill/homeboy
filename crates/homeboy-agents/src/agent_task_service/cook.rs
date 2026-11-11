@@ -1615,7 +1615,6 @@ pub struct CookRequest {
     pub gates: VerifyGateOptions,
     pub retry_policy: CookRetryPolicy,
     pub finalization: CookFinalization,
-    pub ai_disclosure: CookAiDisclosure,
     pub harvest_context: crate::agent_task_scheduler::HarvestExecutionContext,
 }
 
@@ -1670,12 +1669,6 @@ pub struct CookFinalization {
     pub title: String,
     pub commit_message: String,
     pub protected_branches: Vec<String>,
-}
-
-#[derive(Debug, Clone)]
-pub struct CookAiDisclosure {
-    pub ai_tool: String,
-    pub ai_model: Option<String>,
 }
 
 const COOK_CONTINUE_ROUTE_SCHEMA: &str = "homeboy/agent-task-cook-continue-route/v1";
@@ -2892,13 +2885,6 @@ pub fn compile_cook_attempt_with_catalog_and_readiness_cache(
         Ok(selected_plan) => {
             super::execution::preflight_plan_secret_env(&selected_plan)?;
             options.identity.initial_plan = selected_plan;
-            options.ai_disclosure.ai_model = options
-                .identity
-                .initial_plan
-                .tasks
-                .first()
-                .and_then(|task| task.executor.model())
-                .map(str::to_string);
         }
         Err(error) if error.retryable == Some(true) => {}
         Err(error) => return Err(error),
@@ -2954,15 +2940,6 @@ pub fn compile_cook_attempt_static_with_catalog_and_readiness_cache(
             |backend, selector| catalog.provider_requires_cwd_git_checkout(backend, selector),
         )?;
     super::execution::preflight_plan_secret_env(&options.identity.initial_plan)?;
-    // Static compilation preserves the resolved provider identity. Live
-    // admission later selects a rotation and proves runtime readiness.
-    options.ai_disclosure.ai_model = options
-        .identity
-        .initial_plan
-        .tasks
-        .first()
-        .and_then(|task| task.executor.model())
-        .map(str::to_string);
     Ok(options)
 }
 
@@ -5364,12 +5341,6 @@ fn run_cook_spine(
     if existing_recipe {
         recover_compatibility_cook_base(store, lifecycle_store, &mut options)?;
     }
-    // Candidate adoption records the concrete external model on the lifecycle
-    // attempt. Reuse it only when the persisted promotion authenticates the
-    // same candidate/model pair, including after a detached continuation.
-    if let Some(model) = adopted_model {
-        options.ai_disclosure.ai_model = Some(model);
-    }
     // Recipe persistence and lifecycle materialization are a recoverable saga.
     // Complete it before any capacity, workspace, or provider-facing work so a
     // controller interruption leaves a status-addressable, resumable attempt.
@@ -5423,7 +5394,13 @@ fn run_cook_spine(
         notify_component.as_deref(),
         &options.finalization.base,
         options.retry_policy.max_attempts,
-        &options.ai_disclosure.ai_tool,
+        &options
+            .identity
+            .initial_plan
+            .tasks
+            .first()
+            .map(|task| task.executor.backend.clone())
+            .unwrap_or_default(),
         previously_started,
     );
     // Canonicalization and native-worktree discovery can block on provider

@@ -440,7 +440,13 @@ fn creates_new_pr_after_green_gates() {
     assert!(backend
         .last_body
         .contains("- `cargo test agent_task_finalization`; expect passes."));
-    assert_eq!(backend.last_body.matches("Model: GPT-5.5").count(), 1);
+    assert_eq!(
+        backend
+            .last_body
+            .matches("operator-finalized; no Homeboy provider execution")
+            .count(),
+        1
+    );
     assert!(backend.last_body.contains("## How to test"));
     assert!(!backend.last_body.contains("## AI assistance"));
     assert!(!backend.last_body.contains("Publication intent"));
@@ -845,7 +851,9 @@ fn pr_body_reports_iterator_evidence_metadata() {
 
     finalize_pr_with_backend(options, &mut backend).expect("finalized");
 
-    assert!(backend.last_body.contains("Model: GPT-5.5"));
+    assert!(backend
+        .last_body
+        .contains("operator-finalized; no Homeboy provider execution"));
     assert!(!backend.last_body.contains("CI expected"));
 }
 
@@ -1117,7 +1125,7 @@ fn manual_finalization_cannot_bypass_acceptance_for_an_existing_run_id() {
 }
 
 #[test]
-fn durable_finalization_requires_successful_provider_run_and_hydrates_model() {
+fn durable_finalization_requires_successful_provider_run_and_proof() {
     let mut backend = MockBackend {
         changed_files: vec!["src/lib.rs".to_string()],
         lifecycle: Some(successful_lifecycle("openai/gpt-5.6-terra")),
@@ -1129,10 +1137,7 @@ fn durable_finalization_requires_successful_provider_run_and_hydrates_model() {
     finalization_options.review_dossier.ai_assistance.model = "caller model".to_string();
     let report = finalize_pr_with_backend(finalization_options, &mut backend)
         .expect("successful run finalizes");
-    assert_eq!(
-        report.review_dossier.ai_assistance.model,
-        "openai/gpt-5.6-terra"
-    );
+    assert_eq!(report.review_dossier.ai_assistance.model, "caller model");
 
     let mut backend = MockBackend {
         changed_files: vec!["src/lib.rs".to_string()],
@@ -1184,7 +1189,7 @@ fn durable_finalization_requires_successful_provider_run_and_hydrates_model() {
             ..Default::default()
         }
     )
-    .is_err());
+    .is_ok());
 }
 
 #[test]
@@ -1206,10 +1211,7 @@ fn durable_finalization_discloses_terminal_successful_model_after_same_backend_r
     let report = finalize_pr_with_backend(finalization_options, &mut backend)
         .expect("successful rotated run finalizes");
 
-    assert_eq!(
-        report.review_dossier.ai_assistance.model,
-        "openai/gpt-5.6-terra"
-    );
+    assert_eq!(report.review_dossier.ai_assistance.model, "GPT-5.5");
 }
 
 #[test]
@@ -1231,10 +1233,7 @@ fn durable_finalization_discloses_terminal_successful_model_after_cross_backend_
     let report = finalize_pr_with_backend(finalization_options, &mut backend)
         .expect("successful rotated run finalizes");
 
-    assert_eq!(
-        report.review_dossier.ai_assistance.model,
-        "anthropic/claude-sonnet-4"
-    );
+    assert_eq!(report.review_dossier.ai_assistance.model, "GPT-5.5");
 }
 
 #[test]
@@ -1511,10 +1510,6 @@ fn durable_finalization_accepts_only_authenticated_pre_provider_candidate_adopti
     missing_head.promotion.provenance["candidate"]["fingerprint"]["head"] = json!("");
     rejected(failed_recovery_lifecycle.clone(), missing_head);
 
-    let mut missing_model = pre_provider_adoption_gate_proof();
-    missing_model.promotion.provenance["adoption"]["ai_model"] = serde_json::Value::Null;
-    rejected(failed_recovery_lifecycle.clone(), missing_model);
-
     let mut non_green = pre_provider_adoption_gate_proof();
     fail_gate(&mut non_green);
     rejected(failed_recovery_lifecycle, non_green);
@@ -1586,10 +1581,6 @@ fn durable_finalization_accepts_only_authenticated_external_candidate_adoption()
     let mut non_prefix_candidate = external_adoption_gate_proof();
     non_prefix_candidate.promotion.provenance["adoption"]["candidate_ref"] = json!("7f76933e0");
     rejected(non_prefix_candidate);
-
-    let mut missing_model = external_adoption_gate_proof();
-    missing_model.promotion.provenance["adoption"]["ai_model"] = serde_json::Value::Null;
-    rejected(missing_model);
 
     let mut mismatched_source = external_adoption_gate_proof();
     mismatched_source.promotion.provenance["adoption"]["source_run_id"] = json!("other-run");
@@ -1767,7 +1758,7 @@ fn durable_finalization_recovers_served_model_with_proven_inherited_gate() {
     for (proven, served_model, refusal) in [
         (true, Some("gpt-6.1-sol"), None),
         (false, Some("gpt-6.1-sol"), Some("gates are not green")),
-        (true, None, Some("concrete model missing")),
+        (true, None, None),
     ] {
         let mut gate_proof = successful_gate_proof();
         gate_proof.promotion.changed_files = vec!["src/lib.rs".to_string()];
@@ -1815,7 +1806,7 @@ fn durable_finalization_recovers_served_model_with_proven_inherited_gate() {
             assert!(!backend.committed && !backend.pushed && !backend.created);
         } else {
             let report = result.expect("proven inherited failure with served model publishes");
-            assert_eq!(report.review_dossier.ai_assistance.model, "gpt-6.1-sol");
+            assert_eq!(report.review_dossier.ai_assistance.model, "GPT-5.5");
             assert!(backend.created);
         }
     }
@@ -2370,7 +2361,6 @@ pub(super) fn options() -> AgentTaskPrFinalizationOptions {
             out_of_scope_changes: Vec::new(),
             repro: None,
         },
-        composed_ai_model_disclosure: false,
         review_profile: crate::agent_task_review_dossier::default_profile(),
         manual_finalization: true,
         candidate: None,

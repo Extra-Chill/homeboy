@@ -2105,10 +2105,6 @@ fn assert_cook_rearm_queue_ownership(block_capacity: bool) {
                 commit_message: "Readiness rearm".to_string(),
                 protected_branches: Vec::new(),
             },
-            ai_disclosure: homeboy::agents::agent_task_service::CookAiDisclosure {
-                ai_tool: "fixture".to_string(),
-                ai_model: None,
-            },
             harvest_context: homeboy::agents::agent_task_scheduler::HarvestExecutionContext::from_current_process()
                 .expect("harvest context"),
         };
@@ -2374,10 +2370,6 @@ fn persist_recipe_only_cook(cook_id: &str, run_id: &str) {
             title: "Recipe-only Cook".to_string(),
             commit_message: "Recipe-only Cook".to_string(),
             protected_branches: Vec::new(),
-        },
-        ai_disclosure: homeboy::agents::agent_task_service::CookAiDisclosure {
-            ai_tool: "fixture".to_string(),
-            ai_model: Some("fixture-model".to_string()),
         },
         harvest_context:
             homeboy::agents::agent_task_scheduler::HarvestExecutionContext::from_current_process()
@@ -2710,10 +2702,7 @@ fn persist_legacy_candidate_cook(cook_id: &str, run_id: &str, runtime_generation
             commit_message: "Legacy candidate".to_string(),
             protected_branches: Vec::new(),
         },
-        ai_disclosure: homeboy::agents::agent_task_service::CookAiDisclosure {
-            ai_tool: "fixture".to_string(),
-            ai_model: None,
-        },
+
         harvest_context:
             homeboy::agents::agent_task_scheduler::HarvestExecutionContext::from_current_process()
                 .expect("harvest context"),
@@ -3052,10 +3041,6 @@ fn continuation_preflight_bypasses_model_provenance_for_retryable_pre_execution_
                 commit_message: "Pre-execution retry".to_string(),
                 protected_branches: Vec::new(),
             },
-            ai_disclosure: homeboy::agents::agent_task_service::CookAiDisclosure {
-                ai_tool: "fixture".to_string(),
-                ai_model: None,
-            },
             harvest_context: homeboy::agents::agent_task_scheduler::HarvestExecutionContext::from_current_process()
                 .expect("harvest context"),
         };
@@ -3195,10 +3180,6 @@ fn cook_retry_run_recovers_a_historical_transport_recipe_after_zero_provider_exe
                 title: "Pre-execution runtime recovery".to_string(),
                 commit_message: "Pre-execution runtime recovery".to_string(),
                 protected_branches: Vec::new(),
-            },
-            ai_disclosure: homeboy::agents::agent_task_service::CookAiDisclosure {
-                ai_tool: "fixture".to_string(),
-                ai_model: Some("fixture-model".to_string()),
             },
             harvest_context: homeboy::agents::agent_task_scheduler::HarvestExecutionContext::from_current_process()
                 .expect("harvest context"),
@@ -3375,10 +3356,6 @@ fn diagnose_prioritizes_the_current_gate_denial_after_a_repaired_controller_fail
                 title: "Diagnose current gate".to_string(),
                 commit_message: "Diagnose current gate".to_string(),
                 protected_branches: Vec::new(),
-            },
-            ai_disclosure: homeboy::agents::agent_task_service::CookAiDisclosure {
-                ai_tool: "fixture".to_string(),
-                ai_model: Some("fixture-model".to_string()),
             },
             harvest_context: homeboy::agents::agent_task_scheduler::HarvestExecutionContext::from_current_process()
                 .expect("harvest context"),
@@ -6224,10 +6201,6 @@ fn cook_retry_run_executes_the_replacement_through_its_cook_lifecycle() {
                 commit_message: "Cook retry run".to_string(),
                 protected_branches: Vec::new(),
             },
-            ai_disclosure: homeboy::agents::agent_task_service::CookAiDisclosure {
-                ai_tool: "fixture".to_string(),
-                ai_model: None,
-            },
             harvest_context: homeboy::agents::agent_task_scheduler::HarvestExecutionContext::from_current_process()
                 .expect("harvest context"),
         };
@@ -6309,10 +6282,6 @@ fn competing_retry_run_consumers_dispatch_a_queued_cook_replacement_exactly_once
                 title: "Competing Cook retry run".to_string(),
                 commit_message: "Competing Cook retry run".to_string(),
                 protected_branches: Vec::new(),
-            },
-            ai_disclosure: homeboy::agents::agent_task_service::CookAiDisclosure {
-                ai_tool: "fixture".to_string(),
-                ai_model: None,
             },
             harvest_context: homeboy::agents::agent_task_scheduler::HarvestExecutionContext::from_current_process()
                 .expect("harvest context"),

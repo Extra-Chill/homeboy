@@ -937,8 +937,10 @@ status <cook-id>` preserves it with the latest notification delivery outcome.
 selects a specific provider id for that backend, and
 `--model` is only a provider-owned model override. Provider ids come from
 `homeboy agent-task providers`; they are not model names or provider families.
-The same `--model` value records adopted-candidate and manual-finalization AI
-provenance. Both `finalize-pr` and `adopt` accept only `--model`.
+Cook AI provenance comes from Homeboy's durable provider-runtime record: executor,
+selected route, and any concrete served models resolved at dispatch. A route alone
+is valid and never blocks publication. Manual `finalize-pr` accepts no AI disclosure
+inputs and renders `operator-finalized; no Homeboy provider execution`.
 
 ## Gate Command Contracts
 

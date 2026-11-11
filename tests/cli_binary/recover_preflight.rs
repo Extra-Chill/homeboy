@@ -46,8 +46,8 @@ fn cook_fixture(
 ) {
     use homeboy::agents::agent_task_lifecycle::AgentTaskLifecycleStore;
     use homeboy::agents::agent_task_service::{
-        CookAiDisclosure, CookFinalization, CookIdentity, CookProviderTransport, CookRecipeStore,
-        CookRequest, CookRetryPolicy, CookWorkspace,
+        CookFinalization, CookIdentity, CookProviderTransport, CookRecipeStore, CookRequest,
+        CookRetryPolicy, CookWorkspace,
     };
     use homeboy::agents::agent_tasks::scheduler::AgentTaskPlan;
 
@@ -88,10 +88,6 @@ fn cook_fixture(
             title: "Finalized fixture".to_string(),
             commit_message: "Finalized fixture".to_string(),
             protected_branches: Vec::new(),
-        },
-        ai_disclosure: CookAiDisclosure {
-            ai_tool: "fixture".to_string(),
-            ai_model: None,
         },
         harvest_context: Default::default(),
     };

@@ -307,9 +307,6 @@ pub struct AgentTaskPrFinalizationOptions {
     pub changed_files: Vec<String>,
     pub evidence: AgentTaskPrEvidence,
     pub review_dossier: AgentTaskReviewDossier,
-    /// The caller authenticated multiple concrete execution roles. Preserve the
-    /// composed model disclosure instead of replacing it with the terminal run.
-    pub composed_ai_model_disclosure: bool,
     pub review_profile: AgentTaskReviewProfile,
     /// Manual finalization is an explicit migration mode for work not produced by a durable run.
     pub manual_finalization: bool,

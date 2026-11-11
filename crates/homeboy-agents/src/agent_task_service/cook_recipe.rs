@@ -13,7 +13,7 @@ use uuid::Uuid;
 use crate::agent_task_lifecycle;
 use crate::agent_task_scheduler::{AgentTaskAggregate, AgentTaskPlan};
 use crate::agent_task_service::cook::{
-    AgentTaskCookAttemptDispatcher, CookAiDisclosure, CookFinalization, CookIdentity, CookMode,
+    AgentTaskCookAttemptDispatcher, CookFinalization, CookIdentity, CookMode,
     CookProviderTransport, CookRequest, CookRetryPolicy, CookWorkspace,
 };
 use homeboy_core::command_invocation::CommandInvocation;
@@ -1102,8 +1102,6 @@ fn initial_recipe(options: &CookRequest) -> Result<AgentTaskCookRecipe> {
             "title": options.finalization.title,
             "commit_message": options.finalization.commit_message,
             "protected_branches": options.finalization.protected_branches,
-            "ai_tool": options.ai_disclosure.ai_tool,
-            "ai_model": options.ai_disclosure.ai_model,
             "to_worktree": options.workspace.to_worktree,
             "source_worktree_path": options.workspace.source_worktree_path,
             "task_base_sha": options.workspace.task_base_sha,
@@ -3162,12 +3160,6 @@ fn reconstruct_recipe_options(
             protected_branches: serde_json::from_value(field("protected_branches")?)
                 .map_err(recipe_value_error("protected_branches"))?,
         },
-        ai_disclosure: CookAiDisclosure {
-            ai_tool: serde_json::from_value(field("ai_tool")?)
-                .map_err(recipe_value_error("ai_tool"))?,
-            ai_model: serde_json::from_value(field("ai_model")?)
-                .map_err(recipe_value_error("ai_model"))?,
-        },
         harvest_context: recipe.harvest_context.clone(),
     })
 }
@@ -4455,7 +4447,6 @@ mod tests {
         request.retry_policy.max_attempts = 2;
         request.finalization.draft_pr = true;
         request.finalization.head = Some("lab-head".to_string());
-        request.ai_disclosure.ai_model = Some("lab-model".to_string());
 
         store
             .persist_initial_recipe(&request)
@@ -4501,7 +4492,6 @@ mod tests {
                     assert_eq!(request.retry_policy.max_attempts, 2);
                     assert!(request.finalization.draft_pr);
                     assert_eq!(request.finalization.head.as_deref(), Some("lab-head"));
-                    assert_eq!(request.ai_disclosure.ai_model.as_deref(), Some("lab-model"));
                     Ok(0)
                 },
             )
@@ -4528,7 +4518,6 @@ mod tests {
         options.finalization.draft_pr = true;
         options.finalization.head = Some("nested-head".to_string());
         options.finalization.protected_branches = vec!["main".to_string()];
-        options.ai_disclosure.ai_model = Some("nested-model".to_string());
 
         let persisted = initial_recipe(&options).expect("serialize request sections");
         assert_eq!(persisted.schema, COOK_RECIPE_SCHEMA);
@@ -4547,7 +4536,7 @@ mod tests {
         );
         assert_eq!(persisted.finalization["task_base_sha"], "base-sha");
         assert_eq!(persisted.finalization["head"], "nested-head");
-        assert_eq!(persisted.finalization["ai_model"], "nested-model");
+        assert!(persisted.finalization.get("ai_model").is_none());
         assert_eq!(persisted.finalization["draft_pr"], true);
 
         let reconstructed = reconstruct_options_without_dispatcher(&persisted)
@@ -4587,10 +4576,6 @@ mod tests {
         assert_eq!(
             reconstructed.finalization.protected_branches,
             options.finalization.protected_branches
-        );
-        assert_eq!(
-            reconstructed.ai_disclosure.ai_model,
-            options.ai_disclosure.ai_model
         );
     }
 

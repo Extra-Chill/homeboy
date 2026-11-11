@@ -11,11 +11,7 @@ pub fn normalize_concrete_model_identifier(value: &str) -> Option<String> {
         || value.chars().any(char::is_control)
         || matches!(
             normalized.to_ascii_lowercase().as_str(),
-            "not recorded"
-                | "unknown"
-                | "ai-assisted"
-                | "ai assisted"
-                | "legacy caller did not record a model"
+            "not recorded" | "unknown" | "ai-assisted" | "ai assisted"
         )
     {
         return None;
@@ -38,7 +34,6 @@ mod tests {
             " unknown ",
             "not recorded",
             "AI-assisted",
-            "legacy caller did not record a model",
             "model\nidentifier",
         ] {
             assert_eq!(

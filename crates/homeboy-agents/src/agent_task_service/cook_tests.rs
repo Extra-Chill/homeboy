@@ -15,9 +15,9 @@ use super::super::cook_promotion::{
     finalize_or_load_cook_pr_with_backend_with_stores, mark_replacement_gate_execution_started,
     persisted_promotion_for_attempt, persisted_promotion_for_attempt_in_store,
     preflight_cook_promotion_in_store, promote_attempt_in_store, promote_or_load_attempt_in_store,
-    promotion_executed_model_in_store, recover_cook_pr_with_backend,
-    recover_cook_pr_with_backend_and_review_form, selected_candidate_task_id_in_store,
-    verify_replacement_gates, AgentTaskSuppliedReviewForm, CookReportInput,
+    recover_cook_pr_with_backend, recover_cook_pr_with_backend_and_review_form,
+    selected_candidate_task_id_in_store, verify_replacement_gates, AgentTaskSuppliedReviewForm,
+    CookReportInput,
 };
 use super::super::execution_step::execution_step_fixtures::{
     current_intent, kill_test_child_at_marker, step_harness, terminal_delivery, QueuedRunTransport,
@@ -2182,173 +2182,6 @@ fn seed_moving_base_attempt(
     (options, applied)
 }
 
-/// #15112: a Cook dispatched without `--model` executes under the provider's
-/// resolved default. Seed a terminal attempt whose selected outcome never
-/// recorded `metadata.model` so promotion must resolve the executed model from
-/// the attempt's remaining durable evidence.
-fn seed_default_model_attempt(
-    cook_id: &str,
-    run_id: &str,
-    outcome: crate::agent_task::AgentTaskOutcome,
-) -> CookRequest {
-    use crate::agent_task_scheduler::{
-        AgentTaskAggregate, AgentTaskAggregateTotals, AgentTaskProgressEvent,
-    };
-
-    let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
-    options.identity.initial_run_id = run_id.to_string();
-    agent_task_lifecycle::submit_plan(&options.identity.initial_plan, Some(run_id))
-        .expect("submit default-model attempt");
-    agent_task_lifecycle::record_run_aggregate(
-        run_id,
-        &options.identity.initial_plan,
-        &AgentTaskAggregate {
-            schema: crate::agent_task::AGENT_TASK_AGGREGATE_SCHEMA.to_string(),
-            plan_id: options.identity.initial_plan.plan_id.clone(),
-            totals: AgentTaskAggregateTotals {
-                succeeded: 1,
-                ..Default::default()
-            },
-            outcomes: vec![outcome],
-            events: vec![AgentTaskProgressEvent {
-                task_id: "provider".to_string(),
-                state: AgentTaskState::Succeeded,
-                attempt: 1,
-                message: None,
-            }],
-            artifact_lineage: Vec::new(),
-            child_runs: Vec::new(),
-            artifact_bindings: Vec::new(),
-            queue: Default::default(),
-        },
-    )
-    .expect("record default-model aggregate");
-    options
-}
-
-fn modelless_outcome(
-    outputs: serde_json::Value,
-    artifacts: Vec<crate::agent_task::AgentTaskArtifact>,
-) -> crate::agent_task::AgentTaskOutcome {
-    crate::agent_task::AgentTaskOutcome {
-        task_id: "provider".to_string(),
-        status: crate::agent_task::AgentTaskOutcomeStatus::Succeeded,
-        summary: Some("provider resolved its own default model".to_string()),
-        outputs,
-        artifacts,
-        metadata: serde_json::Value::Null,
-        ..Default::default()
-    }
-}
-
-fn selected_outcome_of(run_id: &str) -> crate::agent_task::AgentTaskOutcome {
-    test_lifecycle_store()
-        .read_aggregate(run_id)
-        .expect("seeded aggregate")
-        .outcomes
-        .first()
-        .cloned()
-        .expect("seeded outcome")
-}
-
-/// #15112 (local placement): the scheduler's durable provider execution ledger
-/// recorded the executed model even though the normalized outcome lost it.
-#[test]
-fn promotion_resolves_executed_model_from_local_provider_execution_ledger() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let run_id = "cook-15112-local-run";
-        seed_default_model_attempt(
-            "cook-15112-local",
-            run_id,
-            modelless_outcome(serde_json::Value::Null, Vec::new()),
-        );
-        agent_task_lifecycle::rewrite_record_for_test(run_id, |record| {
-            record.metadata["provider_executions"] = serde_json::json!([{
-                "key": "provider:1",
-                "task_id": "provider",
-                "attempt": 1,
-                "state": "succeeded",
-                "model": "anthropic/claude-sonnet-5",
-            }]);
-        })
-        .expect("record executed-model ledger");
-
-        let model = promotion_executed_model_in_store(
-            &test_lifecycle_store(),
-            run_id,
-            &selected_outcome_of(run_id),
-        )
-        .expect("ledger-backed attempt promotes");
-
-        assert_eq!(model, "anthropic/claude-sonnet-5");
-    });
-}
-
-/// #15112 (Lab placement): the candidate harvested from the runner carries the
-/// executed model on the patch artifact (`metadata.provider_model`) even when
-/// no ledger entry and no normalized outcome model survived the handoff.
-#[test]
-fn promotion_resolves_executed_model_from_lab_harvested_candidate_artifact() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let run_id = "cook-15112-lab-run";
-        seed_default_model_attempt(
-            "cook-15112-lab",
-            run_id,
-            modelless_outcome(
-                serde_json::Value::Null,
-                vec![crate::agent_task::AgentTaskArtifact {
-                    id: "attempt-1-uncommitted-changes".to_string(),
-                    kind: "patch".to_string(),
-                    role: Some("patch".to_string()),
-                    metadata: serde_json::json!({
-                        "change_source": "uncommitted_attempt_workspace",
-                        "provider_backend": "pi",
-                        "provider_model": "anthropic/claude-sonnet-5",
-                    }),
-                    ..Default::default()
-                }],
-            ),
-        );
-
-        let model = promotion_executed_model_in_store(
-            &test_lifecycle_store(),
-            run_id,
-            &selected_outcome_of(run_id),
-        )
-        .expect("harvested candidate binding promotes");
-
-        assert_eq!(model, "anthropic/claude-sonnet-5");
-    });
-}
-
-/// #15112: the provider's generic run-result envelope is execution evidence
-/// when neither the ledger nor the artifact binding retained the model.
-#[test]
-fn promotion_resolves_executed_model_from_provider_run_result_evidence() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let run_id = "cook-15112-run-result-run";
-        seed_default_model_attempt(
-            "cook-15112-run-result",
-            run_id,
-            modelless_outcome(
-                serde_json::json!({
-                    "provider_run_result": { "metadata": { "model": "anthropic/claude-sonnet-5" } }
-                }),
-                Vec::new(),
-            ),
-        );
-
-        let model = promotion_executed_model_in_store(
-            &test_lifecycle_store(),
-            run_id,
-            &selected_outcome_of(run_id),
-        )
-        .expect("run-result evidence promotes");
-
-        assert_eq!(model, "anthropic/claude-sonnet-5");
-    });
-}
-
 fn delivery_of(run_id: &str) -> crate::agent_task_service::CookDelivery {
     crate::agent_task_service::CookDelivery::from_run_metadata(
         &agent_task_lifecycle::reconcile_status(run_id)
@@ -4225,10 +4058,6 @@ fn batch_cook_options(
             commit_message: "test".to_string(),
             protected_branches: Vec::new(),
         },
-        ai_disclosure: CookAiDisclosure {
-            ai_tool: "test".to_string(),
-            ai_model: None,
-        },
         gates: VerifyGateOptions::default(),
         harvest_context: Default::default(),
     }
@@ -4435,7 +4264,7 @@ fn compiled_cook_binds_and_executes_the_first_ready_production_provider_route() 
         )
         .expect("Cook compiles to its first ready route");
         assert_eq!(
-            options.ai_disclosure.ai_model.as_deref(),
+            options.identity.initial_plan.tasks[0].executor.model(),
             Some("test/fallback")
         );
         let mut plan = options.identity.initial_plan;
@@ -5686,7 +5515,6 @@ fn dirty_explicit_cwd_blocks_detached_provider_dispatch() {
         options.identity.initial_plan.tasks[0].metadata["worktree_provision"] =
             serde_json::json!({ "kind": "explicit_cwd" });
         std::fs::write(target.join("untracked.txt"), "user drift\n").expect("write drift");
-        options.ai_disclosure.ai_model = Some("openai/gpt-5.6-terra".to_string());
 
         let result = run_cook(CookContext::new(options, Arc::new(UnusedExecutor)))
             .expect("Cook reports admission failure");
@@ -5721,7 +5549,7 @@ fn dirty_explicit_cwd_blocks_detached_provider_dispatch() {
         );
         assert_eq!(
             context.next_actions[2].command,
-            "homeboy agent-task adopt cwd-detached-dirty --candidate-ref HEAD --model openai/gpt-5.6-terra"
+            "homeboy agent-task adopt cwd-detached-dirty --candidate-ref HEAD --model operator-finalized"
         );
     });
 }
@@ -6633,7 +6461,6 @@ impl CandidateAdoptionFixture {
             );
         options.finalization.no_finalize = no_finalize;
         options.finalization.head = Some("fix/8058".to_string());
-        options.ai_disclosure.ai_model = Some("openai/gpt-5.6-terra".to_string());
         if let Ok(caller) = std::env::var("HOMEBOY_CALLER_CONTEXT") {
             options.identity.initial_plan.metadata["client_context"] =
                 serde_json::json!({"caller_context": caller});
@@ -8247,7 +8074,6 @@ fn provider_route_override_preserves_recipe_inputs_and_is_idempotent() {
             Some("preserved-worktree".to_string());
         options.gates.verify = vec!["preserved-gate".to_string()];
         options.finalization.title = "preserved notification".to_string();
-        options.ai_disclosure.ai_model = Some("preserved disclosure".to_string());
         super::super::persist_initial_recipe(&options).expect("persist Cook recipe");
         let original = super::super::load_recipe(cook_id).expect("read original recipe");
         super::super::materialize_initial_cook_attempt(&options)
@@ -9147,7 +8973,7 @@ fn retryable_pre_provider_retry_returns_terminal_successor_without_reexecution()
         assert_eq!(completed.metadata["provider_executions_consumed"], 1);
         assert_eq!(
             completed.metadata["cook_controller_failure"]["details"]["field"],
-            "provider_model"
+            "source.candidate"
         );
 
         let retry =
@@ -12165,10 +11991,7 @@ fn cook_returns_after_accepted_detached_attempt_without_waiting_for_daemon_compl
                     commit_message: "test".to_string(),
                     protected_branches: Vec::new(),
                 },
-                ai_disclosure: CookAiDisclosure {
-                    ai_tool: "test".to_string(),
-                    ai_model: None,
-                },
+
                 gates: VerifyGateOptions::default(),
                 harvest_context: Default::default(),
             },
@@ -12386,8 +12209,6 @@ fn adopt_green_candidate_missing_review_form_with_scope(
     options.retry_policy.max_attempts = 2;
     options.finalization.no_finalize = false;
     options.finalization.head = Some("fix/8058".to_string());
-    options.ai_disclosure.ai_tool = "fixture-provider".to_string();
-    options.ai_disclosure.ai_model = Some("fixture-model-implementation".to_string());
     options.identity.initial_plan.tasks[0].executor.backend = "fixture-provider".to_string();
     options.identity.initial_plan.tasks[0].executor.model =
         Some("fixture-model-implementation".to_string());
@@ -15659,7 +15480,6 @@ fn with_corrected_gate_failure(lab: bool, test: impl FnOnce(CookRequest, PathBuf
             Arc::new(AcceptedDetachedAttemptDispatcher),
         );
         options.identity.initial_run_id = "run-corrected-gate".to_string();
-        options.ai_disclosure.ai_model = Some("openai/gpt-6.1-sol".to_string());
         options.identity.initial_plan.tasks[0].executor.model =
             Some("openai/gpt-6.1-sol".to_string());
         options.workspace.to_worktree = "fixture@fix-8058".to_string();
@@ -16306,7 +16126,6 @@ fn baseline_comparison_finalization_fixture() {
         options.workspace.source_worktree_path = Some(root.to_path_buf());
         options.retry_policy.max_attempts = 1;
         options.identity.initial_plan.tasks[0].executor.model = Some("test/model".to_string());
-        options.ai_disclosure.ai_model = Some("test/model".to_string());
 
         options.gates.verify = vec!["cat failure >&2; exit 1".to_string()];
         options.identity.initial_plan.options.execution_budget =
@@ -16582,10 +16401,6 @@ fn promotion_claim_options(cook_id: &str, run_id: &str) -> CookRequest {
             title: "fix(cook): cook".to_string(),
             commit_message: "test".to_string(),
             protected_branches: Vec::new(),
-        },
-        ai_disclosure: CookAiDisclosure {
-            ai_tool: "test".to_string(),
-            ai_model: None,
         },
         gates: VerifyGateOptions::default(),
         harvest_context: Default::default(),
@@ -17045,7 +16860,7 @@ fn persisted_promotion_from_another_attempt_is_rejected() {
 }
 
 #[test]
-fn cook_real_pi_response_persists_served_model_through_published_body() {
+fn cook_publishes_route_without_served_model_through_real_finalization() {
     homeboy_core::test_support::with_isolated_home(|_| {
         let run_id = "cook-8058-attempt-1";
         let target = tempfile::tempdir().expect("fixture target");
@@ -17086,10 +16901,7 @@ fn cook_real_pi_response_persists_served_model_through_published_body() {
                 commit_message: "test".to_string(),
                 protected_branches: vec!["main".to_string()],
             },
-            ai_disclosure: CookAiDisclosure {
-                ai_tool: "fixture-provider".to_string(),
-                ai_model: Some("fixture-model; review form: spoof".to_string()),
-            },
+
             gates: VerifyGateOptions {
                 verify: vec!["cargo test --locked agent_task_promotion --lib".to_string()],
                 private_verify: Vec::new(),
@@ -17106,16 +16918,12 @@ fn cook_real_pi_response_persists_served_model_through_published_body() {
             run_id,
         )
         .unwrap();
-        let mut aggregate = review_form_aggregate(&plan);
-        let session = include_str!("../agent_task_provider/fixtures/pi-roadie-session.jsonl");
-        aggregate.outcomes[0].metadata["served_models"] = serde_json::json!(
-            crate::agent_task_provider::pi_response::served_models(session.as_bytes())
-        );
+        let aggregate = review_form_aggregate(&plan);
         agent_task_lifecycle::record_run_aggregate(run_id, &plan, &aggregate).unwrap();
-        assert_eq!(
-            agent_task_lifecycle::status(run_id).unwrap().served_models,
-            ["gpt-6.1-sol"]
-        );
+        assert!(agent_task_lifecycle::status(run_id)
+            .unwrap()
+            .served_models
+            .is_empty());
         let promotion = promotion_with_existing_path(run_id, target.path());
         let mut backend = CaptureBackend {
             synthetic_gate_proof: Some(promotion.clone()),
@@ -17126,7 +16934,7 @@ fn cook_real_pi_response_persists_served_model_through_published_body() {
             "Relates to Extra-Chill/homeboy#8058\n",
             "## What changed",
             "## Verification",
-            "Model: gpt-6.1-sol",
+            "route cook-heavy",
             ". Base `main`@`verified-base` (publication state not recorded).",
             // AI-authored prose (from the seeded review form).
             "Close the issue by guarding the reload path.",
@@ -17220,7 +17028,7 @@ fn finalization_dossier_and_backend_hydration_use_explicit_lifecycle_store() {
     .unwrap();
     assert_eq!(
         left.review_dossier.ai_assistance.model,
-        "tier left-model; served model not recorded"
+        "fixture · route left-model"
     );
 
     let mut backend = RealAgentTaskPrFinalizationBackend;
@@ -17351,7 +17159,7 @@ fn cook_promotion_finalizes_with_form_title_and_durable_receipts() {
     .expect("build finalization options from durable evidence");
     assert_eq!(
         finalization_options.review_dossier.ai_assistance.model,
-        "tier split-root-model; served model not recorded"
+        "fixture · route split-root-model"
     );
     assert_eq!(finalization_options.title, test_review_form().pr_title);
     assert_eq!(
@@ -17546,10 +17354,7 @@ fn interrupted_attempt_does_not_change_the_only_substantive_disclosure() {
         .expect("finalize the only authenticated implementation");
 
         assert!(
-            backend.body.contains("Homeboy (second-provider)")
-                && backend
-                    .body
-                    .contains("tier second-model; served model not recorded"),
+            backend.body.contains("second-provider") && backend.body.contains("route second-model"),
             "{}",
             backend.body
         );
@@ -17690,10 +17495,8 @@ fn green_retry_after_verified_no_change_attempt_finalizes_its_contribution_chain
         )
         .expect("a green candidate after a verified no-change attempt finalizes");
         for expected in [
-            "Implementation 1: Homeboy (first-provider)",
-            "Implementation 2: Homeboy (third-provider)",
-            "Implementation 1: tier first-model; served model not recorded",
-            "Implementation 2: tier third-model; served model not recorded",
+            "Implementation 1: first-provider · route first-model",
+            "Implementation 2: third-provider · route third-model",
         ] {
             assert!(
                 backend.body.contains(expected),
@@ -17882,10 +17685,7 @@ fn cook_finalization_without_a_passed_gate_publishes_only_inherited_failures() {
             commit_message: "test".to_string(),
             protected_branches: vec!["main".to_string()],
         },
-        ai_disclosure: CookAiDisclosure {
-            ai_tool: "fixture-provider".to_string(),
-            ai_model: Some("fixture-model".to_string()),
-        },
+
         gates: VerifyGateOptions {
             verify: vec!["cargo test unsupported".to_string()],
             private_verify: Vec::new(),
@@ -19491,7 +19291,6 @@ fn run_cook_preserves_prior_failed_candidate_before_detached_dispatch() {
         options.workspace.to_worktree = handle.to_string();
         options.workspace.source_worktree_path = Some(target.clone());
         options.identity.initial_plan.tasks[0].workspace.root = Some(target.display().to_string());
-        options.ai_disclosure.ai_model = Some("openai/gpt-5.6-terra".to_string());
         let run_id = options.identity.initial_run_id.clone();
 
         let result = run_cook(CookContext::new(options, Arc::new(UnusedExecutor)));

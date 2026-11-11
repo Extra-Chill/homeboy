@@ -7,7 +7,6 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use homeboy::agents::agent_task_builtin_backend::BUILTIN_DEFAULT_BACKEND;
-use homeboy::agents::agent_task_model::normalize_concrete_model_identifier;
 use homeboy::agents::agent_tasks::cook_loop::{evaluate_cook_loop, AgentTaskCookLoopOptions};
 use homeboy::agents::agent_tasks::dispatch_service as agent_task_dispatch_service;
 use homeboy::agents::agent_tasks::finalization::{
@@ -23,12 +22,11 @@ use homeboy::agents::agent_tasks::provider::{
     ProviderRuntimeReadinessCache,
 };
 use homeboy::agents::agent_tasks::review_dossier::{
-    homeboy_tool_disclosure, resolve_review_profile, validate_issue_reference,
-    AgentTaskExternalUsageEvidence, AgentTaskExternalUsageStatus, AgentTaskPublicContract,
-    AgentTaskPublicContractEvidence, AgentTaskReviewAiAssistance, AgentTaskReviewDossier,
-    AgentTaskReviewIssueRelationship, AgentTaskReviewIssueRelationshipKind,
-    AgentTaskReviewOverride, AgentTaskReviewOverrideTarget, AgentTaskReviewTestStep,
-    AiFilledReviewForm, AGENT_TASK_REVIEW_DOSSIER_SCHEMA,
+    resolve_review_profile, validate_issue_reference, AgentTaskExternalUsageEvidence,
+    AgentTaskExternalUsageStatus, AgentTaskPublicContract, AgentTaskPublicContractEvidence,
+    AgentTaskReviewAiAssistance, AgentTaskReviewDossier, AgentTaskReviewIssueRelationship,
+    AgentTaskReviewIssueRelationshipKind, AgentTaskReviewOverride, AgentTaskReviewOverrideTarget,
+    AgentTaskReviewTestStep, AiFilledReviewForm, AGENT_TASK_REVIEW_DOSSIER_SCHEMA,
 };
 use homeboy::agents::agent_tasks::service as agent_task_service;
 use homeboy::agents::agent_tasks::AgentTaskRequest;
@@ -61,15 +59,6 @@ pub struct FinalizePrEvidenceArgs {
     /// Artifact/evidence URL, path, or identifier. Repeatable.
     #[arg(long = "artifact-ref", value_name = "REF")]
     pub artifact_refs: Vec<String>,
-
-    /// AI tool disclosure line for the PR body.
-    #[arg(long, default_value = "AI-assisted", value_name = "TEXT")]
-    pub ai_tool: String,
-
-    /// Actual model identifier for AI disclosure. Finalization requires a recorded model; Cook
-    /// publication through `recover` uses durable provenance instead.
-    #[arg(long = "model", value_name = "MODEL")]
-    pub ai_model: Option<String>,
 
     /// Source finding id shared by sibling generated PRs.
     #[arg(long, value_name = "ID")]
@@ -162,8 +151,8 @@ impl TryFrom<FinalizePrEvidenceArgs> for AgentTaskPrEvidence {
             source_refs: args.source_refs,
             artifact_refs: args.artifact_refs,
             attempt_summary: args.attempt_summary,
-            ai_tool: args.ai_tool,
-            ai_model: args.ai_model,
+            ai_tool: String::new(),
+            ai_model: None,
             source_relationship: AgentTaskPrSourceRelationship {
                 related_finding_id: args.related_finding_id,
                 source_packet_id: args.source_packet_id,
@@ -932,11 +921,8 @@ fn manual_finalization_options(
         verified_base: None,
         ai_assistance: AgentTaskReviewAiAssistance {
             used: true,
-            tool: homeboy_tool_disclosure(&evidence.ai_tool),
-            model: evidence
-                .ai_model
-                .clone()
-                .unwrap_or_else(|| "legacy caller did not record a model".to_string()),
+            tool: String::new(),
+            model: "operator-finalized; no Homeboy provider execution".to_string(),
         },
         source_relationships: args
             .closes
@@ -979,7 +965,6 @@ fn manual_finalization_options(
         changed_files: args.changed_files,
         evidence,
         review_dossier,
-        composed_ai_model_disclosure: false,
         review_profile,
         manual_finalization: args.manual_finalization,
         candidate: None,
@@ -1144,16 +1129,6 @@ fn validate_finalize_inputs(args: &FinalizePrArgs) -> homeboy::core::Result<()> 
                 "--verify derives gate result, targeted-check evidence, and reviewer test instructions; remove --gate-result, --targeted-check-run, and --test-step",
                 None,
                 Some(vec!["homeboy agent-task finalize-pr --manual-finalization --verify '<command>' ...".to_string()]),
-            ));
-        }
-    }
-    if let Some(model) = args.evidence.ai_model.as_deref() {
-        if normalize_concrete_model_identifier(model).is_none() {
-            errors.push(homeboy::core::Error::validation_invalid_argument(
-                "model",
-                "AI disclosure requires a concrete model identifier",
-                None,
-                None,
             ));
         }
     }
@@ -3073,41 +3048,6 @@ mod tests {
     }
 
     #[test]
-    fn invalid_manual_model_fails_before_reserving_finalization_identity() {
-        homeboy::test_support::with_isolated_home(|_| {
-            let error = dispatch_agent_task_error(&[
-                "homeboy",
-                "agent-task",
-                "finalize-pr",
-                "--manual-finalization",
-                "--preflight",
-                "--run-id",
-                "manual-invalid-model",
-                "--path",
-                "/tmp/manual-invalid-model",
-                "--title",
-                "Invalid model",
-                "--commit-message",
-                "fixture",
-                "--model",
-                "unknown",
-            ]);
-
-            assert!(error.details["diagnostics"]
-                .as_array()
-                .expect("validation diagnostics")
-                .iter()
-                .any(|diagnostic| {
-                    diagnostic["details"]["field"] == "model"
-                        && diagnostic["message"].as_str().is_some_and(|message| {
-                            message.contains("AI disclosure requires a concrete model identifier")
-                        })
-                }));
-            assert!(agent_task_lifecycle::reconcile_status("manual-invalid-model").is_err());
-        });
-    }
-
-    #[test]
     fn compact_provider_bounds_provider_output() {
         let provider: AgentTaskExecutorProvider = serde_json::from_value(serde_json::json!({
             "id": "provider-".to_string() + &"x".repeat(10_000),
@@ -3901,8 +3841,6 @@ mod tests {
                 "feature.txt",
                 "--verify",
                 "true",
-                "--model",
-                "fixture-model",
             ]);
             assert!(
                 error
@@ -3957,8 +3895,6 @@ mod tests {
                 "feature.txt",
                 "--targeted-check-run",
                 "cargo test fixture",
-                "--model",
-                "fixture-model",
             ]);
             run_git(
                 &checkout,
@@ -3990,8 +3926,6 @@ mod tests {
                 "printf 'first gate output'",
                 "--verify",
                 "printf 'Authorization: Bearer manual-secret' >&2; false",
-                "--model",
-                "fixture-model",
             ]);
             assert!(failed_gate
                 .message
@@ -4038,8 +3972,6 @@ mod tests {
                 "feature.txt",
                 "--verify",
                 "printf 'changed by gate' > feature.txt",
-                "--model",
-                "fixture-model",
             ]);
             assert!(changed_checkout
                 .message
@@ -4078,8 +4010,6 @@ mod tests {
                 "feature.txt",
                 "--verify",
                 &race_gate,
-                "--model",
-                "fixture-model",
             ]);
             assert!(mutation
                 .message
@@ -4186,8 +4116,6 @@ esac
                 "feature.txt",
                 "--verify",
                 "test \"$(cat feature.txt)\" = feature",
-                "--model",
-                "fixture-model",
             ];
             let preflight = dispatch_agent_task(&manual_argv);
             assert_eq!(preflight["status"], "validated");
@@ -4202,7 +4130,7 @@ esac
             );
             assert_eq!(
                 preflight["review_dossier"]["ai_assistance"]["model"],
-                "fixture-model"
+                "operator-finalized; no Homeboy provider execution"
             );
             // The apply step is the same invocation without --preflight; rerunning it is the retry.
             let argv = manual_argv
