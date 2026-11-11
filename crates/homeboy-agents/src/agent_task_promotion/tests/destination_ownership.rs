@@ -76,3 +76,75 @@ fn cook_recovery_two_cooks_refuses_foreign_destination_and_preserves_staged_tree
     git(&a, &["checkout", "-b", "unexpected"]);
     assert!(destination::before_reset(&a, "cook-a").is_err());
 }
+
+/// A destination follows its Cook's lineage and outlives a terminal owner: a
+/// retry publishes through it, a successor Cook takes it over (keeping the
+/// owner's staged candidate), and a live owner or foreign run is still refused.
+#[test]
+fn destination_passes_to_retries_and_to_successors_of_a_terminal_cook() {
+    use crate::agent_task_lifecycle as lifecycle;
+    homeboy_core::test_support::with_isolated_home(|home| {
+        let store = lifecycle::AgentTaskLifecycleStore::from_environment().unwrap();
+        let repo = home.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "fix/issue-1"]);
+        git(&repo, &["config", "user.name", "Test"]);
+        git(&repo, &["config", "user.email", "test@example.com"]);
+        std::fs::write(repo.join("file"), "base\n").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-qm", "base"]);
+        let durable = |id: &str, state, retry_of: Option<&str>| {
+            lifecycle::record_detached_cook_handoff_parent_in_store(&store, id).unwrap();
+            lifecycle::rewrite_record_for_test(id, |record| {
+                lifecycle::set_run_state(record, state);
+                if let Some(parent) = retry_of {
+                    record.metadata["retry_of"] = serde_json::json!(parent);
+                }
+            })
+            .unwrap();
+        };
+        durable("cook-a", lifecycle::AgentTaskRunState::Running, None);
+        durable(
+            "retry-a",
+            lifecycle::AgentTaskRunState::Running,
+            Some("cook-a"),
+        );
+        durable("cook-b", lifecycle::AgentTaskRunState::Queued, None);
+        destination::record(&repo, "cook-a").unwrap();
+
+        assert!(
+            destination::check(&repo, Some("cook-b")).is_err(),
+            "live owner"
+        );
+        assert!(
+            destination::check_run(&repo, Some("retry-a")).is_ok(),
+            "retry lineage"
+        );
+        assert!(
+            destination::check_run(&repo, Some("cook-b")).is_err(),
+            "foreign run"
+        );
+
+        lifecycle::rewrite_record_for_test("cook-a", |record| {
+            lifecycle::set_run_state(record, lifecycle::AgentTaskRunState::Failed);
+        })
+        .unwrap();
+        assert!(
+            destination::check_run(&repo, Some("cook-b")).is_err(),
+            "runs never take over"
+        );
+        std::fs::write(repo.join("file"), "cook-a candidate\n").unwrap();
+        git(&repo, &["add", "file"]);
+        destination::check(&repo, Some("cook-b")).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(repo.join("file")).unwrap(),
+            "cook-a candidate\n"
+        );
+        git(&repo, &["show", "refs/homeboy/candidates/cook-a:file"]);
+        assert!(
+            destination::check(&repo, Some("cook-a")).is_err(),
+            "ownership moved"
+        );
+        assert!(destination::check(&repo, Some("cook-b")).is_ok());
+    });
+}
