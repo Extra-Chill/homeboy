@@ -388,7 +388,7 @@ fn observe_launch_exit(cook_id: &str, exit: &StepTerminalDelivery) -> Result<()>
     let parent = agent_task_lifecycle::fail_detached_cook_handoff_parent_in_store(
         &store,
         cook_id,
-        "detached Cook exited before materializing its first attempt",
+        &launch_exit_reason(exit),
     )?;
     if parent.metadata["detached_cook_handoff"]["state"] != "redirected" {
         return Ok(());
@@ -409,6 +409,25 @@ fn observe_launch_exit(cook_id: &str, exit: &StepTerminalDelivery) -> Result<()>
         agent_task_lifecycle::record_interrupted_local_owner_in_store(&store, &attempt)?;
     }
     notify_cook_attempt(cook_id, &attempt)
+}
+
+/// Why a launch exited before its first attempt: the launcher's own failed
+/// command result when it reported one, else its exit status and log.
+fn launch_exit_reason(exit: &StepTerminalDelivery) -> String {
+    const EXITED: &str = "detached Cook exited before materializing its first attempt";
+    let cause = last_failed_command_result(&exit.log_path)
+        .and_then(|result| {
+            result["summary"]
+                .as_str()
+                .map(str::trim)
+                .map(str::to_string)
+        })
+        .filter(|summary| !summary.is_empty());
+    match (cause, exit.exit_code) {
+        (Some(cause), _) => format!("{EXITED}: {cause}"),
+        (None, Some(code)) => format!("{EXITED} (exit {code}); see {}", exit.log_path.display()),
+        (None, None) => format!("{EXITED}; see {}", exit.log_path.display()),
+    }
 }
 
 /// A redirected handoff without its canonical alias is broken durable
@@ -579,6 +598,60 @@ mod tests {
             );
             assert_eq!(after.revision, before.revision);
             assert!(after.metadata.get("cook_controller_failure").is_none());
+        });
+    }
+
+    /// A launcher that refuses before its first attempt reports why; the
+    /// handoff failure carries that cause rather than a generic exit.
+    #[test]
+    fn launch_exit_before_first_attempt_records_the_launcher_cause() {
+        with_isolated_home(|home| {
+            let store = agent_task_lifecycle::AgentTaskLifecycleStore::from_environment().unwrap();
+            let cook_id = "launch-refused-before-attempt";
+            agent_task_lifecycle::record_detached_cook_handoff_parent_in_store(&store, cook_id)
+                .unwrap();
+            let log_path = home.path().join("step.log");
+            std::fs::write(
+                &log_path,
+                concat!(
+                    "{\"schema\":\"homeboy/agent-task-admission-progress/v1\",\"state\":\"pending\"}\n",
+                    "{\"schema\":\"homeboy/command-result/v3\",\"success\":false,\"exit_code\":2,",
+                    "\"summary\":\"Invalid argument 'gate_input': input is a symbolic link\"}\n",
+                ),
+            )
+            .unwrap();
+            let request = cook_launch_step_request(
+                cook_id,
+                "launcher",
+                Path::new("/bin/sh"),
+                Vec::new(),
+                home.path(),
+                Default::default(),
+            );
+            observe_cook_step_exit(&StepTerminalDelivery {
+                job_id: "refused-step".to_string(),
+                key: request.key.clone(),
+                request,
+                checkpoint: None,
+                linked_durable_run_id: Some(cook_id.to_string()),
+                child: None,
+                outcome: step_job::StepTerminalOutcome::Exited,
+                error: None,
+                exit_code: Some(2),
+                cancelled: false,
+                log_path,
+                daemon_scope: None,
+            })
+            .unwrap();
+            let parent = store.read_record(cook_id).unwrap();
+            assert_eq!(
+                parent.state(),
+                agent_task_lifecycle::AgentTaskRunState::Failed
+            );
+            assert_eq!(
+                parent.metadata["detached_cook_handoff"]["reason"],
+                "detached Cook exited before materializing its first attempt: Invalid argument 'gate_input': input is a symbolic link"
+            );
         });
     }
 

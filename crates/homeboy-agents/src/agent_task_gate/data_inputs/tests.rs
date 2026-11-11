@@ -45,3 +45,32 @@ fn admitted_gate_reads_snapshot_and_replays_after_source_mutation() {
     let replay = report.environment.replay_policy();
     assert_eq!(replay.data_inputs, policy.data_inputs);
 }
+
+#[cfg(unix)]
+#[test]
+fn admission_refusal_names_the_symlinked_input() {
+    let temp = tempfile::tempdir().unwrap();
+    let target = temp.path().join("capture-target");
+    fs::create_dir(&target).unwrap();
+    let link = temp.path().join("capture");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    let mut policy = AgentTaskGateEnvironmentPolicy {
+        data_inputs: vec![GateInput {
+            id: "capture".into(),
+            source: link.display().to_string(),
+            env: "CAPTURE".into(),
+            digest: String::new(),
+            size_bytes: 0,
+            directory: false,
+        }],
+        ..Default::default()
+    };
+    let error = admit(&mut policy, temp.path()).unwrap_err();
+    assert_eq!(
+        error.details["problem"],
+        format!(
+            "input `capture` ({}): input is a symbolic link; declare its resolved target instead",
+            link.display()
+        )
+    );
+}

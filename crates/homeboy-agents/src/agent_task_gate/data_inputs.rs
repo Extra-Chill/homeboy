@@ -102,6 +102,11 @@ pub fn inspect(path: &Path) -> Result<(String, u64, bool)> {
         }
         return Ok((format!("sha256:{}", sha256_file(path)?), meta.len(), false));
     }
+    if meta.file_type().is_symlink() {
+        return Err(invalid(
+            "input is a symbolic link; declare its resolved target instead",
+        ));
+    }
     if !meta.is_dir() {
         return Err(invalid("input must be a regular file or directory"));
     }
@@ -240,7 +245,18 @@ pub fn admit(policy: &mut AgentTaskGateEnvironmentPolicy, root: &Path) -> Result
         if !source.is_absolute() {
             return Err(invalid("input source must be absolute"));
         }
-        let (digest, size_bytes, directory) = inspect(source)?;
+        // Name the declaration: an admission refusal must be actionable
+        // without re-deriving which of several inputs failed.
+        let (digest, size_bytes, directory) = inspect(source).map_err(|error| {
+            let problem = error.details["problem"]
+                .as_str()
+                .unwrap_or(&error.message)
+                .to_string();
+            invalid(&format!(
+                "input `{}` ({}): {problem}",
+                input.id, input.source
+            ))
+        })?;
         if !input.digest.is_empty()
             && (input.digest != digest
                 || input.size_bytes != size_bytes
