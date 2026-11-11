@@ -6353,7 +6353,7 @@ impl RetryLineageLock {
 /// store. The walk decides which lineage lock is taken and which successors
 /// count as this run's own, so a parent read from another home would reserve and
 /// scan a lineage that does not exist here.
-fn retry_root_run_id_in_store(
+pub(crate) fn retry_root_run_id_in_store(
     lifecycle_store: &AgentTaskLifecycleStore,
     record: &AgentTaskRunRecord,
 ) -> Result<String> {

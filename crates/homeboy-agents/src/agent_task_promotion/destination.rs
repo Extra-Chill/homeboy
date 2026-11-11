@@ -77,47 +77,94 @@ pub(crate) fn record(repo: &Path, cook: &str) -> Result<()> {
     }
 }
 
-/// Unmanaged Git checkouts remain caller-owned. A recorded Cook destination
-/// can never be adopted implicitly by a different invocation.
+/// Unmanaged Git checkouts remain caller-owned. A recorded destination admits
+/// its owner, a retry of the owner's lineage, and a Cook succeeding a terminal
+/// owner (which first preserves the owner's staged candidate).
 pub(crate) fn check(repo: &Path, cook: Option<&str>) -> Result<()> {
-    admit(repo, cook, |owner| cook == Some(owner))
+    admit(repo, cook, true)
+}
+
+/// A run claims through its Cook: an attempt by its id prefix, a retry by its
+/// `retry_of` lineage. A run never takes over another Cook's destination.
+pub(crate) fn check_run(repo: &Path, run: Option<&str>) -> Result<()> {
+    admit(repo, run, false)
 }
 
 /// Attempt ids are `<cook>-attempt-<n>-<suffix>` (`cook_attempt_run_id`), so
 /// an attempt maps to its Cook without reading lifecycle state.
-pub(crate) fn check_run(repo: &Path, run: Option<&str>) -> Result<()> {
-    admit(repo, run, |owner| {
-        run.is_some_and(|run| {
-            run == owner
-                || run
-                    .strip_prefix(owner)
-                    .is_some_and(|rest| rest.starts_with("-attempt-"))
-        })
-    })
+fn acts_for(owner: &str, run: &str) -> bool {
+    run == owner
+        || run
+            .strip_prefix(owner)
+            .is_some_and(|rest| rest.starts_with("-attempt-"))
 }
 
-fn admit(repo: &Path, claimant: Option<&str>, owns: impl Fn(&str) -> bool) -> Result<()> {
+/// What the durable lifecycle says about `claimant` against `owner`. An
+/// unreadable record proves nothing, so it admits nothing.
+fn lifecycle_admits(owner: &str, claimant: &str, succeed: bool) -> Option<bool> {
+    let store = crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment().ok()?;
+    if let Ok(record) = store.read_record(claimant) {
+        let root = crate::agent_task_lifecycle::retry_root_run_id_in_store(&store, &record).ok()?;
+        if acts_for(owner, &root) {
+            return Some(false);
+        }
+    }
+    (succeed && store.read_record(owner).ok()?.state().is_terminal()).then_some(true)
+}
+
+fn admit(repo: &Path, claimant: Option<&str>, succeed: bool) -> Result<()> {
     let path = marker(repo)?;
-    let bytes = match std::fs::read(path) {
+    let bytes = match std::fs::read(&path) {
         Ok(bytes) => bytes,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err(owner_mismatch(e.to_string())),
     };
     let owner: Owner = serde_json::from_slice(&bytes).map_err(|e| owner_mismatch(e.to_string()))?;
     let branch = git(repo, &["symbolic-ref", "--short", "HEAD"])?;
-    if !owns(&owner.cook) || branch != owner.branch {
-        return Err(owner_mismatch(format!(
+    let admitted = match claimant {
+        _ if branch != owner.branch => None,
+        Some(run) if acts_for(&owner.cook, run) => Some(false),
+        Some(run) => lifecycle_admits(&owner.cook, run, succeed),
+        None => None,
+    };
+    match (admitted, claimant) {
+        (Some(true), Some(cook)) => {
+            preserve_candidate(repo, &owner.cook)?;
+            write_owner(
+                &path,
+                &Owner {
+                    cook: cook.to_string(),
+                    branch,
+                },
+            )
+        }
+        (Some(_), _) => Ok(()),
+        (None, _) => Err(owner_mismatch(format!(
             "destination belongs to Cook {} on {}, not {:?} on {}",
             owner.cook, owner.branch, claimant, branch
-        )));
+        ))),
     }
-    Ok(())
+}
+
+fn write_owner(path: &Path, owner: &Owner) -> Result<()> {
+    let staged = path.with_extension("json.next");
+    std::fs::write(
+        &staged,
+        serde_json::to_vec(owner).map_err(|e| Error::internal_io(e.to_string(), None))?,
+    )
+    .and_then(|()| std::fs::rename(&staged, path))
+    .map_err(|e| Error::internal_io(e.to_string(), None))
 }
 
 /// Must succeed before any destructive recovery operation. The index is the
 /// candidate, not HEAD; commit-tree leaves both index and working tree intact.
 pub(crate) fn before_reset(repo: &Path, cook: &str) -> Result<()> {
     check(repo, Some(cook))?;
+    preserve_candidate(repo, cook)
+}
+
+/// Keep a staged candidate reachable at `refs/homeboy/candidates/<cook>`.
+fn preserve_candidate(repo: &Path, cook: &str) -> Result<()> {
     let tree = git(repo, &["write-tree"])?;
     let head_tree = git(repo, &["rev-parse", "HEAD^{tree}"])?;
     if tree != head_tree {
