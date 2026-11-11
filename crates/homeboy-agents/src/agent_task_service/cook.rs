@@ -7859,24 +7859,26 @@ pub(super) fn publish_incomplete_draft<
         .trim()
         .to_string(),
     };
+    let record = lifecycle_store.read_record(run_id)?;
+    let unverified = &record.metadata[super::cook_promotion::UNVERIFIED_CANDIDATE_METADATA];
+    let unverified = review_form_unavailable && unverified.is_object();
     let title = if options.finalization.title.is_empty() {
         format!(
             "fix(cook): {} {}",
-            if review_form_unavailable {
-                "verified candidate"
-            } else {
-                "incomplete"
+            match (review_form_unavailable, unverified) {
+                (true, true) => "unverified candidate",
+                (true, false) => "verified candidate",
+                (false, _) => "incomplete",
             },
             options.identity.cook_id
         )
     } else {
         options.finalization.title.clone()
     };
-    let record = lifecycle_store.read_record(run_id)?;
-    let note = if review_form_unavailable {
-        "review: unavailable\n\nReview form unavailable: completion not assessed; deterministic gates passed"
-    } else {
-        "Incomplete candidate; deterministic verification failed."
+    let note = match (review_form_unavailable, unverified) {
+        (true, true) => "review: unavailable\n\nNo deterministic gate passed on this candidate; every gate failure is inherited from the base",
+        (true, false) => "review: unavailable\n\nReview form unavailable: completion not assessed; deterministic gates passed",
+        (false, _) => "Incomplete candidate; deterministic verification failed.",
     };
     let mut body = format!(
         "{note}\n\nTask: {}\n\nincomplete_reason: {}\n",
@@ -7887,10 +7889,11 @@ pub(super) fn publish_incomplete_draft<
     body.push_str(&format!(
         "\nCandidate from attempt {attempt} (`{run_id}`).\n"
     ));
-    if review_form_unavailable {
-        let reason = record.metadata["review_form_unavailable"]["message"]
-            .as_str()
-            .unwrap_or("missing review_form output");
+    if let Some(reason) = record.metadata["review_form_unavailable"]["message"]
+        .as_str()
+        .or((review_form_unavailable && !unverified).then_some("missing review_form output"))
+        .filter(|_| review_form_unavailable)
+    {
         body.push_str(&format!(
             "\nReview form failed: {}\n",
             reason.replace(['\n', '\r'], " ")
