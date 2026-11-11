@@ -1350,6 +1350,9 @@ fn nonfresh_daemon_admission_error(
                 "next_action": next_action,
             }),
         );
+        if let Some(reason) = refusal.transient_reason() {
+            details.insert("readiness_reasons".to_string(), serde_json::json!([reason]));
+        }
     }
     error
 }
