@@ -97,16 +97,11 @@ pub(crate) fn validate_discovery(args: &super::RunsListArgs) -> homeboy::core::R
     Ok(())
 }
 
-pub(crate) fn discover(mut args: super::RunsListArgs) -> super::CmdResult<serde_json::Value> {
+pub(crate) fn discover(args: super::RunsListArgs) -> super::CmdResult<serde_json::Value> {
     use crate::commands::agent_task::status;
     use homeboy::agents::agent_task_service::{
         AgentTaskDiscoveryFilter, AgentTaskDiscoveryOptions,
     };
-    if let Some(since) = &args.since {
-        if chrono::DateTime::parse_from_rfc3339(since).is_err() {
-            args.since = Some(super::common::since_threshold(since)?);
-        }
-    }
     if args.full {
         let options = AgentTaskDiscoveryOptions {
             limit: None,
