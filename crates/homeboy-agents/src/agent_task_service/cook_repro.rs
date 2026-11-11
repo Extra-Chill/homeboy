@@ -102,6 +102,13 @@ pub(crate) fn run_repro_on_base(
                 base_sha,
                 component_id.as_deref(),
                 |base_workspace| {
+                    super::cook_baseline::hydrate_base_gate_workspace(
+                        base_workspace,
+                        &environment,
+                        component_id.as_deref(),
+                        &gates.repro,
+                        gates.gate_timeout(),
+                    )?;
                     gates
                         .repro
                         .iter()
