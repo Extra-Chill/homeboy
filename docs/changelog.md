@@ -4,6 +4,16 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.458.19] - 2026-11-11
+
+### Changed
+- Settle exact cancellation when the staging controller job already settled
+- Name the blockers when an upgrade refuses at extension preflight
+- Admit reconcile --apply as local control
+
+### Fixed
+- align Cook outcomes across discovery and observations
+
 ## [0.458.18] - 2026-11-11
 
 ### Changed
