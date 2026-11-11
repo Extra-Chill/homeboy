@@ -1536,6 +1536,16 @@ mod tests {
             ["homeboy", "agent-task", "diagnose", "agent-task-123"].as_slice(),
             ["homeboy", "agent-task", "review", "agent-task-123"].as_slice(),
             ["homeboy", "agent-task", "reconcile", "agent-task-123"].as_slice(),
+            // Applying reconciliation is record bookkeeping, like `cancel`.
+            [
+                "homeboy",
+                "agent-task",
+                "reconcile",
+                "agent-task-123",
+                "--apply",
+            ]
+            .as_slice(),
+            ["homeboy", "agent-task", "reconcile", "--all", "--apply"].as_slice(),
             ["homeboy", "runs", "list", "--kind", "agent-task"].as_slice(),
             [
                 "homeboy",

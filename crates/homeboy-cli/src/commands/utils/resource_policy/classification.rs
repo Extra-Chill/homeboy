@@ -20,7 +20,7 @@
 //! - `cook --queue-only` — `LocalControl`, otherwise `AdmittedWorkload`
 //! - `retry --run` — `AdmittedWorkload`, otherwise `LocalControl`
 //! - Cook discovery (`runs list --kind agent-task`) — `BoundedMetadataRead`
-//! - `reconcile --apply` — `AdmittedWorkload`, otherwise `BoundedMetadataRead`
+//! - `reconcile --apply` — `LocalControl`, otherwise `BoundedMetadataRead`
 //! - `recover --preflight` — `BoundedMetadataRead`, otherwise `AdmittedWorkload`
 //! - `fanout cook-batch --dry-run` — `is_plan_only_command` below
 //!
@@ -98,9 +98,8 @@ pub(super) fn agent_task_resource_behavior(
         agent_task::AgentTaskCommand::Retry(_) => AgentTaskResourceBehavior::LocalControl,
         // `recover --preflight` only reads durable Cook state to name its step
         // and validate continuation or publication admission read-only. Every
-        // step it performs (continuation, `retry --run`, `reconcile --apply`,
-        // replacement gates, publication) is an admitted workload, like the
-        // handlers it calls.
+        // step it performs (continuation, `retry --run`, replacement gates,
+        // publication) is an admitted workload, like the handlers it calls.
         agent_task::AgentTaskCommand::Recover(recover) if recover.preflight => {
             AgentTaskResourceBehavior::BoundedMetadataRead
         }
@@ -135,9 +134,11 @@ pub(super) fn agent_task_resource_behavior(
         agent_task::AgentTaskCommand::Reconcile(reconcile) if !reconcile.apply => {
             AgentTaskResourceBehavior::BoundedMetadataRead
         }
-        agent_task::AgentTaskCommand::Reconcile(_) => {
-            AgentTaskResourceBehavior::AdmittedWorkload
-        }
+        // Applying only cancels or expires lifecycle records (and, at most,
+        // the exact runner job), the same bookkeeping as `cancel`. Admitting
+        // it as a workload refused fleet recovery precisely when a hot
+        // controller or a pressure-blocked Lab needed it (the #9428 failure).
+        agent_task::AgentTaskCommand::Reconcile(_) => AgentTaskResourceBehavior::LocalControl,
         // Cook-batch admits a workflow; batch-prepare plans it. Their
         // children are ordinary Cooks with their own admission.
         agent_task::AgentTaskCommand::Fanout(_) | agent_task::AgentTaskCommand::BatchPrepare(_) => {
