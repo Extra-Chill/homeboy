@@ -198,6 +198,12 @@ pub(super) fn is_bounded_agent_task_metadata_read(command: &Commands) -> bool {
     agent_task_resource_behavior(command) == Some(AgentTaskResourceBehavior::BoundedMetadataRead)
 }
 
+/// Controller-local agent-task bookkeeping never enters resource admission,
+/// whatever Lab contract its reads carry.
+pub(super) fn is_agent_task_local_control(command: &Commands) -> bool {
+    agent_task_resource_behavior(command) == Some(AgentTaskResourceBehavior::LocalControl)
+}
+
 /// Local registry/source-state management (`rig install|update|sync|sources`)
 /// is lightweight controller-local bookkeeping, not a resource-intensive
 /// workload. These commands carry a `LocalOnly` Lab contract only to *explain*

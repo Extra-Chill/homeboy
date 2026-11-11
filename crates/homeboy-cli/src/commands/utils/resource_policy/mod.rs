@@ -10,8 +10,9 @@ use crate::commands::resources::{DoctorOutput, ResourceRecommendation};
 use serde::Serialize;
 
 use classification::{
-    is_bounded_agent_task_metadata_read, is_controller_owned_fanout_coordination,
-    is_executable_agent_task_retry, is_local_registry_management, is_plan_only_command,
+    is_agent_task_local_control, is_bounded_agent_task_metadata_read,
+    is_controller_owned_fanout_coordination, is_executable_agent_task_retry,
+    is_local_registry_management, is_plan_only_command,
 };
 use messages::{
     append_local_placement, lab_routed_controller_notice, primary_action, severity_str,
@@ -467,6 +468,7 @@ pub(crate) fn hot_command(command: &Commands) -> Option<HotCommand> {
         || is_plan_only_command(command)
         || is_controller_owned_fanout_coordination(command)
         || is_bounded_agent_task_metadata_read(command)
+        || is_agent_task_local_control(command)
         || is_local_registry_management(command)
     {
         return None;
