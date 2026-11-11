@@ -3346,10 +3346,8 @@ fn cook_review_unavailable_draft_uses_default_title_without_source_lookup() {
             .expect("draft publication needs no title lookup");
         assert_eq!(result.exit_code, 0, "{:?}", result.value);
         assert_eq!(result.value.status, "draft_published");
-        assert_eq!(
-            fixture.backend.title,
-            "fix(cook): verified candidate cook-review-default-title"
-        );
+        // The title names the change, never the Cook id (#17919).
+        assert_eq!(fixture.backend.title, "fix: update PROBE");
         assert!(homeboy_core::git::is_conventional_subject(
             &fixture.backend.title
         ));
