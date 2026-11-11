@@ -475,5 +475,28 @@ pub(crate) fn prepare_request(
         request,
         serde_json::json!({ "cook_feedback": pending }),
     );
+    if !pending.is_empty() {
+        // Providers that see only instructions (Pi) receive the feedback
+        // through the operator's `feedback` template, rendered here because
+        // the facts exist only at dispatch.
+        crate::agent_task_prompt_template::append_prompt_template(
+            request,
+            crate::agent_task_prompt_template::PromptPurpose::Feedback,
+        );
+    }
     Ok(Some((store, cook_id.to_string(), pending)))
+}
+
+/// Whether the Cook has operator feedback no provider attempt has consumed.
+pub(crate) fn has_pending(
+    lifecycle: &crate::agent_task_lifecycle::AgentTaskLifecycleStore,
+    cook_id: &str,
+) -> bool {
+    CookFeedbackStore::new(lifecycle.data_root())
+        .list(cook_id)
+        .is_ok_and(|items| {
+            items
+                .iter()
+                .any(|item| item.state == FeedbackState::Pending)
+        })
 }

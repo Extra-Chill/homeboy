@@ -346,6 +346,14 @@ pub fn evaluate_cook_loop(options: AgentTaskCookLoopOptions) -> AgentTaskCookLoo
             .as_ref()
             .is_some_and(|form| form.validate().is_ok() && form.incomplete_reason().is_some());
 
+    // Operator feedback recorded against a green candidate is new work for the
+    // same Cook (#17611): a provider attempt on the same workspace receives it
+    // at dispatch (`homeboy.cook_feedback`) before the candidate publishes.
+    let operator_feedback_pending = gates_green_with_changes
+        && !agent_reported_incomplete
+        && options.metadata["pending_operator_feedback"] == true
+        && retry_budget_remaining > 0;
+
     let follow_up_request = if should_retry {
         Some(build_follow_up_request(
             &options,
@@ -360,6 +368,8 @@ pub fn evaluate_cook_loop(options: AgentTaskCookLoopOptions) -> AgentTaskCookLoo
         && retry_budget_remaining > 0
     {
         Some(build_no_change_follow_up_request(&options, &failed_gates))
+    } else if operator_feedback_pending {
+        Some(build_operator_feedback_follow_up_request(&options))
     } else {
         None
     };
@@ -620,6 +630,77 @@ fn gate_failure_paths(failed_gates: &[AgentTaskCookLoopGateFailure]) -> Vec<Stri
         .filter(|path| !path.is_empty())
         .map(str::to_string)
         .collect()
+}
+
+/// Build a follow-up attempt that applies pending operator feedback to a green
+/// candidate (#17611). The candidate workspace and task instructions are kept;
+/// the feedback itself is attached at the provider dispatch boundary.
+fn build_operator_feedback_follow_up_request(
+    options: &AgentTaskCookLoopOptions,
+) -> AgentTaskRequest {
+    let mut request = options.source_request.clone();
+    let next_attempt = options.attempt.saturating_add(1);
+    request.schema = AGENT_TASK_REQUEST_SCHEMA.to_string();
+    request.task_id = format!("{}-feedback-{}", request.task_id, next_attempt);
+    request.parent_plan_id = request
+        .parent_plan_id
+        .clone()
+        .or_else(|| options.source_run_id.clone());
+    if !request.inputs.is_object() {
+        request.inputs = json!({});
+    }
+    request.inputs["cook_loop"] = json!({
+        "source_run_id": options.source_run_id,
+        "source_task_id": options.source_request.task_id,
+        "source_patch_task_id": options.promotion_report.source.task_id,
+        "promotion_status": options.promotion_report.status,
+        "attempt": options.attempt,
+        "next_attempt": next_attempt,
+        "max_attempts": options.max_attempts,
+        "retry_budget_remaining_after_dispatch": options.max_attempts.saturating_sub(next_attempt),
+        "to_worktree": options.promotion_report.to_worktree,
+        "changed_files": options.promotion_report.changed_files,
+        "candidate": options.promotion_report.candidate,
+        "current_diff": options.current_diff,
+        "operator_feedback": true,
+        "remediation_scope": remediation_scope(options, Vec::new()),
+    });
+    request.instructions = strip_gate_failure_prompt_section(&request.instructions).to_string();
+    request.source_refs.push(AgentTaskSourceRef {
+        kind: "agent-task-run".to_string(),
+        uri: options
+            .source_run_id
+            .as_ref()
+            .map(|run_id| format!("homeboy://agent-task/run/{run_id}"))
+            .unwrap_or_else(|| {
+                format!(
+                    "homeboy://agent-task/task/{}",
+                    options.source_request.task_id
+                )
+            }),
+        revision: None,
+    });
+    request.workspace.mode = AgentTaskWorkspaceMode::Existing;
+    request.workspace.root = request
+        .workspace
+        .root
+        .clone()
+        .or_else(|| worktree_root_hint(&options.promotion_report));
+    request.policy.grant_workspace_read_tool();
+    replace_metadata_keeping_prompt_base(
+        &mut request,
+        json!({
+            "cook_loop": {
+                "kind": "operator-feedback",
+                "attempt": next_attempt,
+                "previous_attempt": options.attempt,
+                "max_attempts": options.max_attempts,
+                "source_task_id": options.source_request.task_id,
+                "source_run_id": options.source_run_id,
+            }
+        }),
+    );
+    request
 }
 
 /// Build a follow-up attempt for an attempt that produced no change (#15364).
@@ -2298,6 +2379,42 @@ mod tests {
             verification: Vec::new(),
             completion: Some(crate::agent_task_review_dossier::AiReviewCompletion::Complete),
             incomplete_reason: String::new(),
+        }
+    }
+
+    #[test]
+    fn pending_operator_feedback_turns_a_green_candidate_into_a_feedback_attempt() {
+        // #17611: feedback on a green (or published) candidate is new work for
+        // the same Cook, while budget remains; without budget it publishes.
+        for (max_attempts, pending, follow_up) in
+            [(2, true, true), (1, true, false), (2, false, false)]
+        {
+            let report = evaluate_cook_loop(AgentTaskCookLoopOptions {
+                source_request: source_request(),
+                promotion_report: promotion_report(
+                    AgentTaskPromotionStatus::Applied,
+                    vec![green_gate()],
+                ),
+                attempt: 1,
+                max_attempts,
+                source_run_id: Some("run-feedback".to_string()),
+                current_diff: String::new(),
+                review_form: Some(valid_review_form()),
+                metadata: json!({ "pending_operator_feedback": pending }),
+            });
+            assert_eq!(
+                report.follow_up_request.is_some(),
+                follow_up,
+                "{max_attempts}/{pending}"
+            );
+            if let Some(request) = report.follow_up_request {
+                assert_eq!(report.status, AgentTaskCookLoopStatus::RetryRequested);
+                assert_eq!(request.workspace.mode, AgentTaskWorkspaceMode::Existing);
+                assert_eq!(request.metadata["cook_loop"]["kind"], "operator-feedback");
+                assert_eq!(request.inputs["cook_loop"]["operator_feedback"], true);
+            } else {
+                assert_eq!(report.status, AgentTaskCookLoopStatus::GreenCompleted);
+            }
         }
     }
 
