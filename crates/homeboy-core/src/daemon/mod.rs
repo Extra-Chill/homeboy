@@ -189,8 +189,13 @@ fn heartbeat_only_stall_reason(timeout: Duration) -> String {
 
 /// Generic client for controller-local daemon jobs. Domain crates use this
 /// rather than carrying daemon HTTP or controller-job semantics themselves.
+/// How long a submission waits for a replacement daemon to start serving.
+const DAEMON_HANDOFF_WAIT: Duration = Duration::from_secs(60);
+
 pub struct LocalControllerJobClient {
     endpoint: String,
+    /// The serving lease that names this daemon's replacement after a handoff.
+    state_path: PathBuf,
     client: reqwest::blocking::Client,
     // Fence recovery from exact-build preflight through durable handoff only.
     admission_guard: Mutex<Option<DaemonAdmissionGuard>>,
@@ -389,6 +394,7 @@ impl LocalControllerJobClient {
             })?;
         Ok(Self {
             endpoint: format!("http://{}", state.address),
+            state_path,
             client,
             admission_guard: Mutex::new(None),
         })
@@ -405,6 +411,7 @@ impl LocalControllerJobClient {
             })?;
         Ok(Self {
             endpoint: format!("http://{}", daemon.address),
+            state_path: state_path()?,
             client,
             admission_guard: Mutex::new(None),
         })
@@ -453,6 +460,36 @@ impl LocalControllerJobClient {
 
     /// Admit and start a typed durable controller job. The daemon, rather than
     /// the submitting CLI process, owns execution after this method returns.
+    /// A daemon handoff can close this listener between connect and submit. A
+    /// refused connection proves the daemon never received the request, so it
+    /// is resent to the replacement the serving lease names; the request's
+    /// idempotency key makes any replay reuse its job.
+    fn send_to_serving_daemon(
+        &self,
+        send: impl Fn(&str) -> reqwest::Result<reqwest::blocking::Response>,
+    ) -> Result<(String, reqwest::blocking::Response)> {
+        let deadline = std::time::Instant::now() + DAEMON_HANDOFF_WAIT;
+        let mut endpoint = self.endpoint.clone();
+        loop {
+            match send(&endpoint) {
+                Ok(response) => return Ok((endpoint, response)),
+                Err(error) if error.is_connect() && std::time::Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(250));
+                    if let Ok(Some(state)) =
+                        validate_lease_file(&self.state_path).map(|lease| lease.state)
+                    {
+                        endpoint = format!("http://{}", state.address);
+                    }
+                }
+                Err(error) => {
+                    return Err(Error::internal_unexpected(format!(
+                        "submit local controller job: {error}"
+                    )))
+                }
+            }
+        }
+    }
+
     pub fn submit(&self, request: serde_json::Value) -> Result<crate::api_jobs::Job> {
         Ok(self.submit_with_disposition(request)?.job)
     }
@@ -464,14 +501,12 @@ impl LocalControllerJobClient {
         request: serde_json::Value,
     ) -> Result<ControllerJobSubmission> {
         let _admission_guard = self.admission_guard.lock().unwrap().take();
-        let response = self
-            .client
-            .post(format!("{}/controller/jobs", self.endpoint))
-            .json(&request)
-            .send()
-            .map_err(|error| {
-                Error::internal_unexpected(format!("submit local controller job: {error}"))
-            })?;
+        let (endpoint, response) = self.send_to_serving_daemon(|endpoint| {
+            self.client
+                .post(format!("{endpoint}/controller/jobs"))
+                .json(&request)
+                .send()
+        })?;
         let status = response.status();
         let value: serde_json::Value = response.json().map_err(|error| {
             Error::internal_json(
@@ -514,10 +549,7 @@ impl LocalControllerJobClient {
             .map(str::to_owned);
         let response = self
             .client
-            .post(format!(
-                "{}/controller/jobs/{}/start",
-                self.endpoint, job.id
-            ))
+            .post(format!("{endpoint}/controller/jobs/{}/start", job.id))
             .send()
             .map_err(|error| {
                 Error::internal_unexpected(format!(
@@ -5931,8 +5963,37 @@ mod tests {
                     write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
                 }
             });
+            // The client still names the daemon a handoff just closed; the
+            // serving lease names its replacement.
+            let closed = TcpListener::bind("127.0.0.1:0")
+                .unwrap()
+                .local_addr()
+                .unwrap();
+            let state_path = state_path().unwrap();
+            fs::create_dir_all(state_path.parent().unwrap()).unwrap();
+            fs::write(
+                &state_path,
+                serde_json::to_vec(&json!({
+                    "schema": "homeboy.daemon.session_lease.v1",
+                    "lease_id": "replacement",
+                    "startup_token": "replacement-token",
+                    "address": address.to_string(),
+                    "pid": std::process::id(),
+                    "state_path": state_path.to_string_lossy(),
+                    "started_at": "2026-01-01T00:00:00Z",
+                    "last_seen_at": "2026-01-01T00:00:00Z",
+                    "build_identity": {
+                        "version": "0.0.0", "git_commit": "0000000", "git_dirty": false,
+                        "display": "homeboy 0.0.0"
+                    },
+                    "runtime_paths": { "loaded_at": "2026-01-01T00:00:00Z", "paths": [] }
+                }))
+                .unwrap(),
+            )
+            .unwrap();
             let client = LocalControllerJobClient {
-                endpoint: format!("http://{address}"),
+                endpoint: format!("http://{closed}"),
+                state_path,
                 client: reqwest::blocking::Client::builder()
                     .no_proxy()
                     .build()
@@ -5940,10 +6001,19 @@ mod tests {
                 admission_guard: Mutex::new(Some(acquire_daemon_admission_lock().unwrap())),
             };
             assert!(try_acquire_daemon_job_admission_fence().unwrap().is_none());
-            client.submit(json!({})).unwrap();
+            client
+                .submit(json!({}))
+                .expect("submission reaches the replacement daemon");
             let fence = acquire_daemon_job_admission_fence_with_wait(Duration::ZERO)
                 .expect("durable handoff releases the client's admission guard");
-            assert_eq!(client.status(&job_id.to_string()).unwrap().id, job_id);
+            assert_eq!(
+                LocalControllerJobClient::connect_existing_job(&job_id.to_string())
+                    .unwrap()
+                    .status(&job_id.to_string())
+                    .unwrap()
+                    .id,
+                job_id
+            );
             drop(fence);
             server.join().unwrap();
         });
