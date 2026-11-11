@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.458.13] - 2026-11-11
+
+### Fixed
+- skip unrelated legacy recipes when scanning for an attempt
+- refuse cross-source clobbering of shared extension assets
+
 ## [0.458.12] - 2026-11-10
 
 ### Changed
