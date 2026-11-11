@@ -3072,8 +3072,8 @@ impl JobStore {
         &self,
         now: u64,
     ) -> Result<Vec<Uuid>> {
-        self.durable_transaction(|inner| {
-            let expired = inner
+        let expired_in = |inner: &JobStoreInner| {
+            inner
                 .jobs
                 .values()
                 .filter(|stored| {
@@ -3084,7 +3084,16 @@ impl JobStore {
                         })
                 })
                 .map(|stored| stored.job.id)
-                .collect::<Vec<_>>();
+                .collect::<Vec<_>>()
+        };
+        // This daemon writes its own reservations, so its view already holds
+        // them. With nothing expired, skip the reload-clone-rewrite of the
+        // whole shared ledger that a durable transaction costs (#17918).
+        if expired_in(&self.inner.lock().expect("job store mutex poisoned")).is_empty() {
+            return Ok(Vec::new());
+        }
+        self.durable_transaction(|inner| {
+            let expired = expired_in(inner);
 
             for job_id in &expired {
                 let stored = inner.jobs.get_mut(job_id).expect("expired job exists");
