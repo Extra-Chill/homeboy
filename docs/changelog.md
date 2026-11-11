@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.458.14] - 2026-11-11
+
+### Changed
+- agent-task status: name the task's state in the summary headline
+- Decode recipes that record a review-form lineage (regression from #17814)
+
 ## [0.458.13] - 2026-11-11
 
 ### Fixed
