@@ -5150,6 +5150,9 @@ pub(crate) fn start_controller_job(
     job_id: Uuid,
     job_store: &JobStore,
 ) -> Result<crate::api_jobs::Job> {
+    if let Some(settled) = job_store.settled_controller_job(job_id) {
+        return Ok(settled);
+    }
     let controller = job_store.controller_job_state(job_id)?;
     if job_store.get(job_id)?.status != JobStatus::Queued {
         return job_store.get(job_id);
@@ -5614,6 +5617,9 @@ pub(crate) fn cancel_controller_job(
     reason: &str,
     job_store: &JobStore,
 ) -> Result<crate::api_jobs::Job> {
+    if let Some(settled) = job_store.settled_controller_job(job_id) {
+        return Ok(settled);
+    }
     let controller = job_store.controller_job_state(job_id)?;
     // Resolve the persisted type/version, not a caller-controlled envelope.
     let _driver = controller_job_driver::driver(&controller.job_type, controller.version)?;

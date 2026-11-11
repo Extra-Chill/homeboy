@@ -106,6 +106,12 @@ fn exact_terminal_controller_prune_fences_active_jobs_and_preserves_replay_tombs
     store
         .fail_controller_error(first, "done".to_string(), json!({}))
         .expect("first terminal");
+    let settled = |store: &JobStore, id| {
+        crate::daemon::cancel_controller_job(id, "reconcile stale run", store)
+            .expect("a settled controller job cancels into its terminal projection")
+            .status
+    };
+    assert_eq!(settled(&store, first), JobStatus::Failed);
     let unrelated = store.create("unrelated");
     store.start(unrelated.id).expect("other starts");
     store.complete(unrelated.id, None).expect("other terminal");
@@ -150,6 +156,11 @@ fn exact_terminal_controller_prune_fences_active_jobs_and_preserves_replay_tombs
         .unwrap()
         .is_empty());
     assert!(reopened.get(first).is_err());
+    assert_eq!(
+        settled(&reopened, first),
+        JobStatus::Failed,
+        "the replay tombstone answers for a pruned job"
+    );
     assert!(reopened.get(second).is_err());
     assert_eq!(
         reopened.get(unrelated.id).unwrap().status,
