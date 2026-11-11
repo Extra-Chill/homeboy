@@ -8006,13 +8006,13 @@ fn operator_timeout_override_appends_a_budget_bounded_recipe_attempt() {
         agent_task_lifecycle::rewrite_record_for_test(&options.identity.initial_run_id, |record| {
             record.metadata["provider_executions"][0]["state"] = serde_json::json!("running");
         })
-        .expect("restore a deferred cleanup owner");
+        .expect("restore a live provider execution");
         let owner_error = crate::agent_task_service::retry_with_timeout_override(
             &options.identity.initial_run_id,
             None,
             100,
         )
-        .expect_err("active deferred ownership must block retry");
+        .expect_err("a live provider execution must block retry");
         assert!(
             owner_error.message.contains("still owns"),
             "{owner_error:?}"
@@ -8020,7 +8020,7 @@ fn operator_timeout_override_appends_a_budget_bounded_recipe_attempt() {
         agent_task_lifecycle::rewrite_record_for_test(&options.identity.initial_run_id, |record| {
             record.metadata["provider_executions"][0]["state"] = serde_json::json!("timed_out");
         })
-        .expect("terminalize deferred cleanup ownership");
+        .expect("terminalize the provider execution");
 
         let retry = crate::agent_task_service::retry_with_timeout_override(
             &options.identity.initial_run_id,

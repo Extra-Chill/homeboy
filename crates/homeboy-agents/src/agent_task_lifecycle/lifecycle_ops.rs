@@ -11,201 +11,6 @@ use std::fs::{self, File, OpenOptions};
 pub(crate) const EXPIRED_LAB_HANDOFF_REASON: &str =
     "runner handoff acceptance deadline expired before a runner job was recorded";
 
-// The ambient `reconcile_deferred_candidate()` shim that used to sit above this
-// resolved a root and delegated straight here. It had no callers, so it was a
-// resolution point that existed for nobody (#7505).
-
-/// Merge a completed deferred-cleanup candidate into its timeout outcome,
-/// inside an explicitly rooted store.
-///
-/// The worker owns the mutable workspace until it exits; this lifecycle-side
-/// operation is the only place where its immutable recovery result is adopted.
-/// A per-run advisory lock makes concurrent status/artifact/Cook readers
-/// reread and persist one coherent aggregate and terminal projection.
-///
-/// The advisory lock is the whole point of this operation, so it must be taken
-/// in the same installation the record, aggregate, plan, and terminal
-/// projection are read and written in. The ambient form resolved the data root
-/// for the lock separately from the root every `store::` shim below it resolved
-/// for itself, which is a lock that excludes nobody as soon as the two differ
-/// (#7505). Deriving it from `run_dir` also makes the lock path agree with the
-/// aggregate path, which already sanitized the resolved run id when the lock
-/// did not.
-pub(crate) fn reconcile_deferred_candidate_in_store(
-    lifecycle_store: &AgentTaskLifecycleStore,
-    run_id: &str,
-) -> Result<bool> {
-    let run_id = resolve_run_id_in_store(lifecycle_store, run_id)?;
-    let lock_path = lifecycle_store
-        .run_dir(&run_id)
-        .join("deferred-candidate.lock");
-    if let Some(parent) = lock_path.parent() {
-        fs::create_dir_all(parent).map_err(|error| Error::internal_io(error.to_string(), None))?;
-    }
-    let file = OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(&lock_path)
-        .map_err(|error| {
-            Error::internal_io(
-                error.to_string(),
-                Some("open deferred candidate lock".to_string()),
-            )
-        })?;
-    let _lock = DeferredCandidateLock::lock(file)?;
-
-    let mut record = lifecycle_store.read_record(&run_id)?;
-    let mut aggregate = match lifecycle_store.read_aggregate(&run_id) {
-        Ok(aggregate) => aggregate,
-        // The worker may finish before the aggregate is committed. A later
-        // read retries from durable state rather than inventing a projection.
-        Err(_) => return Ok(false),
-    };
-    let mut changed = false;
-    let mut recovered_events = Vec::new();
-
-    for outcome in &mut aggregate.outcomes {
-        if outcome.status != AgentTaskOutcomeStatus::Timeout {
-            continue;
-        }
-        let Some(action) = outcome.artifacts.iter().find(|artifact| {
-            artifact.schema == crate::agent_task::AGENT_TASK_ARTIFACT_SCHEMA
-                && artifact.kind == "cleanup_action"
-                && artifact.role.as_deref() == Some("cleanup_action")
-                && artifact.metadata.get("run_id").and_then(Value::as_str) == Some(run_id.as_str())
-                && artifact.metadata.get("task_id").and_then(Value::as_str)
-                    == Some(outcome.task_id.as_str())
-        }) else {
-            continue;
-        };
-        let Some(path) = action.path.as_deref() else {
-            continue;
-        };
-        let raw = match fs::read_to_string(path) {
-            Ok(raw) => raw,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                if !outcome
-                    .diagnostics
-                    .iter()
-                    .any(|entry| entry.class == "agent_task.deferred_cleanup_descriptor_missing")
-                {
-                    outcome.diagnostics.push(AgentTaskDiagnostic {
-                        class: "agent_task.deferred_cleanup_descriptor_missing".to_string(),
-                        message: "deferred cleanup descriptor is missing; its workspace receipt cannot be reconciled".to_string(),
-                        data: json!({
-                            "path": path,
-                            "safe_next_action": format!(
-                                "homeboy agent-task diagnose {run_id} --full"
-                            ),
-                        }),
-                    });
-                    changed = true;
-                }
-                continue;
-            }
-            Err(_) => continue,
-        };
-        let action_value: Value = match serde_json::from_str(&raw) {
-            Ok(value) => value,
-            Err(_) => continue,
-        };
-        if action_value.get("schema").and_then(Value::as_str)
-            != Some("homeboy/agent-task-deferred-cleanup/v1")
-            || action_value.get("run_id").and_then(Value::as_str) != Some(run_id.as_str())
-            || action_value.get("task_id").and_then(Value::as_str) != Some(outcome.task_id.as_str())
-            || action_value.get("attempt") != action.metadata.get("attempt")
-        {
-            continue;
-        }
-        match action_value.get("status").and_then(Value::as_str) {
-            Some("pending") | Some("completed") | Some("completed_no_candidate") | None => continue,
-            Some("failed") => {
-                let diagnostic = action_value
-                    .get("diagnostic")
-                    .and_then(Value::as_str)
-                    .unwrap_or("deferred cleanup failed");
-                if !outcome
-                    .diagnostics
-                    .iter()
-                    .any(|entry| entry.class == "agent_task.deferred_cleanup_failed")
-                {
-                    outcome.diagnostics.push(AgentTaskDiagnostic {
-                        class: "agent_task.deferred_cleanup_failed".to_string(),
-                        message: diagnostic.chars().take(512).collect(),
-                        data: json!({ "safe_next_action": "Inspect the deferred cleanup diagnostic before retrying the provider." }),
-                    });
-                    changed = true;
-                }
-            }
-            Some("candidate_recovered") => {
-                let Some(candidate) = action_value.get("candidate").cloned().and_then(|value| {
-                    serde_json::from_value::<crate::agent_task::AgentTaskCandidate>(value).ok()
-                }) else {
-                    continue;
-                };
-                let plan = lifecycle_store.read_controller_plan(&run_id)?;
-                let Some(root) = plan
-                    .tasks
-                    .iter()
-                    .find(|task| task.task_id == outcome.task_id)
-                    .and_then(|task| task.workspace.root.as_deref())
-                else {
-                    continue;
-                };
-                if crate::agent_task_promotion::validate_candidate_commit(
-                    std::path::Path::new(root),
-                    &candidate,
-                )
-                .is_err()
-                {
-                    continue;
-                }
-                outcome.candidate = Some(candidate);
-                outcome.status = AgentTaskOutcomeStatus::CandidateRecoverable;
-                outcome.failure_classification = None;
-                outcome.summary =
-                    Some("deferred cleanup recovered an immutable candidate".to_string());
-                outcome.metadata["deferred_candidate_reconciled_at"] = json!(now_timestamp());
-                outcome.metadata["safe_next_action"] =
-                    json!("Promote the recovered candidate through controller-owned gates.");
-                // The task's last event must not keep contradicting its outcome.
-                recovered_events.push(AgentTaskProgressEvent {
-                    task_id: outcome.task_id.clone(),
-                    state: AgentTaskState::from_outcome_status(outcome.status),
-                    attempt: action_value["attempt"].as_u64().unwrap_or(1) as u32,
-                    message: outcome.summary.clone(),
-                });
-                changed = true;
-            }
-            Some(_) => continue,
-        }
-    }
-    if !changed {
-        return Ok(false);
-    }
-    aggregate.events.extend(recovered_events);
-
-    let plan = lifecycle_store.read_controller_plan(&run_id)?;
-    aggregate.totals =
-        AgentTaskAggregateTotals::from_outcomes(plan.tasks.len(), &aggregate.outcomes);
-    let aggregate_path = lifecycle_store
-        .aggregate_path(&run_id)
-        .display()
-        .to_string();
-    let decided_from = record.state();
-    apply_aggregate_to_record(&mut record, &plan, &aggregate, aggregate_path);
-    record = lifecycle_store.project_terminal_aggregate(&record, decided_from, &aggregate)?;
-    record_terminal_artifact_projection_in_store(lifecycle_store, &mut record, &aggregate)?;
-    Ok(true)
-}
-
-struct DeferredCandidateLock {
-    #[allow(dead_code)] // Retains the advisory lock until this guard drops.
-    file: File,
-}
-
 pub(crate) struct LabHandoffLock {
     // Retains the advisory lock until acceptance or expiry has been persisted.
     #[allow(dead_code)]
@@ -225,10 +30,8 @@ impl LabHandoffLock {
     /// acceptance would both believe they held it (#7505). Requiring the store
     /// in the signature is what makes that divergence unrepresentable.
     ///
-    /// Deriving the path from `run_dir` also sanitizes the run id, which the
-    /// ambient form did not, so the lock now names a path that agrees with the
-    /// run's own record and aggregate — the same correction
-    /// `reconcile_deferred_candidate_in_store` made for its per-run lock.
+    /// Deriving the path from `run_dir` also sanitizes the run id, so the lock
+    /// names a path that agrees with the run's own record and aggregate.
     pub(crate) fn lock_in_store(
         lifecycle_store: &AgentTaskLifecycleStore,
         run_id: &str,
@@ -257,24 +60,6 @@ impl LabHandoffLock {
         Ok(Self { file })
     }
 }
-impl DeferredCandidateLock {
-    #[cfg(unix)]
-    fn lock(file: File) -> Result<Self> {
-        use std::os::fd::AsRawFd;
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
-            return Err(Error::internal_io(
-                std::io::Error::last_os_error().to_string(),
-                Some("lock deferred candidate".to_string()),
-            ));
-        }
-        Ok(Self { file })
-    }
-    #[cfg(not(unix))]
-    fn lock(file: File) -> Result<Self> {
-        Ok(Self { file })
-    }
-}
-
 /// Restore the terminal aggregate only when one persisted executor outcome maps
 /// exactly to the run's one planned task.
 pub fn recover_single_task_aggregate_from_executor_outcome_in_store(
@@ -5132,10 +4917,9 @@ pub(crate) fn reconcile_terminal_cook_provider_result_with_scheduler(
 /// The shared, store-rooted body of [`reconcile_status`] and
 /// [`reconcile_status_with_options`].
 ///
-/// Every durable write below names the installation the caller injected; both
-/// advisory locks (`reconcile_deferred_candidate_in_store` and the expiry
-/// path's `LabHandoffLock::lock_in_store`) are taken on this store's own
-/// `run_dir` (#7505). The Cook recipe store is *derived* from
+/// Every durable write below names the installation the caller injected; the
+/// expiry path's `LabHandoffLock::lock_in_store` advisory lock is taken on this
+/// store's own `run_dir` (#7505). The Cook recipe store is *derived* from
 /// `lifecycle_store.data_root()` rather than injected: it carries nothing but
 /// that root, so a second parameter could only add a way for the two to
 /// disagree.
@@ -5209,7 +4993,6 @@ fn converge_resolved_run_in_store(
 ) -> Result<(AgentTaskRunRecord, AgentTaskRunnerProbePlan)> {
     let recipe_store =
         crate::agent_task_service::CookRecipeStore::for_lifecycle_store(lifecycle_store);
-    let _ = reconcile_deferred_candidate_in_store(lifecycle_store, resolved_run_id)?;
     // A candidate adoption whose owner process died is interrupted. Decided
     // from a fresh read under the store lock, not from a caller copy.
     lifecycle_store.mutate_record(resolved_run_id, reconcile_candidate_adoption)?;

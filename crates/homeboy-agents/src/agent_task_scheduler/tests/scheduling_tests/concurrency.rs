@@ -174,14 +174,17 @@ pub(super) mod concurrency_tests {
                 .on_cancel(Arc::new(move || cancelled.store(true, Ordering::SeqCst)));
             self.entered.wait();
             if request.task_id == "task-2" {
-                std::thread::sleep(Duration::from_millis(300));
+                let deadline = Instant::now() + Duration::from_secs(30);
+                while !context.cancellation.is_cancelled() && Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
             }
             outcome(request.task_id, AgentTaskOutcomeStatus::Succeeded)
         }
     }
 
     #[test]
-    fn first_green_returns_after_concurrent_winner_and_supervises_sibling() {
+    fn first_green_returns_after_concurrent_winner_and_stops_sibling() {
         let cancelled = Arc::new(AtomicBool::new(false));
         let scheduler = AgentTaskScheduler::new(Arc::new(FirstGreenExecutor {
             entered: Arc::new(std::sync::Barrier::new(2)),
@@ -198,8 +201,15 @@ pub(super) mod concurrency_tests {
         let started = Instant::now();
         let aggregate = scheduler.run(plan);
 
-        assert!(started.elapsed() < Duration::from_millis(250));
+        assert!(started.elapsed() < Duration::from_secs(10));
         assert!(cancelled.load(Ordering::SeqCst));
+        let sibling = aggregate
+            .outcomes
+            .iter()
+            .find(|outcome| outcome.task_id == "task-2")
+            .expect("stopped sibling outcome");
+        assert_eq!(sibling.status, AgentTaskOutcomeStatus::Timeout);
+        assert!(sibling.candidate.is_none());
         let selected = aggregate
             .selected_outcome()
             .expect("selected first-green outcome");
@@ -550,253 +560,6 @@ pub(super) mod concurrency_tests {
         );
         assert_eq!(serialized[0], "task-1");
         assert_eq!(serialized, vec!["task-1", "task-2", "task-3"]);
-    }
-
-    #[derive(Clone)]
-    struct LateMutatingExecutor {
-        events: Arc<Mutex<Vec<String>>>,
-        finished: Arc<AtomicBool>,
-        attempt_roots: Arc<Mutex<Vec<std::path::PathBuf>>>,
-        scratch_roots: Arc<Mutex<Vec<std::path::PathBuf>>>,
-        scratch_active_while_running: Arc<AtomicBool>,
-    }
-
-    impl AgentTaskExecutorAdapter for LateMutatingExecutor {
-        fn execute(
-            &self,
-            request: AgentTaskRequest,
-            _context: AgentTaskExecutionContext,
-        ) -> AgentTaskOutcome {
-            self.events
-                .lock()
-                .expect("events")
-                .push(format!("{}-started", request.task_id));
-            if request.task_id == "task-1" {
-                let workspace = request
-                    .workspace
-                    .root
-                    .as_deref()
-                    .map(std::path::PathBuf::from)
-                    .expect("attempt workspace");
-                self.attempt_roots
-                    .lock()
-                    .expect("attempt roots")
-                    .push(workspace.clone());
-                let scratch_root = std::path::PathBuf::from(
-                    request.executor.config["runtime_env"]["TMPDIR"]
-                        .as_str()
-                        .expect("scheduler scratch root"),
-                );
-                self.scratch_roots
-                    .lock()
-                    .expect("scratch roots")
-                    .push(scratch_root.clone());
-                std::thread::sleep(Duration::from_millis(3_000));
-                let scratch_index = scratch_root
-                    .ancestors()
-                    .nth(6)
-                    .expect("controller scratch root")
-                    .join("resources.json");
-                let active = serde_json::from_str::<Value>(
-                    &fs::read_to_string(scratch_index).expect("scratch index"),
-                )
-                .expect("scratch index JSON")["resources"]
-                    .as_array()
-                    .expect("scratch resources")
-                    .iter()
-                    .any(|resource| {
-                        resource["path"] == scratch_root.display().to_string()
-                            && resource["lifecycle_state"] == "active"
-                    });
-                self.scratch_active_while_running
-                    .store(active, Ordering::SeqCst);
-                fs::write(workspace.join("late-change.txt"), "late\n")
-                    .expect("late workspace mutation");
-                assert!(Command::new("git")
-                    .args(["add", "late-change.txt"])
-                    .current_dir(&workspace)
-                    .status()
-                    .expect("stage late mutation")
-                    .success());
-                assert!(Command::new("git")
-                    .args(["commit", "-m", "late mutation"])
-                    .current_dir(&workspace)
-                    .status()
-                    .expect("commit late mutation")
-                    .success());
-            }
-            self.events
-                .lock()
-                .expect("events")
-                .push(format!("{}-finished", request.task_id));
-            if request.task_id == "task-1" {
-                self.finished.store(true, Ordering::SeqCst);
-            }
-            outcome(request.task_id, AgentTaskOutcomeStatus::Succeeded)
-        }
-    }
-
-    #[test]
-    fn timeout_quarantines_only_its_workspace_without_starving_unrelated_work() {
-        let _home = homeboy_core::test_support::HomeGuard::new();
-        let run_id = "deferred-timeout-owner";
-        let temp = tempfile::tempdir().expect("tempdir");
-        let workspace = temp.path().join("workspace");
-        let unrelated = temp.path().join("unrelated");
-        init_git_workspace(&workspace);
-        init_git_workspace(&unrelated);
-        let events = Arc::new(Mutex::new(Vec::new()));
-        let finished = Arc::new(AtomicBool::new(false));
-        let attempt_roots = Arc::new(Mutex::new(Vec::new()));
-        let scratch_roots = Arc::new(Mutex::new(Vec::new()));
-        let scratch_active_while_running = Arc::new(AtomicBool::new(false));
-        let mut plan = plan_with_tasks(3);
-        plan.options.max_concurrency = 3;
-        plan.tasks[0].workspace.root = Some(workspace.display().to_string());
-        plan.tasks[0].limits.timeout_ms = Some(1);
-        plan.tasks[1].workspace.root = Some(workspace.display().to_string());
-        plan.tasks[2].workspace.root = Some(unrelated.display().to_string());
-        crate::agent_task_lifecycle::submit_plan(&plan, Some(run_id)).expect("durable run");
-        let scheduler = AgentTaskScheduler::new(Arc::new(LateMutatingExecutor {
-            events: Arc::clone(&events),
-            finished: Arc::clone(&finished),
-            attempt_roots: Arc::clone(&attempt_roots),
-            scratch_roots: Arc::clone(&scratch_roots),
-            scratch_active_while_running: Arc::clone(&scratch_active_while_running),
-        }))
-        .with_run_id(run_id);
-
-        // No wall-clock bound here. "Without starving unrelated work" is asserted
-        // structurally further down — `task-3-started` proves the unrelated
-        // workspace ran, and the absence of `task-2-started` proves the shared
-        // workspace was quarantined. A 2s bound restated that as a claim about
-        // host load, and under eight-way contention it failed while both
-        // event assertions still held. Same reasoning as the deferred-cleanup
-        // bound below, which was already relaxed for exactly this (#7505).
-        let aggregate = scheduler.run(plan);
-        let lifecycle_store =
-            crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
-                .expect("lifecycle store");
-        assert!(
-            crate::agent_task_lifecycle::has_active_provider_execution_in_store(
-                &lifecycle_store,
-                run_id,
-            )
-            .expect("deferred provider remains active"),
-            "the timeout must not make a still-live cleanup owner retryable"
-        );
-        wait_until("the late-mutating executor to finish", || {
-            finished.load(Ordering::SeqCst)
-        });
-        let scratch_root = scratch_roots.lock().expect("scratch roots")[0].clone();
-        let scratch_index = scratch_root
-            .ancestors()
-            .nth(6)
-            .expect("controller scratch root")
-            .join("resources.json");
-        assert!(scratch_active_while_running.load(Ordering::SeqCst));
-        let recovered_candidate_sha;
-        let cleanup_action = aggregate
-            .outcomes
-            .iter()
-            .find(|outcome| outcome.task_id == "task-1")
-            .and_then(|outcome| {
-                outcome
-                    .artifacts
-                    .iter()
-                    .find(|artifact| artifact.kind == "cleanup_action")
-            })
-            .and_then(|artifact| artifact.path.as_deref())
-            .expect("deferred cleanup action path");
-        // Deferred cleanup is asynchronous; the assertion is that it recovers,
-        // not that it recovers within any particular fraction of a second. A 2s
-        // bound made this a wall-clock race on a loaded machine.
-        let deadline = Instant::now() + Duration::from_secs(30);
-        loop {
-            let action: Value = serde_json::from_str(
-                &fs::read_to_string(cleanup_action).expect("deferred cleanup action"),
-            )
-            .expect("deferred cleanup JSON");
-            if action["status"] == "candidate_recovered" {
-                let sha = action["candidate"]["candidate_sha"]
-                    .as_str()
-                    .expect("recovered candidate commit")
-                    .to_string();
-                assert_eq!(sha.len(), 40);
-                recovered_candidate_sha = Some(sha);
-                break;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "deferred cleanup did not recover"
-            );
-            std::thread::sleep(Duration::from_millis(2));
-        }
-        let scratch_deadline = Instant::now() + Duration::from_secs(30);
-        let scratch = loop {
-            let index: Value =
-                serde_json::from_str(&fs::read_to_string(&scratch_index).expect("scratch index"))
-                    .expect("scratch index JSON");
-            let scratch = index["resources"]
-                .as_array()
-                .expect("scratch resources")
-                .iter()
-                .find(|resource| resource["path"] == scratch_root.display().to_string())
-                .cloned()
-                .expect("scratch resource");
-            if scratch["terminal_reason"] == "scheduler_timeout_completion" {
-                break scratch;
-            }
-            assert!(
-                Instant::now() < scratch_deadline,
-                "deferred scratch release did not complete"
-            );
-            std::thread::sleep(Duration::from_millis(2));
-        };
-        assert_eq!(scratch["terminal_reason"], "scheduler_timeout_completion");
-        // Terminal evidence binds the recovered candidate commit, never a
-        // patch artifact.
-        assert_eq!(
-            scratch["terminal_evidence"]["outcome"]["candidate"]["candidate_sha"].as_str(),
-            recovered_candidate_sha.as_deref()
-        );
-        assert!(scratch["terminal_evidence"]["outcome"]["artifacts"]
-            .as_array()
-            .is_some_and(|artifacts| artifacts.iter().any(|artifact| artifact["kind"] == "patch")));
-        assert!(
-            !crate::agent_task_lifecycle::has_active_provider_execution_in_store(
-                &lifecycle_store,
-                run_id,
-            )
-            .expect("completed deferred provider is inactive")
-        );
-        assert_eq!(
-            lifecycle_store
-                .read_record(run_id)
-                .expect("durable timeout")
-                .metadata["provider_executions"][0]["state"],
-            "timed_out"
-        );
-        let events = events.lock().expect("events");
-
-        assert!(events.iter().any(|event| event == "task-3-started"));
-        assert!(!events.iter().any(|event| event == "task-2-started"));
-        assert!(aggregate
-            .outcomes
-            .iter()
-            .any(|outcome| outcome.task_id == "task-1"
-                && outcome.status == AgentTaskOutcomeStatus::Timeout
-                && outcome
-                    .artifacts
-                    .iter()
-                    .any(|artifact| artifact.kind == "cleanup_action")));
-        assert!(aggregate.outcomes.iter().any(|outcome| {
-            outcome.task_id == "task-2" && outcome.status == AgentTaskOutcomeStatus::Failed
-        }));
-        assert!(
-            !workspace.join("late-change.txt").exists(),
-            "the late provider mutation must stay out of the caller workspace"
-        );
     }
 
     #[test]

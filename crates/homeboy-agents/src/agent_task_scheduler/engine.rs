@@ -1,4 +1,3 @@
-use homeboy_engine_primitives::content_hash;
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc, OnceLock};
@@ -462,7 +461,6 @@ impl AgentTaskScheduler {
             })
             .collect();
         let mut running: Vec<RunningTask> = Vec::new();
-        let mut quarantined: Vec<QuarantinedTask> = Vec::new();
         // Providers this run has already learned are over their usage cap,
         // plus the reset time each carried. Shared across every task in this
         // plan so a fanout sibling skips a known-capped rotation entry
@@ -576,29 +574,12 @@ impl AgentTaskScheduler {
                 let Some(next_index) = AgentTaskScheduleSupport::next_dispatchable_index(
                     &queued,
                     &running,
-                    &quarantined,
                     &plan.options.per_executor_concurrency,
                     &plan.options.per_model_concurrency,
                     &plan.options.resource_budget,
                 ) else {
                     if running.is_empty() {
                         if let Some(task) = queued.pop_front() {
-                            if AgentTaskScheduleSupport::workspace_is_quarantined(
-                                &task,
-                                &quarantined,
-                            ) {
-                                AgentTaskScheduleSupport::block_and_record_scheduled_task(
-                                    &task,
-                                    "workspace_quarantined",
-                                    "task workspace remains quarantined after a timed-out executor"
-                                        .to_string(),
-                                    &mut backpressure,
-                                    &mut events,
-                                    &mut outcomes,
-                                    &mut blocked_count,
-                                );
-                                continue;
-                            }
                             let task_units =
                                 task_resource_units(&task.request, &plan.options.resource_budget);
                             let max_active_units = plan
@@ -634,7 +615,6 @@ impl AgentTaskScheduler {
                         kind: AgentTaskScheduleSupport::backpressure_kind(
                             &queued,
                             &running,
-                            &quarantined,
                             &plan.options.per_executor_concurrency,
                             &plan.options.per_model_concurrency,
                             &plan.options.resource_budget,
@@ -1159,28 +1139,20 @@ impl AgentTaskScheduler {
                     .join_handle = Some(join_handle);
             }
 
-            AgentTaskScheduleSupport::expire_timed_out_tasks(
-                &mut running,
-                &mut quarantined,
-                &mut outcomes,
-                &mut events,
-                self.durable_lifecycle_store().ok(),
-            );
+            AgentTaskScheduleSupport::cancel_expired_tasks(&mut running, &mut events);
 
             if running.is_empty() {
                 continue;
             }
 
+            // A cancelled task has no deadline left: its provider is being
+            // terminated, and its result is awaited like any other.
             let wait_timeout = running
                 .iter()
+                .filter(|task| !task.timeout_cancel_requested)
                 .filter_map(|task| {
                     task.timeout_ms.map(|ms| {
-                        let deadline = if task.timeout_cancel_requested {
-                            timeout_with_grace(ms)
-                        } else {
-                            std::time::Duration::from_millis(ms)
-                        };
-                        deadline.saturating_sub(task.started_at.elapsed())
+                        Duration::from_millis(ms).saturating_sub(task.started_at.elapsed())
                     })
                 })
                 .min();
@@ -1747,18 +1719,8 @@ impl AgentTaskScheduler {
                             &mut outcomes,
                             &mut events,
                         );
-                        // Reuse the scheduler's durable deferred-cleanup owner.
-                        // It keeps the join handle until the provider terminates,
-                        // preserves late artifacts, and never reopens this result.
-                        for task in &mut running {
-                            task.cancellation.cancel();
-                            task.timeout_cancel_requested = true;
-                            task.timeout_ms = Some(0);
-                            task.started_at = Instant::now() - timeout_with_grace(0);
-                        }
-                        AgentTaskScheduleSupport::expire_timed_out_tasks(
+                        AgentTaskScheduleSupport::stop_unselected_candidates(
                             &mut running,
-                            &mut quarantined,
                             &mut outcomes,
                             &mut events,
                             self.durable_lifecycle_store().ok(),
@@ -2029,10 +1991,6 @@ pub(super) struct ResourceWait {
     pub(super) started_at: Instant,
 }
 
-pub(super) struct QuarantinedTask {
-    pub(super) workspace_key: Option<String>,
-}
-
 struct TaskResult {
     task_id: String,
     attempt: u32,
@@ -2040,58 +1998,6 @@ struct TaskResult {
     scratch: crate::controller_scratch::ControllerScratchAllocation,
     /// Captured by the provider worker before controller-owned artifact work.
     completed_at: Instant,
-}
-
-pub(super) fn deferred_cleanup_action_artifact(
-    running: &RunningTask,
-) -> Result<AgentTaskArtifact, HarvestError> {
-    let run_id = running.run_id.as_deref().unwrap_or("unrecorded-run");
-    let directory = artifact_root_for_running(running)?
-        .join("agent-task")
-        .join("deferred-cleanup")
-        .join(homeboy_core::paths::sanitize_path_segment(run_id));
-    std::fs::create_dir_all(&directory).map_err(|error| HarvestError::ArtifactDirectory {
-        path: directory.clone(),
-        message: error.to_string(),
-    })?;
-    let id = format!(
-        "{}-attempt-{}-deferred-cleanup",
-        homeboy_core::paths::sanitize_path_segment(&running.task_id),
-        running.attempt
-    );
-    let path = directory.join(format!("{id}.json"));
-    let action = serde_json::json!({
-        "schema": "homeboy/agent-task-deferred-cleanup/v1",
-        "status": "pending",
-        "run_id": running.run_id,
-        "task_id": running.task_id,
-        "attempt": running.attempt,
-        "safe_next_action": "Wait for cleanup completion; mutable workspace recovery is intentionally deferred until provider exit.",
-    });
-    let content = serde_json::to_vec_pretty(&action).expect("cleanup action serializes");
-    // The aggregate may expose this path as soon as this function returns, so
-    // publish only a complete descriptor.
-    write_deferred_cleanup_action(&path, &content).map_err(|error| {
-        HarvestError::ArtifactWrite {
-            path: path.clone(),
-            message: error.to_string(),
-        }
-    })?;
-    Ok(AgentTaskArtifact {
-        schema: crate::agent_task::AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
-        id: id.clone(),
-        kind: "cleanup_action".to_string(),
-        name: Some("deferred-cleanup.json".to_string()),
-        label: Some("deferred attempt workspace cleanup".to_string()),
-        role: Some("cleanup_action".to_string()),
-        semantic_key: None,
-        path: Some(path.display().to_string()),
-        url: None,
-        mime: Some("application/json".to_string()),
-        size_bytes: Some(content.len() as u64),
-        sha256: Some(content_hash::sha256_hex(&content)),
-        metadata: serde_json::json!({ "run_id": running.run_id, "task_id": running.task_id, "attempt": running.attempt }),
-    })
 }
 
 pub(super) fn artifact_root_for_running(running: &RunningTask) -> Result<PathBuf, HarvestError> {
@@ -2109,63 +2015,6 @@ pub(super) fn artifact_root_for_running(running: &RunningTask) -> Result<PathBuf
             message: error.message,
         })
     }
-}
-
-fn write_deferred_cleanup_action(path: &Path, content: &[u8]) -> std::io::Result<()> {
-    let parent = path
-        .parent()
-        .expect("cleanup action has a parent directory");
-    let temporary = parent.join(format!(
-        ".{}.{}.tmp",
-        path.file_name()
-            .expect("cleanup action has a file name")
-            .to_string_lossy(),
-        uuid::Uuid::new_v4()
-    ));
-    std::fs::write(&temporary, content)?;
-    if let Err(error) = std::fs::rename(&temporary, path) {
-        let _ = std::fs::remove_file(&temporary);
-        return Err(error);
-    }
-    Ok(())
-}
-
-pub(super) fn complete_deferred_cleanup_recovery(
-    path: &Path,
-    outcome: &AgentTaskOutcome,
-    cleanup: Result<(), String>,
-) -> Result<(), String> {
-    let raw = std::fs::read_to_string(path)
-        .map_err(|error| format!("cannot read deferred cleanup descriptor: {error}"))?;
-    let mut action: serde_json::Value = serde_json::from_str(&raw)
-        .map_err(|error| format!("cannot parse deferred cleanup descriptor: {error}"))?;
-    let candidate = outcome.outcome_candidate();
-    action["completed_at"] = serde_json::json!(chrono::Utc::now().to_rfc3339());
-    match (cleanup, candidate.is_none()) {
-        (Err(error), false) => {
-            // A committed or dirty attempt is deliberately retained, but its
-            // harvested patch is still a completed durable result.
-            action["status"] = serde_json::json!("candidate_recovered");
-            action["candidate"] =
-                serde_json::to_value(candidate).unwrap_or(serde_json::Value::Null);
-            action["workspace_retention"] =
-                serde_json::json!(error.chars().take(512).collect::<String>());
-        }
-        (Err(error), true) => {
-            action["status"] = serde_json::json!("failed");
-            action["diagnostic"] = serde_json::json!(error.chars().take(512).collect::<String>());
-        }
-        (Ok(()), true) => action["status"] = serde_json::json!("completed_no_candidate"),
-        (Ok(()), false) => {
-            action["status"] = serde_json::json!("candidate_recovered");
-            action["candidate"] =
-                serde_json::to_value(candidate).unwrap_or(serde_json::Value::Null);
-        }
-    }
-    let content = serde_json::to_vec_pretty(&action)
-        .map_err(|error| format!("cannot serialize deferred cleanup receipt: {error}"))?;
-    write_deferred_cleanup_action(path, &content)
-        .map_err(|error| format!("cannot persist deferred cleanup receipt: {error}"))
 }
 
 fn retry_attempt_evidence(outcome: &AgentTaskOutcome, running: &RunningTask) -> serde_json::Value {
@@ -2752,33 +2601,6 @@ fn first_non_empty_json_string<'a>(
             .filter(|value| !value.is_empty())
             .map(ToString::to_string)
     })
-}
-
-#[cfg(test)]
-mod executor_erasure_tests {
-    use super::*;
-
-    #[test]
-    fn deferred_cleanup_descriptor_replaces_only_complete_content() {
-        let directory = tempfile::tempdir().expect("descriptor directory");
-        let descriptor = directory.path().join("deferred-cleanup.json");
-        std::fs::write(&descriptor, b"old receipt").expect("seed descriptor");
-
-        write_deferred_cleanup_action(&descriptor, br#"{"status":"pending"}"#)
-            .expect("atomically publish descriptor");
-
-        assert_eq!(
-            std::fs::read(&descriptor).expect("published descriptor"),
-            br#"{"status":"pending"}"#
-        );
-        assert_eq!(
-            std::fs::read_dir(directory.path())
-                .expect("descriptor directory entries")
-                .count(),
-            1,
-            "temporary descriptor files must not be exposed"
-        );
-    }
 }
 
 /// Component a task checks out: the workspace's own component when set,

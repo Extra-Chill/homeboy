@@ -464,8 +464,7 @@ mod timeout_tests {
                 )
                 .expect("write transcript before timeout");
                 // Outlive the deadline, but return once cancellation is
-                // requested so the bounded grace (not deferred cleanup)
-                // harvests the workspace on a loaded machine too.
+                // requested so the scheduler harvests the workspace.
                 let deadline = std::time::Instant::now() + Duration::from_secs(30);
                 while !context.cancellation.is_cancelled() && std::time::Instant::now() < deadline {
                     thread::sleep(Duration::from_millis(1));

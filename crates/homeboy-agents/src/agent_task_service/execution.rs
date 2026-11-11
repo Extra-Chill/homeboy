@@ -1579,33 +1579,6 @@ pub fn retry_with_provider_route_override(
     Ok(retry)
 }
 
-pub(super) fn deferred_cleanup_receipt_is_terminal(
-    outcome: &crate::agent_task::AgentTaskOutcome,
-    run_id: &str,
-) -> bool {
-    outcome
-        .artifacts
-        .iter()
-        .find(|artifact| artifact.kind == "cleanup_action")
-        .and_then(|artifact| artifact.path.as_deref().map(|path| (artifact, path)))
-        .and_then(|(artifact, path)| {
-            std::fs::read_to_string(path)
-                .ok()
-                .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
-                .map(|receipt| (artifact, receipt))
-        })
-        .is_some_and(|(artifact, receipt)| {
-            receipt["schema"] == "homeboy/agent-task-deferred-cleanup/v1"
-                && receipt["run_id"] == run_id
-                && receipt["task_id"] == outcome.task_id
-                && receipt["attempt"] == artifact.metadata["attempt"]
-                && matches!(
-                    receipt["status"].as_str(),
-                    Some("completed" | "completed_no_candidate" | "candidate_recovered" | "failed")
-                )
-        })
-}
-
 /// Reserve a retry only after the caller has revalidated the persisted action.
 ///
 /// Generic Lab replays need controller-owned workspace validation that this
@@ -2010,20 +1983,7 @@ fn apply_cook_timeout_override(
     )? {
         return Err(Error::validation_invalid_argument(
             "timeout-ms",
-            "timed-out provider or its deferred cleanup still owns the execution; wait for durable terminal ownership before retrying",
-            Some(source.run_id.clone()),
-            Some(vec![format!(
-                "homeboy agent-task diagnose {} --full",
-                source.run_id
-            )]),
-        ));
-    }
-    if timeout_outcome.metadata["deferred_cleanup_pending"] == Value::Bool(true)
-        && !deferred_cleanup_receipt_is_terminal(timeout_outcome, &source.run_id)
-    {
-        return Err(Error::validation_invalid_argument(
-            "timeout-ms",
-            "timed-out provider still owns deferred cleanup; wait for its cleanup receipt before retrying",
+            "timed-out provider still owns the execution; wait for it to exit before retrying",
             Some(source.run_id.clone()),
             Some(vec![format!(
                 "homeboy agent-task diagnose {} --full",

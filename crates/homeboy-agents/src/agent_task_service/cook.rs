@@ -4045,14 +4045,9 @@ fn make_provider_timeout_actionable(
     } else {
         command
             .as_deref()
-            .map(|command| format!("After any deferred cleanup completes, retry with `{command}`."))
+            .map(|command| format!("Retry with `{command}`."))
             .unwrap_or_else(|| "No provider timeout retry budget remains.".to_string())
     };
-    let deferred_cleanup_pending = provider_execution_active
-        || aggregate.outcomes.iter().any(|outcome| {
-            outcome.metadata["deferred_cleanup_pending"] == Value::Bool(true)
-                && !super::execution::deferred_cleanup_receipt_is_terminal(outcome, run_id)
-        });
 
     report.value.terminal_phase = Some("provider".to_string());
     report.value.terminal_failure_classification = Some("provider_timeout".to_string());
@@ -4073,16 +4068,16 @@ fn make_provider_timeout_actionable(
                 "remaining_same_provider_retries": remaining_retries,
                 "remaining_provider_rotations": remaining_rotations,
                 "remaining_execution_deadline_ms": remaining_deadline_ms,
-                "deferred_cleanup_pending": deferred_cleanup_pending,
+                "provider_execution_active": provider_execution_active,
             }
         }));
-        context.recovery_legal = can_retry && !deferred_cleanup_pending;
+        context.recovery_legal = can_retry && !provider_execution_active;
         context.recovery_reason = if deadline_expired {
             "the durable provider execution deadline is exhausted".to_string()
         } else if !can_retry {
             "provider timeout retry budget is exhausted".to_string()
-        } else if deferred_cleanup_pending {
-            "provider timeout retry is blocked until deferred cleanup is terminal".to_string()
+        } else if provider_execution_active {
+            "provider timeout retry is blocked until the timed-out provider exits".to_string()
         } else {
             "an explicit provider timeout increase can consume the remaining retry budget"
                 .to_string()
@@ -4094,11 +4089,11 @@ fn make_provider_timeout_actionable(
         context.recovery_step = Some(CookRecoveryStep::none(
             command
                 .as_deref()
-                .filter(|_| !deferred_cleanup_pending)
+                .filter(|_| !provider_execution_active)
                 .map(|command| format!("Retry with an explicit timeout increase: `{command}`."))
                 .unwrap_or_else(|| context.recovery_reason.clone()),
         ));
-        if deferred_cleanup_pending {
+        if provider_execution_active {
             context.next_actions.push(AgentTaskCookRecoveryAction {
                 action: "status".to_string(),
                 command: lifecycle_store.map_or_else(
@@ -4114,13 +4109,10 @@ fn make_provider_timeout_actionable(
             });
         }
         // A resume command is only offered when it is actually admitted right
-        // now. While deferred cleanup is pending, `recovery_legal` is false and
-        // the durable retry route itself refuses the same command (#14732) —
-        // advertising it in `next_actions` printed a command the operator could
-        // not yet run. The `status`/`diagnose` action above remains the correct
-        // next step until cleanup goes terminal.
+        // now. While the provider is still running, `recovery_legal` is false
+        // and the durable retry route refuses the same command (#14732).
         if let Some(command) = command {
-            if !deferred_cleanup_pending {
+            if !provider_execution_active {
                 let action = AgentTaskCookRecoveryAction {
                     action: "resume".to_string(),
                     command,
