@@ -328,10 +328,10 @@ pub struct AgentTaskPrFinalizationOptions {
     pub review_profile: AgentTaskReviewProfile,
     /// Manual finalization is an explicit migration mode for work not produced by a durable run.
     pub manual_finalization: bool,
-    /// A recovered manual preflight may only publish the immutable candidate it validated.
-    pub expected_candidate_sha: Option<String>,
-    /// A command gate may only finalize the committed candidate it observed.
-    pub verified_candidate_sha: Option<String>,
+    /// Immutable candidate covered by the gates; manual publication prepares a tree locally.
+    pub candidate: Option<crate::agent_task::AgentTaskCandidate>,
+    pub expected_candidate_tree: Option<String>,
+    pub verified_candidate_tree: Option<String>,
     /// Set only after finalization validates a durable green promotion receipt.
     pub inherited_gate_evidence: Option<AgentTaskInheritedGateEvidence>,
     pub protected_branches: Vec<String>,
@@ -347,32 +347,6 @@ pub struct AgentTaskPrRef {
     pub number: u64,
     pub url: String,
     pub is_draft: bool,
-}
-
-/// The draft-only safe transition if a PR binding drifts after mutation.
-/// Existing draft/ready capabilities apply to newly created PRs too; PRs stay open.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AgentTaskPrQuarantineCapability {
-    PreserveExistingDraft,
-    ConvertExistingReadyPrToDraft,
-    Unsupported,
-}
-
-/// The complete Git candidate classification, determined before finalization
-/// mutates the worktree or remote.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AgentTaskPrCandidateState {
-    Dirty {
-        changed_files: Vec<String>,
-    },
-    Committed {
-        changed_files: Vec<String>,
-        push_required: bool,
-    },
-    Equivalent,
-    Invalid {
-        diagnostic: String,
-    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -408,15 +382,6 @@ pub trait AgentTaskPrFinalizationBackend {
     ) -> Result<Option<AgentTaskPrDurableGateProof>> {
         Ok(None)
     }
-    /// Real finalization binds the exact promoted bytes immediately before the
-    /// first mutation. Test backends can focus on publication behavior.
-    fn validate_candidate_in_store(
-        &mut self,
-        _lifecycle_store: &crate::agent_task_lifecycle::AgentTaskLifecycleStore,
-        _options: &AgentTaskPrFinalizationOptions,
-    ) -> Result<()> {
-        Ok(())
-    }
     fn publication_context(
         &mut self,
         _run_id: &str,
@@ -425,7 +390,20 @@ pub trait AgentTaskPrFinalizationBackend {
         Ok(("ambient_gh".into(), None))
     }
     fn current_branch(&mut self, path: &str) -> Result<String>;
-    fn changed_files(&mut self, path: &str) -> Result<Vec<String>>;
+    fn prepare_manual_candidate(
+        &mut self,
+        path: &str,
+        base: &str,
+    ) -> Result<(crate::agent_task::AgentTaskCandidate, Vec<String>)>;
+    fn candidate_dates(&mut self, path: &str, candidate_sha: &str) -> Result<(String, String)>;
+    fn publish_tree(
+        &mut self,
+        path: &str,
+        tree: &str,
+        parent: &str,
+        message: &str,
+        dates: &(String, String),
+    ) -> Result<String>;
     fn resolve_base(&mut self, _path: &str, base: &str) -> Result<AgentTaskPrResolvedBase> {
         Ok(AgentTaskPrResolvedBase {
             reference: base.to_string(),
@@ -446,28 +424,8 @@ pub trait AgentTaskPrFinalizationBackend {
     fn publication_base_sha(&mut self, _path: &str, _base: &str) -> Result<Option<String>> {
         Ok(None)
     }
-    fn candidate_state(
-        &mut self,
-        path: &str,
-        _base: &AgentTaskPrResolvedBase,
-        _head: &str,
-    ) -> Result<AgentTaskPrCandidateState> {
-        let changed_files = self.changed_files(path)?;
-        Ok(if changed_files.is_empty() {
-            AgentTaskPrCandidateState::Equivalent
-        } else {
-            AgentTaskPrCandidateState::Dirty { changed_files }
-        })
-    }
     /// Validates the effective prospective identity before commit mutation.
     fn validate_publication_identity(&mut self, path: &str) -> Result<GitIdentityProof>;
-    /// Validates and reports the immutable identity stored in the candidate commit.
-    fn validate_committed_publication_identity(
-        &mut self,
-        path: &str,
-        expected: Option<&GitIdentityProof>,
-    ) -> Result<GitIdentityProof>;
-    fn commit_all(&mut self, path: &str, message: &str) -> Result<()>;
     /// Pushes the verified commit SHA to the candidate branch.
     fn push_branch(
         &mut self,
@@ -510,23 +468,6 @@ pub trait AgentTaskPrFinalizationBackend {
     ) -> Result<Option<AgentTaskPrRef>> {
         Ok(None)
     }
-    /// Re-reads the live candidate branch immediately before a GitHub mutation.
-    /// This is separate from post-mutation binding verification because a remote
-    /// writer can advance the branch between Homeboy's push and PR mutation.
-    fn verify_remote_candidate(
-        &mut self,
-        path: &str,
-        head: &str,
-        candidate_sha: &str,
-    ) -> Result<String>;
-    /// Declares the safe post-mutation state transition before the mutation is
-    /// admitted. A ready existing PR may only be updated when conversion to a
-    /// draft is supported.
-    fn quarantine_capability(
-        &mut self,
-        newly_created: bool,
-        was_draft: bool,
-    ) -> Result<AgentTaskPrQuarantineCapability>;
     fn create_pr(
         &mut self,
         component_id: Option<&str>,
@@ -565,11 +506,4 @@ pub trait AgentTaskPrFinalizationBackend {
         changed_files: &[String],
         pr: &AgentTaskPrRef,
     ) -> Result<AgentTaskPublicationBinding>;
-    /// Applies the safe transition declared by [`Self::quarantine_capability`].
-    fn quarantine_pr(
-        &mut self,
-        path: &str,
-        pr: &AgentTaskPrRef,
-        capability: AgentTaskPrQuarantineCapability,
-    ) -> Result<String>;
 }

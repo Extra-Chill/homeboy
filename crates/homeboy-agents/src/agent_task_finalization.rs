@@ -80,28 +80,6 @@ pub fn preflight_pr_with_backend<B: AgentTaskPrFinalizationBackend>(
     finalize_pr_with_backend_mode(options, backend, false, lifecycle_store)
 }
 
-/// The quarantine transition for this publication, refusing a PR mutation
-/// that has no guaranteed safe transition.
-fn safe_quarantine_capability<B: AgentTaskPrFinalizationBackend>(
-    backend: &mut B,
-    newly_created: bool,
-    draft: bool,
-) -> Result<AgentTaskPrQuarantineCapability> {
-    let capability = backend.quarantine_capability(newly_created, draft)?;
-    if !quarantine_capability_is_safe(capability, draft) {
-        return Err(Error::validation_invalid_argument(
-            "publication_quarantine",
-            format!(
-                "refusing PR mutation without a guaranteed safe quarantine transition; cleanup_capability={}",
-                quarantine_capability_name(capability)
-            ),
-            None,
-            None,
-        ));
-    }
-    Ok(capability)
-}
-
 /// Update an open PR for this candidate, marking a draft ready when the
 /// publication is not itself a draft.
 fn update_existing_pr<B: AgentTaskPrFinalizationBackend>(
@@ -168,7 +146,6 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
     publish: bool,
     lifecycle_store: &crate::agent_task_lifecycle::AgentTaskLifecycleStore,
 ) -> Result<AgentTaskPrFinalizationReport> {
-    let mut durable_changed_files = Vec::new();
     let (publication_identity, _requester) =
         backend.publication_context(&options.run_id, lifecycle_store)?;
     // Recorded before preflight so the validated intent and the published
@@ -184,7 +161,7 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
         durable_acceptance = validate_manual_finalization_policy(lifecycle_store, &options.run_id)?;
         if options.inherited_gate_evidence.is_some()
             || (options.normalized_gate_results.is_empty()
-                && options.verified_candidate_sha.is_none())
+                && options.verified_candidate_tree.is_none())
         {
             let claimed_evidence = options.inherited_gate_evidence.take();
             let inherited =
@@ -226,7 +203,7 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
             validate_durable_acceptance(&options.run_id, &gate_proof.promotion, lifecycle_store)?;
         let eligibility =
             validate_durable_publication_eligibility(&lifecycle, &gate_proof.promotion)?;
-        durable_changed_files = normalize_changed_files(&gate_proof.promotion.changed_files);
+        let durable_changed_files = normalize_changed_files(&gate_proof.promotion.changed_files);
         if normalize_changed_files(&options.changed_files) != durable_changed_files {
             return Err(changed_files_mismatch_error(
                 &options.run_id,
@@ -234,6 +211,27 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
                 &gate_proof.promotion.changed_files,
             ));
         }
+        let gated = gate_proof.promotion.candidate.clone().ok_or_else(|| {
+            Error::validation_invalid_argument(
+                "candidate",
+                "promotion has no gated candidate",
+                None,
+                None,
+            )
+        })?;
+        if options
+            .candidate
+            .as_ref()
+            .is_some_and(|candidate| candidate.tree_sha != gated.tree_sha)
+        {
+            return Err(Error::validation_invalid_argument(
+                "candidate",
+                "publication tree differs from gated tree",
+                None,
+                None,
+            ));
+        }
+        options.candidate = Some(gated);
         // A partial or recoverable run names the model of the runtime that produced its candidate.
         let recovered_model_task = (lifecycle.execution.state != RunExecutionState::Succeeded)
             .then_some(gate_proof.promotion.source.task_id.as_str());
@@ -280,67 +278,25 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
         )
     })?;
     let base = backend.resolve_verified_base(&options.path, verified_base_sha)?;
-    let candidate = backend.candidate_state(&options.path, &base, &head)?;
-    let binds_promoted_candidate =
-        !options.manual_finalization || options.inherited_gate_evidence.is_some();
-    let (mut changed_files, commit_required, push_required) = match candidate {
-        AgentTaskPrCandidateState::Dirty { changed_files } => (changed_files, true, true),
-        AgentTaskPrCandidateState::Committed {
-            changed_files,
-            push_required,
-        } => (changed_files, false, push_required),
-        AgentTaskPrCandidateState::Equivalent => (Vec::new(), false, false),
-        AgentTaskPrCandidateState::Invalid { diagnostic } => {
-            return Err(Error::validation_invalid_argument(
-                "base",
-                &diagnostic,
-                None,
-                None,
-            ));
-        }
+    let (candidate, mut changed_files) = match options.candidate.clone() {
+        Some(candidate) => (candidate, options.changed_files.clone()),
+        None => backend.prepare_manual_candidate(&options.path, &base.sha)?,
     };
-    let candidate_changed_files = normalize_changed_files(&changed_files);
-    if let Some(verified_candidate_sha) = options.verified_candidate_sha.as_deref() {
-        if commit_required {
-            return Err(Error::validation_invalid_argument(
-                "verify",
-                "manual verification candidate changed after its gate completed",
-                None,
-                None,
-            ));
-        }
-        let observed = backend.validate_committed_publication_identity(&options.path, None)?;
-        if observed.commit_sha.as_deref() != Some(verified_candidate_sha) {
-            return Err(Error::validation_invalid_argument(
-                "verify",
-                "manual verification candidate changed after its gate completed",
-                observed.commit_sha,
-                None,
-            ));
-        }
-    }
-    if options.expected_candidate_sha.is_some() && (commit_required || push_required) {
-        return Err(Error::validation_invalid_argument(
-            "publication_intent",
-            "recovered manual finalization requires the already-pushed candidate validated by preflight",
-            None,
-            None,
-        ));
-    }
-    if options.expected_candidate_sha.is_some()
-        && normalize_changed_files(&options.changed_files) != candidate_changed_files
+    for expected in [
+        &options.expected_candidate_tree,
+        &options.verified_candidate_tree,
+    ]
+    .into_iter()
+    .flatten()
     {
-        return Err(Error::validation_invalid_argument(
-            "publication_intent.changed_files",
-            "recovered manual finalization changed files no longer match the preflight-validated candidate",
-            None,
-            None,
-        ));
-    }
-    if !options.manual_finalization {
-        changed_files = durable_changed_files;
-    } else if !options.changed_files.is_empty() {
-        changed_files = options.changed_files.clone();
+        if expected != &candidate.tree_sha {
+            return Err(Error::validation_invalid_argument(
+                "candidate",
+                "candidate tree changed after verification",
+                None,
+                None,
+            ));
+        }
     }
     changed_files.sort();
     changed_files.dedup();
@@ -392,28 +348,9 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
         ));
     }
 
-    if binds_promoted_candidate {
-        backend.validate_candidate_in_store(lifecycle_store, &options)?;
-    }
-    if options.manual_finalization && !publish && !commit_required && push_required {
-        return Err(Error::validation_invalid_argument(
-            "publication_intent",
-            "recoverable manual preflight requires an already-pushed candidate; push the candidate branch and rerun preflight",
-            None,
-            None,
-        ));
-    }
-    // Validate intent before commit mutation, then bind evidence to immutable HEAD before push.
-    let prospective_identity = if commit_required {
-        Some(backend.validate_publication_identity(&options.path)?)
-    } else {
-        None
-    };
+    let mut git_identity = backend.validate_publication_identity(&options.path)?;
     if !publish {
-        let git_identity = match prospective_identity {
-            Some(git_identity) => git_identity,
-            None => backend.validate_committed_publication_identity(&options.path, None)?,
-        };
+        git_identity.commit_sha = Some(candidate.candidate_sha.clone());
         return Ok(report(
             &options,
             intent,
@@ -422,56 +359,35 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
             "none",
             None,
             None,
-            changed_files,
+            changed_files.clone(),
             Some(proof),
             false,
             false,
             Some(git_identity),
-            // Validation-only finalization performs no push, so there is no
-            // publication git tracking to record.
             None,
-            None,
+            Some(AgentTaskPublicationBinding {
+                candidate_sha: candidate.candidate_sha.clone(),
+                candidate_tree: candidate.tree_sha.clone(),
+                remote_sha: String::new(),
+                pr_head_sha: String::new(),
+                repository: String::new(),
+                head_repository: String::new(),
+                changed_files: changed_files.clone(),
+            }),
             durable_acceptance,
         ));
     }
-    if commit_required {
-        backend.commit_all(&options.path, &options.commit_message)?;
-    }
-    let git_identity = backend
-        .validate_committed_publication_identity(&options.path, prospective_identity.as_ref())?;
-    let commit_sha = git_identity.commit_sha.as_deref().ok_or_else(|| {
-        Error::validation_invalid_argument(
-            "git_identity",
-            "committed Git identity proof must be bound to a commit SHA before publication",
-            None,
-            None,
-        )
-    })?;
-    if let Some(verified_candidate_sha) = options.verified_candidate_sha.as_deref() {
-        if verified_candidate_sha != commit_sha {
-            return Err(Error::validation_invalid_argument(
-                "verify",
-                "manual verification candidate changed after its gate completed",
-                Some(commit_sha.to_string()),
-                None,
-            ));
-        }
-    }
-    if let Some(expected_candidate_sha) = options.expected_candidate_sha.as_deref() {
-        if expected_candidate_sha != commit_sha {
-            return Err(Error::validation_invalid_argument(
-                "publication_intent",
-                "recovered manual finalization candidate no longer matches the preflight-validated commit",
-                Some(commit_sha.to_string()),
-                None,
-            ));
-        }
-    }
-    let git_tracking = if push_required {
-        Some(backend.push_branch(&options.path, commit_sha, &head)?)
-    } else {
-        None
-    };
+    let dates = backend.candidate_dates(&options.path, &candidate.candidate_sha)?;
+    let published_sha = backend.publish_tree(
+        &options.path,
+        &candidate.tree_sha,
+        &base.sha,
+        &options.commit_message,
+        &dates,
+    )?;
+    let commit_sha = published_sha.as_str();
+    git_identity.commit_sha = Some(published_sha.clone());
+    let git_tracking = Some(backend.push_branch(&options.path, commit_sha, &head)?);
     let existing = backend.find_open_pr(
         options.component_id.as_deref(),
         &options.path,
@@ -490,91 +406,14 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
             }
         }
     }
-    if existing.is_none() {
-        if let Some(merged) = backend.find_merged_pr(
-            options.component_id.as_deref(),
-            &options.path,
-            &options.base,
-            &head,
-        )? {
-            let observed_remote_sha =
-                backend.verify_remote_candidate(&options.path, &head, commit_sha)?;
-            if observed_remote_sha != commit_sha {
-                return Err(publication_drift_error(
-                    commit_sha,
-                    &observed_remote_sha,
-                    None,
-                    "no PR mutation performed",
-                ));
-            }
-            let binding = observe_publication_binding(|| {
-                backend.verify_publication_binding(
-                    &options.path,
-                    &options.base,
-                    &head,
-                    commit_sha,
-                    &changed_files,
-                    &merged,
-                )
-            })?;
-            // A different merged head is a prior publication, not this candidate.
-            if binding.pr_head_sha == commit_sha {
-                if let Err(error) = validate_publication_binding(
-                    &binding,
-                    commit_sha,
-                    &changed_files,
-                    intent.target.publication_route.as_ref(),
-                ) {
-                    return Err(append_binding_error(
-                        publication_drift_error(
-                            commit_sha,
-                            &binding.remote_sha,
-                            Some(&binding.pr_head_sha),
-                            "no PR mutation performed",
-                        ),
-                        binding_validation_reason(&error),
-                    ));
-                }
-                return Ok(report(
-                    &options,
-                    intent,
-                    &head,
-                    "review_ready",
-                    "already_merged",
-                    Some(merged.number),
-                    Some(merged.url),
-                    changed_files,
-                    Some(proof),
-                    commit_required,
-                    push_required,
-                    Some(git_identity),
-                    git_tracking,
-                    Some(binding),
-                    durable_acceptance,
-                ));
-            }
-        }
-    }
     let publication_base_sha = backend.publication_base_sha(&options.path, &options.base)?;
     intent.target.publication_base_sha = publication_base_sha.clone();
     if let Some(verified_base) = options.review_dossier.verified_base.as_mut() {
         verified_base.publication_sha = publication_base_sha;
     }
     let body = render_review_dossier(&options.review_dossier, &options.review_profile);
-    // The lookup and base observation may take long enough for another writer to
-    // replace the branch. Bind the live remote again at the last safe point.
-    let observed_remote_sha = backend.verify_remote_candidate(&options.path, &head, commit_sha)?;
-    if observed_remote_sha != commit_sha {
-        return Err(publication_drift_error(
-            commit_sha,
-            &observed_remote_sha,
-            None,
-            "no PR mutation performed",
-        ));
-    }
     let mut newly_created = existing.is_none();
     let mut draft = existing.as_ref().map_or(options.draft_pr, |pr| pr.is_draft);
-    let mut quarantine_capability = safe_quarantine_capability(backend, newly_created, draft)?;
     let mut ready_transitioned = false;
     let (action, pr) = match existing {
         Some(existing) => {
@@ -609,7 +448,6 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
                 };
                 newly_created = false;
                 draft = adopted.is_draft;
-                quarantine_capability = safe_quarantine_capability(backend, newly_created, draft)?;
                 update_existing_pr(backend, &mut options, &adopted, &mut ready_transitioned)?
             }
             Err(error) => return Err(error),
@@ -623,7 +461,7 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
         draft
     };
 
-    let binding = match observe_publication_binding(|| {
+    let binding = read_publication_head(&options.run_id, commit_sha, || {
         backend.verify_publication_binding(
             &options.path,
             &options.base,
@@ -632,67 +470,7 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
             &changed_files,
             &pr,
         )
-    }) {
-        Ok(binding) => binding,
-        Err(error) if !is_observed_binding_drift(&error) => {
-            // Unavailable evidence cannot justify destructive quarantine. Keep
-            // the PR discoverable by recover, but not ready for review.
-            let capability = if published_draft {
-                AgentTaskPrQuarantineCapability::PreserveExistingDraft
-            } else {
-                AgentTaskPrQuarantineCapability::ConvertExistingReadyPrToDraft
-            };
-            let state = match backend.quarantine_pr(&options.path, &pr, capability) {
-                Ok(state) => state,
-                Err(cleanup) => format!(
-                    "PR left open; draft conversion failed: {}",
-                    publication_error_diagnostic(&cleanup)
-                ),
-            };
-            let diagnostic = publication_error_diagnostic(&error);
-            let mut failure = Error::validation_invalid_argument(
-                "publication_binding",
-                format!("publication binding observation unavailable (recoverable); PR #{} left open; cleanup_state={state}; binding_error={diagnostic}; retry with `homeboy agent-task recover {}`", pr.number, options.run_id),
-                None,
-                None,
-            );
-            if let Some(details) = failure.details.as_object_mut() {
-                details.insert("binding_error".into(), serde_json::json!(diagnostic));
-                details.insert("recoverable".into(), serde_json::json!(true));
-            }
-            failure.retryable = Some(true);
-            return Err(failure);
-        }
-        Err(error) => {
-            return Err(publication_drift_with_cleanup_error(
-                backend,
-                &options,
-                &pr,
-                commit_sha,
-                "not_observed",
-                None,
-                quarantine_capability,
-                &publication_error_diagnostic(&error),
-            ));
-        }
-    };
-    if let Err(error) = validate_publication_binding(
-        &binding,
-        commit_sha,
-        &changed_files,
-        intent.target.publication_route.as_ref(),
-    ) {
-        return Err(publication_drift_with_cleanup_error(
-            backend,
-            &options,
-            &pr,
-            commit_sha,
-            &binding.remote_sha,
-            Some(&binding.pr_head_sha),
-            quarantine_capability,
-            binding_validation_reason(&error),
-        ));
-    }
+    })?;
 
     Ok(report(
         &options,
@@ -708,8 +486,8 @@ fn finalize_pr_with_backend_mode<B: AgentTaskPrFinalizationBackend>(
         Some(pr.url),
         changed_files,
         Some(proof),
-        commit_required,
-        push_required,
+        true,
+        true,
         Some(git_identity),
         git_tracking,
         Some(binding),
@@ -1078,6 +856,8 @@ fn inherit_promotion_gates(
             detail: Some("verified inherited promotion evidence".to_string()),
         })
         .collect();
+    options.candidate = promotion.candidate.clone();
+    options.changed_files = promotion.changed_files.clone();
     options.normalized_gate_results = promotion.gate_results;
     options.inherited_gate_evidence = Some(AgentTaskInheritedGateEvidence {
         schema: AGENT_TASK_INHERITED_GATE_EVIDENCE_SCHEMA.to_string(),
@@ -1235,221 +1015,27 @@ pub fn validate_publication_intent(intent: &AgentTaskPublicationIntent) -> Resul
     Ok(())
 }
 
-/// `validate_publication_binding`'s errors are built with
-/// `Error::validation_invalid_argument("publication_binding", ...)`, whose
-/// `message` bakes in a `"Invalid argument 'publication_binding': "` prefix.
-/// Call sites that fold that reason into a drift error already name the
-/// `publication_binding` field themselves, so this strips the redundant
-/// prefix and returns just the specific reason (for example, "a
-/// same-repository PR head").
-fn binding_validation_reason(error: &Error) -> &str {
-    error
-        .message
-        .strip_prefix("Invalid argument 'publication_binding': ")
-        .unwrap_or(&error.message)
-}
-
-fn validate_publication_binding(
-    binding: &AgentTaskPublicationBinding,
-    candidate_sha: &str,
-    changed_files: &[String],
-    route: Option<&AgentTaskPublicationRoute>,
-) -> Result<()> {
-    if binding.candidate_sha != candidate_sha
-        || binding.remote_sha != candidate_sha
-        || binding.pr_head_sha != candidate_sha
-    {
-        return Err(Error::validation_invalid_argument(
-            "publication_binding",
-            "candidate SHA, pushed remote ref SHA, and GitHub PR head SHA must match before finalization succeeds",
-            None,
-            None,
-        ));
-    }
-    if binding.candidate_tree.is_empty()
-        || binding.repository.is_empty()
-        || !binding.head_repository.eq_ignore_ascii_case(
-            route
-                .map(|route| route.head_repository.as_str())
-                .unwrap_or(&binding.repository),
-        )
-        || normalize_changed_files(&binding.changed_files) != normalize_changed_files(changed_files)
-    {
-        return Err(Error::validation_invalid_argument(
-            "publication_binding",
-            "publication binding must record the candidate tree, exact changed files, and a same-repository PR head",
-            None,
-            None,
-        ));
-    }
-    Ok(())
-}
-
-const PUBLICATION_IDENTITY_DIAGNOSTIC_LIMIT: usize = 160;
-
-fn publication_drift_error(
-    expected_candidate_sha: &str,
-    observed_remote_sha: &str,
-    observed_pr_head_sha: Option<&str>,
-    cleanup_state: &str,
-) -> Error {
-    let bounded = |value: &str| {
-        let value = value.trim();
-        let characters = value.chars().count();
-        if characters <= PUBLICATION_IDENTITY_DIAGNOSTIC_LIMIT {
-            value.to_string()
-        } else {
-            format!(
-                "{}...(+{} chars)",
-                value
-                    .chars()
-                    .take(PUBLICATION_IDENTITY_DIAGNOSTIC_LIMIT)
-                    .collect::<String>(),
-                characters - PUBLICATION_IDENTITY_DIAGNOSTIC_LIMIT
-            )
-        }
-    };
-    Error::validation_invalid_argument(
-        "publication_binding",
-        format!(
-            "publication candidate drift refused: expected_candidate_sha={}; observed_remote_sha={}; observed_pr_head_sha={}; cleanup_state={}",
-            bounded(expected_candidate_sha),
-            bounded(observed_remote_sha),
-            observed_pr_head_sha.map(bounded).unwrap_or_else(|| "not_observed".to_string()),
-            bounded(cleanup_state),
-        ),
-        None,
-        None,
-    )
-}
-
-fn quarantine_capability_is_safe(
-    capability: AgentTaskPrQuarantineCapability,
-    was_draft: bool,
-) -> bool {
-    matches!(
-        (capability, was_draft),
-        (AgentTaskPrQuarantineCapability::PreserveExistingDraft, true)
-            | (
-                AgentTaskPrQuarantineCapability::ConvertExistingReadyPrToDraft,
-                false
-            )
-    )
-}
-
-fn quarantine_capability_name(capability: AgentTaskPrQuarantineCapability) -> &'static str {
-    match capability {
-        AgentTaskPrQuarantineCapability::PreserveExistingDraft => "preserve_existing_draft",
-        AgentTaskPrQuarantineCapability::ConvertExistingReadyPrToDraft => {
-            "convert_existing_ready_pr_to_draft"
-        }
-        AgentTaskPrQuarantineCapability::Unsupported => "unsupported",
-    }
-}
-
-fn publication_drift_with_cleanup_error<B: AgentTaskPrFinalizationBackend>(
-    backend: &mut B,
-    options: &AgentTaskPrFinalizationOptions,
-    pr: &AgentTaskPrRef,
-    expected_candidate_sha: &str,
-    observed_remote_sha: &str,
-    observed_pr_head_sha: Option<&str>,
-    capability: AgentTaskPrQuarantineCapability,
-    binding_error: &str,
-) -> Error {
-    let (cleanup, pr_state) = match backend.quarantine_pr(&options.path, pr, capability) {
-        Ok(state) => (state, "left open as draft"),
-        Err(error) => (
-            format!(
-                "failed; cleanup_capability={}; cleanup_error={}",
-                quarantine_capability_name(capability),
-                publication_error_diagnostic(&error)
-            ),
-            "left open; draft conversion failed",
-        ),
-    };
-    let drift = publication_drift_error(
-        expected_candidate_sha,
-        observed_remote_sha,
-        observed_pr_head_sha,
-        &cleanup,
-    );
-    let mut failure = append_binding_error(drift, binding_error);
-    failure.message.push_str(&format!(
-        "; PR #{} {}; retry with `homeboy agent-task recover {}`",
-        pr.number, pr_state, options.run_id
-    ));
-    failure
-}
-
-/// Carries `validate_publication_binding`'s specific failure reason (for
-/// example, "same-repository PR head" or "candidate SHA...must match")
-/// forward onto a drift error, so operators can see which field differed
-/// instead of a generic mismatch notice.
-fn append_binding_error(error: Error, binding_error: &str) -> Error {
-    let mut failure = Error::validation_invalid_argument(
-        "publication_binding",
-        format!(
-            "{}; binding_error={}",
-            error.message,
-            bounded_publication_diagnostic(binding_error)
-        ),
-        None,
-        None,
-    );
-    if let Some(details) = failure.details.as_object_mut() {
-        details.insert(
-            "binding_error".into(),
-            serde_json::json!(bounded_publication_diagnostic(binding_error)),
-        );
-    }
-    failure
-}
-
-fn bounded_publication_diagnostic(value: &str) -> String {
-    let redacted = homeboy_core::redaction::redact_string(value);
-    let value = redacted.trim();
-    let characters = value.chars().count();
-    const DIAGNOSTIC_LIMIT: usize = 2048;
-    if characters <= DIAGNOSTIC_LIMIT {
-        value.to_string()
-    } else {
-        format!(
-            "{}...(+{} chars)",
-            value.chars().take(DIAGNOSTIC_LIMIT).collect::<String>(),
-            characters - DIAGNOSTIC_LIMIT
-        )
-    }
-}
-
-/// Only explicit local/ref validation is observed drift. Process, config,
-/// authentication and transport errors leave the binding unobserved.
-fn is_observed_binding_drift(error: &Error) -> bool {
-    error
-        .message
-        .starts_with("Invalid argument 'publication_binding': ")
-}
-
-fn observe_publication_binding(
+fn read_publication_head(
+    run_id: &str,
+    published_sha: &str,
     mut observe: impl FnMut() -> Result<AgentTaskPublicationBinding>,
 ) -> Result<AgentTaskPublicationBinding> {
+    let mut diagnostic = String::new();
     for attempt in 0..3 {
         match observe() {
-            Err(error) if !is_observed_binding_drift(&error) && attempt < 2 => {
-                std::thread::sleep(std::time::Duration::from_millis(100 * (attempt + 1)));
+            Ok(binding) if binding.pr_head_sha == published_sha => return Ok(binding),
+            Ok(binding) => {
+                diagnostic = format!("expected {published_sha}, observed {}", binding.pr_head_sha)
             }
-            result => return result,
+            Err(error) => diagnostic = error.message,
+        }
+        if attempt < 2 {
+            std::thread::sleep(std::time::Duration::from_millis(100));
         }
     }
-    unreachable!("bounded observation always returns")
-}
-
-fn publication_error_diagnostic(error: &Error) -> String {
-    let mut diagnostic = error.message.clone();
-    if !error.details.is_null() {
-        diagnostic.push_str(&format!("; details={}", error.details));
-    }
-    bounded_publication_diagnostic(&diagnostic)
+    let mut error = Error::validation_invalid_argument("publication_binding", format!("PR left open; head read-back failed: {diagnostic}; retry with `homeboy agent-task recover {run_id}`"), None, None);
+    error.retryable = Some(true);
+    Err(error)
 }
 
 fn build_pr_publication_intent(

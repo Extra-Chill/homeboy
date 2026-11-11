@@ -44,6 +44,8 @@ pub struct PushOptions {
     /// Use `--force-with-lease` for safe force-pushes (e.g. after a rebase).
     /// Deliberately the only force flavour exposed — never plain `--force`.
     pub force_with_lease: bool,
+    /// Explicit ref and expected remote object for publication CAS.
+    pub lease: Option<String>,
     /// Push to a remote URL directly instead of the configured upstream.
     pub remote_url: Option<String>,
     /// GitHub App/user token injected into `remote_url` for this invocation.
@@ -129,6 +131,9 @@ fn push_at_inner(id: String, path: String, options: PushOptions) -> Result<GitOu
     }
     if options.tags {
         args.push("--follow-tags".to_string());
+    }
+    if let Some(lease) = &options.lease {
+        args.push(format!("--force-with-lease={lease}"));
     }
     if options.force_with_lease {
         args.push("--force-with-lease".to_string());
@@ -249,6 +254,7 @@ pub fn push_bulk(json_spec: &str) -> Result<BulkResult<GitOutput>> {
                 tags: push_tags,
                 atomic,
                 force_with_lease,
+                lease: None,
                 remote_url: remote_url.clone(),
                 token: token.clone(),
                 refspec: refspec.clone(),

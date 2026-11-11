@@ -425,6 +425,7 @@ pub fn run(args: GitArgs) -> CmdResult<GitCommandOutput> {
                     tags,
                     atomic,
                     force_with_lease,
+                    lease: None,
                     remote_url,
                     token,
                     refspec,

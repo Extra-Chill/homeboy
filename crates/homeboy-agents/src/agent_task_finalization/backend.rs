@@ -1,9 +1,7 @@
 use super::{
-    AgentTaskPrCandidateState, AgentTaskPrDurableGateProof, AgentTaskPrFinalizationBackend,
-    AgentTaskPrFinalizationOptions, AgentTaskPrQuarantineCapability, AgentTaskPrRef,
+    AgentTaskPrDurableGateProof, AgentTaskPrFinalizationBackend, AgentTaskPrRef,
     AgentTaskPrResolvedBase, AgentTaskPublicationBinding, AgentTaskPublicationGitTracking,
 };
-use crate::agent_task_promotion::AgentTaskPromotionCandidate;
 use homeboy_core::error::{Error, Result};
 use homeboy_core::git::{
     classify_git_push_failure, get_uncommitted_changes, pr_create_with_token, pr_edit_with_token,
@@ -13,7 +11,6 @@ use homeboy_core::git::{
     PrState, PushOptions, DEFAULT_NON_INTERACTIVE_PUSH_TIMEOUT,
 };
 use homeboy_core::run_lifecycle_record::RunLifecycleRecord;
-use serde::de::DeserializeOwned;
 use std::path::Path;
 
 fn publication_route(path: &str) -> Result<super::AgentTaskPublicationRoute> {
@@ -184,19 +181,6 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
         optional_gate_proof(lifecycle_store.read_record(run_id)?)
     }
 
-    fn validate_candidate_in_store(
-        &mut self,
-        lifecycle_store: &crate::agent_task_lifecycle::AgentTaskLifecycleStore,
-        options: &AgentTaskPrFinalizationOptions,
-    ) -> Result<()> {
-        validate_real_candidate_fingerprint_in_store(lifecycle_store, options)?;
-        homeboy_core::repository_integrity::verify_tracked_symlink_portability(
-            std::path::Path::new(&options.path),
-            "HEAD",
-            options.repository_integrity_evidence.as_ref(),
-        )
-    }
-
     fn current_branch(&mut self, path: &str) -> Result<String> {
         let output = std::process::Command::new("git")
             .args(["rev-parse", "--abbrev-ref", "HEAD"])
@@ -210,16 +194,6 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
             )));
         }
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-    }
-
-    fn changed_files(&mut self, path: &str) -> Result<Vec<String>> {
-        let changes = get_uncommitted_changes(path)?;
-        let mut files = changes.staged;
-        files.extend(changes.unstaged);
-        files.extend(changes.untracked);
-        files.sort();
-        files.dedup();
-        Ok(files)
     }
 
     fn resolve_base(&mut self, path: &str, base: &str) -> Result<AgentTaskPrResolvedBase> {
@@ -366,77 +340,6 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
             .map(str::to_string))
     }
 
-    fn candidate_state(
-        &mut self,
-        path: &str,
-        base: &AgentTaskPrResolvedBase,
-        head: &str,
-    ) -> Result<AgentTaskPrCandidateState> {
-        let base_ref = &base.reference;
-        let counts = git_output(
-            path,
-            &[
-                "rev-list",
-                "--left-right",
-                "--count",
-                &format!("{}...HEAD", base_ref),
-            ],
-        )?;
-        // The candidate is published on its gated base: a base that moved
-        // since is the forge's mergeability question, not a refusal (#17675).
-        let Some(ahead) = counts
-            .split_whitespace()
-            .nth(1)
-            .and_then(|ahead| ahead.parse::<u64>().ok())
-        else {
-            return Ok(AgentTaskPrCandidateState::Invalid {
-                diagnostic: format!(
-                    "could not compare resolved base `{base_ref}` at `{}` to HEAD",
-                    base.sha
-                ),
-            });
-        };
-        let dirty = self.changed_files(path)?;
-        if !dirty.is_empty() {
-            return Ok(AgentTaskPrCandidateState::Dirty {
-                changed_files: dirty,
-            });
-        }
-        if ahead == 0 {
-            return Ok(AgentTaskPrCandidateState::Equivalent);
-        }
-
-        let changed_files = committed_changed_files(path, base_ref)?;
-        let local_head = git_output(path, &["rev-parse", "HEAD"])?;
-        let local_head = local_head.trim();
-        let remote_head = remote_branch_head(path, head)?;
-
-        // A live remote head that Homeboy's candidate does not contain means the
-        // branch was advanced out of contract — e.g. an executor pushed from its
-        // attempt checkout before finalization. Homeboy exclusively owns the
-        // remote branch; force-pushing over the divergence would clobber those
-        // commits, and a plain push fails with an opaque rejection classified as
-        // a generic policy failure. Refuse with a specific diagnostic so the
-        // out-of-sync state is legible rather than reported as a failed push.
-        // (#8486)
-        if let Some(remote_head) = remote_head.as_deref() {
-            if remote_head != local_head
-                && !remote_head_is_ancestor_of_candidate(path, remote_head, local_head)
-            {
-                return Ok(AgentTaskPrCandidateState::Invalid {
-                    diagnostic: format!(
-                        "remote branch `{head}` advanced to `{remote_head}`, which is not contained in the finalization candidate `{local_head}`; the branch was modified outside Homeboy's finalization (an executor may have pushed from its attempt checkout). Refusing to finalize to avoid clobbering unverified remote commits; reconcile the branch manually before retrying."
-                    ),
-                });
-            }
-        }
-
-        Ok(AgentTaskPrCandidateState::Committed {
-            changed_files,
-            push_required: remote_head.as_deref() != Some(local_head),
-        })
-    }
-
     fn validate_publication_identity(
         &mut self,
         path: &str,
@@ -444,23 +347,66 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
         homeboy_core::git::validate_publication_identity(path)
     }
 
-    fn validate_committed_publication_identity(
+    fn prepare_manual_candidate(
         &mut self,
         path: &str,
-        expected: Option<&homeboy_core::git::GitIdentityProof>,
-    ) -> Result<homeboy_core::git::GitIdentityProof> {
-        homeboy_core::git::validate_committed_publication_identity(path, expected)
+        base: &str,
+    ) -> Result<(crate::agent_task::AgentTaskCandidate, Vec<String>)> {
+        let candidate_sha = git_output(path, &["rev-parse", "HEAD"])?;
+        let changes = get_uncommitted_changes(path)?;
+        let tree_sha = if changes.staged.is_empty()
+            && changes.unstaged.is_empty()
+            && changes.untracked.is_empty()
+        {
+            git_output(path, &["rev-parse", "HEAD^{tree}"])?
+        } else {
+            git_output(path, &["add", "-A"])?;
+            git_output(path, &["write-tree"])?
+        };
+        let files = git_output(path, &["diff", "--name-only", base, &tree_sha])?
+            .lines()
+            .map(str::to_string)
+            .collect();
+        Ok((
+            crate::agent_task::AgentTaskCandidate {
+                base_sha: base.into(),
+                candidate_sha,
+                tree_sha,
+            },
+            files,
+        ))
     }
 
-    fn commit_all(&mut self, path: &str, message: &str) -> Result<()> {
-        // `path` is the already validated candidate repository root, not a
-        // component selector. Resolving it again loses Cook's admitted identity
-        // and is ambiguous for monorepos (#17379). Stage at the root so changes
-        // outside the admitted component are included in the verified candidate.
-        for args in [vec!["add", "."], vec!["commit", "-m", message]] {
-            run_git(Path::new(path), &args, "commit finalization candidate")?;
+    fn candidate_dates(&mut self, path: &str, candidate_sha: &str) -> Result<(String, String)> {
+        let dates = git_output(path, &["show", "-s", "--format=%aI%n%cI", candidate_sha])?;
+        let mut lines = dates.lines();
+        Ok((
+            lines.next().unwrap_or_default().into(),
+            lines.next().unwrap_or_default().into(),
+        ))
+    }
+
+    fn publish_tree(
+        &mut self,
+        path: &str,
+        tree: &str,
+        parent: &str,
+        message: &str,
+        dates: &(String, String),
+    ) -> Result<String> {
+        let output = std::process::Command::new("git")
+            .current_dir(path)
+            .args(["commit-tree", tree, "-p", parent, "-m", message])
+            .env("GIT_AUTHOR_DATE", &dates.0)
+            .env("GIT_COMMITTER_DATE", &dates.1)
+            .output()
+            .map_err(|error| Error::git_command_failed(error.to_string()))?;
+        if !output.status.success() {
+            return Err(Error::git_command_failed(
+                String::from_utf8_lossy(&output.stderr).to_string(),
+            ));
         }
-        Ok(())
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     }
 
     fn push_branch(
@@ -476,6 +422,7 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
         let push_remote = route.push_remote.clone();
         let effective_remote = resolve_effective_push_url(Path::new(path), &push_remote).ok();
         let credential = publication_credential(path)?;
+        let expected = remote_branch_head(path, head)?.unwrap_or_default();
         let output = push_in_checkout(
             "",
             path,
@@ -493,6 +440,7 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
                     .map(|(_, credential)| credential.token().to_string()),
                 strip_extraheader: credential.is_some(),
                 refspec: Some(format!("{commit_sha}:refs/heads/{head}")),
+                lease: Some(format!("refs/heads/{head}:{expected}")),
                 non_interactive: true,
                 timeout: Some(DEFAULT_NON_INTERACTIVE_PUSH_TIMEOUT),
                 ..Default::default()
@@ -527,6 +475,10 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
             )));
         }
 
+        git_output(
+            path,
+            &["update-ref", &format!("refs/heads/{head}"), commit_sha],
+        )?;
         let upstream_ref = format!("refs/remotes/{push_remote}/{head}");
         let existing_upstream =
             git_output(path, &["rev-parse", "--symbolic-full-name", "@{upstream}"]).ok();
@@ -643,31 +595,6 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
         .body)
     }
 
-    fn verify_remote_candidate(
-        &mut self,
-        path: &str,
-        head: &str,
-        candidate_sha: &str,
-    ) -> Result<String> {
-        let observed = remote_branch_head(path, head)?.unwrap_or_default();
-        if observed != candidate_sha {
-            return Ok(observed);
-        }
-        Ok(candidate_sha.to_string())
-    }
-
-    fn quarantine_capability(
-        &mut self,
-        _newly_created: bool,
-        was_draft: bool,
-    ) -> Result<AgentTaskPrQuarantineCapability> {
-        Ok(if was_draft {
-            AgentTaskPrQuarantineCapability::PreserveExistingDraft
-        } else {
-            AgentTaskPrQuarantineCapability::ConvertExistingReadyPrToDraft
-        })
-    }
-
     fn create_pr(
         &mut self,
         component_id: Option<&str>,
@@ -747,23 +674,12 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
     fn verify_publication_binding(
         &mut self,
         path: &str,
-        base: &str,
-        head: &str,
+        _base: &str,
+        _head: &str,
         candidate_sha: &str,
         changed_files: &[String],
         pr: &AgentTaskPrRef,
     ) -> Result<AgentTaskPublicationBinding> {
-        let dirty = self
-            .changed_files(path)
-            .map_err(|error| publication_observation_context(error, "binding: changed files"))?;
-        if !dirty.is_empty() || git_output(path, &["rev-parse", "HEAD"])? != candidate_sha {
-            return Err(Error::validation_invalid_argument(
-                "publication_binding",
-                "candidate changed after commit; finalization requires a clean worktree still at the verified candidate SHA",
-                None,
-                None,
-            ));
-        }
         let candidate_tree =
             git_output(path, &["rev-parse", &format!("{candidate_sha}^{{tree}}")])?;
         let repository = gh_json(path, &["repo", "view", "--json", "nameWithOwner"])?
@@ -801,72 +717,15 @@ impl AgentTaskPrFinalizationBackend for RealAgentTaskPrFinalizationBackend {
                 "binding: gh returned incomplete PR head repository",
             ));
         }
-        let route = publication_route(path)?;
-        if pr_value["baseRefName"].as_str() != Some(base)
-            || pr_value["headRefName"].as_str() != Some(head)
-            || (!route.head_repository.is_empty()
-                && !head_repository.eq_ignore_ascii_case(&route.head_repository))
-        {
-            return Err(Error::validation_invalid_argument(
-                "publication_binding",
-                "GitHub PR does not match the requested base and head refs",
-                None,
-                None,
-            ));
-        }
-        // Re-read after GitHub observation to reject a force-update race.
-        let remote_sha = remote_branch_head(path, head)
-            .map_err(|error| publication_observation_context(error, "binding: remote branch head"))?
-            .unwrap_or_default();
         Ok(AgentTaskPublicationBinding {
             candidate_sha: candidate_sha.to_string(),
             candidate_tree,
-            remote_sha,
+            remote_sha: candidate_sha.to_string(),
             pr_head_sha,
             repository,
             head_repository,
             changed_files: super::normalize_changed_files(changed_files),
         })
-    }
-
-    fn quarantine_pr(
-        &mut self,
-        path: &str,
-        pr: &AgentTaskPrRef,
-        capability: AgentTaskPrQuarantineCapability,
-    ) -> Result<String> {
-        let (args, state) = match capability {
-            AgentTaskPrQuarantineCapability::PreserveExistingDraft => {
-                return Ok("existing_pr_already_draft".to_string())
-            }
-            AgentTaskPrQuarantineCapability::ConvertExistingReadyPrToDraft => (
-                vec![
-                    "pr".to_string(),
-                    "ready".to_string(),
-                    pr.number.to_string(),
-                    "--undo".to_string(),
-                ],
-                "existing_pr_converted_to_draft",
-            ),
-            AgentTaskPrQuarantineCapability::Unsupported => {
-                return Err(Error::validation_invalid_argument(
-                    "publication_quarantine",
-                    "backend does not support a safe PR quarantine transition",
-                    None,
-                    None,
-                ))
-            }
-        };
-        let output =
-            publication_gh_output(path, &args.iter().map(String::as_str).collect::<Vec<_>>())?;
-        if !output.status.success() {
-            return Err(Error::git_command_failed(format!(
-                "gh {} failed while quarantining publication drift: {}",
-                args.join(" "),
-                String::from_utf8_lossy(&output.stderr).trim()
-            )));
-        }
-        Ok(state.to_string())
     }
 }
 
@@ -890,26 +749,6 @@ fn missing_promotion() -> Error {
         None,
         None,
     )
-}
-
-fn committed_changed_files(path: &str, base: &str) -> Result<Vec<String>> {
-    let output = git_output(
-        path,
-        &["diff", "--name-status", "-M", &format!("{base}...HEAD")],
-    )?;
-    let mut files = Vec::new();
-    for line in output.lines() {
-        let mut fields = line.split('\t');
-        let status = fields.next().unwrap_or_default();
-        if status.starts_with('R') || status.starts_with('C') {
-            files.extend(fields.take(2).map(str::to_string));
-        } else if let Some(file) = fields.next() {
-            files.push(file.to_string());
-        }
-    }
-    files.sort();
-    files.dedup();
-    Ok(files)
 }
 
 /// Read the live remote branch head through the effective push transport
@@ -1082,36 +921,6 @@ fn push_recovery_hint(
 /// pushed it directly), so fetch it best-effort first. If it still cannot be
 /// resolved, the divergence cannot be proven safe — treat it as non-ancestor so
 /// finalization fails closed with the out-of-contract diagnostic.
-fn remote_head_is_ancestor_of_candidate(path: &str, remote_head: &str, local_head: &str) -> bool {
-    // Best-effort: bring the remote-only commit into the local object database
-    // so ancestry can be evaluated. Ignore failure; the ancestry check below
-    // fails closed when the object is unavailable.
-    let _ = homeboy_core::git::with_remote_tracking_authority_until(
-        Path::new(path),
-        "materialize finalization remote head",
-        std::time::Instant::now() + std::time::Duration::from_secs(30),
-        |remaining| {
-            homeboy_core::git::run_git_output_with_env_timeout(
-                Path::new(path),
-                &[
-                    "fetch",
-                    "--no-tags",
-                    &publication_route(path)?.push_remote,
-                    remote_head,
-                ],
-                "materialize finalization remote head",
-                &[],
-                remaining,
-            )
-        },
-    );
-    std::process::Command::new("git")
-        .args(["merge-base", "--is-ancestor", remote_head, local_head])
-        .current_dir(path)
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
-}
 
 /// Run git and return trimmed stdout. Thin delegation to the canonical
 /// `homeboy_core::git::run_git` so the command spelling and failure handling
@@ -1277,214 +1086,6 @@ mod pr_head_repository_tests {
     fn a_wholly_absent_payload_fails_closed() {
         assert_eq!(pr_head_repository_from_json(&json!({})), "");
     }
-}
-
-pub(super) fn validate_real_candidate_fingerprint_in_store(
-    lifecycle_store: &crate::agent_task_lifecycle::AgentTaskLifecycleStore,
-    options: &AgentTaskPrFinalizationOptions,
-) -> Result<()> {
-    let record = lifecycle_store.read_record(&options.run_id)?;
-    validate_real_candidate_fingerprint_from_record(options, &record)
-}
-
-fn validate_real_candidate_fingerprint_from_record(
-    options: &AgentTaskPrFinalizationOptions,
-    record: &crate::agent_task_lifecycle::AgentTaskRunRecord,
-) -> Result<()> {
-    let promotion =
-        crate::agent_task_service::persisted_promotion_from_record(&record.run_id, record.clone())?
-            .ok_or_else(missing_promotion)?;
-    let expected: AgentTaskPromotionCandidate = deserialize_persisted_value(
-        promotion.provenance.get("candidate").cloned(),
-        "applied promotion is missing a candidate capability; rerun promotion before normal finalization or use --manual-finalization to record the explicit bypass",
-        "persisted candidate capability is invalid",
-    )?;
-    if !matches!(expected, AgentTaskPromotionCandidate::Git { .. }) {
-        return Err(Error::validation_invalid_argument(
-            "run_id",
-            "normal GitHub PR finalization requires an exact Git candidate fingerprint; the applied promotion target was not a Git worktree. Rerun promotion into a Git worktree or use --manual-finalization to record the explicit provenance bypass",
-            None,
-            None,
-        ));
-    }
-    if super::normalize_changed_files(&options.changed_files)
-        != super::normalize_changed_files(&promotion.changed_files)
-    {
-        return Err(super::changed_files_mismatch_error(
-            &options.run_id,
-            &options.changed_files,
-            &promotion.changed_files,
-        ));
-    }
-    validate_adoption_merge_proof(
-        options,
-        &expected,
-        promotion.provenance.get("adoption_merge"),
-    )?;
-    validate_candidate_fingerprint(options, &expected)
-}
-
-/// Adoption records the authenticated parent roles separately because a merge
-/// candidate's first-parent fingerprint alone cannot prove which base it merged.
-fn validate_adoption_merge_proof(
-    options: &AgentTaskPrFinalizationOptions,
-    expected: &AgentTaskPromotionCandidate,
-    adoption_merge: Option<&serde_json::Value>,
-) -> Result<()> {
-    let AgentTaskPromotionCandidate::Git { fingerprint } = expected else {
-        return Ok(());
-    };
-    let parents = git_output(
-        &options.path,
-        &["rev-list", "--parents", "-n", "1", &fingerprint.head],
-    )?;
-    let parents = parents.split_whitespace().skip(1).collect::<Vec<_>>();
-    if parents.len() > 2 {
-        return Err(Error::validation_invalid_argument(
-            "run_id",
-            "promoted candidate has more than two parents; finalization accepts only one-parent candidates or authenticated two-parent merges",
-            None,
-            None,
-        ));
-    }
-    let Some(proof) = adoption_merge.filter(|proof| !proof.is_null()) else {
-        if parents.len() == 2 {
-            let committed_tree = git_output(
-                &options.path,
-                &["rev-parse", &format!("{}^{{tree}}", fingerprint.head)],
-            )?;
-            if committed_tree == fingerprint.tree {
-                return Err(Error::validation_invalid_argument(
-                    "run_id",
-                    "two-parent promoted candidate is missing its required adoption merge proof",
-                    None,
-                    None,
-                ));
-            }
-        }
-        return Ok(());
-    };
-    let field = |name| {
-        proof
-            .get(name)
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| {
-                Error::validation_invalid_argument(
-                    "run_id",
-                    format!("adoption merge proof is missing `{name}`"),
-                    None,
-                    None,
-                )
-            })
-    };
-    let candidate = field("candidate")?;
-    let candidate_parent = field("candidate_parent")?;
-    let resolved_base_parent = field("resolved_base_parent")?;
-    let candidate_tree = field("candidate_tree")?;
-    let resolved_base_tree = field("resolved_base_tree")?;
-    if candidate != fingerprint.head || candidate_tree != fingerprint.tree {
-        return Err(Error::validation_invalid_argument(
-            "run_id",
-            "adoption merge proof does not match the exact promoted candidate SHA and tree",
-            None,
-            None,
-        ));
-    }
-    if parents.as_slice() != [candidate_parent, resolved_base_parent] {
-        return Err(Error::validation_invalid_argument(
-            "run_id",
-            "adoption merge proof parents do not match the promoted merge candidate",
-            None,
-            None,
-        ));
-    }
-    let actual_candidate_tree = git_output(
-        &options.path,
-        &["rev-parse", &format!("{candidate}^{{tree}}")],
-    )?;
-    if actual_candidate_tree != candidate_tree {
-        return Err(Error::validation_invalid_argument(
-            "run_id",
-            "adoption merge proof candidate tree does not match the promoted merge candidate",
-            None,
-            None,
-        ));
-    }
-    let actual_base_tree = git_output(
-        &options.path,
-        &["rev-parse", &format!("{resolved_base_parent}^{{tree}}")],
-    )?;
-    if actual_base_tree != resolved_base_tree {
-        return Err(Error::validation_invalid_argument(
-            "run_id",
-            "adoption merge proof resolved-base tree does not match its recorded parent",
-            None,
-            None,
-        ));
-    }
-    Ok(())
-}
-
-pub(super) fn validate_candidate_fingerprint(
-    options: &AgentTaskPrFinalizationOptions,
-    expected: &AgentTaskPromotionCandidate,
-) -> Result<()> {
-    let AgentTaskPromotionCandidate::Git {
-        fingerprint: expected_fingerprint,
-    } = expected
-    else {
-        unreachable!("caller validates Git promotion candidate")
-    };
-    let actual = crate::agent_task_promotion::candidate_fingerprint(&options.path)?;
-    let AgentTaskPromotionCandidate::Git {
-        fingerprint: actual_fingerprint,
-    } = &actual
-    else {
-        return Err(Error::validation_invalid_argument(
-            "path",
-            "finalization path is not a Git worktree; normal GitHub PR finalization requires the promoted Git candidate",
-            Some(options.path.clone()),
-            None,
-        ));
-    };
-    if actual == *expected {
-        return Ok(());
-    }
-    if !actual_fingerprint.changed_files.is_empty()
-        || expected_fingerprint.tree.is_empty()
-        || !committed_candidate_matches(options, expected_fingerprint)?
-    {
-        return Err(Error::validation_invalid_argument(
-            "path",
-            "candidate changed after promotion; durable finalization accepts a recovery commit only when its parent and tree exactly match the recorded promoted candidate. Rerun promotion gates before finalization.",
-            None,
-            None,
-        ));
-    }
-    Ok(())
-}
-
-fn committed_candidate_matches(
-    options: &AgentTaskPrFinalizationOptions,
-    fingerprint: &crate::agent_task_promotion::AgentTaskCandidateFingerprint,
-) -> Result<bool> {
-    let parent = git_output(&options.path, &["rev-parse", "HEAD^"])?;
-    if parent.trim() != fingerprint.head {
-        return Ok(false);
-    }
-    let tree = git_output(&options.path, &["rev-parse", "HEAD^{tree}"])?;
-    Ok(tree.trim() == fingerprint.tree)
-}
-
-fn deserialize_persisted_value<T: DeserializeOwned>(
-    value: Option<serde_json::Value>,
-    missing_message: &str,
-    invalid_message: &str,
-) -> Result<T> {
-    let value = value
-        .ok_or_else(|| Error::validation_invalid_argument("run_id", missing_message, None, None))?;
-    serde_json::from_value(value)
-        .map_err(|_| Error::validation_invalid_argument("run_id", invalid_message, None, None))
 }
 
 #[cfg(test)]
@@ -1696,6 +1297,76 @@ mod remote_base_tests {
     }
 
     #[test]
+    fn publishes_gated_tree_reproducibly_and_leaves_pr_open_on_read_failure() {
+        let (repo, _origin) = publication_repo();
+        let path = repo.path().to_str().unwrap();
+        let base = git_output(path, &["rev-parse", "HEAD^"]).unwrap();
+        let candidate_sha = git_output(path, &["rev-parse", "HEAD"]).unwrap();
+        let tree = git_output(path, &["rev-parse", "HEAD^{tree}"]).unwrap();
+        // Destination bytes are not publication input.
+        std::fs::write(repo.path().join("unrelated"), "do not publish").unwrap();
+        let mut options = super::super::tests::options();
+        options.path = path.into();
+        options.head = Some("fix/cook".into());
+        options.verified_base_sha = Some(base.clone());
+        options.candidate = Some(crate::agent_task::AgentTaskCandidate {
+            base_sha: base.clone(),
+            candidate_sha,
+            tree_sha: tree.clone(),
+        });
+        options.changed_files = vec!["feature.txt".into()];
+        let store =
+            crate::agent_task_lifecycle::AgentTaskLifecycleStore::from_environment().unwrap();
+        let mut backend = super::super::tests::MockBackend::default();
+        backend.real_git = true;
+        let first =
+            super::super::finalize_pr_with_backend(options.clone(), &mut backend, &store).unwrap();
+        assert!(backend.created);
+        let sha = first
+            .publication_proof
+            .git_identity
+            .unwrap()
+            .commit_sha
+            .unwrap();
+        assert_eq!(
+            git_output(path, &["rev-parse", &format!("{sha}^{{tree}}")]).unwrap(),
+            tree
+        );
+        assert_eq!(
+            git_output(path, &["rev-parse", &format!("{sha}^")]).unwrap(),
+            base
+        );
+        backend.existing_pr = Some(AgentTaskPrRef {
+            number: 123,
+            url: "https://example.test/pr/123".into(),
+            is_draft: false,
+        });
+        let second =
+            super::super::finalize_pr_with_backend(options.clone(), &mut backend, &store).unwrap();
+        assert_eq!(
+            second
+                .publication_proof
+                .git_identity
+                .unwrap()
+                .commit_sha
+                .as_deref(),
+            Some(sha.as_str())
+        );
+        backend.read_failure = true;
+        let error =
+            super::super::finalize_pr_with_backend(options, &mut backend, &store).unwrap_err();
+        assert_eq!(error.retryable, Some(true));
+        assert!(error
+            .message
+            .contains("homeboy agent-task recover cook-3678"));
+        assert!(!backend.existing_pr.unwrap().is_draft);
+        assert_eq!(
+            std::fs::read_to_string(repo.path().join("unrelated")).unwrap(),
+            "do not publish"
+        );
+    }
+
+    #[test]
     fn pushed_branch_without_upstream_tracks_verified_remote_head() {
         let (repo, _origin) = publication_repo();
         let commit_sha = git_output(repo.path().to_str().unwrap(), &["rev-parse", "HEAD"]).unwrap();
@@ -1815,143 +1486,6 @@ mod remote_base_tests {
     }
 
     #[test]
-    fn ssh_agent_refused_push_is_a_retryable_blocked_action_and_retry_reuses_the_candidate() {
-        let _env = push_transport_env_lock();
-        // The remote is addressed through an SSH-shaped URL so the push goes
-        // through GIT_SSH_COMMAND, where a fixture agent refuses to sign
-        // while the screen is locked (#10734).
-        let origin = tempfile::tempdir().unwrap();
-        git(origin.path(), &["init", "--bare", "-b", "main"]);
-        let repo = repo();
-        git(
-            repo.path(),
-            &[
-                "remote",
-                "add",
-                "origin",
-                "git@git.example.test:acme/repo.git",
-            ],
-        );
-        git(
-            repo.path(),
-            &["push", origin.path().to_str().unwrap(), "main"],
-        );
-        git(repo.path(), &["checkout", "-b", "feature"]);
-        std::fs::write(repo.path().join("feature.txt"), "feature").unwrap();
-        git(repo.path(), &["add", "feature.txt"]);
-        git(repo.path(), &["commit", "-m", "feature"]);
-        let path = repo.path().to_str().unwrap().to_string();
-        let commit_sha = git_output(&path, &["rev-parse", "HEAD"]).unwrap();
-
-        let fixture = tempfile::tempdir().unwrap();
-        let ssh_fixture = fixture.path().join("refusing-ssh");
-        homeboy_test_support::write_executable(&ssh_fixture, "#!/bin/sh\nprintf '%s\\n' 'sign_and_send_pubkey: signing failed for ECDSA \"~/.ssh/example.pub\" from agent: agent refused operation' >&2\nprintf '%s\\n' 'git@git.example.test: Permission denied (publickey).' >&2\nexit 255\n", 0o755)
-        .unwrap();
-
-        let _fixture_ssh = homeboy_core::test_support::EnvVarGuard::set(
-            "GIT_SSH_COMMAND",
-            ssh_fixture.to_str().unwrap(),
-        );
-
-        let error = RealAgentTaskPrFinalizationBackend
-            .push_branch(&path, &commit_sha, "feature")
-            .expect_err("agent refusal blocks publication");
-
-        assert_eq!(error.retryable, Some(true));
-        let preflight = &error.details["git_push_preflight"];
-        assert_eq!(preflight["schema"], "homeboy/git-push-preflight/v1");
-        assert_eq!(preflight["remote"], "origin");
-        assert_eq!(preflight["classification"], "ssh_agent_refused");
-        assert_eq!(preflight["transport_kind"], "ssh");
-        assert_eq!(preflight["host"], "git.example.test");
-        assert_eq!(
-            preflight["effective_push_url"],
-            "git@git.example.test:acme/repo.git"
-        );
-        assert!(preflight["git_stderr"]
-            .as_str()
-            .unwrap()
-            .contains("agent refused operation"));
-        assert!(error
-            .hints
-            .iter()
-            .any(|hint| hint.message.contains("pushInsteadOf")
-                && hint.message.to_ascii_lowercase().contains("unlock")
-                && hint.message.contains("github_hosts.git.example.test.env")));
-
-        // The blocked push leaves branch tracking untouched and the origin
-        // never receives the branch.
-        assert!(upstream(repo.path()).is_err());
-        assert!(git_output(
-            &path,
-            &["rev-parse", "--verify", "refs/remotes/origin/feature"]
-        )
-        .is_err());
-        assert!(git_output(
-            origin.path().to_str().unwrap(),
-            &["rev-parse", "--verify", "refs/heads/feature"],
-        )
-        .is_err());
-
-        // Operator recovery: route pushes over a working transport with the
-        // same env-configured rewrite the host policy would apply, then
-        // retry finalization. The retry pushes the same commit exactly once.
-        drop(_fixture_ssh);
-        // Repo-local, not process-global GIT_CONFIG_* env: a partially set
-        // env layer would break every git command concurrent tests spawn.
-        git(
-            repo.path(),
-            &[
-                "config",
-                &format!("url.{}.pushInsteadOf", origin.path().display()),
-                "git@git.example.test:acme/repo.git",
-            ],
-        );
-
-        let tracking = RealAgentTaskPrFinalizationBackend
-            .push_branch(&path, &commit_sha, "feature")
-            .expect("retry publishes the same candidate");
-
-        assert_eq!(tracking.verified_remote_sha, commit_sha);
-        assert_eq!(tracking.remote, "origin");
-        assert_eq!(
-            upstream(repo.path()).unwrap(),
-            "refs/remotes/origin/feature"
-        );
-        assert_eq!(
-            git_output(
-                origin.path().to_str().unwrap(),
-                &["rev-parse", "refs/heads/feature"],
-            )
-            .unwrap(),
-            commit_sha
-        );
-        // Exactly one commit reached the remote branch beyond the pushed
-        // base — no duplicate.
-        assert_eq!(
-            git_output(
-                origin.path().to_str().unwrap(),
-                &["rev-list", "--count", "main..refs/heads/feature"],
-            )
-            .unwrap(),
-            "1"
-        );
-        // The remote-head reconciliation finalization relies on now sees the
-        // candidate already published — no push required — with a clean
-        // worktree, so a further retry neither commits nor pushes.
-        let main_sha = git_output(&path, &["rev-parse", "main"]).unwrap();
-        assert_eq!(
-            RealAgentTaskPrFinalizationBackend
-                .candidate_state(&path, &base("main", &main_sha), "feature")
-                .expect("reconciled candidate"),
-            AgentTaskPrCandidateState::Committed {
-                changed_files: vec!["feature.txt".to_string()],
-                push_required: false,
-            }
-        );
-    }
-
-    #[test]
     fn remote_head_read_honors_push_instead_of_over_the_fetch_url() {
         let _env = push_transport_env_lock();
         // The remote is addressed through an SSH-shaped fetch URL whose
@@ -2028,181 +1562,6 @@ mod remote_base_tests {
             remote_branch_head(&path, "main").expect("reads the effective push destination"),
             Some(main_sha)
         );
-    }
-
-    #[test]
-    fn classifies_staged_unstaged_and_untracked_files_as_dirty() {
-        let repo = repo();
-        std::fs::write(repo.path().join("old.txt"), "staged").unwrap();
-        git(repo.path(), &["add", "old.txt"]);
-        std::fs::write(repo.path().join("removed.txt"), "unstaged").unwrap();
-        std::fs::write(repo.path().join("untracked.txt"), "untracked").unwrap();
-
-        let state = RealAgentTaskPrFinalizationBackend
-            .candidate_state(
-                repo.path().to_str().unwrap(),
-                &base("main", "base"),
-                "feature",
-            )
-            .expect("state");
-
-        assert_eq!(
-            state,
-            AgentTaskPrCandidateState::Dirty {
-                changed_files: vec![
-                    "old.txt".to_string(),
-                    "removed.txt".to_string(),
-                    "untracked.txt".to_string(),
-                ],
-            }
-        );
-    }
-
-    #[test]
-    fn recognizes_equivalent_main_and_trunk_bases() {
-        let repo = repo();
-        git(repo.path(), &["branch", "trunk"]);
-        for base_name in ["main", "trunk"] {
-            let state = RealAgentTaskPrFinalizationBackend
-                .candidate_state(
-                    repo.path().to_str().unwrap(),
-                    &base(base_name, "base"),
-                    "feature",
-                )
-                .expect("state");
-            assert_eq!(state, AgentTaskPrCandidateState::Equivalent);
-        }
-    }
-
-    #[test]
-    fn classifies_committed_merge_candidate_and_tracks_renames_and_deletes() {
-        let repo = repo();
-        git(repo.path(), &["checkout", "-b", "feature"]);
-        git(repo.path(), &["mv", "old.txt", "renamed.txt"]);
-        std::fs::remove_file(repo.path().join("removed.txt")).unwrap();
-        git(repo.path(), &["add", "-A"]);
-        git(repo.path(), &["commit", "-m", "rename and delete"]);
-        git(repo.path(), &["checkout", "main"]);
-        std::fs::write(repo.path().join("main.txt"), "main").unwrap();
-        git(repo.path(), &["add", "main.txt"]);
-        git(repo.path(), &["commit", "-m", "main advance"]);
-        git(repo.path(), &["checkout", "feature"]);
-        git(repo.path(), &["merge", "main", "--no-edit"]);
-
-        let remote = tempfile::tempdir().unwrap();
-        git(remote.path(), &["init", "--bare"]);
-        git(
-            repo.path(),
-            &["remote", "add", "origin", remote.path().to_str().unwrap()],
-        );
-        let state = RealAgentTaskPrFinalizationBackend
-            .candidate_state(
-                repo.path().to_str().unwrap(),
-                &base("main", "base"),
-                "feature",
-            )
-            .expect("state");
-
-        assert_eq!(
-            state,
-            AgentTaskPrCandidateState::Committed {
-                changed_files: vec![
-                    "old.txt".to_string(),
-                    "removed.txt".to_string(),
-                    "renamed.txt".to_string(),
-                ],
-                push_required: true,
-            }
-        );
-    }
-
-    #[test]
-    fn out_of_contract_remote_advance_is_rejected_not_reported_as_committed() {
-        // Homeboy's candidate branch, pushed to origin, then advanced on the
-        // remote out-of-band (an executor pushed a commit not in the candidate).
-        // Finalization must refuse with a specific diagnostic rather than
-        // attempt a push that fails as a generic policy failure. (#8486)
-        let origin = tempfile::tempdir().unwrap();
-        git(origin.path(), &["init", "--bare", "-b", "main"]);
-        let repo = repo();
-        git(
-            repo.path(),
-            &["remote", "add", "origin", origin.path().to_str().unwrap()],
-        );
-        git(repo.path(), &["push", "origin", "main"]);
-        git(repo.path(), &["checkout", "-b", "feature"]);
-        std::fs::write(repo.path().join("candidate.txt"), "candidate").unwrap();
-        git(repo.path(), &["add", "candidate.txt"]);
-        git(repo.path(), &["commit", "-m", "homeboy candidate"]);
-        git(repo.path(), &["push", "origin", "feature"]);
-
-        // A second checkout advances the remote feature branch out-of-band.
-        let other = tempfile::tempdir().unwrap();
-        git(
-            other.path(),
-            &["clone", origin.path().to_str().unwrap(), "."],
-        );
-        git(other.path(), &["config", "user.email", "evil@example.com"]);
-        git(other.path(), &["config", "user.name", "Executor"]);
-        git(other.path(), &["checkout", "feature"]);
-        std::fs::write(other.path().join("out-of-band.txt"), "executor").unwrap();
-        git(other.path(), &["add", "out-of-band.txt"]);
-        git(other.path(), &["commit", "-m", "executor out-of-band push"]);
-        git(other.path(), &["push", "origin", "feature"]);
-
-        let state = RealAgentTaskPrFinalizationBackend
-            .candidate_state(
-                repo.path().to_str().unwrap(),
-                &base("main", "base"),
-                "feature",
-            )
-            .expect("candidate state");
-
-        match state {
-            AgentTaskPrCandidateState::Invalid { diagnostic } => {
-                assert!(
-                    diagnostic.contains("advanced")
-                        && diagnostic.contains("outside Homeboy's finalization"),
-                    "diagnostic must name the out-of-contract remote advance: {diagnostic}"
-                );
-            }
-            other => panic!("expected Invalid for a diverged remote, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn remote_tracking_base_wins_over_stale_local_branch() {
-        let repo = repo();
-        git(repo.path(), &["checkout", "-b", "origin-base"]);
-        std::fs::write(repo.path().join("origin.txt"), "origin").unwrap();
-        git(repo.path(), &["add", "origin.txt"]);
-        git(repo.path(), &["commit", "-m", "origin advance"]);
-        let origin_base =
-            git_output(repo.path().to_str().unwrap(), &["rev-parse", "HEAD"]).unwrap();
-        git(
-            repo.path(),
-            &["update-ref", "refs/remotes/origin/main", origin_base.trim()],
-        );
-        let remote = tempfile::tempdir().unwrap();
-        git(remote.path(), &["init", "--bare"]);
-        git(
-            repo.path(),
-            &["remote", "add", "origin", remote.path().to_str().unwrap()],
-        );
-        git(repo.path(), &["checkout", "-b", "feature"]);
-        std::fs::write(repo.path().join("feature.txt"), "feature").unwrap();
-        git(repo.path(), &["add", "feature.txt"]);
-        git(repo.path(), &["commit", "-m", "feature"]);
-
-        let state = RealAgentTaskPrFinalizationBackend
-            .candidate_state(
-                repo.path().to_str().unwrap(),
-                &base("refs/remotes/origin/main", origin_base.trim()),
-                "feature",
-            )
-            .expect("state");
-
-        assert!(matches!(state, AgentTaskPrCandidateState::Committed { .. }));
     }
 
     #[test]
@@ -2313,63 +1672,5 @@ mod remote_base_tests {
             error.code,
             homeboy_core::ErrorCode::ValidationInvalidArgument
         );
-    }
-
-    #[test]
-    fn a_candidate_behind_its_base_publishes_only_its_own_changes() {
-        let repo = repo();
-        let remote = tempfile::tempdir().unwrap();
-        git(remote.path(), &["init", "--bare"]);
-        git(
-            repo.path(),
-            &["remote", "add", "origin", remote.path().to_str().unwrap()],
-        );
-        git(repo.path(), &["push", "-u", "origin", "main"]);
-        let captured_base = git_output(repo.path().to_str().unwrap(), &["rev-parse", "HEAD"])
-            .expect("captured declared base");
-
-        git(repo.path(), &["checkout", "-b", "feature"]);
-        std::fs::write(repo.path().join("feature.txt"), "feature").unwrap();
-        git(repo.path(), &["add", "feature.txt"]);
-        git(
-            repo.path(),
-            &["commit", "-m", "candidate verified by gates"],
-        );
-
-        git(repo.path(), &["checkout", "main"]);
-        std::fs::write(repo.path().join("main.txt"), "advance").unwrap();
-        git(repo.path(), &["add", "main.txt"]);
-        git(repo.path(), &["commit", "-m", "remote advance after gates"]);
-        git(repo.path(), &["push", "origin", "main"]);
-        let advanced_base = git_output(repo.path().to_str().unwrap(), &["rev-parse", "HEAD"])
-            .expect("advanced base");
-        git(repo.path(), &["checkout", "feature"]);
-
-        let published = RealAgentTaskPrFinalizationBackend
-            .candidate_state(
-                repo.path().to_str().unwrap(),
-                &base(&captured_base, &captured_base),
-                "feature",
-            )
-            .expect("captured base validates candidate");
-        assert!(matches!(
-            published,
-            AgentTaskPrCandidateState::Committed { .. }
-        ));
-
-        let stale = RealAgentTaskPrFinalizationBackend
-            .candidate_state(
-                repo.path().to_str().unwrap(),
-                &base(&advanced_base, &advanced_base),
-                "feature",
-            )
-            .expect("newer snapshot compares candidate");
-        // A base that moved past the gated one is the forge's mergeability
-        // question: the candidate publishes as it stands, carrying only its
-        // own change and none of the base's (#17675).
-        let AgentTaskPrCandidateState::Committed { changed_files, .. } = stale else {
-            panic!("a candidate behind its base publishes as committed, got {stale:?}");
-        };
-        assert_eq!(changed_files, vec!["feature.txt".to_string()]);
     }
 }
