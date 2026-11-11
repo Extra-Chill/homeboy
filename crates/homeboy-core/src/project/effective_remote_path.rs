@@ -381,6 +381,7 @@ mod tests {
                 owner_hints: Vec::new(),
                 archive_install: Vec::new(),
                 remote_path_inference: Vec::new(),
+                dependency_inference: Vec::new(),
                 path_roots: vec![RemotePathRootRule {
                     path_prefix: "packages".to_string(),
                     root: "package_root".to_string(),

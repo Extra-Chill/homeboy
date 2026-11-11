@@ -283,6 +283,17 @@ homeboy deploy myproject my-plugin --version 1.2.3 --dry-run
 - `deploy_strategy: "git"` and `deploy_strategy: "file"` components, which deploy from the checkout itself by design.
 - Every local-build safety guard (uncommitted changes, source freshness, unreleased-commit gaps) still applies to any component that *does* build locally — checkout-less resolution only ever exempts a component that already resolves to a release asset.
 
+## Apply order
+
+A multi-component deploy writes components one at a time. Homeboy applies them in dependency order, so a component never goes live before a component it depends on that ships in the same run. Without that ordering, the target briefly runs the new dependent against the old dependency. With no dependencies declared, the project's attachment order is kept.
+
+Dependencies come from two sources, merged:
+
+- **Project attachment** `components[].depends_on`: component ids, local directory names, or remote directory names.
+- **Extension inference** `deploy.dependency_inference` in the extension manifest. Each rule names a component-relative file (`{{id}}` and `{{dir_name}}` templates) and a regex whose first capture group is a separator-delimited list (`separator`, default `,`). The bundled WordPress extension reads the plugin header's `Requires Plugins:` line, so WordPress plugins are ordered with no configuration.
+
+A dependency that is not part of the current deploy is ignored. A dependency cycle fails the deploy before the first remote write.
+
 ## Post-Deploy Hooks
 
 After a successful deploy, Homeboy runs `post:deploy` hooks remotely via SSH on the deployment target. Hooks are resolved from extensions and components (see [hooks](../architecture/hooks.md)).

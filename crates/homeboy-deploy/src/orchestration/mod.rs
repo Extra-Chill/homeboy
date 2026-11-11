@@ -900,7 +900,7 @@ pub(super) fn apply_prepared_components(
         project,
         components,
         config,
-        prepared_deployments,
+        mut prepared_deployments,
         deployment_provenance,
         exact_ref_identities,
         deployed_refs,
@@ -910,6 +910,10 @@ pub(super) fn apply_prepared_components(
         extension_skipped,
         mut phase_timings,
     } = plan;
+
+    // Apply dependencies before their dependents (homeboy#17899). A cycle fails
+    // here, before the first remote write.
+    order_prepared_deployments(&mut prepared_deployments.deployments, &project)?;
 
     // Execute deployments only after every component passed the local preflight.
     let mut results: Vec<ComponentDeployResult> = vec![];
@@ -1099,6 +1103,58 @@ pub(super) fn apply_prepared_components(
     };
     attach_version_sources(&mut result, &components);
     Ok(result)
+}
+
+/// Order the apply set so no component is written before a dependency that
+/// deploys in the same run. Dependencies are the project attachment's
+/// `depends_on` merged with extension-inferred ones.
+fn order_prepared_deployments(
+    deployments: &mut Vec<super::execution::PreparedComponentDeploy>,
+    project: &Project,
+) -> Result<()> {
+    if deployments.len() < 2 {
+        return Ok(());
+    }
+    let nodes: Vec<super::deploy_order::OrderNode> = deployments
+        .iter()
+        .map(|prepared| {
+            let component = &prepared.component;
+            let mut depends_on: Vec<String> = project
+                .components
+                .iter()
+                .find(|attachment| attachment.id == component.id)
+                .and_then(|attachment| attachment.depends_on.clone())
+                .unwrap_or_default();
+            for inferred in
+                homeboy_core::component::deploy_dependencies::infer_deploy_dependencies(component)
+            {
+                if !depends_on.contains(&inferred) {
+                    depends_on.push(inferred);
+                }
+            }
+            super::deploy_order::OrderNode::new(
+                &component.id,
+                &[
+                    component.local_path.as_str(),
+                    component.remote_path.as_str(),
+                    prepared.install_dir.as_str(),
+                ],
+                depends_on,
+            )
+        })
+        .collect();
+    if super::deploy_order::reorder(deployments, &nodes)? {
+        homeboy_core::log_status!(
+            "deploy",
+            "apply order (dependencies first): {}",
+            deployments
+                .iter()
+                .map(|prepared| prepared.component.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    Ok(())
 }
 
 fn attach_version_sources(result: &mut DeployOrchestrationResult, components: &[Component]) {

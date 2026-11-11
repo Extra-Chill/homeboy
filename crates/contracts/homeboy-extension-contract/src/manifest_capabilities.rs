@@ -7,8 +7,9 @@ use std::collections::HashMap;
 use crate::manifest_action_config::{InputConfig, RuntimeConfig};
 use crate::manifest_deploy_config::DeployArchiveInstallPolicy;
 use crate::manifest_toolchain_config::{
-    DeployOverride, DeployOwnerHint, DeployVerification, DiscoveryConfig, RemotePathInferenceRule,
-    RemotePathRootRule, SinceTagConfig, VersionPatternConfig,
+    DeployDependencyInferenceRule, DeployOverride, DeployOwnerHint, DeployVerification,
+    DiscoveryConfig, RemotePathInferenceRule, RemotePathRootRule, SinceTagConfig,
+    VersionPatternConfig,
 };
 
 /// Deploy lifecycle: verification rules, install overrides, version patterns, @since tags.
@@ -27,6 +28,10 @@ pub struct DeployCapability {
     pub archive_install: Vec<DeployArchiveInstallPolicy>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub remote_path_inference: Vec<RemotePathInferenceRule>,
+    /// Rules that discover which other components a component must deploy
+    /// after (see [`DeployDependencyInferenceRule`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dependency_inference: Vec<DeployDependencyInferenceRule>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub path_roots: Vec<RemotePathRootRule>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

@@ -4,6 +4,7 @@ pub mod changed;
 // `homeboy.json`. The extension-driven, fs-touching remote-path resolution over
 // `Component` lives in `remote_path` as free functions.
 pub mod config;
+pub mod deploy_dependencies;
 pub mod drift;
 pub mod inventory;
 pub mod model;

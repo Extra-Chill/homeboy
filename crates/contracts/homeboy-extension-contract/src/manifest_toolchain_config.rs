@@ -171,6 +171,30 @@ pub struct RemotePathInferenceRule {
     pub remote_path: String,
 }
 
+/// Declarative deploy-order dependency discovery.
+///
+/// An extension names a file inside the component (rendered with the same
+/// `{{id}}` / `{{dir_name}}` template as `remote_path_inference`) and a regex
+/// whose first capture group holds a list of dependency slugs. Core evaluates
+/// the rule without knowing anything about the framework: a WordPress
+/// extension can point it at the plugin header's `Requires Plugins:` line,
+/// another extension at its own manifest format.
+///
+/// Discovered slugs are matched against the other components in the same
+/// deploy by component id, local directory name, or remote directory name, and
+/// a component is never applied before a matched dependency.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeployDependencyInferenceRule {
+    /// Component-relative file to read. Absolute paths and `..` are ignored.
+    pub file: String,
+    /// Regex applied per line (multi-line mode). Capture group 1 is the list.
+    pub pattern: String,
+    /// Separator splitting the captured list. Defaults to `,`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub separator: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RemotePathRootRule {
