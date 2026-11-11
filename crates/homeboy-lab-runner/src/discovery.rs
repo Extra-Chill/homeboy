@@ -31,10 +31,22 @@ impl RunnerDiscoveryService {
     pub fn inspect(runner_id: &str) -> Result<RunnerInspection> {
         Ok(RunnerInspection {
             schema: RUNNER_INSPECTION_SCHEMA.to_string(),
+            environment: Self::environment(runner_id).ok(),
             descriptor: Self::descriptor(runner_id)?,
             readiness: Self::readiness(runner_id)?,
             capabilities: Self::capabilities(runner_id)?,
         })
+    }
+
+    pub fn environment(runner_id: &str) -> Result<homeboy_runner_contract::RunnerEnvironment> {
+        let runner = crate::load(runner_id)?;
+        let mut environment = if runner.kind == RunnerKind::Local {
+            homeboy_core::daemon::observed_runner_environment()?
+        } else {
+            crate::connection::observed_environment(runner_id)?
+        };
+        environment.execution_kind = runner.settings.execution_kind;
+        Ok(environment)
     }
 
     pub fn descriptor(runner_id: &str) -> Result<RunnerDescriptor> {

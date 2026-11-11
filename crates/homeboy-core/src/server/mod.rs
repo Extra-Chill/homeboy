@@ -63,6 +63,9 @@ pub struct Server {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RunnerSettings {
+    /// Provider-declared isolation kind; platform and architecture are observed.
+    #[serde(default)]
+    pub execution_kind: homeboy_runner_contract::RunnerExecutionKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub homeboy_path: Option<String>,
     /// Verified build waiting for a daemon replacement; never used by jobs.

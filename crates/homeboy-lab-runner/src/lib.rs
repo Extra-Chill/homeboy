@@ -52,6 +52,8 @@ mod daemon_repair;
 pub use daemon_repair::codes as daemon_repair_codes;
 mod discovery;
 pub use discovery::RunnerDiscoveryService;
+mod environment_placement;
+pub use environment_placement::select_environment_runner;
 pub mod direct_lab_handoff;
 mod evidence;
 mod execution;

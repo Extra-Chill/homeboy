@@ -7,6 +7,8 @@
 mod artifact;
 mod capability;
 mod discovery;
+mod environment;
+pub use environment::*;
 pub mod env_materialization_plan;
 mod execution_context;
 mod lifecycle;

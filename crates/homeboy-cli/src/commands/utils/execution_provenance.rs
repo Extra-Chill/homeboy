@@ -72,7 +72,31 @@ pub fn capture_composed(
 /// Return the command provenance captured for this process, if any. Older
 /// callers and imported observations remain valid without this optional field.
 pub fn captured() -> Option<Value> {
-    captured_storage().read().ok().and_then(|slot| slot.clone())
+    let mut value = captured_storage()
+        .read()
+        .ok()
+        .and_then(|slot| slot.clone())?;
+    if let Some(environment) = ENVIRONMENT_EVIDENCE.get() {
+        value["environment"] = environment.clone();
+    } else {
+        let runner_id = value
+            .pointer("/resolved_execution/runner_id")
+            .and_then(Value::as_str)
+            .unwrap_or("local");
+        let resolved =
+            homeboy::runner::runners::RunnerDiscoveryService::environment(runner_id).ok();
+        value["environment"] = json!({"requested": null, "resolved": {"runner_id": runner_id, "environment": resolved}});
+    }
+    Some(value)
+}
+
+static ENVIRONMENT_EVIDENCE: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
+
+pub(crate) fn capture_environment(
+    requested: &homeboy_runner_contract::RunnerEnvironmentRequirement,
+    resolved: &homeboy_runner_contract::RunnerEnvironmentOffer,
+) {
+    let _ = ENVIRONMENT_EVIDENCE.set(json!({"requested": requested, "resolved": resolved}));
 }
 
 fn build(result: &homeboy::core::parsed_command_preflight::ParsedCommandPreflightResult) -> Value {

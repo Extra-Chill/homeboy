@@ -204,6 +204,13 @@ pub(crate) fn rewrite_lab_offload_args(
             }
             continue;
         }
+        if arg == "--require-environment" {
+            let _ = iter.next();
+            continue;
+        }
+        if arg.starts_with("--require-environment=") {
+            continue;
+        }
         if arg == "--placement" {
             let _ = iter.next();
             continue;
@@ -381,6 +388,13 @@ pub(crate) fn rewrite_runner_resident_lab_offload_args(
             continue;
         }
         if arg.starts_with("--runner=") {
+            continue;
+        }
+        if arg == "--require-environment" {
+            let _ = iter.next();
+            continue;
+        }
+        if arg.starts_with("--require-environment=") {
             continue;
         }
         if arg == "--placement" {

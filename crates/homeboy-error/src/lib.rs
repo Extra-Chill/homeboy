@@ -119,6 +119,7 @@ pub enum ErrorCode {
     DocsTopicNotFound,
     RigNotFound,
     RunnerNotFound,
+    RunnerEnvironmentMismatch,
     RunnerPolicyDenied,
     RunnerCapabilityMissing,
     RunnerWorkspaceOwnershipConflict,
@@ -214,6 +215,7 @@ impl ErrorCode {
             ErrorCode::DocsTopicNotFound => "docs.topic_not_found",
             ErrorCode::RigNotFound => "rig.not_found",
             ErrorCode::RunnerNotFound => "runner.not_found",
+            ErrorCode::RunnerEnvironmentMismatch => "runner.environment_mismatch",
             ErrorCode::RunnerPolicyDenied => "runner.policy_denied",
             ErrorCode::RunnerCapabilityMissing => "runner.capability_missing",
             ErrorCode::RunnerWorkspaceOwnershipConflict => "runner.workspace_ownership_conflict",
@@ -261,6 +263,7 @@ impl ErrorCode {
     }
 
     /// Decode the stable wire spelling used by daemon error responses.
+    #[allow(clippy::should_implement_trait)] // Compatibility lookup returns Option, not FromStr's Result.
     pub fn from_str(code: &str) -> Option<Self> {
         Some(match code {
             "config.missing_key" => Self::ConfigMissingKey,
@@ -282,6 +285,7 @@ impl ErrorCode {
             "docs.topic_not_found" => Self::DocsTopicNotFound,
             "rig.not_found" => Self::RigNotFound,
             "runner.not_found" => Self::RunnerNotFound,
+            "runner.environment_mismatch" => Self::RunnerEnvironmentMismatch,
             "runner.policy_denied" => Self::RunnerPolicyDenied,
             "runner.capability_missing" => Self::RunnerCapabilityMissing,
             "runner.workspace_ownership_conflict" => Self::RunnerWorkspaceOwnershipConflict,

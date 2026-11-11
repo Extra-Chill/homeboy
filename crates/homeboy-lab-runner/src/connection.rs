@@ -858,7 +858,7 @@ fn connect_with_live_lease(
         ),
     };
     let Ok(daemon) = daemon else {
-        let error = daemon.err().expect("failed daemon connection has an error");
+        let error = daemon.expect_err("failed daemon connection has an error");
         let failure_evidence_ref = error
             .details
             .get("failure_evidence_ref")
@@ -2021,6 +2021,36 @@ fn direct_observation_failure_freshness(runner_id: &str, error: &Error) -> Daemo
     freshness
 }
 
+pub(crate) fn observed_environment(
+    runner_id: &str,
+) -> Result<homeboy_runner_contract::RunnerEnvironment> {
+    let session = read_session(runner_id)?
+        .ok_or_else(|| Error::internal_unexpected("runner has no connected session"))?;
+    let client = Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .map_err(|error| Error::internal_unexpected(error.to_string()))?;
+    let url = session
+        .local_url
+        .as_deref()
+        .ok_or_else(|| Error::internal_unexpected("runner has no observation endpoint"))?;
+    let data = daemon_get(
+        &client,
+        url,
+        homeboy_runner_contract::RUNNER_API_DESCRIBE_PATH,
+    )?;
+    let body = data
+        .get("body")
+        .ok_or_else(|| Error::internal_unexpected("missing runner observation"))?;
+    if session.remote_daemon_lease_id.as_deref() != body["lease_id"].as_str() {
+        return Err(Error::internal_unexpected(
+            "runner environment lease mismatch",
+        ));
+    }
+    serde_json::from_value(body["environment"].clone())
+        .map_err(|error| Error::internal_unexpected(format!("invalid runner environment: {error}")))
+}
+
 fn describe_direct_runner_until(
     runner_id: &str,
     session: &RunnerSession,
@@ -2280,8 +2310,8 @@ fn runner_running_runs_with_client(
     timeout: Duration,
 ) -> Result<Vec<RunSummary>> {
     let started = Instant::now();
-    let data = homeboy_core::observation::phase_timing::time("resolve.readonly_probe.runner_running_runs", || daemon_get(client, local_url, "/runs?status=running&limit=1000")).map_err(|error| {
-        let timed_out = typed_probe_timed_out(&error, started, timeout);
+    let data = homeboy_core::observation::phase_timing::time("resolve.readonly_probe.runner_running_runs", || daemon_get(client, local_url, "/runs?status=running&limit=1000")).inspect_err(|error| {
+        let timed_out = typed_probe_timed_out(error, started, timeout);
         crate::readonly_probe::record_degradation(crate::readonly_probe::ReadOnlyProbeDegradation {
             probe: "runner_running_runs".to_string(),
             runner_id: Some(runner_id.to_string()),
@@ -2303,7 +2333,6 @@ fn runner_running_runs_with_client(
                 runner_id, error.message
             ),
         });
-        error
     })?;
     let runs: Vec<RunSummary> =
         serde_json::from_value(data["body"]["runs"].clone()).map_err(|err| {

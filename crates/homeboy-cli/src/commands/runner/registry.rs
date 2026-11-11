@@ -191,6 +191,7 @@ fn runner_inventory_summary(
         )
     });
     RunnerInventorySummary {
+        environment: runner::RunnerDiscoveryService::environment(&configured.runner_id).ok(),
         pressure: admission
             .as_ref()
             .and_then(|snapshot| snapshot.summary.pressure.clone()),
@@ -339,6 +340,11 @@ pub(crate) fn render_list_summary(payload: &Value) -> Option<String> {
             summary.get("drift")?.as_str()?,
             summary.get("next_action")?.as_str()?,
         ));
+        if let Some(environment) = summary.get("environment").cloned().and_then(|value| {
+            serde_json::from_value::<homeboy_runner_contract::RunnerEnvironment>(value).ok()
+        }) {
+            rendered.push_str(&format!("\nEnvironment: {environment}"));
+        }
     }
     Some(rendered)
 }

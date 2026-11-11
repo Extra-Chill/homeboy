@@ -163,6 +163,7 @@ pub struct RunnerOperatorSummary {
 /// Bounded default inventory row for one configured runner.
 #[derive(Debug, Serialize)]
 pub struct RunnerInventorySummary {
+    pub environment: Option<homeboy_runner_contract::RunnerEnvironment>,
     pub pressure: Option<homeboy::core::runner_pressure::RunnerPressure>,
     pub identity: String,
     pub kind: String,
