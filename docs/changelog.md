@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.458.26] - 2026-11-11
+
+### Changed
+- prune Cook recover/retry/resume tests to one per behavior
+
 ## [0.458.25] - 2026-11-11
 
 ### Fixed
