@@ -4,6 +4,11 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.458.34] - 2026-11-11
+
+### Changed
+- Delete deferred cleanup: await cancelled providers
+
 ## [0.458.33] - 2026-11-11
 
 ### Fixed
