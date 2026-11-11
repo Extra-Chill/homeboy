@@ -200,6 +200,9 @@ pub(super) fn compile(
             prepare.extend([flag.to_string(), value.clone()]);
         }
     }
+    for (url, prompt) in issue_prompt_files(&args.issue_prompt_files, &args.issues)? {
+        prepare.extend(["--issue-prompt".to_string(), format!("{url}={prompt}")]);
+    }
     prepare.extend(args.issues.iter().cloned());
 
     let mut cook = args.cook.child_flags()?;
@@ -324,9 +327,56 @@ fn parse_issues(issues: &[String]) -> Result<Vec<IssueRef>> {
         .collect()
 }
 
+/// Split one `ISSUE_URL=VALUE` per-child entry and bind it to a batch issue.
+fn issue_entry<'a>(
+    flag: &str,
+    entry: &'a str,
+    issues: &[IssueRef],
+) -> Result<(&'a str, &'a str, String)> {
+    let invalid = |problem: &str| {
+        Error::validation_invalid_argument(flag, problem, Some(entry.to_string()), None)
+    };
+    let (url, value) = entry
+        .split_once('=')
+        .ok_or_else(|| invalid("expected ISSUE_URL=VALUE"))?;
+    let key = IssueRef::parse(url)?.key;
+    if !issues.iter().any(|issue| issue.key == key) {
+        return Err(invalid("names an issue that is not part of this batch"));
+    }
+    Ok((url, value, key))
+}
+
+/// Snapshot each `--issue-prompt-file ISSUE_URL=PATH` into its prompt text.
+fn issue_prompt_files(entries: &[String], issues: &[String]) -> Result<Vec<(String, String)>> {
+    let issues = parse_issues(issues)?;
+    let mut seen = BTreeSet::new();
+    entries
+        .iter()
+        .map(|entry| {
+            let (url, path, key) = issue_entry("issue-prompt-file", entry, &issues)?;
+            if !seen.insert(key) {
+                return Err(Error::validation_invalid_argument(
+                    "issue-prompt-file",
+                    "each issue takes one prompt file",
+                    Some(entry.clone()),
+                    None,
+                ));
+            }
+            let prompt = std::fs::read_to_string(path)
+                .map_err(|error| Error::internal_io(error.to_string(), Some(path.to_string())))?;
+            Ok((url.to_string(), prompt))
+        })
+        .collect()
+}
+
 /// `agent-task batch-prepare`: plan every child of a batch once.
 pub(super) fn batch_prepare(args: AgentTaskBatchPrepareArgs) -> CmdResult<Value> {
     let issues = parse_issues(&args.issues)?;
+    let mut issue_prompts = BTreeMap::new();
+    for entry in &args.issue_prompts {
+        let (_, prompt, key) = issue_entry("issue-prompt", entry, &issues)?;
+        issue_prompts.insert(key, prompt.to_string());
+    }
     let (repository, component) = super::run::cook_repository_names_for_selection(&args.repo)?;
     let path =
         super::run::cook_component_path_for_repository_name(&component)?.ok_or_else(|| {
@@ -365,6 +415,7 @@ pub(super) fn batch_prepare(args: AgentTaskBatchPrepareArgs) -> CmdResult<Value>
             );
             let worktree = format!("{repository}@{}", slugify(&branch));
             let prompt = match &args.prompt_template {
+                _ if issue_prompts.contains_key(&issue.key) => issue_prompts[&issue.key].clone(),
                 Some(template) => template
                     .replace("{issue_url}", &issue.url)
                     .replace("{issue_ref}", &issue.key)
@@ -746,18 +797,39 @@ mod tests {
             .unwrap();
 
             let (value, code) = batch_prepare(AgentTaskBatchPrepareArgs {
-                issues: vec!["https://github.com/Extra-Chill/extrachill-events/issues/12".into()],
+                issues: vec![
+                    "https://github.com/Extra-Chill/extrachill-events/issues/12".into(),
+                    "https://github.com/Extra-Chill/extrachill-events/issues/13".into(),
+                ],
                 repo: "Extra-Chill/extrachill-events".to_string(),
                 base: Some("main".to_string()),
                 branch_prefix: "fix".to_string(),
                 prompt_template: None,
+                issue_prompts: vec![
+                    "https://github.com/Extra-Chill/extrachill-events/issues/13=Apply the verified patch.".into(),
+                ],
                 bundle_runner: None,
             })
             .expect("owner/repo is admitted");
             assert_eq!(code, 0);
             assert_eq!(value["component"], "extrachill-events");
             assert_eq!(value["base"], "main");
-            assert_eq!(value["children"].as_array().map(Vec::len), Some(1));
+            // #17837: a child with its own prompt runs it; the others keep the default.
+            let prompts: Vec<_> = value["children"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|child| child["prompt"].as_str().unwrap().to_string())
+                .collect();
+            assert_eq!(
+                prompts,
+                [
+                    default_task_prompt(
+                        "https://github.com/Extra-Chill/extrachill-events/issues/12"
+                    ),
+                    "Apply the verified patch.".to_string(),
+                ]
+            );
 
             let (preview, _) = cook_batch(
                 parse(&[
@@ -877,6 +949,44 @@ mod tests {
             instance,
             definition.instance_id(&BTreeMap::new(), Some("again"))
         );
+    }
+
+    /// #17837: a per-child prompt file is snapshotted into the plan at
+    /// submission and must name one of the batch's issues.
+    #[test]
+    fn issue_prompt_files_are_snapshotted_for_their_child() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), "Use the approved design.").unwrap();
+        let entry = |issue: &str| format!("{issue}={}", file.path().display());
+        let compiled = |issue: &str| {
+            let given = entry(issue);
+            compile(
+                &parse(&[
+                    "--repo",
+                    "scratch",
+                    "--verify",
+                    "true",
+                    "--issue-prompt-file",
+                    &given,
+                    ISSUES[0],
+                    ISSUES[1],
+                ]),
+                Placement::Auto,
+                None,
+            )
+        };
+        let definition = compiled(ISSUES[1]).unwrap();
+        let prepare = definition.steps[0].homeboy.as_ref().unwrap();
+        let at = prepare
+            .iter()
+            .position(|arg| arg == "--issue-prompt")
+            .unwrap();
+        assert_eq!(
+            prepare[at + 1],
+            format!("{}=Use the approved design.", ISSUES[1])
+        );
+        let error = compiled(ISSUES[2]).unwrap_err().to_string();
+        assert!(error.contains("not part of this batch"), "{error}");
     }
 
     #[test]
