@@ -576,9 +576,7 @@ fn run_controller_upgrade_with_operation(
                 operation_id: None,
             };
             if !completion.superseded {
-                result
-                    .extension_skips
-                    .extend(target_missing_extension_warnings());
+                result.extension_skips.extend(orphan_extension_warnings());
             }
             result.daemon_pending_restart =
                 converge_resident_daemon_after_controller_reconciliation(&completion)?;
@@ -1006,9 +1004,7 @@ fn run_controller_upgrade_with_operation(
                 operation_id: None,
             };
             if !completion_superseded {
-                result
-                    .extension_skips
-                    .extend(target_missing_extension_warnings());
+                result.extension_skips.extend(orphan_extension_warnings());
             }
             if completion_superseded {
                 invalidate_superseded_evidence(&mut result);
@@ -1192,7 +1188,10 @@ fn preflight_extensions_for_upgrade(candidate_version: &str) -> Vec<ExtensionPre
         .filter_map(|discovered| match discovered {
             DiscoveredExtension::Invalid(failure) => {
                 let extension_id = failure.id;
-                if failure.category == "target_missing" {
+                // A dangling link or a directory without a manifest is no
+                // extension the upgrade could refresh; it is reported as a
+                // warning after the swap instead of blocking it (#17835).
+                if is_orphan_extension_entry(failure.category) {
                     return None;
                 }
                 Some(ExtensionPreflightBlocker {
@@ -1246,7 +1245,11 @@ fn preflight_extensions_for_upgrade(candidate_version: &str) -> Vec<ExtensionPre
         .collect()
 }
 
-fn target_missing_extension_warnings() -> Vec<ExtensionUpgradeSkip> {
+fn is_orphan_extension_entry(category: &str) -> bool {
+    matches!(category, "target_missing" | "manifest_missing")
+}
+
+fn orphan_extension_warnings() -> Vec<ExtensionUpgradeSkip> {
     discover_extensions()
         .into_iter()
         .filter_map(|discovered| match discovered {
@@ -1260,6 +1263,13 @@ fn target_missing_extension_warnings() -> Vec<ExtensionUpgradeSkip> {
                         format!("homeboy extension uninstall {extension_id}"),
                     ],
                     extension_id,
+                })
+            }
+            DiscoveredExtension::Invalid(failure) if failure.category == "manifest_missing" => {
+                Some(ExtensionUpgradeSkip {
+                    reason: "WARNING: directory has no extension manifest and no installed extension owns it; remove it".to_string(),
+                    recovery_commands: vec![format!("rm -r {}", failure.path.display())],
+                    extension_id: failure.id,
                 })
             }
             _ => None,
@@ -3658,6 +3668,8 @@ mod runner_source_upgrade_tests {
         homeboy_core::test_support::with_isolated_home(|home| {
             let extensions = home.path().join(".config/homeboy/extensions");
             write_extension(&extensions.join("broken"), "broken", "{ malformed");
+            // A dead tree a prior upgrade recreated: no manifest, no owner.
+            std::fs::create_dir_all(extensions.join("agent-runtimes/lib")).unwrap();
 
             let blockers = preflight_extensions_for_upgrade("1.0.0");
             assert_eq!(blockers.len(), 1);
@@ -3667,6 +3679,9 @@ mod runner_source_upgrade_tests {
                 blockers[0].recovery_command,
                 "homeboy extension show broken"
             );
+            let warnings = orphan_extension_warnings();
+            assert_eq!(warnings.len(), 1);
+            assert_eq!(warnings[0].extension_id, "agent-runtimes");
         });
     }
 
@@ -3812,7 +3827,7 @@ mod runner_source_upgrade_tests {
             .expect("dangling extension link");
 
             assert!(preflight_extensions_for_upgrade("1.0.0").is_empty());
-            let warnings = target_missing_extension_warnings();
+            let warnings = orphan_extension_warnings();
             assert_eq!(warnings.len(), 1);
             assert_eq!(warnings[0].extension_id, "discord");
             assert!(warnings[0].reason.contains("WARNING"));
