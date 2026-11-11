@@ -4740,51 +4740,15 @@ fn run_cook_with_runtime(
             )?;
         }
         if result.value.disposition.is_terminal() {
-            let finalized = lifecycle_store
-                .open_observation_initialized()
-                .map(|observation| {
-                    let status = if result.exit_code == 0 {
-                        homeboy_core::observation::RunStatus::Pass
-                    } else {
-                        homeboy_core::observation::RunStatus::Fail
-                    };
-                    let mut run_ids = result.value.history_run_ids.clone();
-                    run_ids.extend(result.value.invocation_run_ids.iter().cloned());
-                    run_ids.push(result.value.cook_id.clone());
-                    run_ids.extend(result.value.latest_run_id.iter().cloned());
-                    run_ids.sort();
-                    run_ids.dedup();
-                    for run_id in run_ids {
-                        // A detached handoff can settle `pass` before a failing
-                        // continuation (Extra-Chill/homeboy#15393).
-                        let finished = observation.settle_run(&run_id, status);
-                        if let Err(error) = finished {
-                            homeboy_core::log_status!(
-                                "agent-task",
-                                "Cook run persistence failed for {run_id}: {}",
-                                error
-                            );
-                        }
-                    }
-                });
-            if let Err(error) = finalized {
-                homeboy_core::log_status!("agent-task", "Cook run persistence failed: {}", error);
-            }
-            // Inclusive whole-Cook timing belongs to the mission, never its
-            // attempts. This boundary also sees failed and cancelled reports.
-            let timing = lifecycle_store
-                .open_observation_initialized()
-                .and_then(|observation| {
-                    observation.record_run_phase(
-                        &result.value.cook_id,
-                        "cook",
-                        result.exit_code != 0,
-                    )
-                });
-            if let Err(error) = timing {
+            if let Err(error) = settle_cook_observations(
+                lifecycle_store,
+                &result.value,
+                &notification_options.identity.initial_run_id,
+                result.exit_code,
+            ) {
                 homeboy_core::log_status!(
                     "agent-task",
-                    "Cook timing persistence failed: {}",
+                    "Cook terminal persistence failed: {}",
                     error
                 );
             }
@@ -4796,6 +4760,27 @@ fn run_cook_with_runtime(
         }
     }
     result
+}
+
+/// One terminal write boundary for every Cook report, including publication,
+/// recoverable candidates and cancellation. Invocation sources may be absent
+/// from the recipe history (detached dispatch), but must settle as well.
+fn settle_cook_observations(
+    lifecycle: &AgentTaskLifecycleStore,
+    report: &AgentTaskCookReport,
+    source_run_id: &str,
+    exit_code: i32,
+) -> Result<()> {
+    let mut ids = report.history_run_ids.clone();
+    ids.extend(report.invocation_run_ids.iter().cloned());
+    ids.extend(report.latest_run_id.iter().cloned());
+    ids.extend([report.cook_id.clone(), source_run_id.to_string()]);
+    agent_task_lifecycle::settle_cook_terminal_observations_in_store(
+        lifecycle,
+        &report.cook_id,
+        &ids,
+        exit_code == 0,
+    )
 }
 
 /// The component a cook is working on, for notification attribution.

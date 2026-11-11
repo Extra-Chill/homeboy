@@ -90,6 +90,8 @@ struct AgentTaskDiscoveryPageScope {
     workspace: Option<String>,
     task_url: Option<String>,
     submitted_after: Option<String>,
+    #[serde(default)]
+    resolved_submitted_after: Option<String>,
     state: Option<String>,
     placement: Option<String>,
     parent_id: Option<String>,
@@ -107,6 +109,7 @@ impl AgentTaskDiscoveryPageScope {
             workspace: options.workspace.clone(),
             task_url: options.task_url.clone(),
             submitted_after: options.submitted_after.clone(),
+            resolved_submitted_after: None,
             state: options.state.clone(),
             placement: options.placement.clone(),
             parent_id: options.parent_id.clone(),
@@ -384,7 +387,22 @@ pub fn discover_runs_page(
 ) -> Result<AgentTaskDiscoveryPage> {
     let requested_limit = options.limit;
     let limit = requested_limit.clamp(1, MAX_AGENT_TASK_DISCOVERY_PAGE_LIMIT);
-    let scope = AgentTaskDiscoveryPageScope::from_options(filter, &options);
+    let mut scope = AgentTaskDiscoveryPageScope::from_options(filter, &options);
+    if let Some(value) = options.cursor.as_deref() {
+        let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(value)
+            .map_err(|_| invalid_page_cursor(value))?;
+        let cursor: AgentTaskDiscoveryPageCursor =
+            serde_json::from_slice(&bytes).map_err(|_| invalid_page_cursor(value))?;
+        scope.resolved_submitted_after = cursor.scope.resolved_submitted_after;
+    } else {
+        scope.resolved_submitted_after = options
+            .submitted_after
+            .as_deref()
+            .map(parse_submitted_after)
+            .transpose()?
+            .map(|bound| bound.to_rfc3339());
+    }
     let after = options
         .cursor
         .as_deref()
@@ -417,8 +435,8 @@ pub fn discover_runs_page(
         } else {
             store.read_record_keyset_page(after, FILTERED_DISCOVERY_PHYSICAL_LIMIT)?
         };
-    let submitted_after = options
-        .submitted_after
+    let submitted_after = scope
+        .resolved_submitted_after
         .as_deref()
         .map(parse_submitted_after)
         .transpose()?;
@@ -687,23 +705,19 @@ fn matches_discovery_options(
     options: &AgentTaskDiscoveryOptions,
     submitted_after: Option<&chrono::DateTime<chrono::Utc>>,
 ) -> bool {
-    if options
-        .state
-        .as_deref()
-        .is_some_and(|state| !format!("{:?}", record.state()).eq_ignore_ascii_case(state))
-        || submitted_after.is_some_and(|after| {
-            chrono::DateTime::parse_from_rfc3339(&record.submitted_at)
-                .map(|submitted| submitted.with_timezone(&chrono::Utc) <= *after)
-                .unwrap_or(true)
-        })
-        || options.placement.as_deref().is_some_and(|placement| {
-            let source = run_source(record);
-            !(matches!(
-                (placement, source.as_str()),
-                ("local", "local") | ("remote", "remote")
-            ) || placement == "runner" && source.starts_with("runner:"))
-        })
-    {
+    if options.state.as_deref().is_some_and(|state| {
+        !format!("{:?}", discovery_outcome(record).state()).eq_ignore_ascii_case(state)
+    }) || submitted_after.is_some_and(|after| {
+        chrono::DateTime::parse_from_rfc3339(&record.submitted_at)
+            .map(|submitted| submitted.with_timezone(&chrono::Utc) <= *after)
+            .unwrap_or(true)
+    }) || options.placement.as_deref().is_some_and(|placement| {
+        let source = run_source(record);
+        !(matches!(
+            (placement, source.as_str()),
+            ("local", "local") | ("remote", "remote")
+        ) || placement == "runner" && source.starts_with("runner:"))
+    }) {
         return false;
     }
 
@@ -793,6 +807,11 @@ fn discovery_identity(record: &AgentTaskRunRecord) -> DiscoveryIdentity {
 }
 
 fn parse_submitted_after(value: &str) -> Result<chrono::DateTime<chrono::Utc>> {
+    if let Ok(duration) = homeboy_core::duration::parse_duration("submitted-after", value) {
+        let duration = chrono::Duration::from_std(duration)
+            .map_err(|error| Error::internal_unexpected(error.to_string()))?;
+        return Ok(chrono::Utc::now() - duration);
+    }
     chrono::DateTime::parse_from_rfc3339(value)
         .map(|timestamp| timestamp.with_timezone(&chrono::Utc))
         .map_err(|_| {
@@ -1332,6 +1351,15 @@ fn age_minutes(timestamp: Option<&str>, now: chrono::DateTime<chrono::Utc>) -> O
     Some(minutes.max(0))
 }
 
+fn discovery_outcome(record: &AgentTaskRunRecord) -> AgentTaskRunRecord {
+    agent_task_lifecycle::AgentTaskLifecycleStore::from_environment()
+        .and_then(|store| {
+            let selected = agent_task_lifecycle::status_in_store(&store, &record.run_id)?;
+            Ok(super::cook::project_cook_observation(&store, &selected))
+        })
+        .unwrap_or_else(|_| record.clone())
+}
+
 fn discovery_run(
     record: AgentTaskRunRecord,
     live: Option<&BTreeSet<Uuid>>,
@@ -1381,16 +1409,20 @@ fn discovery_run(
     };
     let command_prefix = format!("{homeboy_prefix} agent-task");
 
+    // A mission's dispatcher completing is not the Cook completing. Use the
+    // same latest-attempt resolution and outcome projection as status, while
+    // preserving the physical row identity for keyset pagination.
+    let outcome = discovery_outcome(&record);
     AgentTaskDiscoveryRun {
         run_id: run_id.clone(),
         branch: metadata_string(&record.metadata, "branch")
             .or_else(|| metadata_string(&record.metadata, "worktree_branch")),
-        state: record.state(),
+        state: outcome.state(),
         repo: identity.repo,
         component,
         workspace: identity.workspace,
         task_url: identity.task_url,
-        counts: discovery_counts(&record.tasks),
+        counts: discovery_counts(&outcome.tasks),
         submitted_at: record.submitted_at,
         updated_at: record.updated_at,
         runner_id,
@@ -1616,6 +1648,7 @@ mod tests {
             workspace: None,
             task_url: None,
             submitted_after: None,
+            resolved_submitted_after: None,
             state: Some("queued".to_string()),
             placement: None,
             parent_id: None,
