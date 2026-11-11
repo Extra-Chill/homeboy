@@ -41,26 +41,10 @@ pub(crate) struct UsageCapSkip {
     pub(crate) exhausted: bool,
 }
 
-fn deferred_timeout_outcome(task_id: &str, timeout_ms: u64, source: &str) -> AgentTaskOutcome {
-    AgentTaskOutcome {
-        task_id: task_id.to_string(),
-        status: AgentTaskOutcomeStatus::Timeout,
-        summary: Some(format!("provider exceeded timeout_ms={timeout_ms}")),
-        failure_classification: Some(AgentTaskFailureClassification::Timeout),
-        diagnostics: vec![AgentTaskDiagnostic {
-            class: source.to_string(),
-            message: format!("provider exceeded timeout_ms={timeout_ms}"),
-            data: serde_json::json!({ "timeout_ms": timeout_ms }),
-        }],
-        ..Default::default()
-    }
-}
-
 impl AgentTaskScheduleSupport {
     pub(super) fn next_dispatchable_index(
         queued: &VecDeque<ScheduledTask>,
         running: &[RunningTask],
-        quarantined: &[QuarantinedTask],
         per_executor_concurrency: &HashMap<String, usize>,
         per_model_concurrency: &HashMap<String, usize>,
         resource_budget: &AgentTaskResourceBudget,
@@ -68,7 +52,7 @@ impl AgentTaskScheduleSupport {
         queued.iter().position(|task| {
             // An existing workspace is mutable executor state. Keep one task at
             // a time in that directory so a commit range belongs to one task.
-            if workspace_is_busy(task, running, quarantined) {
+            if workspace_is_busy(task, running) {
                 return false;
             }
 
@@ -273,7 +257,6 @@ impl AgentTaskScheduleSupport {
     pub(super) fn backpressure_kind(
         queued: &VecDeque<ScheduledTask>,
         running: &[RunningTask],
-        quarantined: &[QuarantinedTask],
         per_executor_concurrency: &HashMap<String, usize>,
         per_model_concurrency: &HashMap<String, usize>,
         resource_budget: &AgentTaskResourceBudget,
@@ -314,8 +297,8 @@ impl AgentTaskScheduleSupport {
             return "resource_budget";
         }
 
-        if workspace_is_busy(task, running, quarantined) {
-            return "workspace_quarantined";
+        if workspace_is_busy(task, running) {
+            return "workspace_busy";
         }
 
         if resource_is_busy(task, running).is_some() {
@@ -405,68 +388,68 @@ impl AgentTaskScheduleSupport {
         ));
     }
 
-    pub(super) fn expire_timed_out_tasks(
+    /// Cancel every task whose deadline has passed. Its provider observes the
+    /// task token and terminates its process group, so the scheduler simply
+    /// awaits the result and harvests the attempt like any other completion.
+    pub(super) fn cancel_expired_tasks(
+        running: &mut [RunningTask],
+        events: &mut Vec<AgentTaskProgressEvent>,
+    ) {
+        for task in running {
+            let expired = task
+                .timeout_ms
+                .is_some_and(|ms| task.started_at.elapsed() > Duration::from_millis(ms));
+            if !expired || task.timeout_cancel_requested {
+                continue;
+            }
+            task.cancellation.cancel();
+            task.timeout_cancel_requested = true;
+            events.push(event(
+                &task.task_id,
+                AgentTaskState::Running,
+                task.attempt,
+                Some("deadline expired; provider cancellation requested".to_string()),
+            ));
+        }
+    }
+
+    /// First-green selected a winner: stop every sibling and wait for its
+    /// provider to exit so its checkout and scratch are released before the
+    /// run reports. Siblings record a timeout, never a candidate.
+    pub(super) fn stop_unselected_candidates(
         running: &mut Vec<RunningTask>,
-        quarantined: &mut Vec<QuarantinedTask>,
         outcomes: &mut Vec<AgentTaskOutcome>,
         events: &mut Vec<AgentTaskProgressEvent>,
         lifecycle_store: Option<&crate::agent_task_lifecycle::AgentTaskLifecycleStore>,
     ) {
-        let mut index = 0;
-        while index < running.len() {
-            let Some(timeout_ms) = running[index].timeout_ms else {
-                index += 1;
-                continue;
+        for task in running.iter() {
+            task.cancellation.cancel();
+        }
+        for mut task in running.drain(..) {
+            if let Some(join_handle) = task.join_handle.take() {
+                let _ = join_handle.join();
+            }
+            let outcome = AgentTaskOutcome {
+                task_id: task.task_id.clone(),
+                status: AgentTaskOutcomeStatus::Timeout,
+                summary: Some("stopped after another candidate was selected".to_string()),
+                failure_classification: Some(AgentTaskFailureClassification::Timeout),
+                diagnostics: vec![AgentTaskDiagnostic {
+                    class: "agent_task.candidate_not_selected".to_string(),
+                    message: "first-green selected another candidate".to_string(),
+                    data: Value::Null,
+                }],
+                ..Default::default()
             };
-            let elapsed = running[index].started_at.elapsed();
-            if elapsed <= Duration::from_millis(timeout_ms) {
-                index += 1;
-                continue;
+            if let (Some(store), Some(run_id)) = (lifecycle_store, task.run_id.as_deref()) {
+                let _ = store.record_provider_execution_terminal(
+                    run_id,
+                    &task.task_id,
+                    task.attempt,
+                    "cancelled",
+                );
             }
-            if !running[index].timeout_cancel_requested {
-                running[index].cancellation.cancel();
-                running[index].timeout_cancel_requested = true;
-                events.push(event(
-                    &running[index].task_id,
-                    AgentTaskState::Running,
-                    running[index].attempt,
-                    Some(
-                        "deadline expired; cancellation requested and bounded grace started"
-                            .to_string(),
-                    ),
-                ));
-                index += 1;
-                continue;
-            }
-            if elapsed <= timeout_with_grace(timeout_ms) {
-                index += 1;
-                continue;
-            }
-
-            let mut task = running.remove(index);
-            let mut outcome =
-                deferred_timeout_outcome(&task.task_id, timeout_ms, "scheduler_timeout");
-            outcome.diagnostics.push(AgentTaskDiagnostic {
-                class: "agent_task.deferred_cleanup".to_string(),
-                message: "grace expired; deferred cleanup owns the still-running attempt workspace".to_string(),
-                data: serde_json::json!({ "cleanup": "deferred_cleanup_pending", "grace_ms": timeout_with_grace(timeout_ms).as_millis() }),
-            });
-            let action_path = match super::deferred_cleanup_action_artifact(&task) {
-                Ok(action) => {
-                    let path = action.path.clone().map(std::path::PathBuf::from);
-                    outcome.artifacts.push(action);
-                    path
-                }
-                Err(error) => {
-                    outcome.diagnostics.push(AgentTaskDiagnostic {
-                        class: "agent_task.deferred_cleanup_action_failed".to_string(),
-                        message: "could not persist deferred cleanup action".to_string(),
-                        data: serde_json::json!({ "error": format!("{error:?}") }),
-                    });
-                    None
-                }
-            };
-            outcome.metadata = serde_json::json!({ "deferred_cleanup_pending": true });
+            let _ = super::engine::release_scratch(&task.scratch, "cancelled", &outcome);
             events.push(event(
                 &task.task_id,
                 AgentTaskState::from_outcome_status(outcome.status),
@@ -474,89 +457,6 @@ impl AgentTaskScheduleSupport {
                 outcome.summary.clone(),
             ));
             outcomes.push(outcome);
-            quarantined.push(QuarantinedTask {
-                workspace_key: task.workspace_key.clone(),
-            });
-            let lifecycle_store = lifecycle_store.cloned();
-            if let Some(join_handle) = task.join_handle.take() {
-                // Deferred cleanup outlives the scheduler thread, so it must
-                // carry the caller's route to keep recovery attributable.
-                let notification_route = homeboy_core::notification_route::capture();
-                std::thread::spawn(move || {
-                    notification_route.bind(|| {
-                        let joined = join_handle
-                            .join()
-                            .map_err(|_| "provider worker panicked".to_string());
-                        let mut recovered = deferred_timeout_outcome(
-                            &task.task_id,
-                            task.timeout_ms.unwrap_or_default(),
-                            "deferred_cleanup",
-                        );
-                        // A completed join proves the provider no longer owns the
-                        // checkout, so its committed candidate is safe to harvest.
-                        recovered.status = AgentTaskOutcomeStatus::Succeeded;
-                        recovered.failure_classification = None;
-                        let harvest = joined.and_then(|_| {
-                            super::harvest_candidate_commit_in_store(
-                                &mut recovered,
-                                &task,
-                                lifecycle_store.as_ref(),
-                            )
-                            .map_err(|error| format!("{error:?}"))
-                        });
-                        if harvest.is_ok() {
-                            super::mark_timeout_workspace_candidates_incomplete(&mut recovered);
-                            // The provider has exited, so runtime artifact discovery can no
-                            // longer race its writes to the isolated attempt workspace.
-                            Self::reconcile_timeout_artifacts(
-                                &mut recovered,
-                                &task,
-                                "deferred_cleanup",
-                            );
-                        }
-                        let cleanup = harvest.and_then(|_| {
-                            task._attempt_workspace
-                                .as_ref()
-                                .map(|workspace| workspace.cleanup())
-                                .unwrap_or(Ok(()))
-                        });
-                        // Publish terminal execution ownership before making the
-                        // cleanup receipt observable. A terminal receipt must
-                        // never authorize a retry while the durable provider
-                        // ledger still says this owner is running.
-                        if let (Some(store), Some(run_id)) =
-                            (lifecycle_store.as_ref(), task.run_id.as_deref())
-                        {
-                            let _ = store.record_provider_execution_terminal(
-                                run_id,
-                                &task.task_id,
-                                task.attempt,
-                                "timed_out",
-                            );
-                        }
-                        let receipt = action_path.as_deref().map_or(
-                            Err("deferred cleanup descriptor was not persisted".to_string()),
-                            |action_path| {
-                                super::complete_deferred_cleanup_recovery(
-                                    action_path,
-                                    &recovered,
-                                    cleanup,
-                                )
-                            },
-                        );
-                        // Keep the scratch lease active until both checkout
-                        // cleanup and its durable receipt have reached a
-                        // terminal state. A released lease is reclaimable.
-                        if receipt.is_ok() {
-                            let _ = super::engine::release_scratch(
-                                &task.scratch,
-                                "scheduler_timeout_completion",
-                                &recovered,
-                            );
-                        }
-                    })
-                });
-            }
         }
     }
 

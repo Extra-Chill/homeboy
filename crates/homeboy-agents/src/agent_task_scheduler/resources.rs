@@ -5,22 +5,13 @@ use serde_json::Value;
 
 use super::*;
 
-pub(super) fn workspace_is_busy(
-    task: &ScheduledTask,
-    running: &[RunningTask],
-    quarantined: &[QuarantinedTask],
-) -> bool {
+pub(super) fn workspace_is_busy(task: &ScheduledTask, running: &[RunningTask]) -> bool {
     let Some(workspace) = task.workspace_key.as_deref() else {
         return false;
     };
     running
         .iter()
         .filter_map(|task| task.workspace_key.as_deref())
-        .chain(
-            quarantined
-                .iter()
-                .filter_map(|task| task.workspace_key.as_deref()),
-        )
         .any(|running_workspace| workspace_keys_overlap(running_workspace, workspace))
 }
 
@@ -46,19 +37,6 @@ pub(super) fn resource_is_busy(
 }
 
 impl AgentTaskScheduleSupport {
-    pub(super) fn workspace_is_quarantined(
-        task: &ScheduledTask,
-        quarantined: &[QuarantinedTask],
-    ) -> bool {
-        let Some(workspace) = task.workspace_key.as_deref() else {
-            return false;
-        };
-        quarantined
-            .iter()
-            .filter_map(|task| task.workspace_key.as_deref())
-            .any(|quarantined_workspace| workspace_keys_overlap(quarantined_workspace, workspace))
-    }
-
     pub(crate) fn workspace_key(request: &AgentTaskRequest) -> Option<String> {
         let root = request.workspace.root.as_deref()?;
         let git_identity = Command::new("git")

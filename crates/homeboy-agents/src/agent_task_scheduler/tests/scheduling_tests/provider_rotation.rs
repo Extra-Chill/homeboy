@@ -1855,11 +1855,7 @@ mod provider_rotation_tests {
         let mut plan = plan_with_tasks(1);
         // The first worker returns only after the scheduler reaches the normal
         // timeout cancellation path, so test scheduling cannot decide whether
-        // this is a timeout or a successful attempt. The cancelled worker must
-        // still return inside the timeout grace (timeout/10, at least 100ms),
-        // or the scheduler takes the deferred-cleanup path, which does not
-        // rotate. A 500ms timeout left a 100ms grace that loaded CI runners
-        // missed (#17410); 5s leaves 500ms.
+        // this is a timeout or a successful attempt.
         plan.tasks[0].limits.timeout_ms = Some(5_000);
         plan.options.rotation = Some(rotation_policy(vec![entry("fallback-backend-a")]));
         enable_rotation(&mut plan);

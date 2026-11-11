@@ -2,7 +2,7 @@
 //! path wrote it (#15718).
 
 use super::*;
-use crate::agent_task::{AgentTaskArtifact, AgentTaskCandidate, AgentTaskOutcomeStatus};
+use crate::agent_task::{AgentTaskCandidate, AgentTaskOutcomeStatus};
 use crate::agent_task_scheduler::{
     AgentTaskAggregate, AgentTaskExecutionContext, AgentTaskExecutorAdapter, AgentTaskScheduler,
 };
@@ -78,7 +78,7 @@ fn status_totals_state(
 }
 
 #[test]
-fn mixed_outcomes_keep_status_and_totals_through_deferred_candidate_reconciliation() {
+fn mixed_scheduler_outcomes_keep_status_and_totals() {
     with_isolated_home(|home| {
         let store = AgentTaskLifecycleStore::from_environment().expect("store");
         let candidate_root = home.path().join("candidate-repo");
@@ -120,50 +120,6 @@ fn mixed_outcomes_keep_status_and_totals_through_deferred_candidate_reconciliati
         assert_eq!(before.1.candidate_recoverable, 1);
         assert_eq!(before.1.recoverable_candidates, 1);
         assert_eq!(before.2, AgentTaskRunState::Succeeded);
-
-        // Deferred-candidate path: the same scheduler aggregate, written while
-        // `task-b` had timed out, is rewritten once its deferred cleanup
-        // recovers the candidate.
-        let run_id = "mixed-deferred";
-        let descriptor = home.path().join("deferred-cleanup.json");
-        fs::write(
-            &descriptor,
-            serde_json::to_vec(&json!({
-                "schema": "homeboy/agent-task-deferred-cleanup/v1",
-                "run_id": run_id,
-                "task_id": "task-b",
-                "attempt": 1,
-                "status": "candidate_recovered",
-                "candidate": candidate,
-            }))
-            .expect("descriptor json"),
-        )
-        .expect("write descriptor");
-        let mut timed_out = scheduled.clone();
-        let task_b = &mut timed_out.outcomes[1];
-        task_b.status = AgentTaskOutcomeStatus::Timeout;
-        task_b.candidate = None;
-        task_b.artifacts.push(AgentTaskArtifact {
-            schema: crate::agent_task::AGENT_TASK_ARTIFACT_SCHEMA.to_string(),
-            id: "deferred-cleanup".to_string(),
-            kind: "cleanup_action".to_string(),
-            role: Some("cleanup_action".to_string()),
-            path: Some(descriptor.display().to_string()),
-            metadata: json!({ "run_id": run_id, "task_id": "task-b", "attempt": 1 }),
-            ..Default::default()
-        });
-        timed_out.totals = AgentTaskAggregateTotals::from_outcomes(2, &timed_out.outcomes);
-        store
-            .submit_plan_with_runtime_admission(&plan, run_id, |_| Ok(json!({})))
-            .expect("submit deferred run");
-        record_run_aggregate_in_store(&store, run_id, &plan, &timed_out)
-            .expect("record timed-out aggregate");
-
-        assert!(reconcile_deferred_candidate_in_store(&store, run_id).expect("reconcile"));
-
-        let reconciled = store.read_aggregate(run_id).expect("reconciled aggregate");
-        assert_eq!(statuses(&reconciled), mixed);
-        assert_eq!(status_totals_state(&store, run_id), before);
     });
 }
 

@@ -42,7 +42,6 @@ pub use crate::agent_task_schedule::{
     AgentTaskResourceBudgetStatus, AgentTaskRetryPolicy, AgentTaskScheduleOptions, AgentTaskState,
     AGENT_TASK_AGGREGATE_SCHEMA, AGENT_TASK_PLAN_SCHEMA,
 };
-use crate::agent_task_timeout::timeout_with_grace;
 #[cfg(test)]
 pub(crate) use attempt_workspace::set_snapshot_fence_test_hook;
 pub use attempt_workspace::HarvestExecutionContext;
@@ -55,7 +54,7 @@ use candidate_adoption::{
     validate_and_apply_candidate_adoption,
 };
 pub use engine::*;
-use engine::{QuarantinedTask, ResourceWait, RunningTask, ScheduledTask};
+use engine::{ResourceWait, RunningTask, ScheduledTask};
 use harvest::mark_timeout_workspace_candidates_incomplete;
 pub(crate) use harvest::{candidate_from_workspace, git_output, HarvestError};
 use harvest::{
