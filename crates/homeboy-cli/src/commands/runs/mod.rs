@@ -97,9 +97,7 @@ use types::DEFAULT_LIMIT;
 pub(crate) use types::{RunsListArgs, RunsListOutput};
 
 pub(super) use bench::{bench_numeric_metrics, run_contains_scenario};
-pub(crate) use resources::{
-    runs_resources, ResourceCleanupMode, RunsResourcesArgs, RunsResourcesOutput,
-};
+pub(crate) use resources::{runs_resources, RunsResourcesArgs, RunsResourcesOutput};
 
 // Test-only helpers consumed by sibling test modules via `super::runs::*` / `super::*`.
 #[cfg(test)]

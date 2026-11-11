@@ -5272,7 +5272,7 @@ mod tests {
                 RunsResourcesOutput {
                     command: "runs.resources",
                     schema: "homeboy/resource-lifecycle-index/v1",
-                    mode: super::super::runs::ResourceCleanupMode::DryRun,
+                    mode: serde_json::from_value(json!("dry_run")).unwrap(),
                     source_count: 1,
                     resource_count: count,
                     actionable_count: count,
