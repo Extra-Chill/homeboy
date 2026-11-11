@@ -124,6 +124,7 @@ fn lab_gate_public_error(error: &Error, artifact_ref: String) -> Error {
         "stage": error.details.get("stage"),
         "gate_disposition": error.details.get("gate_disposition"),
         "job_id": error.details.get("job_id"),
+        "readiness_reasons": error.details.get("readiness_reasons"),
         "artifact_ref": artifact_ref,
     });
     details["diagnostic"] = homeboy_core::redaction::redact_json(&serde_json::json!({

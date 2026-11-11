@@ -792,6 +792,12 @@ fn nonfresh_daemon_admission_refusal_names_its_failing_check() {
             error.message
         );
         assert_eq!(error.retryable, Some(retryable), "{check}");
+        // Queued work waits through exactly the retryable refusals (#17776).
+        assert_eq!(
+            homeboy_core::substrate_wait::is_transient_error(&error),
+            retryable,
+            "{check}"
+        );
         assert!(
             named["next_action"]
                 .as_str()

@@ -601,7 +601,15 @@ pub(super) fn dispatch(
     let mut setup_attempts = Vec::new();
     let mut receipt = None;
     for attempt in 0..2 {
-        let result = match active_transport().execute(cwd, request, supervision) {
+        // Admission can pass while the daemon republishes its lease; the
+        // gate never ran, so it waits like admission does (#17776).
+        let result = match homeboy_core::substrate_wait::wait_through(
+            "Lab gate execution",
+            homeboy_core::substrate_wait::SUBSTRATE_WAIT_DEADLINE,
+            || supervision.is_some_and(|policy| (policy.is_cancelled)()),
+            |_, _| {},
+            || active_transport().execute(cwd, request, supervision),
+        ) {
             Ok(receipt) => receipt,
             Err(error) => {
                 let error = gate_execute_unavailable(error, "transport", None);
@@ -2443,6 +2451,7 @@ mod tests {
         struct AdmissionTransport {
             previous: Arc<dyn LabGateTransport>,
             admissions: std::sync::Mutex<Vec<Option<LabGateAdmission>>>,
+            refusals: std::sync::Mutex<Vec<homeboy_core::Error>>,
             observed: Arc<std::sync::atomic::AtomicUsize>,
             executed: Arc<std::sync::atomic::AtomicUsize>,
         }
@@ -2481,6 +2490,9 @@ mod tests {
                 }
                 self.executed
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if let Some(refusal) = self.refusals.lock().unwrap().pop() {
+                    return Err(refusal);
+                }
                 execute_with_context(request.clone(), cwd, &runner_context(&request.runner_id))
             }
         }
@@ -2490,6 +2502,20 @@ mod tests {
             freshness,
             next_action: None,
         };
+        // Admission passed, then the exec preflight saw the daemon
+        // republishing its lease (agent-task-b4764127, #17776).
+        let lease_republishing = || {
+            homeboy_core::Error::validation_invalid_argument(
+                "runner",
+                "runner `admission-runner` has a non-fresh daemon admission session (lease_not_fresh: daemon freshness report publishes no lease)",
+                None,
+                None,
+            )
+            .with_retryable(true)
+        };
+        let mut republishing = lease_republishing();
+        republishing.details["readiness_reasons"] =
+            serde_json::json!(["daemon_freshness_unavailable"]);
         homeboy_core::test_support::with_isolated_home(|_| {
             let cases = [
                 (
@@ -2498,23 +2524,40 @@ mod tests {
                         None,
                         Some(LabGateAdmission::accepting()),
                     ],
+                    vec![],
+                    (3, 1),
                     true,
+                ),
+                (
+                    vec![Some(LabGateAdmission::accepting())],
+                    vec![republishing],
+                    (1, 2),
+                    true,
+                ),
+                (
+                    vec![Some(LabGateAdmission::accepting())],
+                    vec![lease_republishing().with_retryable(false)],
+                    (1, 1),
+                    false,
                 ),
                 (
                     vec![Some(refused(
                         &["not_connected", "active_jobs_unavailable"],
                         LabGateFreshness::NotObserved,
                     ))],
+                    vec![],
+                    (1, 0),
                     false,
                 ),
             ];
-            for (admissions, runs) in cases {
+            for (admissions, refusals, expected, runs) in cases {
                 let previous = active_transport();
                 let observed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
                 let executed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
                 register_lab_gate_transport(Arc::new(AdmissionTransport {
                     previous,
                     admissions: std::sync::Mutex::new(admissions),
+                    refusals: std::sync::Mutex::new(refusals),
                     observed: observed.clone(),
                     executed: executed.clone(),
                 }));
@@ -2532,17 +2575,17 @@ mod tests {
 
                 let observed = observed.load(std::sync::atomic::Ordering::SeqCst);
                 let executed = executed.load(std::sync::atomic::Ordering::SeqCst);
+                assert_eq!(
+                    (observed, executed),
+                    expected,
+                    "transient admission and execute refusals are waited out; hard ones are not"
+                );
                 if runs {
-                    assert_eq!(
-                        observed, 3,
-                        "pressure and probe timeouts are re-observed until accepting"
-                    );
-                    assert_eq!(executed, 1);
                     assert_eq!(report.status, AgentTaskGateStatus::Succeeded, "{report:?}");
                     assert_eq!(report.stdout, "executed");
+                } else if executed == 1 {
+                    assert_eq!(report.status, AgentTaskGateStatus::Unavailable);
                 } else {
-                    assert_eq!(observed, 1, "a disconnected runner is not re-observed");
-                    assert_eq!(executed, 0);
                     assert_eq!(report.status, AgentTaskGateStatus::Unavailable);
                     assert!(
                         report.stderr.contains(

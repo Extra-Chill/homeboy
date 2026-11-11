@@ -507,6 +507,18 @@ impl LabRunnerAdmissionRefusal {
         }
     }
 
+    /// The substrate readiness reason a retryable refusal clears with, so
+    /// queued work waits through it instead of terminalizing (#17776).
+    pub(crate) fn transient_reason(&self) -> Option<&'static str> {
+        match self {
+            Self::StaleDaemonUnverified { .. } => Some("daemon_unverified"),
+            Self::LeaseNotFresh {
+                transient: true, ..
+            } => Some("daemon_freshness_unavailable"),
+            _ => None,
+        }
+    }
+
     pub(crate) fn evidence(&self) -> String {
         match self {
             Self::StaleDaemonUnverified { probe_error } => format!(
