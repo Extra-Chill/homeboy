@@ -115,4 +115,10 @@ fn concurrent_admissions_of_one_input_share_its_snapshot() {
         assert!(result.is_ok(), "{result:?}");
     }
     input.verify(&input.path_in(&root).unwrap()).unwrap();
+    // Snapshots are sealed read-only; unseal so the temp dir can be removed.
+    std::process::Command::new("chmod")
+        .args(["-R", "u+w"])
+        .arg(&root)
+        .status()
+        .unwrap();
 }
