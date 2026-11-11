@@ -667,7 +667,9 @@ mod tests {
             let _directory = EnvVarGuard::set("PI_CODING_AGENT_DIR", directory);
             let plan = admitted_cook_environment(Vec::new()).expect("admit environment");
             assert_eq!(
-                plan.public_env.get("PI_CODING_AGENT_DIR").map(String::as_str),
+                plan.public_env
+                    .get("PI_CODING_AGENT_DIR")
+                    .map(String::as_str),
                 Some(directory),
                 "env_clear must not switch the detached child's Pi catalog"
             );
