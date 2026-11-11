@@ -2238,12 +2238,18 @@ pub(crate) fn finalize_or_load_cook_pr_with_backend_with_stores<
         ));
     }
     // The unverified draft carries no review form, so it reads none.
+    let mut invalid_form = None;
     let review_failure = if unverified {
         None
     } else {
         let aggregate = lifecycle_store.read_aggregate(successful_run_id)?;
         match super::cook::review_form_from_aggregate(&aggregate) {
-            Ok(Some(form)) => form.validate().err().map(|error| error.to_string()),
+            Ok(Some(form)) => {
+                let failure = form.validate().err().map(|error| error.to_string());
+                // The draft still carries the agent's own title and summary.
+                invalid_form = failure.is_some().then_some(form);
+                failure
+            }
             Ok(None) => Some(
                 aggregate
                     .outcomes
@@ -2268,7 +2274,7 @@ pub(crate) fn finalize_or_load_cook_pr_with_backend_with_stores<
             lifecycle_store,
             options,
             &promotion,
-            None,
+            invalid_form.as_ref(),
             0,
             successful_run_id,
             &[],

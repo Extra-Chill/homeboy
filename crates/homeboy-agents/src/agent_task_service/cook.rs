@@ -7848,7 +7848,15 @@ pub(super) fn publish_incomplete_draft<
     // A gated draft whose gates are all inherited failures has nothing verified.
     let unverified = review_form_unavailable
         && crate::agent_task_review_dossier::verified_commands_from_promotion(promotion).is_empty();
-    let title = if options.finalization.title.is_empty() {
+    let title = if let Some(title) = options
+        .finalization
+        .title
+        .is_empty()
+        .then(|| form.and_then(|form| form.specific_title()))
+        .flatten()
+    {
+        title.to_string()
+    } else if options.finalization.title.is_empty() {
         format!(
             "fix(cook): {} {}",
             match (review_form_unavailable, unverified) {
@@ -7866,12 +7874,29 @@ pub(super) fn publish_incomplete_draft<
         (true, false) => "review: unavailable\n\nReview form unavailable: completion not assessed; deterministic gates passed",
         (false, _) => "Incomplete candidate; deterministic verification failed.",
     };
-    let mut body = format!(
+    let summary = form
+        .filter(|form| !form.summary.trim().is_empty())
+        .map(|form| {
+            let mut summary = format!("{}\n", form.summary.trim());
+            for change in form
+                .what_changed
+                .iter()
+                .filter(|line| !line.trim().is_empty())
+            {
+                summary.push_str(&format!("- {}\n", change.trim()));
+            }
+            summary
+        });
+    let mut body = summary
+        .map(|summary| format!("{summary}\n"))
+        .unwrap_or_default();
+    body.push_str(&format!(
         "{note}\n\nTask: {}\n\nincomplete_reason: {}\n",
         options.workspace.source_refs.join("\n"),
         form.map(|form| form.incomplete_reason.as_str())
+            .filter(|reason| !reason.trim().is_empty())
             .unwrap_or("completion not assessed")
-    );
+    ));
     body.push_str(&format!(
         "\nCandidate from attempt {attempt} (`{run_id}`).\n"
     ));
@@ -7898,7 +7923,16 @@ pub(super) fn publish_incomplete_draft<
     }
     for gate in &promotion.deterministic_gates {
         body.push_str(&format!("\nGate: {} — {:?}\n", gate.id, gate.status));
-        let output = format!("{}\n{}", gate.stdout, gate.stderr);
+        // A passing gate's status is the evidence; only a failure's output
+        // helps the reviewer, and it is reduced to plain text.
+        if matches!(
+            gate.status,
+            crate::agent_task_gate::AgentTaskGateStatus::Succeeded
+                | crate::agent_task_gate::AgentTaskGateStatus::Skipped
+        ) {
+            continue;
+        }
+        let output = plain_text(&format!("{}\n{}", gate.stdout, gate.stderr));
         let tail = output
             .lines()
             .rev()
@@ -7981,6 +8015,29 @@ pub(super) fn publish_incomplete_draft<
         )?,
     };
     Ok(serde_json::json!({"status": "draft_published", "pr_number": pr.number, "pr_url": pr.url}))
+}
+
+/// Terminal output without ANSI escape sequences or other control characters.
+fn plain_text(output: &str) -> String {
+    let mut plain = String::with_capacity(output.len());
+    let mut chars = output.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' {
+            // CSI sequences end at a byte in `@`..=`~`; other escapes are two chars.
+            if chars.next_if_eq(&'[').is_some() {
+                for next in chars.by_ref() {
+                    if ('@'..='~').contains(&next) {
+                        break;
+                    }
+                }
+            } else {
+                chars.next();
+            }
+        } else if ch == '\n' || ch == '\t' || !ch.is_control() {
+            plain.push(ch);
+        }
+    }
+    plain
 }
 
 /// A deferred gate never executed, so the stop reason names each typed cause
