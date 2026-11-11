@@ -4119,9 +4119,14 @@ exit 2
 printf '%s\n' "$*" >> "$HOMEBOY_FAKE_GH_LOG"
 case "$1 $2" in
   "auth status"|"repo view") printf '%s\n' '{"nameWithOwner":"example/manual-finalization"}' ;;
-  "pr list") printf '%s\n' '[]' ;;
+  "pr list")
+    case "$*" in
+      *"--state open"*) grep -q '^pr create ' "$HOMEBOY_FAKE_GH_LOG" && printf '%s\n' '[{"number":1,"title":"Manual continuation","url":"https://github.com/example/manual-finalization/pull/1","state":"OPEN","isDraft":false,"baseRefName":"main","headRefName":"feature","headRepositoryOwner":{"login":"example"}}]' || printf '%s\n' '[]' ;;
+      *) printf '%s\n' '[]' ;;
+    esac ;;
   "pr create") printf '%s\n' 'https://github.com/example/manual-finalization/pull/1' ;;
   "pr view") sha=$(git rev-parse HEAD); printf '{"baseRefName":"main","headRefName":"feature","headRefOid":"%s","headRepository":{"name":"manual-finalization"},"headRepositoryOwner":{"login":"example"}}\n' "$sha" ;;
+  "api -X") printf '%s\n' '{"number":1,"html_url":"https://github.com/example/manual-finalization/pull/1"}' ;;
   *) [ "$1" = "--version" ] || exit 2 ;;
 esac
 "#, 0o755)
