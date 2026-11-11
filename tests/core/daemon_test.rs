@@ -3229,9 +3229,7 @@ fn exec_commit_failure_keeps_primary_error_and_restart_recovers_failed_owner_rol
     claims
         .fail_next_owner_releases(&workspace, 1)
         .expect("inject owner release failure");
-    // The endpoint's pre-dispatch reconciler writes first; fail the following
-    // durable queue commit, after owner registration.
-    store.skip_next_durable_writes(1);
+    // Fail the durable queue commit, after owner registration.
     store.fail_next_durable_writes(1);
 
     // Exercise the daemon's actual `/exec` endpoint path after it has registered

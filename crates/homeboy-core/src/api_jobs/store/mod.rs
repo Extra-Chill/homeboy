@@ -74,8 +74,6 @@ pub struct JobStore {
     terminal_write_failures: Arc<AtomicU64>,
     #[cfg(test)]
     durable_write_failures: Arc<AtomicU64>,
-    #[cfg(test)]
-    durable_write_skips: Arc<AtomicU64>,
 }
 
 impl JobStore {
@@ -620,17 +618,11 @@ impl JobStore {
         };
         #[cfg(test)]
         if self
-            .durable_write_skips
+            .durable_write_failures
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
                 remaining.checked_sub(1)
             })
-            .is_err()
-            && self
-                .durable_write_failures
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
-                    remaining.checked_sub(1)
-                })
-                .is_ok()
+            .is_ok()
         {
             return Err(Error::internal_io(
                 "injected durable store write failure",
@@ -909,8 +901,6 @@ impl JobStore {
             terminal_write_failures: Arc::new(AtomicU64::new(0)),
             #[cfg(test)]
             durable_write_failures: Arc::new(AtomicU64::new(0)),
-            #[cfg(test)]
-            durable_write_skips: Arc::new(AtomicU64::new(0)),
             daemon_freshness_snapshot: Arc::default(),
             health_revision: Arc::default(),
         };
@@ -993,8 +983,6 @@ impl JobStore {
             terminal_write_failures: Arc::new(AtomicU64::new(0)),
             #[cfg(test)]
             durable_write_failures: Arc::new(AtomicU64::new(0)),
-            #[cfg(test)]
-            durable_write_skips: Arc::new(AtomicU64::new(0)),
             daemon_freshness_snapshot: Arc::default(),
             health_revision: Arc::default(),
         };
@@ -1837,11 +1825,6 @@ impl JobStore {
     #[cfg(test)]
     pub(crate) fn fail_next_durable_writes(&self, count: u64) {
         self.durable_write_failures.store(count, Ordering::SeqCst);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn skip_next_durable_writes(&self, count: u64) {
-        self.durable_write_skips.store(count, Ordering::SeqCst);
     }
 
     /// Whether another thread holds the in-memory store lock, as a durable
