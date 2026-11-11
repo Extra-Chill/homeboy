@@ -15,8 +15,7 @@ use super::super::cook_promotion::{
     finalize_or_load_cook_pr_with_backend, finalize_or_load_cook_pr_with_backend_with_stores,
     mark_replacement_gate_execution_started, persisted_promotion_for_attempt,
     persisted_promotion_for_attempt_in_store, preflight_cook_promotion_in_store,
-    prepare_manual_finalization_identity, promote_attempt_in_store,
-    promote_or_load_attempt_in_store, promotion_executed_model_in_store,
+    promote_attempt_in_store, promote_or_load_attempt_in_store, promotion_executed_model_in_store,
     record_replacement_gate_proof, recover_cook_pr_with_backend,
     recover_cook_pr_with_backend_and_review_form, selected_candidate_task_id_in_store,
     verify_replacement_gates, AgentTaskSuppliedReviewForm, CookReportInput,
@@ -21177,114 +21176,6 @@ fn cook_promotion_finalizes_with_form_title_and_durable_receipts() {
     );
 }
 
-#[test]
-fn manual_finalization_identity_resolves_cook_and_failed_attempt_or_reserves_fresh_id() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let cook_id = "cook-11334";
-        let attempt_id = "cook-11334-attempt-1";
-        let mut options = batch_cook_options(cook_id, Arc::new(AcceptedDetachedAttemptDispatcher));
-        options.identity.initial_run_id = attempt_id.to_string();
-        persist_initial_recipe(&options).expect("persist recipe");
-        agent_task_lifecycle::submit_plan(&options.identity.initial_plan, Some(attempt_id))
-            .expect("submit attempt");
-        agent_task_lifecycle::record_pre_execution_failure(
-            attempt_id,
-            &options.identity.initial_plan,
-            "test",
-            &homeboy_core::Error::invalid_argument("test", "failed Cook attempt"),
-        )
-        .expect("fail attempt");
-
-        assert_eq!(
-            prepare_manual_finalization_identity(cook_id).expect("Cook ID resolves"),
-            attempt_id
-        );
-        assert_eq!(
-            prepare_manual_finalization_identity(attempt_id).expect("failed attempt resolves"),
-            attempt_id
-        );
-
-        let fresh_id = "manual-11334";
-        assert_eq!(
-            prepare_manual_finalization_identity(fresh_id).expect("fresh ID reserves a record"),
-            fresh_id
-        );
-        let fresh =
-            agent_task_lifecycle::reconcile_status(fresh_id).expect("reserved finalization record");
-        assert_eq!(fresh.metadata["manual_finalization_identity"], true);
-        assert_eq!(
-            prepare_manual_finalization_identity(fresh_id)
-                .expect("reserved identity remains reusable"),
-            fresh_id
-        );
-    });
-}
-
-#[test]
-fn direct_manual_publication_failure_records_retry_and_successful_recovery_supersedes_it() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let run_id = "manual-publication-failure";
-        prepare_manual_finalization_identity(run_id).expect("reserve manual identity");
-        crate::agent_task_lifecycle::record_manual_finalization_retry(run_id)
-            .expect("persist direct retry dossier marker");
-        let error = homeboy_core::Error::validation_invalid_argument_with_evidence(
-            "publication",
-            "git push failed token=secret-value",
-            None,
-            None,
-            Some(homeboy_error::CommandEvidence {
-                command: "git add".to_string(),
-                cwd: None,
-                location: Some("local".to_string()),
-                exit_code: 17,
-                stdout: "index is locked".to_string(),
-                stderr: String::new(),
-                truncated: false,
-            }),
-        );
-
-        crate::agent_task_lifecycle::record_manual_finalization_failure(run_id, &error)
-            .expect("record publication failure");
-        let record = agent_task_lifecycle::reconcile_status(run_id).expect("failed manual record");
-        assert_eq!(record.state(), AgentTaskRunState::Failed);
-        assert_eq!(record.lifecycle.execution.state, RunExecutionState::Failed);
-        assert_eq!(
-            record.metadata["cook_delivery"]["artifacts"]["manual"]["failure"]["error"]["details"]
-                ["command_evidence"]["command"],
-            "git add"
-        );
-        assert_eq!(
-            record.metadata["cook_delivery"]["artifacts"]["manual"]["failure"]["error"]["details"]
-                ["command_evidence"]["stdout"],
-            "index is locked"
-        );
-        assert_eq!(
-            record.metadata["cook_delivery"]["artifacts"]["manual"]["retry"],
-            true
-        );
-        assert!(
-            !record.metadata["cook_delivery"]["artifacts"]["manual"]["failure"]
-                .to_string()
-                .contains("secret-value")
-        );
-
-        crate::agent_task_lifecycle::record_manual_finalization_receipt(
-            run_id,
-            serde_json::json!({ "status": "review_ready", "run_id": run_id }),
-        )
-        .expect("record successful retry receipt");
-        let recovered =
-            agent_task_lifecycle::reconcile_status(run_id).expect("recovered manual record");
-        assert_eq!(recovered.state(), AgentTaskRunState::Succeeded);
-        assert_eq!(
-            recovered.lifecycle.execution.state,
-            RunExecutionState::Succeeded
-        );
-        assert!(recovered.metadata["cook_delivery"]["artifacts"]["manual"]["failure"].is_null());
-        assert!(recovered.metadata["cook_delivery"]["artifacts"]["manual"]["retry"].is_null());
-    });
-}
-
 /// Register a repository-root component and a nested component sharing one
 /// Git remote, plus a separate checkout with the identical remote: the
 /// overlapping-registration case where Cook carries its selected component
@@ -22261,22 +22152,6 @@ fn recovery_supplies_missing_historical_review_form_without_provider_dispatch() 
             .metadata
             .get("recovery_review_form")
             .is_none());
-
-        agent_task_lifecycle::fail_next_record_write_for_test();
-        let mut failed_persistence_backend = CaptureBackend {
-            synthetic_gate_proof: Some(applied.clone()),
-            ..Default::default()
-        };
-        recover_cook_pr_with_backend_and_review_form(
-            cook_id,
-            Some(supplied_test_review_form()),
-            None,
-            Vec::new(),
-            false,
-            &mut failed_persistence_backend,
-        )
-        .expect_err("provenance persistence fails before publication");
-        assert!(!failed_persistence_backend.created);
 
         let mut failed_publication_backend = CaptureBackend {
             synthetic_gate_proof: Some(applied.clone()),

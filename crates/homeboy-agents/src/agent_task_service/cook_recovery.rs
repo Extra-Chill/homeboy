@@ -51,7 +51,7 @@ pub enum CookRecoveryStep {
     /// operator authorization (`recover --authorize-external-proof ...`).
     ReplaceGates,
     /// The verified candidate is unpublished; publish it from the durable Cook
-    /// record or validated manual-finalization intent.
+    /// record.
     Publish,
     /// The Cook produced no candidate patch, but the destination worktree's
     /// branch holds commits ahead of its recorded base: the operator's verified
@@ -166,10 +166,6 @@ pub(crate) struct CookRecoveryInputs<'a> {
     /// state is adoptable: the operator's committed work is the candidate the
     /// provider could not produce.
     pub adoptable_candidate_ref: Option<&'a str>,
-    /// A validated manual-finalization intent awaits publication and the
-    /// applied candidate holds a passing verdict: the operator's explicit
-    /// publication decision for this attempt.
-    pub manual_publication_pending: bool,
     /// The previous `recover` performed a step from this exact attempt and
     /// status without changing either (#17650).
     pub no_progress: Option<&'a CookRecoveryNoProgress>,
@@ -226,12 +222,6 @@ format!(
     }
     if inputs.blocking_claim {
         return CookRecoveryStep::Reconcile;
-    }
-    // A held claim precedes the operator's publication intent, and so does
-    // verification of an applied candidate without a passing verdict:
-    // publication refuses it, so selecting it would deadlock (#17494).
-    if inputs.manual_publication_pending {
-        return CookRecoveryStep::Publish;
     }
     // A publishable candidate whose agent declared the task incomplete stops
     // here whatever the gate status: rearming would replay provider work only
@@ -671,7 +661,7 @@ pub fn plan_cook_recovery(id: &str) -> Result<CookRecoveryPlan> {
             });
         }
     }
-    plan_cook_recovery_for_cook(id).or_else(|error| manual_finalization_plan(id).ok_or(error))
+    plan_cook_recovery_for_cook(id)
 }
 
 /// A Cook that failed before materializing (its admission failed) has no
@@ -702,27 +692,6 @@ fn unmaterialized_cook_recovery_plan(
                 "The Cook failed before materializing and recorded no admission request to replay; re-run the original Cook command.",
             )
         },
-    })
-}
-
-/// A durable manual-finalization record outside any readable Cook recipe:
-/// its only recovery is publishing the validated intent, which replays the
-/// recorded receipt once published.
-fn manual_finalization_plan(id: &str) -> Option<CookRecoveryPlan> {
-    if !super::manual_finalization_intent_recorded(id) {
-        return None;
-    }
-    let record = agent_task_lifecycle::exact_record(id).ok()?;
-    Some(CookRecoveryPlan {
-        cook_id: record
-            .metadata
-            .get("cook_id")
-            .and_then(Value::as_str)
-            .unwrap_or(id)
-            .to_string(),
-        run_id: id.to_string(),
-        status: cook_recovery_status(&record),
-        step: CookRecoveryStep::Publish,
     })
 }
 
@@ -948,7 +917,7 @@ fn recover_cook_once(
         plan.status = cook_recovery_status(&record);
         plan.step = CookRecoveryStep::Regate;
     }
-    // Ownership wins over every operator override and manual publication intent.
+    // Ownership wins over every operator override.
     // Report the durable claim and progress without touching admission or gates.
     let live_record = agent_task_lifecycle::exact_record(&plan.run_id).ok();
     if let Some((record, owner)) = live_record

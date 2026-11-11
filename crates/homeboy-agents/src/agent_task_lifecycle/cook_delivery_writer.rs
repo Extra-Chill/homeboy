@@ -1,7 +1,7 @@
 //! The single writer of the persisted `cook_delivery` record (#16049).
 //!
-//! Every delivery step (promotion, finalization, delivery blockers, manual
-//! publication and force-with-lease receipts) commits through
+//! Every Cook delivery step (promotion, finalization, delivery blockers and
+//! force-with-lease receipts) commits through
 //! [`record_cook_delivery`]. The step records its artifact in the record it
 //! read; the writer projects the delivery facts from the result, stores both
 //! as the versioned `cook_delivery` record, and moves the run state the
@@ -21,9 +21,6 @@ use homeboy_core::cook_status::CookStatus;
 pub(crate) enum CookDeliveryCommit {
     /// The run state follows the delivery (see [`CookDelivery::lifecycle`]).
     FollowDelivery,
-    /// The receipt terminalizes the run itself, e.g. a manual publication
-    /// receipt or failure.
-    Terminal(AgentTaskTerminalOutcome),
 }
 
 /// The `cook_delivery` record a delivery step updates.
@@ -69,7 +66,6 @@ pub(crate) fn record_cook_delivery(
             );
         }
         let next_state = match commit {
-            CookDeliveryCommit::Terminal(outcome) => Some(outcome.run_state()),
             CookDeliveryCommit::FollowDelivery => {
                 delivery_run_state(previous.as_ref(), delivery.as_ref(), current)
             }
