@@ -245,36 +245,6 @@ impl DaemonControllerJobService {
         start_controller_job(job_id, &self.job_store)
     }
 
-    /// A daemon handoff can close this listener between connect and submit. A
-    /// refused connection proves the daemon never received the request, so it
-    /// is resent to the replacement the serving lease names; the request's
-    /// idempotency key makes any replay reuse its job.
-    fn send_to_serving_daemon(
-        &self,
-        send: impl Fn(&str) -> reqwest::Result<reqwest::blocking::Response>,
-    ) -> Result<(String, reqwest::blocking::Response)> {
-        let deadline = std::time::Instant::now() + DAEMON_HANDOFF_WAIT;
-        let mut endpoint = self.endpoint.clone();
-        loop {
-            match send(&endpoint) {
-                Ok(response) => return Ok((endpoint, response)),
-                Err(error) if error.is_connect() && std::time::Instant::now() < deadline => {
-                    std::thread::sleep(Duration::from_millis(250));
-                    if let Ok(Some(state)) =
-                        validate_lease_file(&self.state_path).map(|lease| lease.state)
-                    {
-                        endpoint = format!("http://{}", state.address);
-                    }
-                }
-                Err(error) => {
-                    return Err(Error::internal_unexpected(format!(
-                        "submit local controller job: {error}"
-                    )))
-                }
-            }
-        }
-    }
-
     pub fn status(&self, job_id: &str) -> Result<crate::api_jobs::Job> {
         let id = Uuid::parse_str(job_id).map_err(|error| {
             Error::validation_invalid_argument("job_id", error.to_string(), None, None)
@@ -490,6 +460,36 @@ impl LocalControllerJobClient {
 
     /// Admit and start a typed durable controller job. The daemon, rather than
     /// the submitting CLI process, owns execution after this method returns.
+    /// A daemon handoff can close this listener between connect and submit. A
+    /// refused connection proves the daemon never received the request, so it
+    /// is resent to the replacement the serving lease names; the request's
+    /// idempotency key makes any replay reuse its job.
+    fn send_to_serving_daemon(
+        &self,
+        send: impl Fn(&str) -> reqwest::Result<reqwest::blocking::Response>,
+    ) -> Result<(String, reqwest::blocking::Response)> {
+        let deadline = std::time::Instant::now() + DAEMON_HANDOFF_WAIT;
+        let mut endpoint = self.endpoint.clone();
+        loop {
+            match send(&endpoint) {
+                Ok(response) => return Ok((endpoint, response)),
+                Err(error) if error.is_connect() && std::time::Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(250));
+                    if let Ok(Some(state)) =
+                        validate_lease_file(&self.state_path).map(|lease| lease.state)
+                    {
+                        endpoint = format!("http://{}", state.address);
+                    }
+                }
+                Err(error) => {
+                    return Err(Error::internal_unexpected(format!(
+                        "submit local controller job: {error}"
+                    )))
+                }
+            }
+        }
+    }
+
     pub fn submit(&self, request: serde_json::Value) -> Result<crate::api_jobs::Job> {
         Ok(self.submit_with_disposition(request)?.job)
     }
