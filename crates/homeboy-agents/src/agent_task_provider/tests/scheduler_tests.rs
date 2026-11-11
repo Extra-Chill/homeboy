@@ -1352,12 +1352,24 @@ fn stalled_provider_retains_declared_attempt_workspace_artifact() {
 #[test]
 fn provider_command_receives_executor_config_env() {
     let fake = super::super::test_pi::FakePi::new(&format!(
-        "test \"$HOMEBOY_AGENT_TASK_PROVIDER_ID\" = pi.agent-task-executor || exit 23\nprintf '%s' \"$HOMEBOY_AGENT_TASK_EXECUTOR_CONFIG_JSON\" | grep configured >/dev/null || exit 24\n{}",
+        "test \"$HOMEBOY_AGENT_TASK_PROVIDER_ID\" = pi.agent-task-executor || exit 23\nprintf '%s' \"$HOMEBOY_AGENT_TASK_EXECUTOR_CONFIG_JSON\" | grep configured >/dev/null || exit 24\nprintf '%s' \"$HOMEBOY_AGENT_TASK_EXECUTOR_CONFIG_JSON\" | grep /evidence/site >/dev/null || exit 25\n{}",
         super::super::test_pi::FakePi::answer("pi.agent-task-executor"),
     ));
     let mut request = fake.request("task-config");
     let provider = fake.provider();
     request.executor.config["marker"] = json!("configured");
+    // A 2,000-file directory manifest is larger than one Linux environment
+    // string (128 KiB); the provider still spawns and sees the location (#17913).
+    let entries: Vec<Value> = (0..2000)
+        .map(|index| json!({ "path": format!("pages/page-{index:04}/index.html"), "sha256": "0".repeat(64), "size_bytes": 1024 }))
+        .collect();
+    request.executor.config["evidence_inputs"] = json!([{
+        "id": "site",
+        "path": "/evidence/site",
+        "read_only": true,
+        "transport": "directory",
+        "entries": entries,
+    }]);
     let scheduler = AgentTaskScheduler::new(Arc::new(
         ExtensionProviderAgentTaskExecutor::with_providers(vec![provider]),
     ));
