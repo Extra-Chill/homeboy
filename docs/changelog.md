@@ -4,6 +4,15 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.458.28] - 2026-11-11
+
+### Changed
+- deterministic model provenance from the run record
+
+### Fixed
+- reuse a gate input snapshot published by a concurrent admission
+- hydrate the dependency roots baseline gates name
+
 ## [0.458.27] - 2026-11-11
 
 ### Fixed
