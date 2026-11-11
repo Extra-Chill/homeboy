@@ -4,6 +4,13 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.458.16] - 2026-11-11
+
+### Changed
+- report manifestless extension directories instead of refusing
+- Cook start survives a daemon handoff and names its transport failure
+- settle runs whose staging controller job already settled
+
 ## [0.458.15] - 2026-11-11
 
 ### Changed
