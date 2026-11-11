@@ -1053,7 +1053,7 @@ fn cancel_resolved_run_in_store(
                 json!({
                     "controller_job_id": controller_job_id,
                     "status": controller_job_status,
-                    "phase": if controller_job_status == homeboy_core::api_jobs::JobStatus::Cancelled { "cancelled" } else { "requested" },
+                    "phase": if controller_job_status == homeboy_core::api_jobs::JobStatus::Cancelled { "cancelled" } else if controller_job_status.is_terminal() { "settled" } else { "requested" },
                     "reason": cancellation_reason,
                     "recovery_action": recovery_action,
                     "requested_at": requested_at,
@@ -1074,10 +1074,14 @@ fn cancel_resolved_run_in_store(
             );
         };
         record = updated;
-        if controller_job_status != homeboy_core::api_jobs::JobStatus::Cancelled {
+        if !controller_job_status.is_terminal() {
             return Ok(CancelResolvedOutcome::Cancelled(record));
         }
-        true
+        // A cancelled job stopped everything it owned. A job that settled on its
+        // own before handing off to a runner left nothing running either, so the
+        // run is settled here; one that handed off defers to that runner job.
+        controller_job_status == homeboy_core::api_jobs::JobStatus::Cancelled
+            || record.runner_job_id().is_none()
     } else {
         false
     };

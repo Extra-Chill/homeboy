@@ -1916,13 +1916,10 @@ impl JobStore {
                     Some(job_id.to_string()), None,
                 ));
             }
+            // A settled job owns no work left to stop: its terminal projection
+            // is the answer, so the caller can settle whatever it owns.
             if stored.job.status.is_terminal() {
-                return Err(Error::validation_invalid_argument(
-                    "status",
-                    "cannot cancel a terminal controller job that did not stop by cancellation",
-                    Some(job_id.to_string()),
-                    None,
-                ));
+                return Ok(stored.job.clone());
             }
             // Persist the intent before releasing this lock. Dispatchers only observe
             // cancellation through this durable state, never through a transient flag.
