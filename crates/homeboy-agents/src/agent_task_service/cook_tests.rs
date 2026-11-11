@@ -4069,64 +4069,6 @@ fn cook_delivery_review_timeout_publishes_gate_green_candidate_marked_review_una
     });
 }
 
-/// A gated candidate whose only gate failure is inherited from the base is
-/// finalization-eligible, so it publishes as a draft instead of stranding.
-#[test]
-fn inherited_failure_only_candidate_publishes_as_unverified_draft() {
-    homeboy_core::test_support::with_isolated_home(|_| {
-        let temp = tempfile::tempdir().unwrap();
-        let fixture = adopt_candidate_with_gate_proof(
-            temp.path(),
-            "cook-inherited-only",
-            Arc::new(TimeoutReviewFormExecutor),
-            "",
-            None,
-            |proof| {
-                let gate = &mut proof.deterministic_gates[0];
-                gate.status = crate::agent_task_gate::AgentTaskGateStatus::AcceptedInheritedFailure;
-                gate.exit_code = 1;
-                gate.failure_evidence = Some(
-                    serde_json::from_value(serde_json::json!({
-                        "classification": "candidate_code",
-                        "summary": "inherited", "command": "test", "exit_code": 1,
-                        "agent_feedback": "",
-                    }))
-                    .expect("failure evidence"),
-                );
-                gate.baseline_comparison = Some(
-                    serde_json::from_value(serde_json::json!({
-                        "base_ref": "main", "exit_code": 1,
-                        "failure_fingerprint": "inherited",
-                        "matches_candidate_failure": true, "result": "baseline_red",
-                    }))
-                    .expect("baseline comparison"),
-                );
-            },
-        );
-        let result = fixture
-            .result
-            .expect("an inherited-failure candidate must not strand");
-        assert_eq!(result.value.status, "draft_published", "{:?}", result.value);
-        assert!(fixture.backend.draft && fixture.backend.created);
-        assert_eq!(
-            fixture.backend.title,
-            "fix(cook): unverified candidate cook-inherited-only"
-        );
-        assert!(
-            fixture
-                .backend
-                .body
-                .contains("every gate failure is inherited from the base"),
-            "{}",
-            fixture.backend.body
-        );
-        assert_eq!(
-            fixture.backend.pushed_sha.as_deref(),
-            Some(fixture.candidate.as_str())
-        );
-    });
-}
-
 #[test]
 fn cook_review_unavailable_draft_uses_default_title_without_source_lookup() {
     homeboy_core::test_support::with_isolated_home(|_| {
@@ -15168,24 +15110,6 @@ fn adopt_green_candidate_missing_review_form_with_scope(
     title: &str,
     remediation_scope: Option<&[&str]>,
 ) -> AdoptedMissingFormFixture {
-    adopt_candidate_with_gate_proof(
-        temp,
-        cook_id,
-        review_executor,
-        title,
-        remediation_scope,
-        |_| {},
-    )
-}
-
-fn adopt_candidate_with_gate_proof(
-    temp: &std::path::Path,
-    cook_id: &str,
-    review_executor: SharedAgentTaskExecutor,
-    title: &str,
-    remediation_scope: Option<&[&str]>,
-    gate_proof_override: impl FnOnce(&mut AgentTaskPromotionReport),
-) -> AdoptedMissingFormFixture {
     let source = temp.join("source");
     let target = temp.join("target");
     std::fs::create_dir(&source).expect("create source repository");
@@ -15316,10 +15240,8 @@ fn adopt_candidate_with_gate_proof(
     gate_proof["deterministic_gates"][0]["candidate_checkout"] = candidate_checkout.clone();
     gate_proof["provenance"]["worktree_path"] = serde_json::json!(target.display().to_string());
     gate_proof["provenance"]["candidate_checkout"] = candidate_checkout;
-    let mut gate_proof: AgentTaskPromotionReport = serde_json::from_value(gate_proof).unwrap();
-    gate_proof_override(&mut gate_proof);
     let mut backend = CaptureBackend {
-        synthetic_gate_proof: Some(gate_proof),
+        synthetic_gate_proof: Some(serde_json::from_value(gate_proof).unwrap()),
         ..Default::default()
     };
     let result = adopt_cook_candidate_with_dispatcher_and_backend(
@@ -24546,7 +24468,7 @@ fn replacement_gate_proof_recovers_failed_candidate_without_hiding_evidence_or_r
 }
 
 #[test]
-fn cook_rejects_test_claim_without_matching_durable_gate() {
+fn cook_finalization_without_a_passed_gate_publishes_only_inherited_failures() {
     let context = homeboy_core::test_support::HermeticTestContext::new();
     let lifecycle_store =
         crate::agent_task_lifecycle::AgentTaskLifecycleStore::new(context.path_roots());
@@ -24593,11 +24515,8 @@ fn cook_rejects_test_claim_without_matching_durable_gate() {
         },
         harvest_context: crate::agent_task_scheduler::HarvestExecutionContext::default(),
     };
-    // Finalization eligibility is checked before the test-claim contract and
-    // requires a non-empty gate set, so clearing the gates outright never
-    // reaches the check this test names. Keep the gate green but private:
-    // eligible to finalize, yet not visible evidence that can back a
-    // published test claim.
+    // A private green gate is eligible yet backs no published test claim:
+    // publication refuses it.
     let mut unsupported = promotion(run_id);
     unsupported.deterministic_gates[0].visibility =
         homeboy_core::gate::HomeboyGateVisibility::Private;
@@ -24615,6 +24534,47 @@ fn cook_rejects_test_claim_without_matching_durable_gate() {
             .message
             .contains("matching successful visible durable gate"),
         "{error}"
+    );
+
+    // A proven inherited baseline failure is also eligible with no passed
+    // gate: it publishes as an unverified draft instead of stranding.
+    let mut inherited = promotion(run_id);
+    let gate = &mut inherited.deterministic_gates[0];
+    gate.status = crate::agent_task_gate::AgentTaskGateStatus::AcceptedInheritedFailure;
+    gate.exit_code = 1;
+    gate.failure_evidence = Some(
+        serde_json::from_value(serde_json::json!({
+            "classification": "candidate_code", "summary": "inherited",
+            "command": "cargo test", "exit_code": 1, "agent_feedback": "",
+        }))
+        .unwrap(),
+    );
+    gate.baseline_comparison = Some(
+        serde_json::from_value(serde_json::json!({
+            "base_ref": "main", "exit_code": 1, "failure_fingerprint": "inherited",
+            "matches_candidate_failure": true, "result": "baseline_red",
+        }))
+        .unwrap(),
+    );
+    assert!(inherited.finalization_eligible());
+    let mut backend = CaptureBackend::default();
+    let value = finalize_or_load_cook_pr_with_backend_with_stores(
+        &recipe_store,
+        &lifecycle_store,
+        &options,
+        run_id,
+        &inherited,
+        &mut backend,
+    )
+    .expect("an inherited-failure candidate publishes");
+    assert_eq!(value["status"], "draft_published", "{value}");
+    assert!(backend.draft && backend.created);
+    assert!(
+        backend
+            .body
+            .starts_with("verification: unavailable\n\nNo deterministic gate passed"),
+        "{}",
+        backend.body
     );
 }
 
