@@ -4036,6 +4036,8 @@ fn cook_invalid_review_form_draft_carries_the_agent_form_not_placeholders() {
         );
         options.finalization.no_finalize = false;
         options.finalization.head = Some("fix/invalid-form".to_string());
+        // No operator title, as in Studio#5880: the form's title is the only one.
+        options.finalization.title = String::new();
         let mut promotion = fixture.backend.synthetic_gate_proof.clone().unwrap();
         promotion.deterministic_gates[0].stdout =
             "\u{1b}[32m✓\u{1b}[39m 412 tests passed https://linear.app/private".to_string();
