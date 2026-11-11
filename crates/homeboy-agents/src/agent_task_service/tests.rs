@@ -553,6 +553,36 @@ fn execution_step_terminal_recovery_survives_exited_restart_and_lost_ack() {
 }
 
 #[test]
+fn execution_step_handed_to_lab_staging_is_not_replayed() {
+    with_isolated_home(|_| {
+        let store = test_lifecycle_store();
+        prepare_empty_admission("staging-owned");
+        let intent = current_intent(&store, "staging-owned");
+        let mut record = store.read_record("staging-owned").unwrap();
+        record.metadata["lab_staging_controller_job_id"] = serde_json::json!("staging-job");
+        store.write_record(&record).unwrap();
+        // The step exits 0 once detached staging is submitted, before the
+        // staging job dispatches a runner job.
+        let mut delivery = terminal_delivery(&intent);
+        delivery.outcome = homeboy_core::daemon::step_job::StepTerminalOutcome::Exited;
+        delivery.exit_code = Some(0);
+        delivery.error = None;
+        let receipt = consume_execution_terminal_in_store(&store, &delivery).unwrap();
+        assert_eq!(receipt["disposition"], "execution_owned");
+        let after = store.read_record("staging-owned").unwrap();
+        assert!(!after.state().is_terminal());
+        assert_eq!(
+            current_intent(&store, "staging-owned").intent_id,
+            intent.intent_id
+        );
+        assert!(work_intent_absent(
+            &store,
+            "agent-task-exec:staging-owned:1:1"
+        ));
+    });
+}
+
+#[test]
 fn execution_step_recovery_backoff_budget_exhaustion_and_stale_delivery() {
     with_isolated_home(|_| {
         let store = test_lifecycle_store();

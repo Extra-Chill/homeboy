@@ -2895,7 +2895,9 @@ pub(crate) fn has_unambiguous_zero_execution(
             .get("provider_executions")
             .is_none_or(|value| value.as_array().is_some_and(Vec::is_empty))
         && record.provider_handles.is_empty()
-        && record.runner_job_id().is_none()
+        // A submitted Lab staging job can still dispatch the provider, so it
+        // owns execution exactly like an accepted runner job.
+        && !record.has_remote_execution_owner()
         && record.lab_handoff.as_ref().is_none_or(|handoff| {
             handoff.state != agent_task_lifecycle::AgentTaskLabHandoffState::Accepted
         })
