@@ -2177,10 +2177,6 @@ fn normalized_changed_files(files: &[String]) -> Vec<String> {
     files
 }
 
-/// Metadata naming a gated candidate published as a draft because none of its
-/// gates passed (each failure is inherited from the base).
-pub(crate) const UNVERIFIED_CANDIDATE_METADATA: &str = "verification_unavailable";
-
 pub(crate) fn finalize_or_load_cook_pr_with_stores(
     store: &super::cook_recipe::CookRecipeStore,
     lifecycle_store: &agent_task_lifecycle::AgentTaskLifecycleStore,
@@ -2273,16 +2269,6 @@ pub(crate) fn finalize_or_load_cook_pr_with_backend_with_stores<
         ),
         Err(error) => Some(error.to_string()),
     };
-    if unverified {
-        lifecycle_store.record_metadata_value(
-            successful_run_id,
-            UNVERIFIED_CANDIDATE_METADATA,
-            serde_json::json!({
-                "phase": "verification",
-                "message": "no deterministic gate passed on the candidate; every gate failure is inherited from the base",
-            }),
-        )?;
-    }
     if unverified || review_failure.is_some() {
         if let Some(reason) = review_failure {
             lifecycle_store.record_metadata_value(

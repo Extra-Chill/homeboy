@@ -7860,8 +7860,9 @@ pub(super) fn publish_incomplete_draft<
         .to_string(),
     };
     let record = lifecycle_store.read_record(run_id)?;
-    let unverified = &record.metadata[super::cook_promotion::UNVERIFIED_CANDIDATE_METADATA];
-    let unverified = review_form_unavailable && unverified.is_object();
+    // A gated draft whose gates are all inherited failures has nothing verified.
+    let unverified = review_form_unavailable
+        && crate::agent_task_review_dossier::verified_commands_from_promotion(promotion).is_empty();
     let title = if options.finalization.title.is_empty() {
         format!(
             "fix(cook): {} {}",
@@ -7876,7 +7877,7 @@ pub(super) fn publish_incomplete_draft<
         options.finalization.title.clone()
     };
     let note = match (review_form_unavailable, unverified) {
-        (true, true) => "review: unavailable\n\nNo deterministic gate passed on this candidate; every gate failure is inherited from the base",
+        (true, true) => "verification: unavailable\n\nNo deterministic gate passed on this candidate; every gate failure is inherited from the base",
         (true, false) => "review: unavailable\n\nReview form unavailable: completion not assessed; deterministic gates passed",
         (false, _) => "Incomplete candidate; deterministic verification failed.",
     };
