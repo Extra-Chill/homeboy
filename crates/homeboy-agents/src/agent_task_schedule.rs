@@ -773,6 +773,15 @@ mod cancellation {
             }
         }
 
+        /// A token cancelled by this one, or on its own (e.g. one task's
+        /// deadline) without cancelling its parent.
+        pub(crate) fn child(&self) -> Self {
+            let child = Self::default();
+            let linked = child.clone();
+            self.on_cancel(Arc::new(move || linked.cancel()));
+            child
+        }
+
         pub(crate) fn is_cancelled(&self) -> bool {
             self.inner.cancelled.load(Ordering::SeqCst)
         }

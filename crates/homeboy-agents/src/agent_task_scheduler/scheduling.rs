@@ -410,7 +410,6 @@ impl AgentTaskScheduleSupport {
         quarantined: &mut Vec<QuarantinedTask>,
         outcomes: &mut Vec<AgentTaskOutcome>,
         events: &mut Vec<AgentTaskProgressEvent>,
-        executor: &dyn AgentTaskExecutorAdapter,
         lifecycle_store: Option<&crate::agent_task_lifecycle::AgentTaskLifecycleStore>,
     ) {
         let mut index = 0;
@@ -425,7 +424,7 @@ impl AgentTaskScheduleSupport {
                 continue;
             }
             if !running[index].timeout_cancel_requested {
-                executor.cancel(&running[index].task_id);
+                running[index].cancellation.cancel();
                 running[index].timeout_cancel_requested = true;
                 events.push(event(
                     &running[index].task_id,
