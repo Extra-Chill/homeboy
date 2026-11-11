@@ -95,7 +95,11 @@ pub fn admitted_cook_environment(
     overrides: impl IntoIterator<Item = (String, String)>,
 ) -> Result<EnvMaterializationPlan> {
     let catalog = crate::agent_task_provider::AgentTaskProviderCatalog::discover();
-    let mut names = Vec::new();
+    // Pi readiness and execution both resolve their catalog from this directory.
+    // It is non-secret process configuration, not a credential. Preserve it for
+    // the controller step; otherwise detached admission silently uses ~/.pi/agent
+    // while foreground preview uses the caller's explicitly selected catalog.
+    let mut names = vec!["PI_CODING_AGENT_DIR".to_string()];
     for provider in &catalog.providers {
         for env in &provider.invocation.env {
             if env.value.is_none()
@@ -651,6 +655,34 @@ mod tests {
             assert_eq!(
                 parent.metadata["detached_cook_handoff"]["reason"],
                 "detached Cook exited before materializing its first attempt: Invalid argument 'gate_input': input is a symbolic link"
+            );
+        });
+    }
+
+    #[test]
+    fn detached_cook_preserves_the_preview_pi_agent_directory() {
+        with_isolated_home(|home| {
+            let directory = home.path().join("runner-catalog");
+            let directory = directory.to_str().unwrap();
+            let _directory = EnvVarGuard::set("PI_CODING_AGENT_DIR", directory);
+            let plan = admitted_cook_environment(Vec::new()).expect("admit environment");
+            assert_eq!(
+                plan.public_env
+                    .get("PI_CODING_AGENT_DIR")
+                    .map(String::as_str),
+                Some(directory),
+                "env_clear must not switch the detached child's Pi catalog"
+            );
+            assert!(plan.secret_refs.is_empty());
+
+            let overridden = admitted_cook_environment([(
+                "PI_CODING_AGENT_DIR".to_string(),
+                "/explicit/child/catalog".to_string(),
+            )])
+            .expect("admit explicit child override");
+            assert_eq!(
+                overridden.public_env["PI_CODING_AGENT_DIR"],
+                "/explicit/child/catalog"
             );
         });
     }
