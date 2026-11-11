@@ -421,10 +421,20 @@ fn launch_exit_reason(exit: &StepTerminalDelivery) -> String {
     const EXITED: &str = "detached Cook exited before materializing its first attempt";
     let cause = last_failed_command_result(&exit.log_path)
         .and_then(|result| {
-            result["summary"]
-                .as_str()
-                .map(str::trim)
-                .map(str::to_string)
+            let summary = result["summary"].as_str().map(str::trim)?;
+            // A generic summary such as "IO error" names no operation; the
+            // diagnostic details carry the operation and the OS error.
+            let details = &result["diagnostics"]["details"];
+            let detail = ["context", "error"]
+                .iter()
+                .filter_map(|key| details[*key].as_str().map(str::trim))
+                .filter(|value| !value.is_empty() && !summary.contains(value))
+                .collect::<Vec<_>>();
+            Some(if detail.is_empty() {
+                summary.to_string()
+            } else {
+                format!("{summary} ({})", detail.join(": "))
+            })
         })
         .filter(|summary| !summary.is_empty());
     match (cause, exit.exit_code) {
@@ -620,7 +630,9 @@ mod tests {
                 concat!(
                     "{\"schema\":\"homeboy/agent-task-admission-progress/v1\",\"state\":\"pending\"}\n",
                     "{\"schema\":\"homeboy/command-result/v3\",\"success\":false,\"exit_code\":2,",
-                    "\"summary\":\"Invalid argument 'gate_input': input is a symbolic link\"}\n",
+                    "\"summary\":\"IO error\",\"diagnostics\":{\"code\":\"internal.io_error\",",
+                    "\"details\":{\"context\":\"publish gate input snapshot capture\",",
+                    "\"error\":\"Directory not empty (os error 39)\"}}}\n",
                 ),
             )
             .unwrap();
@@ -654,7 +666,7 @@ mod tests {
             );
             assert_eq!(
                 parent.metadata["detached_cook_handoff"]["reason"],
-                "detached Cook exited before materializing its first attempt: Invalid argument 'gate_input': input is a symbolic link"
+                "detached Cook exited before materializing its first attempt: IO error (publish gate input snapshot capture: Directory not empty (os error 39))"
             );
         });
     }

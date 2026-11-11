@@ -213,7 +213,23 @@ impl GateInput {
         let staged = temp.path().join("input");
         copy(source, &staged, 0, &mut 0, &mut 0)?;
         self.verify(&staged)?;
-        fs::rename(&staged, &destination).map_err(io)?;
+        if let Err(error) = fs::rename(&staged, &destination) {
+            // Concurrent Cooks admitting the same input race to publish one
+            // content-addressed snapshot. Losing that race means the snapshot
+            // already exists; it is reused once its digest verifies.
+            if destination.exists() {
+                self.verify(&destination)?;
+                return Ok(true);
+            }
+            return Err(Error::internal_io(
+                error.to_string(),
+                Some(format!(
+                    "publish gate input snapshot {} at {}",
+                    self.id,
+                    destination.display()
+                )),
+            ));
+        }
         seal(&destination)?;
         Ok(false)
     }
