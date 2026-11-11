@@ -6088,6 +6088,45 @@ fn resolve_cook_base(
     Ok(())
 }
 
+/// Read an issue's timeline. A missing issue is a bad `task_url`; any other
+/// `gh` failure (TLS or connection timeouts, 5xx) is transient, so it is
+/// retried briefly and then reported as retryable rather than as the caller's
+/// argument error.
+fn issue_timeline(path: &str, url: &str) -> homeboy::core::Result<std::process::Output> {
+    let mut stderr = String::new();
+    for delay in [2, 5, 0] {
+        let output = std::process::Command::new("gh")
+            // No `--slurp`: it needs gh >= 2.48, and Ubuntu 24.04 ships 2.45
+            // (homeboy#17735). `--paginate` alone emits one JSON array per page.
+            .args(["api", "--paginate", &format!("repos/{path}/timeline")])
+            .output()
+            .map_err(|error| {
+                homeboy::core::Error::internal_io(
+                    error.to_string(),
+                    Some("gh api issue timeline".into()),
+                )
+            })?;
+        if output.status.success() {
+            return Ok(output);
+        }
+        stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if stderr.contains("HTTP 404") || stderr.contains("Not Found") {
+            return Err(homeboy::core::Error::validation_invalid_argument(
+                "task_url",
+                format!("could not resolve issue's linked PRs: {stderr}"),
+                Some(url.to_string()),
+                None,
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_secs(delay));
+    }
+    Err(homeboy::core::Error::internal_io(
+        format!("GitHub was unreachable while resolving the issue's linked PRs; retry the Cook: {stderr}"),
+        Some("gh api issue timeline".into()),
+    )
+    .with_retryable(true))
+}
+
 /// Resolve linked PRs from the issue, not from a guessed branch name.
 fn resolve_cook_issue(args: &mut AgentTaskCookArgs) -> homeboy::core::Result<()> {
     let Some(url) = args
@@ -6108,28 +6147,7 @@ fn resolve_cook_issue(args: &mut AgentTaskCookArgs) -> homeboy::core::Result<()>
             None,
         )
     })?;
-    let output = std::process::Command::new("gh")
-        // No `--slurp`: it needs gh >= 2.48, and Ubuntu 24.04 ships 2.45
-        // (homeboy#17735). `--paginate` alone emits one JSON array per page.
-        .args(["api", "--paginate", &format!("repos/{path}/timeline")])
-        .output()
-        .map_err(|error| {
-            homeboy::core::Error::internal_io(
-                error.to_string(),
-                Some("gh api issue timeline".into()),
-            )
-        })?;
-    if !output.status.success() {
-        return Err(homeboy::core::Error::validation_invalid_argument(
-            "task_url",
-            format!(
-                "could not resolve issue's linked PRs: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            ),
-            Some(url),
-            None,
-        ));
-    }
+    let output = issue_timeline(path, &url)?;
     let pages = parse_gh_paginated_arrays(&output.stdout)?;
     let prs: std::collections::BTreeSet<String> = pages
         .into_iter()
@@ -6458,7 +6476,27 @@ mod cook_pull_request_ref_tests {
                     .unwrap(),
                 pr_head
             );
-            std::fs::write(&gh, "#!/bin/sh\nexit 1\n").unwrap();
+            // A TLS timeout is transient: the lookup retries and still adopts the PR.
+            let flaked = linked.join("gh-flaked");
+            std::fs::write(
+                &gh,
+                format!(
+                    "#!/bin/sh\nif [ ! -f {flag} ]; then touch {flag}; echo 'net/http: TLS handshake timeout' >&2; exit 1; fi\nprintf '[{{\"event\":\"cross-referenced\",\"source\":{{\"issue\":{{\"state\":\"open\",\"html_url\":\"https://github.com/example/repo/pull/1895\",\"pull_request\":{{}}}}}}}}]'\n",
+                    flag = flaked.display()
+                ),
+            )
+            .unwrap();
+            let mut input = issue.clone();
+            resolve_cook_issue(&mut input).expect("transient lookup failure is retried");
+            assert_eq!(
+                input.dispatch.task_url.as_deref(),
+                Some("https://github.com/example/repo/pull/1895")
+            );
+            std::fs::write(
+                &gh,
+                "#!/bin/sh\necho 'gh: Not Found (HTTP 404)' >&2\nexit 1\n",
+            )
+            .unwrap();
             let error = {
                 let mut input = issue;
                 let repository =
