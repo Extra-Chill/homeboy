@@ -588,7 +588,7 @@ fn finish_without_step(mut report: CookRecoveryReport) -> (CookRecoveryReport, i
         report.failure = Some(serde_json::json!({
             "code": "agent_task.recover_blocked",
             "message": format!(
-                "`recover` already performed `{repeated}` from this exact durable state and it made no progress: {blocker}. Resolve that blocker, then run `homeboy agent-task recover {run} --unblock`, or supply explicit recovery inputs.",
+                "`recover` already performed `{repeated}` from this exact durable state and environment and it made no progress: {blocker}. Resolve that blocker, then run `homeboy agent-task recover {run} --unblock`, or supply explicit recovery inputs. Upgrading the controller or refreshing or reconnecting a runner retries it without `--unblock`.",
                 blocker = blocker.trim_end_matches('.'),
                 run = report.cook_id,
             ),
@@ -1332,6 +1332,52 @@ pub(crate) struct CookRecoveryNoProgress {
     pub status: String,
     pub step: String,
     pub blocker: String,
+    /// The environment the step ran in, from [`recovery_environment`].
+    #[serde(default)]
+    pub environment: String,
+}
+
+/// The execution environment a recovery step depends on beyond the Cook's own
+/// durable state: this controller's build and each runner session it holds
+/// (the runner's build and when it connected). Upgrading the controller, or
+/// refreshing or reconnecting a runner, changes it, so a step blocked by the
+/// old environment is performed again without `--unblock` (#17873).
+fn recovery_environment() -> String {
+    let mut facts = vec![format!(
+        "controller {}",
+        homeboy_core::build_identity::current().display
+    )];
+    let sessions = homeboy_core::paths::runner_sessions_dir()
+        .ok()
+        .and_then(|dir| std::fs::read_dir(dir).ok())
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|runner| std::fs::read_dir(runner.path()).ok())
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("controller-") && name.ends_with(".json"))
+        });
+    let mut runners: Vec<String> = sessions
+        .filter_map(|path| {
+            let session: Value = serde_json::from_slice(&std::fs::read(&path).ok()?).ok()?;
+            Some(format!(
+                "{} {} connected {}",
+                session["runner_id"].as_str()?,
+                session["homeboy_build_identity"]
+                    .as_str()
+                    .unwrap_or("unknown build"),
+                session["connected_at"].as_str().unwrap_or("unknown"),
+            ))
+        })
+        .collect();
+    runners.sort();
+    facts.extend(runners);
+    facts.join("; ")
 }
 
 const NO_PROGRESS_MARKER: &str = "recover-no-progress.json";
@@ -1345,8 +1391,10 @@ pub(crate) fn matching_no_progress(
     let record = record?;
     let path = lifecycle_store.cook_dir(cook_id).join(NO_PROGRESS_MARKER);
     let marker: CookRecoveryNoProgress = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
-    (marker.run_id == record.run_id && marker.status == cook_recovery_status(record))
-        .then_some(marker)
+    (marker.run_id == record.run_id
+        && marker.status == cook_recovery_status(record)
+        && marker.environment == recovery_environment())
+    .then_some(marker)
 }
 
 fn no_progress_path(id: &str) -> Option<std::path::PathBuf> {
@@ -1410,6 +1458,7 @@ fn record_recovery_progress(
         status,
         step: action.to_string(),
         blocker,
+        environment: recovery_environment(),
     };
     if let (Some(parent), Ok(bytes)) = (path.parent(), serde_json::to_vec_pretty(&marker)) {
         let staged = path.with_extension("json.tmp");

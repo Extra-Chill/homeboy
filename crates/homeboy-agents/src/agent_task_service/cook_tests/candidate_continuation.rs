@@ -877,6 +877,22 @@ fn cook_recovery_blocks_a_repeated_non_progressing_step_on_every_surface() {
                 .unwrap();
         assert_eq!(context.recovery_step, Some(second.step.clone()));
 
+        // A refreshed runner is a new environment: plain `recover` performs
+        // the step again (#17873).
+        let session = homeboy_core::paths::runner_sessions_dir()
+            .unwrap()
+            .join("lab/controller-fixture.json");
+        std::fs::create_dir_all(session.parent().unwrap()).unwrap();
+        std::fs::write(
+            &session,
+            r#"{"runner_id":"lab","homeboy_build_identity":"homeboy 9.9.9+refreshed","connected_at":"2026-11-11T00:00:00Z"}"#,
+        )
+        .unwrap();
+        let (refreshed, _) =
+            crate::agent_task_service::recover_cook(cook, Default::default(), &performer).unwrap();
+        assert_eq!(refreshed.step, CookRecoveryStep::Continue, "{refreshed:#?}");
+        assert_eq!(performed(), 2);
+
         let (unblocked, _) = crate::agent_task_service::recover_cook(
             cook,
             CookRecoveryRequest {
@@ -887,7 +903,7 @@ fn cook_recovery_blocks_a_repeated_non_progressing_step_on_every_surface() {
         )
         .unwrap();
         assert_eq!(unblocked.step, CookRecoveryStep::Continue);
-        assert_eq!(performed(), 2);
+        assert_eq!(performed(), 3);
     });
 }
 
