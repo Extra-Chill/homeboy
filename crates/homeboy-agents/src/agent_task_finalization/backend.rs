@@ -1416,6 +1416,31 @@ mod remote_base_tests {
         );
     }
 
+    /// #17874: a promoted candidate is staged in the destination. Publishing
+    /// it leaves the destination clean at the pushed head, so a follow-up
+    /// Cook can attribute the worktree and removal is safe.
+    #[test]
+    fn publishing_a_staged_candidate_leaves_the_destination_clean_at_the_pushed_head() {
+        let (repo, _origin) = publication_repo();
+        let path = repo.path().to_str().unwrap();
+        let base = git_output(path, &["rev-parse", "HEAD"]).unwrap();
+        std::fs::write(repo.path().join("feature.txt"), "candidate").unwrap();
+        std::fs::write(repo.path().join("added.txt"), "added").unwrap();
+        git(repo.path(), &["add", "-A"]);
+        let mut backend = RealAgentTaskPrFinalizationBackend;
+
+        let (candidate, _) = backend.prepare_manual_candidate(path, &base).unwrap();
+        let dates = backend.candidate_dates(path, &base).unwrap();
+        let published = backend
+            .publish_tree(path, &candidate.tree_sha, &base, "publish", &dates)
+            .unwrap();
+        let tracking = backend.push_branch(path, &published, "feature").unwrap();
+
+        assert_eq!(git_output(path, &["status", "--porcelain"]).unwrap(), "");
+        assert_eq!(git_output(path, &["rev-parse", "HEAD"]).unwrap(), published);
+        assert_eq!(tracking.verified_remote_sha, published);
+    }
+
     #[test]
     fn pushed_branch_without_upstream_tracks_verified_remote_head() {
         let (repo, _origin) = publication_repo();
