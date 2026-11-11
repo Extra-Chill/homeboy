@@ -2255,19 +2255,24 @@ pub(crate) fn finalize_or_load_cook_pr_with_backend_with_stores<
             None,
         ));
     }
-    let aggregate = lifecycle_store.read_aggregate(successful_run_id)?;
-    let review_failure = match super::cook::review_form_from_aggregate(&aggregate) {
-        Ok(Some(form)) => form.validate().err().map(|error| error.to_string()),
-        Ok(None) => Some(
-            aggregate
-                .outcomes
-                .iter()
-                .flat_map(|outcome| &outcome.diagnostics)
-                .map(|diagnostic| diagnostic.class.clone())
-                .next()
-                .unwrap_or_else(|| "missing review_form output".to_string()),
-        ),
-        Err(error) => Some(error.to_string()),
+    // The unverified draft carries no review form, so it reads none.
+    let review_failure = if unverified {
+        None
+    } else {
+        let aggregate = lifecycle_store.read_aggregate(successful_run_id)?;
+        match super::cook::review_form_from_aggregate(&aggregate) {
+            Ok(Some(form)) => form.validate().err().map(|error| error.to_string()),
+            Ok(None) => Some(
+                aggregate
+                    .outcomes
+                    .iter()
+                    .flat_map(|outcome| &outcome.diagnostics)
+                    .map(|diagnostic| diagnostic.class.clone())
+                    .next()
+                    .unwrap_or_else(|| "missing review_form output".to_string()),
+            ),
+            Err(error) => Some(error.to_string()),
+        }
     };
     if unverified || review_failure.is_some() {
         if let Some(reason) = review_failure {
