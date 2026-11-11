@@ -447,7 +447,7 @@ pub(crate) fn cancel_exact_run_in_store_with_provenance(
             &controller_job_id,
             reason.unwrap_or("agent-task cancellation requested"),
         )?;
-        if job.status != homeboy_core::api_jobs::JobStatus::Cancelled {
+        if !job.status.is_terminal() {
             let recovery_action = format!("homeboy agent-task cancel {run_id}");
             let _ = lifecycle_store.mutate_record(&run_id, |record| {
                 if record.state().is_terminal() {
@@ -467,8 +467,11 @@ pub(crate) fn cancel_exact_run_in_store_with_provenance(
             })?;
             return Ok(lifecycle_store.read_record(&run_id)?);
         }
-        controller_cancelled = true;
-        cancelled_controller_job_id = Some(controller_job_id);
+        // As for the fleet path: a job that settled on its own before handing
+        // off left nothing running; one that handed off defers to its runner job.
+        controller_cancelled = job.status == homeboy_core::api_jobs::JobStatus::Cancelled
+            || rooted_record.runner_job_id().is_none();
+        cancelled_controller_job_id = Some((controller_job_id, job.status));
     }
     let canonical_provenance =
         canonical_cancellation_provenance_in_store(lifecycle_store, &run_id)?;
@@ -592,9 +595,9 @@ pub(crate) fn cancel_exact_run_in_store_with_provenance(
                 metadata.insert(
                     "controller_job_cancellation".to_string(),
                     json!({
-                        "controller_job_id": cancelled_controller_job_id,
-                        "status": "cancelled",
-                        "phase": "cancelled",
+                        "controller_job_id": cancelled_controller_job_id.as_ref().map(|(id, _)| id),
+                        "status": cancelled_controller_job_id.as_ref().map(|(_, status)| status),
+                        "phase": if cancelled_controller_job_id.as_ref().is_some_and(|(_, status)| *status == homeboy_core::api_jobs::JobStatus::Cancelled) { "cancelled" } else { "settled" },
                         "reason": reason.unwrap_or("agent-task cancellation requested"),
                         "recovery_action": format!("homeboy agent-task status {record_run_id}"),
                     }),

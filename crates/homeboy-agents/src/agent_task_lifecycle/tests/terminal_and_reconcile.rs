@@ -446,8 +446,12 @@ fn detached_handoff_persists_redacted_submission_intent_before_broker_ack() {
     });
 }
 
-#[test]
-fn rooted_controller_staging_cancel_retains_blocker_until_job_is_terminal() {
+/// Cancel a run owned by a staging controller job whose daemon reports
+/// `statuses` on successive cancel requests, one cancel call per status.
+fn cancel_through_staging_controller(
+    statuses: &'static [&'static str],
+    runner_child: bool,
+) -> Vec<AgentTaskRunRecord> {
     use std::io::{Read, Write};
     use std::net::TcpListener;
 
@@ -461,25 +465,27 @@ fn rooted_controller_staging_cancel_retains_blocker_until_job_is_terminal() {
             |_| Ok(json!({})),
         )
         .expect("durable pending run");
-    let command = vec!["homeboy".to_string(), "agent-task".to_string()];
-    let runner_job_id = uuid::Uuid::new_v4().to_string();
-    record_detached_lab_run_in_store(
-        &lifecycle_store,
-        DetachedLabRunRecord {
-            run_id,
-            runner_id: "homeboy-lab",
-            runner_job_id: &runner_job_id,
-            remote_workspace: "/runner/workspace/homeboy",
-            remote_command: &command,
-        },
-    )
-    .expect("bind runner child to its staging controller");
+    if runner_child {
+        let command = vec!["homeboy".to_string(), "agent-task".to_string()];
+        let runner_job_id = uuid::Uuid::new_v4().to_string();
+        record_detached_lab_run_in_store(
+            &lifecycle_store,
+            DetachedLabRunRecord {
+                run_id,
+                runner_id: "homeboy-lab",
+                runner_job_id: &runner_job_id,
+                remote_workspace: "/runner/workspace/homeboy",
+                remote_command: &command,
+            },
+        )
+        .expect("bind runner child to its staging controller");
+    }
 
     let controller_job_id = uuid::Uuid::new_v4();
     let listener = TcpListener::bind("127.0.0.1:0").expect("mock controller endpoint");
     let address = listener.local_addr().expect("mock endpoint address");
     let server = std::thread::spawn(move || {
-        for attempt in 0..2 {
+        for status in statuses {
             let (mut stream, _) = listener.accept().expect("controller cancel request");
             let mut request = [0_u8; 4096];
             let count = stream.read(&mut request).expect("read cancel request");
@@ -495,7 +501,7 @@ fn rooted_controller_staging_cancel_retains_blocker_until_job_is_terminal() {
                         "job": {
                             "id": controller_job_id,
                             "operation": "agent_task",
-                            "status": if attempt == 0 { "queued" } else { "cancelled" },
+                            "status": status,
                             "created_at_ms": 1,
                             "updated_at_ms": 2,
                             "event_count": 1
@@ -561,20 +567,27 @@ fn rooted_controller_staging_cancel_retains_blocker_until_job_is_terminal() {
         panic!("controller-owned runner child must not be cancelled separately")
     }));
 
-    let pending =
-        cancel_exact_run_in_store(&lifecycle_store, run_id, Some("operator cancellation"))
-            .expect("controller-owned staging cancellation is routed in this root");
-    assert_eq!(pending.state(), AgentTaskRunState::Running);
-    assert!(logs_in_store(&lifecycle_store, run_id)
-        .expect("pending event stream")
+    let records = statuses
+        .iter()
+        .map(|_| {
+            cancel_exact_run_in_store(&lifecycle_store, run_id, Some("operator cancellation"))
+                .expect("controller-owned staging cancellation is routed in this root")
+        })
+        .collect();
+    server.join().expect("controller endpoint finished");
+    let cancelled = logs_in_store(&lifecycle_store, run_id)
+        .expect("event stream remains inspectable")
         .events
         .iter()
-        .all(|event| event.kind != "run.cancelled"));
-    let cancellation =
-        cancel_exact_run_in_store(&lifecycle_store, run_id, Some("operator cancellation"))
-            .expect("controller terminal confirmation cancels its owned child");
-    server.join().expect("controller endpoint finished");
+        .any(|event| event.kind == "run.cancelled");
+    assert_eq!(cancelled, statuses.last() != Some(&"queued"));
+    records
+}
 
+#[test]
+fn rooted_controller_staging_cancel_retains_blocker_until_job_is_terminal() {
+    let records = cancel_through_staging_controller(&["queued", "cancelled"], true);
+    let (pending, cancellation) = (&records[0], &records[1]);
     assert_eq!(pending.state(), AgentTaskRunState::Running);
     assert_eq!(cancellation.state(), AgentTaskRunState::Cancelled);
     assert_eq!(
@@ -583,13 +596,27 @@ fn rooted_controller_staging_cancel_retains_blocker_until_job_is_terminal() {
     );
     assert_eq!(
         pending.metadata["controller_job_cancellation"]["recovery_action"],
-        format!("homeboy agent-task cancel {run_id}")
+        format!("homeboy agent-task cancel {}", pending.run_id)
     );
-    assert!(logs_in_store(&lifecycle_store, run_id)
-        .expect("event stream remains inspectable")
-        .events
-        .iter()
-        .any(|event| event.kind == "run.cancelled"));
+}
+
+/// A staging job that settled on its own before any runner handoff owns no
+/// work: exact cancellation (reconcile's path) settles the run rather than
+/// leaving it queued behind a request the daemon can never act on.
+#[test]
+fn rooted_cancel_settles_run_whose_staging_job_settled_before_handoff() {
+    for statuses in [&["succeeded"], &["failed"]] {
+        let records = cancel_through_staging_controller(statuses, false);
+        assert_eq!(
+            records[0].state(),
+            AgentTaskRunState::Cancelled,
+            "{statuses:?}"
+        );
+        assert_eq!(
+            records[0].metadata["controller_job_cancellation"]["phase"],
+            "settled"
+        );
+    }
 }
 
 /// Rooted in an explicit store rather than a mutated process environment
