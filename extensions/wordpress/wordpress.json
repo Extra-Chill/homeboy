@@ -228,6 +228,10 @@
         "remote_path": "wp-content/themes/{{dir_name}}"
       }
     ],
+    "dependency_inference": [
+      { "file": "{{dir_name}}.php", "pattern": "^[ \\t/*#@]*Requires Plugins:[ \\t]*(.+?)[ \\t]*$" },
+      { "file": "{{id}}.php", "pattern": "^[ \\t/*#@]*Requires Plugins:[ \\t]*(.+?)[ \\t]*$" }
+    ],
     "archive_install": [
       {
         "path_pattern": "/wp-content/plugins/",

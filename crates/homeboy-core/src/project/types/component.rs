@@ -49,6 +49,14 @@ pub struct ProjectComponentAttachment {
     /// portable component model: target identity is environment-owned.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deployment_provider_input: Option<serde_json::Value>,
+    /// Components (by id, local directory name, or remote directory name) that
+    /// must be applied before this one when they deploy in the same run.
+    ///
+    /// Extensions can also infer these (see the extension contract's
+    /// `deploy.dependency_inference`); explicit entries are merged with any
+    /// inferred ones. Dependencies outside the current deploy are ignored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub depends_on: Option<Vec<String>>,
 }
 
 impl ProjectComponentAttachment {

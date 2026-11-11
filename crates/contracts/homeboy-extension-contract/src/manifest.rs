@@ -489,6 +489,17 @@ impl ExtensionManifest {
             .unwrap_or(&[])
     }
 
+    /// Convenience: get deploy-order dependency inference rules (empty if no
+    /// deploy capability).
+    pub fn deploy_dependency_inference_rules(
+        &self,
+    ) -> &[crate::manifest_toolchain_config::DeployDependencyInferenceRule] {
+        self.deploy
+            .as_ref()
+            .map(|d| d.dependency_inference.as_slice())
+            .unwrap_or(&[])
+    }
+
     /// Convenience: get version patterns (empty if no deploy capability).
     pub fn version_patterns(&self) -> &[VersionPatternConfig] {
         self.deploy

@@ -72,7 +72,9 @@ pub use manifest_toolchain_config::{
     CliAutoFlag, CliAutoFlagCondition, CliHelpConfig, DeployVerification, LintChangedFileRoute,
     RemotePathRootRule, RequirementsConfig, TestSecretEnvProjection, TestSettingStringPredicate,
 };
-pub use manifest_toolchain_config::{CliConfig, RemotePathInferenceRule};
+pub use manifest_toolchain_config::{
+    CliConfig, DeployDependencyInferenceRule, RemotePathInferenceRule,
+};
 pub mod action_types;
 pub mod bench_artifact;
 pub mod bench_diagnostics;

@@ -436,6 +436,7 @@ mod tests {
                 owner_hints: Vec::new(),
                 archive_install: Vec::new(),
                 remote_path_inference: Vec::new(),
+                dependency_inference: Vec::new(),
                 path_roots: vec![RemotePathRootRule {
                     path_prefix: "managed".to_string(),
                     root: "managed_root".to_string(),

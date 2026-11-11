@@ -24,6 +24,7 @@ fn install_wordpress_extension() {
             owner_hints: Vec::new(),
             archive_install: Vec::new(),
             remote_path_inference: Vec::new(),
+            dependency_inference: Vec::new(),
             path_roots: vec![RemotePathRootRule {
                 path_prefix: "wp-content".to_string(),
                 root: "wp_content".to_string(),
