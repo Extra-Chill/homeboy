@@ -702,13 +702,18 @@ fn unnamed_failure_diagnostics(
             .and_then(Value::as_str)
             .map(str::to_string)
     });
-    let reason = (identity.command == "workflow"
-        || (identity.command == "runs"
-            && data["instance"]
-                .as_str()
-                .is_some_and(|id| id.starts_with("wf-"))))
-    .then(|| data.get("reason").and_then(Value::as_str))
-    .flatten()
+    let reason = if identity.command == "upgrade" {
+        // An upgrade that refused before installing says why in `message`.
+        data.get("message").and_then(Value::as_str)
+    } else {
+        (identity.command == "workflow"
+            || (identity.command == "runs"
+                && data["instance"]
+                    .as_str()
+                    .is_some_and(|id| id.starts_with("wf-"))))
+        .then(|| data.get("reason").and_then(Value::as_str))
+        .flatten()
+    }
     .filter(|reason| !reason.trim().is_empty());
     let message = match (reason, subject) {
         (Some(reason), _) => reason.to_string(),
@@ -3340,20 +3345,29 @@ mod tests {
     }
 
     #[test]
-    fn workflow_run_view_summarizes_the_failure_reason() {
-        let reason = "step `prepare` did not succeed: repository does not exist";
-        let response = cli_response_for_json_result_for_identity(
-            &Ok(json!({ "instance": "wf-example-hash", "status": "failed", "reason": reason })),
-            1,
-            &CommandIdentity::with_operation("runs", "show"),
-            None,
-        );
-        let value = serde_json::to_value(response).unwrap();
-        assert_eq!(value["summary"], reason);
-        assert_eq!(value["diagnostics"]["message"], reason);
-        assert!(!value
-            .to_string()
-            .contains("without reporting a failure cause"));
+    fn refused_runs_summarize_their_recorded_cause() {
+        let workflow = "step `prepare` did not succeed: repository does not exist";
+        // #17835: a refused upgrade read "upgrade exited 1 without reporting a
+        // failure cause" although its payload named the blockers.
+        let upgrade = "extension_preflight_failed: 1 extension(s) cannot be safely refreshed (agent-runtimes: manifest_missing); controller was not updated";
+        for (identity, payload, reason) in [
+            (
+                CommandIdentity::with_operation("runs", "show"),
+                json!({ "instance": "wf-example-hash", "status": "failed", "reason": workflow }),
+                workflow,
+            ),
+            (
+                CommandIdentity::top_level("upgrade"),
+                json!({ "command": "upgrade", "outcome": "extension_preflight_failed", "message": upgrade }),
+                upgrade,
+            ),
+        ] {
+            let response =
+                cli_response_for_json_result_for_identity(&Ok(payload), 1, &identity, None);
+            let value = serde_json::to_value(response).unwrap();
+            assert_eq!(value["summary"], reason);
+            assert_eq!(value["diagnostics"]["message"], reason);
+        }
     }
 
     #[test]

@@ -1134,6 +1134,15 @@ fn extension_preflight_failure_result(
     candidate_version: &str,
     extension_blockers: Vec<ExtensionPreflightBlocker>,
 ) -> UpgradeResult {
+    let message = format!(
+        "extension_preflight_failed: {} extension(s) cannot be safely refreshed ({}); controller was not updated",
+        extension_blockers.len(),
+        extension_blockers
+            .iter()
+            .map(|blocker| format!("{}: {}", blocker.extension_id, blocker.classification))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
     UpgradeResult {
         command: "upgrade".to_string(),
         token_source: crate::upgrade::github_api::token_source(),
@@ -1164,7 +1173,7 @@ fn extension_preflight_failure_result(
         partial: true,
         runner_convergence: None,
         daemon_pending_restart: None,
-        message: "extension_preflight_failed: controller was not updated".to_string(),
+        message,
         restart_required: false,
         extensions_updated: Vec::new(),
         extensions_skipped: Vec::new(),
@@ -3923,6 +3932,13 @@ mod runner_source_upgrade_tests {
                 Some("extension_preflight_failed")
             );
             assert_eq!(result.preflight.unwrap().extension_blockers.len(), 1);
+            assert!(
+                result.message.starts_with(
+                    "extension_preflight_failed: 1 extension(s) cannot be safely refreshed (incompatible: "
+                ),
+                "{}",
+                result.message
+            );
         });
     }
 
