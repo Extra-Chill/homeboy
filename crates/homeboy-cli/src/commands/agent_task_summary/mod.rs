@@ -710,11 +710,9 @@ fn render_status_summary(payload: &Value) -> Option<String> {
     }
     let run_id = string_value(payload, &["run"])?;
     let state = string_value(payload, &["state"]).unwrap_or("unknown");
-    let mut lines = vec![
-        "Agent task status".to_string(),
-        format!("Status: {state}"),
-        format!("Run: {run_id}"),
-    ];
+    // The envelope's `status` reports the status command itself, so the
+    // headline names the task's own state (#17838).
+    let mut lines = vec![format!("Agent task {state}"), format!("Run: {run_id}")];
     if let Some(mission) = string_value(payload, &["mission"]) {
         lines.push(format!("Mission: {mission}"));
     }
@@ -2421,9 +2419,7 @@ mod tests {
                 render_agent_task_summary(AgentTaskSummaryKind::Status, &payload).unwrap();
 
             assert!(
-                summary.starts_with(&format!(
-                    "Agent task status\nStatus: {state}\nRun: homeboy-4345"
-                )),
+                summary.starts_with(&format!("Agent task {state}\nRun: homeboy-4345")),
                 "{summary}"
             );
             assert!(summary.contains("Artifacts: 0\n"), "{summary}");

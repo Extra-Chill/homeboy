@@ -29,7 +29,7 @@ fn agent_task_status_run_directories_preserve_recorded_cause_and_next_action() {
             let mut payload = serde_json::to_value(&run).unwrap();
             payload["reason"] = serde_json::to_value(&verdict.reason).unwrap();
             let summary = render_agent_task_summary(AgentTaskSummaryKind::Status, &payload).unwrap();
-            assert!(summary.contains("Status: failed\n"), "{class}: {summary}");
+            assert!(summary.contains("Agent task failed\n"), "{class}: {summary}");
             assert!(summary.contains(&format!("Blocker: {reason}")), "{class}: {summary}");
             assert_eq!(summary.matches("Blocker:").count(), 1, "{summary}");
             assert!(!summary.contains("Reason:"), "{summary}");
@@ -89,7 +89,7 @@ fn agent_task_status_published_receipt_wins_over_terminal_and_promotion_snapshot
                 let payload = serde_json::to_value(&run).unwrap();
                 let summary =
                     render_agent_task_summary(AgentTaskSummaryKind::Status, &payload).unwrap();
-                assert!(summary.contains("Status: succeeded\n"), "{summary}");
+                assert!(summary.contains("Agent task succeeded\n"), "{summary}");
                 assert!(
                     summary.contains(&format!("Publication: {status}\n")),
                     "{summary}"
