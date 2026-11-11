@@ -4,6 +4,12 @@ All notable changes to Homeboy CLI are documented in this file.
 
 (This file is embedded into the CLI binary and is also viewable via `homeboy changelog`.)
 
+## [0.458.21] - 2026-11-11
+
+### Changed
+- Treat a submitted Lab staging job as the execution owner, not zero execution
+- Pass Cook destinations to retries and to successors of a terminal owner
+
 ## [0.458.20] - 2026-11-11
 
 ### Changed
