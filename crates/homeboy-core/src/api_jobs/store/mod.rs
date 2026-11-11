@@ -1851,21 +1851,6 @@ impl JobStore {
         self.inner.try_lock().is_err()
     }
 
-    /// The terminal projection of a controller job that already settled,
-    /// including one compaction pruned (its replay tombstone keeps it).
-    pub(crate) fn settled_controller_job(&self, job_id: Uuid) -> Option<Job> {
-        let inner = self.inner.lock().expect("job store mutex poisoned");
-        match inner.jobs.get(&job_id) {
-            Some(stored) => (stored.controller_job.is_some() && stored.job.status.is_terminal())
-                .then(|| stored.job.clone()),
-            None => inner
-                .expired_controller_submissions
-                .values()
-                .find(|submission| submission.job_id == job_id)
-                .and_then(|submission| submission.terminal_job.clone()),
-        }
-    }
-
     pub(crate) fn controller_job_state(&self, job_id: Uuid) -> Result<ControllerJobState> {
         let inner = self.inner.lock().expect("job store mutex poisoned");
         inner

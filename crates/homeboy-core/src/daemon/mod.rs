@@ -5150,7 +5150,9 @@ pub(crate) fn start_controller_job(
     job_id: Uuid,
     job_store: &JobStore,
 ) -> Result<crate::api_jobs::Job> {
-    if let Some(settled) = job_store.settled_controller_job(job_id) {
+    // A settled job, including one compaction pruned, owns no work left to
+    // stop: its terminal projection is the answer.
+    if let Some(settled) = job_store.terminal_controller_job(job_id)? {
         return Ok(settled);
     }
     let controller = job_store.controller_job_state(job_id)?;
@@ -5617,7 +5619,9 @@ pub(crate) fn cancel_controller_job(
     reason: &str,
     job_store: &JobStore,
 ) -> Result<crate::api_jobs::Job> {
-    if let Some(settled) = job_store.settled_controller_job(job_id) {
+    // A settled job, including one compaction pruned, owns no work left to
+    // stop: its terminal projection is the answer.
+    if let Some(settled) = job_store.terminal_controller_job(job_id)? {
         return Ok(settled);
     }
     let controller = job_store.controller_job_state(job_id)?;
