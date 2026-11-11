@@ -148,7 +148,7 @@ pub(crate) fn require_destination_free_of_live_cook(
 }
 
 /// Whether another process holds the Cook's driver lock.
-fn cook_driver_is_live(cook_id: &str) -> Result<bool> {
+pub(crate) fn cook_driver_is_live(cook_id: &str) -> Result<bool> {
     Ok(super::CookRecipeStore::from_current_data_root()?
         .foreign_cook_driver(cook_id)?
         .is_some())
