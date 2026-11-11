@@ -437,11 +437,12 @@ impl AiFilledReviewForm {
 (`complete` or `incomplete`; `incomplete` requires a non-empty `incomplete_reason`). `pr_title` must use feat/fix/refactor/docs/chore/test/perf/ci/build, optional scope and `!`, then a non-empty subject; its type drives release bump (feat → minor, `!` → major, otherwise patch)."
     }
 
-    /// Validate that the agent filled every required slot with real content.
-    /// `Err` carries actionable, agent-facing feedback for the nudge loop.
-    pub fn validate(&self) -> Result<()> {
+    /// The agent's title when it is a specific, bounded, single line, whether
+    /// or not it follows the conventional-subject contract. A held draft uses
+    /// it so a title-only form failure still publishes the agent's own words.
+    pub fn specific_title(&self) -> Option<&str> {
         let title = self.pr_title.trim();
-        if title.is_empty()
+        let generic = title.is_empty()
             || title.chars().count() > 256
             || title != self.pr_title
             || title.chars().any(char::is_control)
@@ -451,10 +452,16 @@ impl AiFilledReviewForm {
                 title.to_ascii_lowercase().as_str(),
                 "n/a" | "na" | "none" | "tbd" | "untitled" | "pr title" | "title"
             )
-            || (title.starts_with("Cook ") && title.split_whitespace().count() == 2)
-        {
+            || (title.starts_with("Cook ") && title.split_whitespace().count() == 2);
+        (!generic).then_some(title)
+    }
+
+    /// Validate that the agent filled every required slot with real content.
+    /// `Err` carries actionable, agent-facing feedback for the nudge loop.
+    pub fn validate(&self) -> Result<()> {
+        let Some(title) = self.specific_title() else {
             return Err(review_form_gap("review_form.pr_title", "pr_title must be a specific, bounded, single-line title for the actual change (not a placeholder or generic Cook title)"));
-        }
+        };
         if !is_conventional_subject(title) {
             return Err(review_form_gap("review_form.pr_title", "pr_title must be a conventional commit subject using feat/fix/refactor/docs/chore/test/perf/ci/build, optional scope and !, then : and a non-empty title"));
         }

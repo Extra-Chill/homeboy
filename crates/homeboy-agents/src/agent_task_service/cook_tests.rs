@@ -4001,6 +4001,72 @@ fn cook_finalization_publishes_gated_sha_when_review_budget_is_exhausted() {
     });
 }
 
+/// #17880: a form that fails only the title contract publishes a held draft
+/// in the agent's own words, without passing-gate logs or terminal escapes.
+#[test]
+fn cook_invalid_review_form_draft_carries_the_agent_form_not_placeholders() {
+    homeboy_core::test_support::with_isolated_home(|_| {
+        let temp = tempfile::tempdir().unwrap();
+        let mut fixture = adopt_green_candidate_missing_review_form(
+            temp.path(),
+            "cook-17880-invalid-form",
+            Arc::new(TimeoutReviewFormExecutor),
+        );
+        let run_id = fixture
+            .result
+            .as_ref()
+            .expect("initial candidate publication")
+            .value
+            .latest_run_id
+            .clone()
+            .unwrap();
+        let lifecycle = test_lifecycle_store();
+        let plan = lifecycle.read_controller_plan(&run_id).unwrap();
+        let mut aggregate = lifecycle.read_aggregate(&run_id).unwrap();
+        aggregate.outcomes[0].outputs = serde_json::json!({"review_form": {
+            "pr_title": "Preview sites: keep categories when pulling without backup",
+            "summary": "Pull keeps the site's categories.",
+            "what_changed": ["Restore categories after a pull without backup."],
+            "completion": "complete"
+        }});
+        agent_task_lifecycle::record_run_aggregate(&run_id, &plan, &aggregate).unwrap();
+        let mut options = batch_cook_options(
+            "cook-17880-invalid-form",
+            Arc::new(AcceptedDetachedAttemptDispatcher),
+        );
+        options.finalization.no_finalize = false;
+        options.finalization.head = Some("fix/invalid-form".to_string());
+        // No operator title, as in Studio#5880: the form's title is the only one.
+        options.finalization.title = String::new();
+        let mut promotion = fixture.backend.synthetic_gate_proof.clone().unwrap();
+        promotion.deterministic_gates[0].stdout =
+            "\u{1b}[32m✓\u{1b}[39m 412 tests passed https://linear.app/private".to_string();
+        let receipt = finalize_or_load_cook_pr_with_backend(
+            &options,
+            &run_id,
+            &promotion,
+            &mut fixture.backend,
+        )
+        .expect("an invalid form still publishes the green candidate as a draft");
+        assert_eq!(receipt["status"], "draft_published");
+        assert!(fixture.backend.draft);
+        assert_eq!(
+            fixture.backend.title,
+            "Preview sites: keep categories when pulling without backup"
+        );
+        let body = &fixture.backend.body;
+        assert!(
+            body.starts_with("Pull keeps the site's categories.\n- Restore categories"),
+            "{body}"
+        );
+        assert!(
+            !body.contains('\u{1b}') && !body.contains("linear.app"),
+            "{body}"
+        );
+        assert!(body.contains("Review form failed:"), "{body}");
+    });
+}
+
 /// The provider-shaped review timeout from #17361: supervision kills the
 /// review after `timeout_ms` and classifies it as a provider timeout.
 #[derive(Clone)]
